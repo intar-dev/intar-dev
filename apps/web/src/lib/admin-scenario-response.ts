@@ -35,3 +35,21 @@ export function serializeAdminScenarioDetail(scenario: ScenarioDetailRecord) {
     vms: scenario.vms,
   };
 }
+
+/** Admin detail links can open the learner's canonical course route. */
+export async function serializeAdminScenarioDetailForUser(
+  scenario: ScenarioDetailRecord,
+  userId: string,
+) {
+  const { resolveScenarioCourseLocationForUser } = await import(
+    "@/lib/scenario-runs/catalog"
+  );
+  return {
+    ...serializeAdminScenarioDetail(scenario),
+    courseLocation: await resolveScenarioCourseLocationForUser({
+      userId,
+      scenarioId: scenario.scenarioId,
+      organizationId: scenario.organizationId,
+    }),
+  };
+}

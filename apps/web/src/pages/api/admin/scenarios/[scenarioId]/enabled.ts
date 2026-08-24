@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireAdminUserContext } from "@/lib/agent-bridge";
-import { serializeAdminScenarioDetail } from "@/lib/admin-scenario-response";
+import { serializeAdminScenarioDetailForUser } from "@/lib/admin-scenario-response";
 import { toErrorResponse } from "@/lib/app-error";
 import { isSafeScenarioId } from "@/lib/scenario-id";
 import { disableScenario, enableScenario } from "@/lib/scenarios";
@@ -23,7 +23,12 @@ export const POST: APIRoute = async ({ request, params }) => {
     const scenario = await enableScenario({
       scenarioId,
     });
-    return jsonResponse({ scenario: serializeAdminScenarioDetail(scenario) });
+    return jsonResponse({
+      scenario: await serializeAdminScenarioDetailForUser(
+        scenario,
+        authz.context.userId,
+      ),
+    });
   } catch (error) {
     const { status, body } = toErrorResponse(
       error,
@@ -49,7 +54,12 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     const scenario = await disableScenario({
       scenarioId,
     });
-    return jsonResponse({ scenario: serializeAdminScenarioDetail(scenario) });
+    return jsonResponse({
+      scenario: await serializeAdminScenarioDetailForUser(
+        scenario,
+        authz.context.userId,
+      ),
+    });
   } catch (error) {
     const { status, body } = toErrorResponse(
       error,

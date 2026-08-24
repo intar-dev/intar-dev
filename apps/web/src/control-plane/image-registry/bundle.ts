@@ -13,6 +13,7 @@ import {
   syncScenarioCourseCatalogSnapshot,
   validateScenarioCourseCatalogReferences,
 } from "@/lib/scenario-course-catalogs";
+import { GENERAL_PRACTICE_COURSE_ID } from "@/lib/course-location";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import {
   jsonResponse,
@@ -330,6 +331,7 @@ export function normalizeCourseCatalogSnapshot(
     const description = readString(valueCourse.description);
     if (
       !courseId ||
+      courseId === GENERAL_PRACTICE_COURSE_ID ||
       !isSafeBundleRev(courseId) ||
       !title ||
       !description ||

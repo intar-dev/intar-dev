@@ -825,6 +825,11 @@ describe("course catalog bundle metadata", () => {
       {
         version: 1,
         mode: "replace",
+        courses: [courseMeta({ course_id: "general-practice" })],
+      },
+      {
+        version: 1,
+        mode: "replace",
         courses: [courseMeta({ title: " " })],
       },
       {

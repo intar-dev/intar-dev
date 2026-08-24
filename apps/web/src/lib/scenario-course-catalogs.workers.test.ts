@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
+  member,
   organization,
   scenarioCourseCatalogs,
   scenarioRuns,
@@ -18,7 +19,11 @@ import {
   syncScenarioCourseCatalogSnapshot,
   validateScenarioCourseCatalogReferences,
 } from "@/lib/scenario-course-catalogs";
-import { listScenarioCatalogForUser } from "@/lib/scenario-runs";
+import {
+  listScenarioRunsForUser,
+  listScenarioCatalogForUser,
+  resolveScenarioCourseLocationForUser,
+} from "@/lib/scenario-runs";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("scenario course catalog storage", () => {
@@ -26,7 +31,7 @@ describe("scenario course catalog storage", () => {
     await resetD1Database();
   });
 
-  it("replaces snapshots per scope, clears explicitly, and is idempotent", async () => {
+  it("merges independent snapshots per scope and is idempotent", async () => {
     const db = drizzle(env.DB);
     await insertOrganization("org-a");
     await insertOrganization("org-b");
@@ -80,10 +85,10 @@ describe("scenario course catalog storage", () => {
       rows.find((row) => row.scopeKey === "organization:org-a"),
     ).toMatchObject({
       organizationId: "org-a",
-      coursesJson: [],
-      sourceRevision: "org-a-clear-rev",
+      coursesJson: [course("org-a-course", ["org-a-one"])],
+      sourceRevision: "org-a-rev",
       createdAt: 110,
-      updatedAt: 210,
+      updatedAt: 110,
     });
     expect(rows.find((row) => row.scopeKey === "public")?.coursesJson).toEqual([
       course("public-course", ["public-one"]),
@@ -91,6 +96,110 @@ describe("scenario course catalog storage", () => {
     expect(
       rows.find((row) => row.scopeKey === "organization:org-b")?.coursesJson,
     ).toEqual([course("org-b-course", ["org-b-one"])]);
+  });
+
+  it("keeps distinct publisher courses, updates matching IDs, and moves memberships", async () => {
+    const db = drizzle(env.DB);
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("linux", ["linux-one", "shared"]),
+        course("operations", ["operations-one"]),
+      ),
+      sourceRevision: "linux-rev",
+      organizationId: null,
+      nowUnixMs: 100,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("kubernetes", ["shared", "k8s-one"])),
+      sourceRevision: "k8s-rev",
+      organizationId: null,
+      nowUnixMs: 110,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("linux", ["linux-two", "k8s-one"])),
+      sourceRevision: "linux-update-rev",
+      organizationId: null,
+      nowUnixMs: 120,
+    });
+
+    const [row] = await db
+      .select()
+      .from(scenarioCourseCatalogs)
+      .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
+    expect(row?.coursesJson).toEqual([
+      course("linux", ["linux-two", "k8s-one"]),
+      course("operations", ["operations-one"]),
+      course("kubernetes", ["shared"]),
+    ]);
+    expect(row?.sourceRevision).toBe("linux-update-rev");
+  });
+
+  it("does not rewrite an unchanged merged catalog and keeps update times monotonic", async () => {
+    const db = drizzle(env.DB);
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("linux", ["linux-one"])),
+      sourceRevision: "linux-first",
+      organizationId: null,
+      nowUnixMs: 100,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("linux", ["linux-one"])),
+      sourceRevision: "linux-replayed-with-new-revision",
+      organizationId: null,
+      nowUnixMs: 500,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("linux", ["linux-two"])),
+      sourceRevision: "linux-changed",
+      organizationId: null,
+      nowUnixMs: 50,
+    });
+
+    const [row] = await db
+      .select()
+      .from(scenarioCourseCatalogs)
+      .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
+    expect(row).toMatchObject({
+      sourceRevision: "linux-changed",
+      coursesJson: [course("linux", ["linux-two"])],
+      createdAt: 100,
+      updatedAt: 101,
+    });
+  });
+
+  it("retries concurrent publishers without losing either course", async () => {
+    const db = drizzle(env.DB);
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("base", ["base-one"])),
+      sourceRevision: "base-rev",
+      organizationId: null,
+      nowUnixMs: 100,
+    });
+
+    await Promise.all([
+      syncScenarioCourseCatalogSnapshot(db, {
+        snapshot: snapshot(course("linux", ["linux-one"])),
+        sourceRevision: "linux-rev",
+        organizationId: null,
+        nowUnixMs: 110,
+      }),
+      syncScenarioCourseCatalogSnapshot(db, {
+        snapshot: snapshot(course("kubernetes", ["k8s-one"])),
+        sourceRevision: "k8s-rev",
+        organizationId: null,
+        nowUnixMs: 110,
+      }),
+    ]);
+
+    const [row] = await db
+      .select()
+      .from(scenarioCourseCatalogs)
+      .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
+    expect(row?.coursesJson.map((course) => course.courseId).sort()).toEqual([
+      "base",
+      "kubernetes",
+      "linux",
+    ]);
   });
 
   it("cascades organization snapshots and enforces deterministic scope keys", async () => {
@@ -361,6 +470,58 @@ describe("scenario course catalog reads", () => {
     );
   });
 
+  it("does not resolve an organization course for a user without membership", async () => {
+    await expect(
+      resolveScenarioCourseLocationForUser({
+        userId: "learner",
+        scenarioId: "org-a-one",
+        organizationId: "org-a",
+      }),
+    ).resolves.toBeNull();
+
+    const db = drizzle(env.DB);
+    await db.insert(user).values({
+      id: "learner",
+      name: "Learner",
+      email: "learner@example.test",
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.insert(member).values({
+      id: "org-a-learner",
+      organizationId: "org-a",
+      userId: "learner",
+      role: "member",
+      createdAt: new Date(),
+    });
+
+    await expect(
+      resolveScenarioCourseLocationForUser({
+        userId: "learner",
+        scenarioId: "org-a-one",
+        organizationId: "org-a",
+      }),
+    ).resolves.toMatchObject({
+      scope: "organization-private",
+      courseId: "organization-curriculum",
+      step: 2,
+      steps: 2,
+    });
+    await expect(
+      resolveScenarioCourseLocationForUser({
+        userId: "learner",
+        scenarioId: "public-two",
+        organizationId: "org-a",
+      }),
+    ).resolves.toMatchObject({
+      scope: "organization-public",
+      courseId: "public-curriculum",
+      step: 1,
+      steps: 1,
+    });
+  });
+
   it("omits General practice when authored courses claim every visible scenario", async () => {
     await syncScenarioCourseCatalogSnapshot(drizzle(env.DB), {
       snapshot: snapshot(
@@ -378,7 +539,11 @@ describe("scenario course catalog reads", () => {
 
     const catalog = await listScenarioCatalogForUser("learner");
     expect(catalog.courses).toHaveLength(1);
-    expect(catalog.courses[0]).toMatchObject({
+    expect(
+      catalog.courses.find(
+        (course) => course.courseId === "complete-curriculum",
+      ),
+    ).toMatchObject({
       kind: "authored",
       courseId: "complete-curriculum",
     });
@@ -420,7 +585,9 @@ describe("scenario course catalog reads", () => {
     expect(
       flattenScenarioIds(catalog).filter((id) => id === "public-two"),
     ).toEqual(["public-two"]);
-    expect(catalog.courses[0]).toMatchObject({
+    expect(
+      catalog.courses.find((course) => course.courseId === "first-course"),
+    ).toMatchObject({
       kind: "authored",
       courseId: "first-course",
       scenarios: [
@@ -437,11 +604,61 @@ describe("scenario course catalog reads", () => {
         },
       ],
     });
-    expect(catalog.courses[1]).toMatchObject({
+    expect(
+      catalog.courses.find((course) => course.courseId === "second-course"),
+    ).toMatchObject({
       kind: "authored",
       courseId: "second-course",
       scenarios: [expect.objectContaining({ scenarioId: "public-one" })],
     });
+  });
+
+  it("deduplicates repeated run course locations in one catalog scope", async () => {
+    const db = drizzle(env.DB);
+    await db.insert(user).values({
+      id: "learner",
+      name: "Learner",
+      email: "learner@example.test",
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.insert(agentHosts).values({
+      id: "run-list-host",
+      userId: "learner",
+      name: "Run list host",
+    });
+    const historicalRuns = Array.from({ length: 100 }, (_, index) => ({
+      ...completedScenarioRun("public-two"),
+      runId: `public-two-run-${index}`,
+      hostId: "run-list-host",
+      createdAt: 10_000 + index,
+      updatedAt: 10_000 + index,
+    }));
+    for (let start = 0; start < historicalRuns.length; start += 3) {
+      await db
+        .insert(scenarioRuns)
+        .values(historicalRuns.slice(start, start + 3));
+    }
+
+    const runs = await listScenarioRunsForUser({ userId: "learner" });
+
+    expect(runs).toHaveLength(100);
+    expect(
+      new Set(runs.map((run) => JSON.stringify(run.courseLocation))),
+    ).toEqual(
+      new Set([
+        JSON.stringify({
+          courseKind: "authored",
+          scope: "public",
+          organizationId: null,
+          courseId: "public-curriculum",
+          courseTitle: "public-curriculum title",
+          step: 1,
+          steps: 2,
+        }),
+      ]),
+    );
   });
 });
 

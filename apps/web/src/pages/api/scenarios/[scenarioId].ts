@@ -2,6 +2,7 @@ import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { isSafeScenarioId } from "@/lib/scenario-id";
 import { loadEnabledScenarioForUser } from "@/lib/scenario-runs";
+import { resolveOrganizationId } from "@/lib/organizations";
 
 export const prerender = false;
 
@@ -17,11 +18,14 @@ export const GET: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "invalid scenarioId" }, { status: 400 });
   }
 
-  const organizationId =
+  const organizationKey =
     new URL(request.url).searchParams.get("organizationId")?.trim() || null;
+  const organizationId = organizationKey
+    ? await resolveOrganizationId(organizationKey)
+    : null;
   if (
-    organizationId &&
-    !authz.context.organizationIds.includes(organizationId)
+    (organizationKey && !organizationId) ||
+    (organizationId && !authz.context.organizationIds.includes(organizationId))
   ) {
     return jsonResponse({ error: "scenario not found" }, { status: 404 });
   }

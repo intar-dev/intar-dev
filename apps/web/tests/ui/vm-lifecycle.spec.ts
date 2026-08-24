@@ -180,6 +180,15 @@ test("deleting a private run preserves its organization course context", async (
   });
   ui.server.state.run.scenarioId = "platform-logrotate";
   ui.server.state.run.organizationId = "org-platform";
+  ui.server.state.run.courseLocation = {
+    courseKind: "authored",
+    scope: "organization-private",
+    organizationId: "org-platform",
+    courseId: "operations",
+    courseTitle: "Platform repair sequence",
+    step: 2,
+    steps: 2,
+  };
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
 
@@ -189,8 +198,29 @@ test("deleting a private run preserves its organization course context", async (
   await dialog.getByRole("button", { name: "Delete run" }).click();
 
   await expect(page).toHaveURL(
-    /\/courses\/platform-logrotate\?organizationId=org-platform$/,
+    "/organizations/org-platform/courses/private/operations/platform-logrotate",
   );
+});
+
+test("deleting an organization run without a course location returns its catalog", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "archived",
+  });
+  ui.server.state.run.organizationId = "org-platform";
+  ui.server.state.run.courseLocation = null;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await page.getByRole("button", { name: "Page actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete run…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete run" }).click();
+
+  await expect(page).toHaveURL("/organizations/org-platform/courses");
 });
 
 for (const terminalCase of [

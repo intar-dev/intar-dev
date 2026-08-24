@@ -1035,6 +1035,15 @@ export function createMockApiState(input?: {
               updatedAt: FIXED_NOW - minute,
             },
       blockingRun: null,
+      courseLocation: {
+        courseKind: "authored",
+        scope: "public",
+        organizationId: null,
+        courseId: "operations",
+        courseTitle: "Linux operations",
+        step: 1,
+        steps: 2,
+      },
       finishedRuns: empty
         ? []
         : [
@@ -1083,6 +1092,15 @@ export function createMockApiState(input?: {
             organizationName: organizationDetail.name,
             assignedAt: FIXED_NOW - 7 * day,
             createdAt: FIXED_NOW - 7 * day,
+            courseLocation: {
+              courseKind: "authored",
+              scope: "organization-private",
+              organizationId: "org-platform",
+              courseId: "operations",
+              courseTitle: "Platform repair sequence",
+              step: 1,
+              steps: 2,
+            },
           },
         ],
     progress: {

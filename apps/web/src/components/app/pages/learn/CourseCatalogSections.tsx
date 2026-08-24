@@ -21,7 +21,10 @@ import {
 } from "@/components/app/patterns/CollectionPagination";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { ScenarioCatalogWireEntry } from "@/lib/scenario-runs";
+import type {
+  ScenarioCatalogCourseWireEntry,
+  ScenarioCatalogWireEntry,
+} from "@/lib/scenario-runs";
 import {
   courseCatalogKey,
   courseHeadingId,
@@ -31,6 +34,7 @@ import {
 export interface CourseScenarioRendererContext {
   courseKey: string;
   courseTitle: string;
+  course: ScenarioCatalogCourseWireEntry;
   /** Present only for authored courses, using the unfiltered curriculum order. */
   sequence?: {
     position: number;
@@ -396,6 +400,7 @@ function CourseDetail({
                 const context: CourseScenarioRendererContext = {
                   courseKey,
                   courseTitle: section.course.title,
+                  course: section.course,
                   ...(position
                     ? {
                         sequence: {

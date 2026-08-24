@@ -42,6 +42,7 @@ import {
   type ScenarioDestroyAcceptedResponse,
 } from "@/components/app/run/run-types";
 import { cn } from "@/lib/utils";
+import type { CourseLocation } from "@/lib/scenario-runs";
 
 export function ScenarioRun() {
   const navigate = useNavigate();
@@ -174,13 +175,12 @@ export function ScenarioRun() {
         queryKey: ["scenario-runs", "list"],
       });
       if (attemptData?.scenarioId) {
-        await navigate({
-          to: "/courses/$scenarioId",
-          params: { scenarioId: attemptData.scenarioId },
-          search: attemptData.organizationId
-            ? { organizationId: attemptData.organizationId }
-            : {},
-        });
+        await navigateToRunCourse(
+          navigate,
+          attemptData.courseLocation,
+          attemptData.scenarioId,
+          attemptData.organizationId,
+        );
         return;
       }
 
@@ -852,6 +852,63 @@ export function ScenarioRun() {
       ) : null}
     </div>
   );
+}
+
+async function navigateToRunCourse(
+  navigate: ReturnType<typeof useNavigate>,
+  location: CourseLocation | null | undefined,
+  scenarioId: string,
+  fallbackOrganizationId: string | null | undefined,
+) {
+  if (!location) {
+    if (fallbackOrganizationId) {
+      await navigate({
+        to: "/organizations/$orgId/courses",
+        params: { orgId: fallbackOrganizationId },
+      });
+      return;
+    }
+    await navigate({ to: "/courses" });
+    return;
+  }
+
+  const courseId = location.courseId ?? "general-practice";
+  switch (location.scope) {
+    case "public":
+      await navigate({
+        to: "/courses/$courseId/$scenarioId",
+        params: { courseId, scenarioId },
+      });
+      return;
+    case "organization-public":
+      if (location.organizationId) {
+        await navigate({
+          to: "/organizations/$orgId/courses/public/$courseId/$scenarioId",
+          params: { orgId: location.organizationId, courseId, scenarioId },
+        });
+        return;
+      }
+      break;
+    case "organization-private":
+      if (location.organizationId) {
+        await navigate({
+          to: "/organizations/$orgId/courses/private/$courseId/$scenarioId",
+          params: { orgId: location.organizationId, courseId, scenarioId },
+        });
+        return;
+      }
+      break;
+    case "organization-general-practice":
+      if (location.organizationId) {
+        await navigate({
+          to: "/organizations/$orgId/courses/general-practice/$scenarioId",
+          params: { orgId: location.organizationId, scenarioId },
+        });
+        return;
+      }
+      break;
+  }
+  await navigate({ to: "/courses" });
 }
 
 function useDesktopRunRail() {

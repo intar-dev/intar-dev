@@ -1,13 +1,13 @@
 import type { ReactNode } from "react";
-import { Link } from "@tanstack/react-router";
 import { ArrowRight, CircleCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { formatDurationMs } from "@/components/app/lib/format";
 import { cn } from "@/lib/utils";
 import { MetaDifficulty, MetaLine, type ScenarioDifficulty } from "./MetaLine";
 import { StatusToken } from "./StatusToken";
-import type { ScenarioProgress } from "@/lib/scenario-runs";
-import type { ScenarioBriefingSearch } from "@/components/app/pages/tab-search";
+import type { CourseLocation, ScenarioProgress } from "@/lib/scenario-runs";
+import type { CatalogSearch } from "@/components/app/pages/learn/catalog-search";
+import { CourseScenarioLink } from "@/components/app/pages/learn/course-route-links";
 
 export interface ScenarioCardData {
   scenarioId: string;
@@ -30,23 +30,25 @@ export function ScenarioCard({
   headingLevel = 3,
   search,
   sequence,
+  courseLocation,
 }: {
   scenario: ScenarioCardData;
   footer?: ReactNode;
   className?: string;
   headingLevel?: 3 | 4;
-  search?: ScenarioBriefingSearch | undefined;
+  search?: CatalogSearch | undefined;
   sequence?: {
     position: number;
     total: number;
   } | undefined;
+  courseLocation: CourseLocation | null;
 }) {
   const Heading = headingLevel === 4 ? "h4" : "h3";
   return (
-    <Link
-      to="/courses/$scenarioId"
-      params={{ scenarioId: scenario.scenarioId }}
-      search={search ?? {}}
+    <CourseScenarioLink
+      location={courseLocation}
+      scenarioId={scenario.scenarioId}
+      search={search}
       preloadDelay={250}
       className={cn(
         "group flex min-h-56 min-w-0 flex-col gap-6 rounded-xl border bg-card p-4 transition-[background-color,border-color,transform] hover:border-brand-border hover:bg-muted/35 active:translate-y-px motion-reduce:transition-none sm:p-6",
@@ -85,7 +87,7 @@ export function ScenarioCard({
           aria-hidden
         />
       </span>
-    </Link>
+    </CourseScenarioLink>
   );
 }
 

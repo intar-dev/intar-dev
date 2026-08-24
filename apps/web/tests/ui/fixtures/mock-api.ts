@@ -87,6 +87,44 @@ function nestedCourseCatalog(
   };
 }
 
+function courseLocationForScenario(
+  catalog: ReturnType<typeof nestedCourseCatalog>,
+  scenarioId: string,
+  organizationId: string | null,
+) {
+  for (const course of catalog.courses) {
+    const step = course.scenarios.findIndex(
+      (scenario) => scenario.scenarioId === scenarioId,
+    );
+    if (step < 0) continue;
+    if (course.kind === "general-practice") {
+      return {
+        courseKind: "general-practice" as const,
+        scope: organizationId ? "organization-general-practice" : "public",
+        organizationId,
+        courseId: null,
+        courseTitle: "General practice" as const,
+        step: null,
+        steps: null,
+      };
+    }
+    return {
+      courseKind: "authored" as const,
+      scope: organizationId
+        ? course.organizationId
+          ? "organization-private"
+          : "organization-public"
+        : "public",
+      organizationId,
+      courseId: course.courseId as string,
+      courseTitle: course.title as string,
+      step: step + 1,
+      steps: course.scenarios.length,
+    };
+  }
+  return null;
+}
+
 function probeSnapshots(variant: MockApiState["variant"]) {
   if (variant === "long") {
     return [
@@ -699,7 +737,24 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         /^\/api\/scenarios\/([^/]+)$/,
       );
       if (learnerScenarioId && method === "GET") {
-        await json(route, { scenario: server.state.scenarioDetail });
+        const organizationId = url.searchParams.get("organizationId") || null;
+        const catalog = organizationId
+          ? nestedCourseCatalog(
+              server.state.organizationScenarios,
+              server.state.organizationCourses,
+            )
+          : nestedCourseCatalog(server.state.scenarios, server.state.courses);
+        await json(route, {
+          scenario: {
+            ...server.state.scenarioDetail,
+            scenarioId: learnerScenarioId,
+            courseLocation: courseLocationForScenario(
+              catalog,
+              learnerScenarioId,
+              organizationId,
+            ),
+          },
+        });
         return;
       }
 

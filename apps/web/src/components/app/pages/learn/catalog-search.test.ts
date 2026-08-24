@@ -6,22 +6,24 @@ import {
 } from "./catalog-search";
 
 describe("course catalog search", () => {
-  it("normalizes a scope-qualified course selection", () => {
+  it("keeps only catalog filters", () => {
     expect(
       normalizeCatalogSearch({
         course: "  org-platform:operations  ",
         q: "  repair  ",
       }),
-    ).toMatchObject({
-      course: "org-platform:operations",
+    ).toEqual({
       q: "repair",
+      difficulty: undefined,
+      category: undefined,
+      tags: [],
+      sort: "recommended",
     });
   });
 
-  it("drops an empty course selection from compact search state", () => {
+  it("drops legacy course state from compact search", () => {
     const normalized = normalizeCatalogSearch({ course: "   " });
 
-    expect(normalized.course).toBeUndefined();
     expect(compactCatalogSearch(normalized)).not.toHaveProperty("course");
     expect(validateSearch({ course: 42 })).not.toHaveProperty("course");
   });

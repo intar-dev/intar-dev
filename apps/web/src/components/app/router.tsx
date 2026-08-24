@@ -125,9 +125,24 @@ const courseCatalogRoute = createRoute({
   ),
 });
 
+const courseDetailRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "courses/$courseId",
+  validateSearch: validateCatalogSearch,
+  head: () =>
+    routeHead(
+      "Course",
+      "Follow a guided sequence of systems repair labs.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/learn/ScenarioCatalog"),
+    "CourseCatalogDetail",
+  ),
+});
+
 const courseScenarioBriefingRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "courses/$scenarioId",
+  path: "courses/$courseId/$scenarioId",
   validateSearch: validateScenarioBriefingSearch,
   head: () =>
     routeHead(
@@ -136,7 +151,7 @@ const courseScenarioBriefingRoute = createRoute({
     ),
   component: lazyRouteComponent(
     () => import("./pages/learn/ScenarioBriefing"),
-    "ScenarioBriefing",
+    "PublicCourseScenarioBriefing",
   ),
 });
 
@@ -244,6 +259,111 @@ const organizationDetailRoute = createRoute({
   component: lazyRouteComponent(
     () => import("./pages/OrganizationDetail"),
     "OrganizationDetail",
+  ),
+});
+
+const organizationCoursesRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId/courses",
+  validateSearch: validateCatalogSearch,
+  head: () =>
+    routeHead(
+      "Organization courses",
+      "Browse public and private systems repair courses for this organization.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/OrganizationCourses"),
+    "OrganizationCourses",
+  ),
+});
+
+const organizationPublicCourseRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId/courses/public/$courseId",
+  validateSearch: validateCatalogSearch,
+  head: () =>
+    routeHead(
+      "Organization course",
+      "Follow a public course with organization-run lab environments.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/OrganizationCourses"),
+    "OrganizationPublicCourseCatalog",
+  ),
+});
+
+const organizationPrivateCourseRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId/courses/private/$courseId",
+  validateSearch: validateCatalogSearch,
+  head: () =>
+    routeHead(
+      "Organization course",
+      "Follow this organization's private repair curriculum.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/OrganizationCourses"),
+    "OrganizationPrivateCourseCatalog",
+  ),
+});
+
+const organizationGeneralPracticeRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId/courses/general-practice",
+  validateSearch: validateCatalogSearch,
+  head: () =>
+    routeHead(
+      "General practice",
+      "Practice standalone systems with organization-run lab environments.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/OrganizationCourses"),
+    "OrganizationGeneralPracticeCatalog",
+  ),
+});
+
+const organizationPublicCourseScenarioRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId/courses/public/$courseId/$scenarioId",
+  validateSearch: validateScenarioBriefingSearch,
+  head: () =>
+    routeHead(
+      "Scenario briefing",
+      "Review objectives, constraints, and previous attempts before starting a lab.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/learn/ScenarioBriefing"),
+    "OrganizationPublicCourseScenarioBriefing",
+  ),
+});
+
+const organizationPrivateCourseScenarioRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId/courses/private/$courseId/$scenarioId",
+  validateSearch: validateScenarioBriefingSearch,
+  head: () =>
+    routeHead(
+      "Scenario briefing",
+      "Review objectives, constraints, and previous attempts before starting a lab.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/learn/ScenarioBriefing"),
+    "OrganizationPrivateCourseScenarioBriefing",
+  ),
+});
+
+const organizationGeneralPracticeScenarioRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId/courses/general-practice/$scenarioId",
+  validateSearch: validateScenarioBriefingSearch,
+  head: () =>
+    routeHead(
+      "Scenario briefing",
+      "Review objectives, constraints, and previous attempts before starting a lab.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/learn/ScenarioBriefing"),
+    "OrganizationGeneralPracticeScenarioBriefing",
   ),
 });
 
@@ -380,6 +500,7 @@ const routeTree = rootRoute.addChildren([
   ]),
   appLayoutRoute.addChildren([
     courseCatalogRoute,
+    courseDetailRoute,
     courseScenarioBriefingRoute,
     workshopsRoute,
     workshopRoomRoute,
@@ -389,6 +510,13 @@ const routeTree = rootRoute.addChildren([
     runsListRoute,
     organizationsRoute,
     organizationDetailRoute,
+    organizationCoursesRoute,
+    organizationPublicCourseRoute,
+    organizationPrivateCourseRoute,
+    organizationGeneralPracticeRoute,
+    organizationPublicCourseScenarioRoute,
+    organizationPrivateCourseScenarioRoute,
+    organizationGeneralPracticeScenarioRoute,
     organizationWorkshopsRoute,
     profileRoute,
     adminOverviewRoute,

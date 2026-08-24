@@ -33,6 +33,8 @@ import type {
   ScenarioProbeRecord,
   ScenarioVmRecord,
 } from "@/lib/scenario-model";
+import type { CourseLocation } from "@/lib/scenario-runs";
+import { courseRouteId } from "@/lib/course-location";
 
 interface ScenarioRecord extends AdminScenarioSummary {
   briefingMarkdown: string;
@@ -40,6 +42,7 @@ interface ScenarioRecord extends AdminScenarioSummary {
   hints: ScenarioHintManifestV3[];
   probes: ScenarioProbeRecord[];
   vms: ScenarioVmRecord[];
+  courseLocation: CourseLocation | null;
 }
 
 interface ScenarioDetailResponse {
@@ -155,6 +158,7 @@ export function ScenarioDetails() {
 
   const scenarioRecord = scenario.data ?? null;
   const enabled = scenarioRecord?.enabled ?? false;
+  const learnerCourseLocation = scenarioRecord?.courseLocation ?? null;
 
   usePageChrome({
     title: scenarioRecord?.title,
@@ -202,17 +206,11 @@ export function ScenarioDetails() {
     ),
     menu: useMemo(
       () =>
-        scenarioRecord && enabled ? (
-          <DropdownMenuItem
-            render={
-              <Link
-                to="/courses/$scenarioId"
-                params={{ scenarioId: scenarioRecord.scenarioId }}
-              />
-            }
-          >
-            View as learner
-          </DropdownMenuItem>
+        scenarioRecord && enabled && learnerCourseLocation ? (
+          <LearnerCourseMenuItem
+            scenarioId={scenarioRecord.scenarioId}
+            courseLocation={learnerCourseLocation}
+          />
         ) : undefined,
       [scenarioRecord, enabled],
     ),
@@ -386,6 +384,81 @@ export function ScenarioDetails() {
         </>
       )}
     </PageShell>
+  );
+}
+
+function LearnerCourseMenuItem({
+  scenarioId,
+  courseLocation,
+}: {
+  scenarioId: string;
+  courseLocation: NonNullable<ScenarioRecord["courseLocation"]>;
+}) {
+  const location = courseLocation;
+
+  const courseId = courseRouteId(location);
+  if (location.scope === "public") {
+    return (
+      <DropdownMenuItem
+        render={
+          <Link
+            to="/courses/$courseId/$scenarioId"
+            params={{ courseId, scenarioId }}
+          />
+        }
+      >
+        View as learner
+      </DropdownMenuItem>
+    );
+  }
+  if (!location.organizationId) return null;
+  if (location.scope === "organization-public") {
+    return (
+      <DropdownMenuItem
+        render={
+          <Link
+            to="/organizations/$orgId/courses/public/$courseId/$scenarioId"
+            params={{
+              orgId: location.organizationId,
+              courseId,
+              scenarioId,
+            }}
+          />
+        }
+      >
+        View as learner
+      </DropdownMenuItem>
+    );
+  }
+  if (location.scope === "organization-private") {
+    return (
+      <DropdownMenuItem
+        render={
+          <Link
+            to="/organizations/$orgId/courses/private/$courseId/$scenarioId"
+            params={{
+              orgId: location.organizationId,
+              courseId,
+              scenarioId,
+            }}
+          />
+        }
+      >
+        View as learner
+      </DropdownMenuItem>
+    );
+  }
+  return (
+    <DropdownMenuItem
+      render={
+        <Link
+          to="/organizations/$orgId/courses/general-practice/$scenarioId"
+          params={{ orgId: location.organizationId, scenarioId }}
+        />
+      }
+    >
+      View as learner
+    </DropdownMenuItem>
   );
 }
 

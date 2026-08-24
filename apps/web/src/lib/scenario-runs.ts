@@ -4,6 +4,7 @@ export type {
   ScenarioCatalogWireEntry,
   ScenarioCatalogWireResponse,
   ScenarioCatalogCourseWireEntry,
+  CourseLocation,
   ScenarioDetail,
   ScenarioRunRecord,
   ScenarioTerminalSessionResult,
@@ -18,6 +19,7 @@ export {
   listScenarioRunsForUser,
   getScenarioProgressByScenario,
   listScenarioCatalogForUser,
+  resolveScenarioCourseLocationForUser,
 } from "./scenario-runs/catalog";
 export {
   startScenarioRunForUser,

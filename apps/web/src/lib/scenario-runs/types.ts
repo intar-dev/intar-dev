@@ -39,6 +39,31 @@ export interface ScenarioProgress {
   lastPlayedAt: number | null;
 }
 
+/**
+ * The canonical course context for a scenario.  A scenario can be linked from
+ * a run, assignment, or admin record without carrying route state in a query
+ * string; consumers use this view to build its canonical learner URL.
+ */
+export type CourseLocation =
+  | {
+      courseKind: "authored";
+      scope: "public" | "organization-public" | "organization-private";
+      organizationId: string | null;
+      courseId: string;
+      courseTitle: string;
+      step: number;
+      steps: number;
+    }
+  | {
+      courseKind: "general-practice";
+      scope: "public" | "organization-general-practice";
+      organizationId: string | null;
+      courseId: null;
+      courseTitle: "General practice";
+      step: null;
+      steps: null;
+    };
+
 export interface ScenarioCatalogWireEntry extends ScenarioCatalogEntry {
   progress: ScenarioProgress;
 }
@@ -90,6 +115,8 @@ export interface ScenarioDetail {
     slug: string;
     title: string;
   } | null;
+  /** Null when this scenario is no longer visible in the current catalog. */
+  courseLocation: CourseLocation | null;
   finishedRuns: Array<{
     runId: string;
     phase: "completed" | "failed";
@@ -108,6 +135,8 @@ export interface ScenarioRunRecord extends RunStateDocument {
   id: string;
   scenarioId: string;
   organizationId: string | null;
+  /** Resolved when a user-facing run view loads; absent on internal snapshots. */
+  courseLocation?: CourseLocation | null;
   scenarioName: string;
   title: string;
   tagline: string;
@@ -138,6 +167,7 @@ export interface ScenarioRunListEntry {
   runId: string;
   scenarioId: string;
   organizationId: string | null;
+  courseLocation?: CourseLocation | null;
   scenarioName: string;
   title: string;
   difficulty: ScenarioDifficulty;

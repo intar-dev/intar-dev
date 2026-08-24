@@ -1,5 +1,4 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { ArrowRight, BookOpen, Plus, UserMinus, Users } from "lucide-react";
 import { useState } from "react";
 import { formatDurationMs, formatRelativeTime } from "../../lib/format";
@@ -25,6 +24,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ScenarioCatalogWireResponse } from "@/lib/scenario-runs";
+import { findScenarioCourseLocation } from "@/lib/course-location";
+import { CourseScenarioLink } from "../learn/course-route-links";
 import type { OrganizationDetailTab } from "../tab-search";
 import {
   type AssignmentsResponse,
@@ -40,9 +41,11 @@ type Detail = OrganizationDetailResponse["organization"];
 export function OrganizationOverview({
   detail,
   setTab,
+  onOpenCourses,
 }: {
   detail: Detail;
   setTab: (tab: OrganizationDetailTab) => void;
+  onOpenCourses: () => void;
 }) {
   const admin = detail.role !== "member";
   return (
@@ -62,7 +65,7 @@ export function OrganizationOverview({
           label="Courses"
           value="Catalog"
           action="Open courses"
-          onClick={() => setTab("courses")}
+          onClick={onOpenCourses}
         />
         <OverviewMetric
           label="Runners"
@@ -294,6 +297,11 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
   const scenarioById = new Map(
     catalogEntries.map((scenario) => [scenario.scenarioId, scenario]),
   );
+  const courseByScenarioId = new Map(
+    (catalog.data?.courses ?? []).flatMap((course) =>
+      course.scenarios.map((scenario) => [scenario.scenarioId, course] as const),
+    ),
+  );
   const actionError = assign.error ?? unassign.error;
 
   return (
@@ -346,14 +354,20 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                       <BookOpen className="size-4" />
                     </span>
                     <div className="min-w-0 flex-1">
-                      <Link
-                        to="/courses/$scenarioId"
-                        params={{ scenarioId: entry.scenarioId }}
-                        search={{ organizationId: detail.id }}
+                      <CourseScenarioLink
+                        location={findScenarioCourseLocation(
+                          courseByScenarioId.get(entry.scenarioId)
+                            ? [courseByScenarioId.get(entry.scenarioId)!]
+                            : [],
+                          entry.scenarioId,
+                          detail.id,
+                        )}
+                        scenarioId={entry.scenarioId}
+                        fallbackOrganizationId={detail.id}
                         className="text-sm font-semibold hover:text-primary"
                       >
                         {entry.scenarioTitle ?? entry.scenarioId}
-                      </Link>
+                      </CourseScenarioLink>
                       <p className="text-caption">
                         Assigned {formatRelativeTime(entry.createdAt)}
                       </p>

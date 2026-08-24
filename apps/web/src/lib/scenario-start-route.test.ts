@@ -8,6 +8,10 @@ const agentBridgeMock = vi.hoisted(() => ({
 }));
 const scenarioRunsMock = vi.hoisted(() => ({
   startScenarioRunForUser: vi.fn(),
+  resolveScenarioCourseLocationForUser: vi.fn(),
+}));
+const organizationsMock = vi.hoisted(() => ({
+  resolveOrganizationId: vi.fn(),
 }));
 const betaAdmission = {
   sourceInviteId: "invite-1",
@@ -17,6 +21,7 @@ const betaAdmission = {
 
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/scenario-runs", () => scenarioRunsMock);
+vi.mock("@/lib/organizations", () => organizationsMock);
 
 import { POST } from "@/pages/api/scenarios/[scenarioId]/start";
 import { appError } from "@/lib/app-error";
@@ -30,6 +35,7 @@ describe("scenario start route", () => {
         userId: "user-1",
         isAdmin: false,
         betaAdmission,
+        organizationIds: [],
       },
     });
     scenarioRunsMock.startScenarioRunForUser.mockResolvedValue({
@@ -40,6 +46,9 @@ describe("scenario start route", () => {
       reused: false,
       run: { id: "run-1" },
     });
+    scenarioRunsMock.resolveScenarioCourseLocationForUser.mockResolvedValue(
+      null,
+    );
   });
 
   it("starts an ordinary scenario from an empty JSON object", async () => {
@@ -68,6 +77,59 @@ describe("scenario start route", () => {
       scenarioId: "pair-ping",
       userId: "user-1",
       betaAdmission,
+    });
+  });
+
+  it("rejects an unknown organization key", async () => {
+    organizationsMock.resolveOrganizationId.mockResolvedValue(null);
+
+    const response = await startRequest({ organizationId: "missing-org" });
+
+    expect(response.status).toBe(404);
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+    expect(
+      scenarioRunsMock.resolveScenarioCourseLocationForUser,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("rejects an organization outside the user's membership", async () => {
+    organizationsMock.resolveOrganizationId.mockResolvedValue("other-org");
+
+    const response = await startRequest({ organizationId: "other-org" });
+
+    expect(response.status).toBe(404);
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("normalizes an organization slug before starting and resolving a run", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: {
+        userId: "user-1",
+        isAdmin: false,
+        betaAdmission,
+        organizationIds: ["org-id"],
+      },
+    });
+    organizationsMock.resolveOrganizationId.mockResolvedValue("org-id");
+
+    const response = await startRequest({
+      organizationId: "platform-repair-crew",
+    });
+
+    expect(response.status).toBe(202);
+    expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
+      scenarioId: "pair-ping",
+      userId: "user-1",
+      betaAdmission,
+      organizationId: "org-id",
+    });
+    expect(
+      scenarioRunsMock.resolveScenarioCourseLocationForUser,
+    ).toHaveBeenCalledWith({
+      userId: "user-1",
+      scenarioId: "pair-ping",
+      organizationId: "org-id",
     });
   });
 

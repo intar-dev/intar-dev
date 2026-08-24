@@ -3,6 +3,7 @@
 
 import type { RunVmProvisioningSpec } from "@/lib/run-state";
 import type {
+  CourseLocation,
   ScenarioRunActivity,
   ScenarioRunRecord as ScenarioRunWireRecord,
   ScenarioRunReplayState,
@@ -84,6 +85,8 @@ export interface ScenarioRunVmRecord {
 export interface ScenarioRunRecord {
   id: string;
   scenarioId: string;
+  organizationId?: string | null;
+  courseLocation?: CourseLocation | null;
   scenarioName: string;
   phase:
     | "launching"

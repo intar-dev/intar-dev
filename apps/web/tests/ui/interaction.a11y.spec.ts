@@ -60,22 +60,18 @@ test("keyboard-only landing navigation keeps focus visible", async ({
   }
 });
 
-test("organization tabs support keyboard navigation and update the URL", async ({
+test("organization courses use their own path instead of a tab query", async ({
   page,
   ui,
 }) => {
   await ui.open({ ...routeCase("organization-detail"), theme: "light" });
-  const overview = page.getByRole("tab", { name: "Overview" });
-  const courses = page.getByRole("tab", { name: "Courses" });
-
-  await overview.focus();
-  await expect(overview).toBeFocused();
-  await page.keyboard.press("ArrowRight");
-
-  await expect(courses).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(courses).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/tab=courses/);
+  await expect(page.getByRole("tab", { name: "Courses" })).toHaveCount(0);
+  await page
+    .locator("main")
+    .getByRole("button", { name: "Courses", exact: true })
+    .click();
+  await expect(page).toHaveURL("/organizations/org-platform/courses");
+  expect(new URL(page.url()).searchParams.has("tab")).toBe(false);
 });
 
 test("legacy organization scenario tab falls back to Overview", async ({
@@ -93,10 +89,7 @@ test("legacy organization scenario tab falls back to Overview", async ({
     "aria-selected",
     "true",
   );
-  await expect(page.getByRole("tab", { name: "Courses" })).toHaveAttribute(
-    "aria-selected",
-    "false",
-  );
+  await expect(page.getByRole("tab", { name: "Courses" })).toHaveCount(0);
 });
 
 test("large card collections paginate without repeating items", async ({
@@ -113,13 +106,14 @@ test("large card collections paginate without repeating items", async ({
   const pagination = page.getByRole("navigation", {
     name: "scenarios pagination",
   });
-  const scenarioLinks = page.locator('a[href^="/courses/paging-scenario-"]');
+  const scenarioLinks = page.locator(
+    'a[href^="/courses/general-practice/paging-scenario-"]',
+  );
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
-  expect(new URL(page.url()).searchParams.get("course")).toBe(
-    "general-practice",
-  );
+  await expect(page).toHaveURL("/courses/general-practice");
+  expectNoLegacyCourseSearch(page.url());
   await expect(pagination).toContainText("1–9 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(9);
   await expect(generalPractice).toContainText("19 scenarios");
@@ -154,7 +148,7 @@ test("large card collections paginate without repeating items", async ({
   await expect(scenarioLinks).toHaveCount(9);
 });
 
-test("course drill-down returns to the originating catalog page", async ({
+test("course drill-down uses a course path and keeps filter-only search", async ({
   page,
   ui,
 }) => {
@@ -184,17 +178,15 @@ test("course drill-down returns to the originating catalog page", async ({
   await expect(courseButton).toHaveCSS("cursor", "pointer");
   await courseButton.click();
   await expect(
-    page.getByRole("heading", { name: "Paging course 10" }),
-  ).toBeFocused();
+    page
+      .locator('section[data-course-id="paging-course-10"]')
+      .getByRole("heading", { name: "Paging course 10", level: 3 }),
+  ).toBeVisible();
+  await expect(page).toHaveURL("/courses/paging-course-10");
 
   await page.goBack();
-  await expect(pagination).toContainText("10–10 of 10 courses");
-  await expect(courseButton).toBeFocused();
-
-  await courseButton.click();
-  await page.getByRole("button", { name: "All courses" }).click();
-  await expect(pagination).toContainText("10–10 of 10 courses");
-  await expect(courseButton).toBeFocused();
+  await expect(pagination).toContainText("1–9 of 10 courses");
+  await expect(page).toHaveURL("/courses");
 
   const search = page.getByRole("textbox", {
     name: "Search courses and scenarios",
@@ -236,25 +228,24 @@ test("public courses preserve curriculum order and place standalone work in Gene
   );
   const courseLinks = courseDetail.locator('a[href^="/courses/"]');
   await expect(courseLinks).toHaveCount(2);
-  expect(new URL(page.url()).searchParams.get("course")).toBe(
-    "public:operations",
-  );
+  await expect(page).toHaveURL("/courses/operations");
+  expectNoLegacyCourseSearch(page.url());
   await expect(courseLinks.nth(0)).toHaveAttribute(
     "href",
-    /^\/courses\/repair-nginx\?/,
+    "/courses/operations/repair-nginx",
   );
   await expect(courseLinks.nth(1)).toHaveAttribute(
     "href",
-    /^\/courses\/repair-dns\?/,
+    "/courses/operations/repair-dns",
   );
   await expect(
     courseDetail.getByRole("heading", { name: "Linux operations" }),
-  ).toBeFocused();
+  ).toBeVisible();
 
   await courseDetail.getByRole("button", { name: "All courses" }).click();
   await expect(
     course.getByRole("button", { name: "Linux operations" }),
-  ).toBeFocused();
+  ).toBeVisible();
   const generalPracticeIndex = page.locator(
     'li[data-course-id="general-practice"][data-course-scope="generated"]',
   );
@@ -264,9 +255,16 @@ test("public courses preserve curriculum order and place standalone work in Gene
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
-  await expect(
-    generalPractice.locator('a[href^="/courses/recover-postgres?"]'),
-  ).toBeVisible();
+  const postgres = generalPractice.getByRole("link", {
+    name: /Recover a read-only PostgreSQL node/i,
+  });
+  await expect(postgres).toBeVisible();
+  const postgresHref = await postgres.getAttribute("href");
+  const postgresUrl = new URL(postgresHref ?? "", page.url());
+  expect(postgresUrl.pathname).toBe(
+    "/courses/general-practice/recover-postgres",
+  );
+  expect(postgresUrl.searchParams.get("q")).toBeNull();
   await expect(generalPractice).toContainText("Open practice");
 });
 
@@ -285,19 +283,21 @@ test("course scenarios return to the selected filtered public course", async ({
   );
   await course.getByRole("button", { name: "Linux operations" }).click();
 
-  const expectedSearch = {
-    course: "public:operations",
-    q: "nginx",
-    difficulty: "medium",
-  };
+  const expectedSearch = { q: "nginx", difficulty: "medium" };
   await expect.poll(() => {
-    const search = new URL(page.url()).searchParams;
+    const url = new URL(page.url());
+    const search = url.searchParams;
     return {
-      course: search.get("course"),
+      pathname: url.pathname,
       q: search.get("q"),
       difficulty: search.get("difficulty"),
+      legacy: legacyCourseSearch(url),
     };
-  }).toEqual(expectedSearch);
+  }).toEqual({
+    pathname: "/courses/operations",
+    ...expectedSearch,
+    legacy: [null, null, null, null],
+  });
 
   const courseDetail = page.locator(
     'section[data-course-id="operations"][data-course-scope="public"][data-course-view="detail"]',
@@ -308,17 +308,23 @@ test("course scenarios return to the selected filtered public course", async ({
   await expect(scenario).toBeVisible();
   await scenario.click();
 
-  const backToCourse = page.getByRole("button", { name: "Back to course" });
+  const backToCourse = page.getByRole("link", { name: "Back to course" });
   await expect(backToCourse).toBeVisible();
   await expect(page.getByText("Course step 1 of 2")).toBeVisible();
   await expect.poll(() => {
-    const search = new URL(page.url()).searchParams;
+    const url = new URL(page.url());
+    const search = url.searchParams;
     return {
-      course: search.get("course"),
+      pathname: url.pathname,
       q: search.get("q"),
       difficulty: search.get("difficulty"),
+      legacy: legacyCourseSearch(url),
     };
-  }).toEqual(expectedSearch);
+  }).toEqual({
+    pathname: "/courses/operations/repair-nginx",
+    ...expectedSearch,
+    legacy: [null, null, null, null],
+  });
 
   await backToCourse.click();
   await expect(courseDetail).toBeVisible();
@@ -330,13 +336,19 @@ test("course scenarios return to the selected filtered public course", async ({
     "true",
   );
   await expect.poll(() => {
-    const search = new URL(page.url()).searchParams;
+    const url = new URL(page.url());
+    const search = url.searchParams;
     return {
-      course: search.get("course"),
+      pathname: url.pathname,
       q: search.get("q"),
       difficulty: search.get("difficulty"),
+      legacy: legacyCourseSearch(url),
     };
-  }).toEqual(expectedSearch);
+  }).toEqual({
+    pathname: "/courses/operations",
+    ...expectedSearch,
+    legacy: [null, null, null, null],
+  });
 });
 
 test("private assignments return to the organization course library", async ({
@@ -351,21 +363,36 @@ test("private assignments return to the organization course library", async ({
     })
     .click();
   await expect(page).toHaveURL(
-    /\/courses\/repair-nginx\?organizationId=org-platform$/,
+    "/organizations/org-platform/courses/private/operations/repair-nginx",
   );
 
-  const backToOrganization = page.getByRole("button", {
-    name: "Back to organization courses",
-  });
-  await expect(backToOrganization).toBeVisible();
-  await backToOrganization.click();
+  const backToCourse = page.getByRole("link", { name: "Back to course" });
+  await expect(backToCourse).toBeVisible();
+  await backToCourse.click();
 
   await expect(page).toHaveURL(
-    /\/organizations\/org-platform\?tab=courses$/,
+    "/organizations/org-platform/courses/private/operations",
   );
   await expect(
-    page.getByRole("heading", { name: "Organization courses" }),
+    page.getByRole("heading", { name: "Platform repair sequence" }).first(),
   ).toBeVisible();
+});
+
+test("an assignment without a current course still stays in its organization", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+  ui.server.state.assignments[0]!.courseLocation = null;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await page
+    .getByRole("link", {
+      name: /Repair a broken nginx service Assigned by Platform Repair Crew/i,
+    })
+    .click();
+  await expect(page).toHaveURL("/organizations/org-platform/courses");
 });
 
 test("organization course scenarios return to the selected private course", async ({
@@ -373,26 +400,67 @@ test("organization course scenarios return to the selected private course", asyn
   ui,
 }) => {
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
-  await page.getByRole("tab", { name: "Courses" }).click();
   await page
-    .getByRole("button", { name: "Platform repair sequence" })
+    .locator("main")
+    .getByRole("button", { name: "Courses", exact: true })
+    .click();
+  await page
+    .getByRole("link", { name: "Platform repair sequence" })
     .click();
   await page
     .getByRole("link", { name: /Repair a broken nginx service/i })
     .click();
 
   await expect(page).toHaveURL(
-    /\/courses\/repair-nginx\?.*organizationId=org-platform.*course=org-platform%3Aoperations/,
+    "/organizations/org-platform/courses/private/operations/repair-nginx",
   );
-  await page.getByRole("button", { name: "Back to course" }).click();
+  await page.getByRole("link", { name: "Back to course" }).click();
 
   await expect(page).toHaveURL(
-    /\/organizations\/org-platform\?tab=courses&course=org-platform%3Aoperations$/,
+    "/organizations/org-platform/courses/private/operations",
   );
   await expect(
     page.locator(
       'section[data-course-id="operations"][data-course-scope="org-platform"][data-course-view="detail"]',
     ),
+  ).toBeVisible();
+});
+
+test("direct organization public and General practice briefing paths resolve", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    path: "/organizations/org-platform/courses/public/operations/repair-dns",
+    sessionRole: "owner",
+    theme: "light",
+  });
+  await expect(page.getByText("Course step 1 of 1")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to course" })).toHaveAttribute(
+    "href",
+    "/organizations/org-platform/courses/public/operations",
+  );
+
+  await ui.open({
+    path: "/organizations/org-platform/courses/general-practice/recover-postgres",
+    sessionRole: "owner",
+    theme: "light",
+  });
+  await expect(page.getByRole("link", { name: "Back to course" })).toHaveAttribute(
+    "href",
+    "/organizations/org-platform/courses/general-practice",
+  );
+});
+
+test("a scenario outside the stated course is rejected", async ({ page, ui }) => {
+  await ui.open({
+    path: "/courses/operations/recover-postgres",
+    sessionRole: "learner",
+    theme: "light",
+  });
+
+  await expect(
+    page.getByRole("heading", { name: "Scenario is not in this course" }),
   ).toBeVisible();
 });
 
@@ -433,9 +501,16 @@ test("matching the General practice title reveals all eligible members", async (
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
-  await expect(
-    generalPractice.locator('a[href^="/courses/recover-postgres?"]'),
-  ).toBeVisible();
+  const postgres = generalPractice.getByRole("link", {
+    name: /Recover a read-only PostgreSQL node/i,
+  });
+  await expect(postgres).toBeVisible();
+  const postgresHref = await postgres.getAttribute("href");
+  const postgresUrl = new URL(postgresHref ?? "", page.url());
+  expect(postgresUrl.pathname).toBe(
+    "/courses/general-practice/recover-postgres",
+  );
+  expect(postgresUrl.searchParams.get("q")).toBe("General practice");
   await expect(
     page.getByRole("heading", { name: "Linux operations" }),
   ).toHaveCount(0);
@@ -460,10 +535,10 @@ test("partially available courses remain visible", async ({ page, ui }) => {
     'section[data-course-id="operations"][data-course-scope="public"][data-course-view="detail"]',
   );
   await expect(
-    courseDetail.locator('a[href^="/courses/repair-nginx?"]'),
+    courseDetail.locator('a[href="/courses/operations/repair-nginx"]'),
   ).toBeVisible();
   await expect(
-    courseDetail.locator('a[href^="/courses/repair-dns?"]'),
+    courseDetail.locator('a[href="/courses/operations/repair-dns"]'),
   ).toHaveCount(0);
 });
 
@@ -472,10 +547,13 @@ test("organization catalogs render public courses before scoped courses", async 
   ui,
 }) => {
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
-  await page.getByRole("tab", { name: "Courses" }).click();
+  await page
+    .locator("main")
+    .getByRole("button", { name: "Courses", exact: true })
+    .click();
 
   const courses = page.locator(
-    'li[data-course-id="operations"][data-course-view="index"]',
+    'section[data-course-id="operations"][data-course-view="index"]',
   );
   await expect(courses).toHaveCount(2);
   await expect(courses.nth(0)).toHaveAttribute("data-course-scope", "public");
@@ -484,43 +562,66 @@ test("organization catalogs render public courses before scoped courses", async 
     "org-platform",
   );
   await expect(courses.locator('a[href*="repair-dns"]')).toHaveCount(0);
-  await courses.nth(0).getByRole("button").click();
+  await courses.nth(0).getByRole("link", { name: /Linux operations/ }).click();
+  await expect(page).toHaveURL(
+    "/organizations/org-platform/courses/public/operations",
+  );
   let selectedCourse = page.locator(
     'section[data-course-view="detail"][data-course-scope="public"]',
   );
-  await expect(selectedCourse.locator('a[href*="repair-dns"]')).toHaveCount(1);
+  await expect(
+    selectedCourse.locator(
+      'a[href="/organizations/org-platform/courses/public/operations/repair-dns"]',
+    ),
+  ).toHaveCount(1);
   await expect(selectedCourse.locator('a[href*="repair-nginx"]')).toHaveCount(
     0,
   );
-  await selectedCourse.getByRole("button", { name: "All courses" }).click();
+  await page.getByRole("button", { name: "All courses" }).click();
 
   const organizationCourse = page.locator(
-    'li[data-course-id="operations"][data-course-scope="org-platform"]',
+    'section[data-course-id="operations"][data-course-scope="org-platform"]',
   );
-  await organizationCourse.getByRole("button").click();
+  await organizationCourse
+    .getByRole("link", { name: /Platform repair sequence/ })
+    .click();
+  await expect(page).toHaveURL(
+    "/organizations/org-platform/courses/private/operations",
+  );
   selectedCourse = page.locator(
     'section[data-course-view="detail"][data-course-scope="org-platform"]',
   );
-  await expect(selectedCourse.locator('a[href*="repair-nginx"]')).toHaveCount(
-    1,
-  );
   await expect(
-    selectedCourse.locator('a[href*="platform-logrotate"]'),
+    selectedCourse.locator(
+      'a[href="/organizations/org-platform/courses/private/operations/repair-nginx"]',
+    ),
   ).toHaveCount(1);
-  await selectedCourse.getByRole("button", { name: "All courses" }).click();
+  await expect(
+    selectedCourse.locator(
+      'a[href="/organizations/org-platform/courses/private/operations/platform-logrotate"]',
+    ),
+  ).toHaveCount(1);
+  await page.getByRole("button", { name: "All courses" }).click();
 
   await page
-    .locator('li[data-course-scope="generated"]')
-    .getByRole("button", { name: "General practice" })
+    .locator('section[data-course-scope="generated"]')
+    .getByRole("link", { name: /General practice/ })
     .click();
+  await expect(page).toHaveURL(
+    "/organizations/org-platform/courses/general-practice",
+  );
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
   await expect(
-    generalPractice.locator('a[href*="recover-postgres"]'),
+    generalPractice.locator(
+      'a[href="/organizations/org-platform/courses/general-practice/recover-postgres"]',
+    ),
   ).toHaveCount(1);
   await expect(
-    generalPractice.locator('a[href*="platform-firewall"]'),
+    generalPractice.locator(
+      'a[href="/organizations/org-platform/courses/general-practice/platform-firewall"]',
+    ),
   ).toHaveCount(1);
 
   const catalog = (await page.evaluate(async () => {
@@ -826,16 +927,19 @@ test("organization courses remain operable at 200% text", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
-  await page.getByRole("tab", { name: "Courses" }).click();
+  await page
+    .locator("main")
+    .getByRole("button", { name: "Courses", exact: true })
+    .click();
   await page.evaluate(() => {
     document.documentElement.style.fontSize = "200%";
   });
   await page.waitForTimeout(100);
   const course = page.locator(
-    'li[data-course-id="operations"][data-course-scope="org-platform"]',
+    'section[data-course-id="operations"][data-course-scope="org-platform"]',
   );
-  const courseButton = course.getByRole("button", {
-    name: "Platform repair sequence",
+  const courseButton = course.getByRole("link", {
+    name: /Platform repair sequence/,
   });
   await courseButton.scrollIntoViewIfNeeded();
   await expect(courseButton).toBeVisible();
@@ -846,6 +950,19 @@ test("organization courses remain operable at 200% text", async ({
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
+
+function legacyCourseSearch(url: URL): Array<string | null> {
+  return [
+    url.searchParams.get("course"),
+    url.searchParams.get("organizationId"),
+    url.searchParams.get("step"),
+    url.searchParams.get("steps"),
+  ];
+}
+
+function expectNoLegacyCourseSearch(url: string): void {
+  expect(legacyCourseSearch(new URL(url))).toEqual([null, null, null, null]);
+}
 
 test("unknown route has a designed recovery path", async ({ page, ui }) => {
   await ui.open({
@@ -864,7 +981,10 @@ test("unknown route has a designed recovery path", async ({ page, ui }) => {
   ).toBeVisible();
 });
 
-for (const legacyPath of ["/scenarios", "/scenarios/repair-nginx"] as const) {
+for (const legacyPath of [
+  "/scenarios",
+  "/scenarios/repair-nginx",
+] as const) {
   test(`legacy learner route ${legacyPath} is removed without redirecting`, async ({
     page,
     ui,
@@ -882,6 +1002,23 @@ for (const legacyPath of ["/scenarios", "/scenarios/repair-nginx"] as const) {
     ).toHaveAttribute("href", "/courses");
   });
 }
+
+test("legacy one-segment course scenario path is not redirected", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    path: "/courses/repair-nginx",
+    sessionRole: "learner",
+    theme: "light",
+  });
+
+  await expect(page).toHaveURL(/\/courses\/repair-nginx$/);
+  await expect(
+    page.getByRole("heading", { name: "Course not available" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "All courses" })).toBeVisible();
+});
 
 test("Recursive Mono keeps terminal cell geometry stable", async ({
   page,

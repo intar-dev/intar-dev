@@ -13,7 +13,6 @@ export type CatalogSort =
   | "title";
 
 export interface CatalogSearch {
-  course?: string;
   q?: string;
   difficulty?: ScenarioDifficulty;
   category?: string;
@@ -22,7 +21,6 @@ export interface CatalogSearch {
 }
 
 export interface NormalizedCatalogSearch {
-  course: string | undefined;
   q: string;
   difficulty: ScenarioDifficulty | undefined;
   category: string | undefined;
@@ -76,10 +74,6 @@ export function normalizeCatalogSearch(
       : "recommended";
 
   return {
-    course:
-      typeof search.course === "string" && search.course.trim()
-        ? search.course.trim()
-        : undefined,
     q: typeof search.q === "string" ? search.q.trim() : "",
     difficulty,
     category:
@@ -95,7 +89,6 @@ export function compactCatalogSearch(
   search: NormalizedCatalogSearch,
 ): CatalogSearch {
   const compact: CatalogSearch = {};
-  if (search.course) compact.course = search.course;
   if (search.q) compact.q = search.q;
   if (search.difficulty) compact.difficulty = search.difficulty;
   if (search.category) compact.category = search.category;

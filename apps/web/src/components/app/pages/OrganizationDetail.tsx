@@ -21,7 +21,6 @@ import {
   ProgressSection,
 } from "./organization-detail/people";
 import { OrganizationRunnersSection } from "./organization-detail/runners";
-import { OrganizationScenariosSection } from "./organization-detail/scenarios";
 import { OrganizationSettingsSection } from "./organization-detail/settings";
 import {
   type OrganizationDetailResponse,
@@ -75,13 +74,6 @@ export function OrganizationDetail() {
       to: ".",
       replace: true,
       search: tab === "overview" ? {} : { tab },
-    });
-  };
-  const setCourse = (course: string | undefined) => {
-    void navigate({
-      to: ".",
-      replace: course === undefined,
-      search: course ? { tab: "courses", course } : { tab: "courses" },
     });
   };
 
@@ -143,18 +135,32 @@ export function OrganizationDetail() {
           />
         }
         actions={
-          <Button
-            size="sm"
-            variant="outline"
-            render={
-              <Link
-                to="/organizations/$orgId/workshops"
-                params={{ orgId: detail.id }}
-              />
-            }
-          >
-            Workshops
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              render={
+                <Link
+                  to="/organizations/$orgId/courses"
+                  params={{ orgId: detail.id }}
+                />
+              }
+            >
+              Courses
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              render={
+                <Link
+                  to="/organizations/$orgId/workshops"
+                  params={{ orgId: detail.id }}
+                />
+              }
+            >
+              Workshops
+            </Button>
+          </div>
         }
       />
 
@@ -166,7 +172,6 @@ export function OrganizationDetail() {
         <div className="min-w-0 max-w-full overflow-x-auto border-b px-1 pt-1">
           <TabsList variant="line" className="min-w-max pb-1">
             <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="courses">Courses</TabsTrigger>
             <TabsTrigger value="people">Members</TabsTrigger>
             <TabsTrigger value="assignments">Assignments</TabsTrigger>
             {admin ? (
@@ -178,13 +183,15 @@ export function OrganizationDetail() {
         </div>
 
         <TabsContent value="overview" className="min-w-0">
-          <OrganizationOverview detail={detail} setTab={setTab} />
-        </TabsContent>
-        <TabsContent value="courses" className="min-w-0">
-          <OrganizationScenariosSection
+          <OrganizationOverview
             detail={detail}
-            selectedCourseKey={routeSearch.course}
-            onCourseChange={setCourse}
+            setTab={setTab}
+            onOpenCourses={() =>
+              void navigate({
+                to: "/organizations/$orgId/courses",
+                params: { orgId: detail.id },
+              })
+            }
           />
         </TabsContent>
         <TabsContent value="people" className="min-w-0">

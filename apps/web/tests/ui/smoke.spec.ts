@@ -170,16 +170,16 @@ test("learner discovery filters the catalog", async ({ page, ui }) => {
   ).toBeHidden();
 });
 
-test("scenario briefing is nested beneath the Courses breadcrumb", async ({
+test("scenario briefing is nested beneath its catalog course breadcrumb", async ({
   page,
   ui,
 }) => {
   await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
   const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
   await expect(
-    breadcrumb.getByRole("link", { name: "Courses" }),
-  ).toHaveAttribute("href", "/courses");
-  await expect(page).toHaveURL(/\/courses\/repair-nginx$/);
+    breadcrumb.getByRole("link", { name: "Linux operations" }),
+  ).toHaveAttribute("href", "/courses/operations");
+  await expect(page).toHaveURL("/courses/operations/repair-nginx");
 });
 
 test("learner enters the live workshop and can raise a hand", async ({

@@ -8,6 +8,7 @@ const agentBridgeMock = vi.hoisted(() => ({
 }));
 const scenarioRunsMock = vi.hoisted(() => ({
   destroyScenarioRunForUser: vi.fn(),
+  resolveScenarioCourseLocationForUser: vi.fn(),
 }));
 
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
@@ -29,6 +30,9 @@ describe("scenario destroy route", () => {
       activeSlotReleased: true,
       run: { id: "run-1", activity: "background" },
     });
+    scenarioRunsMock.resolveScenarioCourseLocationForUser.mockResolvedValue(
+      null,
+    );
   });
 
   it("returns the background snapshot and long-running-operation headers", async () => {

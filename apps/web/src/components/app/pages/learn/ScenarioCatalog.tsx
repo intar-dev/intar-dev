@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArrowRight,
   CircleDot,
@@ -20,6 +20,7 @@ import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
 import { ScenarioCard } from "@/components/app/patterns/ScenarioCard";
 import { SCENARIO_DIFFICULTIES } from "@/components/app/patterns/MetaLine";
 import { useMyRuns } from "@/components/app/hooks/useMyRuns";
+import { usePageChrome } from "@/components/app/shell/page-chrome";
 import {
   HttpResponseError,
   isAccessResponseError,
@@ -52,13 +53,18 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { ScenarioCatalogWireResponse } from "@/lib/scenario-runs";
+import type {
+  CourseLocation,
+  ScenarioCatalogWireResponse,
+} from "@/lib/scenario-runs";
+import { findScenarioCourseLocation } from "@/lib/course-location";
 import { CourseCatalogBrowser } from "./CourseCatalogSections";
 import {
   buildCourseCatalogSection,
   buildCourseCatalogView,
   courseCatalogKey,
 } from "./course-catalog";
+import { CourseScenarioLink } from "./course-route-links";
 
 interface MyAssignmentsResponse {
   assignments: Array<{
@@ -68,11 +74,21 @@ interface MyAssignmentsResponse {
     organizationId: string;
     organizationName: string;
     assignedAt: number;
+    courseLocation: CourseLocation | null;
   }>;
 }
 
 export function ScenarioCatalog() {
-  const routeSearch = useSearch({ from: "/app/courses" });
+  return <PublicCourseCatalogPage courseId={null} />;
+}
+
+export function CourseCatalogDetail() {
+  const { courseId } = useParams({ from: "/app/courses/$courseId" });
+  return <PublicCourseCatalogPage courseId={courseId} />;
+}
+
+function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
+  const routeSearch = useSearch({ strict: false });
   const searchState = useMemo(
     () => normalizeCatalogSearch(routeSearch),
     [routeSearch],
@@ -219,12 +235,17 @@ export function ScenarioCatalog() {
   );
   const selectedCourse = useMemo(
     () =>
-      searchState.course
+      courseId
         ? allCourses.find(
-            (course) => courseCatalogKey(course) === searchState.course,
+            (course) =>
+              (course.kind === "general-practice" &&
+                courseId === "general-practice") ||
+              (course.kind === "authored" &&
+                course.organizationId === null &&
+                course.courseId === courseId),
           )
         : undefined,
-    [allCourses, searchState.course],
+    [allCourses, courseId],
   );
   const selectedSection = useMemo(
     () =>
@@ -233,6 +254,7 @@ export function ScenarioCatalog() {
         : null,
     [catalogFilter, selectedCourse],
   );
+  usePageChrome({ title: selectedCourse?.title });
 
   const toggleTag = (tag: string) => {
     const nextTags = searchState.tags.includes(tag)
@@ -251,7 +273,6 @@ export function ScenarioCatalog() {
   const clearFilters = () => {
     setSearchText("");
     void navigateCatalogSearch(navigate, {
-      course: searchState.course,
       q: "",
       difficulty: undefined,
       category: undefined,
@@ -405,7 +426,7 @@ export function ScenarioCatalog() {
         </Alert>
       ) : null}
 
-      {!searchState.course && activeRuns.length ? (
+      {!courseId && activeRuns.length ? (
         <section className="space-y-4" aria-labelledby="active-work-heading">
           <div className="flex flex-wrap items-baseline justify-between gap-3">
             <div>
@@ -450,7 +471,7 @@ export function ScenarioCatalog() {
         </section>
       ) : null}
 
-      {!searchState.course && assignments.length ? (
+      {!courseId && assignments.length ? (
         <section className="space-y-4" aria-labelledby="assignments-heading">
           <div>
             <p className="text-eyebrow">From your organizations</p>
@@ -466,11 +487,11 @@ export function ScenarioCatalog() {
             {(visibleAssignments) => (
               <div className="divide-y overflow-hidden rounded-xl border bg-card">
                 {visibleAssignments.map((assignment) => (
-                  <Link
+                  <CourseScenarioLink
                     key={assignment.assignmentId}
-                    to="/courses/$scenarioId"
-                    params={{ scenarioId: assignment.scenarioId }}
-                    search={{ organizationId: assignment.organizationId }}
+                    location={assignment.courseLocation}
+                    scenarioId={assignment.scenarioId}
+                    fallbackOrganizationId={assignment.organizationId}
                     className="group flex min-h-16 items-center gap-4 px-4 py-4 transition-colors hover:bg-muted/60 sm:px-6"
                   >
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
@@ -485,7 +506,7 @@ export function ScenarioCatalog() {
                       </span>
                     </span>
                     <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-                  </Link>
+                  </CourseScenarioLink>
                 ))}
               </div>
             )}
@@ -498,7 +519,7 @@ export function ScenarioCatalog() {
           <div>
             <p className="text-eyebrow">Course catalog</p>
             <h2 id="catalog-heading" className="mt-2 text-section-title">
-              {searchState.course ? "Course catalog" : "Choose your next course"}
+              {courseId ? "Course catalog" : "Choose your next course"}
             </h2>
           </div>
           <FilterBar
@@ -572,7 +593,7 @@ export function ScenarioCatalog() {
             </Button>
           }
         />
-      ) : !searchState.course && !catalogView.visibleScenarioCount ? (
+      ) : !courseId && !catalogView.visibleScenarioCount ? (
         <EmptyState
           icon={<Search />}
           title="No courses match your filters"
@@ -586,24 +607,40 @@ export function ScenarioCatalog() {
       ) : (
         <CourseCatalogBrowser
           courses={catalogView.courses}
-          selectedCourseKey={searchState.course}
+          selectedCourseKey={
+            courseId
+              ? (selectedCourse ? courseCatalogKey(selectedCourse) : courseId)
+              : undefined
+          }
           selectedSection={selectedSection}
           onSelectCourse={(course) => {
             if (pendingSearchNavigation.current !== null) {
               window.clearTimeout(pendingSearchNavigation.current);
               pendingSearchNavigation.current = null;
             }
-            void navigateCatalogSearch(
-              navigate,
-              { ...searchState, q: searchText.trim(), course },
-              false,
+            const selected = allCourses.find(
+              (candidate) => courseCatalogKey(candidate) === course,
             );
+            if (!selected) return;
+            void navigate({
+              to: "/courses/$courseId",
+              params: {
+                courseId:
+                  selected.kind === "general-practice"
+                    ? "general-practice"
+                    : selected.courseId,
+              },
+              search: compactCatalogSearch({
+                ...searchState,
+                q: searchText.trim(),
+              }),
+            });
           }}
           onShowAllCourses={() =>
-            void navigateCatalogSearch(
-              navigate,
-              { ...searchState, course: undefined },
-            )
+            void navigate({
+              to: "/courses",
+              search: compactCatalogSearch(searchState),
+            })
           }
           onClearFilters={clearFilters}
           resetKey={`${searchState.q}|${searchState.difficulty ?? ""}|${searchState.category ?? ""}|${searchState.tags.join(",")}|${searchState.sort}`}
@@ -611,19 +648,13 @@ export function ScenarioCatalog() {
             <ScenarioCard
               scenario={scenario}
               headingLevel={4}
-              search={{
-                ...compactCatalogSearch({
-                  ...searchState,
-                  course: context.courseKey,
-                }),
-                ...(context.sequence
-                  ? {
-                      step: context.sequence.position,
-                      steps: context.sequence.total,
-                    }
-                  : {}),
-              }}
+              search={compactCatalogSearch(searchState)}
               sequence={context.sequence}
+              courseLocation={findScenarioCourseLocation(
+                [context.course],
+                scenario.scenarioId,
+                null,
+              )}
             />
           )}
         />

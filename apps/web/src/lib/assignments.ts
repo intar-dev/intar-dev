@@ -3,8 +3,11 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { member, organization, scenarioAssignments } from "@/db/schema";
 import { appError } from "@/lib/app-error";
+import { findScenarioCourseLocation } from "@/lib/course-location";
 import { createAppId } from "@/lib/id";
 import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
+import { listScenarioCatalogForUser } from "@/lib/scenario-runs/catalog";
+import type { CourseLocation } from "@/lib/scenario-runs";
 import { requireOrganizationRole } from "@/lib/organizations";
 
 export interface OrganizationAssignmentRecord {
@@ -21,6 +24,7 @@ export interface MyAssignment {
   organizationId: string;
   organizationName: string;
   assignedAt: number;
+  courseLocation: CourseLocation | null;
 }
 
 async function scenarioTitleMap(
@@ -170,16 +174,31 @@ export async function listMyAssignments(params: {
     )
     .orderBy(desc(scenarioAssignments.createdAt));
 
-  const titleMaps = await Promise.all(
-    memberships.map(
-      async ({ organizationId }) =>
-        [organizationId, await scenarioTitleMap(organizationId)] as const,
+  const catalogsByOrganization = new Map(
+    await Promise.all(
+      [...new Set(rows.map((row) => row.organizationId))].map(
+        async (organizationId) => {
+          const catalog = await listScenarioCatalogForUser(
+            params.userId,
+            organizationId,
+          );
+          return [organizationId, catalog.courses] as const;
+        },
+      ),
     ),
   );
-  const titlesByOrganization = new Map(titleMaps);
   return rows.map((row) => ({
     ...row,
     scenarioTitle:
-      titlesByOrganization.get(row.organizationId)?.get(row.scenarioId) ?? null,
+      catalogsByOrganization
+        .get(row.organizationId)
+        ?.flatMap((course) => course.scenarios)
+        .find((scenario) => scenario.scenarioId === row.scenarioId)?.title ??
+      null,
+    courseLocation: findScenarioCourseLocation(
+      catalogsByOrganization.get(row.organizationId) ?? [],
+      row.scenarioId,
+      row.organizationId,
+    ),
   }));
 }

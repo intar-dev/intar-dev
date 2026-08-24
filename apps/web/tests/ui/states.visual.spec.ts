@@ -317,7 +317,10 @@ for (const viewport of [
     for (const theme of ["light", "dark"] as const) {
       test(`${theme}`, async ({ page, ui }) => {
         await ui.open({ ...routeCase("organization-detail"), theme });
-        await page.getByRole("tab", { name: "Courses" }).click();
+        await page
+          .locator("main")
+          .getByRole("button", { name: "Courses", exact: true })
+          .click();
         await expect(
           page.getByRole("heading", { name: "Platform repair sequence" }),
         ).toBeVisible();
@@ -329,10 +332,13 @@ for (const viewport of [
 
       test(`${theme} · combined General practice`, async ({ page, ui }) => {
         await ui.open({ ...routeCase("organization-detail"), theme });
-        await page.getByRole("tab", { name: "Courses" }).click();
         await page
-          .locator('li[data-course-scope="generated"]')
-          .getByRole("button", { name: "General practice" })
+          .locator("main")
+          .getByRole("button", { name: "Courses", exact: true })
+          .click();
+        await page
+          .locator('section[data-course-scope="generated"]')
+          .getByRole("link", { name: /General practice/ })
           .click();
         const generalPractice = page.locator(
           'section[data-course-scope="generated"][data-course-view="detail"]',

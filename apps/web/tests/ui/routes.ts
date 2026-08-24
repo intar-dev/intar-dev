@@ -36,7 +36,7 @@ export const ROUTE_CASES = [
   { id: "scenario-catalog", path: "/courses", sessionRole: "learner" },
   {
     id: "scenario-briefing",
-    path: "/courses/repair-nginx",
+    path: "/courses/operations/repair-nginx",
     sessionRole: "learner",
   },
   { id: "workshops", path: "/workshops", sessionRole: "learner" },

@@ -8,29 +8,20 @@ import {
 } from "./tab-search";
 
 describe("organization detail tab search", () => {
-  it("accepts the course tab", () => {
-    expect(validateOrganizationDetailSearch({ tab: "courses" })).toEqual({
-      tab: "courses",
-    });
-    expect(ORGANIZATION_DETAIL_TABS).toContain("courses");
-  });
-
-  it("keeps course drill-down state only on the Courses tab", () => {
+  it("drops the former course panel and its drill-down query state", () => {
     expect(
       validateOrganizationDetailSearch({
         tab: "courses",
         course: " org-platform:operations ",
       }),
-    ).toEqual({
-      tab: "courses",
-      course: "org-platform:operations",
-    });
+    ).toEqual({});
     expect(
       validateOrganizationDetailSearch({
         tab: "assignments",
         course: "org-platform:operations",
       }),
     ).toEqual({ tab: "assignments" });
+    expect(ORGANIZATION_DETAIL_TABS).not.toContain("courses");
   });
 
   it("falls legacy scenario tab links back to overview", () => {
@@ -61,7 +52,7 @@ describe("admin people tab search", () => {
 });
 
 describe("scenario briefing search", () => {
-  it("keeps normalized catalog return state", () => {
+  it("keeps only normalized catalog filters", () => {
     expect(
       validateScenarioBriefingSearch({
         course: " public:operations ",
@@ -75,19 +66,15 @@ describe("scenario briefing search", () => {
         steps: "5",
       }),
     ).toEqual({
-      course: "public:operations",
       q: "nginx",
       difficulty: "medium",
       category: "Linux services",
       tags: ["linux", "networking"],
       sort: "title",
-      organizationId: "org-platform",
-      step: 2,
-      steps: 5,
     });
   });
 
-  it("drops invalid catalog and organization values", () => {
+  it("drops invalid and legacy navigation values", () => {
     expect(
       validateScenarioBriefingSearch({
         course: " ",

@@ -18,6 +18,7 @@ import {
 } from "../../patterns/CollectionPagination";
 import { MetaDifficulty } from "../../patterns/MetaLine";
 import { Section } from "../../patterns/Section";
+import { usePageChrome } from "../../shell/page-chrome";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,15 +30,23 @@ import {
   type ScenarioValidationResult,
 } from "@/lib/authoring-wasm";
 import type {
+  ScenarioCatalogCourseWireEntry,
   ScenarioCatalogWireEntry,
   ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
-import { CourseCatalogBrowser } from "../learn/CourseCatalogSections";
 import {
-  buildCourseCatalogSection,
+  findScenarioCourseLocation,
+  matchesCourseRoute,
+  type CourseRouteMatch,
+} from "@/lib/course-location";
+import {
   buildCourseCatalogView,
-  courseCatalogKey,
+  type CourseCatalogSectionView,
 } from "../learn/course-catalog";
+import {
+  CourseCatalogLink,
+  CourseScenarioLink,
+} from "../learn/course-route-links";
 import {
   type OrganizationDetailResponse,
   fetchJson,
@@ -62,12 +71,10 @@ interface SavedSource extends SourceSummary {
 
 export function OrganizationScenariosSection({
   detail,
-  selectedCourseKey,
-  onCourseChange,
+  courseRoute = null,
 }: {
   detail: Detail;
-  selectedCourseKey?: string | undefined;
-  onCourseChange: (courseKey: string | undefined) => void;
+  courseRoute?: CourseRouteMatch | null;
 }) {
   const queryClient = useQueryClient();
   const admin = detail.role !== "member";
@@ -261,58 +268,68 @@ export function OrganizationScenariosSection({
   );
   const selectedCourse = useMemo(
     () =>
-      selectedCourseKey
-        ? courses.find(
-            (course) => courseCatalogKey(course) === selectedCourseKey,
-          )
-        : undefined,
-    [courses, selectedCourseKey],
-  );
-  const selectedSection = useMemo(
-    () =>
-      selectedCourse
-        ? buildCourseCatalogSection(selectedCourse, {
-            q: "",
-            tags: [],
-            sort: null,
-          })
+      courseRoute
+        ? (catalogView.courses.find((section) => {
+            const scenario = section.accessibleScenarios[0];
+            if (!scenario) return false;
+            return matchesCourseRoute(
+              findScenarioCourseLocation(
+                [section.course],
+                scenario.scenarioId,
+                detail.id,
+              ),
+              courseRoute,
+            );
+          }) ?? null)
         : null,
-    [selectedCourse],
+    [catalogView.courses, courseRoute, detail.id],
   );
   const privateEntries = entries.filter(
     (scenario) => scenario.organizationId === detail.id,
   );
   const actionError = save.error ?? build.error ?? deleteSource.error;
+  usePageChrome({ title: selectedCourse?.course.title });
 
   return (
     <div className="space-y-8">
       <Section
-        title="Organization courses"
-        description="Public courses and this organization's private course catalog are visible to every member. Private runs use organization runners only."
+        title={selectedCourse?.course.title ?? "Organization courses"}
+        description={
+          selectedCourse
+            ? selectedCourse.course.description
+            : "Public courses and this organization's private course catalog are visible to every member. Private runs use organization runners only."
+        }
       >
+        {courseRoute ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="-ml-2 mb-4"
+            render={
+              <Link
+                to="/organizations/$orgId/courses"
+                params={{ orgId: detail.id }}
+              />
+            }
+          >
+            All courses
+          </Button>
+        ) : null}
         {catalog.error ? (
           <InlineFeedback tone="error">
             {catalog.error instanceof Error
               ? catalog.error.message
               : "Failed to load courses"}
           </InlineFeedback>
+        ) : courseRoute && !selectedCourse ? (
+          <p className="text-sm text-muted-foreground">
+            This course is not available in this organization catalog.
+          </p>
         ) : entries.length ? (
-          <CourseCatalogBrowser
-            courses={catalogView.courses}
-            selectedCourseKey={selectedCourseKey}
-            selectedSection={selectedSection}
-            onSelectCourse={(courseKey) => onCourseChange(courseKey)}
-            onShowAllCourses={() => onCourseChange(undefined)}
-            gridClassName="sm:grid-cols-2"
-            resetKey="organization-courses"
-            renderScenario={(scenario, context) => (
-              <OrganizationScenarioCard
-                scenario={scenario}
-                organizationId={detail.id}
-                courseKey={context.courseKey}
-                sequence={context.sequence ?? null}
-              />
-            )}
+          <OrganizationCourseCatalog
+            courses={selectedCourse ? [selectedCourse] : catalogView.courses}
+            organizationId={detail.id}
+            showCourseLinks={!courseRoute}
           />
         ) : (
           <p className="text-sm text-muted-foreground">
@@ -534,28 +551,208 @@ export function OrganizationScenariosSection({
   );
 }
 
+function OrganizationCourseCatalog({
+  courses,
+  organizationId,
+  showCourseLinks,
+}: {
+  courses: readonly CourseCatalogSectionView[];
+  organizationId: string;
+  showCourseLinks: boolean;
+}) {
+  if (showCourseLinks) {
+    return (
+      <PaginatedCollection
+        items={courses}
+        pageSize={COLLECTION_PAGE_SIZE.cards}
+        itemLabel="courses"
+        resetKey="organization-courses"
+      >
+        {(visibleCourses) => (
+          <div className="space-y-6">
+            {visibleCourses.map((section) => (
+              <OrganizationCourseIndex
+                key={organizationCourseKey(section.course)}
+                section={section}
+                organizationId={organizationId}
+              />
+            ))}
+          </div>
+        )}
+      </PaginatedCollection>
+    );
+  }
+
+  return (
+    <div className="space-y-8">
+      {courses.map((section) => (
+        <OrganizationCourseDetail
+          key={organizationCourseKey(section.course)}
+          section={section}
+          organizationId={organizationId}
+        />
+      ))}
+    </div>
+  );
+}
+
+function OrganizationCourseIndex({
+  section,
+  organizationId,
+}: {
+  section: CourseCatalogSectionView;
+  organizationId: string;
+}) {
+  const course = section.course;
+  const firstScenario = section.accessibleScenarios[0];
+  const courseLocation = firstScenario
+    ? findScenarioCourseLocation(
+        [course],
+        firstScenario.scenarioId,
+        organizationId,
+      )
+    : null;
+  return (
+    <section
+      className="space-y-3 border-t pt-6 first:border-t-0 first:pt-0"
+      data-course-id={course.courseId ?? "general-practice"}
+      data-course-scope={organizationCourseScope(course)}
+      data-course-view="index"
+    >
+      {courseLocation ? (
+        <CourseCatalogLink
+          location={courseLocation}
+          className="group block rounded-lg px-2 py-1 -mx-2 outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/40"
+        >
+          <CourseHeading course={course} linked />
+        </CourseCatalogLink>
+      ) : (
+        <CourseHeading course={course} linked={false} />
+      )}
+      <p className="text-metadata">
+        {section.accessibleScenarios.length} {" "}
+        {section.accessibleScenarios.length === 1 ? "scenario" : "scenarios"}
+        {" · ~"}
+        {section.totalEstimatedMinutes} min total
+      </p>
+    </section>
+  );
+}
+
+function OrganizationCourseDetail({
+  section,
+  organizationId,
+}: {
+  section: CourseCatalogSectionView;
+  organizationId: string;
+}) {
+  const course = section.course;
+  return (
+    <section
+      className="space-y-4"
+      data-course-id={course.courseId ?? "general-practice"}
+      data-course-scope={organizationCourseScope(course)}
+      data-course-view="detail"
+    >
+      <p className="text-eyebrow">{courseKindLabel(course)}</p>
+      <PaginatedCollection
+        items={section.visibleScenarios}
+        pageSize={COLLECTION_PAGE_SIZE.cards}
+        itemLabel="scenarios"
+        resetKey={organizationCourseKey(course)}
+      >
+        {(visibleScenarios) => (
+          <div className="grid gap-4 sm:grid-cols-2">
+            {visibleScenarios.map((scenario) => (
+              <OrganizationScenarioCard
+                key={scenario.scenarioId}
+                scenario={scenario}
+                course={course}
+                organizationId={organizationId}
+                sequence={
+                  course.kind === "authored"
+                    ? {
+                        position:
+                          section.accessibleScenarios.findIndex(
+                            (entry) => entry.scenarioId === scenario.scenarioId,
+                          ) + 1,
+                        total: section.accessibleScenarios.length,
+                      }
+                    : null
+                }
+              />
+            ))}
+          </div>
+        )}
+      </PaginatedCollection>
+    </section>
+  );
+}
+
+function organizationCourseKey(course: ScenarioCatalogCourseWireEntry): string {
+  return course.kind === "general-practice"
+    ? "general-practice"
+    : `${course.organizationId ?? "public"}:${course.courseId}`;
+}
+
+function organizationCourseScope(course: ScenarioCatalogCourseWireEntry): string {
+  return course.kind === "general-practice"
+    ? "generated"
+    : (course.organizationId ?? "public");
+}
+
+function courseKindLabel(course: ScenarioCatalogCourseWireEntry): string {
+  return course.kind === "general-practice"
+    ? "Open practice"
+    : course.organizationId
+      ? "Private course"
+      : "Public course";
+}
+
+function CourseHeading({
+  course,
+  linked,
+}: {
+  course: ScenarioCatalogCourseWireEntry;
+  linked: boolean;
+}) {
+  return (
+    <div>
+      <p className="text-eyebrow">{courseKindLabel(course)}</p>
+      <h2
+        className={
+          "mt-1 text-section-title" + (linked ? " group-hover:text-primary" : "")
+        }
+      >
+        {course.title}
+      </h2>
+      <p className="mt-2 text-sm text-muted-foreground">
+        {course.description}
+      </p>
+    </div>
+  );
+}
+
 function OrganizationScenarioCard({
   scenario,
+  course,
   organizationId,
-  courseKey,
   sequence,
 }: {
   scenario: ScenarioCatalogWireEntry;
+  course: ScenarioCatalogCourseWireEntry;
   organizationId: string;
-  courseKey: string;
   sequence: { position: number; total: number } | null;
 }) {
+  const courseLocation = findScenarioCourseLocation(
+    [course],
+    scenario.scenarioId,
+    organizationId,
+  );
   return (
-    <Link
-      to="/courses/$scenarioId"
-      params={{ scenarioId: scenario.scenarioId }}
-      search={{
-        organizationId,
-        course: courseKey,
-        ...(sequence
-          ? { step: sequence.position, steps: sequence.total }
-          : {}),
-      }}
+    <CourseScenarioLink
+      location={courseLocation}
+      scenarioId={scenario.scenarioId}
       preloadDelay={250}
       className="group rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
     >
@@ -581,6 +778,6 @@ function OrganizationScenarioCard({
           <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
         </div>
       </Card>
-    </Link>
+    </CourseScenarioLink>
   );
 }

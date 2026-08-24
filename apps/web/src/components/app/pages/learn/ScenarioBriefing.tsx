@@ -40,6 +40,10 @@ import {
 import { presentScenarioDetail, presentScenarioRun } from "@/lib/run-phase";
 import type { ScenarioDetail } from "@/lib/scenario-runs";
 import {
+  matchesCourseRoute,
+  type CourseRouteMatch,
+} from "@/lib/course-location";
+import {
   requestScenarioStartWithCapacityWait,
   ScenarioStartCancelledError,
 } from "@/components/app/lib/scenario-start";
@@ -64,6 +68,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import type { CatalogSearch } from "./catalog-search";
+import { CourseCatalogLink } from "./course-route-links";
 
 type PresentedScenarioDetail = ReturnType<typeof presentScenarioDetail>;
 type FinishedRun = PresentedScenarioDetail["finishedRuns"][number];
@@ -77,14 +83,73 @@ interface ScenarioDetailResponse {
   scenario: PresentedScenarioDetail;
 }
 
-export function ScenarioBriefing() {
+interface ScenarioBriefingRoute extends CourseRouteMatch {
+  organizationId: string | null;
+}
+
+export function PublicCourseScenarioBriefing() {
+  const { courseId, scenarioId } = useParams({
+    from: "/app/courses/$courseId/$scenarioId",
+  });
+  return (
+    <ScenarioBriefing
+      route={{ scope: "public", courseId, organizationId: null }}
+      scenarioId={scenarioId}
+    />
+  );
+}
+
+export function OrganizationPublicCourseScenarioBriefing() {
+  const { orgId, courseId, scenarioId } = useParams({
+    from: "/app/organizations/$orgId/courses/public/$courseId/$scenarioId",
+  });
+  return (
+    <ScenarioBriefing
+      route={{ scope: "organization-public", courseId, organizationId: orgId }}
+      scenarioId={scenarioId}
+    />
+  );
+}
+
+export function OrganizationPrivateCourseScenarioBriefing() {
+  const { orgId, courseId, scenarioId } = useParams({
+    from: "/app/organizations/$orgId/courses/private/$courseId/$scenarioId",
+  });
+  return (
+    <ScenarioBriefing
+      route={{ scope: "organization-private", courseId, organizationId: orgId }}
+      scenarioId={scenarioId}
+    />
+  );
+}
+
+export function OrganizationGeneralPracticeScenarioBriefing() {
+  const { orgId, scenarioId } = useParams({
+    from: "/app/organizations/$orgId/courses/general-practice/$scenarioId",
+  });
+  return (
+    <ScenarioBriefing
+      route={{
+        scope: "organization-general-practice",
+        courseId: "general-practice",
+        organizationId: orgId,
+      }}
+      scenarioId={scenarioId}
+    />
+  );
+}
+
+function ScenarioBriefing({
+  route,
+  scenarioId,
+}: {
+  route: ScenarioBriefingRoute;
+  scenarioId: string;
+}) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { scenarioId } = useParams({ from: "/app/courses/$scenarioId" });
-  const routeSearch = useSearch({
-    from: "/app/courses/$scenarioId",
-  });
-  const { organizationId, step, steps, ...catalogReturnSearch } = routeSearch;
+  const routeSearch = useSearch({ strict: false }) as CatalogSearch;
+  const organizationId = route.organizationId;
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [waitingForCapacity, setWaitingForCapacity] = useState(false);
   const [startNotice, setStartNotice] = useState<string | null>(null);
@@ -124,7 +189,10 @@ export function ScenarioBriefing() {
       return requestScenarioStartWithCapacityWait(scenarioId, {
         signal: controller.signal,
         onCapacityWait: () => setWaitingForCapacity(true),
-        organizationId: organizationId ?? null,
+        organizationId:
+          scenarioQuery.data?.scenario.courseLocation?.organizationId ??
+          organizationId ??
+          null,
       });
     },
     onSuccess: (result) => {
@@ -181,6 +249,10 @@ export function ScenarioBriefing() {
   const scenarioData = scenarioAccessError
     ? null
     : (scenarioQuery.data?.scenario ?? null);
+  const routeMatchesCatalog = matchesCourseRoute(
+    scenarioData?.courseLocation,
+    route,
+  );
   const finishedRuns = scenarioData?.finishedRuns ?? [];
   // A solve counts even when teardown later failed or the run was destroyed
   // afterwards — same semantics as the catalog's ScenarioProgress.
@@ -193,12 +265,17 @@ export function ScenarioBriefing() {
   const recentRuns = runsWithAttemptNumbers.slice(0, 5);
   const olderRuns = runsWithAttemptNumbers.slice(5);
   const solved = succeededRuns.length > 0;
+  const breadcrumbLabels = useMemo(
+    () => courseBreadcrumbLabels(route, scenarioData?.courseLocation),
+    [route, scenarioData?.courseLocation],
+  );
   usePageChrome({
     title: scenarioData?.briefing.title,
     status: useMemo(
       () => (solved ? <Badge variant="success">Solved</Badge> : undefined),
       [solved],
     ),
+    breadcrumbLabels,
   });
 
   const bestSolveMs = succeededRuns
@@ -250,6 +327,12 @@ export function ScenarioBriefing() {
             <Skeleton className="h-48 rounded-xl" />
           </div>
         </div>
+      ) : !routeMatchesCatalog ? (
+        <ErrorState
+          title="Scenario is not in this course"
+          description="This course path no longer contains the selected scenario. Open the current course catalog to choose an available lab."
+          onRetry={() => void scenarioQuery.refetch()}
+        />
       ) : (
         <>
           {scenarioQuery.error ? (
@@ -275,41 +358,14 @@ export function ScenarioBriefing() {
           ) : null}
 
           <div className="space-y-4">
-            {organizationId ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="-ml-2"
-                render={
-                  <Link
-                    to="/organizations/$orgId"
-                    params={{ orgId: organizationId }}
-                    search={
-                      routeSearch.course
-                        ? { tab: "courses", course: routeSearch.course }
-                        : { tab: "courses" }
-                    }
-                  />
-                }
-              >
-                <ArrowLeft className="size-4" aria-hidden />
-                {routeSearch.course
-                  ? "Back to course"
-                  : "Back to organization courses"}
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="-ml-2"
-                render={<Link to="/courses" search={catalogReturnSearch} />}
-              >
-                <ArrowLeft className="size-4" aria-hidden />
-                {routeSearch.course ? "Back to course" : "All courses"}
-              </Button>
-            )}
+            <CourseCatalogLink
+              location={scenarioData.courseLocation}
+              search={routeSearch}
+              className="-ml-2 inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted"
+            >
+              <ArrowLeft className="size-4" aria-hidden />
+              Back to course
+            </CourseCatalogLink>
 
             <ContentHeader
               title={scenarioData.briefing.title}
@@ -318,7 +374,10 @@ export function ScenarioBriefing() {
               meta={
                 <MetaLine
                   items={[
-                    step && steps ? `Course step ${step} of ${steps}` : null,
+                    scenarioData.courseLocation?.step &&
+                    scenarioData.courseLocation.steps
+                      ? `Course step ${scenarioData.courseLocation.step} of ${scenarioData.courseLocation.steps}`
+                      : null,
                     scenarioData.briefing.category,
                     <MetaDifficulty
                       key="difficulty"
@@ -792,6 +851,32 @@ async function fetchScenarioDetail(
   return {
     scenario: presentScenarioDetail(body.scenario),
   } satisfies ScenarioDetailResponse;
+}
+
+function courseBreadcrumbLabels(
+  route: ScenarioBriefingRoute,
+  location: PresentedScenarioDetail["courseLocation"] | undefined,
+): Record<string, string> | undefined {
+  if (!location) return undefined;
+  switch (route.scope) {
+    case "public":
+      return { [`/courses/${route.courseId}`]: location.courseTitle };
+    case "organization-public":
+      return {
+        [`/organizations/${route.organizationId}/courses/public/${route.courseId}`]:
+          location.courseTitle,
+      };
+    case "organization-private":
+      return {
+        [`/organizations/${route.organizationId}/courses/private/${route.courseId}`]:
+          location.courseTitle,
+      };
+    case "organization-general-practice":
+      return {
+        [`/organizations/${route.organizationId}/courses/general-practice`]:
+          location.courseTitle,
+      };
+  }
 }
 
 function TechnicalDetail({

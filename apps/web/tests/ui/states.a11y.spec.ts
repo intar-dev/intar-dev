@@ -27,13 +27,16 @@ test.describe("focused state accessibility", () => {
       ui,
     }, testInfo) => {
       await ui.open({ ...routeCase("organization-detail"), theme });
-      await page.getByRole("tab", { name: "Courses" }).click();
+      await page
+        .locator("main")
+        .getByRole("button", { name: "Courses", exact: true })
+        .click();
 
       await expect(
         page.getByRole("heading", { name: "Platform repair sequence" }),
       ).toBeVisible();
       await page
-        .getByRole("button", { name: "Platform repair sequence" })
+        .getByRole("link", { name: /Platform repair sequence/ })
         .click();
       await expect(
         page.getByRole("heading", { name: "Repair a broken nginx service" }),

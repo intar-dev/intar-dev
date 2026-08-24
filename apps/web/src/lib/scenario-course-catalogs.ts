@@ -1,7 +1,8 @@
-import { inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   scenarioCourseCatalogs,
+  type ScenarioCourseCatalogCourse,
   type ScenarioCourseCatalogSnapshotV1,
   vmScenarios,
 } from "@/db/schema";
@@ -97,26 +98,116 @@ export async function syncScenarioCourseCatalogSnapshot(
   },
 ): Promise<void> {
   const scopeKey = scenarioCourseCatalogScopeKey(input.organizationId);
-  const encodedCourses = JSON.stringify(input.snapshot.courses);
-  await db
-    .insert(scenarioCourseCatalogs)
-    .values({
-      scopeKey,
-      organizationId: input.organizationId,
-      coursesJson: input.snapshot.courses,
-      sourceRevision: input.sourceRevision,
-      createdAt: input.nowUnixMs,
-      updatedAt: input.nowUnixMs,
-    })
-    .onConflictDoUpdate({
-      target: scenarioCourseCatalogs.scopeKey,
-      set: {
-        coursesJson: input.snapshot.courses,
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const [existing] = await db
+      .select({
+        courses: scenarioCourseCatalogs.coursesJson,
+        sourceRevision: scenarioCourseCatalogs.sourceRevision,
+        updatedAt: scenarioCourseCatalogs.updatedAt,
+      })
+      .from(scenarioCourseCatalogs)
+      .where(eq(scenarioCourseCatalogs.scopeKey, scopeKey))
+      .limit(1);
+    const courses = mergeScenarioCourseCatalogCourses(
+      existing?.courses ?? [],
+      input.snapshot.courses,
+    );
+
+    if (!existing) {
+      const inserted = await db
+        .insert(scenarioCourseCatalogs)
+        .values({
+          scopeKey,
+          organizationId: input.organizationId,
+          coursesJson: courses,
+          sourceRevision: input.sourceRevision,
+          createdAt: input.nowUnixMs,
+          updatedAt: input.nowUnixMs,
+        })
+        .onConflictDoNothing()
+        .returning({ scopeKey: scenarioCourseCatalogs.scopeKey });
+      if (inserted.length) return;
+      continue;
+    }
+
+    const encodedExistingCourses = JSON.stringify(existing.courses);
+    if (encodedExistingCourses === JSON.stringify(courses)) {
+      return;
+    }
+
+    const updated = await db
+      .update(scenarioCourseCatalogs)
+      .set({
+        coursesJson: courses,
         sourceRevision: input.sourceRevision,
-        updatedAt: input.nowUnixMs,
-      },
-      setWhere: sql`${scenarioCourseCatalogs.sourceRevision} <> ${input.sourceRevision} OR ${scenarioCourseCatalogs.coursesJson} <> ${encodedCourses}`,
-    });
+        updatedAt: Math.max(input.nowUnixMs, existing.updatedAt + 1),
+      })
+      .where(
+        and(
+          eq(scenarioCourseCatalogs.scopeKey, scopeKey),
+          eq(scenarioCourseCatalogs.sourceRevision, existing.sourceRevision),
+          eq(scenarioCourseCatalogs.updatedAt, existing.updatedAt),
+          sql`${scenarioCourseCatalogs.coursesJson} = ${encodedExistingCourses}`,
+        ),
+      )
+      .returning({ scopeKey: scenarioCourseCatalogs.scopeKey });
+    if (updated.length) return;
+  }
+  throw new Error("course catalog update did not converge");
+}
+
+/**
+ * Course manifests arrive independently.  Preserve old course order and
+ * append new IDs, while making incoming membership authoritative so a
+ * scenario cannot remain in an older course after it moves to a new one.
+ */
+export function mergeScenarioCourseCatalogCourses(
+  existing: readonly ScenarioCourseCatalogCourse[],
+  incoming: readonly ScenarioCourseCatalogCourse[],
+): ScenarioCourseCatalogCourse[] {
+  const incomingById = new Map(
+    incoming.map((course) => [course.courseId, cloneCourse(course)]),
+  );
+  const incomingScenarioIds = new Set(
+    incoming.flatMap((course) => course.scenarioIds),
+  );
+  const merged: ScenarioCourseCatalogCourse[] = [];
+  const emittedCourseIds = new Set<string>();
+
+  for (const existingCourse of existing) {
+    const replacement = incomingById.get(existingCourse.courseId);
+    if (replacement) {
+      merged.push(replacement);
+      emittedCourseIds.add(replacement.courseId);
+      continue;
+    }
+
+    const retainedScenarioIds = existingCourse.scenarioIds.filter(
+      (scenarioId) => !incomingScenarioIds.has(scenarioId),
+    );
+    if (!retainedScenarioIds.length) continue;
+    merged.push({ ...cloneCourse(existingCourse), scenarioIds: retainedScenarioIds });
+    emittedCourseIds.add(existingCourse.courseId);
+  }
+
+  for (const incomingCourse of incoming) {
+    if (emittedCourseIds.has(incomingCourse.courseId)) continue;
+    merged.push(cloneCourse(incomingCourse));
+    emittedCourseIds.add(incomingCourse.courseId);
+  }
+
+  return merged;
+}
+
+function cloneCourse(
+  course: ScenarioCourseCatalogCourse,
+): ScenarioCourseCatalogCourse {
+  return {
+    courseId: course.courseId,
+    title: course.title,
+    description: course.description,
+    scenarioIds: [...course.scenarioIds],
+  };
 }
 
 export async function listVisibleScenarioCourses(

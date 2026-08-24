@@ -1,9 +1,17 @@
 import { env } from "cloudflare:workers";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
-import { scenarioRuns } from "@/db/schema";
-import { listVisibleScenarioCourses } from "@/lib/scenario-course-catalogs";
+import {
+  member,
+  scenarioCourseCatalogs,
+  scenarioRuns,
+  vmScenarios,
+} from "@/db/schema";
+import {
+  listVisibleScenarioCourses,
+  scenarioCourseCatalogScopeKey,
+} from "@/lib/scenario-course-catalogs";
 import { RUN_PHASE_ORDER, type RunPhase } from "@/lib/run-state";
 import {
   deriveScenarioRunOutcome,
@@ -18,6 +26,7 @@ import {
   type ScenarioCatalogWireResponse,
   type ScenarioCatalogWireEntry,
   type ScenarioCatalogCourseWireEntry,
+  type CourseLocation,
 } from "./types";
 import {
   loadEnabledScenarioRows,
@@ -114,6 +123,11 @@ export async function loadEnabledScenarioForUser(params: {
             title: active.title,
           }
         : null,
+    courseLocation: await resolveScenarioCourseLocationForUser({
+      userId: params.userId,
+      scenarioId: enabled.scenarioId,
+      organizationId: params.organizationId ?? null,
+    }),
     finishedRuns,
   };
 }
@@ -131,9 +145,12 @@ export async function getScenarioRunForUser(params: {
   // startup/readiness poll to one run-row query without hiding artifact
   // upload progress from teardown and archive views.
   if (RUN_PHASE_ORDER[run.phase] < RUN_PHASE_ORDER.teardown_requested) {
-    return run;
+    return withScenarioRunCourseLocation(run, params.userId);
   }
-  return hydrateScenarioRunReplayArtifacts(run);
+  return withScenarioRunCourseLocation(
+    await hydrateScenarioRunReplayArtifacts(run),
+    params.userId,
+  );
 }
 
 export async function listScenarioRunsForUser(params: {
@@ -163,7 +180,7 @@ export async function listScenarioRunsForUser(params: {
     .orderBy(desc(scenarioRuns.createdAt))
     .limit(100);
 
-  return rows.map((row) => {
+  const listedRuns = rows.map((row) => {
     const phase = row.state as RunPhase;
     const replayState = deriveScenarioRunReplayState(
       parseRunState(row.stateJson),
@@ -200,6 +217,19 @@ export async function listScenarioRunsForUser(params: {
       hasReplay: replayState === "ready",
     };
   });
+  const locations = await resolveScenarioCourseLocationsForUser({
+    userId: params.userId,
+    targets: listedRuns.map((run) => ({
+      scenarioId: run.scenarioId,
+      organizationId: run.organizationId,
+    })),
+  });
+  return listedRuns.map((run) => ({
+    ...run,
+    courseLocation:
+      locations.get(courseLocationLookupKey(run.organizationId, run.scenarioId)) ??
+      null,
+  }));
 }
 
 export async function getScenarioProgressByScenario(
@@ -365,4 +395,285 @@ export async function listScenarioCatalogForUser(
   }
 
   return { courses: projectedCourses };
+}
+
+/**
+ * Finds a scenario's canonical learner location without hydrating every
+ * enabled scenario. This is used by polled run and briefing views, so it reads
+ * only the target scenario and the one or two catalog snapshots that can own
+ * it.
+ */
+export async function resolveScenarioCourseLocationForUser(params: {
+  userId: string;
+  scenarioId: string;
+  organizationId?: string | null;
+}): Promise<CourseLocation | null> {
+  const organizationId = params.organizationId ?? null;
+  if (!(await canReadCourseCatalog(params.userId, organizationId))) {
+    return null;
+  }
+  return resolveVisibleScenarioCourseLocation({
+    scenarioId: params.scenarioId,
+    organizationId,
+  });
+}
+
+async function withScenarioRunCourseLocation(
+  run: ScenarioRunRecord,
+  userId: string,
+): Promise<ScenarioRunRecord> {
+  return {
+    ...run,
+    courseLocation: await resolveScenarioCourseLocationForUser({
+      userId,
+      scenarioId: run.scenarioId,
+      organizationId: run.organizationId,
+    }),
+  };
+}
+
+async function resolveVisibleScenarioCourseLocation(input: {
+  scenarioId: string;
+  organizationId: string | null;
+}): Promise<CourseLocation | null> {
+  const locations = await resolveVisibleScenarioCourseLocations({
+    scenarioIds: [input.scenarioId],
+    organizationId: input.organizationId,
+  });
+  return locations.get(input.scenarioId) ?? null;
+}
+
+async function resolveScenarioCourseLocationsForUser(input: {
+  userId: string;
+  targets: Array<{ scenarioId: string; organizationId: string | null }>;
+}): Promise<Map<string, CourseLocation | null>> {
+  const scenarioIdsByOrganization = new Map<string | null, Set<string>>();
+  for (const target of input.targets) {
+    const scenarioIds =
+      scenarioIdsByOrganization.get(target.organizationId) ?? new Set<string>();
+    scenarioIds.add(target.scenarioId);
+    scenarioIdsByOrganization.set(target.organizationId, scenarioIds);
+  }
+
+  const groupedLocations = await Promise.all(
+    [...scenarioIdsByOrganization.entries()].map(
+      async ([organizationId, scenarioIds]) => {
+        if (!(await canReadCourseCatalog(input.userId, organizationId))) {
+          return [organizationId, new Map<string, CourseLocation | null>()] as const;
+        }
+        return [
+          organizationId,
+          await resolveVisibleScenarioCourseLocations({
+            scenarioIds: [...scenarioIds],
+            organizationId,
+          }),
+        ] as const;
+      },
+    ),
+  );
+
+  const locations = new Map<string, CourseLocation | null>();
+  for (const [organizationId, scenarios] of groupedLocations) {
+    for (const [scenarioId, location] of scenarios) {
+      locations.set(courseLocationLookupKey(organizationId, scenarioId), location);
+    }
+  }
+  return locations;
+}
+
+async function resolveVisibleScenarioCourseLocations(input: {
+  scenarioIds: readonly string[];
+  organizationId: string | null;
+}): Promise<Map<string, CourseLocation | null>> {
+  const uniqueScenarioIds = [...new Set(input.scenarioIds)];
+  const locations = new Map<string, CourseLocation | null>();
+  if (!uniqueScenarioIds.length) return locations;
+
+  const db = drizzle(env.DB);
+  const scopeKeys = [
+    scenarioCourseCatalogScopeKey(null),
+    ...(input.organizationId
+      ? [scenarioCourseCatalogScopeKey(input.organizationId)]
+      : []),
+  ];
+  const [scenarioRows, catalogRows] = await Promise.all([
+    db
+      .select({
+        scenarioId: vmScenarios.scenarioId,
+        organizationId: vmScenarios.organizationId,
+        enabledAt: vmScenarios.enabledAt,
+      })
+      .from(vmScenarios)
+      .where(
+        and(
+          inArray(vmScenarios.scenarioId, uniqueScenarioIds),
+          eq(vmScenarios.enabled, true),
+          visibleInCatalogScope(vmScenarios.organizationId, input.organizationId),
+        ),
+      ),
+    db
+      .select({
+        scopeKey: scenarioCourseCatalogs.scopeKey,
+        organizationId: scenarioCourseCatalogs.organizationId,
+        courses: scenarioCourseCatalogs.coursesJson,
+      })
+      .from(scenarioCourseCatalogs)
+      .where(inArray(scenarioCourseCatalogs.scopeKey, scopeKeys)),
+  ]);
+  const rowsByScope = new Map(
+    catalogRows.map((row) => [row.scopeKey, row]),
+  );
+  const publicCourses =
+    rowsByScope.get(scenarioCourseCatalogScopeKey(null))?.courses ?? [];
+  const organizationCourses = input.organizationId
+    ? (rowsByScope.get(scenarioCourseCatalogScopeKey(input.organizationId))
+        ?.courses ?? [])
+    : [];
+  const visibleTargetIds = new Set(
+    scenarioRows
+      .filter((scenario) => scenario.enabledAt !== null)
+      .map((scenario) => scenario.scenarioId),
+  );
+  const claimedOrganizationScenarioIds = new Set(
+    organizationCourses.flatMap((candidate) => candidate.scenarioIds),
+  );
+  const selectionByScenarioId = new Map<
+    string,
+    {
+      course: (typeof publicCourses)[number];
+      organizationCourse: boolean;
+    }
+  >();
+  for (const scenarioId of uniqueScenarioIds) {
+    if (!visibleTargetIds.has(scenarioId)) {
+      locations.set(scenarioId, null);
+      continue;
+    }
+    const organizationCourse = organizationCourses.find((course) =>
+      course.scenarioIds.includes(scenarioId),
+    );
+    const publicCourse = organizationCourse
+      ? undefined
+      : publicCourses.find((course) => course.scenarioIds.includes(scenarioId));
+    const course = organizationCourse ?? publicCourse;
+    if (!course) {
+      locations.set(scenarioId, {
+        courseKind: "general-practice",
+        scope: input.organizationId
+          ? "organization-general-practice"
+          : "public",
+        organizationId: input.organizationId,
+        courseId: null,
+        courseTitle: "General practice",
+        step: null,
+        steps: null,
+      });
+      continue;
+    }
+    selectionByScenarioId.set(scenarioId, {
+      course,
+      organizationCourse: Boolean(organizationCourse),
+    });
+  }
+
+  const neededScenarioIds = new Set<string>();
+  for (const { course, organizationCourse } of selectionByScenarioId.values()) {
+    for (const scenarioId of course.scenarioIds) {
+      if (
+        input.organizationId &&
+        !organizationCourse &&
+        claimedOrganizationScenarioIds.has(scenarioId)
+      ) {
+        continue;
+      }
+      neededScenarioIds.add(scenarioId);
+    }
+  }
+  if (!neededScenarioIds.size) return locations;
+
+  const memberRows = await db
+    .select({
+      scenarioId: vmScenarios.scenarioId,
+      enabledAt: vmScenarios.enabledAt,
+    })
+    .from(vmScenarios)
+    .where(
+      and(
+        inArray(vmScenarios.scenarioId, [...neededScenarioIds]),
+        eq(vmScenarios.enabled, true),
+        visibleInCatalogScope(vmScenarios.organizationId, input.organizationId),
+      ),
+    );
+  const availableScenarioIds = new Set(
+    memberRows
+      .filter((row) => row.enabledAt !== null)
+      .map((row) => row.scenarioId),
+  );
+  for (const [scenarioId, selection] of selectionByScenarioId) {
+    const visibleCourseScenarioIds = selection.course.scenarioIds.filter(
+      (courseScenarioId) =>
+        availableScenarioIds.has(courseScenarioId) &&
+        !(
+          input.organizationId &&
+          !selection.organizationCourse &&
+          claimedOrganizationScenarioIds.has(courseScenarioId)
+        ),
+    );
+    const position = visibleCourseScenarioIds.indexOf(scenarioId);
+    locations.set(
+      scenarioId,
+      position < 0
+        ? null
+        : {
+            courseKind: "authored",
+            scope: input.organizationId
+              ? selection.organizationCourse
+                ? "organization-private"
+                : "organization-public"
+              : "public",
+            organizationId: input.organizationId,
+            courseId: selection.course.courseId,
+            courseTitle: selection.course.title,
+            step: position + 1,
+            steps: visibleCourseScenarioIds.length,
+          },
+    );
+  }
+  return locations;
+}
+
+function courseLocationLookupKey(
+  organizationId: string | null,
+  scenarioId: string,
+): string {
+  return organizationId
+    ? `organization:${organizationId}\u0000${scenarioId}`
+    : `public\u0000${scenarioId}`;
+}
+
+function visibleInCatalogScope(
+  column: typeof vmScenarios.organizationId,
+  organizationId: string | null,
+) {
+  return organizationId
+    ? or(isNull(column), eq(column, organizationId))
+    : isNull(column);
+}
+
+async function canReadCourseCatalog(
+  userId: string,
+  organizationId: string | null,
+): Promise<boolean> {
+  if (!organizationId) return true;
+  const rows = await drizzle(env.DB)
+    .select({ organizationId: member.organizationId })
+    .from(member)
+    .where(
+      and(
+        eq(member.organizationId, organizationId),
+        eq(member.userId, userId),
+      ),
+    )
+    .limit(1);
+  return rows.length === 1;
 }

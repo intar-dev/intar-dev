@@ -24,6 +24,8 @@ export interface PageChrome {
   action?: ReactNode;
   /** Overflow DropdownMenuItem elements; the ⋯ menu renders only when set. */
   menu?: ReactNode;
+  /** Labels for route ancestors when a catalog supplies human-readable names. */
+  breadcrumbLabels?: Readonly<Record<string, string>> | undefined;
 }
 
 interface PageChromeSetters {
@@ -47,7 +49,20 @@ function chromeEquals(a: PageChrome | undefined, b: PageChrome): boolean {
     a.title === b.title &&
     Object.is(a.status, b.status) &&
     Object.is(a.action, b.action) &&
-    Object.is(a.menu, b.menu)
+    Object.is(a.menu, b.menu) &&
+    equalBreadcrumbLabels(a.breadcrumbLabels, b.breadcrumbLabels)
+  );
+}
+
+function equalBreadcrumbLabels(
+  left: Readonly<Record<string, string>> | undefined,
+  right: Readonly<Record<string, string>> | undefined,
+): boolean {
+  const leftEntries = Object.entries(left ?? {});
+  const rightEntries = Object.entries(right ?? {});
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every(([path, label]) => right?.[path] === label)
   );
 }
 
@@ -97,6 +112,11 @@ export function useBreadcrumbOverrides(): ReadonlyMap<string, string> {
   return useMemo(() => {
     const titles = new Map<string, string>();
     for (const [path, chrome] of value?.chrome ?? []) {
+      for (const [breadcrumbPath, label] of Object.entries(
+        chrome.breadcrumbLabels ?? {},
+      )) {
+        titles.set(breadcrumbPath, label);
+      }
       if (chrome.title) titles.set(path, chrome.title);
     }
     return titles;
@@ -119,12 +139,14 @@ export function usePageChrome(chrome: PageChrome): void {
     select: (state) =>
       state.resolvedLocation?.pathname ?? state.location.pathname,
   });
-  const { title, status, action, menu } = chrome;
+  const { title, status, action, menu, breadcrumbLabels } = chrome;
 
   useEffect(() => {
     if (!set || !clear) return;
-    if (title == null && !status && !action && !menu) return;
-    set(pathname, { title, status, action, menu });
+    if (title == null && !status && !action && !menu && !breadcrumbLabels) {
+      return;
+    }
+    set(pathname, { title, status, action, menu, breadcrumbLabels });
     return () => clear(pathname);
-  }, [set, clear, pathname, title, status, action, menu]);
+  }, [set, clear, pathname, title, status, action, menu, breadcrumbLabels]);
 }

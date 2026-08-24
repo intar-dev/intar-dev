@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type {
+  CourseLocation,
   ScenarioRunActivity,
   ScenarioRunReplayState,
 } from "@/lib/scenario-runs";
@@ -14,6 +15,8 @@ import {
 export interface MyRunEntry {
   runId: string;
   scenarioId: string;
+  organizationId?: string | null;
+  courseLocation?: CourseLocation | null;
   scenarioName: string;
   title: string;
   difficulty: "easy" | "medium" | "hard";

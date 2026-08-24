@@ -2,7 +2,11 @@ import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
 import { isSafeScenarioId } from "@/lib/scenario-id";
-import { startScenarioRunForUser } from "@/lib/scenario-runs";
+import {
+  resolveScenarioCourseLocationForUser,
+  startScenarioRunForUser,
+} from "@/lib/scenario-runs";
+import { resolveOrganizationId } from "@/lib/organizations";
 
 export const prerender = false;
 
@@ -59,13 +63,16 @@ export const POST: APIRoute = async ({ request, params }) => {
         { status: 400 },
       );
     }
-    organizationId =
+    const organizationKey =
       typeof body.organizationId === "string"
         ? body.organizationId.trim() || null
         : null;
+    organizationId = organizationKey
+      ? await resolveOrganizationId(organizationKey)
+      : null;
     if (
-      organizationId &&
-      !authz.context.organizationIds.includes(organizationId)
+      (organizationKey && !organizationId) ||
+      (organizationId && !authz.context.organizationIds.includes(organizationId))
     ) {
       return jsonResponse({ error: "scenario not found" }, { status: 404 });
     }
@@ -89,13 +96,26 @@ export const POST: APIRoute = async ({ request, params }) => {
       ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
     });
-    return jsonResponse(result, {
+    return jsonResponse(
+      {
+        ...result,
+        run: {
+          ...result.run,
+          courseLocation: await resolveScenarioCourseLocationForUser({
+            userId: authz.context.userId,
+            scenarioId,
+            organizationId,
+          }),
+        },
+      },
+      {
       status: 202,
       headers: {
         Location: `/api/scenarios/runs/${result.runId}`,
         "Retry-After": "1",
       },
-    });
+      },
+    );
   } catch (error) {
     const { status, body } = toErrorResponse(error, "failed to start scenario");
     return jsonResponse(body, {

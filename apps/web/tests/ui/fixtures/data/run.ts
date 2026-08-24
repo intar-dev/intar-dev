@@ -69,6 +69,16 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
   return {
     id: "run-active",
     scenarioId: "repair-nginx",
+    organizationId: null,
+    courseLocation: {
+      courseKind: "authored",
+      scope: "public",
+      organizationId: null,
+      courseId: "operations",
+      courseTitle: "Linux operations",
+      step: 1,
+      steps: 2,
+    },
     scenarioName: "repair-nginx",
     title: briefing.title,
     tagline: briefing.tagline,
