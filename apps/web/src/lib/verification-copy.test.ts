@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVerificationLabelMap,
+  isVerificationPassed,
   repairObjectiveTitle,
   verificationStatusLabel,
 } from "./verification-copy";
@@ -32,10 +33,29 @@ describe("verification copy", () => {
     ).toBe("Repair objective 3");
   });
 
-  it("translates engine states into learner states", () => {
-    expect(verificationStatusLabel("pass")).toBe("Verified");
-    expect(verificationStatusLabel("fail")).toBe("Needs repair");
-    expect(verificationStatusLabel("error")).toBe("Retrying");
-    expect(verificationStatusLabel("unknown")).toBe("Checking");
+  it("shows exactly two probe results", () => {
+    for (const status of [
+      "pass",
+      "passed",
+      "passing",
+      "ready",
+      "ok",
+      "success",
+      "succeeded",
+    ]) {
+      expect(isVerificationPassed(status)).toBe(true);
+      expect(verificationStatusLabel(status)).toBe("Verified");
+    }
+    for (const status of [
+      "fail",
+      "error",
+      "unknown",
+      "pending",
+      "",
+      "unexpected",
+    ]) {
+      expect(isVerificationPassed(status)).toBe(false);
+      expect(verificationStatusLabel(status)).toBe("Needs repair");
+    }
   });
 });

@@ -535,6 +535,8 @@ export async function getWorkshopSessionProjection(params: {
               ? { participantUserId: params.userId }
               : {}),
             facilitator: canFacilitate,
+            verificationExpected:
+              access.workspaceEnabled && ownWorkspace?.state === "ready",
             probeReport: access.workspaceEnabled
               ? (probeReports.get(params.userId) ?? null)
               : null,
@@ -849,6 +851,7 @@ function projectModules(params: {
   progress: WorkshopModuleProgressRecord[];
   participantUserId?: string;
   facilitator: boolean;
+  verificationExpected: boolean;
   probeReport: CurrentWorkshopProbeReport | null;
 }) {
   return params.manifest.modules.map((module, ordinal) => {
@@ -907,6 +910,10 @@ function projectModules(params: {
           : null,
       explainBackCompletedAt: progress?.explainBackCompletedAt ?? null,
       verifiedAt: progress?.firstVerifiedAt ?? null,
+      verificationUnavailable:
+        module.probeIds.length > 0 &&
+        params.verificationExpected &&
+        currentWorkshopProbeReportUnavailable(params.probeReport),
       hints: module.hints.map((hint, hintOrdinal) => {
         const revealed =
           params.facilitator ||
@@ -923,11 +930,11 @@ function projectModules(params: {
           revealed,
         };
       }),
-      probes: module.probeIds.map((probeId) => {
+      probes: module.probeIds.map((probeId, probeOrdinal) => {
         const snapshot = params.probeReport?.probes.get(probeId);
         return {
           id: probeId,
-          label: probeId,
+          label: `Verification objective ${probeOrdinal + 1}`,
           status:
             snapshot?.status ??
             (params.probeReport?.hasValidReport
@@ -937,7 +944,7 @@ function projectModules(params: {
                 : progress?.currentHealth === "failing"
                   ? ("fail" as const)
                   : ("unknown" as const)),
-          detail: snapshot?.detail ?? null,
+          detail: null,
         };
       }),
     };
@@ -953,6 +960,7 @@ function projectProjectorModules(
     session,
     progress: [],
     facilitator: false,
+    verificationExpected: false,
     probeReport: null,
   })
     .filter((module) => module.released)
@@ -1216,17 +1224,21 @@ function projectRosterMember(params: {
           (module.explainBackPrompt
             ? ("pending" as const)
             : ("not_required" as const)),
-        probes: module.probeIds.map((probeId) => {
+        verificationUnavailable:
+          module.probeIds.length > 0 &&
+          params.workspace?.state === "ready" &&
+          currentWorkshopProbeReportUnavailable(params.probeReport),
+        probes: module.probeIds.map((probeId, probeOrdinal) => {
           const snapshot = params.probeReport?.probes.get(probeId);
           return {
             id: probeId,
-            label: probeId,
+            label: `Verification objective ${probeOrdinal + 1}`,
             status:
               snapshot?.status ??
               (params.probeReport?.hasValidReport
                 ? ("pending" as const)
                 : ("unknown" as const)),
-            detail: snapshot?.detail ?? null,
+            detail: null,
           };
         }),
       };
@@ -1237,6 +1249,7 @@ function projectRosterMember(params: {
 interface CurrentWorkshopProbeSnapshot {
   status: "pass" | "fail" | "unknown";
   detail: string | null;
+  verificationUnavailable: boolean;
   checkedAt: number;
   observedAt: number;
 }
@@ -1368,11 +1381,12 @@ function mergeCurrentWorkshopProbeReport(
   userId: string,
   parsed: Map<string, CurrentWorkshopProbeSnapshot> | null,
 ): void {
-  if (!parsed) return;
   const aggregate = reports.get(userId) ?? {
     hasValidReport: false,
     probes: new Map<string, CurrentWorkshopProbeSnapshot>(),
   };
+  reports.set(userId, aggregate);
+  if (!parsed) return;
   aggregate.hasValidReport = true;
   for (const [probeId, snapshot] of parsed) {
     const existing = aggregate.probes.get(probeId);
@@ -1385,7 +1399,6 @@ function mergeCurrentWorkshopProbeReport(
       aggregate.probes.set(probeId, snapshot);
     }
   }
-  reports.set(userId, aggregate);
 }
 
 function parseCurrentProviderProbeReport(params: {
@@ -1415,6 +1428,10 @@ function parseCurrentProviderProbeReport(params: {
     const snapshot: CurrentWorkshopProbeSnapshot = {
       status,
       detail: typeof error === "string" ? error : null,
+      verificationUnavailable:
+        status !== "pass" &&
+        typeof error === "string" &&
+        Boolean(error.trim()),
       checkedAt,
       observedAt: params.observedAt,
     };
@@ -1464,6 +1481,10 @@ function parseCurrentWorkshopProbeReport(params: {
     const snapshot: CurrentWorkshopProbeSnapshot = {
       status,
       detail: typeof message === "string" ? message : null,
+      verificationUnavailable:
+        status !== "pass" &&
+        typeof message === "string" &&
+        Boolean(message.trim()),
       checkedAt,
       observedAt: params.observedAt,
     };
@@ -1473,6 +1494,17 @@ function parseCurrentWorkshopProbeReport(params: {
     }
   }
   return snapshots;
+}
+
+function currentWorkshopProbeReportUnavailable(
+  report: CurrentWorkshopProbeReport | null,
+) {
+  return (
+    !report?.hasValidReport ||
+    [...report.probes.values()].some(
+      (probe) => probe.verificationUnavailable,
+    )
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

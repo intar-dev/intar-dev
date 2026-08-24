@@ -1,5 +1,6 @@
 // Pure helpers for the scenario run page: formatters, boot-step derivation,
 // and screen copy.
+import { isVerificationPassed } from "@/lib/verification-copy";
 import type {
   ScenarioProbeStatus,
   ScenarioRunRecord,
@@ -73,7 +74,7 @@ export function buildScenarioBootSteps(
   const bootChecksComplete = Boolean(
     vm &&
     (vm.bootProbes.length > 0
-      ? vm.bootProbes.every((probe) => probe.status === "pass")
+      ? vm.bootProbes.every((probe) => isVerificationPassed(probe.status))
       : vm.canOpenTerminal),
   );
   const workspaceCheckStarted = Boolean(

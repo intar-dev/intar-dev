@@ -23,7 +23,6 @@ describe("operator probe diagnostics", () => {
 
     expect(markup).toContain("Restore the web rollout");
     expect(markup).toContain("Needs repair");
-    expect(markup).toContain("This objective still needs repair.");
     expect(markup).not.toContain(hiddenRawOutput);
     expect(markup).not.toContain("Command");
     expect(markup).not.toContain("kubectl");
@@ -53,12 +52,13 @@ describe("operator probe diagnostics", () => {
     );
 
     expect(markup).toContain("Verification objective 1");
-    expect(markup).toContain("Retrying");
+    expect(markup).toContain("Needs repair");
+    expect(markup).not.toContain("Retrying");
     expect(markup).not.toContain(oversized);
     expect(markup).not.toContain("Legacy value");
   });
 
-  it("turns real command failures into a plain retry state", () => {
+  it("keeps real command failures inside the two-state result model", () => {
     const hiddenOutput = "command-output-must-not-render";
     const hiddenError = "command exited with status 1";
     const markup = renderToStaticMarkup(
@@ -77,10 +77,9 @@ describe("operator probe diagnostics", () => {
       }),
     );
 
-    expect(markup).toContain("Retrying");
-    expect(markup).toContain(
-      "Verification could not complete. The system will try again automatically.",
-    );
+    expect(markup).toContain("Needs repair");
+    expect(markup).not.toContain("Retrying");
+    expect(markup).not.toContain("Checking");
     expect(markup).not.toContain(hiddenError);
     expect(markup).not.toContain(hiddenOutput);
     expect(markup).not.toContain("kubectl");
@@ -99,11 +98,10 @@ describe("operator probe diagnostics", () => {
 
     expect(markup).toContain("Restore the web rollout");
     expect(markup).toContain("Verified");
-    expect(markup).toContain("This objective is satisfied.");
     expect(markup).not.toContain("command_json_path");
   });
 
-  it("uses plain checking and retrying states for non-final results", () => {
+  it("maps every non-pass result to needs repair", () => {
     const markup = renderToStaticMarkup(
       createElement(ProbeRows, {
         probes: [
@@ -115,8 +113,10 @@ describe("operator probe diagnostics", () => {
 
     expect(markup).toContain("Verification objective 1");
     expect(markup).toContain("Verification objective 2");
-    expect(markup).toContain("Checking");
-    expect(markup).toContain("Retrying");
+    expect(markup.match(/Needs repair/g)).toHaveLength(2);
+    expect(markup).not.toContain("Checking");
+    expect(markup).not.toContain("Retrying");
+    expect(markup).not.toContain("Recheck");
     expect(markup).not.toContain("raw-unknown-id");
     expect(markup).not.toContain("raw-error-id");
   });

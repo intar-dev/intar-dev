@@ -32,7 +32,10 @@ import {
 } from "@/lib/replay-command-log";
 import { cn } from "@/lib/utils";
 import { useProbeSnapshots } from "./probe-pass-times";
-import { verificationStatusLabel } from "@/lib/verification-copy";
+import {
+  isVerificationPassed,
+  verificationStatusLabel,
+} from "@/lib/verification-copy";
 import { formatScenarioDurationMs } from "./run-support";
 import { scenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
 import {
@@ -257,7 +260,15 @@ function TimelineEvent({
             title={item.summary}
             meta={showMachine ? item.vmName : undefined}
           />
-          <ProbeChanges changes={item.changes} />
+          {item.verificationUnavailable ? (
+            <p className="text-xs font-medium text-destructive" role="status">
+              Verification unavailable. We could not confirm progress at this
+              point.
+            </p>
+          ) : null}
+          {item.changes.length ? (
+            <ProbeChanges changes={item.changes} />
+          ) : null}
         </div>
       );
     case "session":
@@ -374,16 +385,12 @@ function ProbeChanges({ changes }: { changes: RunTimelineProbeChange[] }) {
 }
 
 function ProbeStatus({ status }: { status: string }) {
-  const normalized = status.toLowerCase();
+  const verified = isVerificationPassed(status);
   return (
     <span
       className={cn(
-        "text-xs font-semibold capitalize",
-        normalized === "pass"
-          ? "text-success"
-          : normalized === "fail"
-            ? "text-destructive"
-            : "text-muted-foreground",
+        "text-xs font-semibold",
+        verified ? "text-success" : "text-destructive",
       )}
     >
       {verificationStatusLabel(status)}

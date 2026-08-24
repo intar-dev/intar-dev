@@ -4,7 +4,10 @@ import { drizzle } from "drizzle-orm/d1";
 import { scenarioRunArtifacts, scenarioRunSshKeys } from "@/db/schema";
 import type { AgentHostRow } from "@/lib/agent-bridge";
 import { listHostRunsForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
-import { buildVerificationLabelMap } from "@/lib/verification-copy";
+import {
+  buildVerificationLabelMap,
+  isVerificationPassed,
+} from "@/lib/verification-copy";
 
 export interface DashboardVmProbeState {
   collection_state: string;
@@ -394,19 +397,16 @@ function buildProbeState(
   if (!probes.length || !hasReportedProbeResults(probes)) {
     return null;
   }
+  const verificationUnavailable = isVerificationCollectionUnavailable(probes);
 
   return {
-    collection_state: vm.phase === "failed" ? "error" : "ready",
-    collection_error: vm.phase === "failed" ? vm.phaseDetail : null,
+    collection_state: verificationUnavailable ? "error" : "ready",
+    collection_error: verificationUnavailable
+      ? "Verification unavailable"
+      : null,
     generated_at: new Date(run.updatedAt).toISOString(),
     updated_at: new Date(run.updatedAt).toISOString(),
-    summary: {
-      total: probes.length,
-      pass: probes.filter((probe) => probe.status === "pass").length,
-      fail: probes.filter((probe) => probe.status === "fail").length,
-      unknown: probes.filter((probe) => probe.status !== "pass" && probe.status !== "fail")
-        .length,
-    },
+    summary: summarizeDashboardProbes(probes),
     probes: probes.map((probe) => ({
       id: probe.id,
       kind: probe.kind,
@@ -418,6 +418,34 @@ function buildProbeState(
       error: probe.error,
       value: probe.value,
     })),
+  };
+}
+
+export function isVerificationCollectionUnavailable(
+  probes: ReadonlyArray<{ status: string; error: string | null }>,
+) {
+  return probes.some(
+    (probe) =>
+      !isVerificationPassed(probe.status) &&
+      (probe.status.trim().toLowerCase() === "error" ||
+        Boolean(probe.error?.trim())),
+  );
+}
+
+export function summarizeDashboardProbes(
+  probes: ReadonlyArray<{ status: string }>,
+) {
+  return {
+    total: probes.length,
+    pass: probes.filter((probe) => isVerificationPassed(probe.status)).length,
+    fail: probes.filter(
+      (probe) => probe.status.trim().toLowerCase() === "fail",
+    ).length,
+    unknown: probes.filter(
+      (probe) =>
+        !isVerificationPassed(probe.status) &&
+        probe.status.trim().toLowerCase() !== "fail",
+    ).length,
   };
 }
 

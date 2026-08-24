@@ -2,10 +2,10 @@ import { CircleHelpIcon } from "lucide-react";
 import { NativeSshDialogButton } from "@/components/remote-access/NativeSshDialogButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatTimestamp, probeCollectionTone } from "./format";
+import { formatTimestamp } from "./format";
 import { groupVmProbesByScenario, ProbeRows } from "./ProbeRows";
 import { Stat } from "@/components/app/patterns/Stat";
-import type { AgentHostApi, VmStatus } from "./types";
+import type { AgentHostApi, VmProbeSummary, VmStatus } from "./types";
 
 export function LiveScenarioRunCard(props: {
   host: AgentHostApi;
@@ -18,6 +18,7 @@ export function LiveScenarioRunCard(props: {
 }) {
   const probeState = props.vmItem.probe_state ?? null;
   const summary = probeState?.summary ?? null;
+  const binarySummary = summary ? binaryProbeSummary(summary) : null;
   const scenarioMeta = props.vmItem.scenario_meta ?? null;
   const groupedProbes = probeState
     ? groupVmProbesByScenario(probeState.probes, scenarioMeta)
@@ -56,28 +57,26 @@ export function LiveScenarioRunCard(props: {
             <span className="font-mono text-xs text-muted-foreground">
               {props.host.name}
             </span>
-            {summary ? (
+            {binarySummary ? (
               <span
                 data-numeric
                 className="ml-1 inline-flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
-                aria-label={`${summary.pass} verified, ${summary.fail} need repair, ${summary.unknown} checking`}
+                aria-label={`${binarySummary.verified} verified, ${binarySummary.needsRepair} need repair`}
               >
                 <span>
-                  <strong className="text-success">{summary.pass}</strong>{" "}
-                  verified
+                  <strong className="text-success">
+                    {binarySummary.verified}
+                  </strong>{" "}
+                  Verified
                 </span>
                 <span>
-                  <strong className="text-destructive">{summary.fail}</strong>{" "}
-                  need repair
-                </span>
-                <span>
-                  <strong className="text-foreground">{summary.unknown}</strong>{" "}
-                  checking
+                  <strong className="text-destructive">
+                    {binarySummary.needsRepair}
+                  </strong>{" "}
+                  Needs repair
                 </span>
               </span>
-            ) : (
-              <span className="text-xs text-muted-foreground">Checks pending</span>
-            )}
+            ) : null}
           </div>
 
           <div>
@@ -184,21 +183,14 @@ export function LiveScenarioRunCard(props: {
         }`}
       >
         <div className="overflow-hidden">
-          <div className="grid gap-4 border-t px-4 py-4 xl:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
-            <div className="space-y-4">
-              {probeState ? (
-                <VerificationCollectionStatus
-                  state={probeState.collection_state}
-                  generatedAt={probeState.generated_at}
-                  error={probeState.collection_error}
-                />
-              ) : (
-                <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
-                  Waiting for the first verification result.
-                </div>
-              )}
-            </div>
-
+          <div className="space-y-4 border-t px-4 py-4">
+            {probeState ? (
+              <VerificationCollectionStatus
+                state={probeState.collection_state}
+                generatedAt={probeState.generated_at}
+                error={probeState.collection_error}
+              />
+            ) : null}
             <div className="space-y-4">
               {probeState?.probes.length ? (
                 scenarioMeta && groupedProbes ? (
@@ -256,32 +248,34 @@ export function LiveScenarioRunCard(props: {
   );
 }
 
+export function binaryProbeSummary(summary: VmProbeSummary) {
+  return {
+    verified: summary.pass,
+    needsRepair: summary.fail + summary.unknown,
+  };
+}
+
 export function VerificationCollectionStatus(props: {
   state: string;
   generatedAt: string | null;
   error: string | null;
 }) {
-  const retrying = Boolean(props.error?.trim()) || props.state === "error";
+  const unavailable = Boolean(props.error?.trim()) || props.state === "error";
+  if (!unavailable) return null;
   return (
     <div
-      className={`rounded-xl border px-4 py-3 ${probeCollectionTone(
-        retrying ? "error" : props.state,
-      )}`}
+      role="status"
+      className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-destructive"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-medium">
-          Verification service: {retrying ? "retrying" : "online"}
-        </p>
+        <p className="font-medium">Verification unavailable</p>
         <p className="text-xs">
           Updated {formatTimestamp(props.generatedAt)}
         </p>
       </div>
-      {retrying ? (
-        <p className="mt-2 text-xs">
-          Verification is temporarily unavailable. The service will retry
-          automatically.
-        </p>
-      ) : null}
+      <p className="mt-2 text-xs">
+        We cannot confirm verification progress right now.
+      </p>
     </div>
   );
 }

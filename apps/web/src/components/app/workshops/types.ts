@@ -104,6 +104,7 @@ export interface WorkshopModule {
   explainBackPrompt: string | null;
   explainBackCompletedAt: number | null;
   verifiedAt: number | null;
+  verificationUnavailable?: boolean;
   hints: WorkshopModuleHint[];
   probes: WorkshopProbe[];
 }
@@ -198,6 +199,7 @@ export interface WorkshopRosterProgress {
   state: WorkshopModuleState;
   health: WorkshopHealth;
   explainBackStatus: WorkshopExplainBackStatus;
+  verificationUnavailable?: boolean;
   probes: WorkshopProbe[];
 }
 

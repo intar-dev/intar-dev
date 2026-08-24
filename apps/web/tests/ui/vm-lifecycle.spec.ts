@@ -44,6 +44,26 @@ test("a solved run celebrates the learner-facing scenario title", async ({
   await expect(page.getByText(/You fixed repair-nginx/)).toHaveCount(0);
 });
 
+test("live repair progress shows only two probe indicators", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "running",
+  });
+
+  const progress = page.getByRole("region", { name: "Repair progress" });
+  await expect(progress.getByText("0 Verified", { exact: true })).toBeVisible();
+  await expect(
+    progress.getByText("2 Needs repair", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    progress.getByText(/Checking|Retrying|Recheck/),
+  ).toHaveCount(0);
+});
+
 test("end acceptance stays on one timeline through saved replay", async ({
   page,
   ui,

@@ -1,5 +1,6 @@
 import { decorateVmState, type RunVmStateDocument } from "@/lib/run-state";
 import { deriveVmPhase } from "@/lib/run-lifecycle";
+import { isVerificationPassed } from "@/lib/verification-copy";
 
 export function applyProbePhaseHeuristics(
   vm: RunVmStateDocument,
@@ -16,7 +17,7 @@ export function applyProbePhaseHeuristics(
 export function bootProbesPassing(vm: RunVmStateDocument): boolean {
   return (
     vm.bootProbes.length === 0 ||
-    vm.bootProbes.every((probe) => isPassingProbe(probe.status))
+    vm.bootProbes.every((probe) => isVerificationPassed(probe.status))
   );
 }
 
@@ -39,15 +40,4 @@ export function shouldQueueTerminalStateGet(
     return bootProbesPassing(vm);
   }
   return vm.terminalPhase === "pending";
-}
-
-function isPassingProbe(status: string): boolean {
-  const normalized = status.trim().toLowerCase();
-  return (
-    normalized === "pass" ||
-    normalized === "passed" ||
-    normalized === "ready" ||
-    normalized === "ok" ||
-    normalized === "succeeded"
-  );
 }

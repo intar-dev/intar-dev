@@ -13,6 +13,10 @@ import { Markdown } from "@/components/app/Markdown";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  isVerificationPassed,
+  verificationStatusLabel,
+} from "@/lib/verification-copy";
 import { cn } from "@/lib/utils";
 import type {
   WorkshopAgendaItem,
@@ -117,9 +121,10 @@ export function WorkshopModuleManual({
   onRevealHint: (hintId: string) => void;
   onCompleteExplainBack: () => void;
 }) {
-  const passed = module.probes.filter(
-    (probe) => probe.status === "pass",
+  const passed = module.probes.filter((probe) =>
+    isVerificationPassed(probe.status),
   ).length;
+  const needsRepair = module.probes.length - passed;
   return (
     <section
       aria-labelledby="current-module-heading"
@@ -155,25 +160,48 @@ export function WorkshopModuleManual({
       <div className="px-4 py-4 sm:px-6">
         <div className="mb-2 flex items-center justify-between gap-3">
           <p className="text-eyebrow">Live verification</p>
-          <span className="font-mono text-xs text-muted-foreground tabular-nums">
-            {passed}/{module.probes.length}
-          </span>
+          <div
+            aria-label={`Verified: ${passed}; needs repair: ${needsRepair}`}
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-semibold tabular-nums"
+          >
+            <span className="inline-flex items-center gap-1 text-success">
+              <CheckCircle2 className="size-3.5" aria-hidden="true" />
+              {passed} Verified
+            </span>
+            <span className="inline-flex items-center gap-1 text-destructive">
+              <CircleAlert className="size-3.5" aria-hidden="true" />
+              {needsRepair} Needs repair
+            </span>
+          </div>
         </div>
+        {module.verificationUnavailable ? (
+          <p
+            role="status"
+            className="mb-2 text-xs font-medium text-destructive"
+          >
+            Verification unavailable. We cannot confirm progress right now.
+          </p>
+        ) : null}
         {module.probes.length ? (
           <div className="divide-y">
-            {module.probes.map((probe) => (
+            {module.probes.map((probe, probeIndex) => (
               <div
                 key={probe.id}
-                className="flex min-h-10 items-start gap-3 py-2 text-sm"
+                className="flex min-h-10 items-center gap-3 py-2 text-sm"
               >
                 <ProbeGlyph status={probe.status} />
-                <span className="min-w-0 flex-1">
-                  <span className="block font-medium">{probe.label}</span>
-                  {probe.detail ? (
-                    <span className="mt-0.5 block font-mono text-xs break-words text-muted-foreground">
-                      {probe.detail}
-                    </span>
-                  ) : null}
+                <span className="min-w-0 flex-1 font-medium">
+                  Verification objective {probeIndex + 1}
+                </span>
+                <span
+                  className={cn(
+                    "shrink-0 text-xs font-semibold",
+                    isVerificationPassed(probe.status)
+                      ? "text-success"
+                      : "text-destructive",
+                  )}
+                >
+                  {verificationStatusLabel(probe.status)}
                 </span>
               </div>
             ))}
@@ -324,26 +352,18 @@ export function ModuleStateGlyph({
 }
 
 function ProbeGlyph({ status }: { status: string }) {
-  if (status === "pass") {
+  if (isVerificationPassed(status)) {
     return (
       <CheckCircle2
-        aria-label="Passing"
-        className="mt-0.5 size-4 shrink-0 text-success"
-      />
-    );
-  }
-  if (status === "fail") {
-    return (
-      <CircleAlert
-        aria-label="Failing"
-        className="mt-0.5 size-4 shrink-0 text-destructive"
+        aria-hidden="true"
+        className="size-4 shrink-0 text-success"
       />
     );
   }
   return (
-    <Circle
-      aria-label="Pending"
-      className="mt-0.5 size-4 shrink-0 text-warning"
+    <CircleAlert
+      aria-hidden="true"
+      className="size-4 shrink-0 text-destructive"
     />
   );
 }

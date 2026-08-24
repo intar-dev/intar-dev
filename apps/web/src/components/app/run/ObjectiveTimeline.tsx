@@ -3,6 +3,7 @@ import { formatTimestamp } from "../lib/format";
 import { cn } from "@/lib/utils";
 import {
   buildVerificationLabelMap,
+  isVerificationPassed,
   verificationStatusLabel,
 } from "@/lib/verification-copy";
 import { useProbeSnapshots, type ProbeSnapshotRow } from "./probe-pass-times";
@@ -20,6 +21,7 @@ interface TimelineEvent {
   vmName: string;
   observedAt: number;
   changes: ProbeChange[];
+  verificationUnavailable: boolean;
 }
 
 // Diff consecutive snapshots per VM into "probe X: fail → pass" events.
@@ -28,6 +30,7 @@ export function toTimelineEvents(
   objectives: ScenarioObjective[],
 ): TimelineEvent[] {
   const lastByVm = new Map<string, Map<string, string>>();
+  const lastUnavailableByVm = new Map<string, boolean>();
   const events: TimelineEvent[] = [];
   const allProbes = rows.flatMap((row) => row.probes);
   const labels = buildVerificationLabelMap({
@@ -42,11 +45,27 @@ export function toTimelineEvents(
 
   for (const row of rows) {
     const previous = lastByVm.get(row.vmId);
+    const previousUnavailable = lastUnavailableByVm.get(row.vmId) ?? false;
+    const verificationUnavailable = Boolean(
+      row.verificationUnavailable ||
+        row.probes.some(
+          (probe) => probe.status.trim().toLowerCase() === "error",
+        ),
+    );
+    const availabilityBecameUnavailable =
+      verificationUnavailable && !previousUnavailable;
     const nextStatuses = new Map(
       row.probes.map((probe) => [probe.id, probe.status]),
     );
     const changes: ProbeChange[] = row.probes
-      .filter((probe) => previous?.get(probe.id) !== probe.status)
+      .filter((probe) => {
+        const before = previous?.get(probe.id);
+        return (
+          before === undefined ||
+          isVerificationPassed(before) !==
+            isVerificationPassed(probe.status)
+        );
+      })
       .map((probe) => ({
         probeId: probe.id,
         label: labels[probe.id] ?? "Verification objective",
@@ -54,12 +73,21 @@ export function toTimelineEvents(
         to: probe.status,
       }));
     lastByVm.set(row.vmId, nextStatuses);
-    if (changes.length) {
+    lastUnavailableByVm.set(row.vmId, verificationUnavailable);
+    const initialUnreportedOnly =
+      !previous &&
+      changes.length > 0 &&
+      changes.every((change) => isUnreportedStatus(change.to));
+    if (
+      (changes.length || availabilityBecameUnavailable) &&
+      (!initialUnreportedOnly || availabilityBecameUnavailable)
+    ) {
       events.push({
         id: row.id,
         vmName: row.runtimeVmName,
         observedAt: row.observedAt,
         changes,
+        verificationUnavailable,
       });
     }
   }
@@ -118,8 +146,15 @@ export function ObjectiveTimeline({
             <span className="mx-1.5">·</span>
             <span className="font-medium text-foreground">{event.vmName}</span>
           </p>
-          <ul className="space-y-0.5">
-            {event.changes.map((change) => (
+          {event.verificationUnavailable ? (
+            <p className="font-medium text-destructive" role="status">
+              Verification unavailable. We could not confirm progress at this
+              point.
+            </p>
+          ) : null}
+          {event.changes.length ? (
+            <ul className="space-y-0.5">
+              {event.changes.map((change) => (
               <li
                 key={change.probeId}
                 className="flex flex-wrap items-center gap-1.5"
@@ -136,8 +171,9 @@ export function ObjectiveTimeline({
                 ) : null}
                 <StatusText status={change.to} />
               </li>
-            ))}
-          </ul>
+              ))}
+            </ul>
+          ) : null}
         </li>
       ))}
     </ol>
@@ -145,18 +181,23 @@ export function ObjectiveTimeline({
 }
 
 function StatusText({ status }: { status: string }) {
+  const verified = isVerificationPassed(status);
   return (
     <span
       className={cn(
         "font-medium",
-        status === "pass"
-          ? "text-success"
-          : status === "fail"
-            ? "text-destructive"
-            : "text-muted-foreground",
+        verified ? "text-success" : "text-destructive",
       )}
     >
       {verificationStatusLabel(status)}
     </span>
+  );
+}
+
+function isUnreportedStatus(status: string) {
+  const normalized = status.trim().toLowerCase();
+  return (
+    !isVerificationPassed(normalized) &&
+    !["fail", "error"].includes(normalized)
   );
 }

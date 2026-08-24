@@ -1,5 +1,6 @@
 import type { ScenarioRunHintSnapshot } from "@/db/schema";
 import type { RunStateDocument } from "@/lib/run-state";
+import { isVerificationPassed } from "@/lib/verification-copy";
 
 export interface ScenarioRunHintView {
   key: string;
@@ -252,22 +253,7 @@ export function isScenarioRunSolved(input: {
   return (
     input.state.scenarioProbes.length > 0 &&
     input.state.scenarioProbes.every((probe) =>
-      isPassingProbeStatus(probe.status),
+      isVerificationPassed(probe.status),
     )
   );
-}
-
-function isPassingProbeStatus(status: string | null | undefined): boolean {
-  switch (status?.trim().toLowerCase()) {
-    case "pass":
-    case "passed":
-    case "passing":
-    case "ready":
-    case "ok":
-    case "success":
-    case "succeeded":
-      return true;
-    default:
-      return false;
-  }
 }

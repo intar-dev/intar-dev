@@ -2,6 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { scenarioRunProbeSnapshots, scenarioRuns } from "@/db/schema";
 import { createAppId } from "@/lib/id";
+import { isVerificationPassed } from "@/lib/verification-copy";
 import type {
   RunStateDocument,
   RunVmStateDocument,
@@ -18,6 +19,7 @@ export interface ProbeTransitionRow {
   vmId: string;
   runtimeVmName: string;
   observedAt: number;
+  verificationUnavailable: boolean;
   probes: Array<{
     id: string;
     label: string;
@@ -27,15 +29,18 @@ export interface ProbeTransitionRow {
   }>;
 }
 
-// One status entry per probe, order-independent, ignoring value/error churn.
+// One status entry per probe, order-independent. Raw value/error churn stays
+// ignored, but entering or leaving a verifier outage is a visible transition.
 export function probeStatusSignature(vm: {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
 }): string {
-  return [...vm.bootProbes, ...vm.scenarioProbes]
+  const probes = [...vm.bootProbes, ...vm.scenarioProbes];
+  const statuses = probes
     .map((probe) => `${probe.phase}:${probe.id}=${probe.status}`)
     .sort()
     .join("|");
+  return `${statuses}|verification=${verificationUnavailable(probes) ? "unavailable" : "available"}`;
 }
 
 export function probeTransitionVms(
@@ -71,7 +76,10 @@ export async function recordProbeTransitions(
       changed.map((vm) => {
         const probes = [...vm.bootProbes, ...vm.scenarioProbes];
         const failing = probes.filter((probe) => probe.status === "fail");
-        const passing = probes.filter((probe) => probe.status === "pass");
+        const passing = probes.filter((probe) =>
+          isVerificationPassed(probe.status),
+        );
+        const unavailable = verificationUnavailable(probes);
         const observedAt = vm.runtimeObservedAt ?? params.observedAt;
         return {
           id: createAppId(),
@@ -81,8 +89,8 @@ export async function recordProbeTransitions(
           // The unique (runId, vmId, messageId) index dedups replays of the
           // same observation; one transition per VM per observed millisecond.
           messageId: String(observedAt),
-          collectionState: vm.phase,
-          collectionError: null,
+          collectionState: unavailable ? "error" : vm.phase,
+          collectionError: unavailable ? "Verification unavailable" : null,
           summaryJson: JSON.stringify({
             pass: passing.length,
             fail: failing.length,
@@ -129,6 +137,8 @@ export async function listProbeSnapshotsForUserRun(
       vmId: scenarioRunProbeSnapshots.vmId,
       runtimeVmName: scenarioRunProbeSnapshots.runtimeVmName,
       observedAt: scenarioRunProbeSnapshots.observedAt,
+      collectionState: scenarioRunProbeSnapshots.collectionState,
+      collectionError: scenarioRunProbeSnapshots.collectionError,
       snapshotJson: scenarioRunProbeSnapshots.snapshotJson,
     })
     .from(scenarioRunProbeSnapshots)
@@ -136,13 +146,29 @@ export async function listProbeSnapshotsForUserRun(
     .orderBy(asc(scenarioRunProbeSnapshots.observedAt))
     .limit(500);
 
-  return rows.map((row) => ({
-    id: row.id,
-    vmId: row.vmId,
-    runtimeVmName: row.runtimeVmName,
-    observedAt: row.observedAt,
-    probes: parseSnapshotProbes(row.snapshotJson),
-  }));
+  return rows.map((row) => {
+    const probes = parseSnapshotProbes(row.snapshotJson);
+    return {
+      id: row.id,
+      vmId: row.vmId,
+      runtimeVmName: row.runtimeVmName,
+      observedAt: row.observedAt,
+      verificationUnavailable:
+        row.collectionState === "error" ||
+        Boolean(row.collectionError?.trim()) ||
+        probes.some((probe) => probe.status.trim().toLowerCase() === "error"),
+      probes,
+    };
+  });
+}
+
+function verificationUnavailable(probes: readonly ScenarioProbeStatus[]) {
+  return probes.some(
+    (probe) =>
+      !isVerificationPassed(probe.status) &&
+      (probe.status.trim().toLowerCase() === "error" ||
+        Boolean(probe.error?.trim())),
+  );
 }
 
 function parseSnapshotProbes(raw: string): ProbeTransitionRow["probes"] {

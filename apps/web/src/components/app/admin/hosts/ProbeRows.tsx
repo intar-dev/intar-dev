@@ -1,4 +1,8 @@
 import { Badge } from "@/components/ui/badge";
+import {
+  isVerificationPassed,
+  verificationStatusLabel,
+} from "@/lib/verification-copy";
 import type { VmProbe, VmScenarioMeta } from "./types";
 
 export function groupVmProbesByScenario(
@@ -65,40 +69,16 @@ function ProbeRow({ probe, label }: { probe: VmProbe; label: string }) {
           <Badge variant={presentation.variant}>{presentation.label}</Badge>
           <span className="font-medium">{label}</span>
         </div>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          {presentation.detail}
-        </p>
       </div>
     </li>
   );
 }
 
 function verificationPresentation(probe: VmProbe) {
-  if (probe.status === "pass") {
-    return {
-      label: "Verified",
-      variant: "success" as const,
-      detail: "This objective is satisfied.",
-    };
-  }
-  if (probe.status === "error" || probe.error?.trim()) {
-    return {
-      label: "Retrying",
-      variant: "warning" as const,
-      detail:
-        "Verification could not complete. The system will try again automatically.",
-    };
-  }
-  if (probe.status === "fail") {
-    return {
-      label: "Needs repair",
-      variant: "destructive" as const,
-      detail: "This objective still needs repair.",
-    };
-  }
   return {
-    label: "Checking",
-    variant: "outline" as const,
-    detail: "Waiting for the first verification result.",
+    label: verificationStatusLabel(probe.status),
+    variant: isVerificationPassed(probe.status)
+      ? ("success" as const)
+      : ("destructive" as const),
   };
 }

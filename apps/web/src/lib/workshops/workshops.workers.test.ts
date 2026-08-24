@@ -32,7 +32,9 @@ import {
   agentHosts,
   member,
   organization,
+  runtimeActualState,
   runtimeExecutions,
+  runtimeGuestReports,
   runtimeVmActualState,
   runtimeVms,
   user,
@@ -1192,6 +1194,7 @@ describe("standalone workshops", () => {
           probes: [
             expect.objectContaining({
               id: "workspace-ready",
+              label: "Verification objective 1",
               status: "pending",
             }),
           ],
@@ -1205,14 +1208,20 @@ describe("standalone workshops", () => {
           probes: [
             expect.objectContaining({
               id: "service-ready",
+              label: "Verification objective 1",
               status: "pass",
-              detail: "current generation is healthy",
+              detail: null,
             }),
           ],
         }),
       );
       expect(JSON.stringify(learner?.progress)).not.toContain(
         "undeclared-probe",
+      );
+      expect(learner?.progress).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ verificationUnavailable: false }),
+        ]),
       );
     }
 
@@ -1221,6 +1230,16 @@ describe("standalone workshops", () => {
       userId: "learner-a",
     });
     expect(participant.session.roster).toEqual([]);
+    expect(
+      participant.session.modules.find((module) => module.id === "01-core")
+        ?.probes,
+    ).toEqual([
+      expect.objectContaining({
+        id: "service-ready",
+        label: "Verification objective 1",
+        status: "pass",
+      }),
+    ]);
 
     const observedAt = Date.now() + 20_000;
     await drizzle(env.DB)
@@ -1256,6 +1275,141 @@ describe("standalone workshops", () => {
         moduleId: "01-core",
         probes: [expect.objectContaining({ status: "fail" })],
       }),
+    );
+
+    await drizzle(env.DB)
+      .update(runtimeVmActualState)
+      .set({
+        reportJson: workshopVmProbeReport({
+          executionId: runtime.currentExecutionId,
+          observedAt: observedAt + 1,
+          probes: [
+            {
+              ...probeSnapshot("service-ready", "unknown", observedAt + 1),
+              message: "RAW_AGENT_ERROR_MUST_NOT_RENDER",
+            },
+          ],
+        }),
+        observedAt: observedAt + 1,
+      })
+      .where(eq(runtimeVmActualState.runtimeVmId, runtime.currentRuntimeVmId));
+    const agentUnavailable = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "owner-a",
+    });
+    const agentUnavailableProgress = agentUnavailable.session.roster.find(
+      (entry) => entry.userId === "learner-a",
+    )?.progress;
+    expect(agentUnavailableProgress).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          moduleId: "01-core",
+          verificationUnavailable: true,
+          probes: [
+            expect.objectContaining({
+              label: "Verification objective 1",
+              status: "unknown",
+              detail: null,
+            }),
+          ],
+        }),
+      ]),
+    );
+    expect(JSON.stringify(agentUnavailableProgress)).not.toContain(
+      "RAW_AGENT_ERROR_MUST_NOT_RENDER",
+    );
+
+    await drizzle(env.DB)
+      .update(runtimeVmActualState)
+      .set({
+        reportJson: workshopVmProbeReport({
+          executionId: "mismatched-execution",
+          observedAt: observedAt + 2,
+          probes: [],
+        }),
+        observedAt: observedAt + 2,
+      })
+      .where(eq(runtimeVmActualState.runtimeVmId, runtime.currentRuntimeVmId));
+    const unavailable = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "owner-a",
+    });
+    const unavailableProgress = unavailable.session.roster.find(
+      (entry) => entry.userId === "learner-a",
+    )?.progress;
+    expect(unavailableProgress).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          verificationUnavailable: true,
+          probes: [
+            expect.objectContaining({
+              label: "Verification objective 1",
+            }),
+          ],
+        }),
+      ]),
+    );
+
+    await drizzle(env.DB).insert(runtimeGuestReports).values({
+      id: "probe-report-with-error",
+      executionId: runtime.currentExecutionId,
+      providerKind: "agent_kvm",
+      generation: 2,
+      sequence: 1,
+      checkpointId: "checkpoint-00",
+      bootId: "a".repeat(36),
+      phase: "ready",
+      health: "unknown",
+      probesJson: [
+        {
+          id: "service-ready",
+          status: "unknown",
+          observed_at_unix_ms: observedAt + 3,
+          error: "RAW_PROVIDER_ERROR_MUST_NOT_RENDER",
+        },
+      ],
+      completedModuleIdsJson: [],
+      reportJson: {},
+      reportedAt: observedAt + 3,
+      receivedAt: observedAt + 3,
+    });
+    await drizzle(env.DB).insert(runtimeActualState).values({
+      executionId: runtime.currentExecutionId,
+      latestReportId: "probe-report-with-error",
+      sourceKind: "guest_report",
+      sourceId: "probe-report-with-error",
+      generation: 2,
+      sequence: 1,
+      phase: "ready",
+      health: "unknown",
+      observedAt: observedAt + 3,
+      updatedAt: observedAt + 3,
+    });
+    const providerUnavailable = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "owner-a",
+    });
+    const providerUnavailableProgress =
+      providerUnavailable.session.roster.find(
+        (entry) => entry.userId === "learner-a",
+      )?.progress;
+    expect(providerUnavailableProgress).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          moduleId: "01-core",
+          verificationUnavailable: true,
+          probes: [
+            expect.objectContaining({
+              label: "Verification objective 1",
+              status: "unknown",
+              detail: null,
+            }),
+          ],
+        }),
+      ]),
+    );
+    expect(JSON.stringify(providerUnavailableProgress)).not.toContain(
+      "RAW_PROVIDER_ERROR_MUST_NOT_RENDER",
     );
   });
 

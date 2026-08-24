@@ -16,6 +16,7 @@ import {
   type RunVmStateDocument,
   type VmPhase,
 } from "@/lib/run-state";
+import { isVerificationPassed } from "@/lib/verification-copy";
 
 export function deriveVmPhase(input: {
   vm: RunVmStateDocument;
@@ -28,7 +29,7 @@ export function deriveVmPhase(input: {
   const vm = input.vm;
   const bootGateSatisfied = bootProbesPassing(vm);
   const scenarioPassing = vm.scenarioProbes.length
-    ? vm.scenarioProbes.every((probe) => isPassingProbe(probe.status))
+    ? vm.scenarioProbes.every((probe) => isVerificationPassed(probe.status))
     : false;
 
   let phase = vm.phase;
@@ -310,18 +311,7 @@ function describeReportPhase(
 function bootProbesPassing(vm: RunVmStateDocument): boolean {
   return (
     vm.bootProbes.length === 0 ||
-    vm.bootProbes.every((probe) => isPassingProbe(probe.status))
-  );
-}
-
-function isPassingProbe(status: string): boolean {
-  const normalized = status.trim().toLowerCase();
-  return (
-    normalized === "pass" ||
-    normalized === "passed" ||
-    normalized === "ready" ||
-    normalized === "ok" ||
-    normalized === "succeeded"
+    vm.bootProbes.every((probe) => isVerificationPassed(probe.status))
   );
 }
 

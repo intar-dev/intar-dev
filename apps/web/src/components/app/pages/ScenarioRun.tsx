@@ -18,7 +18,10 @@ import { RunCompletionActions } from "@/components/app/run/RunCompletionActions"
 import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
-import { repairObjectiveTitle } from "@/lib/verification-copy";
+import {
+  isVerificationPassed,
+  repairObjectiveTitle,
+} from "@/lib/verification-copy";
 import {
   RepairProgressSection,
   RunConsole,
@@ -324,10 +327,10 @@ export function ScenarioRun() {
       : null;
   const selectedProbes = selectedVm?.scenarioProbes ?? [];
   const passedCheckCount = selectedProbes.filter(
-    (probe) => probe.status === "pass",
+    (probe) => isVerificationPassed(probe.status),
   ).length;
   const currentProbe =
-    selectedProbes.find((probe) => probe.status !== "pass") ?? null;
+    selectedProbes.find((probe) => !isVerificationPassed(probe.status)) ?? null;
   const currentObjectiveIndex = currentProbe
     ? (attemptData?.objectives.findIndex(
         (objective) => objective.probeName === currentProbe.id,

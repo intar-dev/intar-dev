@@ -39,6 +39,25 @@ describe("host runtime boot probe gating", () => {
     expect(shouldQueueTerminalStateGet(vm, true)).toBe(false);
   });
 
+  it.each([
+    "pass",
+    "passed",
+    "passing",
+    "ready",
+    "ok",
+    "success",
+    "succeeded",
+  ])("uses the shared passing-state contract for %s", (status) => {
+    const vm = buildVm({
+      phase: "booting",
+      bootProbeStatuses: [status],
+      scenarioProbeStatuses: ["pending"],
+    });
+
+    expect(bootProbesPassing(vm)).toBe(true);
+    expect(shouldQueueTerminalStateGet(vm, true)).toBe(true);
+  });
+
   it("promotes bootless VMs to ready and preserves later terminal readiness", () => {
     const bootlessVm = buildVm({
       phase: "booting",

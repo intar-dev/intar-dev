@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
+import { isVerificationPassed } from "@/lib/verification-copy";
 
 export interface ProbeSnapshotRow {
   id: string;
   vmId: string;
   runtimeVmName: string;
   observedAt: number;
+  verificationUnavailable?: boolean;
   probes: Array<{
     id: string;
     label: string;
@@ -54,7 +56,7 @@ export function firstPassTimes(rows: ProbeSnapshotRow[]): Map<string, number> {
   const passedAt = new Map<string, number>();
   for (const row of rows) {
     for (const probe of row.probes) {
-      if (probe.phase !== "scenario" || probe.status !== "pass") {
+      if (probe.phase !== "scenario" || !isVerificationPassed(probe.status)) {
         continue;
       }
       if (!passedAt.has(probe.id)) {

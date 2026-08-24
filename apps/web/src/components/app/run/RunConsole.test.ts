@@ -21,8 +21,8 @@ describe("run console probe diagnostics", () => {
     );
 
     expect(markup).toContain("Repair progress");
-    expect(markup).toContain("0 of 1 verified");
-    expect(markup).toContain("Repair in progress");
+    expect(markup).toContain("0 Verified");
+    expect(markup).toContain("1 Needs repair");
     expect(markup).toContain("Restore the web rollout");
     expect(markup).toContain("Run one current, Ready replica.");
     expect(markup).toContain("Needs repair");
@@ -36,7 +36,7 @@ describe("run console probe diagnostics", () => {
     expect(markup).not.toContain("command_json_path");
   });
 
-  it("turns a probe error into a plain automatic-retry message", () => {
+  it("keeps a probe error inside the two-state result model", () => {
     const noisyOutput = "probe-output-".repeat(2_000);
     const hiddenError = "command exited with status 1";
     const markup = renderToStaticMarkup(
@@ -53,10 +53,12 @@ describe("run console probe diagnostics", () => {
       }),
     );
 
-    expect(markup).toContain("Retrying");
+    expect(markup).toContain("Needs repair");
     expect(markup).toContain(
-      "Verification is temporarily unavailable. The workspace will try again automatically.",
+      "Verification unavailable. We cannot confirm all progress right now.",
     );
+    expect(markup).not.toContain("Retrying");
+    expect(markup).not.toContain("Checking");
     expect(markup).not.toContain(hiddenError);
     expect(markup).not.toContain(noisyOutput);
     expect(markup).not.toContain("kubectl");
@@ -73,8 +75,8 @@ describe("run console probe diagnostics", () => {
       }),
     );
 
-    expect(markup).toContain("1 of 1 verified");
-    expect(markup).toContain("All verified");
+    expect(markup).toContain("1 Verified");
+    expect(markup).toContain("0 Needs repair");
     expect(markup).toContain("Verified");
     expect(markup).not.toContain("$.passed");
   });
@@ -100,7 +102,7 @@ describe("run console probe diagnostics", () => {
     expect(markup).not.toContain("raw-probe-id");
   });
 
-  it("uses plain checking and retrying states", () => {
+  it("maps pending and error states to needs repair", () => {
     const checking = renderToStaticMarkup(
       createElement(RepairProgressSection, {
         vmName: "workshop",
@@ -112,16 +114,18 @@ describe("run console probe diagnostics", () => {
       createElement(RepairProgressSection, {
         vmName: "workshop",
         objectives: [objective()],
-        probes: [commandProbe({ status: "error" })],
+        probes: [commandProbe({ status: "ERROR" })],
       }),
     );
 
-    expect(checking).toContain("Checking");
-    expect(checking).toContain(
-      "The workspace is checking this repair objective.",
-    );
-    expect(retrying).toContain("Verification retrying");
-    expect(retrying).toContain("Retrying");
+    expect(checking).toContain("Needs repair");
+    expect(retrying).toContain("Needs repair");
+    expect(retrying).toContain("Verification unavailable");
+    for (const markup of [checking, retrying]) {
+      expect(markup).not.toContain("Checking");
+      expect(markup).not.toContain("Retrying");
+      expect(markup).not.toContain("Recheck");
+    }
   });
 });
 

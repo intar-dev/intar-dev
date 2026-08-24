@@ -45,6 +45,135 @@ test.describe("focused state accessibility", () => {
     });
   }
 
+  test("expanded admin verification stays binary and hides raw failures", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({ ...routeCase("admin-overview"), theme: "light" });
+    const hostRuns = ui.server.state.hostRuns as {
+      liveVms: Array<Record<string, unknown>>;
+    };
+    const vm = hostRuns.liveVms[0];
+    if (!vm) throw new Error("admin host fixture is missing its live VM");
+    vm.probe_state = {
+      collection_state: "error",
+      collection_error: "RAW_COLLECTOR_FAILURE_MUST_NOT_RENDER",
+      generated_at: "2026-08-24T12:00:00Z",
+      updated_at: "2026-08-24T12:00:00Z",
+      summary: { total: 2, pass: 1, fail: 0, unknown: 1 },
+      probes: [
+        {
+          id: "raw-passing-probe-id",
+          kind: "command_json_path",
+          status: "pass",
+          every_seconds: 5,
+          last_attempt_at: null,
+          last_success_at: null,
+          last_duration_ms: 5,
+          error: null,
+          value: null,
+        },
+        {
+          id: "raw-error-probe-id",
+          kind: "command_json_path",
+          status: "error",
+          every_seconds: 5,
+          last_attempt_at: null,
+          last_success_at: null,
+          last_duration_ms: 5,
+          error: "RAW_PROBE_FAILURE_MUST_NOT_RENDER",
+          value: null,
+        },
+      ],
+    };
+    vm.scenario_meta = {
+      scenarioName: "repair-nginx",
+      scenarioDescription: "Repair the service.",
+      scenarioVmName: "web",
+      hostname: "web",
+      probePhaseMap: {
+        "raw-passing-probe-id": "scenario",
+        "raw-error-probe-id": "scenario",
+      },
+      checkLabelMap: {
+        "raw-passing-probe-id": "Restore the service",
+        "raw-error-probe-id": "Verify the repair",
+      },
+    };
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    const card = page
+      .getByRole("article")
+      .filter({ has: page.getByRole("heading", { name: vm.name as string }) });
+    await card.getByRole("button", { name: "Details" }).click();
+    await expect(card).toContainText("1 Verified");
+    await expect(card).toContainText("1 Needs repair");
+    await expect(card).toContainText("Verification unavailable");
+    await expect(card).toContainText("Restore the service");
+    await expect(card).toContainText("Verify the repair");
+    await expect(card).not.toContainText(/Checking|Retrying|Recheck/);
+    await expect(card).not.toContainText("RAW_COLLECTOR_FAILURE_MUST_NOT_RENDER");
+    await expect(card).not.toContainText("RAW_PROBE_FAILURE_MUST_NOT_RENDER");
+    await expect(card).not.toContainText("raw-passing-probe-id");
+    await expect(card).not.toContainText("raw-error-probe-id");
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("workshop learner probes use safe binary indicators", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({ ...routeCase("workshop-room"), theme: "light" });
+
+    const verification = page
+      .getByText("Live verification", { exact: true })
+      .locator("xpath=parent::div/parent::div");
+    await expect(verification).toContainText("1 Verified");
+    await expect(verification).toContainText("1 Needs repair");
+    await expect(verification).toContainText("Verification objective 1");
+    await expect(verification).toContainText("Verification objective 2");
+    await expect(verification).not.toContainText("talos-members");
+    await expect(verification).not.toContainText("cilium-connectivity");
+    await expect(verification).not.toContainText("3/3 members ready");
+    await expect(verification).not.toContainText("DNS egress policy");
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("facilitator probe rows stay binary when verification is unavailable", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({ ...routeCase("workshop-control-room"), theme: "light" });
+    const session = ui.server.state.workshopSession as {
+      roster: Array<{
+        userId: string;
+        progress: Array<Record<string, unknown>>;
+      }>;
+    };
+    const learner = session.roster.find(
+      (member) => member.userId === "user-learner",
+    );
+    const activeProgress = learner?.progress.find(
+      (progress) => progress.moduleId === "01",
+    );
+    if (!activeProgress) throw new Error("workshop probe fixture is missing");
+    activeProgress.verificationUnavailable = true;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    const probeLists = page.locator('ul[aria-label$=" probe status"]');
+    const probeText = (await probeLists.allTextContents()).join(" ");
+    expect(probeText).toContain("Verification objective 1");
+    expect(probeText).toContain("Verified");
+    expect(probeText).toContain("Needs repair");
+    expect(probeText).not.toMatch(
+      /workspace-ready|talos-members|cilium-connectivity|\bpass\b|\bfail\b|\bpending\b|\bunknown\b/i,
+    );
+    await expect(page.getByText("Verification unavailable").first()).toBeVisible();
+    await expectNoAxeViolations(page, testInfo);
+  });
+
   test("beta invite ready announcement", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("join-beta"), theme: "light" });
 

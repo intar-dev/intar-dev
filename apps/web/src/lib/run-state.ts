@@ -1,6 +1,7 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
 import type { ImageKey } from "@/generated/catalog";
 import type { VmResourceStateV2 } from "@/generated/bridge";
+import { isVerificationPassed } from "@/lib/verification-copy";
 
 export type RunPhase =
   | "queued"
@@ -427,8 +428,8 @@ export function applyProbeSnapshotToVm(
       const nextStatus = next.status?.trim() || probe.status;
       if (
         options?.stickyPass &&
-        isPassingProbeStatus(probe.status) &&
-        !isPassingProbeStatus(nextStatus)
+        isVerificationPassed(probe.status) &&
+        !isVerificationPassed(nextStatus)
       ) {
         return probe;
       }
@@ -452,17 +453,6 @@ export function applyProbeSnapshotToVm(
     bootProbes: merge(vm.bootProbes, { stickyPass: true }),
     scenarioProbes: merge(vm.scenarioProbes),
   });
-}
-
-function isPassingProbeStatus(status: string | null | undefined): boolean {
-  const normalized = status?.trim().toLowerCase() ?? "";
-  return (
-    normalized === "pass" ||
-    normalized === "passed" ||
-    normalized === "ready" ||
-    normalized === "ok" ||
-    normalized === "succeeded"
-  );
 }
 
 function deriveRunPhase(

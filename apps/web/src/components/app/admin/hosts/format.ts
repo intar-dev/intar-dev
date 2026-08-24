@@ -102,11 +102,6 @@ export const runOutcomeTone = (outcome: AgentVmRunRecord["outcome"]) => {
   }
 };
 
-export const probeCollectionTone = (state: string) =>
-  state === "error"
-    ? "border-destructive/30 bg-destructive/5 text-destructive"
-    : "border-border bg-secondary text-secondary-foreground";
-
 export const parseTimestamp = (value: string | null | undefined) => {
   if (!value) return 0;
   const parsed = Date.parse(value);

@@ -11,15 +11,21 @@ export function repairObjectiveTitle(
 }
 
 export function verificationStatusLabel(status: string) {
-  switch (status.trim().toLowerCase()) {
+  return isVerificationPassed(status) ? "Verified" : "Needs repair";
+}
+
+export function isVerificationPassed(status: string | null | undefined) {
+  switch (status?.trim().toLowerCase()) {
     case "pass":
-      return "Verified";
-    case "fail":
-      return "Needs repair";
-    case "error":
-      return "Retrying";
+    case "passed":
+    case "passing":
+    case "ready":
+    case "ok":
+    case "success":
+    case "succeeded":
+      return true;
     default:
-      return "Checking";
+      return false;
   }
 }
 

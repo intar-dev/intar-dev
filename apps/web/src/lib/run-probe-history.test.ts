@@ -64,14 +64,14 @@ function withProbes(
 }
 
 describe("probeStatusSignature", () => {
-  it("is order-independent and ignores value/error churn", () => {
+  it("is order-independent and ignores value and raw error-message churn", () => {
     const a = withProbes(baseState(["a"]), "a", [
-      probe("p1", "fail"),
+      { ...probe("p1", "fail"), error: "first outage detail" },
       probe("p2", "pass"),
     ]).vms[0]!;
     const b = withProbes(baseState(["a"]), "a", [
       { ...probe("p2", "pass"), value: { changed: true } },
-      { ...probe("p1", "fail"), error: "different" },
+      { ...probe("p1", "fail"), error: "different outage detail" },
     ]).vms[0]!;
     expect(probeStatusSignature(a)).toBe(probeStatusSignature(b));
   });
@@ -80,6 +80,19 @@ describe("probeStatusSignature", () => {
     const a = withProbes(baseState(["a"]), "a", [probe("p1", "fail")]).vms[0]!;
     const b = withProbes(baseState(["a"]), "a", [probe("p1", "pass")]).vms[0]!;
     expect(probeStatusSignature(a)).not.toBe(probeStatusSignature(b));
+  });
+
+  it("differs when verification becomes unavailable", () => {
+    const available = withProbes(baseState(["a"]), "a", [
+      probe("p1", "fail"),
+    ]).vms[0]!;
+    const unavailable = withProbes(baseState(["a"]), "a", [
+      { ...probe("p1", "fail"), error: "collector unavailable" },
+    ]).vms[0]!;
+
+    expect(probeStatusSignature(available)).not.toBe(
+      probeStatusSignature(unavailable),
+    );
   });
 });
 
@@ -111,5 +124,18 @@ describe("probeTransitionVms", () => {
     const current = withProbes(baseState(["a"]), "a", probes);
     const next = withProbes(baseState(["a"]), "a", probes);
     expect(probeTransitionVms(current, next)).toEqual([]);
+  });
+
+  it("records a verifier outage without changing the binary probe result", () => {
+    const current = withProbes(baseState(["a"]), "a", [
+      probe("p1", "fail"),
+    ]);
+    const next = withProbes(baseState(["a"]), "a", [
+      { ...probe("p1", "fail"), error: "collector unavailable" },
+    ]);
+
+    expect(probeTransitionVms(current, next).map((vm) => vm.id)).toEqual([
+      "a",
+    ]);
   });
 });

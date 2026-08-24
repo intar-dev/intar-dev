@@ -1,5 +1,8 @@
 import type { ProbeSnapshotRow } from "./probe-pass-times";
-import { buildVerificationLabelMap } from "@/lib/verification-copy";
+import {
+  buildVerificationLabelMap,
+  isVerificationPassed,
+} from "@/lib/verification-copy";
 import { formatScenarioDurationMs } from "./run-support";
 import type {
   ScenarioRunRecord,
@@ -16,11 +19,7 @@ export interface RunTimelineProbeChange {
   to: string;
 }
 
-export type ProbeProgressSummary =
-  | "Verified"
-  | "Needs repair"
-  | "Retrying"
-  | "Checking";
+export type ProbeProgressSummary = "Verified" | "Needs repair";
 
 interface RunTimelineItemBase {
   id: string;
@@ -39,6 +38,7 @@ export type RunTimelineItem =
       vmName: string;
       changes: RunTimelineProbeChange[];
       summary: ProbeProgressSummary;
+      verificationUnavailable: boolean;
     })
   | (RunTimelineItemBase & {
       type: "session";
@@ -197,6 +197,7 @@ function buildProbeItems(
   probeSnapshots: readonly ProbeSnapshotRow[],
 ): RunTimelineItem[] {
   const lastByVm = new Map<string, Map<string, string>>();
+  const lastUnavailableByVm = new Map<string, boolean>();
   const vmNames = new Map(
     run.vms.map((vm) => [vm.id, machineName(vm)] as const),
   );
@@ -218,9 +219,25 @@ function buildProbeItems(
 
   for (const row of rows) {
     const previous = lastByVm.get(row.vmId);
+    const previousUnavailable = lastUnavailableByVm.get(row.vmId) ?? false;
+    const verificationUnavailable = Boolean(
+      row.verificationUnavailable ||
+        row.probes.some(
+          (probe) => probe.status.trim().toLowerCase() === "error",
+        ),
+    );
+    const availabilityBecameUnavailable =
+      verificationUnavailable && !previousUnavailable;
     const next = new Map(row.probes.map((probe) => [probe.id, probe.status]));
     const changes = row.probes
-      .filter((probe) => previous?.get(probe.id) !== probe.status)
+      .filter((probe) => {
+        const before = previous?.get(probe.id);
+        return (
+          before === undefined ||
+          isVerificationPassed(before) !==
+            isVerificationPassed(probe.status)
+        );
+      })
       .map((probe) => ({
         probeId: probe.id,
         label: labels[probe.id] ?? "Verification objective",
@@ -229,10 +246,16 @@ function buildProbeItems(
       }));
 
     lastByVm.set(row.vmId, next);
-    const summary = summarizeProbeProgress(changes);
-    const initialCheckingOnly =
-      !previous && changes.length > 0 && changes.every(isCheckingStatus);
-    if (!changes.length || initialCheckingOnly) {
+    lastUnavailableByVm.set(row.vmId, verificationUnavailable);
+    const summary = summarizeProbeProgress(
+      row.probes.map((probe) => probe.status),
+    );
+    const initialUnreportedOnly =
+      !previous && changes.length > 0 && changes.every(isUnreportedStatus);
+    if (
+      (!changes.length && !availabilityBecameUnavailable) ||
+      (initialUnreportedOnly && !availabilityBecameUnavailable)
+    ) {
       continue;
     }
 
@@ -245,27 +268,27 @@ function buildProbeItems(
       vmName: vmNames.get(row.vmId) ?? row.runtimeVmName,
       changes,
       summary,
+      verificationUnavailable,
     });
   }
 
   return items;
 }
 
-function isCheckingStatus(change: RunTimelineProbeChange): boolean {
+function isUnreportedStatus(change: RunTimelineProbeChange): boolean {
   const status = change.to.trim().toLowerCase();
-  return status !== "pass" && status !== "fail" && status !== "error";
+  return (
+    !isVerificationPassed(status) && status !== "fail" && status !== "error"
+  );
 }
 
 function summarizeProbeProgress(
-  changes: readonly RunTimelineProbeChange[],
+  statuses: readonly string[],
 ): ProbeProgressSummary {
-  const statuses = changes.map((change) => change.to.trim().toLowerCase());
-  if (statuses.some((status) => status === "fail")) return "Needs repair";
-  if (statuses.some((status) => status === "error")) return "Retrying";
-  if (statuses.length && statuses.every((status) => status === "pass")) {
+  if (statuses.length && statuses.every(isVerificationPassed)) {
     return "Verified";
   }
-  return "Checking";
+  return "Needs repair";
 }
 
 function probeProgressTone(summary: ProbeProgressSummary): RunTimelineTone {
@@ -274,10 +297,6 @@ function probeProgressTone(summary: ProbeProgressSummary): RunTimelineTone {
       return "success";
     case "Needs repair":
       return "danger";
-    case "Retrying":
-      return "pending";
-    case "Checking":
-      return "neutral";
   }
 }
 

@@ -120,7 +120,7 @@ describe("run timeline model", () => {
     expect(JSON.stringify(changes)).not.toContain("raw-");
   });
 
-  it("suppresses an initial checking-only snapshot but keeps the first repair result", () => {
+  it("suppresses initial unreported states and binary no-op changes", () => {
     const items = buildRunTimelineItems(
       scenarioRun([runVm({ phase: "running" })], { phase: "running" }),
       [
@@ -140,10 +140,7 @@ describe("run timeline model", () => {
     expect(changes[0]).toMatchObject({
       id: "probe:repair-result",
       summary: "Needs repair",
-      changes: [
-        { probeId: "service", from: "pending", to: "fail" },
-        { probeId: "disk", from: "unknown", to: "pass" },
-      ],
+      changes: [{ probeId: "disk", from: "unknown", to: "pass" }],
     });
   });
 
@@ -160,7 +157,7 @@ describe("run timeline model", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      summary: "Checking",
+      summary: "Needs repair",
       changes: [
         { probeId: "service", to: "pass" },
         { probeId: "disk", to: "pending" },
@@ -168,21 +165,47 @@ describe("run timeline model", () => {
     });
   });
 
-  it("uses consistent learner-facing progress summaries", () => {
+  it("uses exactly two learner-facing progress summaries", () => {
     const items = buildRunTimelineItems(
       scenarioRun([runVm({ phase: "running" })], { phase: "running" }),
       [
         snapshot("needs-repair", 1_000, [probe("check", "Check", "fail")]),
-        snapshot("retrying", 2_000, [probe("check", "Check", "error")]),
+        snapshot("still-needs-repair", 2_000, [
+          probe("check", "Check", "pending"),
+        ]),
         snapshot("verified", 3_000, [probe("check", "Check", "pass")]),
       ],
     ).filter((item) => item.type === "probe_changes");
 
     expect(items.map((item) => item.summary)).toEqual([
       "Needs repair",
-      "Retrying",
       "Verified",
     ]);
+  });
+
+  it("keeps verifier outages separate from the two probe results", () => {
+    const items = buildRunTimelineItems(
+      scenarioRun([runVm({ phase: "running" })], { phase: "running" }),
+      [
+        snapshot("needs-repair", 1_000, [probe("check", "Check", "fail")]),
+        {
+          ...snapshot("unavailable", 2_000, [
+            probe("check", "Check", "error"),
+          ]),
+          verificationUnavailable: true,
+        },
+      ],
+    ).filter((item) => item.type === "probe_changes");
+
+    expect(items).toHaveLength(2);
+    expect(items[1]).toMatchObject({
+      id: "probe:unavailable",
+      summary: "Needs repair",
+      changes: [],
+      verificationUnavailable: true,
+    });
+    expect(JSON.stringify(items)).not.toContain("Retrying");
+    expect(JSON.stringify(items)).not.toContain("Checking");
   });
 
   it("treats cleanup exit 129 as a normal recorded terminal close", () => {

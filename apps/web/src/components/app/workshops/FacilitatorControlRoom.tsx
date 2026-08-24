@@ -25,6 +25,10 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  isVerificationPassed,
+  verificationStatusLabel,
+} from "@/lib/verification-copy";
 import { ModuleStateGlyph } from "./WorkshopAgenda";
 import type {
   WorkshopCheckpoint,
@@ -833,16 +837,14 @@ function RosterModuleCell({
       </div>
       {progress.probes.length ? (
         <ul className="space-y-0.5" aria-label={`${module.title} probe status`}>
-          {progress.probes.map((probe) => (
+          {progress.probes.map((probe, probeIndex) => (
             <li
               key={probe.id}
-              title={`${probe.label}: ${probe.status}${
-                probe.detail ? ` — ${probe.detail}` : ""
-              }`}
+              title={`Verification objective ${probeIndex + 1}: ${verificationStatusLabel(probe.status)}`}
               className="flex min-w-0 items-center justify-between gap-2 font-mono text-[10px] leading-4"
             >
               <span className="truncate text-muted-foreground">
-                {probe.label}
+                Verification objective {probeIndex + 1}
               </span>
               <ProbeStatusText probe={probe} />
             </li>
@@ -853,6 +855,14 @@ function RosterModuleCell({
           No probes
         </span>
       )}
+      {progress.verificationUnavailable ? (
+        <span
+          role="status"
+          className="block text-[10px] font-semibold text-destructive"
+        >
+          Verification unavailable
+        </span>
+      ) : null}
       <span className="sr-only">
         {memberName}, {module.title}: {workshopModuleStateLabel(progress.state)}
         ; explain-back {explainBackStatusLabel(progress.explainBackStatus)}.
@@ -862,17 +872,14 @@ function RosterModuleCell({
 }
 
 function ProbeStatusText({ probe }: { probe: WorkshopProbe }) {
-  const classes =
-    probe.status === "pass"
-      ? "text-success"
-      : probe.status === "fail"
-        ? "text-destructive"
-        : probe.status === "pending"
-          ? "text-warning"
-          : "text-muted-foreground";
+  const passed = isVerificationPassed(probe.status);
   return (
-    <span className={`shrink-0 font-sans font-semibold ${classes}`}>
-      {probe.status}
+    <span
+      className={`shrink-0 font-sans font-semibold ${
+        passed ? "text-success" : "text-destructive"
+      }`}
+    >
+      {verificationStatusLabel(probe.status)}
     </span>
   );
 }
