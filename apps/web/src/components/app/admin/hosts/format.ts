@@ -3,12 +3,6 @@
 
 import type { AgentVmRunRecord } from "./types";
 
-export {
-  formatProbeFailurePreview,
-  formatProbeValueFields,
-  summarizeProbeValue,
-} from "@/lib/probe-values";
-
 export const formatTimestamp = (value: string | null | undefined) =>
   value ? new Date(value).toLocaleString() : "—";
 
@@ -105,17 +99,6 @@ export const runOutcomeTone = (outcome: AgentVmRunRecord["outcome"]) => {
         badgeVariant: "outline" as const,
         label: "In progress",
       };
-  }
-};
-
-export const probeStatusTone = (status: string) => {
-  switch (status) {
-    case "pass":
-      return "secondary" as const;
-    case "fail":
-      return "destructive" as const;
-    default:
-      return "outline" as const;
   }
 };
 

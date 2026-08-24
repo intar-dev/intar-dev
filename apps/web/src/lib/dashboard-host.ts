@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { scenarioRunArtifacts, scenarioRunSshKeys } from "@/db/schema";
 import type { AgentHostRow } from "@/lib/agent-bridge";
 import { listHostRunsForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
+import { buildVerificationLabelMap } from "@/lib/verification-copy";
 
 export interface DashboardVmProbeState {
   collection_state: string;
@@ -35,6 +36,7 @@ export interface DashboardVmScenarioMeta {
   scenarioVmName: string;
   hostname: string;
   probePhaseMap: Record<string, "boot" | "scenario">;
+  checkLabelMap: Record<string, string>;
 }
 
 export interface DashboardVmStatus {
@@ -160,6 +162,11 @@ export async function loadDashboardHostRuns(params: {
                   (probe) => [probe.id, "scenario"] as const,
                 ),
               ]),
+              checkLabelMap: buildVerificationLabelMap({
+                bootProbeIds: vm.bootProbes.map((probe) => probe.id),
+                scenarioProbeIds: vm.scenarioProbes.map((probe) => probe.id),
+                objectives: run.objectives,
+              }),
             },
             details: {
               guest_ip: readString(vm.guestIp),
@@ -302,6 +309,7 @@ async function hydrateArchivedRuns(params: {
         scenarioVmName: scenarioVmNames.join(", ") || "Scenario VM",
         hostname: run.vms.map((vm) => vm.hostname).join(", "),
         probePhaseMap: {},
+        checkLabelMap: {},
       },
     } satisfies DashboardArchivedRun;
   });

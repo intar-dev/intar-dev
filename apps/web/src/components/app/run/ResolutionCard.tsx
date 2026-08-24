@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { firstPassTimes, useProbeSnapshots } from "./probe-pass-times";
 import { formatScenarioDurationMs } from "./run-support";
+import { repairObjectiveTitle } from "@/lib/verification-copy";
 import type { ScenarioObjective, ScenarioRunHint } from "./run-types";
 
 // Replaces the rail once every check passes. The celebration lives in the
@@ -58,7 +59,7 @@ export function ResolutionCard(props: {
       <CardContent className="space-y-4">
         {props.objectives.length ? (
           <ol className="divide-y border-y">
-            {props.objectives.map((objective) => {
+            {props.objectives.map((objective, index) => {
               const passedAt = passTimes.get(objective.probeName) ?? null;
               const sinceStartMs =
                 passedAt !== null ? passedAt - props.createdAt : null;
@@ -73,7 +74,7 @@ export function ResolutionCard(props: {
                       aria-hidden="true"
                     />
                     <span className="min-w-0 truncate">
-                      {objective.title?.trim() || objective.label}
+                      {repairObjectiveTitle(objective, index)}
                     </span>
                   </span>
                   {sinceStartMs !== null && sinceStartMs >= 0 ? (
@@ -87,7 +88,7 @@ export function ResolutionCard(props: {
           </ol>
         ) : (
           <p className="text-sm text-muted-foreground">
-            All scenario checks are complete.
+            All repair objectives are verified.
           </p>
         )}
         <p className="text-sm leading-6 text-muted-foreground">

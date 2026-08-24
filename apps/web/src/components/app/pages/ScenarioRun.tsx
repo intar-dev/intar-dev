@@ -16,7 +16,11 @@ import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
 import { RunTimeline } from "@/components/app/run/RunTimeline";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
-import { ChecksSection, RunConsole } from "@/components/app/run/RunConsole";
+import { repairObjectiveTitle } from "@/lib/verification-copy";
+import {
+  RepairProgressSection,
+  RunConsole,
+} from "@/components/app/run/RunConsole";
 import { AssistDrawer } from "@/components/app/run/AssistDrawer";
 import { ResolutionCard } from "@/components/app/run/ResolutionCard";
 import {
@@ -286,18 +290,26 @@ export function ScenarioRun() {
   ).length;
   const currentProbe =
     selectedProbes.find((probe) => probe.status !== "pass") ?? null;
-  const currentObjective = currentProbe
-    ? (attemptData?.objectives.find(
+  const currentObjectiveIndex = currentProbe
+    ? (attemptData?.objectives.findIndex(
         (objective) => objective.probeName === currentProbe.id,
-      ) ?? null)
-    : null;
+      ) ?? -1)
+    : -1;
+  const currentObjective =
+    currentObjectiveIndex >= 0
+      ? (attemptData?.objectives[currentObjectiveIndex] ?? null)
+      : null;
   const currentCheckLabel =
     selectedProbes.length > 0 && passedCheckCount === selectedProbes.length
-      ? "All checks passing"
-      : currentObjective?.title?.trim() ||
-        currentProbe?.label ||
-        attemptData?.phaseDetail ||
-        "Waiting for run status";
+      ? "All objectives verified"
+      : currentProbe
+        ? repairObjectiveTitle(
+            currentObjective,
+            currentObjectiveIndex >= 0
+              ? currentObjectiveIndex
+              : Math.max(0, selectedProbes.indexOf(currentProbe)),
+          )
+        : attemptData?.phaseDetail || "Waiting for run status";
   const infrastructureTeardownPending = Boolean(
     attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
   );
@@ -580,7 +592,7 @@ export function ScenarioRun() {
                       {String(index + 1).padStart(2, "0")}
                     </span>
                     <span className="font-medium leading-6">
-                      {objective.title?.trim() || objective.label}
+                      {repairObjectiveTitle(objective, index)}
                     </span>
                   </li>
                 ))}
@@ -642,7 +654,7 @@ export function ScenarioRun() {
           <>
             {/* Keyed per machine so row open/close state never leaks across
                 VM switches. */}
-            <ChecksSection
+            <RepairProgressSection
               key={selectedVm?.scenarioVmName ?? "checks"}
               vmName={selectedVm?.scenarioVmName ?? null}
               probes={selectedProbes}
@@ -673,6 +685,7 @@ export function ScenarioRun() {
         )}
         <RunDetailsSection
           runId={runId}
+          objectives={attemptData.objectives}
           vmName={selectedVm?.scenarioVmName ?? null}
           hostname={selectedVm?.hostname ?? null}
           provisioning={selectedVm?.provisioning ?? null}

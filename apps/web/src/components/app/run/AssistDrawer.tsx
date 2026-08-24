@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Eye, LifeBuoy, LockKeyhole } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
+import { repairObjectiveTitle } from "@/lib/verification-copy";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -59,13 +60,20 @@ function groupHints(
         !objectives.some((objective) => objective.probeName === probeName),
     ),
   ];
-  for (const probeName of new Set(orderedProbeNames)) {
-    const objective = objectives.find(
+  for (const [groupIndex, probeName] of [
+    ...new Set(orderedProbeNames),
+  ].entries()) {
+    const objectiveIndex = objectives.findIndex(
       (candidate) => candidate.probeName === probeName,
     );
+    const objective =
+      objectiveIndex >= 0 ? objectives[objectiveIndex] : undefined;
     groups.push({
       key: `probe:${probeName}`,
-      label: objective?.title?.trim() || objective?.label || probeName,
+      label:
+        objectiveIndex >= 0
+          ? repairObjectiveTitle(objective, objectiveIndex)
+          : `Repair guidance ${groupIndex + 1}`,
       hints: byProbe.get(probeName) ?? [],
     });
   }

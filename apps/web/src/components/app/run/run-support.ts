@@ -1,7 +1,5 @@
 // Pure helpers for the scenario run page: formatters, boot-step derivation,
-// screen copy, and probe-value summaries.
-
-import { summarizeProbeValue } from "@/lib/probe-values";
+// and screen copy.
 import type {
   ScenarioProbeStatus,
   ScenarioRunRecord,
@@ -153,42 +151,6 @@ export function getScenarioBootScreenCopy(attempt: ScenarioRunRecord | null) {
     title: "Preparing your workspace",
     description: "Review the work order while the VM starts.",
   };
-}
-
-export function describeProbeValue(probe: ScenarioProbeStatus) {
-  if (probe.value === null || probe.value === undefined) {
-    return probe.status === "pass"
-      ? "Passing"
-      : "Waiting for a passing signal.";
-  }
-
-  const summary = summarizeProbeValue(probe.kind, probe.value);
-  if (summary) return summary;
-
-  if (typeof probe.value === "string") {
-    return probe.value;
-  }
-
-  if (typeof probe.value === "number" || typeof probe.value === "boolean") {
-    return String(probe.value);
-  }
-
-  if (typeof probe.value === "object") {
-    const record = probe.value as Record<string, unknown>;
-    if (typeof record.state === "string") return `State: ${record.state}`;
-    if (
-      typeof record.service === "string" &&
-      typeof record.expectedState === "string"
-    ) {
-      return `${record.service} should be ${record.expectedState}`;
-    }
-    if (typeof record.path === "string") return record.path;
-    if (typeof record.host === "string" && typeof record.port === "number") {
-      return `${record.host}:${record.port}`;
-    }
-  }
-
-  return probe.status === "pass" ? "Passing" : "Waiting for a passing signal.";
 }
 
 export function hasReportedProbeResults(probes: ScenarioProbeStatus[]) {

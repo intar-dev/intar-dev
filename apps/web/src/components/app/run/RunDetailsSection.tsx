@@ -3,18 +3,21 @@ import { formatBytes } from "../lib/format";
 import type { RunVmProvisioningSpec } from "@/lib/run-state";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { ObjectiveTimeline } from "./ObjectiveTimeline";
+import type { ScenarioObjective } from "./run-types";
 
 // Machine facts + probe timeline behind one collapsed disclosure — debugging
 // info, not workspace furniture. The timeline only mounts (and fetches) when
 // the section is opened, keeping it off the run poll's hot path.
 export function RunDetailsSection({
   runId,
+  objectives,
   vmName,
   hostname,
   provisioning,
   terminalTarget,
 }: {
   runId: string;
+  objectives: ScenarioObjective[];
   vmName: string | null;
   hostname: string | null;
   provisioning: RunVmProvisioningSpec | null;
@@ -79,7 +82,7 @@ export function RunDetailsSection({
         ) : null}
         <div className="space-y-2">
           <p className="text-eyebrow">Timeline</p>
-          <ObjectiveTimeline runId={runId} />
+          <ObjectiveTimeline runId={runId} objectives={objectives} />
         </div>
       </DisclosureRow>
     </section>

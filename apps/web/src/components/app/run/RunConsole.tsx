@@ -1,14 +1,8 @@
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { CheckCircle2, CircleAlert } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
-import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { Badge } from "@/components/ui/badge";
-import {
-  formatProbeFailurePreview,
-  formatProbeValueFields,
-  summarizeProbeValue,
-} from "@/lib/probe-values";
-import { describeProbeValue } from "./run-support";
+import { repairObjectiveTitle } from "@/lib/verification-copy";
 import type { ScenarioObjective, ScenarioProbeStatus } from "./run-types";
 
 // The run console is one calm surface: borderless sections split by hairlines
@@ -21,78 +15,69 @@ export function RunConsole({ children }: { children: ReactNode }) {
   );
 }
 
-// The run's monitoring section: probes behave like live healthchecks — the
-// system notices fixes on its own, there is no "check my solution" button.
-export function ChecksSection(props: {
+// Learners work from repair objectives, not probe implementation details. The
+// verification engine stays automatic and invisible behind this progress list.
+export function RepairProgressSection(props: {
   vmName: string | null;
   probes: ScenarioProbeStatus[];
   objectives: ScenarioObjective[];
 }) {
   const passed = props.probes.filter((probe) => probe.status === "pass").length;
   const total = props.probes.length;
-  const anyFailing = props.probes.some((probe) => probe.status === "fail");
+  const anyNeedsRepair = props.probes.some(
+    (probe) => probe.status === "fail" && !probe.error?.trim(),
+  );
+  const anyRetrying = props.probes.some(
+    (probe) => probe.status === "error" || Boolean(probe.error?.trim()),
+  );
   const resolved = total > 0 && passed === total;
-  const focusProbeId =
-    props.probes.find((probe) => probe.status !== "pass")?.id ?? null;
-  // Untouched rows follow the live focus (first non-passing check) as checks
-  // flip, so the open row advances with the incident. An explicit toggle
-  // sticks only while its probe's status is unchanged — once the check flips,
-  // focus-follow resumes.
-  const [overrides, setOverrides] = useState<
-    Record<string, { status: string; open: boolean }>
-  >({});
-  const isOpen = (probe: ScenarioProbeStatus) => {
-    const override = overrides[probe.id];
-    return override && override.status === probe.status
-      ? override.open
-      : probe.id === focusProbeId;
-  };
 
   return (
-    <section aria-label="Checks">
+    <section aria-label="Repair progress">
       <div className="flex items-center justify-between gap-3">
         <p className="text-eyebrow">
-          {props.vmName ? `${props.vmName} checks` : "Checks"}
+          {props.vmName ? `${props.vmName} repair progress` : "Repair progress"}
         </p>
         <span className="flex items-center gap-2">
           {total ? (
             <span className="text-xs font-medium text-muted-foreground tabular-nums">
-              {passed}/{total}
+              {passed} of {total} verified
             </span>
           ) : null}
           {resolved ? (
-            <Badge variant="success">Resolved</Badge>
-          ) : anyFailing ? (
-            <Badge variant="destructive">Failing checks</Badge>
+            <Badge variant="success">All verified</Badge>
+          ) : anyNeedsRepair ? (
+            <Badge variant="destructive">Repair in progress</Badge>
+          ) : anyRetrying ? (
+            <Badge variant="warning">Verification retrying</Badge>
           ) : (
-            <Badge variant="outline">Investigating</Badge>
+            <Badge variant="outline">Checking objectives</Badge>
           )}
         </span>
       </div>
       {total ? (
-        <div className="mt-1">
-          {props.probes.map((probe) => (
-            <CheckRow
-              key={probe.id}
-              probe={probe}
-              objective={
-                props.objectives.find(
-                  (candidate) => candidate.probeName === probe.id,
-                ) ?? null
-              }
-              open={isOpen(probe)}
-              onOpenChange={(open) =>
-                setOverrides((current) => ({
-                  ...current,
-                  [probe.id]: { status: probe.status, open },
-                }))
-              }
-            />
-          ))}
-        </div>
+        <ol className="mt-2 divide-y border-y">
+          {props.probes.map((probe, index) => {
+            const objectiveIndex = props.objectives.findIndex(
+              (candidate) => candidate.probeName === probe.id,
+            );
+            return (
+              <CheckRow
+                key={probe.id}
+                probe={probe}
+                objective={
+                  objectiveIndex >= 0
+                    ? (props.objectives[objectiveIndex] ?? null)
+                    : null
+                }
+                objectiveIndex={objectiveIndex >= 0 ? objectiveIndex : index}
+              />
+            );
+          })}
+        </ol>
       ) : (
         <p className="py-3 text-sm text-muted-foreground">
-          No checks in this section.
+          No repair objectives are available yet.
         </p>
       )}
     </section>
@@ -102,102 +87,99 @@ export function ChecksSection(props: {
 function CheckRow(props: {
   probe: ScenarioProbeStatus;
   objective: ScenarioObjective | null;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  objectiveIndex: number;
 }) {
   const { probe, objective } = props;
-  const title = objective?.title?.trim() || probe.label;
-  // Mono is reserved for actual probe values; the waiting/passing fallback
-  // sentences are ordinary copy.
-  const summary = summarizeProbeValue(probe.kind, probe.value);
-  const valueFields =
-    probe.status === "fail"
-      ? formatProbeValueFields(probe.kind, probe.value)
-      : [];
-  const failurePreview =
-    probe.status === "pass"
-      ? null
-      : formatProbeFailurePreview(probe.kind, probe.value, probe.error);
+  const title = repairObjectiveTitle(objective, props.objectiveIndex);
+  const presentation = objectivePresentation(probe);
 
   return (
-    <DisclosureRow
-      density="compact"
-      open={props.open}
-      onOpenChange={props.onOpenChange}
-      leading={<StatusIcon status={probe.status} />}
-      title={title}
-      contentClassName="space-y-1"
-    >
-      {objective?.bodyMarkdown ? (
-        <Markdown className="space-y-1 text-xs leading-5 text-muted-foreground">
-          {objective.bodyMarkdown}
-        </Markdown>
-      ) : null}
-      {summary ? (
-        <p className="font-mono text-xs break-all text-muted-foreground">
-          {summary}
-        </p>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          {describeProbeValue(probe)}
-        </p>
-      )}
-      {valueFields.length ? (
-        <dl className="grid gap-x-3 gap-y-1 rounded-md border border-border/60 bg-muted/20 p-2 text-xs sm:grid-cols-[auto_1fr]">
-          {valueFields.map((field, index) => (
-            <div key={`${field.label}-${index}`} className="contents">
-              <dt className="text-muted-foreground">{field.label}</dt>
-              <dd className="font-mono break-all text-foreground">
-                {field.value}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
-      {failurePreview ? (
-        <pre className="max-h-40 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[0.7rem] leading-relaxed whitespace-pre-wrap">
-          {failurePreview}
-        </pre>
-      ) : null}
-    </DisclosureRow>
+    <li className="flex gap-3 py-3">
+      <StatusIcon
+        status={probe.status}
+        retrying={probe.status === "error" || Boolean(probe.error?.trim())}
+      />
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="flex items-start justify-between gap-3">
+          <p className="text-sm font-medium text-foreground">{title}</p>
+          <Badge variant={presentation.variant} className="shrink-0">
+            {presentation.label}
+          </Badge>
+        </div>
+        {objective?.bodyMarkdown ? (
+          <Markdown className="max-w-[68ch] space-y-1 text-sm leading-5 text-muted-foreground">
+            {objective.bodyMarkdown}
+          </Markdown>
+        ) : null}
+        {presentation.detail ? (
+          <p className="max-w-[68ch] text-xs leading-5 text-muted-foreground">
+            {presentation.detail}
+          </p>
+        ) : null}
+      </div>
+    </li>
   );
 }
 
-// Status never by color alone: distinct icon shapes plus an sr-only word in
-// the row's accessible name.
-function StatusIcon({ status }: { status: string }) {
+function objectivePresentation(probe: ScenarioProbeStatus) {
+  if (probe.status === "pass") {
+    return { label: "Verified", variant: "success" as const, detail: null };
+  }
+  if (probe.status === "error" || probe.error?.trim()) {
+    return {
+      label: "Retrying",
+      variant: "warning" as const,
+      detail:
+        "Verification is temporarily unavailable. The workspace will try again automatically.",
+    };
+  }
+  if (probe.status === "fail") {
+    return {
+      label: "Needs repair",
+      variant: "destructive" as const,
+      detail: null,
+    };
+  }
+  return {
+    label: "Checking",
+    variant: "outline" as const,
+    detail: "The workspace is checking this repair objective.",
+  };
+}
+
+// Status never relies on color alone: each shape is paired with a visible
+// status badge in the same row.
+function StatusIcon({ status, retrying }: { status: string; retrying: boolean }) {
   if (status === "pass") {
     return (
-      <>
-        <CheckCircle2
-          className="size-4 shrink-0 text-success"
-          aria-hidden="true"
-        />
-        <span className="sr-only">Passing:</span>
-      </>
+      <CheckCircle2
+        className="mt-0.5 size-4 shrink-0 text-success"
+        aria-hidden="true"
+      />
+    );
+  }
+  if (retrying) {
+    return (
+      <CircleAlert
+        className="mt-0.5 size-4 shrink-0 text-warning"
+        aria-hidden="true"
+      />
     );
   }
   if (status === "fail") {
     return (
-      <>
-        <CircleAlert
-          className="size-4 shrink-0 text-destructive"
-          aria-hidden="true"
-        />
-        <span className="sr-only">Failing:</span>
-      </>
+      <CircleAlert
+        className="mt-0.5 size-4 shrink-0 text-destructive"
+        aria-hidden="true"
+      />
     );
   }
   return (
-    <>
-      {/* Watching dot: the probe engine keeps checking on its own. */}
-      <span
-        className="flex size-4 shrink-0 items-center justify-center"
-        aria-hidden="true"
-      >
-        <span className="size-2 rounded-full bg-warning" />
-      </span>
-      <span className="sr-only">Watching:</span>
-    </>
+    <span
+      className="mt-0.5 flex size-4 shrink-0 items-center justify-center"
+      aria-hidden="true"
+    >
+      <span className="size-2 rounded-full bg-warning" />
+    </span>
   );
 }

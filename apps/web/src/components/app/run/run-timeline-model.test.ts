@@ -81,6 +81,43 @@ describe("run timeline model", () => {
     ).toEqual(["probe_changes", "session"]);
   });
 
+  it("replaces stored probe labels with safe objective copy", () => {
+    const run = scenarioRun([runVm({ phase: "running" })], {
+      phase: "running",
+      objectives: [
+        {
+          probeName: "service",
+          vmName: "web",
+          label: "raw-objective-label",
+          title: "Restore service routing",
+          bodyMarkdown: null,
+          hintCount: 0,
+        },
+      ],
+    });
+    const items = buildRunTimelineItems(run, [
+      snapshot("safe-labels", 2_000, [
+        probe("service", "raw-service-probe", "fail"),
+        probe("unmapped", "raw-unmapped-probe", "fail"),
+        {
+          ...probe("boot-network", "raw-boot-probe", "pass"),
+          phase: "boot",
+        },
+      ]),
+    ]);
+    const changes = items.find((item) => item.type === "probe_changes");
+
+    expect(changes).toMatchObject({
+      type: "probe_changes",
+      changes: [
+        { label: "Restore service routing" },
+        { label: "Repair objective 2" },
+        { label: "Startup check 1" },
+      ],
+    });
+    expect(JSON.stringify(changes)).not.toContain("raw-");
+  });
+
   it("keeps current unknown-time work at the end without inventing a timestamp", () => {
     const run = scenarioRun(
       [runVm({ phase: "archiving", hasRecording: true })],

@@ -82,6 +82,7 @@ export interface VmScenarioMeta {
   scenarioVmName: string;
   hostname: string;
   probePhaseMap: Record<string, "boot" | "scenario">;
+  checkLabelMap: Record<string, string>;
 }
 
 export interface AgentVmRunEvent {

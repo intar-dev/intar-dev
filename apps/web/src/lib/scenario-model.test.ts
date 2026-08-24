@@ -159,6 +159,46 @@ describe("scenario model", () => {
     ]);
   });
 
+  it("uses safe copy when a probe has no authored description", () => {
+    const rawProbeName = "internal-probe-id";
+    const briefing = deriveScenarioBriefing({
+      scenarioId: "safe-copy",
+      title: "Safe copy",
+      category: "linux",
+      description: "Repair the service.",
+      difficulty: "easy",
+      estimatedMinutes: 10,
+      tags: [],
+      briefingMarkdown: "Repair it.",
+      probes: [
+        probe({ name: rawProbeName, description: "", phase: "scenario" }),
+      ],
+    });
+    const specs = buildScenarioLaunchSpecs({
+      scenarioId: "safe-copy",
+      vms: [vm({ id: "vm-web", name: "Web" })],
+      probes: [
+        probe({
+          scenarioVmId: "vm-web",
+          name: "raw-boot-id",
+          description: "",
+          phase: "boot",
+        }),
+        probe({
+          scenarioVmId: "vm-web",
+          name: rawProbeName,
+          description: "",
+          phase: "scenario",
+        }),
+      ],
+    });
+
+    expect(briefing.objectives[0]?.label).toBe("Repair objective 1");
+    expect(specs[0]?.summary.probeDescriptors.map((item) => item.label)).toEqual(
+      ["Startup check 1", "Repair objective 1"],
+    );
+  });
+
   it("normalizes launch summaries and ignores malformed probe descriptors", () => {
     expect(
       parseScenarioLaunchSummary(

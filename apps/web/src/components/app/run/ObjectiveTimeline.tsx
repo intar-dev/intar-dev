@@ -1,7 +1,12 @@
 import { ArrowRight } from "lucide-react";
 import { formatTimestamp } from "../lib/format";
 import { cn } from "@/lib/utils";
+import {
+  buildVerificationLabelMap,
+  verificationStatusLabel,
+} from "@/lib/verification-copy";
 import { useProbeSnapshots, type ProbeSnapshotRow } from "./probe-pass-times";
+import type { ScenarioObjective } from "./run-types";
 
 interface ProbeChange {
   probeId: string;
@@ -18,9 +23,22 @@ interface TimelineEvent {
 }
 
 // Diff consecutive snapshots per VM into "probe X: fail → pass" events.
-function toTimelineEvents(rows: ProbeSnapshotRow[]): TimelineEvent[] {
+export function toTimelineEvents(
+  rows: ProbeSnapshotRow[],
+  objectives: ScenarioObjective[],
+): TimelineEvent[] {
   const lastByVm = new Map<string, Map<string, string>>();
   const events: TimelineEvent[] = [];
+  const allProbes = rows.flatMap((row) => row.probes);
+  const labels = buildVerificationLabelMap({
+    bootProbeIds: allProbes
+      .filter((probe) => probe.phase === "boot")
+      .map((probe) => probe.id),
+    scenarioProbeIds: allProbes
+      .filter((probe) => probe.phase === "scenario")
+      .map((probe) => probe.id),
+    objectives,
+  });
 
   for (const row of rows) {
     const previous = lastByVm.get(row.vmId);
@@ -31,7 +49,7 @@ function toTimelineEvents(rows: ProbeSnapshotRow[]): TimelineEvent[] {
       .filter((probe) => previous?.get(probe.id) !== probe.status)
       .map((probe) => ({
         probeId: probe.id,
-        label: probe.label,
+        label: labels[probe.id] ?? "Verification objective",
         from: previous?.get(probe.id) ?? null,
         to: probe.status,
       }));
@@ -51,7 +69,13 @@ function toTimelineEvents(rows: ProbeSnapshotRow[]): TimelineEvent[] {
 
 // Only mounted when the timeline section is expanded, so the fetch stays off
 // the run page's hot polling path.
-export function ObjectiveTimeline({ runId }: { runId: string }) {
+export function ObjectiveTimeline({
+  runId,
+  objectives,
+}: {
+  runId: string;
+  objectives: ScenarioObjective[];
+}) {
   const snapshots = useProbeSnapshots(runId);
 
   if (snapshots.isLoading) {
@@ -64,19 +88,21 @@ export function ObjectiveTimeline({ runId }: { runId: string }) {
 
   if (snapshots.error) {
     return (
-      <p className="px-1 py-2 text-xs text-destructive">
-        {snapshots.error instanceof Error
-          ? snapshots.error.message
-          : "Failed to load timeline"}
+      <p className="px-1 py-2 text-xs text-muted-foreground">
+        The progress timeline is temporarily unavailable. Try again soon.
       </p>
     );
   }
 
-  const events = toTimelineEvents(snapshots.data?.snapshots ?? []);
+  const events = toTimelineEvents(
+    snapshots.data?.snapshots ?? [],
+    objectives,
+  );
   if (!events.length) {
     return (
       <p className="px-1 py-2 text-xs text-muted-foreground">
-        No probe changes recorded yet. Progress shows up here as checks flip.
+        No objective changes recorded yet. Progress will appear here as repairs
+        are verified.
       </p>
     );
   }
@@ -130,7 +156,7 @@ function StatusText({ status }: { status: string }) {
             : "text-muted-foreground",
       )}
     >
-      {status}
+      {verificationStatusLabel(status)}
     </span>
   );
 }

@@ -28,6 +28,7 @@ import { RunListItem } from "@/components/app/patterns/RunListItem";
 import { ErrorState } from "@/components/app/patterns/StateCard";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { formatDurationMs, formatTimestamp } from "@/components/app/lib/format";
+import { repairObjectiveTitle } from "@/lib/verification-copy";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -441,7 +442,7 @@ function ScenarioBriefing({
                             <div className="min-w-0 space-y-1">
                               <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                                 <p className="font-semibold">
-                                  {objective.title?.trim() || objective.label}
+                                  {repairObjectiveTitle(objective, index)}
                                 </p>
                                 {scenarioData.vmCount > 1 ? (
                                   <code className="text-caption">
@@ -453,10 +454,6 @@ function ScenarioBriefing({
                                 <Markdown className="text-muted-foreground [&_code]:text-foreground">
                                   {objective.bodyMarkdown}
                                 </Markdown>
-                              ) : objective.title?.trim() && objective.label ? (
-                                <p className="text-sm leading-6 text-muted-foreground">
-                                  {objective.label}
-                                </p>
                               ) : null}
                               {objective.hintCount > 0 ? (
                                 <p className="text-metadata">

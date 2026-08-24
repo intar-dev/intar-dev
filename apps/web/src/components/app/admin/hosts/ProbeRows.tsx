@@ -1,11 +1,4 @@
 import { Badge } from "@/components/ui/badge";
-import {
-  formatProbeFailurePreview,
-  formatProbeValueFields,
-  formatTimestamp,
-  probeStatusTone,
-  summarizeProbeValue,
-} from "./format";
 import type { VmProbe, VmScenarioMeta } from "./types";
 
 export function groupVmProbesByScenario(
@@ -34,75 +27,78 @@ export function groupVmProbesByScenario(
   return { boot, scenario, other };
 }
 
-export function ProbeRows(props: { probes: VmProbe[] }) {
+export function ProbeRows(props: {
+  probes: VmProbe[];
+  checkLabelMap?: Record<string, string>;
+}) {
   if (!props.probes.length) {
     return (
-      <div className="rounded-xl border border-dashed bg-background/70 px-4 py-6 text-center text-muted-foreground">
-        No probes in this section yet.
-      </div>
+      <p className="py-4 text-sm text-muted-foreground">
+        No verification results yet.
+      </p>
     );
   }
 
   return (
-    <div className="space-y-2">
-      {props.probes.map((probe) => (
-        <ProbeRow key={probe.id} probe={probe} />
+    <ul className="divide-y border-y">
+      {props.probes.map((probe, index) => (
+        <ProbeRow
+          key={probe.id}
+          probe={probe}
+          label={
+            props.checkLabelMap?.[probe.id] ??
+            `Verification objective ${index + 1}`
+          }
+        />
       ))}
-    </div>
+    </ul>
   );
 }
 
-function ProbeRow({ probe }: { probe: VmProbe }) {
-  const valueFields = formatProbeValueFields(probe.kind, probe.value);
-  const failurePreview =
-    probe.status === "pass"
-      ? null
-      : formatProbeFailurePreview(probe.kind, probe.value, probe.error);
+function ProbeRow({ probe, label }: { probe: VmProbe; label: string }) {
+  const presentation = verificationPresentation(probe);
 
   return (
-    <details className="rounded-xl border bg-muted/20 p-3 [&_summary::-webkit-details-marker]:hidden">
-      <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge
-              variant={probeStatusTone(probe.status)}
-              className="capitalize"
-            >
-              {probe.status}
-            </Badge>
-            <span className="font-medium">{probe.id}</span>
-            <span className="text-muted-foreground">{probe.kind}</span>
-          </div>
-          <p className="mt-1 truncate text-xs text-muted-foreground">
-            {summarizeProbeValue(probe.kind, probe.value) ??
-              "No value reported"}
-          </p>
+    <li className="py-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={presentation.variant}>{presentation.label}</Badge>
+          <span className="font-medium">{label}</span>
         </div>
-        <span className="text-xs text-muted-foreground">Details</span>
-      </summary>
-      <div className="mt-3 grid gap-3 text-xs text-muted-foreground">
-        <div className="grid gap-2 sm:grid-cols-2">
-          <p>Every: {probe.every_seconds}s</p>
-          <p>Last duration: {probe.last_duration_ms} ms</p>
-          <p>Last attempt: {formatTimestamp(probe.last_attempt_at)}</p>
-          <p>Last success: {formatTimestamp(probe.last_success_at)}</p>
-        </div>
-        <dl className="grid gap-x-4 gap-y-2 rounded-lg border bg-background/80 p-3 sm:grid-cols-2">
-          {valueFields.map((field, index) => (
-            <div key={`${field.label}-${index}`} className="min-w-0">
-              <dt className="text-muted-foreground">{field.label}</dt>
-              <dd className="mt-0.5 font-mono break-all text-foreground">
-                {field.value}
-              </dd>
-            </div>
-          ))}
-        </dl>
-        {failurePreview ? (
-          <pre className="max-h-56 overflow-auto rounded-lg border border-destructive/30 bg-background/80 p-3 font-mono text-xs text-foreground whitespace-pre-wrap">
-            {failurePreview}
-          </pre>
-        ) : null}
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {presentation.detail}
+        </p>
       </div>
-    </details>
+    </li>
   );
+}
+
+function verificationPresentation(probe: VmProbe) {
+  if (probe.status === "pass") {
+    return {
+      label: "Verified",
+      variant: "success" as const,
+      detail: "This objective is satisfied.",
+    };
+  }
+  if (probe.status === "error" || probe.error?.trim()) {
+    return {
+      label: "Retrying",
+      variant: "warning" as const,
+      detail:
+        "Verification could not complete. The system will try again automatically.",
+    };
+  }
+  if (probe.status === "fail") {
+    return {
+      label: "Needs attention",
+      variant: "destructive" as const,
+      detail: "This objective is not verified yet.",
+    };
+  }
+  return {
+    label: "Checking",
+    variant: "outline" as const,
+    detail: "Waiting for the first verification result.",
+  };
 }

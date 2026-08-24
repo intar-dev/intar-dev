@@ -152,10 +152,10 @@ export function deriveScenarioBriefing(input: {
 }): ScenarioBriefing {
   const objectives = input.probes
     .filter((probe) => probe.phase === "scenario")
-    .map((probe) => ({
+    .map((probe, index) => ({
       probeName: probe.name,
       vmName: probe.scenarioVmName,
-      label: probe.description.trim() || probe.name.trim(),
+      label: probe.description.trim() || `Repair objective ${index + 1}`,
       title: probe.title,
       bodyMarkdown: probe.bodyMarkdown,
       hintCount: probe.hints.length,
@@ -182,17 +182,22 @@ export function buildScenarioLaunchSpecs(input: {
 
   return input.vms.map((vm) => {
     const scenarioVmName = slugify(vm.name);
+    let bootCheckIndex = 0;
+    let repairObjectiveIndex = 0;
     const probeDescriptors = input.probes
       .filter((probe) => probe.scenarioVmId === vm.id)
-      .map((probe) => ({
-        id: buildScenarioProbeRuntimeId(probe),
-        label:
-          probe.description.trim() ||
-          probe.name.trim() ||
-          `Probe ${probe.ordinal + 1}`,
-        kind: probe.kind,
-        phase: probe.phase,
-      }));
+      .map((probe) => {
+        const fallbackLabel =
+          probe.phase === "boot"
+            ? `Startup check ${++bootCheckIndex}`
+            : `Repair objective ${++repairObjectiveIndex}`;
+        return {
+          id: buildScenarioProbeRuntimeId(probe),
+          label: probe.description.trim() || fallbackLabel,
+          kind: probe.kind,
+          phase: probe.phase,
+        };
+      });
     const probePhaseMap = Object.fromEntries(
       probeDescriptors.map((probe) => [probe.id, probe.phase]),
     );

@@ -67,7 +67,7 @@ export function LiveScenarioRunCard(props: {
                 <span><strong className="text-foreground">{summary.unknown}</strong> unknown</span>
               </span>
             ) : (
-              <span className="text-xs text-muted-foreground">Probes pending</span>
+              <span className="text-xs text-muted-foreground">Checks pending</span>
             )}
           </div>
 
@@ -178,26 +178,14 @@ export function LiveScenarioRunCard(props: {
           <div className="grid gap-4 border-t px-4 py-4 xl:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
             <div className="space-y-4">
               {probeState ? (
-                <div
-                  className={`rounded-xl border px-4 py-3 ${probeCollectionTone(
-                    probeState.collection_state,
-                  )}`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="font-medium">
-                      Probe collector: {probeState.collection_state}
-                    </p>
-                    <p className="text-xs">
-                      Generated {formatTimestamp(probeState.generated_at)}
-                    </p>
-                  </div>
-                  {probeState.collection_error ? (
-                    <p className="mt-2 text-xs">{probeState.collection_error}</p>
-                  ) : null}
-                </div>
+                <VerificationCollectionStatus
+                  state={probeState.collection_state}
+                  generatedAt={probeState.generated_at}
+                  error={probeState.collection_error}
+                />
               ) : (
                 <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
-                  Waiting for the first probe scrape.
+                  Waiting for the first verification result.
                 </div>
               )}
             </div>
@@ -208,29 +196,38 @@ export function LiveScenarioRunCard(props: {
                   <>
                     <div className="rounded-xl bg-muted/40 p-4">
                       <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium">Boot probes</p>
+                        <p className="text-sm font-medium">Boot checks</p>
                         <Badge variant="outline">{groupedProbes.boot.length}</Badge>
                       </div>
-                      <ProbeRows probes={groupedProbes.boot} />
+                      <ProbeRows
+                        probes={groupedProbes.boot}
+                        checkLabelMap={scenarioMeta.checkLabelMap}
+                      />
                     </div>
                     <div className="rounded-xl bg-muted/40 p-4">
                       <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium">Scenario probes</p>
+                        <p className="text-sm font-medium">Repair checks</p>
                         <Badge variant="outline">
                           {groupedProbes.scenario.length}
                         </Badge>
                       </div>
-                      <ProbeRows probes={groupedProbes.scenario} />
+                      <ProbeRows
+                        probes={groupedProbes.scenario}
+                        checkLabelMap={scenarioMeta.checkLabelMap}
+                      />
                     </div>
                     {groupedProbes.other.length ? (
                       <div className="rounded-xl bg-muted/40 p-4">
                         <div className="mb-3 flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium">Ungrouped probes</p>
+                          <p className="text-sm font-medium">Other checks</p>
                           <Badge variant="outline">
                             {groupedProbes.other.length}
                           </Badge>
                         </div>
-                        <ProbeRows probes={groupedProbes.other} />
+                        <ProbeRows
+                          probes={groupedProbes.other}
+                          checkLabelMap={scenarioMeta.checkLabelMap}
+                        />
                       </div>
                     ) : null}
                   </>
@@ -239,7 +236,7 @@ export function LiveScenarioRunCard(props: {
                 )
               ) : (
                 <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
-                  No probe rows yet for this VM.
+                  No verification results yet for this VM.
                 </div>
               )}
             </div>
@@ -247,5 +244,35 @@ export function LiveScenarioRunCard(props: {
         </div>
       </div>
     </article>
+  );
+}
+
+export function VerificationCollectionStatus(props: {
+  state: string;
+  generatedAt: string | null;
+  error: string | null;
+}) {
+  const retrying = Boolean(props.error?.trim()) || props.state === "error";
+  return (
+    <div
+      className={`rounded-xl border px-4 py-3 ${probeCollectionTone(
+        retrying ? "error" : props.state,
+      )}`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-medium">
+          Verification service: {retrying ? "retrying" : "online"}
+        </p>
+        <p className="text-xs">
+          Updated {formatTimestamp(props.generatedAt)}
+        </p>
+      </div>
+      {retrying ? (
+        <p className="mt-2 text-xs">
+          Verification is temporarily unavailable. The service will retry
+          automatically.
+        </p>
+      ) : null}
+    </div>
   );
 }

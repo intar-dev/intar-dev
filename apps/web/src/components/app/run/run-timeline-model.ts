@@ -1,4 +1,5 @@
 import type { ProbeSnapshotRow } from "./probe-pass-times";
+import { buildVerificationLabelMap } from "@/lib/verification-copy";
 import type {
   ScenarioRunRecord,
   ScenarioRunVmRecord,
@@ -198,6 +199,16 @@ function buildProbeItems(
     (left, right) =>
       left.observedAt - right.observedAt || left.id.localeCompare(right.id),
   );
+  const allProbes = rows.flatMap((row) => row.probes);
+  const labels = buildVerificationLabelMap({
+    bootProbeIds: allProbes
+      .filter((probe) => probe.phase === "boot")
+      .map((probe) => probe.id),
+    scenarioProbeIds: allProbes
+      .filter((probe) => probe.phase === "scenario")
+      .map((probe) => probe.id),
+    objectives: run.objectives,
+  });
 
   for (const row of rows) {
     const previous = lastByVm.get(row.vmId);
@@ -206,7 +217,7 @@ function buildProbeItems(
       .filter((probe) => previous?.get(probe.id) !== probe.status)
       .map((probe) => ({
         probeId: probe.id,
-        label: probe.label,
+        label: labels[probe.id] ?? "Verification objective",
         from: previous?.get(probe.id) ?? null,
         to: probe.status,
       }));

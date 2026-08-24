@@ -5,10 +5,11 @@ import { ProbeRows } from "./ProbeRows";
 import type { VmProbe } from "./types";
 
 describe("operator probe diagnostics", () => {
-  it("uses the same Boolean comparison fields and omits valid mismatch stdout", () => {
+  it("shows a descriptive check state without implementation details", () => {
     const hiddenRawOutput = "raw-kubernetes-document-must-not-render";
     const markup = renderToStaticMarkup(
       createElement(ProbeRows, {
+        checkLabelMap: { "deployment-ready": "Restore the web rollout" },
         probes: [
           probe({
             value: commandValue({
@@ -20,14 +21,24 @@ describe("operator probe diagnostics", () => {
       }),
     );
 
-    expect(markup).toContain("Expected");
-    expect(markup).toContain("true");
-    expect(markup).toContain("Observed");
-    expect(markup).toContain("false");
+    expect(markup).toContain("Restore the web rollout");
+    expect(markup).toContain("Needs attention");
+    expect(markup).toContain("This objective is not verified yet.");
     expect(markup).not.toContain(hiddenRawOutput);
+    expect(markup).not.toContain("Command");
+    expect(markup).not.toContain("kubectl");
+    expect(markup).not.toContain("command_json_path");
+    expect(markup).not.toContain("$.passed");
+    expect(markup).not.toContain("Expected");
+    expect(markup).not.toContain("Observed");
+    expect(markup).not.toContain("Exit code");
+    expect(markup).not.toContain("Every:");
+    expect(markup).not.toContain("Last duration");
+    expect(markup).not.toContain("deployment-ready");
+    expect(markup).toContain("<ul");
   });
 
-  it("bounds old oversized values instead of JSON-stringifying them", () => {
+  it("hides old oversized values", () => {
     const oversized = "legacy-output-".repeat(8_000);
     const markup = renderToStaticMarkup(
       createElement(ProbeRows, {
@@ -41,9 +52,73 @@ describe("operator probe diagnostics", () => {
       }),
     );
 
-    expect(markup).toContain("Legacy value:");
-    expect(markup).toContain("preview truncated at 4 KiB");
+    expect(markup).toContain("Verification objective 1");
+    expect(markup).toContain("Retrying");
     expect(markup).not.toContain(oversized);
+    expect(markup).not.toContain("Legacy value");
+  });
+
+  it("turns real command failures into a plain retry state", () => {
+    const hiddenOutput = "command-output-must-not-render";
+    const hiddenError = "command exited with status 1";
+    const markup = renderToStaticMarkup(
+      createElement(ProbeRows, {
+        checkLabelMap: { "deployment-ready": "Restore the web rollout" },
+        probes: [
+          probe({
+            error: hiddenError,
+            value: commandValue({
+              stdout: hiddenOutput,
+              stderr: hiddenOutput,
+              exitCode: 1,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    expect(markup).toContain("Retrying");
+    expect(markup).toContain(
+      "Verification could not complete. The system will try again automatically.",
+    );
+    expect(markup).not.toContain(hiddenError);
+    expect(markup).not.toContain(hiddenOutput);
+    expect(markup).not.toContain("kubectl");
+    expect(markup).not.toContain("stdout:");
+    expect(markup).not.toContain("stderr:");
+    expect(markup).not.toContain("deployment-ready");
+  });
+
+  it("marks a completed objective as verified", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ProbeRows, {
+        checkLabelMap: { "deployment-ready": "Restore the web rollout" },
+        probes: [probe({ status: "pass" })],
+      }),
+    );
+
+    expect(markup).toContain("Restore the web rollout");
+    expect(markup).toContain("Verified");
+    expect(markup).toContain("This objective is satisfied.");
+    expect(markup).not.toContain("command_json_path");
+  });
+
+  it("uses plain checking and retrying states for non-final results", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ProbeRows, {
+        probes: [
+          probe({ id: "raw-unknown-id", status: "unknown" }),
+          probe({ id: "raw-error-id", status: "error", error: null }),
+        ],
+      }),
+    );
+
+    expect(markup).toContain("Verification objective 1");
+    expect(markup).toContain("Verification objective 2");
+    expect(markup).toContain("Checking");
+    expect(markup).toContain("Retrying");
+    expect(markup).not.toContain("raw-unknown-id");
+    expect(markup).not.toContain("raw-error-id");
   });
 });
 
@@ -65,6 +140,7 @@ function probe(overrides: Partial<VmProbe> = {}): VmProbe {
 function commandValue(
   overrides: Partial<{
     stdout: string;
+    stderr: string;
     matchedValues: string[];
     exitCode: number;
   }> = {},

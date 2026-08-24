@@ -32,6 +32,7 @@ import {
 } from "@/lib/replay-command-log";
 import { cn } from "@/lib/utils";
 import { useProbeSnapshots } from "./probe-pass-times";
+import { verificationStatusLabel } from "@/lib/verification-copy";
 import { formatScenarioDurationMs } from "./run-support";
 import {
   buildRunTimelineItems,
@@ -251,7 +252,7 @@ function TimelineEvent({
       return (
         <div className="space-y-1">
           <EventCopy
-            title="Checks updated"
+            title="Repair progress updated"
             meta={showMachine ? item.vmName : undefined}
           />
           <ProbeChanges changes={item.changes} />
@@ -283,8 +284,8 @@ function TimelineEvent({
           title="Objectives solved"
           detail={
             item.durationMs === null
-              ? "All scenario checks passed."
-              : `All scenario checks passed in ${formatScenarioDurationMs(item.durationMs)}.`
+              ? "All repair objectives were verified."
+              : `All repair objectives were verified in ${formatScenarioDurationMs(item.durationMs)}.`
           }
         />
       );
@@ -383,7 +384,7 @@ function ProbeStatus({ status }: { status: string }) {
             : "text-muted-foreground",
       )}
     >
-      {status.replaceAll("_", " ")}
+      {verificationStatusLabel(status)}
     </span>
   );
 }
