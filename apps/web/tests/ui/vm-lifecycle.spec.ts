@@ -111,17 +111,20 @@ test("end acceptance stays on one timeline through saved replay", async ({
 
   expect(
     ui.server.requests.some((request) =>
-      request.includes("/artifacts/artifact-cast-1/content"),
+      request.includes("/artifacts/run-vm-web:0/content"),
     ),
   ).toBe(false);
   await page.getByRole("button", { name: "Replay", exact: true }).click();
   await expect
     .poll(() =>
       ui.server.requests.some((request) =>
-        request.includes("/artifacts/artifact-cast-1/content"),
+        request.includes("/artifacts/run-vm-web:0/content"),
       ),
     )
     .toBe(true);
+  expect(
+    ui.server.requests.some((request) => request.includes("%3A")),
+  ).toBe(false);
   await expect(page.locator(".run-artifact-player")).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
@@ -336,7 +339,7 @@ test("replay, transcript, and command failures stay inline", async ({
     theme: "dark",
     runState: "replay",
   });
-  await page.route("**/artifacts/artifact-cast-1/content", async (route) => {
+  await page.route("**/artifacts/run-vm-web:0/content", async (route) => {
     await route.fulfill({
       status: 503,
       json: { error: "Fixture replay failure" },

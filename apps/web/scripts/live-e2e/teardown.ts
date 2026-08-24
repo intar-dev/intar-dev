@@ -2,6 +2,7 @@ import type {
   DashboardArchivedRun,
   DashboardRunArtifact,
 } from "../../src/lib/dashboard-host";
+import { scenarioRunArtifactContentPath } from "../../src/lib/artifact-content-paths";
 import { inspectReplayProbeOutput } from "../live-e2e-terminal";
 import { ApiClient } from "./api-client";
 import {
@@ -323,7 +324,7 @@ export async function assertReplaysContainProbeOutput(
     for (const replay of replays) {
       checkedReplayIds.push(replay.id);
       const response = await client.raw(
-        `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(replay.id)}/content`,
+        scenarioRunArtifactContentPath(run.id, replay.id),
       );
       if (!response.ok) {
         const body = await parseResponseBody(response);
@@ -359,7 +360,7 @@ export async function assertArtifactReadable(
   artifact: { id: string; sizeBytes: number },
 ): Promise<void> {
   const response = await client.raw(
-    `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.id)}/content`,
+    scenarioRunArtifactContentPath(runId, artifact.id),
     artifact.sizeBytes > 0 ? { headers: { range: "bytes=0-0" } } : {},
   );
   if (!response.ok) {

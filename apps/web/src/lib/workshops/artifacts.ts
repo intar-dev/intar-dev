@@ -9,6 +9,10 @@ import {
   workshopWorkspaces,
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
+import {
+  workshopArtifactContentPath,
+  workshopTerminalTranscriptPath,
+} from "@/lib/artifact-content-paths";
 import { requireWorkshopSessionMember, workshopDb } from "./shared";
 
 export interface WorkshopArtifactRecord {
@@ -153,12 +157,12 @@ export async function listWorkshopArtifactsForOwner(input: {
       )
       .map((row) => ({
         ...row,
-        contentUrl: workshopArtifactContentUrl(input.sessionId, row.id),
+        contentUrl: workshopArtifactContentPath(input.sessionId, row.id),
       })),
     terminalSessions: sessionRows.map(({ transcriptR2Key, ...row }) => ({
       ...row,
       transcriptUrl: transcriptR2Key
-        ? workshopTranscriptContentUrl(input.sessionId, row.id)
+        ? workshopTerminalTranscriptPath(input.sessionId, row.id)
         : null,
     })),
   };
@@ -292,18 +296,4 @@ function workshopArtifactOwnershipPredicate(input: {
     eq(runtimeExecutions.generation, workshopWorkspaceGenerations.ordinal),
     eq(runtimeExecutions.organizationId, workshopSessions.organizationId),
   );
-}
-
-function workshopArtifactContentUrl(
-  sessionId: string,
-  artifactId: string,
-): string {
-  return `/api/workshops/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/content`;
-}
-
-function workshopTranscriptContentUrl(
-  sessionId: string,
-  terminalSessionId: string,
-): string {
-  return `/api/workshops/${encodeURIComponent(sessionId)}/terminal-sessions/${encodeURIComponent(terminalSessionId)}/transcript`;
 }

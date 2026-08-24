@@ -54,7 +54,7 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
     state === "replay"
       ? [
           {
-            id: "artifact-cast-1",
+            id: "run-vm-web:0",
             hostId: "host-eu-1",
             runId: "run-active",
             vmId: "run-vm-web",
@@ -183,7 +183,7 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
                   durationMs: 18 * minute,
                   exitCode: 0,
                   castFilename: "session-01.cast",
-                  castArtifactId: "artifact-cast-1",
+                  castArtifactId: "run-vm-web:0",
                   transcriptTruncated: false,
                 },
               ]

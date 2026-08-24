@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 import { useProbeSnapshots } from "./probe-pass-times";
 import { verificationStatusLabel } from "@/lib/verification-copy";
 import { formatScenarioDurationMs } from "./run-support";
+import { scenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
 import {
   buildRunTimelineItems,
   terminalSessionSummary,
@@ -454,7 +455,7 @@ function SessionArtifacts({
   const runSegment = encodeURIComponent(runId);
   const vmSegment = encodeURIComponent(vmId);
   const castUrl = session.castArtifactId
-    ? `/api/runs/${runSegment}/artifacts/${encodeURIComponent(session.castArtifactId)}/content`
+    ? scenarioRunArtifactContentPath(runId, session.castArtifactId)
     : null;
   const transcriptUrl = `/api/runs/${runSegment}/vms/${vmSegment}/sessions/${session.index}/transcript`;
   const cast = useStreamedText(castUrl, replayRequested || logRequested);

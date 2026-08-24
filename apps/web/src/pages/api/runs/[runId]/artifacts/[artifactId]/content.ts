@@ -66,13 +66,10 @@ export const GET: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "artifact not found" }, { status: 404 });
   }
 
+  const requestedRange = request.headers.get("range");
   const object = await env.VM_RUN_ARTIFACTS_BUCKET.get(
     artifact.r2Key,
-    request.headers.get("range")
-      ? {
-          range: request.headers,
-        }
-      : undefined,
+    requestedRange ? { range: request.headers } : undefined,
   );
   if (!object) {
     return jsonResponse(
@@ -92,7 +89,7 @@ export const GET: APIRoute = async ({ request, params }) => {
   });
 
   let status = 200;
-  if (object.range && "offset" in object.range) {
+  if (requestedRange && object.range && "offset" in object.range) {
     const start = object.range.offset;
     const length = object.range.length ?? Math.max(0, object.size - start);
     const end = start + Math.max(0, length - 1);

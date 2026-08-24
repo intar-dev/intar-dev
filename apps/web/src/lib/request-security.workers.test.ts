@@ -95,6 +95,7 @@ describe("worker API request security", () => {
       "/api/%61uth/sign-in/social",
       "/api/auth/sso/%73aml2/callback/provider",
       "/%61gent/connect",
+      "/api/runs/run-1/artifacts/vm-1%3A0/content",
     ]) {
       const result = guardCanonicalRequestPath(
         new Request(`https://intar.dev${pathname}`, { method: "POST" }),
@@ -109,6 +110,16 @@ describe("worker API request security", () => {
         code: "encoded_path_not_allowed",
       });
     }
+  });
+
+  it("accepts canonical literal colons in server-minted resource IDs", () => {
+    const result = guardCanonicalRequestPath(
+      new Request(
+        "https://intar.dev/api/runs/run-1/artifacts/vm-1:0/content",
+      ),
+    );
+
+    expect(result.ok).toBe(true);
   });
 
   it("accepts exact-origin bodyless custom mutations", async () => {

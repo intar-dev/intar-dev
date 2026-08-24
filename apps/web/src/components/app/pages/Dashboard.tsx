@@ -14,6 +14,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { scenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
 import {
   Dialog,
   DialogContent,
@@ -100,7 +101,7 @@ export function Dashboard() {
 
     try {
       const response = await fetch(
-        `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.id)}/content`,
+        scenarioRunArtifactContentPath(runId, artifact.id),
         {
           method: "GET",
           credentials: "include",

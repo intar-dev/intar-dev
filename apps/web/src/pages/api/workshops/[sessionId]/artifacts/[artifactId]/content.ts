@@ -22,9 +22,10 @@ export const GET: APIRoute = async ({ request, params }) => {
       userId: authz.context.userId,
       artifactId,
     });
+    const requestedRange = request.headers.get("range");
     const object = await env.VM_RUN_ARTIFACTS_BUCKET.get(
       artifact.r2Key,
-      request.headers.get("range") ? { range: request.headers } : undefined,
+      requestedRange ? { range: request.headers } : undefined,
     );
     if (!object) return notFound();
     const headers = new Headers();
@@ -37,7 +38,7 @@ export const GET: APIRoute = async ({ request, params }) => {
       forceDownload: new URL(request.url).searchParams.get("download") === "1",
     });
     let status = 200;
-    if (object.range && "offset" in object.range) {
+    if (requestedRange && object.range && "offset" in object.range) {
       const start = object.range.offset;
       const length = object.range.length ?? Math.max(0, object.size - start);
       headers.set(
