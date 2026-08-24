@@ -192,7 +192,7 @@ function CourseIndex({
                 aria-labelledby={headingId}
                 aria-describedby={summaryId}
                 onClick={() => onSelectCourse(key)}
-                className="group grid w-full min-w-0 cursor-pointer gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_auto] @3xl/course:items-center"
+                className="group grid w-full min-w-0 cursor-pointer gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_23rem] @3xl/course:items-center"
               >
                 <span id={summaryId} className="sr-only">
                   {section.course.description} {scenarioCount} {" "}
@@ -239,17 +239,17 @@ function CourseIndex({
                       aria-valuemin={0}
                       aria-valuemax={scenarioCount}
                       aria-valuenow={section.solvedCount}
-                      className="mt-2 block h-1.5 overflow-hidden rounded-full bg-muted"
+                      className="mt-2 block h-1 overflow-hidden bg-border/70"
                     >
                       <span
-                        className="block h-full rounded-full bg-brand-text"
+                        className="block h-full bg-brand-text"
                         style={{ width: progressPercent + "%" }}
                       />
                     </span>
                   </span>
                 </span>
 
-                <span className="flex flex-wrap items-center justify-between gap-5 border-t pt-4 @3xl/course:min-w-64 @3xl/course:border-t-0 @3xl/course:pt-0">
+                <span className="flex w-full flex-wrap items-center justify-between gap-5 border-t pt-4 @3xl/course:border-t-0 @3xl/course:pt-0">
                   <span className="flex flex-wrap gap-x-5 gap-y-2 text-sm tabular-nums text-foreground">
                     <span className="inline-flex items-center gap-1.5 font-medium">
                       <BookOpenCheck

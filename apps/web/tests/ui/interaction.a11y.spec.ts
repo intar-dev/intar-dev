@@ -313,6 +313,42 @@ test("public courses preserve curriculum order and place standalone work in Gene
   await expect(generalPractice).toContainText("Open practice");
 });
 
+test("course progress tracks keep one measure across responsive layouts", async ({
+  page,
+  ui,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+
+  const tracks = page.getByRole("progressbar");
+  await expect(tracks).toHaveCount(2);
+
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const metrics = await tracks.evaluateAll((elements) =>
+      elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          width: rect.width,
+          height: rect.height,
+          borderRadius: getComputedStyle(element).borderRadius,
+        };
+      }),
+    );
+    const widths = metrics.map((metric) => metric.width);
+
+    expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(0.5);
+    expect(metrics.every((metric) => metric.height === 4)).toBe(true);
+    expect(metrics.every((metric) => metric.borderRadius === "0px")).toBe(
+      true,
+    );
+    await expectNoHorizontalOverflow(page);
+  }
+});
+
 test("course scenarios return to the selected filtered public course", async ({
   page,
   ui,
@@ -961,6 +997,14 @@ test("200% text remains operable without page overflow", async ({
   });
   await page.waitForTimeout(100);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  const progressWidths = await page
+    .getByRole("progressbar")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getBoundingClientRect().width),
+    );
+  expect(
+    Math.max(...progressWidths) - Math.min(...progressWidths),
+  ).toBeLessThanOrEqual(0.5);
   await expectNoHorizontalOverflow(page);
   await page.getByRole("button", { name: "Linux operations" }).click();
   await expect(
