@@ -3,7 +3,11 @@ import { CheckCircle2, CircleAlert } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { Badge } from "@/components/ui/badge";
-import { parseProbeValue, summarizeProbeValue } from "@/lib/probe-values";
+import {
+  formatProbeFailurePreview,
+  formatProbeValueFields,
+  summarizeProbeValue,
+} from "@/lib/probe-values";
 import { describeProbeValue } from "./run-support";
 import type { ScenarioObjective, ScenarioProbeStatus } from "./run-types";
 
@@ -106,7 +110,14 @@ function CheckRow(props: {
   // Mono is reserved for actual probe values; the waiting/passing fallback
   // sentences are ordinary copy.
   const summary = summarizeProbeValue(probe.kind, probe.value);
-  const rawOutput = failureOutput(probe);
+  const valueFields =
+    probe.status === "fail"
+      ? formatProbeValueFields(probe.kind, probe.value)
+      : [];
+  const failurePreview =
+    probe.status === "pass"
+      ? null
+      : formatProbeFailurePreview(probe.kind, probe.value, probe.error);
 
   return (
     <DisclosureRow
@@ -131,12 +142,21 @@ function CheckRow(props: {
           {describeProbeValue(probe)}
         </p>
       )}
-      {probe.error ? (
-        <p className="text-xs text-destructive">{probe.error}</p>
+      {valueFields.length ? (
+        <dl className="grid gap-x-3 gap-y-1 rounded-md border border-border/60 bg-muted/20 p-2 text-xs sm:grid-cols-[auto_1fr]">
+          {valueFields.map((field, index) => (
+            <div key={`${field.label}-${index}`} className="contents">
+              <dt className="text-muted-foreground">{field.label}</dt>
+              <dd className="font-mono break-all text-foreground">
+                {field.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
       ) : null}
-      {rawOutput ? (
+      {failurePreview ? (
         <pre className="max-h-40 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[0.7rem] leading-relaxed whitespace-pre-wrap">
-          {rawOutput}
+          {failurePreview}
         </pre>
       ) : null}
     </DisclosureRow>
@@ -180,29 +200,4 @@ function StatusIcon({ status }: { status: string }) {
       <span className="sr-only">Watching:</span>
     </>
   );
-}
-
-// The structured detail a one-line summary can't carry: raw command output,
-// file contents, socket diagnostics, and pod names captured while the probe
-// fails.
-function failureOutput(probe: ScenarioProbeStatus): string | null {
-  if (probe.status !== "fail") return null;
-  const parsed = parseProbeValue(probe.kind, probe.value);
-  if (!parsed) return null;
-  switch (parsed.kind) {
-    case "command_json_path": {
-      const chunks = [parsed.value.stdout, parsed.value.stderr].filter(
-        Boolean,
-      );
-      return chunks.length ? chunks.join("\n") : null;
-    }
-    case "file_regex_capture":
-      return parsed.value.fileContent;
-    case "port_open":
-      return parsed.value.detail;
-    case "k8s_pod_state":
-      return parsed.value.matchingPodNames.join("\n") || null;
-    default:
-      return null;
-  }
 }

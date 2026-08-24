@@ -3,6 +3,12 @@
 
 import type { AgentVmRunRecord } from "./types";
 
+export {
+  formatProbeFailurePreview,
+  formatProbeValueFields,
+  summarizeProbeValue,
+} from "@/lib/probe-values";
+
 export const formatTimestamp = (value: string | null | undefined) =>
   value ? new Date(value).toLocaleString() : "—";
 
@@ -117,38 +123,6 @@ export const probeCollectionTone = (state: string) =>
   state === "error"
     ? "border-destructive/30 bg-destructive/5 text-destructive"
     : "border-border bg-secondary text-secondary-foreground";
-
-export const summarizeProbeValue = (value: unknown) => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return typeof value === "string" ? value : JSON.stringify(value);
-  }
-
-  const object = value as Record<string, unknown>;
-  if (typeof object.path === "string" && typeof object.exists === "boolean") {
-    return `${object.path} ${object.exists ? "exists" : "missing"}`;
-  }
-  if (
-    typeof object.host === "string" &&
-    typeof object.port === "number" &&
-    typeof object.open === "boolean"
-  ) {
-    return `${object.host}:${object.port} ${object.open ? "open" : "closed"}`;
-  }
-  if (
-    typeof object.service === "string" &&
-    typeof object.desiredState === "string"
-  ) {
-    const actualState =
-      typeof object.actualState === "string" && object.actualState.trim()
-        ? ` (${object.actualState})`
-        : "";
-    return `${object.service} -> ${object.desiredState}${actualState}`;
-  }
-  const serialized = JSON.stringify(object);
-  return serialized.length > 120
-    ? `${serialized.slice(0, 117)}...`
-    : serialized;
-};
 
 export const parseTimestamp = (value: string | null | undefined) => {
   if (!value) return 0;

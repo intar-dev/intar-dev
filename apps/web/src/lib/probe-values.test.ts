@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseProbeValue, summarizeProbeValue } from "./probe-values";
+import {
+  formatProbeFailurePreview,
+  formatProbeValueFields,
+  MAX_PROBE_FAILURE_PREVIEW_BYTES,
+  parseProbeValue,
+  summarizeProbeValue,
+} from "./probe-values";
 
 // These fixtures mirror the exact camelCase shapes emitted by the agent in
 // crates/intar-agent/src/kino_probe.rs::normalize_probe. If that serialization
@@ -125,5 +131,76 @@ describe("summarizeProbeValue", () => {
     expect(
       summarizeProbeValue("file_exists", { path: "/x", exists: false }),
     ).toBe("/x is missing");
+  });
+});
+
+describe("probe diagnostics", () => {
+  it("shows a command JSONPath mismatch as expected versus observed without stdout", () => {
+    const value = {
+      argv: ["kubectl", "get", "deployment", "web", "-o", "json"],
+      jsonPath: "$.status.readyReplicas",
+      expectedJson: "1",
+      matched: false,
+      matchedValues: ["0"],
+      stdout: '{"items":["raw Kubernetes JSON must stay hidden"]}',
+      stderr: null,
+      exitCode: 0,
+    };
+
+    expect(formatProbeValueFields("command_json_path", value)).toEqual(
+      expect.arrayContaining([
+        { label: "Expected", value: "1" },
+        { label: "Observed", value: "0" },
+      ]),
+    );
+    expect(
+      formatProbeFailurePreview("command_json_path", value, null),
+    ).toBeNull();
+  });
+
+  it("bounds real failure output to one four KiB preview", () => {
+    const noisyOutput = "x".repeat(MAX_PROBE_FAILURE_PREVIEW_BYTES * 3);
+    const preview = formatProbeFailurePreview(
+      "command_json_path",
+      {
+        argv: ["kubectl", "get", "pods", "-o", "json"],
+        jsonPath: "$.items[*]",
+        expectedJson: null,
+        matched: false,
+        matchedValues: [],
+        stdout: noisyOutput,
+        stderr: noisyOutput,
+        exitCode: 1,
+      },
+      "command exited with status 1",
+    );
+
+    expect(preview).toContain("Error:");
+    expect(preview).toContain("preview truncated at 4 KiB");
+    if (!preview) throw new Error("expected a failure preview");
+    expect(new TextEncoder().encode(preview).byteLength).toBeLessThanOrEqual(
+      MAX_PROBE_FAILURE_PREVIEW_BYTES,
+    );
+    expect(preview).not.toContain(noisyOutput);
+  });
+
+  it("keeps unknown legacy values small in both summaries and details", () => {
+    const legacyValue = { stdout: "x".repeat(64 * 1024) };
+    const summary = summarizeProbeValue("legacy_probe", legacyValue);
+    const fields = formatProbeValueFields("legacy_probe", legacyValue);
+    const preview = formatProbeFailurePreview(
+      "legacy_probe",
+      legacyValue,
+      "legacy probe failed",
+    );
+
+    expect(summary).toContain("truncated");
+    expect(fields[0]).toMatchObject({ label: "Value" });
+    expect(fields[0]?.value.length).toBeLessThan(1_000);
+    expect(preview).toContain("Legacy value:");
+    if (!preview) throw new Error("expected a legacy failure preview");
+    expect(new TextEncoder().encode(preview).byteLength).toBeLessThanOrEqual(
+      MAX_PROBE_FAILURE_PREVIEW_BYTES,
+    );
   });
 });
