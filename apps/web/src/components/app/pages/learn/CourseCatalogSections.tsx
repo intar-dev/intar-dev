@@ -249,8 +249,14 @@ function CourseIndex({
                   </span>
                 </span>
 
-                <span className="flex w-full flex-wrap items-center justify-between gap-5 border-t pt-4 @3xl/course:border-t-0 @3xl/course:pt-0">
-                  <span className="flex flex-wrap gap-x-5 gap-y-2 text-sm tabular-nums text-foreground">
+                <span
+                  data-course-facts
+                  className="flex w-full flex-wrap items-center justify-between gap-5 border-t pt-4 @3xl/course:grid @3xl/course:grid-cols-[minmax(0,1fr)_auto] @3xl/course:border-t-0 @3xl/course:pt-0"
+                >
+                  <span
+                    data-course-metrics
+                    className="flex min-w-0 flex-wrap gap-x-5 gap-y-2 text-sm tabular-nums text-foreground"
+                  >
                     <span className="inline-flex items-center gap-1.5 font-medium">
                       <BookOpenCheck
                         className="size-4 text-brand-text"
@@ -267,7 +273,10 @@ function CourseIndex({
                       ~{section.totalEstimatedMinutes} min total
                     </span>
                   </span>
-                  <span className="hidden items-center gap-2 whitespace-nowrap text-sm font-semibold text-brand-text @3xl/course:inline-flex">
+                  <span
+                    data-course-action
+                    className="hidden items-center gap-2 whitespace-nowrap text-sm font-semibold text-brand-text @3xl/course:inline-flex"
+                  >
                     {actionLabel}
                     <ArrowRight
                       className="size-4 transition-transform group-hover:translate-x-0.5"

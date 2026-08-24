@@ -345,6 +345,25 @@ test("course progress tracks keep one measure across responsive layouts", async 
     expect(metrics.every((metric) => metric.borderRadius === "0px")).toBe(
       true,
     );
+    if (viewport.width >= 1280) {
+      const factsAligned = await page
+        .locator("[data-course-facts]")
+        .evaluateAll((rails) =>
+          rails.every((rail) => {
+            const metrics = rail.querySelector("[data-course-metrics]");
+            const action = rail.querySelector("[data-course-action]");
+            if (!metrics || !action) return false;
+            return (
+              getComputedStyle(rail).display === "grid" &&
+              Math.abs(
+                metrics.getBoundingClientRect().top -
+                  action.getBoundingClientRect().top,
+              ) <= 1
+            );
+          }),
+        );
+      expect(factsAligned).toBe(true);
+    }
     await expectNoHorizontalOverflow(page);
   }
 });
