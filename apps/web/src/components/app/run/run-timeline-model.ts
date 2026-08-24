@@ -1,5 +1,6 @@
 import type { ProbeSnapshotRow } from "./probe-pass-times";
 import { buildVerificationLabelMap } from "@/lib/verification-copy";
+import { formatScenarioDurationMs } from "./run-support";
 import type {
   ScenarioRunRecord,
   ScenarioRunVmRecord,
@@ -14,6 +15,12 @@ export interface RunTimelineProbeChange {
   from: string | null;
   to: string;
 }
+
+export type ProbeProgressSummary =
+  | "Verified"
+  | "Needs repair"
+  | "Retrying"
+  | "Checking";
 
 interface RunTimelineItemBase {
   id: string;
@@ -31,6 +38,7 @@ export type RunTimelineItem =
       vmId: string;
       vmName: string;
       changes: RunTimelineProbeChange[];
+      summary: ProbeProgressSummary;
     })
   | (RunTimelineItemBase & {
       type: "session";
@@ -122,9 +130,7 @@ export function buildRunTimelineItems(
         type: "session",
         at: session.startTimestampMs,
         tone:
-          session.exitCode !== null && session.exitCode !== 0
-            ? "danger"
-            : "neutral",
+          terminalSessionTone(session.exitCode),
         vmId: vm.id,
         vmName: machineName(vm),
         session,
@@ -223,7 +229,10 @@ function buildProbeItems(
       }));
 
     lastByVm.set(row.vmId, next);
-    if (!changes.length) {
+    const summary = summarizeProbeProgress(changes);
+    const initialCheckingOnly =
+      !previous && changes.length > 0 && changes.every(isCheckingStatus);
+    if (!changes.length || initialCheckingOnly) {
       continue;
     }
 
@@ -231,18 +240,67 @@ function buildProbeItems(
       id: `probe:${row.id}`,
       type: "probe_changes",
       at: row.observedAt,
-      tone: changes.every((change) => change.to === "pass")
-        ? "success"
-        : changes.some((change) => change.to === "fail")
-          ? "danger"
-          : "neutral",
+      tone: probeProgressTone(summary),
       vmId: row.vmId,
       vmName: vmNames.get(row.vmId) ?? row.runtimeVmName,
       changes,
+      summary,
     });
   }
 
   return items;
+}
+
+function isCheckingStatus(change: RunTimelineProbeChange): boolean {
+  const status = change.to.trim().toLowerCase();
+  return status !== "pass" && status !== "fail" && status !== "error";
+}
+
+function summarizeProbeProgress(
+  changes: readonly RunTimelineProbeChange[],
+): ProbeProgressSummary {
+  const statuses = changes.map((change) => change.to.trim().toLowerCase());
+  if (statuses.some((status) => status === "fail")) return "Needs repair";
+  if (statuses.some((status) => status === "error")) return "Retrying";
+  if (statuses.length && statuses.every((status) => status === "pass")) {
+    return "Verified";
+  }
+  return "Checking";
+}
+
+function probeProgressTone(summary: ProbeProgressSummary): RunTimelineTone {
+  switch (summary) {
+    case "Verified":
+      return "success";
+    case "Needs repair":
+      return "danger";
+    case "Retrying":
+      return "pending";
+    case "Checking":
+      return "neutral";
+  }
+}
+
+export function terminalSessionTone(
+  exitCode: number | null,
+): RunTimelineTone {
+  return exitCode !== null && exitCode !== 0 && exitCode !== 129
+    ? "danger"
+    : "neutral";
+}
+
+export function terminalSessionSummary(
+  session: Pick<SessionTimelineEntry, "durationMs" | "exitCode">,
+): string {
+  const duration = formatScenarioDurationMs(session.durationMs);
+  if (session.exitCode === null) {
+    return `${duration} · Exit status was not recorded.`;
+  }
+  if (session.exitCode === 0) return `${duration} · Exited cleanly.`;
+  if (session.exitCode === 129) {
+    return `${duration} · Terminal session was recorded and closed during workspace cleanup.`;
+  }
+  return `${duration} · Terminal session ended unexpectedly (exit code ${session.exitCode}). Check the transcript or replay for details.`;
 }
 
 function buildLifecycleItem(run: ScenarioRunRecord): RunTimelineItem {

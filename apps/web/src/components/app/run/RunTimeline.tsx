@@ -36,6 +36,7 @@ import { verificationStatusLabel } from "@/lib/verification-copy";
 import { formatScenarioDurationMs } from "./run-support";
 import {
   buildRunTimelineItems,
+  terminalSessionSummary,
   type RunTimelineItem,
   type RunTimelineProbeChange,
   type RunTimelineTone,
@@ -74,7 +75,7 @@ export function RunTimeline({
   return (
     <section aria-labelledby="run-timeline-heading" className="space-y-4">
       <header className="space-y-1">
-        <p className="text-eyebrow">{run.scenarioName}</p>
+        <p className="text-eyebrow">{run.title}</p>
         <h2
           id="run-timeline-heading"
           ref={headingRef}
@@ -252,7 +253,7 @@ function TimelineEvent({
       return (
         <div className="space-y-1">
           <EventCopy
-            title="Repair progress updated"
+            title={item.summary}
             meta={showMachine ? item.vmName : undefined}
           />
           <ProbeChanges changes={item.changes} />
@@ -268,7 +269,7 @@ function TimelineEvent({
                 : `Terminal session ${item.sessionNumber}`
             }
             meta={showMachine ? item.vmName : undefined}
-            detail={sessionSummary(item.session)}
+            detail={terminalSessionSummary(item.session)}
           />
           <SessionArtifacts
             runId={run.id}
@@ -609,16 +610,6 @@ function SessionArtifacts({
       ) : null}
     </div>
   );
-}
-
-function sessionSummary(session: SessionTimelineEntry): string {
-  const duration = formatScenarioDurationMs(session.durationMs);
-  if (session.exitCode === null) {
-    return `${duration} · Exit status was not recorded.`;
-  }
-  return session.exitCode === 0
-    ? `${duration} · Exited cleanly.`
-    : `${duration} · Exited with code ${session.exitCode}.`;
 }
 
 function markerToneClass(tone: RunTimelineTone): string {

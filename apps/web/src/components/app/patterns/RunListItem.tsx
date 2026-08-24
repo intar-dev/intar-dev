@@ -3,10 +3,10 @@ import { Link } from "@tanstack/react-router";
 import { ArrowRight, PlayCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatDurationMs } from "../lib/format";
+import { formatDurationMs, formatTimestamp } from "../lib/format";
 import { RelativeTime } from "./RelativeTime";
 import { StatusToken } from "./StatusToken";
-import type { ScenarioRunActivity } from "@/lib/scenario-runs";
+import type { CourseLocation, ScenarioRunActivity } from "@/lib/scenario-runs";
 
 export interface RunListItemData {
   runId: string;
@@ -18,6 +18,10 @@ export interface RunListItemData {
   solveDurationMs: number | null;
   solutionAssisted?: boolean;
   hasReplay?: boolean;
+  /** Per-scenario ordinal, where attempt 1 is the earliest recorded run. */
+  attemptNumber?: number;
+  /** The catalog context captured when this run started, when still available. */
+  courseLocation?: CourseLocation | null;
 }
 
 export function RunOutcomeToken({
@@ -44,6 +48,41 @@ export function RunOutcomeToken({
   }
 }
 
+export function runAttemptLabel(attemptNumber?: number): string | null {
+  return Number.isInteger(attemptNumber) && (attemptNumber ?? 0) > 0
+    ? `Attempt ${attemptNumber}`
+    : null;
+}
+
+export function runCourseContextLabel(
+  location: CourseLocation | null | undefined,
+): string | null {
+  if (!location) return null;
+  if (location.courseKind === "general-practice") {
+    return location.courseTitle;
+  }
+  return `${location.courseTitle} · Step ${location.step} of ${location.steps}`;
+}
+
+function runActionContext(run: RunListItemData): string {
+  const attempt = runAttemptLabel(run.attemptNumber);
+  return attempt ? `${run.title}, ${attempt.toLowerCase()}` : run.title;
+}
+
+/** Gives repeated row actions a useful, unique accessible name. */
+export function runListItemActionLabel(run: RunListItemData): string {
+  const activity = run.activity ?? (run.active ? "foreground" : "settled");
+  const target = runActionContext(run);
+  if (activity === "foreground") return `Resume ${target}`;
+  if (activity === "background") return `View progress for ${target}`;
+  if (run.hasReplay) return `Watch replay of ${target}`;
+  return `View ${target}`;
+}
+
+export function runListItemLinkLabel(run: RunListItemData): string {
+  return `View ${runActionContext(run)}`;
+}
+
 // The one horizontal run row: status token, title, meta line, trailing action.
 export function RunListItem({
   run,
@@ -54,6 +93,9 @@ export function RunListItem({
   trailing?: ReactNode;
 }) {
   const activity = run.activity ?? (run.active ? "foreground" : "settled");
+  const attemptLabel = runAttemptLabel(run.attemptNumber);
+  const courseContext = runCourseContextLabel(run.courseLocation);
+  const actionLabel = runListItemActionLabel(run);
   return (
     <article className="flex flex-col gap-3 px-4 py-4 transition-colors sm:flex-row sm:items-center sm:gap-4 sm:px-6">
       <div className="min-w-0 flex-1 space-y-1">
@@ -61,10 +103,12 @@ export function RunListItem({
           <Link
             to="/runs/$runId"
             params={{ runId: run.runId }}
+            aria-label={runListItemLinkLabel(run)}
             className="inline-flex min-h-11 items-center text-sm font-semibold text-balance underline-offset-4 hover:text-brand-text hover:underline"
           >
             {run.title}
           </Link>
+          {attemptLabel ? <Badge variant="outline">{attemptLabel}</Badge> : null}
           <RunOutcomeToken run={run} />
           {run.solutionAssisted ? (
             <Badge variant="outline">Solution used</Badge>
@@ -73,7 +117,12 @@ export function RunListItem({
         <p className="flex flex-wrap items-center gap-x-3 font-mono text-xs text-muted-foreground">
           <span>
             Started <RelativeTime at={run.createdAt} />
+            <span aria-hidden="true"> · </span>
+            <time dateTime={new Date(run.createdAt).toISOString()}>
+              {formatTimestamp(run.createdAt)}
+            </time>
           </span>
+          {courseContext ? <span>{courseContext}</span> : null}
           {run.solveDurationMs !== null ? (
             <span>Solved in {formatDurationMs(run.solveDurationMs)}</span>
           ) : null}
@@ -84,6 +133,7 @@ export function RunListItem({
           variant={activity === "foreground" ? "default" : "outline"}
           size="sm"
           className="min-h-11 flex-1 sm:flex-none"
+          aria-label={actionLabel}
           render={<Link to="/runs/$runId" params={{ runId: run.runId }} />}
         >
           {activity === "foreground" ? (

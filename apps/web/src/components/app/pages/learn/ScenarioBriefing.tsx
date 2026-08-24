@@ -263,8 +263,8 @@ function ScenarioBriefing({
     run,
     attemptNumber: finishedRuns.length - index,
   }));
-  const recentRuns = runsWithAttemptNumbers.slice(0, 5);
-  const olderRuns = runsWithAttemptNumbers.slice(5);
+  const latestRun = runsWithAttemptNumbers[0] ?? null;
+  const olderRuns = runsWithAttemptNumbers.slice(1);
   const solved = succeededRuns.length > 0;
   const breadcrumbLabels = useMemo(
     () => courseBreadcrumbLabels(route, scenarioData?.courseLocation),
@@ -550,24 +550,41 @@ function ScenarioBriefing({
                   </h2>
                 </div>
               </div>
-              <div className="divide-y overflow-hidden rounded-xl border bg-card">
-                {recentRuns.map(({ run, attemptNumber }) => (
+              {latestRun ? (
+                <div className="overflow-hidden rounded-xl border bg-card">
+                  <div className="border-b bg-muted/30 px-4 py-2 sm:px-6">
+                    <p className="text-metadata font-semibold">
+                      Latest attempt
+                    </p>
+                  </div>
                   <PreviousRunRow
-                    key={run.runId}
-                    run={run}
-                    attemptNumber={attemptNumber}
-                    onDelete={() => setDeleteTarget({ run, attemptNumber })}
+                    run={latestRun.run}
+                    attemptNumber={latestRun.attemptNumber}
+                    scenarioTitle={scenarioData.briefing.title}
+                    courseLocation={scenarioData.courseLocation}
+                    onDelete={() =>
+                      setDeleteTarget({
+                        run: latestRun.run,
+                        attemptNumber: latestRun.attemptNumber,
+                      })
+                    }
                   />
-                ))}
-              </div>
+                </div>
+              ) : null}
               {olderRuns.length ? (
                 <Collapsible>
                   <CollapsibleTrigger
                     render={
-                      <Button type="button" variant="outline" size="sm" />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        aria-label={`Show ${olderRuns.length} older attempts for ${scenarioData.briefing.title}`}
+                      />
                     }
                   >
-                    Show all {finishedRuns.length} runs
+                    Show {olderRuns.length} older attempt
+                    {olderRuns.length === 1 ? "" : "s"}
                     <ChevronDown className="size-3.5" />
                   </CollapsibleTrigger>
                   <CollapsibleContent className="mt-3">
@@ -583,6 +600,8 @@ function ScenarioBriefing({
                               key={run.runId}
                               run={run}
                               attemptNumber={attemptNumber}
+                              scenarioTitle={scenarioData.briefing.title}
+                              courseLocation={scenarioData.courseLocation}
                               onDelete={() =>
                                 setDeleteTarget({ run, attemptNumber })
                               }
@@ -608,7 +627,8 @@ function ScenarioBriefing({
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>
-                  Delete attempt {deleteTarget?.attemptNumber ?? ""}?
+                  Delete {scenarioData.briefing.title}, attempt{" "}
+                  {deleteTarget?.attemptNumber ?? ""}?
                 </DialogTitle>
                 <DialogDescription>
                   This permanently removes this run, its checks, and its replay
@@ -631,6 +651,7 @@ function ScenarioBriefing({
                     }
                   }}
                   disabled={deleteRun.isPending || !deleteTarget}
+                  aria-label={`Delete ${scenarioData.briefing.title}, attempt ${deleteTarget?.attemptNumber ?? ""}`}
                 >
                   <Trash2 className="size-4" />
                   {deleteRun.isPending ? "Deleting…" : "Delete run"}
@@ -894,23 +915,29 @@ function TechnicalDetail({
 function PreviousRunRow({
   run,
   attemptNumber,
+  scenarioTitle,
+  courseLocation,
   onDelete,
 }: {
   run: FinishedRun;
   attemptNumber: number;
+  scenarioTitle: string;
+  courseLocation: PresentedScenarioDetail["courseLocation"];
   onDelete: () => void;
 }) {
   return (
     <RunListItem
       run={{
         runId: run.runId,
-        title: `Attempt ${attemptNumber}`,
+        title: scenarioTitle,
         outcome: run.outcome,
         active: false,
         createdAt: run.createdAt,
         solveDurationMs: run.solveDurationMs,
         solutionAssisted: run.solutionAssisted,
         hasReplay: run.hasReplay,
+        attemptNumber,
+        courseLocation,
       }}
       trailing={
         <Button
@@ -919,8 +946,8 @@ function PreviousRunRow({
           size="icon-sm"
           className="text-muted-foreground hover:text-destructive"
           onClick={onDelete}
-          aria-label="Delete run"
-          title="Delete run"
+          aria-label={`Delete ${scenarioTitle}, attempt ${attemptNumber}`}
+          title={`Delete ${scenarioTitle}, attempt ${attemptNumber}`}
         >
           <Trash2 className="size-4" />
         </Button>

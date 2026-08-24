@@ -1,10 +1,4 @@
-import {
-  Fragment,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -20,7 +14,6 @@ import {
   paginateCollection,
 } from "@/components/app/patterns/CollectionPagination";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import type {
   ScenarioCatalogCourseWireEntry,
   ScenarioCatalogWireEntry,
@@ -28,6 +21,7 @@ import type {
 import {
   courseCatalogKey,
   courseHeadingId,
+  getCourseCurriculumState,
   type CourseCatalogSectionView,
 } from "./course-catalog";
 
@@ -40,6 +34,8 @@ export interface CourseScenarioRendererContext {
     position: number;
     total: number;
   };
+  /** The active or first unsolved step in the unfiltered curriculum. */
+  isNext: boolean;
 }
 
 export function CourseCatalogBrowser({
@@ -50,7 +46,6 @@ export function CourseCatalogBrowser({
   onShowAllCourses,
   onClearFilters,
   renderScenario,
-  gridClassName = "md:grid-cols-2 xl:grid-cols-3",
   resetKey,
 }: {
   courses: readonly CourseCatalogSectionView[];
@@ -63,7 +58,6 @@ export function CourseCatalogBrowser({
     scenario: ScenarioCatalogWireEntry,
     context: CourseScenarioRendererContext,
   ) => ReactNode;
-  gridClassName?: string;
   resetKey?: string | number | boolean | null;
 }) {
   const [returnFocusKey, setReturnFocusKey] = useState<
@@ -116,7 +110,6 @@ export function CourseCatalogBrowser({
         onShowAllCourses={onShowAllCourses}
         onClearFilters={onClearFilters}
         renderScenario={renderScenario}
-        gridClassName={gridClassName}
         resetKey={
           selectedCourseKey +
           "|" +
@@ -296,7 +289,6 @@ function CourseDetail({
   onShowAllCourses,
   onClearFilters,
   renderScenario,
-  gridClassName,
   resetKey,
 }: {
   section: CourseCatalogSectionView;
@@ -306,13 +298,24 @@ function CourseDetail({
     scenario: ScenarioCatalogWireEntry,
     context: CourseScenarioRendererContext,
   ) => ReactNode;
-  gridClassName: string;
   resetKey: string;
 }) {
   const headingId = courseHeadingId(section.course);
   const heading = useRef<HTMLHeadingElement>(null);
   const scenarioCount = section.accessibleScenarios.length;
   const courseKey = courseCatalogKey(section.course);
+  const curriculumState = getCourseCurriculumState(
+    section.accessibleScenarios,
+  );
+  const nextVisibleIndex = curriculumState.nextScenarioId
+    ? section.visibleScenarios.findIndex(
+        (scenario) => scenario.scenarioId === curriculumState.nextScenarioId,
+      )
+    : -1;
+  const initialCurriculumPage =
+    nextVisibleIndex >= 0
+      ? Math.floor(nextVisibleIndex / COLLECTION_PAGE_SIZE.cards) + 1
+      : 1;
   const sequenceByScenarioId =
     section.course.kind === "authored"
       ? new Map(
@@ -384,15 +387,30 @@ function CourseDetail({
         </dl>
       </header>
 
+      {curriculumState.complete ? (
+        <p
+          role="status"
+          className="flex items-center gap-2 text-sm font-semibold text-success"
+        >
+          <CircleCheck className="size-4" aria-hidden />
+          Course complete · You solved all {scenarioCount}{" "}
+          {scenarioCount === 1 ? "scenario" : "scenarios"}.
+        </p>
+      ) : null}
+
       {section.visibleScenarios.length ? (
         <PaginatedCollection
           items={section.visibleScenarios}
           pageSize={COLLECTION_PAGE_SIZE.cards}
           itemLabel="scenarios"
-          resetKey={resetKey}
+          initialPage={initialCurriculumPage}
+          resetKey={`${resetKey}|next:${curriculumState.nextScenarioId ?? ""}`}
         >
           {(visibleScenarios) => (
-            <ScenarioGrid className={gridClassName}>
+            <ol
+              className="divide-y overflow-hidden rounded-xl border bg-card"
+              aria-label={section.course.title + " course steps"}
+            >
               {visibleScenarios.map((scenario) => {
                 const position = sequenceByScenarioId?.get(
                   scenario.scenarioId,
@@ -409,15 +427,17 @@ function CourseDetail({
                         },
                       }
                     : {}),
+                  isNext:
+                    curriculumState.nextScenarioId === scenario.scenarioId,
                 };
 
                 return (
-                  <Fragment key={scenario.scenarioId}>
+                  <li key={scenario.scenarioId}>
                     {renderScenario(scenario, context)}
-                  </Fragment>
+                  </li>
                 );
               })}
-            </ScenarioGrid>
+            </ol>
           )}
         </PaginatedCollection>
       ) : (
@@ -515,14 +535,4 @@ function CourseMetric({
       </dd>
     </div>
   );
-}
-
-function ScenarioGrid({
-  className,
-  children,
-}: {
-  className: string;
-  children: ReactNode;
-}) {
-  return <div className={cn("grid gap-4", className)}>{children}</div>;
 }

@@ -91,9 +91,9 @@ function verificationPresentation(probe: VmProbe) {
   }
   if (probe.status === "fail") {
     return {
-      label: "Needs attention",
+      label: "Needs repair",
       variant: "destructive" as const,
-      detail: "This objective is not verified yet.",
+      detail: "This objective still needs repair.",
     };
   }
   return {

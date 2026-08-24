@@ -17,7 +17,7 @@ import {
 } from "@/components/app/patterns/CollectionPagination";
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
-import { ScenarioCard } from "@/components/app/patterns/ScenarioCard";
+import { CourseCurriculumItem } from "@/components/app/patterns/ScenarioCard";
 import { SCENARIO_DIFFICULTIES } from "@/components/app/patterns/MetaLine";
 import { useMyRuns } from "@/components/app/hooks/useMyRuns";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
@@ -95,6 +95,7 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
   );
   const navigate = useNavigate();
   const [searchText, setSearchText] = useState(searchState.q);
+  const [courseFiltersOpen, setCourseFiltersOpen] = useState(false);
   const pendingSearchNavigation = useRef<number | null>(null);
 
   const courses = useQuery({
@@ -191,6 +192,10 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
       current.trim() === searchState.q ? current : searchState.q,
     );
   }, [searchState.q]);
+
+  useEffect(() => {
+    setCourseFiltersOpen(false);
+  }, [courseId]);
 
   useEffect(() => {
     const nextQuery = searchText.trim();
@@ -517,62 +522,119 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
       {allEntries.length ? (
         <section className="space-y-4" aria-labelledby="catalog-heading">
           <div>
-            <p className="text-eyebrow">Course catalog</p>
+            <p className="text-eyebrow">
+              {courseId ? "Course curriculum" : "Course catalog"}
+            </p>
             <h2 id="catalog-heading" className="mt-2 text-section-title">
-              {courseId ? "Course catalog" : "Choose your next course"}
+              {courseId ? "Your curriculum" : "Choose your next course"}
             </h2>
           </div>
-          <FilterBar
-            search={searchText}
-            onSearchChange={setSearchText}
-            searchPlaceholder="Search courses and scenarios…"
-            searchLabel="Search courses and scenarios"
-            filtersActive={filtersActive}
-            stackSearchOnMobile
-            onClear={clearFilters}
-            end={
-              <>
-                <span
-                  role="status"
-                  aria-live="polite"
-                  aria-atomic="true"
-                  className="text-metadata tabular-nums"
+          {courseId ? (
+            <details
+              open={courseFiltersOpen}
+              onToggle={(event) =>
+                setCourseFiltersOpen(event.currentTarget.open)
+              }
+              className={
+                courseFiltersOpen
+                  ? "w-full max-w-full rounded-lg border bg-card"
+                  : "w-fit max-w-full rounded-lg border bg-card"
+              }
+            >
+              <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 text-sm font-semibold marker:hidden">
+                <SlidersHorizontal className="size-4" aria-hidden />
+                Filter course
+                {filtersActive ? (
+                  <span className="ml-auto text-brand-text">
+                    Filters active
+                  </span>
+                ) : (
+                  <span className="ml-auto text-muted-foreground">Optional</span>
+                )}
+              </summary>
+              <div className="space-y-4 border-t p-4">
+                <FilterBar
+                  search={searchText}
+                  onSearchChange={setSearchText}
+                  searchPlaceholder="Search this course…"
+                  searchLabel="Search this course"
+                  filtersActive={filtersActive}
+                  stackSearchOnMobile
+                  onClear={clearFilters}
+                  end={
+                    <>
+                      <span
+                        role="status"
+                        aria-live="polite"
+                        aria-atomic="true"
+                        className="text-metadata tabular-nums"
+                      >
+                        {selectedSection
+                          ? `${selectedSection.visibleScenarios.length} of ${selectedSection.accessibleScenarios.length} scenarios`
+                          : "Course unavailable"}
+                      </span>
+                      {selectedSection?.course.kind === "general-practice" &&
+                      selectedSection.visibleScenarios.length ? (
+                        <SortSelect
+                          value={searchState.sort}
+                          onChange={(sort) =>
+                            void navigateCatalogSearch(navigate, {
+                              ...searchState,
+                              sort,
+                            })
+                          }
+                        />
+                      ) : null}
+                    </>
+                  }
                 >
-                  {selectedSection
-                    ? `${selectedSection.visibleScenarios.length} of ${selectedSection.accessibleScenarios.length} scenarios`
-                    : `${catalogView.courses.length} of ${allCourses.length} courses`}
-                </span>
-                {selectedSection?.course.kind === "general-practice" &&
-                selectedSection.visibleScenarios.length ? (
-                  <SortSelect
-                    value={searchState.sort}
-                    onChange={(sort) =>
-                      void navigateCatalogSearch(navigate, {
-                        ...searchState,
-                        sort,
-                      })
-                    }
-                  />
-                ) : null}
-              </>
-            }
-          >
-            <div className="hidden flex-wrap items-center gap-3 md:flex">
-              {renderFilterControls()}
-            </div>
-          </FilterBar>
-          <details className="rounded-lg border bg-card md:hidden">
-            <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 text-sm font-semibold marker:hidden">
-              <SlidersHorizontal className="size-4" />
-              Refine results
-              {filtersActive ? (
-                <span className="ml-auto text-brand-text">Filters active</span>
-              ) : null}
-            </summary>
-            <div className="flex flex-col items-start gap-4 border-t p-4">
-              {renderFilterControls()}
-            </div>
-          </details>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {renderFilterControls()}
+                  </div>
+                </FilterBar>
+              </div>
+            </details>
+          ) : (
+            <>
+              <FilterBar
+                search={searchText}
+                onSearchChange={setSearchText}
+                searchPlaceholder="Search courses and scenarios…"
+                searchLabel="Search courses and scenarios"
+                filtersActive={filtersActive}
+                stackSearchOnMobile
+                onClear={clearFilters}
+                end={
+                  <span
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                    className="text-metadata tabular-nums"
+                  >
+                    {catalogView.courses.length} of {allCourses.length} courses
+                  </span>
+                }
+              >
+                <div className="hidden flex-wrap items-center gap-3 md:flex">
+                  {renderFilterControls()}
+                </div>
+              </FilterBar>
+              <details className="rounded-lg border bg-card md:hidden">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 text-sm font-semibold marker:hidden">
+                  <SlidersHorizontal className="size-4" />
+                  Refine results
+                  {filtersActive ? (
+                    <span className="ml-auto text-brand-text">
+                      Filters active
+                    </span>
+                  ) : null}
+                </summary>
+                <div className="flex flex-col items-start gap-4 border-t p-4">
+                  {renderFilterControls()}
+                </div>
+              </details>
+            </>
+          )}
         </section>
       ) : null}
 
@@ -645,11 +707,12 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
           onClearFilters={clearFilters}
           resetKey={`${searchState.q}|${searchState.difficulty ?? ""}|${searchState.category ?? ""}|${searchState.tags.join(",")}|${searchState.sort}`}
           renderScenario={(scenario, context) => (
-            <ScenarioCard
+            <CourseCurriculumItem
               scenario={scenario}
               headingLevel={4}
               search={compactCatalogSearch(searchState)}
               sequence={context.sequence}
+              isNext={context.isNext}
               courseLocation={findScenarioCourseLocation(
                 [context.course],
                 scenario.scenarioId,

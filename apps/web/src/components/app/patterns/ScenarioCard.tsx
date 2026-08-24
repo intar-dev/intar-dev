@@ -91,8 +91,118 @@ export function ScenarioCard({
   );
 }
 
+/**
+ * The focused course view uses a curriculum list instead of repeating the
+ * full catalog card for every step. It deliberately keeps only the decision
+ * data a learner needs: where they are, the cost of the step, and what to do.
+ */
+export function CourseCurriculumItem({
+  scenario,
+  className,
+  headingLevel = 4,
+  search,
+  sequence,
+  courseLocation,
+  isNext = false,
+}: {
+  scenario: ScenarioCardData;
+  className?: string;
+  headingLevel?: 3 | 4;
+  search?: CatalogSearch | undefined;
+  sequence?: {
+    position: number;
+    total: number;
+  } | undefined;
+  courseLocation: CourseLocation | null;
+  isNext?: boolean | undefined;
+}) {
+  const Heading = headingLevel === 4 ? "h4" : "h3";
+  const action = curriculumActionLabel(scenario.progress);
+
+  return (
+    <CourseScenarioLink
+      location={courseLocation}
+      scenarioId={scenario.scenarioId}
+      search={search}
+      preloadDelay={250}
+      className={cn(
+        "group grid min-h-20 min-w-0 grid-cols-[2.5rem_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 outline-none transition-colors hover:bg-muted/55 focus-visible:bg-muted/55 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40 sm:grid-cols-[2.5rem_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-6",
+        isNext && "bg-brand-subtle/70 ring-1 ring-inset ring-brand-border",
+        className,
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "flex size-10 self-center items-center justify-center rounded-lg bg-secondary font-mono text-sm font-semibold tabular-nums text-secondary-foreground",
+          isNext && "bg-brand-text text-primary-foreground",
+        )}
+      >
+        {sequence?.position ?? "•"}
+      </span>
+      <div className="min-w-0 space-y-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+          {isNext ? (
+            <span className="text-eyebrow text-brand-text">Next step</span>
+          ) : null}
+          <Heading className="min-w-0 font-heading text-base font-bold tracking-[-0.015em] [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text sm:text-lg">
+            {scenario.title}
+          </Heading>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <CurriculumStatus progress={scenario.progress} />
+          <MetaLine
+            items={[
+              sequence && `Step ${sequence.position} of ${sequence.total}`,
+              <MetaDifficulty key="difficulty" difficulty={scenario.difficulty} />,
+              `~${scenario.estimatedMinutes} min`,
+            ]}
+            className="text-xs"
+          />
+        </div>
+      </div>
+      <div className="col-start-2 flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:col-start-3 sm:row-start-1 sm:self-center">
+        <span className="sr-only">
+          {isNext ? "Next course step: " : ""}
+        </span>
+        {action}
+        <ArrowRight
+          className="size-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
+          aria-hidden
+        />
+      </div>
+    </CourseScenarioLink>
+  );
+}
+
 function scenarioActionLabel(progress: ScenarioProgress) {
   return progress.status === "completed" ? "Review briefing" : "View briefing";
+}
+
+function curriculumActionLabel(progress: ScenarioProgress) {
+  switch (progress.status) {
+    case "completed":
+      return "Review";
+    case "in_progress":
+      return "Continue";
+    case "attempted":
+      return "Try again";
+    case "new":
+      return "Start";
+  }
+}
+
+function CurriculumStatus({ progress }: { progress: ScenarioProgress }) {
+  switch (progress.status) {
+    case "completed":
+      return <StatusToken tone="success" word="Solved" />;
+    case "in_progress":
+      return <StatusToken tone="live" word="In progress" />;
+    case "attempted":
+      return <StatusToken tone="pending" word="Attempted" />;
+    case "new":
+      return <StatusToken tone="muted" word="Ready" />;
+  }
 }
 
 function ScenarioStatusBadge({ progress }: { progress: ScenarioProgress }) {

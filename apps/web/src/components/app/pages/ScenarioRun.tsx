@@ -14,6 +14,8 @@ import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { presentScenarioRun } from "@/lib/run-phase";
 import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
 import { RunTimeline } from "@/components/app/run/RunTimeline";
+import { RunCompletionActions } from "@/components/app/run/RunCompletionActions";
+import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import { repairObjectiveTitle } from "@/lib/verification-copy";
@@ -46,7 +48,10 @@ import {
   type ScenarioDestroyAcceptedResponse,
 } from "@/components/app/run/run-types";
 import { cn } from "@/lib/utils";
-import type { CourseLocation } from "@/lib/scenario-runs";
+import type {
+  CourseLocation,
+  ScenarioCatalogWireResponse,
+} from "@/lib/scenario-runs";
 
 export function ScenarioRun() {
   const navigate = useNavigate();
@@ -97,6 +102,28 @@ export function ScenarioRun() {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: "always",
     staleTime: 1_000,
+  });
+
+  const completedCourseLocation =
+    attempt.data?.run.phase === "completed" &&
+    attempt.data.run.activity === "settled"
+      ? (attempt.data.run.courseLocation ?? null)
+      : null;
+  const shouldLoadNextCourseScenario =
+    completedCourseLocation?.courseKind === "authored";
+  const currentCourse = useQuery({
+    queryKey: [
+      "scenario-run",
+      runId,
+      "current-course",
+      completedCourseLocation?.scope ?? null,
+      completedCourseLocation?.organizationId ?? null,
+      completedCourseLocation?.courseId ?? null,
+    ],
+    queryFn: () => fetchCurrentCourseCatalog(completedCourseLocation),
+    enabled: shouldLoadNextCourseScenario,
+    staleTime: 0,
+    retry: false,
   });
 
   const destroyScenario = useMutation({
@@ -241,6 +268,17 @@ export function ScenarioRun() {
   });
 
   const attemptData = attempt.data?.run ?? null;
+  const nextCourseScenario = useMemo(
+    () =>
+      attemptData && currentCourse.data
+        ? findNextCourseScenario({
+            location: completedCourseLocation,
+            scenarioId: attemptData.scenarioId,
+            courses: currentCourse.data.courses,
+          })
+        : null,
+    [attemptData, completedCourseLocation, currentCourse.data],
+  );
   const selectedVm = useMemo(() => {
     if (!attemptData?.vms.length) {
       return null;
@@ -400,7 +438,7 @@ export function ScenarioRun() {
   );
 
   usePageChrome({
-    title: attemptData?.scenarioName,
+    title: attemptData?.title,
     status: useMemo(() => {
       if (!attemptData) return undefined;
       if (attemptData.outcome === "in_progress") {
@@ -496,7 +534,7 @@ export function ScenarioRun() {
   });
 
   // The browser tab carries live-run state while the user is elsewhere.
-  const scenarioName = attemptData?.scenarioName ?? null;
+  const scenarioName = attemptData?.title ?? null;
   const runIsLive = attemptData?.activity === "foreground";
   useEffect(() => {
     if (!runIsLive || !scenarioName) return;
@@ -640,7 +678,7 @@ export function ScenarioRun() {
           <div>
             <ResolutionCard
               runId={runId}
-              scenarioName={attemptData.scenarioName}
+              scenarioTitle={attemptData.title}
               createdAt={attemptData.createdAt}
               solveDurationMs={attemptData.solveDurationMs}
               hints={attemptData.hints}
@@ -726,6 +764,12 @@ export function ScenarioRun() {
       <PageShell width="content">
         {runDialogs}
         {errorAlerts}
+        {attemptData.phase === "completed" ? (
+          <RunCompletionActions
+            courseLocation={attemptData.courseLocation}
+            nextScenario={nextCourseScenario}
+          />
+        ) : null}
         <RunTimeline run={attemptData} headingRef={timelineHeadingRef} />
       </PageShell>
     );
@@ -865,6 +909,26 @@ export function ScenarioRun() {
       ) : null}
     </div>
   );
+}
+
+async function fetchCurrentCourseCatalog(
+  location: CourseLocation | null,
+): Promise<ScenarioCatalogWireResponse> {
+  if (!location || location.courseKind !== "authored") {
+    throw new Error("A current course catalog is not available.");
+  }
+
+  const endpoint = location.organizationId
+    ? `/api/organizations/${encodeURIComponent(location.organizationId)}/scenarios`
+    : "/api/scenarios";
+  const response = await fetch(endpoint, {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load current course (${response.status})`);
+  }
+  return (await response.json()) as ScenarioCatalogWireResponse;
 }
 
 async function navigateToRunCourse(

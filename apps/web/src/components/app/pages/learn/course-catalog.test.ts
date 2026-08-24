@@ -9,6 +9,7 @@ import {
   buildCourseCatalogSection,
   buildCourseCatalogView,
   courseCatalogKey,
+  getCourseCurriculumState,
 } from "./course-catalog";
 
 type AuthoredCourse = Extract<
@@ -204,6 +205,43 @@ describe("course catalog view", () => {
       "course-10",
       "course-11",
     ]);
+  });
+
+  it("foregrounds a resumable step, then the first unsolved step", () => {
+    const scenarios = [
+      scenario("first", "First", { status: "completed" }),
+      scenario("second", "Second", { status: "new" }),
+      scenario("third", "Third", { status: "in_progress" }),
+      scenario("fourth", "Fourth", { status: "attempted" }),
+    ];
+
+    expect(getCourseCurriculumState(scenarios)).toEqual({
+      complete: false,
+      nextScenarioId: "third",
+    });
+
+    expect(
+      getCourseCurriculumState([
+        scenario("first", "First", { status: "completed" }),
+        scenario("second", "Second", { status: "attempted" }),
+        scenario("third", "Third", { status: "new" }),
+      ]),
+    ).toEqual({
+      complete: false,
+      nextScenarioId: "second",
+    });
+  });
+
+  it("marks a course complete only after every curriculum step is solved", () => {
+    expect(
+      getCourseCurriculumState([
+        scenario("first", "First", { status: "completed" }),
+        scenario("second", "Second", { status: "completed" }),
+      ]),
+    ).toEqual({
+      complete: true,
+      nextScenarioId: null,
+    });
   });
 
   it("hides General practice and its sort target when filters remove every member", () => {

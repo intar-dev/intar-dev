@@ -60,11 +60,20 @@ export function LiveScenarioRunCard(props: {
               <span
                 data-numeric
                 className="ml-1 inline-flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
-                aria-label={`${summary.pass} passing, ${summary.fail} failing, ${summary.unknown} unknown checks`}
+                aria-label={`${summary.pass} verified, ${summary.fail} need repair, ${summary.unknown} checking`}
               >
-                <span><strong className="text-success">{summary.pass}</strong> pass</span>
-                <span><strong className="text-destructive">{summary.fail}</strong> fail</span>
-                <span><strong className="text-foreground">{summary.unknown}</strong> unknown</span>
+                <span>
+                  <strong className="text-success">{summary.pass}</strong>{" "}
+                  verified
+                </span>
+                <span>
+                  <strong className="text-destructive">{summary.fail}</strong>{" "}
+                  need repair
+                </span>
+                <span>
+                  <strong className="text-foreground">{summary.unknown}</strong>{" "}
+                  checking
+                </span>
               </span>
             ) : (
               <span className="text-xs text-muted-foreground">Checks pending</span>

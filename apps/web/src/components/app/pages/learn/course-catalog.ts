@@ -26,6 +26,16 @@ export interface CourseCatalogView {
   visibleScenarioCount: number;
 }
 
+export interface CourseCurriculumState {
+  /** Every scenario in the course has been completed at least once. */
+  complete: boolean;
+  /**
+   * The best step to foreground. An active repair wins over a later/newer
+   * unsolved step so a learner can resume the work they already started.
+   */
+  nextScenarioId: string | null;
+}
+
 export function buildCourseCatalogView(
   courses: readonly ScenarioCatalogCourseWireEntry[],
   filter: CourseCatalogFilter,
@@ -76,6 +86,22 @@ export function buildCourseCatalogSection(
   }
 
   return summarizeCourse(course, accessibleScenarios, visibleScenarios);
+}
+
+export function getCourseCurriculumState(
+  scenarios: readonly ScenarioCatalogWireEntry[],
+): CourseCurriculumState {
+  const resumable = scenarios.find(
+    (scenario) => scenario.progress.status === "in_progress",
+  );
+  const nextUnsolved = scenarios.find(
+    (scenario) => scenario.progress.status !== "completed",
+  );
+
+  return {
+    complete: nextUnsolved === undefined,
+    nextScenarioId: resumable?.scenarioId ?? nextUnsolved?.scenarioId ?? null,
+  };
 }
 
 export function courseCatalogKey(

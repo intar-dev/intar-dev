@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   EllipsisVertical,
@@ -37,8 +37,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   formatLoad,
-  formatTimestamp,
+  formatTimestamp as formatHostTimestamp,
 } from "@/components/app/admin/hosts/format";
+import { formatRelativeTime } from "@/components/app/lib/format";
 import { useHostFleet } from "@/components/app/admin/hosts/useHostFleet";
 import type { AgentHostApi } from "@/components/app/admin/hosts/types";
 
@@ -175,7 +176,10 @@ export function AdminHosts() {
                   : "—";
 
                 return (
-                  <article key={host.id} className="space-y-4 p-4 sm:p-6">
+                  <article
+                    key={host.id}
+                    className="@container/host-card space-y-4 p-4 sm:p-6"
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 space-y-1.5">
                         <div className="flex flex-wrap items-center gap-2">
@@ -246,10 +250,9 @@ export function AdminHosts() {
                       </div>
                     </div>
 
-                    <dl className="grid gap-x-6 gap-y-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-5">
-                      <HostMetric
-                        label="Heartbeat"
-                        value={formatTimestamp(host.status?.lastHeartbeatAt)}
+                    <dl className={hostMetricsGridClassName}>
+                      <HostHeartbeatMetric
+                        heartbeatAt={host.status?.lastHeartbeatAt}
                         detail={
                           host.actualState?.health === "degraded"
                             ? "State report overdue"
@@ -270,6 +273,7 @@ export function AdminHosts() {
                             ? `${capacity.reserved_cpu_millis}m host reserve · load ${formatLoad(capacity.load_avg_1m)} / ${formatLoad(capacity.load_avg_5m)} / ${formatLoad(capacity.load_avg_15m)}`
                             : "No CPU capacity reported"
                         }
+                        wrapDetail
                       />
                       <HostMetric
                         label="Memory"
@@ -378,22 +382,90 @@ export function AdminHosts() {
   );
 }
 
-function HostMetric({
+// Host cards often sit beside the persistent app navigation. Let their own
+// available width choose the grid, rather than letting a wide browser force
+// five narrow metric columns. Five columns need a genuinely wide host card.
+export const hostMetricsGridClassName =
+  "grid grid-cols-1 gap-x-6 gap-y-4 border-t pt-4 @2xl/host-card:grid-cols-2 @4xl/host-card:grid-cols-3 @7xl/host-card:grid-cols-5";
+
+export function HostHeartbeatMetric({
+  heartbeatAt,
+  detail,
+}: {
+  heartbeatAt: string | null | undefined;
+  detail: string;
+}) {
+  const timestamp = parseHostTimestamp(heartbeatAt);
+  const absoluteTimestamp = timestamp
+    ? formatHostTimestamp(heartbeatAt)
+    : null;
+  const accessibleTimestamp = absoluteTimestamp
+    ? `Last heartbeat: ${absoluteTimestamp}`
+    : undefined;
+
+  return (
+    <HostMetric
+      label="Heartbeat"
+      value={
+        timestamp && absoluteTimestamp ? (
+          <time
+            dateTime={new Date(timestamp).toISOString()}
+            title={accessibleTimestamp}
+            aria-label={accessibleTimestamp}
+          >
+            {formatRelativeTime(timestamp)}
+          </time>
+        ) : (
+          "—"
+        )
+      }
+      detail={detail}
+      wrapValue
+      wrapDetail
+    />
+  );
+}
+
+export function HostMetric({
   label,
   value,
   detail,
+  wrapValue = false,
+  wrapDetail = false,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   detail: string;
+  wrapValue?: boolean;
+  wrapDetail?: boolean;
 }) {
   return (
     <div className="min-w-0">
       <dt className="text-eyebrow">{label}</dt>
-      <dd className="mt-1 truncate text-sm font-medium tabular-nums">
+      <dd
+        className={
+          wrapValue
+            ? "mt-1 min-w-0 break-words text-sm font-medium tabular-nums"
+            : "mt-1 min-w-0 truncate text-sm font-medium tabular-nums"
+        }
+      >
         {value}
       </dd>
-      <dd className="mt-0.5 truncate text-metadata">{detail}</dd>
+      <dd
+        className={
+          wrapDetail
+            ? "mt-0.5 min-w-0 break-words text-metadata leading-5"
+            : "mt-0.5 min-w-0 truncate text-metadata"
+        }
+      >
+        {detail}
+      </dd>
     </div>
   );
+}
+
+function parseHostTimestamp(value: string | null | undefined) {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
 }

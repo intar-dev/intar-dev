@@ -143,6 +143,7 @@ export function PaginatedCollection<T>({
   items,
   pageSize,
   itemLabel,
+  initialPage = 1,
   resetKey,
   paginationClassName,
   children,
@@ -150,16 +151,17 @@ export function PaginatedCollection<T>({
   items: readonly T[];
   pageSize: number;
   itemLabel: string;
+  initialPage?: number | undefined;
   resetKey?: string | number | boolean | null;
   paginationClassName?: string | undefined;
   children: (visibleItems: T[]) => ReactNode;
 }) {
   const [pageState, setPageState] = useState(() => ({
-    page: 1,
+    page: initialPage,
     resetKey,
   }));
   const resetPending = !Object.is(pageState.resetKey, resetKey);
-  const requestedPage = resetPending ? 1 : pageState.page;
+  const requestedPage = resetPending ? initialPage : pageState.page;
   const pagination = useMemo(
     () => paginateCollection(items, requestedPage, pageSize),
     [items, pageSize, requestedPage],

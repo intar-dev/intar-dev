@@ -3,6 +3,8 @@ import type { ProbeSnapshotRow } from "./probe-pass-times";
 import {
   buildRunTimelineItems,
   deriveVmRecordingState,
+  terminalSessionSummary,
+  terminalSessionTone,
 } from "./run-timeline-model";
 import type {
   ScenarioRunRecord,
@@ -116,6 +118,82 @@ describe("run timeline model", () => {
       ],
     });
     expect(JSON.stringify(changes)).not.toContain("raw-");
+  });
+
+  it("suppresses an initial checking-only snapshot but keeps the first repair result", () => {
+    const items = buildRunTimelineItems(
+      scenarioRun([runVm({ phase: "running" })], { phase: "running" }),
+      [
+        snapshot("checking", 1_000, [
+          probe("service", "Service", "pending"),
+          probe("disk", "Disk", "unknown"),
+        ]),
+        snapshot("repair-result", 2_000, [
+          probe("service", "Service", "fail"),
+          probe("disk", "Disk", "pass"),
+        ]),
+      ],
+    );
+
+    const changes = items.filter((item) => item.type === "probe_changes");
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      id: "probe:repair-result",
+      summary: "Needs repair",
+      changes: [
+        { probeId: "service", from: "pending", to: "fail" },
+        { probeId: "disk", from: "unknown", to: "pass" },
+      ],
+    });
+  });
+
+  it("keeps an initial pass even when another objective is still checking", () => {
+    const items = buildRunTimelineItems(
+      scenarioRun([runVm({ phase: "running" })], { phase: "running" }),
+      [
+        snapshot("partial-start", 1_000, [
+          probe("service", "Service", "pass"),
+          probe("disk", "Disk", "pending"),
+        ]),
+      ],
+    ).filter((item) => item.type === "probe_changes");
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      summary: "Checking",
+      changes: [
+        { probeId: "service", to: "pass" },
+        { probeId: "disk", to: "pending" },
+      ],
+    });
+  });
+
+  it("uses consistent learner-facing progress summaries", () => {
+    const items = buildRunTimelineItems(
+      scenarioRun([runVm({ phase: "running" })], { phase: "running" }),
+      [
+        snapshot("needs-repair", 1_000, [probe("check", "Check", "fail")]),
+        snapshot("retrying", 2_000, [probe("check", "Check", "error")]),
+        snapshot("verified", 3_000, [probe("check", "Check", "pass")]),
+      ],
+    ).filter((item) => item.type === "probe_changes");
+
+    expect(items.map((item) => item.summary)).toEqual([
+      "Needs repair",
+      "Retrying",
+      "Verified",
+    ]);
+  });
+
+  it("treats cleanup exit 129 as a normal recorded terminal close", () => {
+    expect(terminalSessionTone(129)).toBe("neutral");
+    expect(
+      terminalSessionSummary({ durationMs: 12_000, exitCode: 129 }),
+    ).toContain("recorded and closed during workspace cleanup");
+    expect(terminalSessionTone(17)).toBe("danger");
+    expect(
+      terminalSessionSummary({ durationMs: 12_000, exitCode: 17 }),
+    ).toContain("ended unexpectedly (exit code 17)");
   });
 
   it("keeps current unknown-time work at the end without inventing a timestamp", () => {

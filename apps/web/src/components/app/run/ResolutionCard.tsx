@@ -12,7 +12,7 @@ import type { ScenarioObjective, ScenarioRunHint } from "./run-types";
 // fixing things, and that exploration is learning.
 export function ResolutionCard(props: {
   runId: string;
-  scenarioName: string;
+  scenarioTitle: string;
   createdAt: number;
   solveDurationMs: number | null;
   hints: ScenarioRunHint[];
@@ -92,7 +92,7 @@ export function ResolutionCard(props: {
           </p>
         )}
         <p className="text-sm leading-6 text-muted-foreground">
-          You fixed {props.scenarioName}. The shell stays open if you want to
+          You fixed {props.scenarioTitle}. The shell stays open if you want to
           look around — finish the run to save your replay.
         </p>
         <Button

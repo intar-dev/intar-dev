@@ -28,6 +28,22 @@ test("startup keeps the workspace useful and replaces milestones with the shell"
   await expect(focusTarget).toBeFocused();
 });
 
+test("a solved run celebrates the learner-facing scenario title", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "solved",
+  });
+
+  await expect(
+    page.getByText("You fixed Repair a broken nginx service."),
+  ).toBeVisible();
+  await expect(page.getByText(/You fixed repair-nginx/)).toHaveCount(0);
+});
+
 test("end acceptance stays on one timeline through saved replay", async ({
   page,
   ui,
@@ -61,7 +77,7 @@ test("end acceptance stays on one timeline through saved replay", async ({
     page.getByRole("heading", { name: "Preparing terminal recordings" }),
   ).toBeVisible();
   await expect(
-    page.getByText("nginx listens on port 80").first(),
+    page.getByText("Bring the service back online").first(),
   ).toBeVisible();
 
   const headingHandle = await heading.elementHandle();
@@ -221,6 +237,51 @@ test("deleting an organization run without a course location returns its catalog
   await page.getByRole("dialog").getByRole("button", { name: "Delete run" }).click();
 
   await expect(page).toHaveURL("/organizations/org-platform/courses");
+});
+
+test("a saved run gives a course return and its verified next lab", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "archived",
+  });
+
+  await expect(
+    page.getByRole("link", { name: "Back to Linux operations" }),
+  ).toHaveAttribute("href", "/courses/operations");
+  await expect(
+    page.getByRole("link", {
+      name: "Next: Trace an intermittent DNS failure",
+    }),
+  ).toHaveAttribute("href", "/courses/operations/repair-dns");
+  await expect(
+    page.locator(
+      'section[aria-labelledby="run-timeline-heading"] .text-eyebrow',
+    ),
+  ).toHaveText("Repair a broken nginx service");
+});
+
+test("a saved run without current course context still has a safe exit", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "archived",
+  });
+  ui.server.state.run.courseLocation = null;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await expect(page.getByRole("link", { name: "Back to My runs" })).toHaveAttribute(
+    "href",
+    "/runs",
+  );
+  await expect(page.getByRole("link", { name: /^Next:/ })).toHaveCount(0);
 });
 
 for (const terminalCase of [

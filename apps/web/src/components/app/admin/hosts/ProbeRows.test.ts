@@ -22,8 +22,8 @@ describe("operator probe diagnostics", () => {
     );
 
     expect(markup).toContain("Restore the web rollout");
-    expect(markup).toContain("Needs attention");
-    expect(markup).toContain("This objective is not verified yet.");
+    expect(markup).toContain("Needs repair");
+    expect(markup).toContain("This objective still needs repair.");
     expect(markup).not.toContain(hiddenRawOutput);
     expect(markup).not.toContain("Command");
     expect(markup).not.toContain("kubectl");

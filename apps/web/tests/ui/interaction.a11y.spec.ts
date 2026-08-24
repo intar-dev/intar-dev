@@ -141,9 +141,8 @@ test("large card collections paginate without repeating items", async ({
     pagination.getByRole("button", { name: "Page 3" }),
   ).toHaveAttribute("aria-current", "page");
 
-  await page
-    .getByRole("textbox", { name: "Search courses and scenarios" })
-    .fill("Paging");
+  await page.getByText("Filter course").click();
+  await page.getByRole("textbox", { name: "Search this course" }).fill("Paging");
   await expect(pagination).toContainText("1–9 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(9);
 });
@@ -196,6 +195,52 @@ test("course drill-down uses a course path and keeps filter-only search", async 
     .poll(() => new URL(page.url()).searchParams.get("q"))
     .toBe("Paging course");
   await expect(search).toBeFocused();
+});
+
+test("a long course opens on the page containing the next step", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+  const scenarios = paginatedScenarioFixtures(12).map((scenario, index) => ({
+    ...scenario,
+    progress: {
+      ...scenario.progress,
+      status:
+        index < 9 ? ("completed" as const) : index === 9 ? ("in_progress" as const) : ("new" as const),
+      activeRunId: index === 9 ? "run-active" : null,
+      completedCount: index < 9 ? 1 : 0,
+    },
+  }));
+  ui.server.state.scenarios = scenarios;
+  ui.server.state.courses = [
+    {
+      courseId: "long-course",
+      organizationId: null,
+      title: "Long operations course",
+      description: "A long curriculum with active work beyond the first page.",
+      scenarioIds: scenarios.map((scenario) => scenario.scenarioId),
+    },
+  ];
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await page
+    .getByRole("button", { name: "Long operations course" })
+    .click();
+
+  const pagination = page.getByRole("navigation", {
+    name: "scenarios pagination",
+  });
+  await expect(page).toHaveURL("/courses/long-course");
+  await expect(pagination).toContainText("10–12 of 12 scenarios");
+  await expect(
+    page.getByRole("heading", { name: "Paging scenario 10" }),
+  ).toBeVisible();
+  await expect(page.getByText("Next step")).toBeVisible();
+  await expect(
+    pagination.getByRole("button", { name: "Page 2" }),
+  ).toHaveAttribute("aria-current", "page");
 });
 
 test("public courses preserve curriculum order and place standalone work in General practice", async ({
@@ -328,8 +373,10 @@ test("course scenarios return to the selected filtered public course", async ({
 
   await backToCourse.click();
   await expect(courseDetail).toBeVisible();
+  await expect(page.getByText("Filters active")).toBeVisible();
+  await page.getByText("Filter course").click();
   await expect(page.getByRole("textbox", {
-    name: "Search courses and scenarios",
+    name: "Search this course",
   })).toHaveValue("nginx");
   await expect(page.getByRole("button", { name: "medium" })).toHaveAttribute(
     "aria-pressed",

@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import {
   ArrowRight,
   BookOpen,
+  ChevronDown,
   CircleDot,
   History,
   LoaderCircle,
@@ -21,14 +22,73 @@ import {
 } from "../hooks/useMyRuns";
 import { formatRelativeTime } from "../lib/format";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 
-const DAY_MS = 86_400_000;
+export interface RunAttempt {
+  run: MyRunEntry;
+  /** Per-scenario ordinal, with the earliest retained run numbered 1. */
+  attemptNumber: number;
+}
 
-function groupLabel(run: MyRunEntry, now: number): string {
-  const age = now - run.createdAt;
-  if (age < DAY_MS) return "Today";
-  if (age < 7 * DAY_MS) return "This week";
-  return "Earlier";
+export interface SettledRunGroup {
+  key: string;
+  title: string;
+  latest: RunAttempt;
+  older: RunAttempt[];
+  totalAttempts: number;
+}
+
+function settledRunGroupKey(run: MyRunEntry): string {
+  // Scenario IDs can be reused by different organizations. Keep their
+  // histories separate even when their learner-facing titles are identical.
+  return `${run.organizationId ?? "public"}\u0000${run.scenarioId}`;
+}
+
+/**
+ * Collapses a user's settled history to one latest row per scenario, while
+ * retaining ordered attempt rows for an on-demand disclosure.
+ */
+export function groupSettledRunsByScenario(
+  runs: readonly MyRunEntry[],
+): SettledRunGroup[] {
+  const entriesByScenario = new Map<string, MyRunEntry[]>();
+  const chronologicalRuns = [...runs].sort(
+    (left, right) =>
+      left.createdAt - right.createdAt || left.runId.localeCompare(right.runId),
+  );
+
+  for (const run of chronologicalRuns) {
+    const key = settledRunGroupKey(run);
+    const entries = entriesByScenario.get(key);
+    if (entries) entries.push(run);
+    else entriesByScenario.set(key, [run]);
+  }
+
+  return Array.from(entriesByScenario, ([key, entries]) => {
+    const attempts = entries.map((run, index) => ({
+      run,
+      attemptNumber: index + 1,
+    }));
+    const latest = attempts.at(-1);
+    if (!latest) {
+      throw new Error("A settled run group must contain at least one run");
+    }
+    return {
+      key,
+      title: latest.run.title,
+      latest,
+      older: attempts.slice(0, -1).reverse(),
+      totalAttempts: attempts.length,
+    };
+  }).sort(
+    (left, right) =>
+      right.latest.run.createdAt - left.latest.run.createdAt ||
+      left.key.localeCompare(right.key),
+  );
 }
 
 export function RunsList() {
@@ -39,8 +99,8 @@ export function RunsList() {
   const activeRuns = groupedRuns.foreground;
   const backgroundRuns = groupedRuns.background;
   const pastRuns = groupedRuns.settled;
+  const pastRunGroups = groupSettledRunsByScenario(pastRuns);
 
-  const now = Date.now();
   return (
     <PageShell width="content" density="comfortable">
       {runs.error ? (
@@ -145,23 +205,15 @@ export function RunsList() {
                 </div>
               </div>
               <PaginatedCollection
-                items={pastRuns}
+                items={pastRunGroups}
                 pageSize={COLLECTION_PAGE_SIZE.list}
-                itemLabel="past runs"
+                itemLabel="scenarios with past runs"
+                resetKey={pastRuns.map((run) => run.runId).join("|")}
               >
-                {(visibleRuns) => (
-                  <div className="space-y-8">
-                    {groupPastRuns(visibleRuns, now).map((group) => (
-                      <div key={group.label} className="space-y-3">
-                        <h3 className="text-metadata font-semibold">
-                          {group.label}
-                        </h3>
-                        <div className="divide-y overflow-hidden rounded-xl border bg-card">
-                          {group.runs.map((run) => (
-                            <RunListItem key={run.runId} run={run} />
-                          ))}
-                        </div>
-                      </div>
+                {(visibleGroups) => (
+                  <div className="space-y-4">
+                    {visibleGroups.map((group) => (
+                      <SettledRunGroupCard key={group.key} group={group} />
                     ))}
                   </div>
                 )}
@@ -174,15 +226,55 @@ export function RunsList() {
   );
 }
 
-function groupPastRuns(runs: MyRunEntry[], now: number) {
-  const groups: Array<{ label: string; runs: MyRunEntry[] }> = [];
-  for (const run of runs) {
-    const label = groupLabel(run, now);
-    const group = groups.find((entry) => entry.label === label);
-    if (group) group.runs.push(run);
-    else groups.push({ label, runs: [run] });
-  }
-  return groups;
+function SettledRunGroupCard({ group }: { group: SettledRunGroup }) {
+  const olderAttemptCount = group.older.length;
+  return (
+    <section
+      className="overflow-hidden rounded-xl border bg-card"
+      aria-label={`${group.title} run history`}
+    >
+      {olderAttemptCount ? (
+        <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2 sm:px-6">
+          <p className="text-metadata font-semibold">Latest attempt</p>
+          <p className="text-caption tabular-nums">
+            {group.totalAttempts} attempts
+          </p>
+        </div>
+      ) : null}
+      <RunListItem
+        run={{ ...group.latest.run, attemptNumber: group.latest.attemptNumber }}
+      />
+      {olderAttemptCount ? (
+        <Collapsible>
+          <div className="border-t px-4 py-3 sm:px-6">
+            <CollapsibleTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Show all ${group.totalAttempts} attempts for ${group.title}`}
+                />
+              }
+            >
+              Show all {group.totalAttempts} attempts
+              <ChevronDown className="size-3.5" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-3">
+              <div className="divide-y overflow-hidden rounded-lg border bg-background">
+                {group.older.map((attempt) => (
+                  <RunListItem
+                    key={attempt.run.runId}
+                    run={{ ...attempt.run, attemptNumber: attempt.attemptNumber }}
+                  />
+                ))}
+              </div>
+            </CollapsibleContent>
+          </div>
+        </Collapsible>
+      ) : null}
+    </section>
+  );
 }
 
 // Active runs are the most important objects the user owns — full-width

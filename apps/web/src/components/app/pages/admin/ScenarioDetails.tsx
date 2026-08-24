@@ -1,33 +1,21 @@
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import {
-  CircleCheckBig,
-  CircleOff,
-  Server,
-} from "lucide-react";
+import { CircleCheckBig, CircleOff, ExternalLink } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
 import { formatBytes, formatTimestamp } from "@/components/app/lib/format";
 import { ContentHeader } from "@/components/app/patterns/ContentHeader";
+import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
-import {
-  MetaDifficulty,
-  MetaLine,
-} from "@/components/app/patterns/MetaLine";
+import { MetaDifficulty, MetaLine } from "@/components/app/patterns/MetaLine";
 import { ErrorState } from "@/components/app/patterns/StateCard";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import type { ScenarioHintManifestV3 } from "@/generated/catalog";
 import type {
   ScenarioProbeRecord,
@@ -36,7 +24,7 @@ import type {
 import type { CourseLocation } from "@/lib/scenario-runs";
 import { courseRouteId } from "@/lib/course-location";
 
-interface ScenarioRecord extends AdminScenarioSummary {
+export interface ScenarioRecord extends AdminScenarioSummary {
   briefingMarkdown: string;
   solutionMarkdown: string;
   hints: ScenarioHintManifestV3[];
@@ -67,9 +55,7 @@ export function ScenarioDetails() {
       );
 
       const body = (await response.json().catch(() => null)) as
-        | ScenarioDetailResponse
-        | { error?: string }
-        | null;
+        ScenarioDetailResponse | { error?: string } | null;
 
       if (!response.ok || !body || !("scenario" in body)) {
         throw new Error(
@@ -95,9 +81,7 @@ export function ScenarioDetails() {
       );
 
       const body = (await response.json().catch(() => null)) as
-        | ScenarioDetailResponse
-        | { error?: string }
-        | null;
+        ScenarioDetailResponse | { error?: string } | null;
 
       if (!response.ok || !body || !("scenario" in body)) {
         throw new Error(
@@ -131,9 +115,7 @@ export function ScenarioDetails() {
       );
 
       const body = (await response.json().catch(() => null)) as
-        | ScenarioDetailResponse
-        | { error?: string }
-        | null;
+        ScenarioDetailResponse | { error?: string } | null;
 
       if (!response.ok || !body || !("scenario" in body)) {
         throw new Error(
@@ -204,16 +186,6 @@ export function ScenarioDetails() {
         disableScenario.mutate,
       ],
     ),
-    menu: useMemo(
-      () =>
-        scenarioRecord && enabled && learnerCourseLocation ? (
-          <LearnerCourseMenuItem
-            scenarioId={scenarioRecord.scenarioId}
-            courseLocation={learnerCourseLocation}
-          />
-        ) : undefined,
-      [scenarioRecord, enabled],
-    ),
   });
 
   return (
@@ -247,13 +219,21 @@ export function ScenarioDetails() {
             meta={
               <MetaLine
                 items={[
-                  scenarioRecord.scenarioId,
                   <MetaDifficulty
                     key="difficulty"
                     difficulty={scenarioRecord.difficulty}
                   />,
+                  scenarioVerificationSummary(scenarioRecord.probes, enabled),
                 ]}
               />
+            }
+            actions={
+              enabled && learnerCourseLocation ? (
+                <LearnerCourseAction
+                  scenarioId={scenarioRecord.scenarioId}
+                  courseLocation={learnerCourseLocation}
+                />
+              ) : undefined
             }
           />
 
@@ -279,107 +259,17 @@ export function ScenarioDetails() {
             </Alert>
           ) : null}
 
-          <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
-            <div className="space-y-6">
-              <Section
-                density="compact"
-                title="Briefing"
-                description="How the scenario briefing reads to learners."
-              >
-                <Markdown>{scenarioRecord.briefingMarkdown}</Markdown>
-              </Section>
-
-              <Section
-                density="compact"
-                title="Probes"
-                description="Checks that grade a run, in order."
-              >
-                {scenarioRecord.probes.length ? (
-                  <div className="divide-y">
-                    {scenarioRecord.probes.map((probe, index) => (
-                      <ProbeRecord
-                        key={`${scenarioRecord.scenarioId}-probe-${probe.ordinal}`}
-                        probe={probe}
-                        index={index}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    No probes are defined on this scenario.
-                  </p>
-                )}
-              </Section>
-
-              {scenarioRecord.hints.length ? (
-                <Section density="compact" title="Scenario hints">
-                  <div className="space-y-3">
-                    {scenarioRecord.hints.map((hint, index) => (
-                      <HintTile
-                        key={hint.id}
-                        hint={hint}
-                        fallbackTitle={`Hint ${index + 1}`}
-                      />
-                    ))}
-                  </div>
-                </Section>
-              ) : null}
-
-              <Section
-                density="compact"
-                title="Solution"
-                description="Learner-gated content — visible to admins for inspection."
-              >
-                <Collapsible>
-                  <CollapsibleTrigger
-                    render={<Button type="button" variant="outline" />}
-                  >
-                    Show solution
-                  </CollapsibleTrigger>
-                  <CollapsibleContent className="mt-4">
-                    <Markdown>{scenarioRecord.solutionMarkdown}</Markdown>
-                  </CollapsibleContent>
-                </Collapsible>
-              </Section>
-
-              <Section
-                density="compact"
-                title="VM inventory"
-                description="Machines provisioned for every run of this scenario."
-              >
-                {scenarioRecord.vms.length ? (
-                  <div className="divide-y">
-                    {scenarioRecord.vms.map((vm) => (
-                      <VmRecord key={vm.id} vm={vm} />
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    No VMs are defined on this scenario.
-                  </p>
-                )}
-              </Section>
-            </div>
-
-            <Section
-              density="compact"
-              title="Record"
-              description="Always reflects the current stored scenario for this scenario ID."
-              className="h-fit lg:sticky lg:top-24"
-            >
-              <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1">
-                <MetaRow label="Scenario ID" value={scenarioRecord.scenarioId} mono />
-                <MetaRow label="Availability" value={enabled ? "Enabled for learners" : "Unavailable"} />
-                <MetaRow label="Category" value={scenarioRecord.category} />
-                <MetaRow label="Difficulty" value={scenarioRecord.difficulty} />
-                <MetaRow label="Estimated time" value={`~${scenarioRecord.estimatedMinutes} min`} />
-                <MetaRow label="Inventory" value={`${scenarioRecord.vmCount} VM · ${scenarioRecord.probeCount} probes · ${scenarioRecord.scenarioHintCount} hints`} />
-                <MetaRow label="Tags" value={scenarioRecord.tags.length ? scenarioRecord.tags.join(", ") : "—"} />
-                <MetaRow label="Enabled at" value={scenarioRecord.enabledAt ? formatTimestamp(scenarioRecord.enabledAt) : "Not enabled"} />
-                <MetaRow label="Created" value={formatTimestamp(scenarioRecord.createdAt)} />
-                <MetaRow label="Updated" value={formatTimestamp(scenarioRecord.updatedAt)} />
-              </dl>
-            </Section>
+          <div className="space-y-5">
+            <ScenarioLearnerPreview
+              briefingMarkdown={scenarioRecord.briefingMarkdown}
+              hints={scenarioRecord.hints}
+              solutionMarkdown={scenarioRecord.solutionMarkdown}
+            />
+            <ScenarioVerificationContract probes={scenarioRecord.probes} />
+            <ScenarioOperationalRecord
+              scenario={scenarioRecord}
+              enabled={enabled}
+            />
           </div>
         </>
       )}
@@ -387,7 +277,7 @@ export function ScenarioDetails() {
   );
 }
 
-function LearnerCourseMenuItem({
+function LearnerCourseAction({
   scenarioId,
   courseLocation,
 }: {
@@ -399,7 +289,9 @@ function LearnerCourseMenuItem({
   const courseId = courseRouteId(location);
   if (location.scope === "public") {
     return (
-      <DropdownMenuItem
+      <Button
+        size="sm"
+        variant="outline"
         render={
           <Link
             to="/courses/$courseId/$scenarioId"
@@ -407,14 +299,17 @@ function LearnerCourseMenuItem({
           />
         }
       >
+        <ExternalLink className="size-3.5" />
         View as learner
-      </DropdownMenuItem>
+      </Button>
     );
   }
   if (!location.organizationId) return null;
   if (location.scope === "organization-public") {
     return (
-      <DropdownMenuItem
+      <Button
+        size="sm"
+        variant="outline"
         render={
           <Link
             to="/organizations/$orgId/courses/public/$courseId/$scenarioId"
@@ -426,13 +321,16 @@ function LearnerCourseMenuItem({
           />
         }
       >
+        <ExternalLink className="size-3.5" />
         View as learner
-      </DropdownMenuItem>
+      </Button>
     );
   }
   if (location.scope === "organization-private") {
     return (
-      <DropdownMenuItem
+      <Button
+        size="sm"
+        variant="outline"
         render={
           <Link
             to="/organizations/$orgId/courses/private/$courseId/$scenarioId"
@@ -444,12 +342,15 @@ function LearnerCourseMenuItem({
           />
         }
       >
+        <ExternalLink className="size-3.5" />
         View as learner
-      </DropdownMenuItem>
+      </Button>
     );
   }
   return (
-    <DropdownMenuItem
+    <Button
+      size="sm"
+      variant="outline"
       render={
         <Link
           to="/organizations/$orgId/courses/general-practice/$scenarioId"
@@ -457,12 +358,183 @@ function LearnerCourseMenuItem({
         />
       }
     >
+      <ExternalLink className="size-3.5" />
       View as learner
-    </DropdownMenuItem>
+    </Button>
   );
 }
 
-function ProbeRecord({
+export function scenarioVerificationSummary(
+  probes: readonly ScenarioProbeRecord[],
+  enabled: boolean,
+): string {
+  const bootChecks = probes.filter((probe) => probe.phase === "boot").length;
+  const repairObjectives = probes.filter(
+    (probe) => probe.phase === "scenario",
+  ).length;
+  return `${bootChecks} boot checks · ${repairObjectives} repair objectives · ${enabled ? "enabled" : "disabled"}`;
+}
+
+export function ScenarioLearnerPreview({
+  briefingMarkdown,
+  hints,
+  solutionMarkdown,
+}: Pick<ScenarioRecord, "briefingMarkdown" | "hints" | "solutionMarkdown">) {
+  return (
+    <Section
+      density="compact"
+      title="Learner preview"
+      description="The briefing learners read before they start."
+    >
+      <Markdown className="prose-measure">{briefingMarkdown}</Markdown>
+      <div className="mt-4 divide-y border-t">
+        {hints.length ? (
+          <DisclosureRow
+            title="Hints"
+            meta={`${hints.length} available`}
+            density="compact"
+            contentClassName="space-y-3"
+          >
+            {hints.map((hint, index) => (
+              <HintTile
+                key={hint.id}
+                hint={hint}
+                fallbackTitle={`Hint ${index + 1}`}
+              />
+            ))}
+          </DisclosureRow>
+        ) : null}
+        <DisclosureRow title="Solution" meta="Learner-gated" density="compact">
+          {solutionMarkdown.trim() ? (
+            <Markdown className="prose-measure">{solutionMarkdown}</Markdown>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No solution is configured.
+            </p>
+          )}
+        </DisclosureRow>
+      </div>
+    </Section>
+  );
+}
+
+export function ScenarioVerificationContract({
+  probes,
+}: {
+  probes: readonly ScenarioProbeRecord[];
+}) {
+  const bootChecks = probes.filter((probe) => probe.phase === "boot");
+  const repairObjectives = probes.filter((probe) => probe.phase === "scenario");
+
+  return (
+    <Section
+      density="compact"
+      title="Verification contract"
+      description="The startup gates and repair objectives a learner must satisfy."
+    >
+      {probes.length ? (
+        <>
+          <div className="grid gap-5 lg:grid-cols-2">
+            <VerificationObjectiveGroup
+              title="Boot checks"
+              emptyCopy="No startup checks are configured."
+              probes={bootChecks}
+            />
+            <VerificationObjectiveGroup
+              title="Repair objectives"
+              emptyCopy="No repair objectives are configured."
+              probes={repairObjectives}
+            />
+          </div>
+          <div className="mt-4 border-t">
+            <DisclosureRow
+              title="Probe implementation"
+              meta={`${probes.length} probes`}
+              density="compact"
+              contentClassName="divide-y"
+            >
+              {probes.map((probe, index) => (
+                <TechnicalProbeRecord
+                  key={`${probe.scenarioVmId}-${probe.ordinal}`}
+                  probe={probe}
+                  index={index}
+                />
+              ))}
+            </DisclosureRow>
+          </div>
+        </>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          No probes are defined on this scenario.
+        </p>
+      )}
+    </Section>
+  );
+}
+
+function VerificationObjectiveGroup({
+  title,
+  probes,
+  emptyCopy,
+}: {
+  title: string;
+  probes: readonly ScenarioProbeRecord[];
+  emptyCopy: string;
+}) {
+  return (
+    <div className="space-y-2">
+      <p className="text-eyebrow">{title}</p>
+      {probes.length ? (
+        <ol className="divide-y border-y">
+          {probes.map((probe, index) => (
+            <VerificationObjective
+              key={`${probe.scenarioVmId}-${probe.ordinal}`}
+              probe={probe}
+              index={index}
+            />
+          ))}
+        </ol>
+      ) : (
+        <p className="text-sm text-muted-foreground">{emptyCopy}</p>
+      )}
+    </div>
+  );
+}
+
+function VerificationObjective({
+  probe,
+  index,
+}: {
+  probe: ScenarioProbeRecord;
+  index: number;
+}) {
+  const title = probeObjectiveTitle(probe, index);
+  const description =
+    probe.title?.trim() && probe.description.trim() !== title
+      ? probe.description.trim()
+      : null;
+
+  return (
+    <li className="flex gap-3 py-3 first:pt-0 last:pb-0">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold tabular-nums">
+        {index + 1}
+      </span>
+      <div className="min-w-0 space-y-1">
+        <p className="text-sm font-medium">{title}</p>
+        {description ? (
+          <p className="text-sm text-muted-foreground">{description}</p>
+        ) : null}
+        {probe.bodyMarkdown?.trim() ? (
+          <Markdown className="prose-measure text-muted-foreground">
+            {probe.bodyMarkdown}
+          </Markdown>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+function TechnicalProbeRecord({
   probe,
   index,
 }: {
@@ -470,35 +542,25 @@ function ProbeRecord({
   index: number;
 }) {
   return (
-    <div className="space-y-3 py-4 first:pt-0 last:pb-0">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="font-mono text-sm font-medium">
-          {index + 1}. {probe.name}
-        </p>
-        <Badge variant={probe.phase === "boot" ? "secondary" : "outline"}>
-          {probe.phase === "boot" ? "Boot" : "Scenario"}
-        </Badge>
-        <Badge variant="outline" className="font-mono">
-          {probe.kind}
-        </Badge>
-        <Badge variant="outline" className="font-mono">
-          <Server className="size-3" />
-          {probe.scenarioVmName}
-        </Badge>
-      </div>
-      {probe.title ? <p className="text-sm font-medium">{probe.title}</p> : null}
-      {probe.bodyMarkdown ? <Markdown>{probe.bodyMarkdown}</Markdown> : null}
-      {probe.description ? (
-        <p className="text-caption">{probe.description}</p>
-      ) : null}
+    <div className="space-y-3 py-3 first:pt-0 last:pb-0">
+      <p className="text-sm font-medium">Probe {index + 1}</p>
+      <dl className="grid gap-3 sm:grid-cols-2">
+        <MetaRow label="Probe ID" value={probe.name} mono />
+        <MetaRow label="Kind" value={probe.kind} mono />
+        <MetaRow
+          label="Phase"
+          value={probe.phase === "boot" ? "Boot" : "Repair"}
+        />
+        <MetaRow label="Scenario VM" value={probe.scenarioVmName} mono />
+      </dl>
       {probe.hints.length ? (
-        <Collapsible>
-          <CollapsibleTrigger
-            render={<Button type="button" variant="outline" size="sm" />}
+        <div className="border-t pt-2">
+          <DisclosureRow
+            title="Probe hints"
+            meta={`${probe.hints.length} available`}
+            density="compact"
+            contentClassName="space-y-3"
           >
-            Hints ({probe.hints.length})
-          </CollapsibleTrigger>
-          <CollapsibleContent className="mt-3 space-y-3">
             {probe.hints.map((hint, hintIndex) => (
               <HintTile
                 key={hint.id}
@@ -506,10 +568,103 @@ function ProbeRecord({
                 fallbackTitle={`Hint ${hintIndex + 1}`}
               />
             ))}
-          </CollapsibleContent>
-        </Collapsible>
+          </DisclosureRow>
+        </div>
       ) : null}
     </div>
+  );
+}
+
+export function ScenarioOperationalRecord({
+  scenario,
+  enabled,
+}: {
+  scenario: Pick<
+    ScenarioRecord,
+    | "scenarioId"
+    | "category"
+    | "difficulty"
+    | "estimatedMinutes"
+    | "tags"
+    | "scenarioHintCount"
+    | "probeCount"
+    | "vmCount"
+    | "enabledAt"
+    | "createdAt"
+    | "updatedAt"
+    | "vms"
+  >;
+  enabled: boolean;
+}) {
+  return (
+    <Section
+      density="compact"
+      title="Operations record"
+      description="Publication state, deployment provenance, and stored metadata."
+    >
+      <MetaLine
+        items={[
+          `${scenario.vmCount} VM${scenario.vmCount === 1 ? "" : "s"}`,
+          `${scenario.probeCount} verification ${scenario.probeCount === 1 ? "check" : "checks"}`,
+          enabled ? "Enabled for learners" : "Disabled",
+        ]}
+      />
+      <div className="mt-3 divide-y border-t">
+        <DisclosureRow
+          title="Image provenance"
+          meta={`${scenario.vms.length} VM${scenario.vms.length === 1 ? "" : "s"}`}
+          density="compact"
+          contentClassName="divide-y"
+        >
+          {scenario.vms.length ? (
+            scenario.vms.map((vm) => <VmRecord key={vm.id} vm={vm} />)
+          ) : (
+            <p className="py-2 text-sm text-muted-foreground">
+              No VMs are defined on this scenario.
+            </p>
+          )}
+        </DisclosureRow>
+        <DisclosureRow title="Record metadata" density="compact">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <MetaRow label="Scenario ID" value={scenario.scenarioId} mono />
+            <MetaRow
+              label="Availability"
+              value={enabled ? "Enabled for learners" : "Unavailable"}
+            />
+            <MetaRow label="Category" value={scenario.category} />
+            <MetaRow label="Difficulty" value={scenario.difficulty} />
+            <MetaRow
+              label="Estimated time"
+              value={`~${scenario.estimatedMinutes} min`}
+            />
+            <MetaRow
+              label="Inventory"
+              value={`${scenario.vmCount} VM · ${scenario.probeCount} probes · ${scenario.scenarioHintCount} hints`}
+            />
+            <MetaRow
+              label="Tags"
+              value={scenario.tags.length ? scenario.tags.join(", ") : "—"}
+            />
+            <MetaRow
+              label="Enabled at"
+              value={
+                scenario.enabledAt
+                  ? formatTimestamp(scenario.enabledAt)
+                  : "Not enabled"
+              }
+            />
+            <MetaRow
+              label="Created"
+              value={formatTimestamp(scenario.createdAt)}
+            />
+            <MetaRow
+              label="Updated"
+              value={formatTimestamp(scenario.updatedAt)}
+            />
+          </dl>
+        </DisclosureRow>
+      </div>
+    </Section>
   );
 }
 
@@ -521,18 +676,16 @@ function HintTile({
   fallbackTitle: string;
 }) {
   return (
-    <div className="rounded-xl bg-muted/50 px-4 py-3">
-      <p className="text-sm font-medium">{hint.title?.trim() || fallbackTitle}</p>
+    <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+      <p className="text-sm font-medium">
+        {hint.title?.trim() || fallbackTitle}
+      </p>
       <Markdown className="mt-2">{hint.body_markdown}</Markdown>
     </div>
   );
 }
 
-function VmRecord({
-  vm,
-}: {
-  vm: ScenarioVmRecord;
-}) {
+function VmRecord({ vm }: { vm: ScenarioVmRecord }) {
   return (
     <div className="space-y-4 py-4 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -563,6 +716,17 @@ function VmRecord({
   );
 }
 
+function probeObjectiveTitle(
+  probe: ScenarioProbeRecord,
+  index: number,
+): string {
+  return (
+    probe.title?.trim() ||
+    probe.description.trim() ||
+    `Verification objective ${index + 1}`
+  );
+}
+
 function formatCpu(cpuMillis: number): string {
   return (cpuMillis / 1000).toLocaleString(undefined, {
     maximumFractionDigits: 3,
@@ -582,7 +746,13 @@ function MetaRow(props: { label: string; value: string; mono?: boolean }) {
   return (
     <div>
       <dt className="text-eyebrow">{props.label}</dt>
-      <dd className={props.mono ? "mt-1 font-mono text-xs break-all" : "mt-1 text-sm font-medium break-words"}>
+      <dd
+        className={
+          props.mono
+            ? "mt-1 font-mono text-xs break-all"
+            : "mt-1 text-sm font-medium break-words"
+        }
+      >
         {props.value}
       </dd>
     </div>
