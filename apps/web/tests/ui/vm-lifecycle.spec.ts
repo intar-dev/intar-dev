@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/test";
+import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
 
 test("the boot screen keeps the work order reachable and does not steal focus when the shell opens", async ({
@@ -572,6 +573,7 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
     ),
   ).toBe(false);
   await recap.getByRole("button", { name: "Watch replay" }).click();
+  await expect(recap.locator("[data-run-replay-carousel]")).toHaveCount(0);
   await expect
     .poll(() =>
       ui.server.requests.some((request) =>
@@ -590,7 +592,7 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   ).toBe(false);
 });
 
-test("a replay stays one disclosure and names only learner-facing parts", async ({
+test("a replay carousel keeps learner-facing parts in order", async ({
   page,
   ui,
 }) => {
@@ -599,34 +601,7 @@ test("a replay stays one disclosure and names only learner-facing parts", async 
     sessionRole: route.sessionRole,
     runState: "replay",
   });
-  const run = ui.server.state.run as {
-    vms: Array<Record<string, unknown>>;
-  };
-  const firstVm = run.vms[0];
-  if (!firstVm) throw new Error("run VM fixture missing");
-  run.vms = [
-    firstVm,
-    {
-      ...structuredClone(firstVm),
-      id: "run-vm-worker",
-      ordinal: 2,
-      scenarioVmId: "scenario-vm-worker",
-      scenarioVmName: "worker",
-      runtimeVmName: "run-active-worker",
-      hostname: "worker.intar.test",
-      sessionTimeline: [
-        {
-          index: 2,
-          startTimestampMs: 1_783_670_400_000,
-          durationMs: 60_000,
-          exitCode: 0,
-          castFilename: "worker-session.cast",
-          castArtifactId: "run-vm-worker:0",
-          transcriptTruncated: false,
-        },
-      ],
-    },
-  ];
+  ui.server.state.run = makeMultiReplayRun();
 
   await page.goto(route.path, { waitUntil: "domcontentloaded" });
   await ui.settle();
@@ -634,25 +609,89 @@ test("a replay stays one disclosure and names only learner-facing parts", async 
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
   await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
   await recap.getByRole("button", { name: "Watch replay" }).click();
-  await expect(recap.locator('[aria-label="Replay parts"]')).toBeVisible();
-  await expect(recap.getByRole("button", { name: /Part 1/ })).toBeVisible();
-  await expect(recap.getByRole("button", { name: /Part 2/ })).toBeVisible();
-
-  await recap.getByRole("button", { name: /Part 2/ }).click();
+  const carousel = recap.locator("[data-run-replay-carousel]");
+  const previous = carousel.getByRole("button", {
+    name: "Previous replay part",
+  });
+  const next = carousel.getByRole("button", { name: "Next replay part" });
+  const order = carousel.locator('ol[aria-label="Replay order"]');
+  await expect(carousel).toBeVisible();
+  await expect(carousel).toHaveAttribute("aria-roledescription", "carousel");
+  await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+    "Part 1 of 3 · web",
+  );
+  await expect(previous).toBeDisabled();
+  await expect(next).toBeEnabled();
+  await expect(order.getByRole("button")).toHaveCount(3);
+  await expect(order.getByRole("button").nth(0)).toHaveAccessibleName(
+    "Show Part 1 of 3, web",
+  );
+  await expect(order.getByRole("button").nth(1)).toHaveAccessibleName(
+    "Show Part 2 of 3, web",
+  );
+  await expect(order.getByRole("button").nth(2)).toHaveAccessibleName(
+    "Show Part 3 of 3, worker",
+  );
   await expect
     .poll(() =>
       ui.server.requests.some((request) =>
-        request.includes("/artifacts/run-vm-worker:0/content"),
+        request.includes("/artifacts/cast-web-1/content"),
       ),
     )
     .toBe(true);
+
+  await next.focus();
+  await next.press("Space");
+  await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+    "Part 2 of 3 · web",
+  );
+  await expect(next).toBeFocused();
+  await expect(
+    carousel.getByRole("status").filter({
+      hasText: "Showing Part 2 of 3",
+    }),
+  ).toHaveCount(1);
+  await expect
+    .poll(() =>
+      ui.server.requests.some((request) =>
+        request.includes("/artifacts/cast-web-2/content"),
+      ),
+    )
+    .toBe(true);
+
+  await next.press("Enter");
+  await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+    "Part 3 of 3 · worker",
+  );
+  await expect(previous).toBeEnabled();
+  await expect(next).toBeDisabled();
+  await expect
+    .poll(() =>
+      ui.server.requests.some((request) =>
+        request.includes("/artifacts/cast-worker-1/content"),
+      ),
+    )
+    .toBe(true);
+
+  await previous.click();
+  await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+    "Part 2 of 3 · web",
+  );
+  await order.getByRole("button").nth(0).click();
+  await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+    "Part 1 of 3 · web",
+  );
+  await expect(previous).toBeDisabled();
   await expect(recap.locator(".run-artifact-player")).toBeVisible();
 
   const text = await recap.innerText();
   for (const forbidden of [
-    "run-active-worker",
-    "worker.intar.test",
-    "worker-session.cast",
+    "hidden-worker-vm-id",
+    "hidden-worker-runtime",
+    "hidden-worker-host",
+    "hidden-web-01.cast",
+    "hidden-worker-01.cast",
+    "cast-web-1",
     "Transcript",
     "Command log",
     "Exit status",

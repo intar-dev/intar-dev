@@ -10,12 +10,15 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   CircleAlert,
   Clock3,
   PlayCircle,
 } from "lucide-react";
 import { AsciicastReplaySurface } from "@/components/app/RunArtifactViewer";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
+import { Button } from "@/components/ui/button";
 import {
   CourseCatalogLink,
   CourseScenarioLink,
@@ -414,7 +417,7 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
   );
 }
 
-function ReplayViewer({
+export function ReplayViewer({
   runId,
   parts,
 }: {
@@ -425,8 +428,12 @@ function ReplayViewer({
   const [selectedKey, setSelectedKey] = useState<string | null>(
     firstPart?.key ?? null,
   );
+  const [announcedPart, setAnnouncedPart] = useState<number | null>(null);
   const selected =
     parts.find((part) => part.key === selectedKey) ?? firstPart;
+  const selectedIndex = selected
+    ? parts.findIndex((part) => part.key === selected.key)
+    : -1;
 
   useEffect(() => {
     if (selectedKey && parts.some((part) => part.key === selectedKey)) {
@@ -435,18 +442,81 @@ function ReplayViewer({
     setSelectedKey(firstPart?.key ?? null);
   }, [firstPart?.key, parts, selectedKey]);
 
-  const contentUrl = selected?.castArtifactId
-    ? scenarioRunArtifactContentPath(runId, selected.castArtifactId)
-    : null;
-  const replay = useStreamedText(contentUrl, Boolean(contentUrl));
+  const selectPart = (index: number) => {
+    const part = parts[index];
+    if (!part || part.key === selected?.key) return;
+    setSelectedKey(part.key);
+    setAnnouncedPart(index);
+  };
+
+  if (!selected) {
+    return (
+      <p className="text-sm text-muted-foreground" role="status">
+        Replay unavailable.
+      </p>
+    );
+  }
+
+  if (parts.length === 1) {
+    return <ReplayPartSurface runId={runId} part={selected} />;
+  }
 
   return (
-    <div className="space-y-3">
-      {parts.length > 1 ? (
-        <div className="flex flex-wrap gap-2" aria-label="Replay parts">
-          {parts.map((part) => (
+    <div
+      role="region"
+      aria-roledescription="carousel"
+      aria-label="Replay parts"
+      data-run-replay-carousel
+      className="space-y-3"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
+        <div className="min-w-0">
+          <p className="text-caption">Replay sequence</p>
+          <p
+            className="mt-1 font-heading text-base font-semibold tracking-tight"
+            data-run-replay-position
+          >
+            {selected.partLabel} of {parts.length}
+            {selected.machineLabel ? ` · ${selected.machineLabel}` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Previous replay part"
+            disabled={selectedIndex <= 0}
+            onClick={() => selectPart(selectedIndex - 1)}
+          >
+            <ChevronLeft className="size-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Next replay part"
+            disabled={selectedIndex >= parts.length - 1}
+            onClick={() => selectPart(selectedIndex + 1)}
+          >
+            <ChevronRight className="size-4" aria-hidden="true" />
+          </Button>
+        </div>
+      </div>
+
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcedPart === null
+          ? ""
+          : `Showing Part ${announcedPart + 1} of ${parts.length}`}
+      </p>
+
+      <ol
+        aria-label="Replay order"
+        className="no-scrollbar flex max-w-full gap-2 overflow-x-auto pb-1"
+      >
+        {parts.map((part, index) => (
+          <li key={part.key} className="shrink-0">
             <button
-              key={part.key}
               type="button"
               className={cn(
                 "min-h-11 rounded-lg border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
@@ -454,35 +524,66 @@ function ReplayViewer({
                   ? "border-primary bg-primary text-primary-foreground"
                   : "border-border bg-background hover:bg-muted",
               )}
-              aria-pressed={selected?.key === part.key}
-              onClick={() => setSelectedKey(part.key)}
+              aria-current={selected.key === part.key ? "step" : undefined}
+              aria-label={`Show ${part.partLabel} of ${parts.length}${
+                part.machineLabel ? `, ${part.machineLabel}` : ""
+              }`}
+              onClick={() => selectPart(index)}
             >
-              {part.machineLabel ? `${part.machineLabel} · ` : ""}
               {part.partLabel}
+              {part.machineLabel ? (
+                <span className="ml-1 text-xs opacity-75">
+                  · {part.machineLabel}
+                </span>
+              ) : null}
             </button>
-          ))}
-        </div>
-      ) : null}
+          </li>
+        ))}
+      </ol>
 
-      {!selected?.castArtifactId ? (
-        <p className="text-sm text-muted-foreground" role="status">
-          Replay unavailable.
-        </p>
-      ) : replay.error ? (
-        <p className="text-sm text-muted-foreground" role="status">
-          Replay could not be loaded. Try again soon.
-        </p>
-      ) : (
-        <div className="overflow-hidden rounded-md border bg-terminal-background">
-          <AsciicastReplaySurface
-            key={selected.castArtifactId}
-            contentId={selected.castArtifactId}
-            content={replay.content}
-            loading={replay.loading}
-            minimal
-          />
-        </div>
-      )}
+      <div
+        key={selected.key}
+        role="group"
+        aria-roledescription="slide"
+        aria-label={`${selected.partLabel} of ${parts.length}${
+          selected.machineLabel ? `, ${selected.machineLabel}` : ""
+        }`}
+        data-run-replay-slide
+      >
+        <ReplayPartSurface runId={runId} part={selected} />
+      </div>
+    </div>
+  );
+}
+
+function ReplayPartSurface({
+  runId,
+  part,
+}: {
+  runId: string;
+  part: RunReplayPart;
+}) {
+  const contentUrl = part.castArtifactId
+    ? scenarioRunArtifactContentPath(runId, part.castArtifactId)
+    : null;
+  const replay = useStreamedText(contentUrl, Boolean(contentUrl));
+
+  return !part.castArtifactId ? (
+    <p className="text-sm text-muted-foreground" role="status">
+      Replay unavailable.
+    </p>
+  ) : replay.error ? (
+    <p className="text-sm text-muted-foreground" role="status">
+      Replay could not be loaded. Try again soon.
+    </p>
+  ) : (
+    <div className="overflow-hidden rounded-md border bg-terminal-background">
+      <AsciicastReplaySurface
+        contentId={part.castArtifactId}
+        content={replay.content}
+        loading={replay.loading}
+        minimal
+      />
     </div>
   );
 }

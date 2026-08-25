@@ -1,5 +1,8 @@
 import { expect, test } from "./fixtures/test";
-import { paginatedScenarioFixtures } from "./fixtures/data";
+import {
+  makeMultiReplayRun,
+  paginatedScenarioFixtures,
+} from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectRouteScreenshot } from "./support/screenshot";
 
@@ -127,19 +130,27 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "run-dense-checks-hints-dark-desktop");
   });
 
-  test("run · replay recap", async ({ page, ui }) => {
+  test("run · replay carousel", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "replay",
     });
+    ui.server.state.run = makeMultiReplayRun();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
     await expect(page.getByRole("heading", { name: "Solved" })).toBeVisible();
     await expect(
       page.getByRole("progressbar", { name: "Final checks progress" }),
     ).toBeVisible();
     await page.getByRole("button", { name: "Watch replay" }).click();
+    const carousel = page.locator("[data-run-replay-carousel]");
+    await carousel.getByRole("button", { name: "Next replay part" }).click();
+    await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+      "Part 2 of 3 · web",
+    );
     await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
-    await expectRouteScreenshot(page, "run-replay-recap-dark-desktop");
+    await expectRouteScreenshot(page, "run-replay-carousel-dark-desktop");
   });
 
   test("runs · finishing in background", async ({ page, ui }) => {
@@ -398,6 +409,26 @@ test.describe("focused mobile workspace", () => {
       page.getByRole("progressbar", { name: "Saving your run" }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-mobile");
+  });
+
+  test("replay carousel", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "replay",
+    });
+    ui.server.state.run = makeMultiReplayRun();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+    await page.getByRole("button", { name: "Watch replay" }).click();
+    const carousel = page.locator("[data-run-replay-carousel]");
+    await expect(carousel).toBeVisible();
+    await carousel.getByRole("button", { name: "Next replay part" }).click();
+    await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+      "Part 2 of 3 · web",
+    );
+    await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
+    await expectRouteScreenshot(page, "run-replay-carousel-dark-mobile");
   });
 });
 

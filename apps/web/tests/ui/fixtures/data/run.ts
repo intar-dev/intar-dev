@@ -242,3 +242,59 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
     ],
   };
 }
+
+/** A deliberately shuffled replay fixture that proves learner ordering. */
+export function makeMultiReplayRun(): Record<string, unknown> {
+  const run = makeRun("replay");
+  const vms = run.vms as Array<Record<string, unknown>>;
+  const sourceVm = vms[0];
+  if (!sourceVm) throw new Error("replay fixture needs a VM");
+
+  const webVm = structuredClone(sourceVm);
+  webVm.ordinal = 0;
+  webVm.scenarioVmName = "web";
+  webVm.sessionTimeline = [
+    {
+      index: 2,
+      startTimestampMs: FIXED_NOW - 20 * minute,
+      durationMs: 5 * minute,
+      exitCode: 0,
+      castFilename: "hidden-web-02.cast",
+      castArtifactId: "cast-web-2",
+      transcriptTruncated: false,
+    },
+    {
+      index: 1,
+      startTimestampMs: FIXED_NOW - 30 * minute,
+      durationMs: 8 * minute,
+      exitCode: 0,
+      castFilename: "hidden-web-01.cast",
+      castArtifactId: "cast-web-1",
+      transcriptTruncated: false,
+    },
+  ];
+
+  const workerVm = structuredClone(sourceVm);
+  workerVm.id = "hidden-worker-vm-id";
+  workerVm.ordinal = 1;
+  workerVm.scenarioVmId = "hidden-worker-scenario-id";
+  workerVm.scenarioVmName = "worker";
+  workerVm.runtimeVmName = "hidden-worker-runtime";
+  workerVm.hostname = "hidden-worker-host";
+  workerVm.sessionTimeline = [
+    {
+      index: 1,
+      startTimestampMs: FIXED_NOW - 10 * minute,
+      durationMs: 4 * minute,
+      exitCode: 0,
+      castFilename: "hidden-worker-01.cast",
+      castArtifactId: "cast-worker-1",
+      transcriptTruncated: false,
+    },
+  ];
+
+  // Reverse the source VMs and the web sessions. The learner view must still
+  // use VM ordinal and session index: web parts 1-2, then worker part 3.
+  run.vms = [workerVm, webVm];
+  return run;
+}

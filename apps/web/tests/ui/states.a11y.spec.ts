@@ -1,6 +1,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { buildTemporaryNativeSshCommand } from "@/lib/native-ssh";
 import { expect, test } from "./fixtures/test";
+import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
 import { expectNoHorizontalOverflow } from "./support/layout";
@@ -930,6 +931,53 @@ test.describe("focused state accessibility", () => {
     });
   }
 
+  test("multi-part replay uses an ordered accessible carousel", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "replay",
+    });
+    ui.server.state.run = makeMultiReplayRun();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await page.getByRole("button", { name: "Watch replay" }).click();
+    const carousel = page.locator("[data-run-replay-carousel]");
+    const previous = carousel.getByRole("button", {
+      name: "Previous replay part",
+    });
+    const next = carousel.getByRole("button", { name: "Next replay part" });
+    await expect(carousel).toBeVisible();
+    await expect(carousel).toHaveAttribute("role", "region");
+    await expect(carousel).toHaveAttribute("aria-roledescription", "carousel");
+    await expect(carousel).toHaveAccessibleName("Replay parts");
+    await expect(carousel.locator('[aria-roledescription="slide"]')).toHaveAccessibleName(
+      "Part 1 of 3, web",
+    );
+    await expectMinimumTarget(previous, "previous replay part");
+    await expectMinimumTarget(next, "next replay part");
+    await expect(previous).toBeDisabled();
+    await expect(next).toBeEnabled();
+    await expect(
+      carousel.locator('ol[aria-label="Replay order"] button'),
+    ).toHaveCount(3);
+    await expectLearnerSafeRunCopy(page.locator("main"));
+    for (const rawReplayValue of [
+      "hidden-worker-vm-id",
+      "hidden-worker-runtime",
+      "hidden-worker-host",
+      "hidden-web-01.cast",
+      "cast-web-1",
+    ]) {
+      await expect(page.locator("main")).not.toContainText(rawReplayValue);
+    }
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
   test("cancelled runs use the ended-early recap without teardown detail", async ({
     page,
     ui,
@@ -1551,6 +1599,41 @@ test.describe("small-screen access management", () => {
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("keeps ordered replay controls usable at 320px", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "replay",
+    });
+    ui.server.state.run = makeMultiReplayRun();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await page.getByRole("button", { name: "Watch replay" }).click();
+    const carousel = page.locator("[data-run-replay-carousel]");
+    await carousel.scrollIntoViewIfNeeded();
+    await expect(carousel).toBeVisible();
+    await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+      "Part 1 of 3 · web",
+    );
+    await expect(
+      carousel.locator('ol[aria-label="Replay order"] button'),
+    ).toHaveCount(3);
+    await expectMinimumTarget(
+      carousel.getByRole("button", { name: "Previous replay part" }),
+      "320px previous replay part",
+    );
+    await expectMinimumTarget(
+      carousel.getByRole("button", { name: "Next replay part" }),
+      "320px next replay part",
+    );
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });

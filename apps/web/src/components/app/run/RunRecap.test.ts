@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { RunRecap } from "./RunRecap";
+import { ReplayViewer, RunRecap } from "./RunRecap";
 import {
   getRunRecapObjectives,
   getRunRecapState,
@@ -101,12 +101,73 @@ describe("run recap model", () => {
     expect(getRunReplayAvailability(ready)).toBe("ready");
     expect(getRunReplayParts(ready)).toEqual([
       {
-        key: "replay-1-1",
+        key: "replay-cast-web",
         machineLabel: "web",
         partLabel: "Part 1",
         castArtifactId: "cast-web",
       },
     ]);
+  });
+
+  it("orders replay parts by machine ordinal and session index", () => {
+    const unordered = run({
+      replayState: "ready",
+      hasReplay: true,
+      vms: [
+        vm({
+          id: "worker-vm",
+          ordinal: 2,
+          scenarioVmName: "worker",
+          sessions: [session({ index: 1, castArtifactId: "cast-worker-1" })],
+        }),
+        vm({
+          id: "web-vm",
+          ordinal: 1,
+          scenarioVmName: "web",
+          sessions: [
+            session({ index: 2, castArtifactId: "cast-web-2" }),
+            session({ index: 3, castArtifactId: null }),
+            session({ index: 1, castArtifactId: "cast-web-1" }),
+          ],
+        }),
+      ],
+    });
+    const sourceVms = structuredClone(unordered.vms);
+
+    const orderedParts = getRunReplayParts(unordered);
+    expect(
+      orderedParts.map(
+        ({ machineLabel, partLabel, castArtifactId }) => ({
+          machineLabel,
+          partLabel,
+          castArtifactId,
+        }),
+      ),
+    ).toEqual([
+      {
+        machineLabel: "web",
+        partLabel: "Part 1",
+        castArtifactId: "cast-web-1",
+      },
+      {
+        machineLabel: "web",
+        partLabel: "Part 2",
+        castArtifactId: "cast-web-2",
+      },
+      {
+        machineLabel: "worker",
+        partLabel: "Part 3",
+        castArtifactId: "cast-worker-1",
+      },
+    ]);
+    expect(unordered.vms).toEqual(sourceVms);
+
+    const reorderedSource = structuredClone(unordered);
+    reorderedSource.vms.reverse();
+    for (const machine of reorderedSource.vms) {
+      machine.sessionTimeline?.reverse();
+    }
+    expect(getRunReplayParts(reorderedSource)).toEqual(orderedParts);
   });
 });
 
@@ -334,6 +395,54 @@ describe("RunRecap", () => {
     ]) {
       expect(markup).not.toContain(forbidden);
     }
+  });
+
+  it("uses a carousel only when several ordered replay parts exist", () => {
+    const multiParts = getRunReplayParts(
+      run({
+        replayState: "ready",
+        hasReplay: true,
+        vms: [
+          vm({
+            sessions: [
+              session({ index: 2, castArtifactId: "cast-2" }),
+              session({ index: 1, castArtifactId: "cast-1" }),
+            ],
+          }),
+        ],
+      }),
+    );
+    const multiPart = renderToStaticMarkup(
+      createElement(ReplayViewer, {
+        runId: "safe-run",
+        parts: multiParts,
+      }),
+    );
+    const singlePart = renderToStaticMarkup(
+      createElement(ReplayViewer, {
+        runId: "safe-run",
+        parts: [
+          {
+            key: "part-1",
+            machineLabel: null,
+            partLabel: "Part 1",
+            castArtifactId: "cast-only",
+          },
+        ],
+      }),
+    );
+
+    expect(multiPart).toContain("data-run-replay-carousel");
+    expect(multiPart).toContain('aria-roledescription="carousel"');
+    expect(multiPart).toContain("Part 1 of 2");
+    expect(multiPart).toContain('aria-label="Previous replay part"');
+    expect(multiPart).toContain('aria-label="Next replay part"');
+    expect(multiPart.indexOf("Show Part 1 of 2")).toBeLessThan(
+      multiPart.indexOf("Show Part 2 of 2"),
+    );
+    expect(singlePart).not.toContain("data-run-replay-carousel");
+    expect(singlePart).not.toContain("Previous replay part");
+    expect(singlePart).not.toContain("Next replay part");
   });
 
   it("names pending and unavailable replay states without a technical explanation", () => {

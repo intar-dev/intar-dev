@@ -5,5 +5,5 @@ export type {
   RunFixtureState,
   TerminalMode,
 } from "./data/shared";
-export { makeRun } from "./data/run";
+export { makeMultiReplayRun, makeRun } from "./data/run";
 export { createMockApiState } from "./data/state";

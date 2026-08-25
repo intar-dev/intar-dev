@@ -1,5 +1,8 @@
 import { expect, test } from "./fixtures/test";
-import { paginatedScenarioFixtures } from "./fixtures/data";
+import {
+  makeMultiReplayRun,
+  paginatedScenarioFixtures,
+} from "./fixtures/data";
 import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
@@ -1199,10 +1202,24 @@ test.describe("coarse pointer and mobile overflow", () => {
       theme: "dark",
       runState: "replay",
     });
+    ui.server.state.run = makeMultiReplayRun();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
 
     await page.getByRole("button", { name: "Watch replay" }).click();
+    const carousel = page.locator("[data-run-replay-carousel]");
+    const next = carousel.getByRole("button", { name: "Next replay part" });
+    await expect(carousel).toBeVisible();
+    await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+      "Part 1 of 3 · web",
+    );
     await expect(page.locator(".run-artifact-player")).toBeVisible();
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    await next.press("Space");
+    await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+      "Part 2 of 3 · web",
+    );
+    await expect(next).toBeFocused();
     expect(
       await coarsePointerTargetViolations(page),
       "expanded inline replay coarse-pointer controls smaller than 44px",
@@ -1234,6 +1251,34 @@ test("200% text remains operable without page overflow", async ({
   await expect(
     page.getByRole("heading", { name: "Repair a broken nginx service" }),
   ).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});
+
+test("replay carousel remains ordered at 200% text", async ({ page, ui }) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "replay",
+  });
+  ui.server.state.run = makeMultiReplayRun();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+  });
+
+  await page.getByRole("button", { name: "Watch replay" }).click();
+  const carousel = page.locator("[data-run-replay-carousel]");
+  await expect(carousel).toBeVisible();
+  await expect(carousel.locator("[data-run-replay-position]")).toHaveText(
+    "Part 1 of 3 · web",
+  );
+  await expect(
+    carousel.getByRole("button", { name: "Previous replay part" }),
+  ).toBeDisabled();
+  await expect(
+    carousel.getByRole("button", { name: "Next replay part" }),
+  ).toBeEnabled();
   await expectNoHorizontalOverflow(page);
 });
 

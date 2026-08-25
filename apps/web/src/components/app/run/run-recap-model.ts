@@ -106,29 +106,53 @@ export function getRunRecapObjectives(
 }
 
 /**
- * Replay parts are deliberately presentation-only. They do not include cast
- * filenames, timestamps, VM ids, runtime names, or terminal exit details.
+ * Replay parts are deliberately presentation-only. Machine ordinal and
+ * session index define the learner-visible order before contiguous Part labels
+ * are assigned. Filenames, timestamps, VM ids, runtime names, and terminal
+ * exit details never cross this boundary.
  */
 export function getRunReplayParts(run: ScenarioRunRecord): RunReplayPart[] {
   const hasMultipleMachines = run.vms.length > 1;
-  let partNumber = 0;
+  const orderedVms = run.vms
+    .map((vm, sourceIndex) => ({ vm, sourceIndex }))
+    .sort(
+      (left, right) =>
+        left.vm.ordinal - right.vm.ordinal ||
+        left.vm.scenarioVmId.localeCompare(right.vm.scenarioVmId) ||
+        left.vm.id.localeCompare(right.vm.id) ||
+        left.sourceIndex - right.sourceIndex,
+    );
 
-  return run.vms.flatMap((vm, vmIndex) =>
-    (vm.sessionTimeline ?? []).flatMap((session, sessionIndex) => {
-      if (!session.castArtifactId) return [];
-      partNumber += 1;
-      return [
-        {
-          key: `replay-${vmIndex + 1}-${sessionIndex + 1}`,
-          machineLabel: hasMultipleMachines
-            ? authoredMachineLabel(vm, vmIndex)
-            : null,
-          partLabel: `Part ${partNumber}`,
-          castArtifactId: session.castArtifactId,
-        },
-      ];
-    }),
+  const orderedSessions = orderedVms.flatMap(
+    ({ vm }, vmIndex) =>
+      (vm.sessionTimeline ?? [])
+        .map((session, sourceSessionIndex) => ({
+          vm,
+          vmIndex,
+          session,
+          sourceSessionIndex,
+        }))
+        .sort(
+          (left, right) =>
+            left.session.index - right.session.index ||
+            left.session.startTimestampMs - right.session.startTimestampMs ||
+            (left.session.castArtifactId ?? "").localeCompare(
+              right.session.castArtifactId ?? "",
+            ) ||
+            left.sourceSessionIndex - right.sourceSessionIndex,
+        ),
   );
+
+  return orderedSessions
+    .filter((entry) => entry.session.castArtifactId)
+    .map((entry, index) => ({
+      key: `replay-${entry.session.castArtifactId}`,
+      machineLabel: hasMultipleMachines
+        ? authoredMachineLabel(entry.vm, entry.vmIndex)
+        : null,
+      partLabel: `Part ${index + 1}`,
+      castArtifactId: entry.session.castArtifactId,
+    }));
 }
 
 export function getRunReplayAvailability(
