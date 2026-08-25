@@ -481,13 +481,23 @@ export function ScenarioRun() {
     title: attemptData?.title ?? "Lab run",
     status: useMemo(() => {
       if (!attemptData) return undefined;
+      if (showBackgroundStatus) {
+        return (
+          <ActiveRunStatus
+            tone="pending"
+            word="Saving"
+            compactWord="Saving"
+            pulse
+          />
+        );
+      }
       if (attemptData.outcome === "in_progress") {
-        if (showSelectedVmPreparation || showBackgroundStatus) {
+        if (showSelectedVmPreparation) {
           return (
             <ActiveRunStatus
               tone="pending"
-              word={showBackgroundStatus ? "Saving" : attemptData.phaseTitle}
-              compactWord={showBackgroundStatus ? "Saving" : "Starting"}
+              word={attemptData.phaseTitle}
+              compactWord="Starting"
               pulse
             />
           );

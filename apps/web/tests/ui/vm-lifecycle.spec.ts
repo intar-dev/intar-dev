@@ -536,8 +536,11 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   }
 
   ui.server.setRunState("rendering");
+  ui.server.state.run.outcome = "succeeded";
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingProgress).toBeVisible();
+  await expect(page.locator("header")).toContainText("Saving");
+  await expect(page.locator("header")).not.toContainText("Solved");
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
