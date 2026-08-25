@@ -2,6 +2,7 @@ import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
+  getLearnerChecks,
   getRunLearningPanelState,
   getRunLearningTriggerCopy,
   RunLearningPanel,
@@ -18,39 +19,27 @@ describe("run learning panel", () => {
   it("uses learner-facing app-bar labels with check and hint counts", () => {
     expect(
       getRunLearningTriggerCopy({
-        phase: "booting",
-        passedChecks: 0,
-        totalChecks: 3,
-        revealedHints: 0,
-        totalHints: 2,
-      }),
-    ).toEqual({
-      visibleLabel: "Work order",
-      accessibleLabel: "Work order. 0 of 3 checks verified. 0 of 2 hints revealed.",
-    });
-    expect(
-      getRunLearningTriggerCopy({
-        phase: "running",
         passedChecks: 1,
         totalChecks: 3,
         revealedHints: 1,
         totalHints: 2,
       }),
     ).toEqual({
-      visibleLabel: "Checks 1/3",
-      accessibleLabel: "Checks. 1 of 3 checks verified. 1 of 2 hints revealed.",
+      visibleLabel: "Hints 1/2",
+      accessibleLabel:
+        "Open lab guidance. 1 of 2 hints revealed. 1 of 3 checks verified.",
     });
     expect(
       getRunLearningTriggerCopy({
-        phase: "solved",
         passedChecks: 3,
         totalChecks: 3,
-        revealedHints: 2,
-        totalHints: 2,
+        revealedHints: 0,
+        totalHints: 0,
       }),
     ).toEqual({
-      visibleLabel: "Solved 3/3",
-      accessibleLabel: "Solved. 3 of 3 checks verified. 2 of 2 hints revealed.",
+      visibleLabel: "Guidance",
+      accessibleLabel:
+        "Open lab guidance. No hints are available. 3 of 3 checks verified.",
     });
   });
 
@@ -62,17 +51,95 @@ describe("run learning panel", () => {
     expect(getRunLearningPanelState("failed")).toBe("running");
   });
 
-  it("renders a real 44px app-bar button with a useful accessible name", () => {
+  it("renders 44px check controls and a compact guidance trigger", () => {
     const markup = renderToStaticMarkup(
       createElement(RunLearningPanel, panelProps()),
     );
 
     expect(markup).toContain('data-run-learning-panel-trigger="true"');
-    expect(markup).toContain("Checks 0/1");
+    expect(markup).toContain('data-run-check-indicators="true"');
+    expect(markup).toContain('data-run-check-indicator="true"');
+    expect(markup).toContain('data-run-check-count="true"');
+    expect(markup).toContain('data-run-compact-check-count="true"');
+    expect(markup).toContain('data-status="needs_repair"');
+    expect(markup).toContain("Hints 0/2");
     expect(markup).toContain(
-      'aria-label="Checks. 0 of 1 checks verified. 0 of 2 hints revealed."',
+      'aria-label="Open lab guidance. 0 of 2 hints revealed. 0 of 1 checks verified."',
     );
-    expect(markup).toContain("h-11");
+    expect(markup).toContain(
+      'aria-label="Open lab guidance. Make the site reachable. Needs repair."',
+    );
+    expect(markup).toContain("size-11");
+    expect(markup).not.toContain("http-ok");
+    expect(markup).not.toContain("nginx_http_request");
+  });
+
+  it("maps raw probes to learner-safe circle labels and states", () => {
+    const rawError = "connect ECONNREFUSED 10.0.0.7:443";
+    const checks = getLearnerChecks(
+      [
+        probe({ id: "nginx-service", status: "passed", error: rawError }),
+        probe({ id: "http-ok", status: "pending", error: rawError }),
+        probe({ id: "default-site", status: "fail", error: rawError }),
+      ],
+      [
+        { ...objective(), probeName: "nginx-service", title: "Start the web server" },
+        { ...objective(), probeName: "http-ok", title: "Make the site reachable" },
+        { ...objective(), probeName: "default-site", title: "Restore the default site" },
+      ],
+    );
+
+    expect(checks.map(({ title, status, statusLabel }) => ({
+      title,
+      status,
+      statusLabel,
+    }))).toEqual([
+      {
+        title: "Start the web server",
+        status: "verified",
+        statusLabel: "Verified",
+      },
+      {
+        title: "Make the site reachable",
+        status: "checking",
+        statusLabel: "Checking",
+      },
+      {
+        title: "Restore the default site",
+        status: "needs_repair",
+        statusLabel: "Needs repair",
+      },
+    ]);
+    expect(JSON.stringify(checks)).not.toContain(rawError);
+  });
+
+  it("keeps every check discoverable and shows a total for a long row", () => {
+    const probes = Array.from({ length: 8 }, (_, index) =>
+      probe({ id: `check-${index + 1}` }),
+    );
+    const objectives = probes.map((item, index) => ({
+      ...objective(),
+      probeName: item.id,
+      title: `Learner check ${index + 1}`,
+    }));
+    const markup = renderToStaticMarkup(
+      createElement(RunLearningPanel, {
+        ...panelProps(),
+        probes,
+        objectives,
+      }),
+    );
+
+    expect(
+      markup.match(/data-run-check-indicator="true"/g),
+    ).toHaveLength(8);
+    expect(markup).toContain('data-run-check-count="true"');
+    expect(markup).toContain('data-run-check-overflow="true"');
+    expect(markup).toContain('data-run-compact-check-overflow="true"');
+    expect(markup).toContain("0/8");
+    expect(markup).toContain("+3");
+    expect(markup).toContain("+4");
+    expect(markup).toContain("Learner check 8");
   });
 
   it("never renders raw probe diagnostics in learner checks", () => {
@@ -109,7 +176,7 @@ describe("run learning panel", () => {
   });
 
   it("scopes duplicate probe names to the selected authored machine", () => {
-    const markup = renderContent({
+    const overrides = {
       vmName: "worker",
       objectives: [
         { ...objective(), vmName: "web", title: "Web objective" },
@@ -131,12 +198,21 @@ describe("run learning panel", () => {
           bodyMarkdown: "Worker-only hint",
         }),
       ],
-    });
+    } satisfies Partial<ComponentProps<typeof RunLearningPanelContent>>;
+    const markup = renderContent(overrides);
+    const chromeMarkup = renderToStaticMarkup(
+      createElement(RunLearningPanel, {
+        ...panelProps(),
+        ...overrides,
+      }),
+    );
 
     expect(markup).toContain("Worker objective");
     expect(markup).not.toContain("Web objective");
     expect(markup).toContain("Worker-only hint");
     expect(markup).not.toContain("Web-only hint");
+    expect(chromeMarkup).toContain("Worker objective");
+    expect(chromeMarkup).not.toContain("Web objective");
   });
 
   it("keeps sealed hints quiet and only offers the next reveal in each ladder", () => {

@@ -819,6 +819,25 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
       })),
   );
   expect(offenders, "animations active under reduced motion").toEqual([]);
+
+  await page.locator("[data-run-learning-panel-trigger]").click();
+  const rail = page.getByRole("dialog", { name: "Lab guidance" });
+  await expect(rail).toBeVisible();
+  expect(
+    await rail.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return (
+        style.transitionProperty === "none" ||
+        style.transitionDuration
+          .split(",")
+          .every((entry) => Number.parseFloat(entry) === 0)
+      );
+    }),
+    "guidance rail transition must stop under reduced motion",
+  ).toBe(true);
+  await expect(
+    rail.getByRole("heading", { name: "Hints and guidance" }),
+  ).toBeVisible();
 });
 
 test.describe("wide operational density", () => {

@@ -172,6 +172,12 @@ describe("RunRecap", () => {
     expect(markup).toContain("Final checks");
     expect(markup).toContain("Restore the default site");
     expect(markup).toContain("Verified");
+    expect(markup).toContain('role="progressbar"');
+    expect(markup).toContain('aria-label="Final checks progress"');
+    expect(markup).toContain('aria-valuenow="1"');
+    expect(markup).toContain('aria-valuemax="1"');
+    expect(markup).toContain('aria-valuetext="1 of 1 final checks verified"');
+    expect(markup).toContain('data-status="verified"');
     expect(markup).toContain("00:30");
     expect(markup).toContain("1 hint");
     expect(markup).toContain("Full solution");
@@ -197,6 +203,53 @@ describe("RunRecap", () => {
     ]) {
       expect(markup).not.toContain(forbidden);
     }
+  });
+
+  it("shows partial objective progress without technical data", () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunRecap, {
+        run: run({
+          objectives: [
+            objective("service-running", "Start the web server"),
+            objective("site-reachable", "Make the site reachable"),
+            objective("default-site", "Restore the default site"),
+          ],
+          vms: [
+            vm({
+              scenarioProbes: [
+                probe({ id: "service-running", status: "pass" }),
+                probe({ id: "site-reachable", status: "fail" }),
+                probe({ id: "default-site", status: "pass" }),
+              ],
+            }),
+          ],
+        }),
+        nextAction: createElement("button", { type: "button" }, "Try again"),
+      }),
+    );
+
+    expect(markup).toContain('aria-valuenow="2"');
+    expect(markup).toContain('aria-valuemax="3"');
+    expect(markup).toContain('aria-valuetext="2 of 3 final checks verified"');
+    expect(markup.match(/data-status="verified"/g)).toHaveLength(2);
+    expect(markup.match(/data-status="needs_repair"/g)).toHaveLength(1);
+    expect(markup).not.toContain("hidden raw error");
+    expect(markup).not.toContain("command_json_path");
+  });
+
+  it("omits objective progress when the recap has no checks", () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunRecap, {
+        run: run({
+          objectives: [],
+          vms: [vm({ scenarioProbes: [] })],
+        }),
+        nextAction: createElement("button", { type: "button" }, "Continue"),
+      }),
+    );
+
+    expect(markup).not.toContain('role="progressbar"');
+    expect(markup).not.toContain("Final checks");
   });
 
   it("shows a calm saving state without internal teardown progress", () => {
@@ -346,6 +399,17 @@ function run(overrides: Partial<ScenarioRunRecord> = {}): ScenarioRunRecord {
     replayArtifacts: [],
     vms,
     ...overrides,
+  };
+}
+
+function objective(probeName: string, title: string) {
+  return {
+    probeName,
+    vmName: "web",
+    label: "hidden objective label",
+    title,
+    bodyMarkdown: "hidden objective detail",
+    hintCount: 0,
   };
 }
 

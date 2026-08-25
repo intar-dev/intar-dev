@@ -32,6 +32,7 @@ import {
   getRunRecapState,
   getRunReplayAvailability,
   getRunReplayParts,
+  type RunRecapObjective,
   type RunReplayPart,
 } from "./run-recap-model";
 import type { ScenarioRunRecord } from "./run-types";
@@ -84,6 +85,9 @@ export function RunRecap({
   }
 
   const objectives = getRunRecapObjectives(run);
+  const verifiedObjectives = objectives.filter(
+    (objective) => objective.status === "verified",
+  ).length;
   const revealedHints = run.hints.filter((hint) => hint.revealed).length;
   const solutionUsed = run.solution.assisted || run.solution.revealed;
 
@@ -117,10 +121,13 @@ export function RunRecap({
               Final checks
             </h2>
             <span className="text-xs text-muted-foreground tabular-nums">
-              {objectives.filter((objective) => objective.status === "verified").length}/
-              {objectives.length} verified
+              {verifiedObjectives}/{objectives.length} verified
             </span>
           </div>
+          <RunRecapProgress
+            objectives={objectives}
+            verifiedObjectives={verifiedObjectives}
+          />
           <ol className="mt-3 divide-y border-y">
             {objectives.map((objective) => (
               <li
@@ -209,6 +216,42 @@ export function RunRecap({
         </div>
       </section>
     </section>
+  );
+}
+
+function RunRecapProgress({
+  objectives,
+  verifiedObjectives,
+}: {
+  objectives: readonly RunRecapObjective[];
+  verifiedObjectives: number;
+}) {
+  return (
+    <div
+      role="progressbar"
+      aria-label="Final checks progress"
+      aria-valuemin={0}
+      aria-valuemax={objectives.length}
+      aria-valuenow={verifiedObjectives}
+      aria-valuetext={`${verifiedObjectives} of ${objectives.length} final checks verified`}
+      data-run-recap-progress
+      className="mt-4 flex flex-wrap gap-2"
+    >
+      {objectives.map((objective) => (
+        <span
+          key={objective.key}
+          aria-hidden="true"
+          data-run-recap-progress-segment
+          data-status={objective.status}
+          className={cn(
+            "size-3 rounded-full border",
+            objective.status === "verified"
+              ? "border-success bg-success"
+              : "border-destructive bg-transparent",
+          )}
+        />
+      ))}
+    </div>
   );
 }
 

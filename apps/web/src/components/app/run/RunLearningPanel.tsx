@@ -4,8 +4,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
-import { Popover } from "@base-ui/react/popover";
 import {
   CheckCircle2,
   CircleAlert,
@@ -36,6 +36,11 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
   isVerificationPassed,
@@ -80,6 +85,8 @@ export interface RunLearningPanelProps {
 export interface RunLearningPanelContentProps
   extends Omit<RunLearningPanelProps, "className"> {
   className?: string;
+  /** Desktop check circles replace the repeated list; mobile keeps the list. */
+  showCheckList?: boolean;
 }
 
 interface HintGroup {
@@ -91,6 +98,19 @@ interface HintGroup {
 export interface RunLearningTriggerCopy {
   visibleLabel: string;
   accessibleLabel: string;
+}
+
+export type LearnerCheckStatus =
+  | "verified"
+  | "checking"
+  | "needs_repair";
+
+export interface LearnerCheck {
+  /** React identity only. Never render this internal value. */
+  key: string;
+  title: string;
+  status: LearnerCheckStatus;
+  statusLabel: "Verified" | "Checking" | "Needs repair";
 }
 
 /**
@@ -111,52 +131,46 @@ export function getRunLearningPanelState(
 }
 
 export function getRunLearningTriggerCopy(input: {
-  phase: RunLearningPanelProps["phase"];
   passedChecks: number;
   totalChecks: number;
   revealedHints: number;
   totalHints: number;
 }): RunLearningTriggerCopy {
-  const state = getRunLearningPanelState(input.phase);
   const checks = `${input.passedChecks} of ${input.totalChecks} checks verified`;
   const hints = input.totalHints
     ? `${input.revealedHints} of ${input.totalHints} hints revealed`
-    : "no hints available";
-
-  switch (state) {
-    case "booting":
-      return {
-        visibleLabel: "Work order",
-        accessibleLabel: `Work order. ${checks}. ${hints}.`,
-      };
-    case "solved":
-      return {
-        visibleLabel: `Solved ${input.passedChecks}/${input.totalChecks}`,
-        accessibleLabel: `Solved. ${checks}. ${hints}.`,
-      };
-    default:
-      return {
-        visibleLabel: `Checks ${input.passedChecks}/${input.totalChecks}`,
-        accessibleLabel: `Checks. ${checks}. ${hints}.`,
-      };
-  }
+    : "No hints are available";
+  return {
+    visibleLabel: input.totalHints
+      ? `Hints ${input.revealedHints}/${input.totalHints}`
+      : "Guidance",
+    accessibleLabel: `Open lab guidance. ${hints}. ${checks}.`,
+  };
 }
 
 /**
- * Shared learner panel for the app bar. Desktop and tablet use an anchored,
- * non-modal popover; narrow screens use a bottom sheet. The content stays in
- * one component so polling cannot make the two experiences drift apart.
+ * Shared learner guidance for the app bar. Compact check circles stay visible
+ * while desktop and tablet guidance slides in as a narrow right rail. Phones
+ * retain the bottom sheet. The content stays shared so polling cannot make the
+ * two experiences drift apart.
  */
 export function RunLearningPanel(props: RunLearningPanelProps) {
   const compact = useCompactLearningPanel();
+  const expandedChecks = useExpandedCheckIndicators();
+  const [open, setOpen] = useState(false);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
   const passedChecks = countPassedChecks(props.probes);
   const hints = useMemo(
     () => scopeHintsToVm(props.hints, props.vmName),
     [props.hints, props.vmName],
   );
+  const objectives = useMemo(
+    () => scopeObjectivesToVm(props.objectives, props.vmName),
+    [props.objectives, props.vmName],
+  );
   const revealedHints = countRevealedHints(hints);
   const copy = getRunLearningTriggerCopy({
-    phase: props.phase,
     passedChecks,
     totalChecks: props.probes.length,
     revealedHints,
@@ -167,78 +181,94 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
     totalChecks: props.probes.length,
   });
 
+  useEffect(() => {
+    if (wasOpenRef.current && !open) {
+      const opener = openerRef.current;
+      const frame = window.requestAnimationFrame(() =>
+        opener?.focus({ preventScroll: true }),
+      );
+      wasOpenRef.current = open;
+      return () => window.cancelAnimationFrame(frame);
+    }
+    wasOpenRef.current = open;
+    return undefined;
+  }, [open]);
+
+  const rememberOpener = (event: ReactMouseEvent<HTMLElement>) => {
+    openerRef.current = event.currentTarget;
+  };
+  const openFromCheck = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    rememberOpener(event);
+    setOpen(true);
+  };
   const trigger = renderRunLearningPanelTrigger({
-    visibleLabel: copy.visibleLabel,
-    accessibleLabel: copy.accessibleLabel,
+    copy,
+    probes: props.probes,
+    showCompactChecks: !expandedChecks,
+    onOpen: rememberOpener,
   });
-  const content = <RunLearningPanelContent {...props} hints={hints} />;
+  const content = (
+    <RunLearningPanelContent
+      {...props}
+      hints={hints}
+      showCheckList={!expandedChecks}
+    />
+  );
 
   return (
     <>
-      {compact ? (
-        <Sheet>
-          <SheetTrigger render={trigger} />
-          <SheetContent
-            side="bottom"
-            showCloseButton={false}
-            className="max-h-[min(78dvh,42rem)] rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))]"
-          >
-            <SheetHeader className="sr-only">
-              <SheetTitle>Lab guidance</SheetTitle>
-              <SheetDescription>
-                Your checks, hints, and solution.
-              </SheetDescription>
-            </SheetHeader>
-            <SheetClose
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="absolute top-2 right-2 z-30"
-                  aria-label="Close lab guidance"
-                />
-              }
+      <div
+        data-run-learning-chrome
+        className="flex h-11 shrink-0 items-center gap-1"
+      >
+        <CheckIndicatorRow
+          probes={props.probes}
+          objectives={objectives}
+          expanded={expandedChecks}
+          onOpen={openFromCheck}
+        />
+        {compact ? (
+          <Sheet open={open} onOpenChange={setOpen}>
+            <SheetTrigger render={trigger} />
+            <SheetContent
+              side="bottom"
+              showCloseButton={false}
+              className="max-h-[min(78dvh,42rem)] rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] motion-reduce:transition-none"
             >
-              <X className="size-4" aria-hidden="true" />
-            </SheetClose>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
-              {content}
-            </div>
-          </SheetContent>
-        </Sheet>
-      ) : (
-        <Popover.Root modal={false}>
-          <Popover.Trigger render={trigger} />
-          <Popover.Portal>
-            <Popover.Positioner side="bottom" align="end" sideOffset={8}>
-              <Popover.Popup
-                className="z-50 w-[min(26rem,calc(100vw-1rem))] overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-lg outline-none motion-safe:duration-150 data-ending-style:opacity-0 data-ending-style:translate-y-1 data-starting-style:opacity-0 data-starting-style:translate-y-1"
-                aria-label="Lab guidance"
-              >
-                <Popover.Title className="sr-only">Lab guidance</Popover.Title>
-                <Popover.Description className="sr-only">
-                  Your checks, hints, and solution.
-                </Popover.Description>
-                <Popover.Close
-                  render={
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="absolute top-2 right-2 z-30"
-                      aria-label="Close lab guidance"
-                    />
-                  }
-                >
-                  <X className="size-4" aria-hidden="true" />
-                </Popover.Close>
-                <div className="max-h-[min(42rem,calc(100dvh-var(--app-bar-h,3rem)-1rem))] overflow-y-auto overscroll-contain px-4 pb-4">
-                  {content}
-                </div>
-              </Popover.Popup>
-            </Popover.Positioner>
-          </Popover.Portal>
-        </Popover.Root>
-      )}
+              <LearningPanelA11yHeader />
+              <LearningPanelClose />
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
+                {content}
+              </div>
+            </SheetContent>
+          </Sheet>
+        ) : (
+          <Sheet
+            open={open}
+            onOpenChange={setOpen}
+            modal={false}
+            disablePointerDismissal
+          >
+            <SheetTrigger render={trigger} />
+            <SheetContent
+              side="right"
+              showCloseButton={false}
+              showOverlay={false}
+              style={{
+                top: "var(--app-bar-h)",
+                height: "calc(100dvh - var(--app-bar-h))",
+              }}
+              className="w-[min(22rem,calc(100vw-1rem))] border-l shadow-xl duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+            >
+              <LearningPanelA11yHeader />
+              <LearningPanelClose />
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
+                {content}
+              </div>
+            </SheetContent>
+          </Sheet>
+        )}
+      </div>
       <p aria-live="polite" aria-atomic="true" className="sr-only">
         {announcement}
       </p>
@@ -254,54 +284,60 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
   const headingId = useId();
   const learningStartRef = useRef<HTMLDivElement>(null);
   const state = getRunLearningPanelState(props.phase);
+  const showCheckList = props.showCheckList ?? true;
+  const showWorkOrderOrChecks = state === "booting" || showCheckList;
   const passedChecks = countPassedChecks(props.probes);
   const hints = useMemo(
     () => scopeHintsToVm(props.hints, props.vmName),
     [props.hints, props.vmName],
   );
   const revealedHints = countRevealedHints(hints);
-  const objectives = useMemo(() => {
-    if (!props.vmName) return props.objectives;
-    const scoped = props.objectives.filter(
-      (objective) => objective.vmName === props.vmName,
-    );
-    return scoped.length ? scoped : props.objectives;
-  }, [props.objectives, props.vmName]);
+  const objectives = useMemo(
+    () => scopeObjectivesToVm(props.objectives, props.vmName),
+    [props.objectives, props.vmName],
+  );
 
   return (
     <div
       data-run-learning-panel-content
       className={cn("space-y-6 pb-2", props.className)}
     >
-      <button
-        type="button"
-        data-run-learning-sticky-summary
-        className="sticky top-0 z-20 -mx-4 flex min-h-11 w-[calc(100%+2rem)] items-center justify-between gap-3 border-b bg-popover py-2 pr-14 pl-4 text-sm font-semibold shadow-[0_1px_0_var(--border)] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40"
-        aria-label={`${state === "booting" ? "Show work order" : "Show checks"}. ${passedChecks} of ${props.probes.length} verified.`}
-        onClick={() =>
-          learningStartRef.current?.scrollIntoView({ block: "start" })
-        }
-      >
-        <span className="inline-flex items-center gap-2">
-          <ListChecks className="size-4 text-primary" aria-hidden="true" />
-          {state === "booting"
-            ? "Work order"
-            : state === "solved"
-              ? "Solved"
-              : "Checks"}
-        </span>
-        <span className="text-xs text-muted-foreground tabular-nums">
-          {passedChecks}/{props.probes.length}
-        </span>
-      </button>
+      {showWorkOrderOrChecks ? (
+        <button
+          type="button"
+          data-run-learning-sticky-summary
+          className="sticky top-0 z-20 -mx-4 flex min-h-11 w-[calc(100%+2rem)] items-center justify-between gap-3 border-b bg-popover py-2 pr-14 pl-4 text-sm font-semibold shadow-[0_1px_0_var(--border)] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40"
+          aria-label={`${state === "booting" ? "Show work order" : "Show checks"}. ${passedChecks} of ${props.probes.length} verified.`}
+          onClick={() =>
+            learningStartRef.current?.scrollIntoView({ block: "start" })
+          }
+        >
+          <span className="inline-flex items-center gap-2">
+            <ListChecks className="size-4 text-primary" aria-hidden="true" />
+            {state === "booting"
+              ? "Work order"
+              : state === "solved"
+                ? "Solved"
+                : "Checks"}
+          </span>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {passedChecks}/{props.probes.length}
+          </span>
+        </button>
+      ) : null}
 
       <header className="pr-12">
         <p className="text-eyebrow">Lab guidance</p>
         <h2 id={headingId} className="mt-1 font-heading text-lg font-semibold">
-          {panelHeading(state)}
+          {panelHeading(state, showCheckList)}
         </h2>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          {panelSummary({ state, passedChecks, totalChecks: props.probes.length })}
+          {panelSummary({
+            state,
+            passedChecks,
+            totalChecks: props.probes.length,
+            showCheckList,
+          })}
         </p>
       </header>
 
@@ -323,17 +359,19 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
         </section>
       ) : null}
 
-      <div ref={learningStartRef} className="scroll-mt-12">
-        {state === "booting" ? (
-          <WorkOrder objectives={objectives} />
-        ) : (
-          <Checks
-            probes={props.probes}
-            objectives={objectives}
-            passedChecks={passedChecks}
-          />
-        )}
-      </div>
+      {showWorkOrderOrChecks ? (
+        <div ref={learningStartRef} className="scroll-mt-12">
+          {state === "booting" ? (
+            <WorkOrder objectives={objectives} />
+          ) : (
+            <Checks
+              probes={props.probes}
+              objectives={objectives}
+              passedChecks={passedChecks}
+            />
+          )}
+        </div>
+      ) : null}
 
       <Hints
         hints={hints}
@@ -356,20 +394,214 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
   );
 }
 
-function renderRunLearningPanelTrigger(props: RunLearningTriggerCopy) {
+function renderRunLearningPanelTrigger(props: {
+  copy: RunLearningTriggerCopy;
+  probes: readonly ScenarioProbeStatus[];
+  showCompactChecks: boolean;
+  onOpen: (event: ReactMouseEvent<HTMLElement>) => void;
+}) {
   return (
     <Button
       type="button"
       variant="outline"
       size="default"
-      className="max-w-44 px-3 sm:max-w-none"
-      aria-label={props.accessibleLabel}
+      className="gap-1.5 px-2 md:px-3"
+      aria-label={props.copy.accessibleLabel}
       data-run-learning-panel-trigger
+      onClick={props.onOpen}
     >
-      <ListChecks className="size-4" aria-hidden="true" />
-      <span className="truncate">{props.visibleLabel}</span>
+      <CompactCheckDots
+        probes={props.probes}
+        show={props.showCompactChecks}
+      />
+      <Lightbulb className="size-4" aria-hidden="true" />
+      <span className="hidden sm:inline">{props.copy.visibleLabel}</span>
     </Button>
   );
+}
+
+function LearningPanelA11yHeader() {
+  return (
+    <SheetHeader className="sr-only">
+      <SheetTitle>Lab guidance</SheetTitle>
+      <SheetDescription>Your checks, hints, and solution.</SheetDescription>
+    </SheetHeader>
+  );
+}
+
+function LearningPanelClose() {
+  return (
+    <SheetClose
+      render={
+        <Button
+          variant="ghost"
+          size="icon"
+          className="absolute top-2 right-2 z-30"
+          aria-label="Close lab guidance"
+        />
+      }
+    >
+      <X className="size-4" aria-hidden="true" />
+    </SheetClose>
+  );
+}
+
+function CheckIndicatorRow(props: {
+  probes: readonly ScenarioProbeStatus[];
+  objectives: readonly ScenarioObjective[];
+  expanded: boolean;
+  onOpen: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}) {
+  const checks = getLearnerChecks(props.probes, props.objectives);
+  const passedChecks = checks.filter(
+    (check) => check.status === "verified",
+  ).length;
+
+  if (!checks.length) return null;
+
+  return (
+    <div
+      role="group"
+      aria-label={`${passedChecks} of ${checks.length} checks verified`}
+      data-run-check-indicators
+      className={cn("h-11 items-center", props.expanded ? "flex" : "hidden")}
+    >
+      <div
+        className={cn(
+          "flex items-center",
+          checks.length > 5 &&
+            "max-w-36 overflow-x-auto overscroll-x-contain [scrollbar-width:none] lg:max-w-56 xl:max-w-[22rem] [&::-webkit-scrollbar]:hidden",
+        )}
+      >
+        {checks.map((check) => {
+          return (
+            <Tooltip key={check.key}>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Open lab guidance. ${check.title}. ${check.statusLabel}.`}
+                    aria-haspopup="dialog"
+                    data-run-check-indicator
+                    data-status={check.status}
+                    className="rounded-full"
+                    onClick={props.onOpen}
+                  >
+                    <CheckStatusIcon status={check.status} />
+                  </Button>
+                }
+              />
+              <TooltipContent
+                side="bottom"
+                sideOffset={6}
+                className="max-w-64 motion-reduce:animate-none"
+                data-run-check-tooltip
+              >
+                <span className="font-semibold">{check.title}</span>
+                <span aria-hidden="true">·</span>
+                <span>{check.statusLabel}</span>
+              </TooltipContent>
+            </Tooltip>
+          );
+        })}
+      </div>
+      {checks.length > 5 ? (
+        <span
+          data-run-check-overflow
+          className="ml-1 text-xs text-muted-foreground tabular-nums xl:hidden"
+          aria-hidden="true"
+        >
+          +{checks.length - 5}
+        </span>
+      ) : null}
+      {checks.length > 8 ? (
+        <span
+          data-run-check-overflow
+          className="ml-1 hidden text-xs text-muted-foreground tabular-nums xl:inline"
+          aria-hidden="true"
+        >
+          +{checks.length - 8}
+        </span>
+      ) : null}
+      <span
+        data-run-check-count
+        className="ml-1 text-xs text-muted-foreground tabular-nums"
+        aria-hidden="true"
+      >
+        {passedChecks}/{checks.length}
+      </span>
+    </div>
+  );
+}
+
+function CompactCheckDots({
+  probes,
+  show,
+}: {
+  probes: readonly ScenarioProbeStatus[];
+  show: boolean;
+}) {
+  if (!probes.length) return null;
+  const passedChecks = countPassedChecks(probes);
+  const visibleProbes = probes.slice(0, 4);
+  const remainingChecks = probes.length - visibleProbes.length;
+  return (
+    <span
+      className={cn("items-center gap-1", show ? "flex" : "hidden")}
+      aria-hidden="true"
+      data-run-compact-check-dots
+    >
+      {visibleProbes.map((probe, index) => {
+        const status = learnerCheckStatus(probe.status);
+        return (
+          <span
+            key={`${probe.id}:${index}`}
+            className={cn(
+              "size-2 rounded-full border",
+              status === "verified"
+                ? "border-success bg-success"
+                : status === "checking"
+                  ? "border-warning bg-transparent"
+                  : "border-destructive bg-destructive",
+            )}
+          />
+        );
+      })}
+      {remainingChecks ? (
+        <span
+          data-run-compact-check-overflow
+          className="text-[0.6875rem] text-muted-foreground tabular-nums"
+        >
+          +{remainingChecks}
+        </span>
+      ) : null}
+      <span
+        data-run-compact-check-count
+        className="ml-0.5 text-xs text-muted-foreground tabular-nums"
+      >
+        {passedChecks}/{probes.length}
+      </span>
+    </span>
+  );
+}
+
+function CheckStatusIcon({ status }: { status: LearnerCheckStatus }) {
+  if (status === "verified") {
+    return (
+      <CheckCircle2 className="size-4 text-success" aria-hidden="true" />
+    );
+  }
+  if (status === "checking") {
+    return (
+      <LoaderCircle
+        className="size-4 text-warning motion-safe:animate-spin"
+        aria-hidden="true"
+      />
+    );
+  }
+  return <CircleAlert className="size-4 text-destructive" aria-hidden="true" />;
 }
 
 function WorkOrder({ objectives }: { objectives: readonly ScenarioObjective[] }) {
@@ -411,6 +643,8 @@ function Checks(props: {
   objectives: readonly ScenarioObjective[];
   passedChecks: number;
 }) {
+  const checks = getLearnerChecks(props.probes, props.objectives);
+
   return (
     <section aria-labelledby="run-learning-checks-heading">
       <div className="flex items-center justify-between gap-3">
@@ -419,65 +653,36 @@ function Checks(props: {
         </p>
         <span
           className="shrink-0 text-xs text-muted-foreground tabular-nums"
-          aria-label={`${props.passedChecks} of ${props.probes.length} checks verified`}
+          aria-label={`${props.passedChecks} of ${checks.length} checks verified`}
         >
-          {props.passedChecks}/{props.probes.length} verified
+          {props.passedChecks}/{checks.length} verified
         </span>
       </div>
-      {props.probes.length ? (
+      {checks.length ? (
         <ol className="mt-3 divide-y border-y">
-          {props.probes.map((probe, index) => {
-            const objectiveIndex = props.objectives.findIndex(
-              (candidate) => candidate.probeName === probe.id,
-            );
-            const objective =
-              objectiveIndex >= 0
-                ? (props.objectives[objectiveIndex] ?? null)
-                : null;
-            const status = learnerCheckStatus(probe.status);
-
+          {checks.map((check) => {
             return (
               <li
-                key={`${probe.id}:${index}`}
+                key={check.key}
                 className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 py-3"
               >
-                {status === "verified" ? (
-                  <CheckCircle2
-                    className="mt-0.5 size-4 text-success"
-                    aria-hidden="true"
-                  />
-                ) : status === "checking" ? (
-                  <LoaderCircle
-                    className="mt-0.5 size-4 text-warning motion-safe:animate-spin"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <CircleAlert
-                    className="mt-0.5 size-4 text-destructive"
-                    aria-hidden="true"
-                  />
-                )}
+                <span className="mt-0.5">
+                  <CheckStatusIcon status={check.status} />
+                </span>
                 <span className="min-w-0 text-sm font-medium leading-6">
-                  {repairObjectiveTitle(
-                    objective,
-                    objectiveIndex >= 0 ? objectiveIndex : index,
-                  )}
+                  {check.title}
                 </span>
                 <span
                   className={cn(
                     "pt-0.5 text-xs font-medium whitespace-nowrap",
-                    status === "verified"
+                    check.status === "verified"
                       ? "text-success"
-                      : status === "checking"
+                      : check.status === "checking"
                         ? "text-warning"
                         : "text-destructive",
                   )}
                 >
-                  {status === "verified"
-                    ? "Verified"
-                    : status === "checking"
-                      ? "Checking"
-                      : "Needs repair"}
+                  {check.statusLabel}
                 </span>
               </li>
             );
@@ -789,13 +994,44 @@ function countPassedChecks(probes: readonly ScenarioProbeStatus[]) {
   return probes.filter((probe) => isVerificationPassed(probe.status)).length;
 }
 
-function learnerCheckStatus(status: string) {
+function learnerCheckStatus(status: string): LearnerCheckStatus {
   if (isVerificationPassed(status)) return "verified" as const;
   return ["", "pending", "unknown", "queued", "checking"].includes(
     status.trim().toLowerCase(),
   )
     ? ("checking" as const)
     : ("needs_repair" as const);
+}
+
+function learnerCheckStatusLabel(
+  status: LearnerCheckStatus,
+): LearnerCheck["statusLabel"] {
+  if (status === "verified") return "Verified";
+  if (status === "checking") return "Checking";
+  return "Needs repair";
+}
+
+export function getLearnerChecks(
+  probes: readonly ScenarioProbeStatus[],
+  objectives: readonly ScenarioObjective[],
+): LearnerCheck[] {
+  return probes.map((probe, index) => {
+    const objectiveIndex = objectives.findIndex(
+      (candidate) => candidate.probeName === probe.id,
+    );
+    const objective =
+      objectiveIndex >= 0 ? (objectives[objectiveIndex] ?? null) : null;
+    const status = learnerCheckStatus(probe.status);
+    return {
+      key: `${probe.id}:${index}`,
+      title: repairObjectiveTitle(
+        objective,
+        objectiveIndex >= 0 ? objectiveIndex : index,
+      ),
+      status,
+      statusLabel: learnerCheckStatusLabel(status),
+    };
+  });
 }
 
 function countRevealedHints(hints: readonly ScenarioRunHint[]) {
@@ -814,14 +1050,23 @@ function scopeHintsToVm(
   });
 }
 
-function panelHeading(state: LearningPanelState) {
+function scopeObjectivesToVm(
+  objectives: readonly ScenarioObjective[],
+  vmName: string | null | undefined,
+) {
+  if (!vmName) return objectives;
+  const scoped = objectives.filter((objective) => objective.vmName === vmName);
+  return scoped.length ? scoped : objectives;
+}
+
+function panelHeading(state: LearningPanelState, showCheckList: boolean) {
   switch (state) {
     case "booting":
       return "Work order";
     case "solved":
       return "Lab solved";
     default:
-      return "Checks and guidance";
+      return showCheckList ? "Checks and guidance" : "Hints and guidance";
   }
 }
 
@@ -829,6 +1074,7 @@ function panelSummary(input: {
   state: LearningPanelState;
   passedChecks: number;
   totalChecks: number;
+  showCheckList: boolean;
 }) {
   if (input.state === "booting") {
     return "Read the work order now. Checks will appear when the lab is ready.";
@@ -838,6 +1084,9 @@ function panelSummary(input: {
   }
   if (!input.totalChecks) {
     return "Checks will appear when they are ready.";
+  }
+  if (!input.showCheckList) {
+    return "Use a hint when you need a nudge. Your check circles stay visible above.";
   }
   return `${input.passedChecks} of ${input.totalChecks} checks are verified.`;
 }
@@ -854,6 +1103,22 @@ function useCompactLearningPanel() {
   }, []);
 
   return compact;
+}
+
+function useExpandedCheckIndicators() {
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(
+      "(min-width: 1024px) and (hover: hover) and (pointer: fine)",
+    );
+    const update = () => setExpanded(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return expanded;
 }
 
 function useCheckAnnouncement(input: {

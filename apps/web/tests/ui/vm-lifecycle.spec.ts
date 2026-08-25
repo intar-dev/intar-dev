@@ -17,9 +17,9 @@ test("the boot screen keeps the work order reachable and does not steal focus wh
   await expect(page.getByText(/Review the work order while/i)).toBeVisible();
 
   const trigger = page.getByRole("button", {
-    name: "Work order. 0 of 2 checks verified. 0 of 2 hints revealed.",
+    name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
   });
-  await expect(trigger).toHaveText("Work order");
+  await expect(trigger).toContainText("Hints 0/2");
 
   await trigger.focus();
   await page.keyboard.press("Enter");
@@ -44,13 +44,13 @@ test("the boot screen keeps the work order reachable and does not steal focus wh
   await expect(page.locator(".xterm")).toBeVisible({ timeout: 1_000 });
   await expect(
     page.getByRole("button", {
-      name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+      name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
     }),
   ).toBeVisible();
   await expect(focusTarget).toBeFocused();
 });
 
-test("the desktop guidance popover keeps checks, progressive hints, and solution help learner-safe", async ({
+test("the desktop guidance rail keeps progressive hints and solution help learner-safe", async ({
   page,
   ui,
 }) => {
@@ -61,9 +61,16 @@ test("the desktop guidance popover keeps checks, progressive hints, and solution
   });
 
   const trigger = page.getByRole("button", {
-    name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+    name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
   });
-  await expect(trigger).toHaveText("Checks 0/2");
+  await expect(trigger).toContainText("Hints 0/2");
+  const indicators = page.locator("[data-run-check-indicator]");
+  await expect(indicators).toHaveCount(2);
+  await expect(indicators.first()).toHaveAttribute(
+    "data-status",
+    "needs_repair",
+  );
+  await expect(indicators.nth(1)).toHaveAttribute("data-status", "checking");
   await expect(page.getByRole("complementary", { name: "Run console" })).toHaveCount(
     0,
   );
@@ -78,10 +85,8 @@ test("the desktop guidance popover keeps checks, progressive hints, and solution
   await trigger.click();
   const panel = page.locator("[data-run-learning-panel-content]");
   await expect(panel).toBeVisible();
-  await expect(panel.getByRole("heading", { name: "Checks and guidance" })).toBeVisible();
-  await expect(panel.getByText("0/2 verified", { exact: true })).toBeVisible();
-  await expect(panel.getByText("Needs repair", { exact: true })).toHaveCount(1);
-  await expect(panel.getByText("Checking", { exact: true })).toHaveCount(1);
+  await expect(panel.getByRole("heading", { name: "Hints and guidance" })).toBeVisible();
+  await expect(panel.getByText("0/2 verified", { exact: true })).toHaveCount(0);
   await expect(panel.getByText("Inspect the service boundary")).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: "Reveal", exact: true }),
@@ -158,7 +163,7 @@ test("an older poll cannot hide a newly revealed hint", async ({ page, ui }) => 
   await stalePollStarted;
   await page
     .getByRole("button", {
-      name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+      name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
     })
     .click();
   const panel = page.locator("[data-run-learning-panel-content]");
@@ -179,7 +184,7 @@ test("an older poll cannot hide a newly revealed hint", async ({ page, ui }) => 
   await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
   await expect(
     page.getByRole("button", {
-      name: "Checks. 0 of 2 checks verified. 1 of 2 hints revealed.",
+      name: "Open lab guidance. 1 of 2 hints revealed. 0 of 2 checks verified.",
     }),
   ).toBeVisible();
 });
@@ -258,17 +263,25 @@ test("the Broken Nginx contract exposes three outcomes and five progressive hint
   await ui.settle();
 
   const trigger = page.getByRole("button", {
-    name: "Checks. 0 of 3 checks verified. 0 of 5 hints revealed.",
+    name: "Open lab guidance. 0 of 5 hints revealed. 0 of 3 checks verified.",
   });
-  await expect(trigger).toHaveText("Checks 0/3");
+  await expect(trigger).toContainText("Hints 0/5");
+  const indicators = page.locator("[data-run-check-indicator]");
+  await expect(indicators).toHaveCount(3);
+  await expect(indicators.nth(0)).toHaveAccessibleName(
+    "Open lab guidance. Start the web server. Needs repair.",
+  );
+  await expect(indicators.nth(1)).toHaveAccessibleName(
+    "Open lab guidance. Make the site reachable. Checking.",
+  );
+  await expect(indicators.nth(2)).toHaveAccessibleName(
+    "Open lab guidance. Restore the default site. Needs repair.",
+  );
   await trigger.click();
   const panel = page.locator("[data-run-learning-panel-content]");
-  const checks = panel.locator(
-    'section[aria-labelledby="run-learning-checks-heading"]',
-  );
-  await expect(checks.getByText("Start the web server")).toBeVisible();
-  await expect(checks.getByText("Make the site reachable")).toBeVisible();
-  await expect(checks.getByText("Restore the default site")).toBeVisible();
+  await expect(
+    panel.locator('section[aria-labelledby="run-learning-checks-heading"]'),
+  ).toHaveCount(0);
   await expect(panel.getByText("0/5 used", { exact: true })).toBeVisible();
   await expect(panel).not.toContainText("/etc/nginx/sites-enabled/default");
   await expect(panel).not.toContainText("hidden technical objective body");
@@ -305,7 +318,7 @@ test("hint and solution failures use generic learner-safe messages", async ({
 
   await page
     .getByRole("button", {
-      name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+      name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
     })
     .click();
   const panel = page.locator("[data-run-learning-panel-content]");
@@ -345,24 +358,24 @@ test("a solved lab makes finishing the first learner action", async ({ page, ui 
   });
 
   const trigger = page.getByRole("button", {
-    name: "Solved. 2 of 2 checks verified. 0 of 2 hints revealed.",
+    name: "Open lab guidance. 0 of 2 hints revealed. 2 of 2 checks verified.",
   });
-  await expect(trigger).toHaveText("Solved 2/2");
+  await expect(trigger).toContainText("Hints 0/2");
   await trigger.click();
 
   const panel = page.locator("[data-run-learning-panel-content]");
   await expect(panel.getByRole("heading", { name: "Lab solved" })).toBeVisible();
   const finish = panel.getByRole("button", { name: "Finish and save" });
   await expect(finish).toBeVisible();
-  await expect(panel.getByText("Verified", { exact: true })).toHaveCount(2);
+  await expect(page.locator('[data-run-check-indicator][data-status="verified"]')).toHaveCount(2);
   expect(
     await finish.evaluate((button) => {
-      const checks = button
+      const hints = button
         .closest("[data-run-learning-panel-content]")
-        ?.querySelector('[aria-labelledby="run-learning-checks-heading"]');
+        ?.querySelector('[aria-labelledby="run-learning-hints-heading"]');
       return Boolean(
-        checks &&
-          (button.compareDocumentPosition(checks) &
+        hints &&
+          (button.compareDocumentPosition(hints) &
             Node.DOCUMENT_POSITION_FOLLOWING),
       );
     }),
@@ -497,6 +510,15 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   });
   await expect(recap.getByRole("heading", { name: "Final checks" })).toBeVisible();
   await expect(recap.getByText("2/2 verified", { exact: true })).toBeVisible();
+  const progress = recap.getByRole("progressbar", {
+    name: "Final checks progress",
+  });
+  await expect(progress).toHaveAttribute("aria-valuenow", "2");
+  await expect(progress).toHaveAttribute("aria-valuemax", "2");
+  await expect(progress).toHaveAttribute(
+    "aria-valuetext",
+    "2 of 2 final checks verified",
+  );
   await expect(recap.getByText("Hints used", { exact: true })).toBeVisible();
   await expect(recap.getByText("Full solution", { exact: true })).toBeVisible();
   await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
@@ -679,6 +701,7 @@ test("a failed saved-run deletion stays generic and recoverable", async ({
     theme: "dark",
     runState: "archived",
   });
+  ui.server.state.variant = "error";
   await page.route("**/api/scenarios/runs/run-active", async (route) => {
     if (route.request().method() === "DELETE") {
       await route.fulfill({
