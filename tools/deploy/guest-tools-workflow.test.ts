@@ -41,6 +41,15 @@ describe("guest-tool publication workflow", () => {
     expect(cleanBase).toContain('.path == ".github/workflows/guest-tools.yml"');
   });
 
+  it("keeps Namespace caches off the dedicated agent release runner", () => {
+    expect(release).toContain(
+      "- name: Set up Namespace caches\n        if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'",
+    );
+    expect(release).toContain(
+      "- name: Restore shared Bun cache\n        if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'",
+    );
+  });
+
   it("publishes Scenario source bundles only from the image workflow", () => {
     expect(images).toContain("push:\n    branches:\n      - main");
     expect(images).toContain("Publish exact scenario source bundle");

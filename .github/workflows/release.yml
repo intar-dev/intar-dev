@@ -658,7 +658,7 @@ jobs:
           bun-version: 1.3.14
 
       - name: Restore shared Bun cache
-        if: steps.next.outputs.resume != 'true'
+        if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'
         uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           path: ~/.bun/install/cache
