@@ -52,21 +52,22 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "run-booting-guidance-dark-desktop");
   });
 
-  test("run · solved guidance panel", async ({ page, ui }) => {
+  test("run · solved workspace action", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "solved",
     });
-    await page.locator("[data-run-learning-panel-trigger]").click();
-    const panel = page.locator("[data-run-learning-panel-content]");
     await expect(
-      panel.getByRole("heading", { name: "Lab solved" }),
+      page.locator("[data-run-completion-bar]"),
     ).toBeVisible();
     await expect(
-      panel.getByRole("button", { name: "Finish and save" }),
+      page.getByRole("button", { name: "Finish and save" }),
     ).toBeVisible();
-    await expectRouteScreenshot(page, "run-solved-guidance-dark-desktop");
+    await expect(
+      page.locator("[data-run-learning-panel-content]"),
+    ).toHaveCount(0);
+    await expectRouteScreenshot(page, "run-solved-workspace-action-dark-desktop");
   });
 
   test("run · saving recap", async ({ page, ui }) => {
@@ -372,6 +373,58 @@ test.describe("focused mobile workspace", () => {
       page.getByRole("progressbar", { name: "Final checks progress" }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-failed-recap-light-mobile");
+  });
+
+  test("solved workspace action", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "solved",
+    });
+    await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Finish and save" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-solved-workspace-action-dark-mobile");
+  });
+
+  test("saving recap progress", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+    await expect(
+      page.getByRole("progressbar", { name: "Saving your run" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-saving-recap-dark-mobile");
+  });
+});
+
+test.describe("short landscape run workspace", () => {
+  test.use({ viewport: { width: 667, height: 375 }, hasTouch: true });
+
+  test("solved action keeps terminal space", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "solved",
+    });
+    await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Terminal" })).toBeVisible();
+    await expectRouteScreenshot(page, "run-solved-workspace-action-dark-landscape");
+  });
+
+  test("saving recap progress fits", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+    await expect(
+      page.getByRole("progressbar", { name: "Saving your run" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-saving-recap-dark-landscape");
   });
 });
 

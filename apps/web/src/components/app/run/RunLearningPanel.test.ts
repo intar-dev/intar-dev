@@ -262,12 +262,10 @@ describe("run learning panel", () => {
     expect(markup).not.toContain(rawError);
   });
 
-  it("puts save first for a solved lab and keeps the full solution last", () => {
+  it("keeps solved guidance focused on hints and the full solution", () => {
     const markup = renderContent({
       phase: "solved",
       probes: [probe({ status: "passed" })],
-      onFinishAndSave: vi.fn(),
-      finishError: true,
       solution: {
         ...solution(),
         revealed: true,
@@ -277,15 +275,10 @@ describe("run learning panel", () => {
       },
     });
 
-    expect(markup).toContain("Finish and save");
-    expect(markup).toContain(
-      "We could not save this run. Your work is still open. Try again.",
-    );
+    expect(markup).not.toContain("Finish and save");
+    expect(markup).not.toContain("Saving your run…");
     expect(markup).toContain("You used the full solution for this run.");
     expect(markup).toContain("systemctl restart nginx");
-    expect(markup.indexOf("Finish and save")).toBeLessThan(
-      markup.indexOf("Checks"),
-    );
     expect(markup.lastIndexOf("Full solution")).toBeGreaterThan(
       markup.indexOf("Hints"),
     );
@@ -350,8 +343,6 @@ function panelProps(): ComponentProps<typeof RunLearningPanelContent> {
     onRevealSolution: vi.fn(),
     solutionPending: false,
     solutionError: null,
-    onFinishAndSave: undefined,
-    finishPending: false,
   };
 }
 

@@ -88,6 +88,18 @@
     ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Recursive Mono", SFMono-Regular, Menlo, Monaco, Consolas,
     monospace;
+  --animate-run-saving-progress: run-saving-progress 1.35s
+    cubic-bezier(0.65, 0, 0.35, 1) infinite;
+
+  @keyframes run-saving-progress {
+    from {
+      transform: translateX(-100%);
+    }
+
+    to {
+      transform: translateX(250%);
+    }
+  }
 }
 
 @theme inline {

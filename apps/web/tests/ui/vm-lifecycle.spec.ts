@@ -361,25 +361,17 @@ test("a solved lab makes finishing the first learner action", async ({ page, ui 
     name: "Open lab guidance. 0 of 2 hints revealed. 2 of 2 checks verified.",
   });
   await expect(trigger).toContainText("Hints 0/2");
+  const finish = page.getByRole("button", { name: "Finish and save" });
+  await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
+  await expect(finish).toBeVisible();
   await trigger.click();
 
   const panel = page.locator("[data-run-learning-panel-content]");
   await expect(panel.getByRole("heading", { name: "Lab solved" })).toBeVisible();
-  const finish = panel.getByRole("button", { name: "Finish and save" });
-  await expect(finish).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: "Finish and save" }),
+  ).toHaveCount(0);
   await expect(page.locator('[data-run-check-indicator][data-status="verified"]')).toHaveCount(2);
-  expect(
-    await finish.evaluate((button) => {
-      const hints = button
-        .closest("[data-run-learning-panel-content]")
-        ?.querySelector('[aria-labelledby="run-learning-hints-heading"]');
-      return Boolean(
-        hints &&
-          (button.compareDocumentPosition(hints) &
-            Node.DOCUMENT_POSITION_FOLLOWING),
-      );
-    }),
-  ).toBe(true);
   const text = await panel.innerText();
 
   for (const forbidden of [
@@ -393,6 +385,37 @@ test("a solved lab makes finishing the first learner action", async ({ page, ui 
   ]) {
     expect(text).not.toContain(forbidden);
   }
+});
+
+test("a failed solved-run save stays beside the visible action", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "solved",
+  });
+  ui.server.state.variant = "error";
+  await page.route("**/api/scenarios/runs/run-active/destroy", async (route) => {
+    await route.fulfill({
+      status: 503,
+      json: { error: "host-17 teardown queue rejected run-vm-web" },
+    });
+  });
+
+  const completionBar = page.locator("[data-run-completion-bar]");
+  await completionBar
+    .getByRole("button", { name: "Finish and save" })
+    .click();
+  await expect(completionBar.getByRole("alert")).toHaveText(
+    "We could not save this run. Your work is still open. Try again.",
+  );
+  await expect(completionBar).not.toContainText("host-17");
+  await expect(completionBar).not.toContainText("run-vm-web");
+  await expect(
+    completionBar.getByRole("button", { name: "Finish and save" }),
+  ).toBeEnabled();
 });
 
 test("the final check transition uses one useful live announcement", async ({
@@ -411,6 +434,10 @@ test("the final check transition uses one useful live announcement", async ({
     .filter({ hasText: "All 2 checks are verified." });
   await expect(completion).toHaveCount(1);
   await expect(completion).toHaveText("All 2 checks are verified.");
+  await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Finish and save" }),
+  ).toBeVisible();
   await expect(
     page.getByRole("status").filter({ hasText: "Solved" }),
   ).toHaveCount(0);
@@ -489,6 +516,14 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   await expect(
     page.getByText("Your recap will be ready in a moment."),
   ).toBeVisible();
+  const savingProgress = page.getByRole("progressbar", {
+    name: "Saving your run",
+  });
+  await expect(savingProgress).toBeVisible();
+  await expect(savingProgress).not.toHaveAttribute("aria-valuenow");
+  await expect(
+    page.locator('section[aria-labelledby="run-recap-heading"]'),
+  ).toHaveAttribute("aria-busy", "true");
   for (const forbidden of [
     "Run timeline",
     "Shutting down workspace",
@@ -502,13 +537,18 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
 
   ui.server.setRunState("rendering");
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
+  await expect(savingProgress).toBeVisible();
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
-  await expect(recap.getByRole("heading", { name: "Solved" })).toBeVisible({
+  const settledHeading = recap.getByRole("heading", { name: "Solved" });
+  await expect(settledHeading).toBeVisible({
     timeout: 5_000,
   });
+  await expect(settledHeading).toBeFocused();
   await expect(recap.getByRole("heading", { name: "Final checks" })).toBeVisible();
+  await expect(savingProgress).toHaveCount(0);
+  await expect(recap).not.toHaveAttribute("aria-busy");
   await expect(recap.getByText("2/2 verified", { exact: true })).toBeVisible();
   const progress = recap.getByRole("progressbar", {
     name: "Final checks progress",

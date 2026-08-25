@@ -58,6 +58,26 @@ async function expectMinimumTarget(control: Locator, description: string) {
   );
 }
 
+async function expectGuidanceRailClearOfHeader(page: Page, rail: Locator) {
+  await page.waitForTimeout(250);
+  const appBar = page.locator("header.sticky.top-0").first();
+  const [railBox, appBarBox] = await Promise.all([
+    rail.boundingBox(),
+    appBar.boundingBox(),
+  ]);
+  const viewport = page.viewportSize();
+  expect(railBox).not.toBeNull();
+  expect(appBarBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+
+  const topGap = railBox!.y - (appBarBox!.y + appBarBox!.height);
+  const rightGap = viewport!.width - (railBox!.x + railBox!.width);
+  const bottomGap = viewport!.height - (railBox!.y + railBox!.height);
+  expect(topGap).toBeGreaterThanOrEqual(8);
+  expect(Math.abs(topGap - rightGap)).toBeLessThanOrEqual(1);
+  expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(1);
+}
+
 async function expectLearnerSafeRunCopy(scope: Locator) {
   for (const technicalCopy of TECHNICAL_LEARNER_RUN_COPY) {
     await expect(scope).not.toContainText(technicalCopy);
@@ -689,9 +709,13 @@ test.describe("focused state accessibility", () => {
 
     const sheetBox = await sheet.boundingBox();
     expect(sheetBox).not.toBeNull();
-    expect(sheetBox!.width).toBeLessThanOrEqual(384);
-    expect(sheetBox!.x + sheetBox!.width).toBeGreaterThanOrEqual(1438);
-    expect(sheetBox!.y).toBeGreaterThan(0);
+    expect(sheetBox!.width).toBeLessThanOrEqual(322);
+    await expectGuidanceRailClearOfHeader(page, sheet);
+    const guidanceLabelBox = await panel
+      .getByText("Lab guidance", { exact: true })
+      .boundingBox();
+    expect(guidanceLabelBox).not.toBeNull();
+    expect(guidanceLabelBox!.y - sheetBox!.y).toBeGreaterThanOrEqual(16);
 
     await page.getByRole("textbox", { name: "Terminal input" }).click();
     await expect(sheet).toBeVisible();
@@ -760,7 +784,7 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("solved guidance puts finish and save before the learning details", async ({
+  test("solved workspace exposes finish and save outside guidance", async ({
     page,
     ui,
   }, testInfo) => {
@@ -776,20 +800,35 @@ test.describe("focused state accessibility", () => {
     await expect(trigger).toHaveAccessibleName(
       "Open lab guidance. 0 of 2 hints revealed. 2 of 2 checks verified.",
     );
+    const completionBar = page.locator("[data-run-completion-bar]");
+    const finish = page.getByRole("button", { name: "Finish and save" });
+    await expect(completionBar).toBeVisible();
+    await expect(finish).toBeVisible();
+    await expectMinimumTarget(finish, "finish and save action");
+
+    const terminal = page.getByRole("region", { name: "Terminal" });
+    const [completionBox, terminalBox] = await Promise.all([
+      completionBar.boundingBox(),
+      terminal.boundingBox(),
+    ]);
+    expect(completionBox).not.toBeNull();
+    expect(terminalBox).not.toBeNull();
+    const completionGap = terminalBox!.y - (
+      completionBox!.y + completionBox!.height
+    );
+    expect(completionGap).toBeGreaterThanOrEqual(12);
+    expect(completionGap).toBeLessThanOrEqual(20);
+
     await trigger.click();
 
     const panel = runLearningPanel(page);
-    const finish = panel.getByRole("button", { name: "Finish and save" });
-    const hints = panel.getByText("Hints", { exact: true });
-    await expect(finish).toBeVisible();
-    await expect(hints).toBeVisible();
-    const [finishBox, hintsBox] = await Promise.all([
-      finish.boundingBox(),
-      hints.boundingBox(),
-    ]);
-    expect(finishBox).not.toBeNull();
-    expect(hintsBox).not.toBeNull();
-    expect(finishBox!.y).toBeLessThan(hintsBox!.y);
+    await expect(panel).toBeVisible();
+    await expect(
+      panel.getByRole("button", { name: "Finish and save" }),
+    ).toHaveCount(0);
+    await expect(panel.getByText("Hints", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
 
     await finish.click();
     await expect(
@@ -855,6 +894,17 @@ test.describe("focused state accessibility", () => {
       }
       if (recap.title === "Saving your run…") {
         await expect(page.getByText("Your recap will be ready in a moment.")).toBeVisible();
+        await expect(page.locator("header")).toContainText("Saving");
+        await expect(page.locator("header")).not.toContainText("Ending");
+        const savingProgress = page.getByRole("progressbar", {
+          name: "Saving your run",
+        });
+        await expect(savingProgress).toBeVisible();
+        await expect(savingProgress).not.toHaveAttribute("aria-valuenow");
+        await expect(savingProgress).toHaveAttribute(
+          "aria-valuetext",
+          "Saving your run. Your recap will be ready in a moment.",
+        );
         await expect(page.getByRole("heading", { name: "Final checks" })).toHaveCount(
           0,
         );
@@ -1056,6 +1106,48 @@ test.describe("focused mobile state accessibility", () => {
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
+
+  test("saving progress stays visible on mobile", async ({ page, ui }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+
+    const progress = page.getByRole("progressbar", { name: "Saving your run" });
+    await expect(progress).toBeVisible();
+    await expect(progress).not.toHaveAttribute("aria-valuenow");
+    const bounds = await progress.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("solved action stays visible outside the mobile guidance sheet", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "solved",
+    });
+
+    const finish = page.getByRole("button", { name: "Finish and save" });
+    await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
+    await expectMinimumTarget(finish, "mobile finish and save action");
+    await expect(finish).toBeVisible();
+    await runLearningTrigger(page).click();
+    const sheet = page.getByRole("dialog", { name: "Lab guidance" });
+    await expect(sheet).toHaveAttribute("data-side", "bottom");
+    await expect(
+      sheet.getByRole("button", { name: "Finish and save" }),
+    ).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
 });
 
 test.describe("run guidance at tablet width", () => {
@@ -1078,9 +1170,9 @@ test.describe("run guidance at tablet width", () => {
     await trigger.click();
 
     await expect(runLearningPanel(page)).toBeVisible();
-    await expect(
-      page.getByRole("dialog", { name: "Lab guidance" }),
-    ).toHaveAttribute("data-side", "right");
+    const rail = page.getByRole("dialog", { name: "Lab guidance" });
+    await expect(rail).toHaveAttribute("data-side", "right");
+    await expectGuidanceRailClearOfHeader(page, rail);
     await expect(page.locator('[data-slot="sheet-content"]')).toHaveCount(1);
     await expect(page.locator('[data-slot="sheet-overlay"]')).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
@@ -1106,6 +1198,7 @@ test.describe("run guidance on a touch tablet", () => {
     const sheet = page.getByRole("dialog", { name: "Lab guidance" });
     const panel = runLearningPanel(page);
     await expect(sheet).toHaveAttribute("data-side", "right");
+    await expectGuidanceRailClearOfHeader(page, sheet);
     await expect(
       panel.getByRole("heading", { name: "Checks and guidance" }),
     ).toBeVisible();
@@ -1142,8 +1235,8 @@ test.describe("run guidance at a narrow desktop width", () => {
     await expect(page.locator("[data-run-check-indicators]")).toBeHidden();
     const trigger = runLearningTrigger(page);
     await trigger.click();
-    const rail = page.getByRole("dialog", { name: "Lab guidance" });
-    await expect(rail).toHaveAttribute("data-side", "right");
+    const sheet = page.getByRole("dialog", { name: "Lab guidance" });
+    await expect(sheet).toHaveAttribute("data-side", "bottom");
     await expect(
       runLearningPanel(page).getByRole("heading", {
         name: "Checks and guidance",
@@ -1236,6 +1329,31 @@ test.describe("run guidance at 200% text", () => {
     await expect(
       page.getByRole("dialog", { name: "Lab guidance" }),
     ).toHaveAttribute("data-side", "right");
+    await expectGuidanceRailClearOfHeader(
+      page,
+      page.getByRole("dialog", { name: "Lab guidance" }),
+    );
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("keeps the solved action outside guidance at 200% text", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "solved",
+    });
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = "200%";
+    });
+
+    const finish = page.getByRole("button", { name: "Finish and save" });
+    await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
+    await expectMinimumTarget(finish, "200% finish and save action");
+    await expect(finish).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
@@ -1308,6 +1426,52 @@ test.describe("short run workspace", () => {
     await expect(sheet).toBeHidden();
     await expect(trigger).toBeFocused();
   });
+
+  test("keeps solved action and terminal inside a short viewport", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "solved",
+    });
+
+    const completionBar = page.locator("[data-run-completion-bar]");
+    const terminal = page.getByRole("region", { name: "Terminal" });
+    await expect(completionBar).toBeVisible();
+    await expect(terminal).toBeVisible();
+    const [completionBox, terminalBox] = await Promise.all([
+      completionBar.boundingBox(),
+      terminal.boundingBox(),
+    ]);
+    expect(completionBox).not.toBeNull();
+    expect(terminalBox).not.toBeNull();
+    expect(completionBox!.y).toBeGreaterThanOrEqual(48);
+    expect(terminalBox!.y + terminalBox!.height).toBeLessThanOrEqual(375);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("keeps saving progress inside a short viewport", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+
+    const progress = page.getByRole("progressbar", { name: "Saving your run" });
+    await expect(progress).toBeVisible();
+    const bounds = await progress.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.y).toBeGreaterThanOrEqual(48);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(375);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
 });
 
 test.describe("small-screen access management", () => {
@@ -1339,6 +1503,54 @@ test.describe("small-screen access management", () => {
     await expect(sheet).toBeVisible();
     await expect(runLearningPanel(page)).toBeVisible();
     await expectLearnerSafeRunCopy(runLearningPanel(page));
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("keeps the solved action visible at 320px", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "solved",
+    });
+
+    const completionBar = page.locator("[data-run-completion-bar]");
+    const finish = page.getByRole("button", { name: "Finish and save" });
+    await expect(completionBar).toBeVisible();
+    await expectMinimumTarget(finish, "320px finish and save action");
+    const [barBox, finishBox] = await Promise.all([
+      completionBar.boundingBox(),
+      finish.boundingBox(),
+    ]);
+    expect(barBox).not.toBeNull();
+    expect(finishBox).not.toBeNull();
+    expect(finishBox!.x).toBeGreaterThanOrEqual(barBox!.x);
+    expect(finishBox!.x + finishBox!.width).toBeLessThanOrEqual(
+      barBox!.x + barBox!.width,
+    );
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("keeps saving progress visible at 320px", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "rendering",
+    });
+
+    const progress = page.getByRole("progressbar", { name: "Saving your run" });
+    await expect(progress).toBeVisible();
+    const bounds = await progress.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });

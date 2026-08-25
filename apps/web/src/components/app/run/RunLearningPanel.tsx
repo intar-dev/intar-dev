@@ -75,10 +75,6 @@ export interface RunLearningPanelProps {
   solutionPending?: boolean;
   /** A non-empty value means the solution reveal failed. Its text is never rendered. */
   solutionError?: string | null;
-  /** Present only while a solved lab can be saved and shut down. */
-  onFinishAndSave?: (() => void) | undefined;
-  finishPending?: boolean;
-  finishError?: boolean;
   className?: string;
 }
 
@@ -212,6 +208,7 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
       {...props}
       hints={hints}
       showCheckList={!expandedChecks}
+      {...(!compact ? { className: "pb-0" } : {})}
     />
   );
 
@@ -233,11 +230,11 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
             <SheetContent
               side="bottom"
               showCloseButton={false}
-              className="max-h-[min(78dvh,42rem)] rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] motion-reduce:transition-none"
+              className="max-h-[min(78dvh,42rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] motion-reduce:transition-none"
             >
               <LearningPanelA11yHeader />
               <LearningPanelClose />
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
+              <div className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4">
                 {content}
               </div>
             </SheetContent>
@@ -255,14 +252,22 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
               showCloseButton={false}
               showOverlay={false}
               style={{
-                top: "var(--app-bar-h)",
-                height: "calc(100dvh - var(--app-bar-h))",
+                top: "calc(var(--app-bar-h) + var(--workspace-inset))",
+                right: "var(--workspace-inset)",
+                bottom: "var(--workspace-inset)",
+                left: "auto",
+                width:
+                  "min(20rem, calc(100dvw - var(--workspace-inset) - var(--workspace-inset)))",
+                maxWidth: "none",
+                height: "auto",
+                zIndex: 20,
               }}
-              className="w-[min(22rem,calc(100vw-1rem))] border-l shadow-xl duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+              data-run-guidance-rail
+              className="gap-0 overflow-hidden rounded-xl border shadow-xl duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
             >
               <LearningPanelA11yHeader />
               <LearningPanelClose />
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
+              <div className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4 pb-6">
                 {content}
               </div>
             </SheetContent>
@@ -300,7 +305,11 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
   return (
     <div
       data-run-learning-panel-content
-      className={cn("space-y-6 pb-2", props.className)}
+      className={cn(
+        "space-y-6 pb-5",
+        !showWorkOrderOrChecks && "pt-4",
+        props.className,
+      )}
     >
       {showWorkOrderOrChecks ? (
         <button
@@ -340,24 +349,6 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
           })}
         </p>
       </header>
-
-      {state === "solved" && props.onFinishAndSave ? (
-        <section aria-label="Finish lab">
-          <Button
-            className="w-full bg-success text-success-foreground hover:bg-success/90 focus-visible:ring-success"
-            disabled={props.finishPending}
-            onClick={props.onFinishAndSave}
-          >
-            <CheckCircle2 className="size-4" aria-hidden="true" />
-            {props.finishPending ? "Saving your run…" : "Finish and save"}
-          </Button>
-          {props.finishError ? (
-            <p className="mt-2 text-sm leading-6 text-destructive" role="alert">
-              We could not save this run. Your work is still open. Try again.
-            </p>
-          ) : null}
-        </section>
-      ) : null}
 
       {showWorkOrderOrChecks ? (
         <div ref={learningStartRef} className="scroll-mt-12">
@@ -436,7 +427,7 @@ function LearningPanelClose() {
         <Button
           variant="ghost"
           size="icon"
-          className="absolute top-2 right-2 z-30"
+          className="absolute top-3 right-3 z-30"
           aria-label="Close lab guidance"
         />
       }
@@ -1080,7 +1071,7 @@ function panelSummary(input: {
     return "Read the work order now. Checks will appear when the lab is ready.";
   }
   if (input.state === "solved") {
-    return "All available checks are verified. Finish when you are ready to save your work.";
+    return "All checks are verified. You can review your hints and solution here.";
   }
   if (!input.totalChecks) {
     return "Checks will appear when they are ready.";
@@ -1095,7 +1086,7 @@ function useCompactLearningPanel() {
   const [compact, setCompact] = useState(false);
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 767px)");
+    const media = window.matchMedia("(max-width: 959px)");
     const update = () => setCompact(media.matches);
     update();
     media.addEventListener("change", update);

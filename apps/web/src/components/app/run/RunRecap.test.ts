@@ -260,6 +260,7 @@ describe("RunRecap", () => {
           phase: "archiving",
           phaseTitle: "Archiving",
           phaseDetail: "hidden cleanup state",
+          progressPercent: 47,
           replayState: "preparing",
         }),
       }),
@@ -267,8 +268,18 @@ describe("RunRecap", () => {
 
     expect(markup).toContain("Saving your run…");
     expect(markup).toContain("Your recap will be ready in a moment.");
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain('role="progressbar"');
+    expect(markup).toContain('aria-label="Saving your run"');
+    expect(markup).toContain(
+      'aria-valuetext="Saving your run. Your recap will be ready in a moment."',
+    );
+    expect(markup).toContain("data-run-saving-progress-indicator");
+    expect(markup).toContain("data-run-saving-progress-static");
+    expect(markup).not.toContain("aria-valuenow");
     expect(markup).not.toContain("Archiving");
     expect(markup).not.toContain("hidden cleanup state");
+    expect(markup).not.toContain("47%");
     expect(markup).not.toContain("Watch replay");
   });
 

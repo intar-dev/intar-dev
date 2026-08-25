@@ -854,6 +854,40 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
   await expect(
     rail.getByRole("heading", { name: "Hints and guidance" }),
   ).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "ending",
+  });
+  const savingProgress = page.getByRole("progressbar", {
+    name: "Saving your run",
+  });
+  const savingIndicator = savingProgress.locator(
+    "[data-run-saving-progress-indicator]",
+  );
+  const staticSavingIndicator = savingProgress.locator(
+    "[data-run-saving-progress-static]",
+  );
+  await expect(savingProgress).toBeVisible();
+  await expect(savingIndicator).toBeHidden();
+  await expect(staticSavingIndicator).toBeVisible();
+  const savingIndicatorState = await staticSavingIndicator.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      animationName: style.animationName,
+      width: element.getBoundingClientRect().width,
+    };
+  });
+  expect(
+    savingIndicatorState.animationName,
+    "saving progress animation must stop under reduced motion",
+  ).toBe("none");
+  expect(
+    savingIndicatorState.width,
+    "static saving progress must stay visible without motion",
+  ).toBeGreaterThan(0);
 });
 
 test.describe("wide operational density", () => {

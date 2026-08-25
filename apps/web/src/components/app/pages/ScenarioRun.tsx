@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { presentScenarioRun } from "@/lib/run-phase";
 import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
+import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
 import { RunLearningPanel } from "@/components/app/run/RunLearningPanel";
 import { RunRecap } from "@/components/app/run/RunRecap";
 import {
@@ -61,6 +62,9 @@ export function ScenarioRun() {
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
   const recapHeadingRef = useRef<HTMLHeadingElement>(null);
   const focusRecapAfterShutdownRef = useRef(false);
+  const focusedRecapActivityRef = useRef<"background" | "settled" | null>(
+    null,
+  );
   const runMutationFenceRef = useRef(0);
   const runQueryKey = useMemo(
     () => ["scenarios", "run", runId] as const,
@@ -187,6 +191,7 @@ export function ScenarioRun() {
     },
     onSuccess: (body) => {
       focusRecapAfterShutdownRef.current = true;
+      focusedRecapActivityRef.current = null;
       queryClient.setQueryData(["scenarios", "run", runId], {
         run: presentScenarioRun(body.run),
       });
@@ -335,10 +340,10 @@ export function ScenarioRun() {
     attemptData.activity === "foreground" &&
     (attemptData.canDestroy || acceptanceRetryNeeded) &&
     attemptData.phase !== "solved";
-  const showResolutionCard =
+  const showFinishBar =
     attemptData !== null &&
     attemptData.phase === "solved" &&
-    attemptData.canDestroy;
+    attemptData.activity === "foreground";
   const selectedProbes = selectedVm?.scenarioProbes ?? [];
   const infrastructureTeardownPending = Boolean(
     attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
@@ -382,7 +387,13 @@ export function ScenarioRun() {
       return;
     }
 
-    focusRecapAfterShutdownRef.current = false;
+    if (focusedRecapActivityRef.current === attemptData.activity) {
+      return;
+    }
+    focusedRecapActivityRef.current = attemptData.activity;
+    if (attemptData.activity === "settled") {
+      focusRecapAfterShutdownRef.current = false;
+    }
     const frame = window.requestAnimationFrame(() => {
       recapHeadingRef.current?.focus({ preventScroll: true });
     });
@@ -457,11 +468,6 @@ export function ScenarioRun() {
             ? revealSolution.error.message
             : null
         }
-        onFinishAndSave={
-          showResolutionCard ? requestDestroyScenario : undefined
-        }
-        finishPending={destroyScenario.isPending}
-        finishError={Boolean(destroyScenario.error)}
       />
     );
   }, [
@@ -469,10 +475,6 @@ export function ScenarioRun() {
     selectedProbes,
     revealHint,
     revealSolution,
-    showResolutionCard,
-    requestDestroyScenario,
-    destroyScenario.isPending,
-    destroyScenario.error,
   ]);
 
   usePageChrome({
@@ -484,8 +486,8 @@ export function ScenarioRun() {
           return (
             <ActiveRunStatus
               tone="pending"
-              word={attemptData.phaseTitle}
-              compactWord={showBackgroundStatus ? "Ending" : "Starting"}
+              word={showBackgroundStatus ? "Saving" : attemptData.phaseTitle}
+              compactWord={showBackgroundStatus ? "Saving" : "Starting"}
               pulse
             />
           );
@@ -644,7 +646,7 @@ export function ScenarioRun() {
         </Alert>
       ) : null}
 
-      {destroyScenario.error && !cancelDialogOpen ? (
+      {destroyScenario.error && !cancelDialogOpen && !showFinishBar ? (
         <Alert variant="destructive">
           <AlertTitle>Could not end run</AlertTitle>
           <AlertDescription>
@@ -672,14 +674,28 @@ export function ScenarioRun() {
 
   // Everything else is the workspace frame: bar + panes, no page scroll.
   return (
-    <div className="flex h-[calc(100dvh-var(--app-bar-h,3rem))] min-h-[28rem] flex-col gap-3 overflow-hidden px-[var(--workspace-inset)] py-3">
+    <div
+      data-run-workspace
+      className="flex h-[calc(100dvh-var(--app-bar-h,3rem))] min-h-0 flex-col gap-3 overflow-hidden px-[var(--workspace-inset)] py-3 sm:gap-4 sm:py-4"
+    >
       {runDialogs}
-      <div className="shrink-0 space-y-3 empty:hidden">{errorAlerts}</div>
+      <div className="shrink-0 space-y-2 empty:hidden sm:space-y-3">
+        {errorAlerts}
+      </div>
+
+      {showFinishBar && attemptData ? (
+        <RunCompletionBar
+          canFinish={attemptData.canDestroy}
+          pending={destroyScenario.isPending}
+          error={Boolean(destroyScenario.error)}
+          onFinish={requestDestroyScenario}
+        />
+      ) : null}
 
       {attemptData ? (
         <section
           aria-label="Terminal"
-          className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-3"
+          className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-3 sm:gap-4"
         >
           <ScenarioVmSelector
             vms={attemptData.vms}
@@ -688,7 +704,7 @@ export function ScenarioRun() {
           />
 
           {selectedVm && selectedVmShellReady && terminalVisible ? (
-            <div className="relative min-h-[16rem] min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
+            <div className="relative min-h-0 min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
               <WebSshTerminal
                 vmName={selectedVm.scenarioVmName}
                 sessionRequest={selectedVmSessionRequest!}
@@ -701,7 +717,7 @@ export function ScenarioRun() {
           ) : (
             <div className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
               {showSelectedVmPreparation ? (
-                <div className="m-auto w-full max-w-2xl py-2">
+                <div className="m-auto w-full max-w-2xl py-4 sm:py-6">
                   <ScenarioStepScreen
                     title={bootScreenCopy.title}
                     description={bootScreenCopy.description}

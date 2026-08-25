@@ -66,6 +66,7 @@ export function RunRecap({
     return (
       <section
         aria-labelledby="run-recap-heading"
+        aria-busy="true"
         className="mx-auto w-full max-w-2xl py-10 sm:py-14"
       >
         <p className="text-eyebrow">Lab run</p>
@@ -80,6 +81,7 @@ export function RunRecap({
         <p className="mt-3 max-w-[46ch] text-sm leading-6 text-muted-foreground">
           {recap.description}
         </p>
+        <RunSavingProgress />
       </section>
     );
   }
@@ -216,6 +218,38 @@ export function RunRecap({
         </div>
       </section>
     </section>
+  );
+}
+
+function RunSavingProgress() {
+  return (
+    <div className="mt-8 w-full max-w-lg" data-run-saving-progress>
+      <div className="flex items-center justify-between gap-4 text-xs font-medium">
+        <span>Save progress</span>
+        <span className="text-muted-foreground">In progress</span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label="Saving your run"
+        aria-valuetext="Saving your run. Your recap will be ready in a moment."
+        className="mt-2 h-2 overflow-hidden rounded-full bg-primary/15 ring-1 ring-primary/25 ring-inset"
+      >
+        <span
+          aria-hidden="true"
+          data-run-saving-progress-indicator
+          className="block h-full w-2/5 rounded-full bg-primary animate-run-saving-progress motion-reduce:hidden motion-reduce:animate-none"
+        />
+        <span
+          aria-hidden="true"
+          data-run-saving-progress-static
+          className="hidden h-full items-center justify-center gap-1 motion-reduce:flex"
+        >
+          <span className="size-1 rounded-full bg-primary" />
+          <span className="size-1 rounded-full bg-primary" />
+          <span className="size-1 rounded-full bg-primary" />
+        </span>
+      </div>
+    </div>
   );
 }
 
