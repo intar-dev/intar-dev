@@ -59,8 +59,11 @@ test.describe("focused visual states", () => {
       runState: "ending",
     });
     await expect(
-      page.getByRole("heading", { name: "Checks updated" }),
-    ).toHaveCount(2);
+      page.getByRole("heading", { name: "Needs repair" }),
+    ).toHaveCount(1);
+    await expect(
+      page.getByRole("heading", { name: "Verified" }),
+    ).toHaveCount(1);
     await expect(
       page.locator('ol[aria-label="Run timeline"] ul > li'),
     ).toHaveCount(6);
@@ -297,8 +300,11 @@ test.describe("focused mobile workspace", () => {
       runState: "ending",
     });
     await expect(
-      page.getByRole("heading", { name: "Checks updated" }),
-    ).toHaveCount(2);
+      page.getByRole("heading", { name: "Needs repair" }),
+    ).toHaveCount(1);
+    await expect(
+      page.getByRole("heading", { name: "Verified" }),
+    ).toHaveCount(1);
     await expect(
       page.locator('ol[aria-label="Run timeline"] ul > li'),
     ).toHaveCount(6);
