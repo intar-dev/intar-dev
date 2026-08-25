@@ -18,6 +18,10 @@ pub(super) struct RunUploadBeginRequest {
     created_at_ms: i64,
     delete_requested_at_ms: i64,
     deleted_at_ms: i64,
+    /// Advertises that this agent will durably report granular archive
+    /// milestones. The web control plane keeps older agents on its coarse
+    /// phase mapping when this field is absent or unknown.
+    archive_progress_version: u8,
     artifacts: Vec<RunUploadArtifactDescriptor>,
 }
 
@@ -39,6 +43,33 @@ pub(super) struct MultipartBeginResponse {
     next_expected_part: u32,
 }
 
+/// The begin endpoint is deliberately backward-compatible. Older web
+/// deployments return their existing run/vm payload without this field, so
+/// the agent must treat any absent or unrecognized value as no handshake.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunUploadBeginResponse {
+    #[serde(default)]
+    archive_progress_version: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunUploadBeginOutcome {
+    Registered { archive_progress_enabled: bool },
+    MissingRemote,
+}
+
+impl RunUploadBeginOutcome {
+    fn archive_progress_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::Registered {
+                archive_progress_enabled: true
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct LocalArtifact {
     pub(super) ordinal: u32,
@@ -54,6 +85,22 @@ pub(super) struct LocalArtifact {
 pub(super) enum ArchiveUploadOutcome {
     Uploaded,
     DiscardedMissingRemote,
+}
+
+/// Private control-plane milestones. They are deliberately learner-safe: the
+/// server projects only their aggregate rank, never paths, artifact names, or
+/// retry details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ArchiveStage {
+    RawFilesSaved,
+    ReplayPrepared,
+    ReplaySkipped,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct RunArchiveStageRequest {
+    pub(super) stage: ArchiveStage,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +135,18 @@ pub(super) async fn queue_archive_job(inner: &Inner, prepared: &PreparedVmDeleti
         })
         .await
         .context("failed to persist archive job")?;
+
+    // The durable row exists before waking the worker. `Notify` retains one
+    // permit if the worker is between waits, and one wake is enough because a
+    // retry scan drains every currently due row up to the normal batch limit.
+    inner.archive_jobs_notify.notify_one();
+    info!(
+        event = "scenario_run_archive_queued",
+        run_id = prepared.run_id,
+        vm = prepared.vm_name,
+        queued_at_ms = now,
+        "queued durable archive job and woke archive worker"
+    );
     Ok(())
 }
 
@@ -98,15 +157,45 @@ pub(super) async fn retry_archive_jobs(inner: &Inner) -> Result<()> {
         .load_due_archive_jobs(now_unix_ms(), ARCHIVE_JOB_BATCH_SIZE)
         .await
         .context("failed to load due archive jobs")?;
+    let filled_batch = archive_batch_needs_follow_up(jobs.len());
 
     for job in jobs {
         process_archive_job(inner, job).await?;
     }
 
+    // `Notify` coalesces adjacent queue insertions into one permit. When this
+    // scan filled the bounded batch, schedule another immediate scan so the
+    // next due job does not wait for the ten-second recovery sweep.
+    if filled_batch {
+        inner.archive_jobs_notify.notify_one();
+    }
+
     Ok(())
 }
 
+pub(super) async fn wait_for_archive_worker_signal(notify: &Notify) {
+    notify.notified().await;
+}
+
+pub(super) fn archive_batch_needs_follow_up(job_count: usize) -> bool {
+    job_count == ARCHIVE_JOB_BATCH_SIZE
+}
+
 pub(super) async fn process_archive_job(inner: &Inner, job: ArchiveJobRow) -> Result<()> {
+    let attempt_started_at = Instant::now();
+    let attempt_started_unix_ms = now_unix_ms();
+    // `updated_at_ms` is the durable moment this attempt became due: initial
+    // insert for attempt one, then the last retry scheduling update.
+    let queue_wait_ms = elapsed_since_unix_ms(job.updated_at_ms, attempt_started_unix_ms);
+    info!(
+        event = "scenario_run_archive_started",
+        run_id = job.run_id,
+        vm = job.vm_name,
+        retry_count = job.retry_count,
+        queue_wait_ms,
+        "started archive job"
+    );
+
     match upload_archive_job(inner, &job).await {
         Ok(outcome) => {
             inner
@@ -139,6 +228,19 @@ pub(super) async fn process_archive_job(inner: &Inner, job: ArchiveJobRow) -> Re
                     );
                 }
             }
+            let completed_at_ms = now_unix_ms();
+            info!(
+                event = "scenario_run_archive_timing",
+                run_id = job.run_id,
+                vm = job.vm_name,
+                outcome = archive_upload_outcome_name(outcome),
+                queue_wait_ms,
+                processing_ms = elapsed_since_instant(attempt_started_at),
+                total_ms = elapsed_since_unix_ms(job.created_at_ms, completed_at_ms),
+                teardown_to_archive_complete_ms =
+                    elapsed_since_unix_ms(job.delete_requested_at_ms, completed_at_ms,),
+                "archive job completed"
+            );
         }
         Err(error) => {
             let retry_count = job.retry_count.saturating_add(1);
@@ -165,10 +267,38 @@ pub(super) async fn process_archive_job(inner: &Inner, job: ArchiveJobRow) -> Re
                 next_attempt_at_ms,
                 "archive job failed and will be retried"
             );
+            let failed_at_ms = now_unix_ms();
+            warn!(
+                event = "scenario_run_archive_timing",
+                run_id = job.run_id,
+                vm = job.vm_name,
+                outcome = "retrying",
+                queue_wait_ms,
+                processing_ms = elapsed_since_instant(attempt_started_at),
+                total_ms = elapsed_since_unix_ms(job.created_at_ms, failed_at_ms),
+                teardown_to_archive_complete_ms =
+                    elapsed_since_unix_ms(job.delete_requested_at_ms, failed_at_ms,),
+                "archive job attempt finished with a retry"
+            );
         }
     }
 
     Ok(())
+}
+
+pub(super) fn elapsed_since_unix_ms(started_at_ms: i64, now_ms: i64) -> i64 {
+    now_ms.saturating_sub(started_at_ms).max(0)
+}
+
+fn elapsed_since_instant(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn archive_upload_outcome_name(outcome: ArchiveUploadOutcome) -> &'static str {
+    match outcome {
+        ArchiveUploadOutcome::Uploaded => "uploaded",
+        ArchiveUploadOutcome::DiscardedMissingRemote => "discarded_missing_remote",
+    }
 }
 
 pub(super) async fn upload_archive_job(
@@ -376,7 +506,8 @@ pub(super) async fn upload_vm_run_artifacts(
     let access_token = bootstrap_agent_access_token(&inner.bridge, &inner.http).await?;
     let mut artifacts = collect_local_artifacts(&prepared.artifacts_dir).await?;
 
-    if !begin_run_upload(inner, prepared, &artifacts, &access_token).await? {
+    let initial_begin = begin_run_upload(inner, prepared, &artifacts, &access_token).await?;
+    if initial_begin == RunUploadBeginOutcome::MissingRemote {
         warn!(
             vm = vm_name,
             run_id = prepared.run_id,
@@ -385,6 +516,11 @@ pub(super) async fn upload_vm_run_artifacts(
         return Ok(ArchiveUploadOutcome::DiscardedMissingRemote);
     }
     upload_artifact_set(inner, vm_name, prepared, &artifacts, &access_token).await?;
+    let mut raw_files_stage_reported = false;
+    if initial_begin.archive_progress_enabled() {
+        report_archive_stage(inner, prepared, ArchiveStage::RawFilesSaved, &access_token).await?;
+        raw_files_stage_reported = true;
+    }
 
     // Render and attach session media before sealing the run. Once completion
     // is acknowledged the control plane rejects every new artifact mutation,
@@ -394,7 +530,8 @@ pub(super) async fn upload_vm_run_artifacts(
         Ok(Some((casts, timeline))) => {
             let new_start = artifacts.len();
             artifacts.extend(casts);
-            if !begin_run_upload(inner, prepared, &artifacts, &access_token).await? {
+            let replay_begin = begin_run_upload(inner, prepared, &artifacts, &access_token).await?;
+            if replay_begin == RunUploadBeginOutcome::MissingRemote {
                 warn!(
                     vm = vm_name,
                     run_id = prepared.run_id,
@@ -410,19 +547,48 @@ pub(super) async fn upload_vm_run_artifacts(
                 &access_token,
             )
             .await?;
-            if let Err(error) = submit_run_timeline(inner, prepared, &timeline, &access_token).await
-            {
-                warn!(
-                    event = "scenario_run_replay_failed",
-                    stage = "timeline_submission",
-                    error = %error,
-                    vm = vm_name,
-                    run_id = prepared.run_id,
-                    "failed to submit session timeline; archiving run without one"
-                );
+            let replay_stage =
+                match submit_run_timeline(inner, prepared, &timeline, &access_token).await {
+                    Ok(()) => archive_stage_after_replay(true, true),
+                    Err(error) => {
+                        warn!(
+                            event = "scenario_run_replay_failed",
+                            stage = "timeline_submission",
+                            error = %error,
+                            vm = vm_name,
+                            run_id = prepared.run_id,
+                            "failed to submit session timeline; archiving run without one"
+                        );
+                        archive_stage_after_replay(true, false)
+                    }
+                };
+            // A replay re-registration may be the first successful capability
+            // handshake after a web rollout. Catch up the already-complete raw
+            // milestone first, then preserve the server's monotonic order.
+            if replay_begin.archive_progress_enabled() {
+                if !raw_files_stage_reported {
+                    report_archive_stage(
+                        inner,
+                        prepared,
+                        ArchiveStage::RawFilesSaved,
+                        &access_token,
+                    )
+                    .await?;
+                }
+                report_archive_stage(inner, prepared, replay_stage, &access_token).await?;
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            if raw_files_stage_reported {
+                report_archive_stage(
+                    inner,
+                    prepared,
+                    archive_stage_after_replay(false, false),
+                    &access_token,
+                )
+                .await?;
+            }
+        }
         Err(error) => {
             warn!(
                 event = "scenario_run_replay_failed",
@@ -432,12 +598,77 @@ pub(super) async fn upload_vm_run_artifacts(
                 run_id = prepared.run_id,
                 "failed to render session media; archiving run without a replay"
             );
+            if raw_files_stage_reported {
+                report_archive_stage(
+                    inner,
+                    prepared,
+                    archive_stage_after_replay(false, false),
+                    &access_token,
+                )
+                .await?;
+            }
         }
     }
 
     complete_run_upload(inner, prepared, &access_token).await?;
 
     Ok(ArchiveUploadOutcome::Uploaded)
+}
+
+/// A replay is learner-ready only when its session timeline was accepted.
+/// Empty or unrenderable recording spools deliberately advance to the same
+/// finalizing milestone without promising a replay that the recap cannot use.
+pub(super) fn archive_stage_after_replay(
+    has_rendered_replay: bool,
+    timeline_submitted: bool,
+) -> ArchiveStage {
+    if has_rendered_replay && timeline_submitted {
+        ArchiveStage::ReplayPrepared
+    } else {
+        ArchiveStage::ReplaySkipped
+    }
+}
+
+/// Progress reporting is part of the durable archive protocol. The job is
+/// retried if this request fails, so completion can never get ahead of a
+/// learner-visible milestone.
+async fn report_archive_stage(
+    inner: &Inner,
+    prepared: &PreparedVmDeletion,
+    stage: ArchiveStage,
+    access_token: &str,
+) -> Result<()> {
+    let run_id_segment = encode_url_path_segment(&prepared.run_id);
+    let vm_name_segment = encode_url_path_segment(&prepared.vm_name);
+    let stage_url = format!(
+        "{}/agent/runs/{}/vms/{}/archive-stage",
+        inner.bridge.base_url, run_id_segment, vm_name_segment
+    );
+    post_archive_stage(&inner.http, &stage_url, stage, access_token).await
+}
+
+pub(super) async fn post_archive_stage(
+    http: &HttpClient,
+    stage_url: &str,
+    stage: ArchiveStage,
+    access_token: &str,
+) -> Result<()> {
+    let response = http
+        .post(stage_url)
+        .bearer_auth(access_token)
+        // A stage report is required before completion, but its small payload
+        // must not spend the archive client's 120-second transfer deadline.
+        .timeout(ARCHIVE_STAGE_REPORT_TIMEOUT)
+        .json(&RunArchiveStageRequest { stage })
+        .send()
+        .await
+        .with_context(|| format!("failed to report archive stage at {stage_url}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("archive stage report failed with status {status}: {body}");
+    }
+    Ok(())
 }
 
 pub(super) async fn complete_run_upload(
@@ -468,19 +699,21 @@ pub(super) async fn complete_run_upload(
 
 /// Registers `artifacts` with the run upload. The endpoint merges by
 /// ordinal, so calling this again with a superset only adds the new entries.
-/// Returns `false` when the remote run/vm no longer exists.
+/// A successful response opts into granular stages only when it explicitly
+/// acknowledges the version this agent advertised.
 pub(super) async fn begin_run_upload(
     inner: &Inner,
     prepared: &PreparedVmDeletion,
     artifacts: &[LocalArtifact],
     access_token: &str,
-) -> Result<bool> {
+) -> Result<RunUploadBeginOutcome> {
     let begin_request = RunUploadBeginRequest {
         run_id: prepared.run_id.clone(),
         vm_name: prepared.vm_name.clone(),
         created_at_ms: prepared.vm_created_at_ms,
         delete_requested_at_ms: prepared.delete_requested_at_ms,
         deleted_at_ms: prepared.deleted_at_ms,
+        archive_progress_version: 1,
         artifacts: artifacts
             .iter()
             .map(|artifact| RunUploadArtifactDescriptor {
@@ -507,11 +740,28 @@ pub(super) async fn begin_run_upload(
         let status = begin_response.status();
         let body = begin_response.text().await.unwrap_or_default();
         if is_run_purged_remote_response(status, &body) {
-            return Ok(false);
+            return Ok(RunUploadBeginOutcome::MissingRemote);
         }
         anyhow::bail!("run begin failed with status {status}: {body}");
     }
-    Ok(true)
+    // An old web deployment may return the established payload with no
+    // capability field, or even no readable JSON body. Both are a safe coarse
+    // fallback: uploads and completion remain unchanged, only stage callbacks
+    // are suppressed.
+    let body = begin_response.text().await.unwrap_or_default();
+    Ok(RunUploadBeginOutcome::Registered {
+        archive_progress_enabled: archive_progress_acknowledged(&body),
+    })
+}
+
+pub(super) fn archive_progress_acknowledged(begin_response_body: &str) -> bool {
+    let Ok(response) = serde_json::from_str::<RunUploadBeginResponse>(begin_response_body) else {
+        return false;
+    };
+    matches!(
+        response.archive_progress_version,
+        Some(serde_json::Value::Number(version)) if version.as_u64() == Some(1)
+    )
 }
 
 pub(super) async fn upload_artifact_set(
@@ -745,5 +995,27 @@ pub(super) async fn remove_vm_staging_paths(
         Ok(())
     } else {
         anyhow::bail!(failures.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    #[test]
+    fn run_upload_begin_advertises_archive_progress_v1_in_camel_case() {
+        let payload = RunUploadBeginRequest {
+            run_id: "run".to_string(),
+            vm_name: "vm".to_string(),
+            created_at_ms: 1,
+            delete_requested_at_ms: 2,
+            deleted_at_ms: 3,
+            archive_progress_version: 1,
+            artifacts: Vec::new(),
+        };
+
+        let json = serde_json::to_value(payload).expect("serialize upload begin payload");
+        assert_eq!(json.get("archiveProgressVersion"), Some(&json!(1)));
+        assert!(json.get("archive_progress_version").is_none());
     }
 }

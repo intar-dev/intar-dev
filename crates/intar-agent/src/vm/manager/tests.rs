@@ -125,6 +125,7 @@ fn test_vm_status(name: &str, run_id: Option<&str>) -> VmStatusResponse {
     }
 }
 
+mod archive;
 mod artifacts;
 fn test_ssh_access_config() -> SshAccessConfig {
     SshAccessConfig {

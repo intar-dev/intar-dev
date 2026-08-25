@@ -26,7 +26,16 @@ impl VmManager {
             bridge: cfg.bridge.clone(),
             ssh_access: cfg.ssh_access.clone(),
             db,
-            http: HttpClient::new(),
+            http: HttpClient::builder()
+                .connect_timeout(ARCHIVE_HTTP_CONNECT_TIMEOUT)
+                // Bound an idle response as well as the whole archive
+                // request. Archive jobs are durable and retryable, so one
+                // stuck control-plane request must not hold the archive lock
+                // indefinitely.
+                .read_timeout(ARCHIVE_HTTP_READ_TIMEOUT)
+                .timeout(ARCHIVE_HTTP_TOTAL_TIMEOUT)
+                .build()
+                .context("failed to initialize archive HTTP client")?,
             defaults: cfg.vm_defaults.clone(),
             states: RwLock::new(states),
             lease_expiry_error_log: RwLock::new(BTreeMap::new()),
@@ -44,6 +53,7 @@ impl VmManager {
             cleanup_locks: Mutex::new(BTreeMap::new()),
             run_cleanup_locks: Mutex::new(BTreeMap::new()),
             archive_jobs_lock: Mutex::new(()),
+            archive_jobs_notify: Notify::new(),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -198,6 +208,13 @@ impl VmManager {
 
     pub async fn retry_archive_jobs(&self) -> Result<()> {
         retry_archive_jobs(&self.inner).await
+    }
+
+    /// Wait for a durable archive queue insertion. `Notify` keeps one permit
+    /// if the worker is not currently waiting, while the periodic sweep in
+    /// `main` remains the restart and missed-signal recovery path.
+    pub async fn wait_for_archive_job_signal(&self) {
+        wait_for_archive_worker_signal(&self.inner.archive_jobs_notify).await;
     }
 
     pub async fn create_scenario_vm(

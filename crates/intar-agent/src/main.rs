@@ -120,10 +120,15 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let vm = vm.clone();
         async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            let period = Duration::from_secs(10);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = vm.wait_for_archive_job_signal() => {}
+                    _ = interval.tick() => {}
+                }
                 if let Err(e) = vm.retry_archive_jobs().await {
                     tracing::error!(error = %e, "archive upload retry iteration failed");
                 }

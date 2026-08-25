@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, OnceCell, OwnedMutexGuard, RwLock, Semaphore, broadcast, watch};
+use tokio::sync::{Mutex, Notify, OnceCell, OwnedMutexGuard, RwLock, Semaphore, broadcast, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
@@ -379,6 +379,10 @@ const ARTIFACT_UPLOAD_CONCURRENCY: usize = 4;
 const ARCHIVE_JOB_BATCH_SIZE: usize = 4;
 const ARCHIVE_RETRY_BASE_MS: i64 = 5_000;
 const ARCHIVE_RETRY_MAX_MS: i64 = 5 * 60 * 1000;
+const ARCHIVE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const ARCHIVE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const ARCHIVE_HTTP_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const ARCHIVE_STAGE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 const DELETE_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const PROBE_POLL_INTERVAL_SECONDS: u64 = 2;
 const TERMINAL_PENDING_POLL_INTERVAL_MILLIS: u64 = 500;
@@ -597,6 +601,9 @@ struct Inner {
     cleanup_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     run_cleanup_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     archive_jobs_lock: Mutex<()>,
+    /// A permit is retained when the archive worker is between waits, so a
+    /// durable queue insertion never has to wait for the ten-second sweep.
+    archive_jobs_notify: Notify,
 }
 
 mod api;
