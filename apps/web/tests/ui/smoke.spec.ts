@@ -204,6 +204,7 @@ test("learner enters the live workshop and can raise a hand", async ({
   await page.getByRole("button", { name: "Raise hand" }).click();
   await expect(page.getByText("In the queue")).toBeVisible();
 
+  ui.server.state.sshKeys = [];
   await page.getByRole("button", { name: "Native SSH" }).click();
   const nativeSshDialog = page.getByRole("dialog");
   await expect(
@@ -211,9 +212,52 @@ test("learner enters the live workshop and can raise a hand", async ({
       name: "Native SSH for platform-workshop",
     }),
   ).toBeVisible();
-  await expect(nativeSshDialog.getByLabel("SSH command")).toContainText(
-    "workshop-route-test-only-native@stargate.example.test",
+  await expect(
+    nativeSshDialog.getByRole("button", {
+      name: "Create temporary SSH key",
+    }),
+  ).toBeVisible();
+  await nativeSshDialog
+    .getByRole("button", { name: "Create temporary SSH key" })
+    .click();
+  await expect(
+    nativeSshDialog.getByRole("button", { name: "Download temporary key" }),
+  ).toBeVisible();
+  await expect(nativeSshDialog.getByLabel("SSH command")).toHaveValue(
+    /ssh -i "\$key_path"[\s\S]*workshop-route-test-only-native@stargate\.example\.test/,
   );
+  const issuedRequest = ui.server.nativeSshRequests.at(-1);
+  expect(issuedRequest?.pathname).toBe(
+    "/api/workshops/workshop-live/terminal",
+  );
+  expect(issuedRequest?.body).toMatchObject({
+    mode: "native",
+    clientPublicKeyOpenssh: expect.stringMatching(/^ssh-ed25519 /),
+  });
+  expect(JSON.stringify(issuedRequest?.body)).not.toContain(
+    "OPENSSH PRIVATE KEY",
+  );
+  const issuedPublicKey = issuedRequest?.body.clientPublicKeyOpenssh;
+
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Native SSH" }).click();
+  await expect(
+    nativeSshDialog.getByRole("button", { name: "Download temporary key" }),
+  ).toBeVisible();
+  expect(
+    ui.server.nativeSshRequests.at(-1)?.body.clientPublicKeyOpenssh,
+  ).toBe(issuedPublicKey);
+
+  await page.keyboard.press("Escape");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+  await page.getByRole("button", { name: "Native SSH" }).click();
+  await expect(
+    nativeSshDialog.getByRole("button", { name: "Download temporary key" }),
+  ).toBeVisible();
+  expect(
+    ui.server.nativeSshRequests.at(-1)?.body.clientPublicKeyOpenssh,
+  ).toBe(issuedPublicKey);
 });
 
 test("facilitator advances the native presenter deck with the keyboard", async ({

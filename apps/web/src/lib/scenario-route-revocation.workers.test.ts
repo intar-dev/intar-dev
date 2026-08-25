@@ -19,6 +19,7 @@ vi.mock("@/lib/stargate", () => ({
 import {
   buildRunVmRouteUsername,
   revokeScenarioNativeProfileRoutesForUser,
+  revokeScenarioRunRoutes,
   revokeScenarioRoutesForUser,
 } from "./scenario-runs/start";
 
@@ -30,6 +31,21 @@ beforeEach(async () => {
 });
 
 describe("scenario route revocation", () => {
+  it("revokes every route variant for a run, including issued-key SSH routes", async () => {
+    await revokeScenarioRunRoutes({ runId: "org-run", state: runState });
+
+    expect(revokedRoutes()).toEqual(
+      new Set([
+        expectedRoute("vm-a", "browser"),
+        expectedRoute("vm-a", "native_profile_keys"),
+        expectedRoute("vm-a", "native_issued_key"),
+        expectedRoute("vm-b", "browser"),
+        expectedRoute("vm-b", "native_profile_keys"),
+        expectedRoute("vm-b", "native_issued_key"),
+      ]),
+    );
+  });
+
   it("revokes active and recent terminal routes but excludes expired terminal routes", async () => {
     await revokeScenarioRoutesForUser("blocked-user", 100_000);
 
@@ -37,17 +53,24 @@ describe("scenario route revocation", () => {
       new Set([
         expectedRoute("vm-a", "browser"),
         expectedRoute("vm-a", "native_profile_keys"),
+        expectedRoute("vm-a", "native_issued_key"),
         expectedRoute("vm-b", "browser"),
         expectedRoute("vm-b", "native_profile_keys"),
+        expectedRoute("vm-b", "native_issued_key"),
         expectedRouteForRun("recent-run", "vm-a", "browser"),
         expectedRouteForRun(
           "recent-run",
           "vm-a",
           "native_profile_keys",
         ),
+        expectedRouteForRun(
+          "recent-run",
+          "vm-a",
+          "native_issued_key",
+        ),
       ]),
     );
-    expect(stargateMocks.deleteStargateRoute).toHaveBeenCalledTimes(6);
+    expect(stargateMocks.deleteStargateRoute).toHaveBeenCalledTimes(9);
   });
 
   it("keeps SSH-key rotation scoped to native routes", async () => {
@@ -71,7 +94,7 @@ function revokedRoutes(): Set<string> {
 
 function expectedRoute(
   vmId: string,
-  routeType: "browser" | "native_profile_keys",
+  routeType: "browser" | "native_profile_keys" | "native_issued_key",
 ): string {
   return buildRunVmRouteUsername("org-run", runState.vms, vmId, routeType);
 }
@@ -79,7 +102,7 @@ function expectedRoute(
 function expectedRouteForRun(
   runId: string,
   vmId: string,
-  routeType: "browser" | "native_profile_keys",
+  routeType: "browser" | "native_profile_keys" | "native_issued_key",
 ): string {
   return buildRunVmRouteUsername(runId, singleVmState.vms, vmId, routeType);
 }

@@ -249,8 +249,13 @@ encrypted in D1 and is supplied to Stargate only when issuing a terminal session
 Stargate uses `russh` in process:
 
 - Browser terminal sessions bridge directly to the target SSH channel.
-- Native sessions authenticate the user to Stargate with profile SSH keys, then
-  Stargate connects to the guest with the run-scoped private key.
+- Native sessions authenticate the user to Stargate with either profile SSH keys
+  or a browser-held, route-specific temporary Ed25519 key. For the temporary
+  path, the browser keeps the private key in `sessionStorage`, scoped to the
+  signed-in user, route, and browser tab. It survives page refreshes and
+  terminal reconnects, and is cleared when the route expires, the user signs
+  out, or the tab closes. Only the public key reaches the Worker and Stargate.
+- Stargate connects to the guest with the run-scoped private key.
 - Guest SSH host keys are verified against the keys reported by Kino; missing or
   mismatched host keys fail closed.
 

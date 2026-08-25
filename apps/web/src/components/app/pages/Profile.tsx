@@ -106,9 +106,7 @@ export function Profile() {
       setLabel("");
       setPublicKey("");
       setFormError(null);
-      setFormNotice(
-        "Key saved. New scenario runs will trust it automatically.",
-      );
+      setFormNotice("Key saved. New native SSH routes can use it.");
       await queryClient.invalidateQueries({
         queryKey: ["profile", "ssh-keys"],
       });
@@ -141,7 +139,7 @@ export function Profile() {
       }
     },
     onSuccess: async () => {
-      setFormNotice("SSH key removed. Existing VMs are unchanged.");
+      setFormNotice("SSH key removed. It cannot be used for new routes.");
       setFormError(null);
       await queryClient.invalidateQueries({
         queryKey: ["profile", "ssh-keys"],
@@ -200,15 +198,17 @@ export function Profile() {
             </dd>
           </div>
           <div>
-            <dt className="text-eyebrow">3. Future runs</dt>
-            <dd className="mt-1 text-sm">New VMs trust that key at launch.</dd>
+            <dt className="text-eyebrow">3. Route access</dt>
+            <dd className="mt-1 text-sm">
+              Reuse your local identity for native SSH.
+            </dd>
           </div>
         </dl>
       </Section>
 
       <Section
         title="SSH keys"
-        description="Public keys added here are injected into new scenario VMs at launch. Existing runs keep the keys they started with."
+        description="Saved public keys are optional credentials for native SSH routes. They are never added to scenario VMs."
       >
         <div className="space-y-6">
           {sshKeys.isLoading ? (
@@ -286,9 +286,8 @@ export function Profile() {
               <div>
                 <p className="text-sm font-medium">No public keys yet</p>
                 <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
-                  Add the public half of a key from your machine and intar will
-                  inject it into new VMs so native SSH can use your existing
-                  local identity.
+                  Intar can issue a temporary key for each run. Save a public
+                  key if you want native SSH to reuse your local identity.
                 </p>
               </div>
             </div>
@@ -316,8 +315,8 @@ export function Profile() {
               <h3 className="text-card-title">Add a public key</h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Paste an OpenSSH public key from ~/.ssh/*.pub — one key per
-                save. Changes apply to new scenario runs; already-running VMs
-                keep the authorized keys they launched with.
+                save. Saved keys are optional credentials for future native SSH
+                routes; they are never injected into scenario VMs.
               </p>
             </div>
             <div className="space-y-2">

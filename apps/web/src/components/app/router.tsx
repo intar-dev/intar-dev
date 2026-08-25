@@ -387,7 +387,7 @@ const profileRoute = createRoute({
   head: () =>
     routeHead(
       "Profile",
-      "Manage your identity and SSH keys for future lab runs.",
+      "Manage your identity and optional native SSH keys.",
     ),
   component: lazyRouteComponent(() => import("./pages/Profile"), "Profile"),
 });

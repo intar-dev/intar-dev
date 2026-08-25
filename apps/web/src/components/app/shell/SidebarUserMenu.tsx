@@ -26,6 +26,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { authClient } from "@/lib/auth-client";
+import { clearAllTemporaryNativeSshKeys } from "@/lib/temporary-native-ssh-storage";
 import { useSession } from "../hooks/useSession";
 import { useTheme, type AppTheme } from "../theme";
 
@@ -47,6 +48,7 @@ export function SidebarUserMenu() {
       return result;
     },
     onSuccess: () => {
+      clearAllTemporaryNativeSshKeys();
       queryClient.clear();
       void navigate({ to: "/" });
     },

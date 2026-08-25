@@ -65,6 +65,23 @@ export async function listUserAuthorizedSshKeysForNativeRoutes(
     }));
 }
 
+export async function normalizeTemporaryNativeSshPublicKey(raw: string) {
+  try {
+    const parsed = await parseOpenSshPublicKey(raw);
+    if (parsed.keyType !== "ssh-ed25519") {
+      throw new Error("unsupported temporary key type");
+    }
+    validateEd25519PublicKeyPayload(parsed.payload);
+    return parsed.normalized;
+  } catch {
+    throw appError(
+      400,
+      "native_ssh_public_key_invalid",
+      "temporary native SSH key must be a valid ssh-ed25519 public key",
+    );
+  }
+}
+
 export async function createUserSshKeyForUser(input: {
   userId: string;
   label?: string | null;
@@ -141,6 +158,7 @@ async function parseOpenSshPublicKey(raw: string): Promise<{
   keyType: string;
   comment: string | null;
   fingerprintSha256: string;
+  payload: Uint8Array;
 }> {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -230,7 +248,33 @@ async function parseOpenSshPublicKey(raw: string): Promise<{
     keyType,
     comment,
     fingerprintSha256,
+    payload: decoded,
   };
+}
+
+function validateEd25519PublicKeyPayload(payload: Uint8Array): void {
+  // RFC 8709/OpenSSH encodes an Ed25519 public key as two SSH strings:
+  // the key type and exactly 32 bytes of key material, with no trailing data.
+  if (payload.length < 4) {
+    throw new Error("truncated Ed25519 key payload");
+  }
+  const view = new DataView(
+    payload.buffer,
+    payload.byteOffset,
+    payload.byteLength,
+  );
+  const keyTypeLength = view.getUint32(0, false);
+  const keyLengthOffset = 4 + keyTypeLength;
+  if (keyLengthOffset + 4 > payload.length) {
+    throw new Error("truncated Ed25519 key payload");
+  }
+  const keyLength = view.getUint32(keyLengthOffset, false);
+  if (
+    keyLength !== 32 ||
+    keyLengthOffset + 4 + keyLength !== payload.length
+  ) {
+    throw new Error("invalid Ed25519 key payload");
+  }
 }
 
 function normalizeLabel(raw: string | null | undefined): string | null {

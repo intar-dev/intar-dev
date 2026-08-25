@@ -52,6 +52,11 @@ export async function issueWorkshopNativeSshSession(input: {
   workspaceId: string;
   actorUserId: string;
   vmId?: string;
+  /**
+   * A browser-held SSH public key used only for this gateway route. The API
+   * validates and normalizes this value before it reaches this boundary.
+   */
+  temporaryClientPublicKeyOpenssh?: string;
 }): Promise<NativeTerminalSessionResult> {
   const terminal = await issueWorkshopTerminalSession({
     ...input,
@@ -69,6 +74,7 @@ async function issueWorkshopTerminalSession(input: {
   actorUserId: string;
   vmId?: string;
   mode: "browser" | "native";
+  temporaryClientPublicKeyOpenssh?: string;
 }): Promise<StargateTerminalSessionResult> {
   const access = await requireWorkshopSessionMember({
     sessionId: input.sessionId,
@@ -167,11 +173,21 @@ async function issueWorkshopTerminalSession(input: {
     );
   }
 
-  const profileKeys =
+  const temporaryClientPublicKeyOpenssh =
     input.mode === "native"
+      ? input.temporaryClientPublicKeyOpenssh?.trim() || undefined
+      : undefined;
+  // A one-off browser-held key is deliberately preferred when supplied. This
+  // leaves saved profile keys as the stable default for existing users.
+  const profileKeys =
+    input.mode === "native" && !temporaryClientPublicKeyOpenssh
       ? await listUserAuthorizedSshKeysForNativeRoutes(input.actorUserId)
       : [];
-  if (input.mode === "native" && profileKeys.length === 0) {
+  if (
+    input.mode === "native" &&
+    !temporaryClientPublicKeyOpenssh &&
+    profileKeys.length === 0
+  ) {
     throw appError(
       409,
       "workshop_native_ssh_key_required",
@@ -227,6 +243,9 @@ async function issueWorkshopTerminalSession(input: {
       authorizedClientPublicKeysOpenssh: profileKeys.map(
         (key) => key.publicKeyOpenssh,
       ),
+      ...(temporaryClientPublicKeyOpenssh
+        ? { temporaryClientPublicKeyOpenssh }
+        : {}),
       metadata: {
         hostId: target.hostId,
         runId: target.executionId,

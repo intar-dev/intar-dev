@@ -90,7 +90,10 @@ export type HostSelectionResult =
       reason: "unavailable" | "image_not_ready" | "resource_capacity";
     };
 
-export type ScenarioRouteType = "browser" | "native_profile_keys";
+export type ScenarioRouteType =
+  | "browser"
+  | "native_profile_keys"
+  | "native_issued_key";
 
 export async function startScenarioRunInternal(params: {
   scenarioId: string;
@@ -1161,6 +1164,8 @@ export function routeSuffixForType(routeType: ScenarioRouteType): string {
       return "web";
     case "native_profile_keys":
       return "ssh-profile";
+    case "native_issued_key":
+      return "ssh-issued";
   }
 }
 
@@ -1176,6 +1181,12 @@ export async function revokeScenarioRunRoutes(row: {
         row.state.vms,
         vm.id,
         "native_profile_keys",
+      ),
+      buildRunVmRouteUsername(
+        row.runId,
+        row.state.vms,
+        vm.id,
+        "native_issued_key",
       ),
     ]),
   );
@@ -1198,7 +1209,7 @@ export async function revokeScenarioRoutesForUser(
 ): Promise<void> {
   await revokeScenarioRouteTypesForUser(
     userId,
-    ["browser", "native_profile_keys"],
+    ["browser", "native_profile_keys", "native_issued_key"],
     now - stargateRouteTtlMs(),
   );
 }

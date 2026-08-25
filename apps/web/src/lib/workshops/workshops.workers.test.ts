@@ -2509,7 +2509,7 @@ describe("standalone workshops", () => {
     });
   });
 
-  it("deletes a terminal route when archival wins the final recording race", async () => {
+  it("deletes a temporary native route when archival wins the final recording race", async () => {
     const setup = await readyWorkspaceFixture();
     await seedReadyRuntimeExecution(setup.workspaceId, setup.generationId);
     const executionId = `runtime-${setup.generationId}`;
@@ -2561,16 +2561,28 @@ describe("standalone workshops", () => {
         return {
           routeUsername: input.routeUsername,
           expiresAt: input.expiresAt.getTime(),
-          browser: { websocketUrl: "wss://terminal.example.test/session" },
+          native: {
+            authMode: "profile_keys" as const,
+            authorizedKeyCount: 1,
+            host: "ssh.example.test",
+            port: 2222,
+            username: input.routeUsername,
+            publicHostKeyOpenssh: "ssh-ed25519 gateway-host-key",
+            publicHostKeyFingerprintSha256: "SHA256:gateway",
+            knownHostsLine: "[ssh.example.test]:2222 ssh-ed25519 key",
+            command: `ssh -p 2222 ${input.routeUsername}@ssh.example.test`,
+          },
         };
       },
     );
 
     await expect(
-      issueWorkshopBrowserTerminalSession({
+      issueWorkshopNativeSshSession({
         sessionId: setup.sessionId,
         workspaceId: setup.workspaceId,
         actorUserId: "learner-a",
+        temporaryClientPublicKeyOpenssh:
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItemporary learner@browser",
       }),
     ).rejects.toMatchObject({
       code: "workshop_terminal_authorization_changed",
@@ -2587,6 +2599,13 @@ describe("standalone workshops", () => {
         .from(workshopWorkspaces)
         .where(eq(workshopWorkspaces.id, setup.workspaceId)),
     ).resolves.toEqual([{ routes: [] }]);
+    await expect(
+      env.DB.prepare(
+        "SELECT id FROM workshop_route_issuance_intents WHERE workspace_id = ?",
+      )
+        .bind(setup.workspaceId)
+        .all<{ id: string }>(),
+    ).resolves.toMatchObject({ results: [] });
   });
 
   it("revokes learner-granted assistance when the learner lowers their hand", async () => {
@@ -2742,7 +2761,7 @@ describe("standalone workshops", () => {
     expect(terminalMocks.deleteStargateRoute).toHaveBeenCalledTimes(2);
   });
 
-  it("issues native SSH only to the workspace participant using profile keys", async () => {
+  it("issues native SSH for a participant with either a temporary or profile key", async () => {
     const setup = await readyWorkspaceFixture();
     await seedReadyRuntimeExecution(setup.workspaceId, setup.generationId);
     terminalMocks.loadCurrentRuntimeVmTerminalTarget.mockResolvedValue({
@@ -2786,6 +2805,37 @@ describe("standalone workshops", () => {
       code: "workshop_native_ssh_participant_only",
     });
 
+    const temporaryClientPublicKeyOpenssh =
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItemporary learner@browser";
+    const temporaryTerminal = await issueWorkshopNativeSshSession({
+      sessionId: setup.sessionId,
+      workspaceId: setup.workspaceId,
+      actorUserId: "learner-a",
+      temporaryClientPublicKeyOpenssh,
+    });
+    expect(temporaryTerminal.routeUsername).toMatch(/-native$/);
+    const temporaryRouteInput =
+      terminalMocks.issueStargateTerminalSession.mock.calls.at(-1)?.[0];
+    expect(temporaryRouteInput).toMatchObject({
+      mode: "native",
+      authorizedClientPublicKeysOpenssh: [],
+      temporaryClientPublicKeyOpenssh,
+      metadata: expect.objectContaining({ userId: "learner-a" }),
+    });
+    // The browser sends only its public key. The target private key is a
+    // separate gateway credential and the client private key never enters this
+    // server-side contract.
+    expect(temporaryRouteInput).not.toHaveProperty("clientPrivateKeyOpenssh");
+    expect(temporaryRouteInput).not.toHaveProperty(
+      "temporaryClientPrivateKeyOpenssh",
+    );
+    await expect(
+      drizzle(env.DB)
+        .select({ routes: workshopWorkspaces.terminalRouteUsernamesJson })
+        .from(workshopWorkspaces)
+        .where(eq(workshopWorkspaces.id, setup.workspaceId)),
+    ).resolves.toEqual([{ routes: [temporaryTerminal.routeUsername] }]);
+
     await drizzle(env.DB).insert(userSshKeys).values({
       id: "learner-native-key",
       userId: "learner-a",
@@ -2805,20 +2855,26 @@ describe("standalone workshops", () => {
       authMode: "profile_keys",
       authorizedKeyCount: 1,
     });
-    expect(terminalMocks.issueStargateTerminalSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        mode: "native",
-        authorizedClientPublicKeysOpenssh: [
-          "ssh-ed25519 AAAATEST learner@example.test",
-        ],
-        metadata: expect.objectContaining({ userId: "learner-a" }),
-      }),
+    const profileRouteInput =
+      terminalMocks.issueStargateTerminalSession.mock.calls.at(-1)?.[0];
+    expect(profileRouteInput).toMatchObject({
+      mode: "native",
+      authorizedClientPublicKeysOpenssh: [
+        "ssh-ed25519 AAAATEST learner@example.test",
+      ],
+      metadata: expect.objectContaining({ userId: "learner-a" }),
+    });
+    expect(profileRouteInput).not.toHaveProperty(
+      "temporaryClientPublicKeyOpenssh",
     );
     const events = await drizzle(env.DB)
       .select({ payload: workshopEvents.payloadJson })
       .from(workshopEvents)
       .where(eq(workshopEvents.type, "terminal.opened"));
     expect(events).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({ mode: "native" }),
+      }),
       expect.objectContaining({
         payload: expect.objectContaining({ mode: "native" }),
       }),

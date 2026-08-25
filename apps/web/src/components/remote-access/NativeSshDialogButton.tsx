@@ -37,12 +37,14 @@ export function NativeSshDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Native SSH for {vmName}</DialogTitle>
           <DialogDescription>
-            This route accepts one of the Ed25519 keys saved on your profile.
-            Use your own local SSH identity and connect through Stargate.
+            Use a saved public key, or create a temporary key for this run.
+            Temporary private keys stay in this tab through refreshes and are
+            never saved to your profile. They are removed when the route
+            expires.
           </DialogDescription>
         </DialogHeader>
         {open ? <NativeSshConnectPanel sessionRequest={sessionRequest} /> : null}
@@ -79,12 +81,14 @@ export function NativeSshDialogButton({
           </Button>
         }
       />
-      <DialogContent className="sm:max-w-3xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Native SSH for {vmName}</DialogTitle>
           <DialogDescription>
-            This route accepts one of the Ed25519 keys saved on your profile.
-            Use your own local SSH identity and connect through Stargate.
+            Use a saved public key, or create a temporary key for this run.
+            Temporary private keys stay in this tab through refreshes and are
+            never saved to your profile. They are removed when the route
+            expires.
           </DialogDescription>
         </DialogHeader>
         {open ? <NativeSshConnectPanel sessionRequest={sessionRequest} /> : null}

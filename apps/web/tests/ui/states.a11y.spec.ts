@@ -1,3 +1,4 @@
+import { buildTemporaryNativeSshCommand } from "@/lib/native-ssh";
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
@@ -5,6 +6,15 @@ import {
   coarsePointerTargetViolations,
   expectNoHorizontalOverflow,
 } from "./support/layout";
+
+const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
+  username: "route-test-only",
+  host: "stargate.example.test",
+  port: 2222,
+  knownHostsLine:
+    "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key",
+  keyFilename: "intar-route-test-only.key",
+});
 
 test.describe("focused state accessibility", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -333,6 +343,224 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
+  test("temporary native SSH key persists through dialog reopen and refresh", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+    ui.server.state.sshKeys = [];
+
+    await page.getByRole("button", { name: "Page actions" }).click();
+    await page.getByRole("menuitem", { name: "SSH command" }).click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("button", { name: "Create temporary SSH key" }),
+    ).toBeVisible();
+    expect(ui.server.nativeSshRequests).toHaveLength(1);
+    expect(ui.server.nativeSshRequests[0]?.body).toEqual({
+      vmId: "run-vm-web",
+      mode: "native",
+    });
+
+    ui.server.nativeSshResponseDelayMs = 300;
+    await dialog
+      .getByRole("button", { name: "Create temporary SSH key" })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Object.keys(sessionStorage).filter((key) =>
+            key.startsWith("intar.native-ssh.temporary.v1:"),
+          ),
+        ),
+      )
+      .toHaveLength(1);
+    await expect(
+      dialog.getByRole("button", { name: "Download temporary key" }),
+    ).toBeVisible();
+    ui.server.nativeSshResponseDelayMs = 0;
+    await expect(dialog.getByLabel("SSH command")).toHaveValue(
+      TEMPORARY_RUN_SSH_COMMAND,
+    );
+    await expect(
+      dialog.getByRole("button", { name: "Copy" }).first(),
+    ).toBeDisabled();
+    const downloadPromise = page.waitForEvent("download");
+    await dialog
+      .getByRole("button", { name: "Download temporary key" })
+      .click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe("intar-route-test-only.key");
+    await expect(
+      dialog.getByRole("button", { name: "Copy" }).first(),
+    ).toBeEnabled();
+
+    expect(ui.server.nativeSshRequests).toHaveLength(2);
+    const issuedRequest = ui.server.nativeSshRequests[1];
+    expect(issuedRequest?.pathname).toBe("/api/scenarios/runs/run-active/ssh");
+    expect(issuedRequest?.body).toMatchObject({
+      vmId: "run-vm-web",
+      mode: "native",
+      clientPublicKeyOpenssh: expect.stringMatching(/^ssh-ed25519 /),
+    });
+    expect(Object.keys(issuedRequest?.body ?? {}).sort()).toEqual([
+      "clientPublicKeyOpenssh",
+      "mode",
+      "vmId",
+    ]);
+    const issuedPublicKey = issuedRequest?.body.clientPublicKeyOpenssh;
+    expect(typeof issuedPublicKey).toBe("string");
+    expect(JSON.stringify(issuedRequest?.body)).not.toContain(
+      "OPENSSH PRIVATE KEY",
+    );
+    await expect(page.locator("html")).not.toContainText(
+      "OPENSSH PRIVATE KEY",
+    );
+    expect(
+      await dialog.locator("textarea").evaluateAll((fields) =>
+        fields.map((field) => (field as HTMLTextAreaElement).value),
+      ),
+    ).not.toContain(expect.stringContaining("OPENSSH PRIVATE KEY"));
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await page.getByRole("button", { name: "Page actions" }).click();
+    await page.getByRole("menuitem", { name: "SSH command" }).click();
+    await expect(
+      dialog.getByRole("button", { name: "Download temporary key" }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Copy" }).first(),
+    ).toBeEnabled();
+    expect(ui.server.nativeSshRequests).toHaveLength(3);
+    expect(
+      ui.server.nativeSshRequests[2]?.body.clientPublicKeyOpenssh,
+    ).toBe(issuedPublicKey);
+
+    await page.keyboard.press("Escape");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+    await page.getByRole("button", { name: "Page actions" }).click();
+    await page.getByRole("menuitem", { name: "SSH command" }).click();
+    await expect(
+      dialog.getByRole("button", { name: "Download temporary key" }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Copy" }).first(),
+    ).toBeEnabled();
+    expect(ui.server.nativeSshRequests).toHaveLength(4);
+    expect(
+      ui.server.nativeSshRequests[3]?.body.clientPublicKeyOpenssh,
+    ).toBe(issuedPublicKey);
+
+    await page.clock.setFixedTime(Date.parse("2026-07-10T09:15:00.000Z"));
+    await page.clock.fastForward(15 * 60_000);
+    await expect(
+      dialog.getByRole("button", { name: "Create temporary SSH key" }),
+    ).toBeVisible();
+    expect(ui.server.nativeSshRequests).toHaveLength(5);
+    expect(ui.server.nativeSshRequests[4]?.body).toEqual({
+      vmId: "run-vm-web",
+      mode: "native",
+    });
+    expect(
+      await page.evaluate(() =>
+        Object.keys(sessionStorage).filter((key) =>
+          key.startsWith("intar.native-ssh.temporary.v1:"),
+        ),
+      ),
+    ).toEqual([]);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("temporary native SSH warns when the browser blocks persistence", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+    ui.server.state.sshKeys = [];
+    await page.getByRole("button", { name: "Page actions" }).click();
+    await page.getByRole("menuitem", { name: "SSH command" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("button", { name: "Create temporary SSH key" }),
+    ).toBeVisible();
+    await page.evaluate(() => {
+      Object.defineProperty(Storage.prototype, "setItem", {
+        configurable: true,
+        value() {
+          throw new DOMException("Storage blocked", "SecurityError");
+        },
+      });
+    });
+
+    await dialog
+      .getByRole("button", { name: "Create temporary SSH key" })
+      .click();
+
+    await expect(
+      dialog.getByText(
+        "This browser cannot keep the temporary key after a refresh. Download it now.",
+      ),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Download temporary key" }),
+    ).toBeVisible();
+  });
+
+  test("sign out clears browser-held temporary SSH keys", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+    ui.server.state.sshKeys = [];
+    await page.getByRole("button", { name: "Page actions" }).click();
+    await page.getByRole("menuitem", { name: "SSH command" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog
+      .getByRole("button", { name: "Create temporary SSH key" })
+      .click();
+    await expect(
+      dialog.getByRole("button", { name: "Download temporary key" }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() =>
+        Object.keys(sessionStorage).filter((key) =>
+          key.startsWith("intar.native-ssh.temporary.v1:"),
+        ),
+      ),
+    ).toHaveLength(1);
+
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: /minalearns/i }).click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect.poll(() => ui.server.requests).toContain(
+      "POST /api/auth/sign-out",
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Object.keys(sessionStorage).filter((key) =>
+            key.startsWith("intar.native-ssh.temporary.v1:"),
+          ),
+        ),
+      )
+      .toEqual([]);
+  });
+
   test("startup milestones expose one current ordered step", async ({
     page,
     ui,
@@ -474,6 +702,35 @@ test.describe("focused mobile state accessibility", () => {
     await expect(
       page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
     ).toHaveCount(1);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("native SSH dialog stays reachable on a short phone", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+    ui.server.state.sshKeys = [];
+    await page.getByRole("button", { name: "Page actions" }).click();
+    await page.getByRole("menuitem", { name: "SSH command" }).click();
+
+    const dialog = page.getByRole("dialog");
+    await dialog
+      .getByRole("button", { name: "Create temporary SSH key" })
+      .click();
+    await expect(
+      dialog.getByRole("button", { name: "Download temporary key" }),
+    ).toBeVisible();
+    await expect(dialog.getByLabel("macOS/Linux SSH command")).toBeVisible();
+
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.height).toBeLessThanOrEqual(812);
+    await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
 });

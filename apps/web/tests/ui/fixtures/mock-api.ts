@@ -1,4 +1,5 @@
 import type { Route } from "@playwright/test";
+import { buildTemporaryNativeSshCommand } from "@/lib/native-ssh";
 import {
   FIXED_NOW,
   makeRun,
@@ -11,6 +12,12 @@ export interface MockApiServer {
   state: MockApiState;
   unhandled: string[];
   requests: string[];
+  nativeSshRequests: Array<{
+    pathname: string;
+    body: Record<string, unknown>;
+  }>;
+  expectedNativeSshNoProfileConflicts: number;
+  nativeSshResponseDelayMs: number;
   handle(route: Route): Promise<void>;
   setRunState(state: RunFixtureState): void;
 }
@@ -25,6 +32,41 @@ function noContent(route: Route) {
 
 const GENERAL_PRACTICE_DESCRIPTION =
   "Standalone systems for focused practice outside a guided curriculum.";
+
+function nativeSshSessionFixture(input: {
+  routeUsername: string;
+  clientPublicKeyOpenssh: string | null;
+}) {
+  const knownHostsLine =
+    "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key";
+  const issuedKey = input.clientPublicKeyOpenssh !== null;
+  const keyFilename = `intar-${input.routeUsername}.key`;
+
+  return {
+    routeUsername: input.routeUsername,
+    expiresAt: FIXED_NOW + 15 * 60_000,
+    native: {
+      authMode: issuedKey ? ("issued_key" as const) : ("profile_keys" as const),
+      authorizedKeyCount: 1,
+      host: "stargate.example.test",
+      port: 2222,
+      username: input.routeUsername,
+      command: issuedKey
+        ? buildTemporaryNativeSshCommand({
+            username: input.routeUsername,
+            host: "stargate.example.test",
+            port: 2222,
+            keyFilename,
+            knownHostsLine,
+          })
+        : `ssh -p 2222 ${input.routeUsername}@stargate.example.test`,
+      publicHostKeyOpenssh: "ssh-ed25519 test-only-host-key",
+      publicHostKeyFingerprintSha256: "SHA256:test-only-fingerprint",
+      knownHostsLine,
+      ...(issuedKey ? { keyFilename } : {}),
+    },
+  };
+}
 
 function nestedCourseCatalog(
   scenarios: Array<Record<string, unknown>>,
@@ -242,6 +284,9 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     state: initial,
     unhandled: [],
     requests: [],
+    nativeSshRequests: [],
+    expectedNativeSshNoProfileConflicts: 0,
+    nativeSshResponseDelayMs: 0,
     setRunState(runState) {
       server.state.runState = runState;
       server.state.run = makeRun(runState);
@@ -667,23 +712,36 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       ) {
         const body = await requestBody(route);
         if (body.mode === "native") {
-          await json(route, {
-            routeUsername: "workshop-route-test-only-native",
-            expiresAt: FIXED_NOW + 15 * 60_000,
-            native: {
-              authMode: "profile_keys",
-              authorizedKeyCount: 1,
-              host: "stargate.example.test",
-              port: 2222,
-              username: "workshop-route-test-only-native",
-              command:
-                "ssh -p 2222 workshop-route-test-only-native@stargate.example.test",
-              publicHostKeyOpenssh: "ssh-ed25519 test-only-host-key",
-              publicHostKeyFingerprintSha256: "SHA256:test-only-fingerprint",
-              knownHostsLine:
-                "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key",
-            },
-          });
+          const clientPublicKeyOpenssh =
+            typeof body.clientPublicKeyOpenssh === "string"
+              ? body.clientPublicKeyOpenssh
+              : null;
+          server.nativeSshRequests.push({ pathname, body });
+          if (!clientPublicKeyOpenssh && server.state.sshKeys.length === 0) {
+            server.expectedNativeSshNoProfileConflicts += 1;
+            await json(
+              route,
+              {
+                code: "workshop_native_ssh_key_required",
+                error:
+                  "provide a temporary SSH key or add an SSH key to your profile before opening a native workshop SSH route",
+              },
+              409,
+            );
+            return;
+          }
+          if (server.nativeSshResponseDelayMs > 0) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, server.nativeSshResponseDelayMs),
+            );
+          }
+          await json(
+            route,
+            nativeSshSessionFixture({
+              routeUsername: "workshop-route-test-only-native",
+              clientPublicKeyOpenssh,
+            }),
+          );
           return;
         }
         await json(route, {
@@ -826,22 +884,36 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       ) {
         const body = await requestBody(route);
         if (body.mode === "native") {
-          await json(route, {
-            routeUsername: "route-test-only",
-            expiresAt: FIXED_NOW + 15 * 60_000,
-            native: {
-              authMode: "profile_keys",
-              authorizedKeyCount: 1,
-              host: "stargate.example.test",
-              port: 2222,
-              username: "route-test-only",
-              command: "ssh -p 2222 route-test-only@stargate.example.test",
-              publicHostKeyOpenssh: `ssh-ed25519 ${"A".repeat(68)}`,
-              publicHostKeyFingerprintSha256: "SHA256:test-only-host-key",
-              knownHostsLine:
-                "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key",
-            },
-          });
+          const clientPublicKeyOpenssh =
+            typeof body.clientPublicKeyOpenssh === "string"
+              ? body.clientPublicKeyOpenssh
+              : null;
+          server.nativeSshRequests.push({ pathname, body });
+          if (!clientPublicKeyOpenssh && server.state.sshKeys.length === 0) {
+            server.expectedNativeSshNoProfileConflicts += 1;
+            await json(
+              route,
+              {
+                code: "scenario_native_ssh_key_required",
+                error:
+                  "provide a temporary SSH key or add an SSH key to your profile before opening a native SSH route",
+              },
+              409,
+            );
+            return;
+          }
+          if (server.nativeSshResponseDelayMs > 0) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, server.nativeSshResponseDelayMs),
+            );
+          }
+          await json(
+            route,
+            nativeSshSessionFixture({
+              routeUsername: "route-test-only",
+              clientPublicKeyOpenssh,
+            }),
+          );
           return;
         }
         await json(route, {

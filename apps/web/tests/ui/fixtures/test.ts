@@ -38,9 +38,22 @@ interface UiFixtures {
 
 const EXPECTED_MOCK_503_CONSOLE_ERROR =
   "Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
+const EXPECTED_MOCK_409_CONSOLE_ERROR =
+  "Failed to load resource: the server responded with a status of 409 (Conflict)";
 
-function actionableConsoleError(text: string, variant: DataVariant) {
+function actionableConsoleError(
+  text: string,
+  variant: DataVariant,
+  server: MockApiServer,
+) {
   if (variant === "error" && text === EXPECTED_MOCK_503_CONSOLE_ERROR) {
+    return false;
+  }
+  if (
+    text === EXPECTED_MOCK_409_CONSOLE_ERROR &&
+    server.expectedNativeSshNoProfileConflicts > 0
+  ) {
+    server.expectedNativeSshNoProfileConflicts -= 1;
     return false;
   }
   return !text.includes("favicon.ico") && !text.includes("ResizeObserver loop");
@@ -89,7 +102,7 @@ export const test = base.extend<UiFixtures>({
     page.on("console", (message) => {
       if (
         message.type() === "error" &&
-        actionableConsoleError(message.text(), server.state.variant)
+        actionableConsoleError(message.text(), server.state.variant, server)
       ) {
         consoleErrors.push(`console: ${message.text()}`);
       }
@@ -105,6 +118,9 @@ export const test = base.extend<UiFixtures>({
       configure(options) {
         server.state = createMockApiState(options);
         server.requests.length = 0;
+        server.nativeSshRequests.length = 0;
+        server.expectedNativeSshNoProfileConflicts = 0;
+        server.nativeSshResponseDelayMs = 0;
         server.unhandled.length = 0;
       },
       async open(options) {

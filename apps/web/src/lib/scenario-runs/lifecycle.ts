@@ -391,6 +391,11 @@ export async function createScenarioSshSessionForUser(params: {
   vmId: string;
   userId: string;
   mode?: "browser" | "native";
+  /**
+   * A one-run public key supplied by the native SSH client. This is already
+   * normalized at the HTTP boundary and is never persisted as a profile key.
+   */
+  clientPublicKeyOpenssh?: string;
 }): Promise<ScenarioTerminalSessionResult> {
   const row = await loadRunRow(params.runId, params.userId);
   if (!row) {
@@ -442,15 +447,36 @@ export async function createScenarioSshSessionForUser(params: {
     requestedMode === "native"
       ? await listUserAuthorizedSshKeysForNativeRoutes(params.userId)
       : [];
-  if (requestedMode === "native" && profileKeys.length === 0) {
+  const temporaryClientPublicKeyOpenssh =
+    params.clientPublicKeyOpenssh?.trim() || undefined;
+  if (temporaryClientPublicKeyOpenssh && requestedMode !== "native") {
+    throw appError(
+      400,
+      "native_ssh_public_key_invalid",
+      "a temporary SSH key can only be used for native SSH",
+    );
+  }
+  const usesProfileKeys =
+    requestedMode === "native" &&
+    !temporaryClientPublicKeyOpenssh &&
+    profileKeys.length > 0;
+  if (
+    requestedMode === "native" &&
+    !usesProfileKeys &&
+    !temporaryClientPublicKeyOpenssh
+  ) {
     throw appError(
       409,
       "scenario_native_ssh_key_required",
-      "add an SSH key to your profile before opening a native SSH route",
+      "provide a temporary SSH key or add an SSH key to your profile before opening a native SSH route",
     );
   }
   const routeType =
-    requestedMode === "browser" ? "browser" : "native_profile_keys";
+    requestedMode === "browser"
+      ? "browser"
+      : usesProfileKeys
+        ? "native_profile_keys"
+        : "native_issued_key";
   const routeUsername = buildRunVmRouteUsername(
     row.runId,
     row.state.vms,
@@ -476,9 +502,12 @@ export async function createScenarioSshSessionForUser(params: {
         targetPrivateKeyOpenssh: targetKey.privateKeyOpenssh,
         expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
         mode: requestedMode,
-        authorizedClientPublicKeysOpenssh: profileKeys.map(
-          (key) => key.publicKeyOpenssh,
-        ),
+        authorizedClientPublicKeysOpenssh: usesProfileKeys
+          ? profileKeys.map((key) => key.publicKeyOpenssh)
+          : [],
+        ...(temporaryClientPublicKeyOpenssh
+          ? { temporaryClientPublicKeyOpenssh }
+          : {}),
         metadata: {
           hostId: row.hostId,
           runId: row.runId,
