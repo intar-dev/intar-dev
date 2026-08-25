@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { router } from "./router";
-import { findActiveNavItem } from "./shell/nav-config";
+import { NAV_SECTIONS, findActiveNavItem } from "./shell/nav-config";
 
 describe("course learner routes", () => {
   it("exposes canonical public and organization course paths", () => {
@@ -42,5 +42,21 @@ describe("course learner routes", () => {
       "courses",
     );
     expect(findActiveNavItem("/scenarios")).toBeNull();
+  });
+
+  it("keeps Discord in a signed-in Support section", () => {
+    const support = NAV_SECTIONS.find((section) => section.id === "support");
+
+    expect(support?.label).toBe("Support");
+    expect(support?.requires).toBe("signedIn");
+    expect(support?.items).toEqual([
+      expect.objectContaining({
+        id: "discord",
+        label: "Discord",
+        to: "https://discord.gg/BgknKxJKa",
+        requires: "signedIn",
+        external: true,
+      }),
+    ]);
   });
 });

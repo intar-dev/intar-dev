@@ -60,15 +60,33 @@ export function AppSidebar() {
                   const Icon = item.icon;
                   const badgeCount =
                     item.id === "runs" ? ongoingRunCount : 0;
+                  const destination = item.external ? (
+                    <a
+                      href={item.to}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    />
+                  ) : (
+                    <Link to={item.to} />
+                  );
                   return (
                     <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton
-                        isActive={activeId === item.id}
-                        tooltip={item.label}
-                        render={<Link to={item.to} />}
+                        isActive={!item.external && activeId === item.id}
+                        tooltip={
+                          item.external
+                            ? `${item.label} (opens in a new tab)`
+                            : item.label
+                        }
+                        render={destination}
                       >
                         <Icon />
                         <span>{item.label}</span>
+                        {item.external ? (
+                          <span className="sr-only">
+                            (opens in a new tab)
+                          </span>
+                        ) : null}
                         {badgeCount > 0 ? (
                           <span className="sr-only">
                             , {badgeCount} ongoing {badgeCount === 1 ? "run" : "runs"}

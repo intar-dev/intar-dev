@@ -58,6 +58,22 @@ test("keyboard-only landing navigation keeps focus visible", async ({
   }
 });
 
+test("main menu links Discord under Support", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+
+  await expect(page.getByText("Support", { exact: true })).toBeVisible();
+  const discord = page.getByRole("link", {
+    name: "Discord (opens in a new tab)",
+  });
+  await expect(discord).toBeVisible();
+  await expect(discord).toHaveAttribute(
+    "href",
+    "https://discord.gg/BgknKxJKa",
+  );
+  await expect(discord).toHaveAttribute("target", "_blank");
+  await expect(discord).toHaveAttribute("rel", "noopener noreferrer");
+});
+
 test("organization courses use their own path instead of a tab query", async ({
   page,
   ui,

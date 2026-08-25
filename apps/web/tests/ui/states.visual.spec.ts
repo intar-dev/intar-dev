@@ -180,6 +180,18 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "catalog-paginated-light-desktop");
   });
 
+  test("sidebar · Discord support link", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("scenario-catalog"),
+      theme: "light",
+    });
+    await expect(page.getByText("Support", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Discord (opens in a new tab)" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "sidebar-support-discord-light-desktop");
+  });
+
   test("catalog · authored course", async ({ page, ui }) => {
     await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
     await page.getByRole("button", { name: "Linux operations" }).click();

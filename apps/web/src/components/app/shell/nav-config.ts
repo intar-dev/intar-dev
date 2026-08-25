@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   Library,
   ListChecks,
+  MessageCircle,
   Presentation,
   Server,
   UserPlus,
@@ -20,6 +21,8 @@ export interface NavItem {
   to: string;
   icon: LucideIcon;
   requires: NavRequirement;
+  /** External destinations open separately so learner work stays in place. */
+  external?: boolean;
   /** Match the active state on this prefix (defaults to `to`). */
   matchPrefix?: string;
 }
@@ -128,6 +131,21 @@ export const NAV_SECTIONS: NavSection[] = [
         to: "/admin/people",
         icon: UserPlus,
         requires: "admin",
+      },
+    ],
+  },
+  {
+    id: "support",
+    label: "Support",
+    requires: "signedIn",
+    items: [
+      {
+        id: "discord",
+        label: "Discord",
+        to: "https://discord.gg/BgknKxJKa",
+        icon: MessageCircle,
+        requires: "signedIn",
+        external: true,
       },
     ],
   },
