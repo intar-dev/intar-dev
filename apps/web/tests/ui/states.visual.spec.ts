@@ -85,6 +85,31 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "run-saving-recap-dark-desktop");
   });
 
+  test("run · every saving milestone", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+    const currentStep = page
+      .getByRole("list", { name: "Saving steps" })
+      .locator('[aria-current="step"]');
+    for (const [stage, label, snapshot] of [
+      ["save_requested", "Save requested", "save-requested"],
+      ["closing_workspace", "Closing workspace", "closing-workspace"],
+      ["saving_files", "Saving files", "saving-files"],
+      ["preparing_replay", "Preparing replay", "preparing-replay"],
+      ["finalizing_recap", "Finalizing recap", "finalizing-recap"],
+    ] as const) {
+      ui.server.state.run.savingStage = stage;
+      await expect(currentStep).toContainText(label);
+      await expectRouteScreenshot(
+        page,
+        `run-saving-${snapshot}-dark-desktop`,
+      );
+    }
+  });
+
   test("run · settled recap", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
@@ -405,9 +430,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expect(
-      page.getByRole("progressbar", { name: "Saving your run" }),
-    ).toBeVisible();
+    await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-mobile");
   });
 
@@ -452,9 +475,7 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expect(
-      page.getByRole("progressbar", { name: "Saving your run" }),
-    ).toBeVisible();
+    await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-landscape");
   });
 });

@@ -140,6 +140,11 @@ export const runtimeVms = sqliteTable(
     })
       .default(false)
       .notNull(),
+    // Archive progress is deliberately per VM: callbacks can arrive out of
+    // order or concurrently, and the learner-facing run state takes the
+    // lowest completed stage across every VM. Null keeps existing runs and
+    // older agents on the coarse lifecycle fallback.
+    archiveStageRank: integer("archive_stage_rank"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },

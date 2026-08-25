@@ -75,6 +75,15 @@ describe("Drizzle-managed production D1 schema", () => {
       ),
     ).toMatchObject({ notnull: 1 });
 
+    const runtimeVmColumns = await env.DB.prepare(
+      "PRAGMA table_info('runtime_vms')",
+    ).all<{ name: string; notnull: number }>();
+    expect(
+      runtimeVmColumns.results.find(
+        (column) => column.name === "archive_stage_rank",
+      ),
+    ).toMatchObject({ notnull: 0 });
+
     const routeIndexes = await env.DB.prepare(
       `SELECT name, "unique" AS is_unique
        FROM pragma_index_list('workshop_route_issuance_intents')

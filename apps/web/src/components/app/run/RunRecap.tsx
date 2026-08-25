@@ -3,6 +3,7 @@ import {
   type Ref,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { Link } from "@tanstack/react-router";
@@ -52,6 +53,48 @@ export interface RunRecapProps {
   nextAction?: ReactNode;
 }
 
+type RunSavingStage = NonNullable<ScenarioRunRecord["savingStage"]>;
+export const RUN_SAVING_STALLED_DELAY_MS = 30_000;
+
+export const RUN_SAVING_STEPS = [
+  { stage: "save_requested", label: "Save requested" },
+  { stage: "closing_workspace", label: "Closing workspace" },
+  { stage: "saving_files", label: "Saving files" },
+  { stage: "preparing_replay", label: "Preparing replay" },
+  { stage: "finalizing_recap", label: "Finalizing recap" },
+] as const satisfies readonly { stage: RunSavingStage; label: string }[];
+
+type RunSavingStepState = "done" | "active" | "up_next";
+
+export function getRunSavingStage(
+  run: Pick<ScenarioRunRecord, "phase" | "savingStage">,
+): RunSavingStage {
+  if (run.savingStage) return run.savingStage;
+
+  // Older agents do not send detailed archive milestones. Keep their fallback
+  // deliberately coarse rather than implying later work has completed.
+  if (run.phase === "deleting" || run.phase === "archiving") {
+    return "closing_workspace";
+  }
+
+  return "save_requested";
+}
+
+export function getRunSavingStepState(
+  stage: RunSavingStage,
+  step: RunSavingStage,
+): RunSavingStepState {
+  const activeIndex = RUN_SAVING_STEPS.findIndex(
+    (candidate) => candidate.stage === stage,
+  );
+  const stepIndex = RUN_SAVING_STEPS.findIndex(
+    (candidate) => candidate.stage === step,
+  );
+  if (stepIndex < activeIndex) return "done";
+  if (stepIndex === activeIndex) return "active";
+  return "up_next";
+}
+
 /**
  * A saved run is a short learning recap, not an operations timeline. All
  * technical run state stays outside this component.
@@ -69,8 +112,7 @@ export function RunRecap({
     return (
       <section
         aria-labelledby="run-recap-heading"
-        aria-busy="true"
-        className="mx-auto w-full max-w-2xl py-10 sm:py-14"
+        className="mx-auto w-full max-w-3xl py-8 md:py-12"
       >
         <p className="text-eyebrow">Lab run</p>
         <h2
@@ -84,7 +126,7 @@ export function RunRecap({
         <p className="mt-3 max-w-[46ch] text-sm leading-6 text-muted-foreground">
           {recap.description}
         </p>
-        <RunSavingProgress />
+        <RunSavingProgress stage={getRunSavingStage(run)} />
       </section>
     );
   }
@@ -99,9 +141,9 @@ export function RunRecap({
   return (
     <section
       aria-labelledby="run-recap-heading"
-      className="mx-auto w-full max-w-3xl space-y-8 py-5 sm:py-8"
+      className="mx-auto w-full max-w-3xl space-y-8 py-8 md:space-y-12 md:py-10"
     >
-      <header className="border-b border-primary/15 pb-6">
+      <header className="border-b border-primary/15 pb-8">
         <p className="text-eyebrow">Lab recap</p>
         <h2
           id="run-recap-heading"
@@ -133,11 +175,11 @@ export function RunRecap({
             objectives={objectives}
             verifiedObjectives={verifiedObjectives}
           />
-          <ol className="mt-3 divide-y border-y">
+          <ol className="mt-4 divide-y">
             {objectives.map((objective) => (
               <li
                 key={objective.key}
-                className="grid min-h-11 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-3 py-3"
+                className="grid min-h-11 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-3 py-4"
               >
                 {objective.status === "verified" ? (
                   <CheckCircle2
@@ -171,28 +213,28 @@ export function RunRecap({
         </section>
       ) : null}
 
-      <section aria-label="Learning summary" className="border-y py-4">
-        <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-3">
+      <section aria-label="Learning summary">
+        <dl className="grid gap-x-8 gap-y-4 text-sm sm:grid-cols-3">
           {recap.kind === "solved" && run.solveDurationMs !== null ? (
             <div>
               <dt className="inline-flex items-center gap-2 text-caption">
                 <Clock3 className="size-4" aria-hidden="true" />
                 Solve time
               </dt>
-              <dd className="font-medium tabular-nums">
+              <dd className="mt-1 font-medium tabular-nums">
                 {formatScenarioDurationMs(run.solveDurationMs)}
               </dd>
             </div>
           ) : null}
           <div>
             <dt className="text-caption">Hints used</dt>
-            <dd className="font-medium">
+            <dd className="mt-1 font-medium">
               {revealedHints === 1 ? "1 hint" : `${revealedHints} hints`}
             </dd>
           </div>
           <div>
             <dt className="text-caption">Full solution</dt>
-            <dd className="font-medium">
+            <dd className="mt-1 font-medium">
               {solutionUsed ? "Used" : "Not used"}
             </dd>
           </div>
@@ -201,7 +243,7 @@ export function RunRecap({
 
       <RunReplaySection run={run} />
 
-      <section aria-labelledby="run-recap-next-heading" className="pt-1">
+      <section aria-labelledby="run-recap-next-heading">
         <p className="text-eyebrow">What next?</p>
         <h2
           id="run-recap-next-heading"
@@ -224,34 +266,105 @@ export function RunRecap({
   );
 }
 
-function RunSavingProgress() {
+function RunSavingProgress({ stage }: { stage: RunSavingStage }) {
+  const activeStep =
+    RUN_SAVING_STEPS.find((step) => step.stage === stage) ??
+    RUN_SAVING_STEPS[0];
+  const previousStageRef = useRef(stage);
+  const [announcement, setAnnouncement] = useState("");
+  const [isStalled, setIsStalled] = useState(false);
+
+  useEffect(() => {
+    if (previousStageRef.current !== stage) {
+      setAnnouncement(`${activeStep.label}. In progress.`);
+      previousStageRef.current = stage;
+    }
+  }, [activeStep.label, stage]);
+
+  useEffect(() => {
+    setIsStalled(false);
+    const timeout = window.setTimeout(
+      () => setIsStalled(true),
+      RUN_SAVING_STALLED_DELAY_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [stage]);
+
   return (
-    <div className="mt-8 w-full max-w-lg" data-run-saving-progress>
+    <div className="mt-8 w-full" data-run-saving-progress>
       <div className="flex items-center justify-between gap-4 text-xs font-medium">
-        <span>Save progress</span>
+        <span>Saving steps</span>
         <span className="text-muted-foreground">In progress</span>
       </div>
-      <div
-        role="progressbar"
-        aria-label="Saving your run"
-        aria-valuetext="Saving your run. Your recap will be ready in a moment."
-        className="mt-2 h-2 overflow-hidden rounded-full bg-primary/15 ring-1 ring-primary/25 ring-inset"
+      <ol
+        aria-label="Saving steps"
+        className="mt-4 grid gap-3 sm:grid-cols-5 sm:gap-2"
+        data-run-saving-steps
       >
-        <span
-          aria-hidden="true"
-          data-run-saving-progress-indicator
-          className="block h-full w-2/5 rounded-full bg-primary animate-run-saving-progress motion-reduce:hidden motion-reduce:animate-none"
-        />
-        <span
-          aria-hidden="true"
-          data-run-saving-progress-static
-          className="hidden h-full items-center justify-center gap-1 motion-reduce:flex"
+        {RUN_SAVING_STEPS.map((step, index) => {
+          const state = getRunSavingStepState(stage, step.stage);
+          const stateLabel =
+            state === "done"
+              ? "Done"
+              : state === "active"
+                ? "In progress"
+                : "Up next";
+          return (
+            <li
+              key={step.stage}
+              aria-current={state === "active" ? "step" : undefined}
+              data-run-saving-step
+              data-state={state}
+              className="flex min-w-0 items-center gap-3 sm:flex-col sm:items-start sm:gap-2"
+            >
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "flex size-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold tabular-nums transition-[transform,opacity] duration-150 motion-reduce:transition-none",
+                  state === "done"
+                    ? "scale-100 border-success bg-success text-success-foreground"
+                    : state === "active"
+                      ? "scale-100 border-primary bg-primary text-primary-foreground"
+                      : "scale-95 border-border bg-background text-muted-foreground opacity-70",
+                )}
+              >
+                {state === "done" ? (
+                  <CheckCircle2 className="size-4" />
+                ) : (
+                  index + 1
+                )}
+              </span>
+              <span className="min-w-0 text-sm leading-5 sm:text-xs">
+                <span className="block font-medium text-foreground">
+                  {step.label}
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  {stateLabel}
+                </span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      {isStalled ? (
+        <p
+          className="mt-5 max-w-[52ch] text-sm leading-6 text-muted-foreground"
+          data-run-saving-stalled
+          role="status"
         >
-          <span className="size-1 rounded-full bg-primary" />
-          <span className="size-1 rounded-full bg-primary" />
-          <span className="size-1 rounded-full bg-primary" />
-        </span>
-      </div>
+          This is taking longer than usual. Your work is safe, and your recap
+          will appear here.
+        </p>
+      ) : null}
+      <p
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+        data-run-saving-announcement
+      >
+        {announcement}
+      </p>
     </div>
   );
 }
@@ -272,7 +385,7 @@ function RunRecapProgress({
       aria-valuenow={verifiedObjectives}
       aria-valuetext={`${verifiedObjectives} of ${objectives.length} final checks verified`}
       data-run-recap-progress
-      className="mt-4 flex flex-wrap gap-2"
+      className="mt-5 flex flex-wrap gap-2"
     >
       {objectives.map((objective) => (
         <span
@@ -363,7 +476,10 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
 
   if (availability === "pending") {
     return (
-      <section aria-labelledby="run-recap-replay-heading" className="border-y py-4">
+      <section
+        aria-labelledby="run-recap-replay-heading"
+        className="border-t pt-4 pb-6"
+      >
         <div className="flex items-center gap-2">
           <PlayCircle className="size-4 text-muted-foreground" aria-hidden="true" />
           <h2
@@ -382,7 +498,10 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
 
   if (availability === "unavailable") {
     return (
-      <section aria-labelledby="run-recap-replay-heading" className="border-y py-4">
+      <section
+        aria-labelledby="run-recap-replay-heading"
+        className="border-t pt-4 pb-6"
+      >
         <div className="flex items-center gap-2">
           <PlayCircle className="size-4 text-muted-foreground" aria-hidden="true" />
           <h2
@@ -400,7 +519,10 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
   }
 
   return (
-    <section aria-labelledby="run-recap-replay-heading" className="border-y py-2">
+    <section
+      aria-labelledby="run-recap-replay-heading"
+      className="border-t pt-4 pb-6"
+    >
       <DisclosureRow
         title={
           <span className="flex items-center gap-2">
@@ -409,7 +531,7 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
           </span>
         }
         density="comfortable"
-        contentClassName="pb-4"
+        contentClassName="pt-4 pb-6"
       >
         <ReplayViewer runId={run.id} parts={parts} />
       </DisclosureRow>
@@ -467,19 +589,16 @@ export function ReplayViewer({
       aria-roledescription="carousel"
       aria-label="Replay parts"
       data-run-replay-carousel
-      className="space-y-3"
+      className="space-y-5"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
-        <div className="min-w-0">
-          <p className="text-caption">Replay sequence</p>
-          <p
-            className="mt-1 font-heading text-base font-semibold tracking-tight"
-            data-run-replay-position
-          >
-            {selected.partLabel} of {parts.length}
-            {selected.machineLabel ? ` · ${selected.machineLabel}` : ""}
-          </p>
-        </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <p
+          className="min-w-0 font-heading text-base font-semibold tracking-tight"
+          data-run-replay-position
+        >
+          {selected.partLabel} of {parts.length}
+          {selected.machineLabel ? ` · ${selected.machineLabel}` : ""}
+        </p>
         <div className="flex items-center gap-2">
           <Button
             type="button"
@@ -512,7 +631,7 @@ export function ReplayViewer({
 
       <ol
         aria-label="Replay order"
-        className="no-scrollbar flex max-w-full gap-2 overflow-x-auto pb-1"
+        className="flex max-w-full gap-3 overflow-x-auto pb-2"
       >
         {parts.map((part, index) => (
           <li key={part.key} className="shrink-0">
@@ -577,7 +696,10 @@ function ReplayPartSurface({
       Replay could not be loaded. Try again soon.
     </p>
   ) : (
-    <div className="overflow-hidden rounded-md border bg-terminal-background">
+    <div
+      className="overflow-hidden rounded-md border border-border/70 bg-terminal-background"
+      data-run-recap-replay-surface
+    >
       <AsciicastReplaySurface
         contentId={part.castArtifactId}
         content={replay.content}

@@ -1,3 +1,4 @@
+import type { Locator } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
 import {
   makeMultiReplayRun,
@@ -14,6 +15,22 @@ import {
   REPLAY_TERMINAL_ROWS,
 } from "../../src/lib/replay/config";
 import type { ScenarioCatalogWireResponse } from "../../src/lib/scenario-runs";
+
+async function expectNoVisibleBoxShadow(locator: Locator) {
+  const result = await locator.evaluate((element) => {
+    const value = getComputedStyle(element).boxShadow;
+    const alphas = [...value.matchAll(/rgba\([^)]*,\s*([0-9.]+)\)/g)].map(
+      (match) => Number.parseFloat(match[1] ?? "1"),
+    );
+    return {
+      value,
+      visible: value !== "none" && (alphas.length === 0 || alphas.some((a) => a > 0)),
+    };
+  });
+  expect(result.visible, `unexpected visible box shadow: ${result.value}`).toBe(
+    false,
+  );
+}
 
 test("keyboard-only landing navigation keeps focus visible", async ({
   page,
@@ -842,6 +859,7 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
   await page.locator("[data-run-learning-panel-trigger]").click();
   const rail = page.getByRole("dialog", { name: "Lab guidance" });
   await expect(rail).toBeVisible();
+  await expectNoVisibleBoxShadow(rail);
   expect(
     await rail.evaluate((element) => {
       const style = getComputedStyle(element);
@@ -864,33 +882,27 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     theme: "dark",
     runState: "ending",
   });
-  const savingProgress = page.getByRole("progressbar", {
-    name: "Saving your run",
-  });
-  const savingIndicator = savingProgress.locator(
-    "[data-run-saving-progress-indicator]",
-  );
-  const staticSavingIndicator = savingProgress.locator(
-    "[data-run-saving-progress-static]",
-  );
-  await expect(savingProgress).toBeVisible();
-  await expect(savingIndicator).toBeHidden();
-  await expect(staticSavingIndicator).toBeVisible();
-  const savingIndicatorState = await staticSavingIndicator.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return {
-      animationName: style.animationName,
-      width: element.getBoundingClientRect().width,
-    };
-  });
+  const savingSteps = page.getByRole("list", { name: "Saving steps" });
+  await expect(savingSteps).toBeVisible();
+  await expect(savingSteps.locator("[data-run-saving-step]")).toHaveCount(5);
+  await expect(
+    savingSteps.locator('[aria-current="step"]'),
+  ).toHaveText(/Save requested/);
   expect(
-    savingIndicatorState.animationName,
-    "saving progress animation must stop under reduced motion",
-  ).toBe("none");
-  expect(
-    savingIndicatorState.width,
-    "static saving progress must stay visible without motion",
-  ).toBeGreaterThan(0);
+    await savingSteps
+      .locator("[data-run-saving-step] > span")
+      .first()
+      .evaluate((element) => {
+        const style = getComputedStyle(element);
+        return (
+          style.transitionProperty === "none" ||
+          style.transitionDuration
+            .split(",")
+            .every((entry) => Number.parseFloat(entry) === 0)
+        );
+      }),
+    "saving-step transitions must stop under reduced motion",
+  ).toBe(true);
 });
 
 test.describe("wide operational density", () => {
@@ -1214,6 +1226,64 @@ test.describe("coarse pointer and mobile overflow", () => {
       "Part 1 of 3 · web",
     );
     await expect(page.locator(".run-artifact-player")).toBeVisible();
+    const recapReplay = page.locator("[data-run-recap-replay-surface]");
+    await expect(recapReplay).toBeVisible();
+    const playIcon = recapReplay.locator(
+      ".ap-overlay-start .ap-play-button svg",
+    );
+    await expect(playIcon).toHaveCount(1);
+    expect(
+      await playIcon.evaluate((element) => getComputedStyle(element).filter),
+      "learner replay play icon must not have a drop shadow",
+    ).toBe("none");
+    const playerControlSizes = await recapReplay
+      .locator(".ap-control-bar button.ap-button")
+      .evaluateAll((elements) =>
+        elements.map((element) => {
+          const bounds = element.getBoundingClientRect();
+          return { width: bounds.width, height: bounds.height };
+        }),
+      );
+    expect(playerControlSizes.length).toBeGreaterThan(0);
+    expect(
+      playerControlSizes.every(
+        ({ width, height }) => width >= 44 && height >= 44,
+      ),
+      "learner replay controls must be at least 44px in each direction",
+    ).toBe(true);
+    expect(
+      await recapReplay.evaluate((surface) => {
+        const terminal = surface.querySelector<HTMLElement>(".ap-term");
+        const controls = surface.querySelector<HTMLElement>(".ap-control-bar");
+        if (!terminal || !controls) return Number.POSITIVE_INFINITY;
+        const terminalBounds = terminal.getBoundingClientRect();
+        const controlBounds = controls.getBoundingClientRect();
+        return Math.max(0, terminalBounds.bottom - controlBounds.top);
+      }),
+      "learner replay controls must not cover terminal rows",
+    ).toBeLessThanOrEqual(0.5);
+    const playbackButton = recapReplay.locator(
+      ".ap-control-bar .ap-playback-button",
+    );
+    // Set keyboard modality before focusing the vendor control. Its parent
+    // must reveal the bar for the same focus-visible state reached by Tab.
+    await page.keyboard.press("Tab");
+    await playbackButton.focus();
+    await expect(playbackButton).toBeFocused();
+    await expect(recapReplay.locator(".ap-control-bar")).toHaveCSS(
+      "opacity",
+      "1",
+    );
+    expect(
+      await playbackButton.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return (
+          style.outlineStyle !== "none" &&
+          Number.parseFloat(style.outlineWidth) >= 2
+        );
+      }),
+      "the focused replay control must have a visible outline",
+    ).toBe(true);
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await next.press("Space");
     await expect(carousel.locator("[data-run-replay-position]")).toHaveText(

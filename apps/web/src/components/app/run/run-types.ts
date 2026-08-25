@@ -7,6 +7,7 @@ import type {
   ScenarioRunActivity,
   ScenarioRunRecord as ScenarioRunWireRecord,
   ScenarioRunReplayState,
+  ScenarioRunSavingStage,
 } from "@/lib/scenario-runs";
 
 export interface ScenarioProbeStatus {
@@ -115,6 +116,7 @@ export interface ScenarioRunRecord {
   active: boolean;
   activity: ScenarioRunActivity;
   deleteRequestedAt: number | null;
+  savingStage: ScenarioRunSavingStage | null;
   replayState: ScenarioRunReplayState;
   hasReplay: boolean;
   progressPercent: number;
@@ -188,8 +190,8 @@ export const POLL_INTERVALS: Record<
   waiting_for_target: 750,
   running: 1_500,
   solved: 1_500,
-  deleting: 1_500,
-  archiving: 1_500,
+  deleting: 1_000,
+  archiving: 1_000,
   completed: false,
   failed: false,
 };

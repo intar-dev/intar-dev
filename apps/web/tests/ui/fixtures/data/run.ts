@@ -128,6 +128,12 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
         ? "settled"
         : "foreground",
     deleteRequestedAt: background || complete ? FIXED_NOW - 2 * minute : null,
+    savingStage:
+      state === "ending"
+        ? "save_requested"
+        : state === "rendering"
+          ? "preparing_replay"
+          : null,
     replayState:
       state === "replay"
         ? "ready"

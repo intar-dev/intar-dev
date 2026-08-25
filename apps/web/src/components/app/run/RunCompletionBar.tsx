@@ -22,7 +22,7 @@ export function RunCompletionBar({
     <section
       aria-labelledby="run-completion-heading"
       data-run-completion-bar
-      className="shrink-0 rounded-lg border border-success-border bg-success-subtle px-3 py-3 sm:px-4"
+      className="shrink-0 rounded-lg border border-success-border bg-success-subtle px-4 py-4 lg:px-6 [@media(max-height:500px)]:!px-3 [@media(max-height:500px)]:!py-3"
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div className="flex min-w-0 items-center gap-2.5">

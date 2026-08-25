@@ -88,18 +88,6 @@
     ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Recursive Mono", SFMono-Regular, Menlo, Monaco, Consolas,
     monospace;
-  --animate-run-saving-progress: run-saving-progress 1.35s
-    cubic-bezier(0.65, 0, 0.35, 1) infinite;
-
-  @keyframes run-saving-progress {
-    from {
-      transform: translateX(-100%);
-    }
-
-    to {
-      transform: translateX(250%);
-    }
-  }
 }
 
 @theme inline {
@@ -323,6 +311,50 @@
   --term-color-13: #d8add8;
   --term-color-14: #9bdddd;
   --term-color-15: #fffaf0;
+}
+
+/* The learner recap is intentionally flat and touch-safe. Keep the vendor
+ * player adjustments inside that surface so operations replay tools retain
+ * their dense native controls. */
+[data-run-recap-replay-surface] .ap-player .ap-overlay-start .ap-play-button svg {
+  filter: none !important;
+}
+
+[data-run-recap-replay-surface] div.ap-player div.ap-control-bar {
+  height: 44px !important;
+}
+
+/* Asciinema reserves 32px for its native control bar in JavaScript. The
+ * learner touch bar is 44px plus its 2px separator, so reserve the exact
+ * difference outside the calculated terminal height instead of covering the
+ * final terminal row. */
+[data-run-recap-replay-surface] div.ap-wrapper div.ap-player {
+  padding-bottom: calc(44px + 2px - 32px) !important;
+}
+
+[data-run-recap-replay-surface] div.ap-control-bar button.ap-button {
+  display: inline-flex !important;
+  width: 44px !important;
+  min-width: 44px !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  align-items: center;
+  justify-content: center;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+[data-run-recap-replay-surface] div.ap-control-bar .ap-progressbar .ap-bar .ap-gutter {
+  top: 20px !important;
+}
+
+[data-run-recap-replay-surface] div.ap-control-bar button.ap-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -3px;
+}
+
+[data-run-recap-replay-surface] .ap-wrapper:focus-within .ap-control-bar {
+  opacity: 1 !important;
 }
 
 @utility text-display {

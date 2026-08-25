@@ -31,6 +31,22 @@ const TECHNICAL_LEARNER_RUN_COPY = [
   "Command log",
 ] as const;
 
+async function expectNoVisibleBoxShadow(locator: Locator) {
+  const result = await locator.evaluate((element) => {
+    const value = getComputedStyle(element).boxShadow;
+    const alphas = [...value.matchAll(/rgba\([^)]*,\s*([0-9.]+)\)/g)].map(
+      (match) => Number.parseFloat(match[1] ?? "1"),
+    );
+    return {
+      value,
+      visible: value !== "none" && (alphas.length === 0 || alphas.some((a) => a > 0)),
+    };
+  });
+  expect(result.visible, `unexpected visible box shadow: ${result.value}`).toBe(
+    false,
+  );
+}
+
 function runLearningTrigger(page: Page): Locator {
   return page.locator("[data-run-learning-panel-trigger]");
 }
@@ -691,6 +707,7 @@ test.describe("focused state accessibility", () => {
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("data-side", "right");
     await expect(panel).toBeVisible();
+    await expectNoVisibleBoxShadow(sheet);
     expect(
       await indicators.evaluateAll((controls) =>
         controls.map((control) => getComputedStyle(control).backgroundColor),
@@ -737,6 +754,7 @@ test.describe("focused state accessibility", () => {
       name: "Reveal the full solution?",
     });
     await expect(solutionDialog).toBeVisible();
+    await expectNoVisibleBoxShadow(solutionDialog);
     await page.keyboard.press("Escape");
     await expect(solutionDialog).toBeHidden();
     await expect(sheet).toBeVisible();
@@ -818,7 +836,7 @@ test.describe("focused state accessibility", () => {
       completionBox!.y + completionBox!.height
     );
     expect(completionGap).toBeGreaterThanOrEqual(12);
-    expect(completionGap).toBeLessThanOrEqual(20);
+    expect(completionGap).toBeLessThanOrEqual(24);
 
     await trigger.click();
 
@@ -897,15 +915,10 @@ test.describe("focused state accessibility", () => {
         await expect(page.getByText("Your recap will be ready in a moment.")).toBeVisible();
         await expect(page.locator("header")).toContainText("Saving");
         await expect(page.locator("header")).not.toContainText("Ending");
-        const savingProgress = page.getByRole("progressbar", {
-          name: "Saving your run",
-        });
-        await expect(savingProgress).toBeVisible();
-        await expect(savingProgress).not.toHaveAttribute("aria-valuenow");
-        await expect(savingProgress).toHaveAttribute(
-          "aria-valuetext",
-          "Saving your run. Your recap will be ready in a moment.",
-        );
+        const savingSteps = page.getByRole("list", { name: "Saving steps" });
+        await expect(savingSteps).toBeVisible();
+        await expect(savingSteps.locator("[data-run-saving-step]")).toHaveCount(5);
+        await expect(savingSteps.locator('[aria-current="step"]')).toHaveCount(1);
         await expect(page.getByRole("heading", { name: "Final checks" })).toHaveCount(
           0,
         );
@@ -1080,6 +1093,10 @@ test.describe("focused mobile state accessibility", () => {
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("data-side", "bottom");
     await expect(panel).toBeVisible();
+    await expectNoVisibleBoxShadow(sheet);
+    await expectNoVisibleBoxShadow(
+      panel.locator("[data-run-learning-sticky-summary]"),
+    );
     await expect(
       panel.getByRole("heading", { name: "Checks and guidance" }),
     ).toBeVisible();
@@ -1162,10 +1179,9 @@ test.describe("focused mobile state accessibility", () => {
       runState: "ending",
     });
 
-    const progress = page.getByRole("progressbar", { name: "Saving your run" });
-    await expect(progress).toBeVisible();
-    await expect(progress).not.toHaveAttribute("aria-valuenow");
-    const bounds = await progress.boundingBox();
+    const savingSteps = page.getByRole("list", { name: "Saving steps" });
+    await expect(savingSteps).toBeVisible();
+    const bounds = await savingSteps.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
@@ -1511,9 +1527,9 @@ test.describe("short run workspace", () => {
       runState: "ending",
     });
 
-    const progress = page.getByRole("progressbar", { name: "Saving your run" });
-    await expect(progress).toBeVisible();
-    const bounds = await progress.boundingBox();
+    const savingSteps = page.getByRole("list", { name: "Saving steps" });
+    await expect(savingSteps).toBeVisible();
+    const bounds = await savingSteps.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.y).toBeGreaterThanOrEqual(48);
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(375);
@@ -1593,9 +1609,9 @@ test.describe("small-screen access management", () => {
       runState: "rendering",
     });
 
-    const progress = page.getByRole("progressbar", { name: "Saving your run" });
-    await expect(progress).toBeVisible();
-    const bounds = await progress.boundingBox();
+    const savingSteps = page.getByRole("list", { name: "Saving steps" });
+    await expect(savingSteps).toBeVisible();
+    const bounds = await savingSteps.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);

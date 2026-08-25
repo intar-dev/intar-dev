@@ -723,9 +723,10 @@ export async function transitionRunVmToArchiving(
   db: ReturnType<typeof drizzle>,
   runVm: ResolvedRunVm,
   now: number,
+  options?: { recordArchiveProgress?: boolean },
 ): Promise<void> {
   if (runVm.runtimeVmId) {
-    await db
+    const executionUpdate = db
       .update(runtimeExecutions)
       .set({
         state: sql`CASE
@@ -737,6 +738,30 @@ export async function transitionRunVmToArchiving(
         updatedAt: now,
       })
       .where(eq(runtimeExecutions.id, runVm.runId));
+    if (options?.recordArchiveProgress === true) {
+      // The durable artifact manifest is the archive hand-off. Recording this
+      // first stage in the same D1 batch means a successful version-one
+      // /begin response never depends on a second best-effort callback.
+      const vmStageUpdate = db
+        .update(runtimeVms)
+        .set({
+          archiveStageRank: sql<number>`CASE
+            WHEN ${runtimeVms.archiveStageRank} IS NULL
+              OR ${runtimeVms.archiveStageRank} < 1 THEN 1
+            ELSE ${runtimeVms.archiveStageRank}
+          END`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(runtimeVms.id, runVm.runtimeVmId),
+            eq(runtimeVms.executionId, runVm.runId),
+          ),
+        );
+      await db.batch([executionUpdate, vmStageUpdate]);
+    } else {
+      await executionUpdate;
+    }
   }
   if (runVm.domainKind !== "scenario") return;
 
@@ -772,6 +797,50 @@ export async function transitionRunVmToArchiving(
   );
 }
 
+/**
+ * Advances, never replaces, the durable archive stage for one modern runtime
+ * VM. Archive callbacks are intentionally independent and can arrive out of
+ * order, so the SQL comparison must remain atomic.
+ */
+export async function advanceRunVmArchiveStage(input: {
+  db: ReturnType<typeof drizzle>;
+  runVm: ResolvedRunVm;
+  stageRank: number;
+  now: number;
+}): Promise<void> {
+  if (!input.runVm.runtimeVmId) {
+    // Historical scenario rows do not have a runtime VM ledger. Their
+    // learner view keeps using the existing coarse lifecycle mapping.
+    return;
+  }
+  if (
+    !Number.isInteger(input.stageRank) ||
+    input.stageRank < 1 ||
+    input.stageRank > 4
+  ) {
+    throw new Error("archive stage rank must be an integer from 1 to 4");
+  }
+  const priorRank = input.stageRank - 1;
+  const canAdvance =
+    input.stageRank === 1
+      ? sql`(${runtimeVms.archiveStageRank} IS NULL OR ${runtimeVms.archiveStageRank} < 1)`
+      : sql`${runtimeVms.archiveStageRank} >= ${priorRank}
+          AND ${runtimeVms.archiveStageRank} < ${input.stageRank}`;
+  await input.db
+    .update(runtimeVms)
+    .set({
+      archiveStageRank: input.stageRank,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(runtimeVms.id, input.runVm.runtimeVmId),
+        eq(runtimeVms.executionId, input.runVm.runId),
+        canAdvance,
+      ),
+    );
+}
+
 export async function transitionRunVmToCompleted(
   db: ReturnType<typeof drizzle>,
   runVm: ResolvedRunVm,
@@ -780,7 +849,16 @@ export async function transitionRunVmToCompleted(
   if (runVm.runtimeVmId) {
     await db
       .update(runtimeVms)
-      .set({ artifactWritesSealed: true, updatedAt: now })
+      .set({
+        artifactWritesSealed: true,
+        archiveStageRank: sql<number>`CASE
+          WHEN ${runtimeVms.archiveStageRank} IS NULL
+            THEN NULL
+          WHEN ${runtimeVms.archiveStageRank} < 4 THEN 4
+          ELSE ${runtimeVms.archiveStageRank}
+        END`,
+        updatedAt: now,
+      })
       .where(
         and(
           eq(runtimeVms.id, runVm.runtimeVmId),

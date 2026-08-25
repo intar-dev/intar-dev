@@ -230,11 +230,11 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
             <SheetContent
               side="bottom"
               showCloseButton={false}
-              className="max-h-[min(78dvh,42rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] motion-reduce:transition-none"
+              className="max-h-[min(78dvh,42rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] !shadow-none motion-reduce:transition-none"
             >
               <LearningPanelA11yHeader />
               <LearningPanelClose />
-              <div className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4">
+              <div className="min-h-0 flex-1 scroll-py-5 overflow-y-auto overscroll-contain px-5">
                 {content}
               </div>
             </SheetContent>
@@ -252,22 +252,22 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
               showCloseButton={false}
               showOverlay={false}
               style={{
-                top: "calc(var(--app-bar-h) + var(--workspace-inset))",
-                right: "var(--workspace-inset)",
-                bottom: "var(--workspace-inset)",
+                top: "calc(var(--app-bar-h) + max(1rem, var(--workspace-inset)))",
+                right: "max(1rem, var(--workspace-inset))",
+                bottom: "max(1rem, var(--workspace-inset))",
                 left: "auto",
                 width:
-                  "min(20rem, calc(100dvw - var(--workspace-inset) - var(--workspace-inset)))",
+                  "min(20rem, calc(100dvw - max(1rem, var(--workspace-inset)) - max(1rem, var(--workspace-inset))))",
                 maxWidth: "none",
                 height: "auto",
                 zIndex: 20,
               }}
               data-run-guidance-rail
-              className="gap-0 overflow-hidden rounded-xl border shadow-xl duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+              className="gap-0 overflow-hidden rounded-xl border !shadow-none duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
             >
               <LearningPanelA11yHeader />
               <LearningPanelClose />
-              <div className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4 pb-6">
+              <div className="min-h-0 flex-1 scroll-py-5 overflow-y-auto overscroll-contain px-5 pb-8">
                 {content}
               </div>
             </SheetContent>
@@ -306,7 +306,7 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
     <div
       data-run-learning-panel-content
       className={cn(
-        "space-y-6 pb-5",
+        "space-y-8 pb-8",
         !showWorkOrderOrChecks && "pt-4",
         props.className,
       )}
@@ -315,7 +315,7 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
         <button
           type="button"
           data-run-learning-sticky-summary
-          className="sticky top-0 z-20 -mx-4 flex min-h-11 w-[calc(100%+2rem)] items-center justify-between gap-3 border-b bg-popover py-2 pr-14 pl-4 text-sm font-semibold shadow-[0_1px_0_var(--border)] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40"
+          className="sticky top-0 z-20 -mx-5 flex min-h-11 w-[calc(100%+2.5rem)] items-center justify-between gap-3 border-b bg-popover py-3 pr-14 pl-5 text-sm font-semibold focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40"
           aria-label={`${state === "booting" ? "Show work order" : "Show checks"}. ${passedChecks} of ${props.probes.length} verified.`}
           onClick={() =>
             learningStartRef.current?.scrollIntoView({ block: "start" })
@@ -351,7 +351,7 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
       </header>
 
       {showWorkOrderOrChecks ? (
-        <div ref={learningStartRef} className="scroll-mt-12">
+        <div ref={learningStartRef} className="scroll-mt-16">
           {state === "booting" ? (
             <WorkOrder objectives={objectives} />
           ) : (
@@ -609,7 +609,7 @@ function WorkOrder({ objectives }: { objectives: readonly ScenarioObjective[] })
           {objectives.map((objective, index) => (
             <li
               key={`${objective.probeName}:${index}`}
-              className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2 py-3"
+              className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-3 py-4"
             >
               <span className="font-heading text-sm font-semibold text-primary tabular-nums">
                 {String(index + 1).padStart(2, "0")}
@@ -650,12 +650,12 @@ function Checks(props: {
         </span>
       </div>
       {checks.length ? (
-        <ol className="mt-3 divide-y border-y">
+        <ol className="mt-4 divide-y border-y">
           {checks.map((check) => {
             return (
               <li
                 key={check.key}
-                className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 py-3"
+                className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 py-4"
               >
                 <span className="mt-0.5">
                   <CheckStatusIcon status={check.status} />
@@ -719,7 +719,7 @@ function Hints(props: {
           No hints are available for this lab.
         </p>
       ) : (
-        <div className="mt-3 space-y-5">
+        <div className="mt-4 space-y-6">
           {groups.map((group) => (
             <HintLadder
               key={group.key}
@@ -754,7 +754,7 @@ function HintLadder(props: {
   const nextHint = props.group.hints.find((hint) => !hint.revealed);
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <div className="flex items-baseline justify-between gap-3">
         <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           {props.group.label}
@@ -775,7 +775,7 @@ function HintLadder(props: {
 
           if (hint.revealed) {
             return (
-              <li key={hint.key} className="space-y-2 py-3">
+              <li key={hint.key} className="space-y-2 py-4">
                 <p className="text-sm font-medium">
                   {hint.title?.trim() || ordinal}
                 </p>
@@ -790,7 +790,7 @@ function HintLadder(props: {
 
           if (canReveal) {
             return (
-              <li key={hint.key} className="py-3">
+              <li key={hint.key} className="py-4">
                 <div className="flex min-h-11 items-center justify-between gap-3">
                   {/* Sealed hints expose no authored title or body. */}
                   <p className="text-sm font-medium">{ordinal}</p>
@@ -817,7 +817,7 @@ function HintLadder(props: {
           return (
             <li
               key={hint.key}
-              className="flex min-h-11 items-center gap-2.5 py-3 text-muted-foreground"
+              className="flex min-h-11 items-center gap-2.5 py-4 text-muted-foreground"
             >
               <LockKeyhole className="size-4 shrink-0" aria-hidden="true" />
               {/* This ordinal is not an authored hint title. */}
@@ -846,7 +846,7 @@ function Solution(props: {
   return (
     <section
       aria-labelledby="run-learning-solution-heading"
-      className="border-t pt-5"
+      className="border-t pt-6"
     >
       <p id="run-learning-solution-heading" className="text-eyebrow">
         Full solution
@@ -897,7 +897,7 @@ function Solution(props: {
               <LockKeyhole className="size-4" aria-hidden="true" />
               Reveal the full solution
             </DialogTrigger>
-            <DialogContent>
+            <DialogContent className="!shadow-none">
               <DialogHeader>
                 <DialogTitle>Reveal the full solution?</DialogTitle>
                 <DialogDescription>

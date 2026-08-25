@@ -517,14 +517,12 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   await expect(
     page.getByText("Your recap will be ready in a moment."),
   ).toBeVisible();
-  const savingProgress = page.getByRole("progressbar", {
-    name: "Saving your run",
-  });
-  await expect(savingProgress).toBeVisible();
-  await expect(savingProgress).not.toHaveAttribute("aria-valuenow");
+  const savingSteps = page.getByRole("list", { name: "Saving steps" });
+  await expect(savingSteps).toBeVisible();
+  await expect(savingSteps.locator("[data-run-saving-step]")).toHaveCount(5);
   await expect(
     page.locator('section[aria-labelledby="run-recap-heading"]'),
-  ).toHaveAttribute("aria-busy", "true");
+  ).not.toHaveAttribute("aria-busy");
   for (const forbidden of [
     "Run timeline",
     "Shutting down workspace",
@@ -539,7 +537,7 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   ui.server.setRunState("rendering");
   ui.server.state.run.outcome = "succeeded";
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
-  await expect(savingProgress).toBeVisible();
+  await expect(savingSteps).toBeVisible();
   await expect(page.locator("header")).toContainText("Saving");
   await expect(page.locator("header")).not.toContainText("Solved");
 
@@ -551,7 +549,7 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   });
   await expect(settledHeading).toBeFocused();
   await expect(recap.getByRole("heading", { name: "Final checks" })).toBeVisible();
-  await expect(savingProgress).toHaveCount(0);
+  await expect(savingSteps).toHaveCount(0);
   await expect(recap).not.toHaveAttribute("aria-busy");
   await expect(recap.getByText("2/2 verified", { exact: true })).toBeVisible();
   const progress = recap.getByRole("progressbar", {
@@ -590,6 +588,94 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   expect(
     ui.server.requests.some((request) => request.includes("/transcript")),
   ).toBe(false);
+});
+
+test("saving stages advance from real server state and announce each change once", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "ending",
+  });
+
+  const steps = page.getByRole("list", { name: "Saving steps" });
+  const announcement = page.locator("[data-run-saving-announcement]");
+  await expect(steps.locator('[aria-current="step"]')).toContainText(
+    "Save requested",
+  );
+
+  await page.evaluate(() => {
+    const target = document.querySelector<HTMLElement>(
+      "[data-run-saving-announcement]",
+    );
+    if (!target) throw new Error("saving announcement region is missing");
+    const state = window as typeof window & {
+      __runSavingAnnouncements?: string[];
+      __runSavingObserver?: MutationObserver;
+    };
+    state.__runSavingAnnouncements = [];
+    state.__runSavingObserver = new MutationObserver(() => {
+      const text = target.textContent?.trim() ?? "";
+      const entries = state.__runSavingAnnouncements ?? [];
+      if (text && entries.at(-1) !== text) entries.push(text);
+    });
+    state.__runSavingObserver.observe(target, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+  });
+
+  const changes = [
+    ["closing_workspace", "Closing workspace"],
+    ["saving_files", "Saving files"],
+    ["preparing_replay", "Preparing replay"],
+    ["finalizing_recap", "Finalizing recap"],
+  ] as const;
+  for (const [stage, label] of changes) {
+    ui.server.state.run.savingStage = stage;
+    await expect(steps.locator('[aria-current="step"]')).toContainText(label);
+    await expect(announcement).toHaveText(`${label}. In progress.`);
+  }
+
+  // One unchanged background poll must not repeat the last announcement.
+  await page.waitForTimeout(1_200);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & { __runSavingAnnouncements?: string[] }
+        ).__runSavingAnnouncements ?? [],
+    ),
+  ).toEqual(changes.map(([, label]) => `${label}. In progress.`));
+});
+
+test("saving shows a calm reassurance only after one stage stalls", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "ending",
+  });
+
+  const reassurance = page.locator("[data-run-saving-stalled]");
+  await expect(reassurance).toHaveCount(0);
+  await page.clock.fastForward(30_000);
+  await expect(reassurance).toHaveText(
+    "This is taking longer than usual. Your work is safe, and your recap will appear here.",
+  );
+
+  ui.server.state.run.savingStage = "closing_workspace";
+  await expect(
+    page
+      .getByRole("list", { name: "Saving steps" })
+      .locator('[aria-current="step"]'),
+  ).toContainText("Closing workspace");
+  await expect(reassurance).toHaveCount(0);
 });
 
 test("a replay carousel keeps learner-facing parts in order", async ({

@@ -1,0 +1,1 @@
+ALTER TABLE `runtime_vms` ADD `archive_stage_rank` integer;

@@ -1,7 +1,14 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ReplayViewer, RunRecap } from "./RunRecap";
+import {
+  getRunSavingStage,
+  getRunSavingStepState,
+  ReplayViewer,
+  RunRecap,
+  RUN_SAVING_STALLED_DELAY_MS,
+  RUN_SAVING_STEPS,
+} from "./RunRecap";
 import {
   getRunRecapObjectives,
   getRunRecapState,
@@ -33,6 +40,35 @@ describe("run recap model", () => {
       kind: "could_not_finish",
       title: "Could not finish",
     });
+  });
+
+  it("maps only learner-safe save stages and keeps legacy runs coarse", () => {
+    for (const [index, stage] of RUN_SAVING_STEPS.entries()) {
+      expect(
+        getRunSavingStage(
+          run({ activity: "background", savingStage: stage.stage }),
+        ),
+      ).toBe(stage.stage);
+      expect(
+        RUN_SAVING_STEPS.map((candidate) =>
+          getRunSavingStepState(stage.stage, candidate.stage),
+        ),
+      ).toEqual(
+        RUN_SAVING_STEPS.map((_, candidateIndex) =>
+          candidateIndex < index
+            ? "done"
+            : candidateIndex === index
+              ? "active"
+              : "up_next",
+        ),
+      );
+    }
+
+    expect(
+      getRunSavingStage(
+        run({ activity: "background", phase: "archiving", savingStage: null }),
+      ),
+    ).toBe("closing_workspace");
   });
 
   it("maps only authored objective copy to final results", () => {
@@ -313,7 +349,7 @@ describe("RunRecap", () => {
     expect(markup).not.toContain("Final checks");
   });
 
-  it("shows a calm saving state without internal teardown progress", () => {
+  it("shows a five-step saving state without internal teardown data", () => {
     const markup = renderToStaticMarkup(
       createElement(RunRecap, {
         run: run({
@@ -322,6 +358,7 @@ describe("RunRecap", () => {
           phaseTitle: "Archiving",
           phaseDetail: "hidden cleanup state",
           progressPercent: 47,
+          savingStage: "saving_files",
           replayState: "preparing",
         }),
       }),
@@ -329,15 +366,20 @@ describe("RunRecap", () => {
 
     expect(markup).toContain("Saving your run…");
     expect(markup).toContain("Your recap will be ready in a moment.");
-    expect(markup).toContain('aria-busy="true"');
-    expect(markup).toContain('role="progressbar"');
-    expect(markup).toContain('aria-label="Saving your run"');
-    expect(markup).toContain(
-      'aria-valuetext="Saving your run. Your recap will be ready in a moment."',
-    );
-    expect(markup).toContain("data-run-saving-progress-indicator");
-    expect(markup).toContain("data-run-saving-progress-static");
-    expect(markup).not.toContain("aria-valuenow");
+    expect(markup).not.toContain('aria-busy="true"');
+    expect(markup).toContain('aria-label="Saving steps"');
+    expect(markup).toContain("Save requested");
+    expect(markup).toContain("Closing workspace");
+    expect(markup).toContain("Saving files");
+    expect(markup).toContain("Preparing replay");
+    expect(markup).toContain("Finalizing recap");
+    expect(markup).toContain('aria-current="step"');
+    expect(markup.match(/data-run-saving-step="true"/g)).toHaveLength(5);
+    expect(markup.match(/data-state="done"/g)).toHaveLength(2);
+    expect(markup.match(/data-state="active"/g)).toHaveLength(1);
+    expect(markup.match(/data-state="up_next"/g)).toHaveLength(2);
+    expect(markup).not.toContain('role="progressbar"');
+    expect(RUN_SAVING_STALLED_DELAY_MS).toBe(30_000);
     expect(markup).not.toContain("Archiving");
     expect(markup).not.toContain("hidden cleanup state");
     expect(markup).not.toContain("47%");
@@ -506,6 +548,7 @@ function run(overrides: Partial<ScenarioRunRecord> = {}): ScenarioRunRecord {
     active: false,
     activity: "settled",
     deleteRequestedAt: null,
+    savingStage: null,
     replayState: "none",
     hasReplay: false,
     progressPercent: 100,

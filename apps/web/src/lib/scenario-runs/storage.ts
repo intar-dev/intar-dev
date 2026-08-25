@@ -9,6 +9,7 @@ import {
 import { appError } from "@/lib/app-error";
 import {
   hostActualState,
+  runtimeVms,
   scenarioRunArtifacts,
   scenarioRuns,
   type ScenarioRunHintSnapshot,
@@ -48,6 +49,7 @@ import {
   deriveScenarioRunActivity,
   deriveScenarioRunReplayState,
 } from "./activity";
+import { deriveScenarioRunSavingStage } from "./saving-stage";
 
 export interface ScenarioRunContentSnapshot {
   tags: string[];
@@ -341,11 +343,41 @@ export function toScenarioRunRecord(
     active: row.activeKey !== null,
     activity,
     deleteRequestedAt: row.deleteRequestedAt,
+    savingStage: deriveScenarioRunSavingStage({ phase: row.state.phase }),
     replayState,
     hasReplay: replayState === "ready",
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...row.state,
+  };
+}
+
+/**
+ * Adds only the learner-safe aggregate archive stage to a full run view. A
+ * pre-migration row or an older agent that has not reported every VM keeps
+ * the existing coarse lifecycle stage instead of exposing partial internals.
+ */
+export async function hydrateScenarioRunSavingStage(
+  run: ScenarioRunRecord,
+  runtimeExecutionId: string | null,
+): Promise<ScenarioRunRecord> {
+  // Teardown requested and host shutdown map directly from the run state;
+  // only archive processing needs the per-VM ledger. This keeps foreground
+  // terminal polling to its existing single run-row query.
+  if (run.phase !== "archiving" || !runtimeExecutionId) {
+    return run;
+  }
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({ archiveStageRank: runtimeVms.archiveStageRank })
+    .from(runtimeVms)
+    .where(eq(runtimeVms.executionId, runtimeExecutionId));
+  return {
+    ...run,
+    savingStage: deriveScenarioRunSavingStage({
+      phase: run.phase,
+      archiveStageRanks: rows.map((row) => row.archiveStageRank),
+    }),
   };
 }
 

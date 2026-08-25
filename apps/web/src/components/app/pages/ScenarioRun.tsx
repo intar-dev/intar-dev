@@ -35,7 +35,6 @@ import {
 } from "@/components/app/run/StatusScreens";
 import {
   buildScenarioBootSteps,
-  formatScenarioDurationMs,
   getScenarioBootScreenCopy,
   hasPendingInfrastructureTeardown,
   hasUsableTerminalTarget,
@@ -119,6 +118,9 @@ export function ScenarioRun() {
     refetchInterval: (query) => {
       const record = query.state.data?.run;
       if (!record) return false;
+      // Saving is learner-visible feedback. Poll it more often than a live
+      // terminal so real archive-stage changes appear promptly.
+      if (record.activity === "background") return 1_000;
       return POLL_INTERVALS[record.phase];
     },
     refetchIntervalInBackground: false,
@@ -521,17 +523,7 @@ export function ScenarioRun() {
       }
       switch (attemptData.outcome) {
         case "succeeded":
-          return (
-            <StatusToken
-              tone="success"
-              word="Solved"
-              elapsed={
-                attemptData.solveDurationMs !== null
-                  ? formatScenarioDurationMs(attemptData.solveDurationMs)
-                  : null
-              }
-            />
-          );
+          return <StatusToken tone="success" word="Solved" />;
         case "failed":
           return <StatusToken tone="danger" word="Failed" />;
         default:
@@ -686,7 +678,7 @@ export function ScenarioRun() {
   return (
     <div
       data-run-workspace
-      className="flex h-[calc(100dvh-var(--app-bar-h,3rem))] min-h-0 flex-col gap-3 overflow-hidden px-[var(--workspace-inset)] py-3 sm:gap-4 sm:py-4"
+      className="flex h-[calc(100dvh-var(--app-bar-h,3rem))] min-h-0 flex-col gap-4 overflow-hidden px-4 py-4 lg:gap-6 lg:px-6 lg:py-6 [@media(max-height:500px)]:!gap-3 [@media(max-height:500px)]:!px-3 [@media(max-height:500px)]:!py-3"
     >
       {runDialogs}
       <div className="shrink-0 space-y-2 empty:hidden sm:space-y-3">
@@ -705,7 +697,7 @@ export function ScenarioRun() {
       {attemptData ? (
         <section
           aria-label="Terminal"
-          className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-3 sm:gap-4"
+          className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-4 lg:gap-6 [@media(max-height:500px)]:!gap-3"
         >
           <ScenarioVmSelector
             vms={attemptData.vms}

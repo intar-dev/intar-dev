@@ -6,8 +6,8 @@ describe("scenario run polling", () => {
     expect(POLL_INTERVALS.launching).toBe(750);
     expect(POLL_INTERVALS.booting).toBe(750);
     expect(POLL_INTERVALS.running).toBe(1_500);
-    expect(POLL_INTERVALS.deleting).toBe(1_500);
-    expect(POLL_INTERVALS.archiving).toBe(1_500);
+    expect(POLL_INTERVALS.deleting).toBe(1_000);
+    expect(POLL_INTERVALS.archiving).toBe(1_000);
     expect(POLL_INTERVALS.completed).toBe(false);
     expect(POLL_INTERVALS.failed).toBe(false);
   });

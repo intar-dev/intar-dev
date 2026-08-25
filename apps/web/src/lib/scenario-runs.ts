@@ -12,6 +12,7 @@ export type {
   ScenarioRunActivity,
   ScenarioRunReplayState,
 } from "./scenario-runs/types";
+export type { ScenarioRunSavingStage } from "./scenario-runs/saving-stage";
 export {
   listEnabledScenariosForUser,
   loadEnabledScenarioForUser,

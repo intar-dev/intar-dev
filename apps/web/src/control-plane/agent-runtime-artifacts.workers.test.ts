@@ -29,6 +29,7 @@ import {
 import { AppError } from "@/lib/app-error";
 import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { listWorkshopArtifactsForOwner } from "@/lib/workshops/artifacts";
+import { getScenarioRunForUser } from "@/lib/scenario-runs";
 import {
   drizzleQueryToD1Statement,
   executeScenarioRunRuntimeProjection,
@@ -49,10 +50,16 @@ describe("domain-neutral agent artifact ingestion", () => {
     const token = await seedScenarioRuntime();
     const descriptor = artifactDescriptor("console_log", "console.log");
 
-    expect(
-      (await beginUpload(token, "scenario-execution", "scenario-vm", descriptor))
-        .status,
-    ).toBe(200);
+    const begin = await beginUpload(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      descriptor,
+    );
+    expect(begin.status).toBe(200);
+    await expect(begin.json()).resolves.toMatchObject({
+      archiveProgressVersion: 1,
+    });
     expect(
       (
         await agentRequest(
@@ -88,6 +95,239 @@ describe("domain-neutral agent artifact ingestion", () => {
     const [scenario] = await db.select().from(scenarioRuns);
     expect(runtimeVm?.artifactWritesSealed).toBe(true);
     expect(scenario?.state).toBe("completed");
+  });
+
+  it("records monotonic archive stages from begin through final sealing", async () => {
+    const token = await seedScenarioRuntime();
+    const descriptor = artifactDescriptor("console_log", "console.log");
+    const db = drizzle(env.DB);
+
+    // /begin is the durable archive hand-off, so rank one does not depend on
+    // a separate best-effort stage callback.
+    expect(
+      (await beginUpload(token, "scenario-execution", "scenario-vm", descriptor))
+        .status,
+    ).toBe(200);
+    await expectArchiveStageRank(db, "scenario-runtime-vm", 1);
+
+    for (const [stage, expectedRank] of [
+      // Rank three cannot skip the files-saved milestone.
+      ["replay_prepared", 1],
+      ["raw_files_saved", 2],
+      ["replay_prepared", 3],
+      // Late callbacks must never move a VM backward.
+      ["raw_files_saved", 3],
+      ["replay_skipped", 3],
+    ] as const) {
+      expect(
+        (
+          await agentRequest(
+            token,
+            "/agent/runs/scenario-execution/vms/scenario-vm/archive-stage",
+            "POST",
+            { stage },
+          )
+        ).status,
+      ).toBe(200);
+      await expectArchiveStageRank(db, "scenario-runtime-vm", expectedRank);
+    }
+
+    const concurrentCallbacks = await Promise.all([
+      agentRequest(
+        token,
+        "/agent/runs/scenario-execution/vms/scenario-vm/archive-stage",
+        "POST",
+        { stage: "raw_files_saved" },
+      ),
+      agentRequest(
+        token,
+        "/agent/runs/scenario-execution/vms/scenario-vm/archive-stage",
+        "POST",
+        { stage: "replay_skipped" },
+      ),
+    ]);
+    expect(concurrentCallbacks.map((response) => response.status)).toEqual([
+      200, 200,
+    ]);
+    await expectArchiveStageRank(db, "scenario-runtime-vm", 3);
+
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/archive-stage",
+          "POST",
+          { stage: "not-a-stage" },
+        )
+      ).status,
+    ).toBe(400);
+
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/artifacts/1/multipart-begin",
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/complete",
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+    await expectArchiveStageRank(db, "scenario-runtime-vm", 4);
+
+    const sealedRetry = await beginUpload(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      descriptor,
+    );
+    expect(sealedRetry.status).toBe(200);
+    await expect(sealedRetry.json()).resolves.toMatchObject({
+      archiveProgressVersion: 1,
+    });
+
+    // A duplicate, delayed stage notification remains safe after sealing.
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/archive-stage",
+          "POST",
+          { stage: "raw_files_saved" },
+        )
+      ).status,
+    ).toBe(200);
+    await expectArchiveStageRank(db, "scenario-runtime-vm", 4);
+  });
+
+  it("keeps legacy and unknown begin capabilities on the coarse save fallback", async () => {
+    const token = await seedScenarioRuntime();
+    const descriptor = artifactDescriptor("console_log", "console.log");
+    const db = drizzle(env.DB);
+
+    // Old agents omit the capability. A future or malformed version must not
+    // opt into a partial five-step flow either.
+    const legacyBegin = await beginUpload(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      descriptor,
+      { archiveProgressVersion: null },
+    );
+    expect(legacyBegin.status).toBe(200);
+    await expect(legacyBegin.json()).resolves.not.toHaveProperty(
+      "archiveProgressVersion",
+    );
+    await expectArchiveStageRank(db, "scenario-runtime-vm", null);
+    expect(
+      (
+        await getScenarioRunForUser({
+          runId: "scenario-execution",
+          userId: "scenario-owner",
+        })
+      ).savingStage,
+    ).toBe("closing_workspace");
+
+    const unknownBegin = await beginUpload(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      descriptor,
+      { archiveProgressVersion: 2 },
+    );
+    expect(unknownBegin.status).toBe(200);
+    await expect(unknownBegin.json()).resolves.not.toHaveProperty(
+      "archiveProgressVersion",
+    );
+    await expectArchiveStageRank(db, "scenario-runtime-vm", null);
+
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/artifacts/1/multipart-begin",
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/complete",
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+    await expectArchiveStageRank(db, "scenario-runtime-vm", null);
+  });
+
+  it("publishes only the slowest modern VM's learner-safe archive stage", async () => {
+    await seedScenarioRuntime();
+    const db = drizzle(env.DB);
+    await db.insert(runtimeVms).values({
+      id: "scenario-runtime-vm-2",
+      executionId: "scenario-execution",
+      vmId: "scenario-vm-id-2",
+      ordinal: 1,
+      runtimeVmName: "scenario-vm-2",
+      imageKeyJson: { scenario: "scenario", vm: "vm-2", arch: "x86_64" },
+      imageSha256: "b".repeat(64),
+      cpuMillis: 4_000,
+      memoryMib: 16_384,
+      diskMib: 102_400,
+      artifactWritesSealed: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db
+      .update(runtimeVms)
+      .set({ archiveStageRank: 3 })
+      .where(eq(runtimeVms.id, "scenario-runtime-vm"));
+
+    // An older or lagging VM is a safe coarse fallback, never a false
+    // indication that replay work has begun for every machine.
+    expect(
+      (
+        await getScenarioRunForUser({
+          runId: "scenario-execution",
+          userId: "scenario-owner",
+        })
+      ).savingStage,
+    ).toBe("closing_workspace");
+
+    for (const [rank, expectedStage] of [
+      [1, "saving_files"],
+      [2, "preparing_replay"],
+      [3, "finalizing_recap"],
+    ] as const) {
+      await db
+        .update(runtimeVms)
+        .set({ archiveStageRank: rank })
+        .where(eq(runtimeVms.id, "scenario-runtime-vm-2"));
+      expect(
+        (
+          await getScenarioRunForUser({
+            runId: "scenario-execution",
+            userId: "scenario-owner",
+          })
+        ).savingStage,
+      ).toBe(expectedStage);
+    }
+
+    const learnerRun = await getScenarioRunForUser({
+      runId: "scenario-execution",
+      userId: "scenario-owner",
+    });
+    expect(JSON.stringify(learnerRun)).not.toContain("archiveStageRank");
+    expect(JSON.stringify(learnerRun)).not.toContain("raw_files_saved");
   });
 
   it("archives a workshop recording and terminal timeline on its exact generation", async () => {
@@ -507,7 +747,24 @@ async function beginUpload(
   runId: string,
   vmName: string,
   artifact: ReturnType<typeof artifactDescriptor>,
+  options?: { archiveProgressVersion?: number | null },
 ): Promise<Response> {
+  const body: {
+    runId: string;
+    vmName: string;
+    artifacts: [ReturnType<typeof artifactDescriptor>];
+    archiveProgressVersion?: number;
+  } = {
+    runId,
+    vmName,
+    artifacts: [artifact],
+  };
+  // The default models the new agent. Explicit null models an old payload
+  // without the capability field; any other supplied value stays visible to
+  // test the strict version gate.
+  if (options?.archiveProgressVersion !== null) {
+    body.archiveProgressVersion = options?.archiveProgressVersion ?? 1;
+  }
   const response = await handleAgentRunArtifactRequest(
     new Request("http://localhost/agent/runs/begin", {
       method: "POST",
@@ -515,7 +772,7 @@ async function beginUpload(
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ runId, vmName, artifacts: [artifact] }),
+      body: JSON.stringify(body),
     }),
     env,
   );
@@ -667,6 +924,18 @@ function runtimeVmRow(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+}
+
+async function expectArchiveStageRank(
+  db: ReturnType<typeof drizzle>,
+  runtimeVmId: string,
+  expected: number | null,
+): Promise<void> {
+  const [vm] = await db
+    .select({ archiveStageRank: runtimeVms.archiveStageRank })
+    .from(runtimeVms)
+    .where(eq(runtimeVms.id, runtimeVmId));
+  expect(vm?.archiveStageRank).toBe(expected);
 }
 
 function workshopManifest(): WorkshopManifestV2 {

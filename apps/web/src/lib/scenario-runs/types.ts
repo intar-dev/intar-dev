@@ -14,6 +14,7 @@ import {
   type NativeTerminalSessionResult,
 } from "@/lib/stargate";
 import type { ScenarioRunActivity, ScenarioRunReplayState } from "./activity";
+import type { ScenarioRunSavingStage } from "./saving-stage";
 
 export interface ScenarioCatalogEntry {
   scenarioId: string;
@@ -153,6 +154,8 @@ export interface ScenarioRunRecord extends RunStateDocument {
   active: boolean;
   activity: ScenarioRunActivity;
   deleteRequestedAt: number | null;
+  /** Learner-safe, aggregate archive progress. Null outside save flow. */
+  savingStage: ScenarioRunSavingStage | null;
   replayState: ScenarioRunReplayState;
   hasReplay: boolean;
   createdAt: number;

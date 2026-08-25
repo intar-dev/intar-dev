@@ -35,6 +35,7 @@ import {
   loadFinishedRuns,
   loadRunRow,
   toScenarioRunRecord,
+  hydrateScenarioRunSavingStage,
   hydrateScenarioRunReplayArtifacts,
   parseRunState,
   scenarioRunDifficulty,
@@ -140,7 +141,10 @@ export async function getScenarioRunForUser(params: {
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
-  const run = toScenarioRunRecord(row);
+  const run = await hydrateScenarioRunSavingStage(
+    toScenarioRunRecord(row),
+    row.runtimeExecutionId,
+  );
   // Recording artifacts are produced only after teardown starts. Keep the
   // startup/readiness poll to one run-row query without hiding artifact
   // upload progress from teardown and archive views.

@@ -8,6 +8,7 @@ import {
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import { recomputeRunState, type SessionTimelineEntry } from "@/lib/run-state";
 import {
+  advanceRunVmArchiveStage,
   advanceArtifactUpload,
   artifactMetadataMatches,
   artifactWritesSealedResponse,
@@ -29,10 +30,16 @@ import {
   transitionRunVmToCompleted,
   type AgentRunArtifactInput,
 } from "./agent-run-artifacts/storage";
+import {
+  archiveStageRankForAgentStage,
+  type AgentArchiveStage,
+} from "@/lib/scenario-runs/saving-stage";
 
 interface AgentRunBeginRequest {
   runId?: string;
   vmName?: string;
+  /** Opt-in capability so a newer web deployment stays compatible with old agents. */
+  archiveProgressVersion?: number;
   createdAtMs?: number;
   deleteRequestedAtMs?: number;
   deletedAtMs?: number;
@@ -42,6 +49,10 @@ interface AgentRunBeginRequest {
 interface AgentRunTimelineRequest {
   version?: number;
   sessions?: AgentRunTimelineSessionInput[];
+}
+
+interface AgentRunArchiveStageRequest {
+  stage?: AgentArchiveStage;
 }
 
 interface AgentRunTimelineSessionInput {
@@ -126,6 +137,18 @@ export async function handleAgentRunArtifactRequest(
     );
   }
 
+  const archiveStageMatch = pathname.match(
+    /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/archive-stage$/,
+  );
+  if (archiveStageMatch) {
+    const runId = decodePathSegment(archiveStageMatch[1] ?? "");
+    const vmName = decodePathSegment(archiveStageMatch[2] ?? "");
+    if (!runId || !vmName) {
+      return jsonResponse({ error: "invalid run or vm path" }, 400);
+    }
+    return handleRunArchiveStage(request, env, runId, vmName);
+  }
+
   const runCompleteMatch = pathname.match(
     /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/complete$/,
   );
@@ -194,6 +217,11 @@ async function handleBeginRunUpload(
   if (!runVm) {
     return runPurgedResponse();
   }
+  // This is a private capability negotiation, not learner-facing state. A
+  // new agent can distinguish an upgraded control plane from an older one
+  // that silently ignored the request field.
+  const archiveProgressVersion =
+    body.archiveProgressVersion === 1 ? 1 : undefined;
 
   const existingArtifacts = await loadArtifactStatesForRunVm(
     db,
@@ -210,7 +238,7 @@ async function handleBeginRunUpload(
       );
     });
     return isIdempotentRetry
-      ? jsonResponse({ runId: runVm.runId, vmName: runVm.runtimeVmName })
+      ? runBeginSuccessResponse(runVm, archiveProgressVersion)
       : artifactWritesSealedResponse();
   }
   const now = Date.now();
@@ -236,9 +264,25 @@ async function handleBeginRunUpload(
     });
   }
 
-  await transitionRunVmToArchiving(db, runVm, now);
+  await transitionRunVmToArchiving(db, runVm, now, {
+    // Detailed archive milestones are a versioned agent capability. Keeping
+    // this opt-in means an older agent still receives the established coarse
+    // save flow rather than getting stranded at the first new step.
+    recordArchiveProgress: archiveProgressVersion === 1,
+  });
 
-  return jsonResponse({ runId: runVm.runId, vmName: runVm.runtimeVmName });
+  return runBeginSuccessResponse(runVm, archiveProgressVersion);
+}
+
+function runBeginSuccessResponse(
+  runVm: { runId: string; runtimeVmName: string },
+  archiveProgressVersion: 1 | undefined,
+): Response {
+  return jsonResponse({
+    runId: runVm.runId,
+    vmName: runVm.runtimeVmName,
+    ...(archiveProgressVersion === 1 ? { archiveProgressVersion: 1 } : {}),
+  });
 }
 
 async function handleMultipartBegin(
@@ -489,6 +533,51 @@ async function handleRunComplete(
   await transitionRunVmToCompleted(db, runVm, now);
 
   return jsonResponse({ ok: true });
+}
+
+async function handleRunArchiveStage(
+  request: Request,
+  env: Cloudflare.Env,
+  runId: string,
+  vmName: string,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName, {
+    // A lost response can make a stage report arrive after /complete. It
+    // remains safe and idempotent because the SQL update is monotonic.
+    allowSealed: true,
+  });
+  if (!resolved.ok) {
+    return resolved.response;
+  }
+
+  let body: AgentRunArchiveStageRequest;
+  try {
+    body = (await request.json()) as AgentRunArchiveStageRequest;
+  } catch {
+    return jsonResponse({ error: "invalid json body" }, 400);
+  }
+  if (!isAgentArchiveStage(body.stage)) {
+    return jsonResponse({ error: "invalid archive stage" }, 400);
+  }
+
+  await advanceRunVmArchiveStage({
+    db: resolved.db,
+    runVm: resolved.runVm,
+    stageRank: archiveStageRankForAgentStage(body.stage),
+    now: Date.now(),
+  });
+  return jsonResponse({ ok: true });
+}
+
+function isAgentArchiveStage(value: unknown): value is AgentArchiveStage {
+  return (
+    value === "raw_files_saved" ||
+    value === "replay_prepared" ||
+    value === "replay_skipped"
+  );
 }
 
 /**
