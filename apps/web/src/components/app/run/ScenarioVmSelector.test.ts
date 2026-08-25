@@ -43,6 +43,8 @@ describe("scenario VM selector", () => {
     expect(markup).toContain("Running");
     expect(markup).toContain("worker");
     expect(markup).toContain("Booting");
+    expect(markup).not.toContain("control-plane.intar.test");
+    expect(markup).not.toContain("worker.intar.test");
     expect(markup).toContain("min-h-11");
     expect(markup).toContain("border-b-2");
     expect(markup).toContain("rounded-full");

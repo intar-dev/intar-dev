@@ -90,10 +90,10 @@ export function buildScenarioBootSteps(
     },
     {
       id: "starting-vm",
-      label: "Starting the VM",
+      label: "Starting your workspace",
       detail: vmStarting
-        ? "The host is creating and booting this machine."
-        : "The machine has started.",
+        ? "Preparing a clean place for you to work."
+        : "Your workspace has started.",
       state: vmFailed ? "failed" : vmStarting ? "active" : "done",
     },
     {
@@ -150,7 +150,7 @@ export function getScenarioBootScreenCopy(attempt: ScenarioRunRecord | null) {
   void attempt;
   return {
     title: "Preparing your workspace",
-    description: "Review the work order while the VM starts.",
+    description: "Review the work order while your workspace starts.",
   };
 }
 

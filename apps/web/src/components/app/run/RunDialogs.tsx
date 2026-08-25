@@ -40,16 +40,15 @@ export function ScenarioCancelDialog(props: {
           </DialogTitle>
           <DialogDescription>
             {props.retry
-              ? "The earlier request did not release this run. Retry route revocation and cleanup acceptance now."
-              : "The sandbox will shut down and the terminal session will close. Run history and replay data are kept after cleanup finishes."}
+              ? "The earlier request did not finish. Try again to close the lab and save your work."
+              : "This closes the terminal and saves your result and replay."}
           </DialogDescription>
         </DialogHeader>
         {props.error ? (
           <Alert variant="destructive">
             <AlertTitle>Run could not be ended</AlertTitle>
             <AlertDescription>
-              {props.error} This run still owns your active slot; retry when
-              ready.
+              {props.error} Try again when you are ready.
             </AlertDescription>
           </Alert>
         ) : null}
@@ -84,6 +83,7 @@ export function DeleteRunDialog(props: {
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
   pending: boolean;
+  error?: boolean;
   /** Render the inline trigger button; false when the app bar opens it. */
   trigger?: boolean;
 }) {
@@ -107,6 +107,14 @@ export function DeleteRunDialog(props: {
             This action cannot be undone.
           </DialogDescription>
         </DialogHeader>
+        {props.error ? (
+          <Alert variant="destructive">
+            <AlertTitle>Run could not be deleted</AlertTitle>
+            <AlertDescription>
+              Nothing was removed. Try again when you are ready.
+            </AlertDescription>
+          </Alert>
+        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={() => props.onOpenChange(false)}>
             Keep run

@@ -42,9 +42,33 @@ function labelForFinal(
 ): string {
   const override = overrides.get(path);
   if (override) return override;
+  const safeDynamicLabel = safeDynamicPageLabel(path);
+  if (safeDynamicLabel) return safeDynamicLabel;
   const navMatch = NAV_ITEMS.find((item) => item.to === path);
   if (navMatch) return navMatch.label;
   return SEGMENT_LABELS[segment] ?? trimSegment(segment);
+}
+
+// Page data replaces these labels after load. Until then, never put internal
+// scenario or run identifiers into the visible heading.
+export function safeDynamicPageLabel(pathname: string): string | null {
+  if (/^\/runs\/[^/]+$/.test(pathname)) {
+    return "Lab run";
+  }
+  if (/^\/courses\/[^/]+\/[^/]+$/.test(pathname)) {
+    return "Lab";
+  }
+  if (
+    /^\/organizations\/[^/]+\/courses\/(?:public|private)\/[^/]+\/[^/]+$/.test(
+      pathname,
+    ) ||
+    /^\/organizations\/[^/]+\/courses\/general-practice\/[^/]+$/.test(
+      pathname,
+    )
+  ) {
+    return "Lab";
+  }
+  return null;
 }
 
 function labelForAncestor(

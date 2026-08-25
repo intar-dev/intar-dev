@@ -74,18 +74,17 @@ export const objectives = [
     probeName: "nginx-listening",
     vmName: "web",
     label: "Restore the public web listener",
-    title: "Bring the service back online",
+    title: "Start the web server",
     bodyMarkdown:
-      "Find why **nginx** is not listening on port 80 and restore the service without replacing the machine.",
+      "HIDDEN_OBJECTIVE_DETAIL: run `sudo systemctl restart internal-nginx`.",
     hintCount: 2,
   },
   {
     probeName: "health-endpoint",
     vmName: "web",
     label: "Return a healthy response",
-    title: "Verify the health endpoint",
-    bodyMarkdown:
-      "Make `http://localhost/health` return a successful response containing `ok`.",
+    title: "Make the site reachable",
+    bodyMarkdown: "HIDDEN_OBJECTIVE_PATH: inspect `/etc/internal/health`.",
     hintCount: 1,
   },
 ];
@@ -135,7 +134,7 @@ export const scenarioProbes = [
     ordinal: 1,
     name: "nginx-listening",
     description: "nginx listens on port 80",
-    title: "Bring the service back online",
+    title: "Start the web server",
     bodyMarkdown: objectives[0]?.bodyMarkdown ?? null,
     hints: scenarioHints,
     phase: "scenario",
@@ -147,7 +146,7 @@ export const scenarioProbes = [
     ordinal: 2,
     name: "health-endpoint",
     description: "health endpoint returns ok",
-    title: "Verify the health endpoint",
+    title: "Make the site reachable",
     bodyMarkdown: objectives[1]?.bodyMarkdown ?? null,
     hints: [],
     phase: "scenario",
@@ -157,12 +156,12 @@ export const scenarioProbes = [
 
 export const briefing = {
   title: "Repair a broken nginx service",
-  tagline: "A routine configuration change left the service unreachable.",
+  tagline: "Bring a stopped website back online.",
   category: "Linux services",
   difficulty: "medium",
   estimatedMinutes: 35,
   briefingMarkdown:
-    "## Work order\n\nThe edge monitor reports that the web service stopped answering after a routine change. Diagnose the failure, make the smallest safe repair, and verify it from the machine.\n\n> Preserve the existing content and leave a clear audit trail in the shell history.",
+    "A routine change left the website down. Find what is wrong and get it working again.",
   tags: ["linux", "nginx", "systemd", "networking"],
   objectives,
 };

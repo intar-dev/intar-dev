@@ -4,8 +4,6 @@ import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
   expectNoHorizontalOverflow,
-  expectTimelineMarkerTitleAlignment,
-  expectTimelineSurfaceWidths,
 } from "./support/layout";
 import {
   REPLAY_TERMINAL_COLS,
@@ -410,7 +408,7 @@ test("course scenarios return to the selected filtered public course", async ({
 
   const backToCourse = page.getByRole("link", { name: "Back to course" });
   await expect(backToCourse).toBeVisible();
-  await expect(page.getByText("Course step 1 of 2")).toBeVisible();
+  await expect(page.getByText("step 1 of 2")).toBeVisible();
   await expect.poll(() => {
     const url = new URL(page.url());
     const search = url.searchParams;
@@ -537,7 +535,7 @@ test("direct organization public and General practice briefing paths resolve", a
     sessionRole: "owner",
     theme: "light",
   });
-  await expect(page.getByText("Course step 1 of 1")).toBeVisible();
+  await expect(page.getByText("step 1 of 1")).toBeVisible();
   await expect(page.getByRole("link", { name: "Back to course" })).toHaveAttribute(
     "href",
     "/organizations/org-platform/courses/public/operations",
@@ -857,55 +855,6 @@ test.describe("wide operational density", () => {
   });
 });
 
-test.describe("timeline marker and title alignment", () => {
-  test.describe("desktop", () => {
-    test.use({ viewport: { width: 1440, height: 900 } });
-
-    test("markers center on their event titles", async ({ page, ui }) => {
-      await ui.open({
-        ...routeCase("run-workspace"),
-        theme: "dark",
-        variant: "long",
-        runState: "ending",
-      });
-
-      await expectTimelineMarkerTitleAlignment(page);
-    });
-
-    test("structured event content shares one width", async ({ page, ui }) => {
-      await ui.open({
-        ...routeCase("run-workspace"),
-        theme: "dark",
-        runState: "replay",
-      });
-
-      await expectTimelineSurfaceWidths(page);
-    });
-  });
-
-  test.describe("mobile", () => {
-    test.use({
-      viewport: { width: 390, height: 844 },
-      hasTouch: true,
-      isMobile: true,
-    });
-
-    test("markers center on titles below mobile timestamps", async ({
-      page,
-      ui,
-    }) => {
-      await ui.open({
-        ...routeCase("run-workspace"),
-        theme: "dark",
-        variant: "long",
-        runState: "ending",
-      });
-
-      await expectTimelineMarkerTitleAlignment(page);
-    });
-  });
-});
-
 test.describe("scenario briefing on mobile", () => {
   test.use({
     viewport: { width: 390, height: 844 },
@@ -913,42 +862,230 @@ test.describe("scenario briefing on mobile", () => {
     isMobile: true,
   });
 
-  test("keeps the Start or Resume action visible before the work flow", async ({
+  test("keeps the learner flow clear and free of platform details", async ({
     page,
     ui,
   }) => {
     await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
 
     const action = page.getByRole("button", {
-      name: /^(Start scenario|Resume run)$/,
+      name: "Continue lab",
     });
-    const objectives = page.getByRole("heading", {
-      name: "Repair objectives",
-    });
-    const briefing = page.getByRole("heading", { name: "Briefing" });
+    const task = page.getByRole("heading", { name: "Your task" });
+    const outcomes = page.getByRole("heading", { name: "Done when" });
+    const guidance = page.getByText("Guidance is available while you work.");
+    const progress = page.getByRole("heading", { name: "Lab in progress" });
     await expect(action).toBeVisible();
-    await expect(objectives).toBeVisible();
-    await expect(briefing).toBeVisible();
+    await expect(task).toBeVisible();
+    await expect(outcomes).toBeVisible();
+    await expect(guidance).toBeVisible();
+    await expect(progress).toBeVisible();
+    await expect(page.getByRole("link", { name: "View all runs" })).toHaveAttribute(
+      "href",
+      "/runs",
+    );
 
-    const [actionBox, objectivesBox, briefingBox] = await Promise.all([
+    await expect(page.locator("main")).not.toContainText("Technical details");
+    await expect(page.locator("main")).not.toContainText("Linux services");
+    await expect(page.locator("main")).not.toContainText(/\b\d+ machines?\b/);
+    await expect(page.locator("main")).not.toContainText(/\bhints? available\b/i);
+    await expect(page.locator("main")).not.toContainText("Latest attempt");
+    await expect(page.locator("main")).not.toContainText(
+      "HIDDEN_OBJECTIVE_DETAIL",
+    );
+    await expect(page.locator("main")).not.toContainText(
+      "HIDDEN_OBJECTIVE_PATH",
+    );
+    await expect(page.locator("main")).not.toContainText("Previous runs");
+
+    const [actionBox, taskBox, outcomesBox, guidanceBox, progressBox] = await Promise.all([
       action.boundingBox(),
-      objectives.boundingBox(),
-      briefing.boundingBox(),
+      task.boundingBox(),
+      outcomes.boundingBox(),
+      guidance.boundingBox(),
+      progress.boundingBox(),
     ]);
     expect(actionBox).not.toBeNull();
-    expect(objectivesBox).not.toBeNull();
-    expect(briefingBox).not.toBeNull();
+    expect(taskBox).not.toBeNull();
+    expect(outcomesBox).not.toBeNull();
+    expect(guidanceBox).not.toBeNull();
+    expect(progressBox).not.toBeNull();
 
     const actionBottom = (actionBox?.y ?? Number.POSITIVE_INFINITY) +
       (actionBox?.height ?? 0);
     expect(actionBox?.y ?? Number.POSITIVE_INFINITY).toBeGreaterThanOrEqual(0);
     expect(actionBottom).toBeLessThanOrEqual(844);
-    expect(actionBottom).toBeLessThanOrEqual(
-      Math.min(
-        objectivesBox?.y ?? Number.POSITIVE_INFINITY,
-        briefingBox?.y ?? Number.POSITIVE_INFINITY,
-      ),
+    expect(actionBottom).toBeLessThanOrEqual(taskBox?.y ?? Number.POSITIVE_INFINITY);
+    expect(taskBox?.y ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
+      outcomesBox?.y ?? Number.POSITIVE_INFINITY,
     );
+    expect(outcomesBox?.y ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
+      guidanceBox?.y ?? Number.POSITIVE_INFINITY,
+    );
+    expect(guidanceBox?.y ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
+      progressBox?.y ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
+  test("uses Lab while briefing data loads", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("scenario-briefing"),
+      theme: "light",
+      variant: "loading",
+    });
+
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Lab");
+  });
+
+  test("offers Start lab when no lab is active", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("scenario-briefing"),
+      theme: "light",
+      runState: "archived",
+    });
+
+    await expect(page.getByRole("button", { name: "Start lab" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Continue lab" }),
+    ).toHaveCount(0);
+  });
+
+  test("uses learner-safe copy when the briefing cannot load", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("scenario-briefing"),
+      theme: "light",
+      variant: "error",
+    });
+
+    await expect(
+      page.getByRole("heading", { name: "Could not load this lab" }),
+    ).toBeVisible({ timeout: 12_000 });
+    await expect(
+      page.getByText("Check your connection and try again."),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+    await expect(page.locator("main")).not.toContainText("500");
+    await expect(page.locator("main")).not.toContainText("scenarioId");
+    await expect(page.locator("main")).not.toContainText(
+      "Deterministic fixture failure",
+    );
+  });
+});
+
+test("the Broken Nginx briefing renders its exact learner contract", async ({
+  page,
+  ui,
+}) => {
+  const route = routeCase("scenario-briefing");
+  ui.configure({
+    sessionRole: route.sessionRole,
+    runState: "archived",
+  });
+  const detail = ui.server.state.scenarioDetail as {
+    briefing: Record<string, unknown>;
+    courseLocation: Record<string, unknown>;
+  };
+  detail.briefing = {
+    ...detail.briefing,
+    difficulty: "easy",
+    estimatedMinutes: 15,
+    objectives: [
+      {
+        probeName: "nginx-running",
+        vmName: "webserver",
+        label: "hidden service probe",
+        title: "Start the web server",
+        bodyMarkdown: "HIDDEN_SERVICE_COMMAND",
+        hintCount: 1,
+      },
+      {
+        probeName: "port-80-open",
+        vmName: "webserver",
+        label: "hidden port probe",
+        title: "Make the site reachable",
+        bodyMarkdown: "HIDDEN_PORT_PATH",
+        hintCount: 1,
+      },
+      {
+        probeName: "default-site-enabled",
+        vmName: "webserver",
+        label: "hidden file probe",
+        title: "Restore the default site",
+        bodyMarkdown: "HIDDEN_SITE_PATH",
+        hintCount: 1,
+      },
+    ],
+  };
+  detail.courseLocation = {
+    ...detail.courseLocation,
+    step: 1,
+    steps: 1,
+  };
+  const course = ui.server.state.courses[0] as
+    | { scenarioIds?: string[] }
+    | undefined;
+  if (course) course.scenarioIds = ["repair-nginx"];
+
+  await page.goto(route.path, { waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await expect(page.getByText("Easy", { exact: true })).toBeVisible();
+  await expect(page.getByText("about 15 minutes", { exact: true })).toBeVisible();
+  await expect(page.getByText("step 1 of 1", { exact: true })).toBeVisible();
+  const outcomes = page
+    .getByRole("heading", { name: "Done when" })
+    .locator("xpath=ancestor::section");
+  await expect(outcomes.getByText("Start the web server")).toBeVisible();
+  await expect(outcomes.getByText("Make the site reachable")).toBeVisible();
+  await expect(outcomes.getByText("Restore the default site")).toBeVisible();
+  await expect(outcomes).not.toContainText("HIDDEN_SERVICE_COMMAND");
+  await expect(outcomes).not.toContainText("HIDDEN_PORT_PATH");
+  await expect(outcomes).not.toContainText("HIDDEN_SITE_PATH");
+});
+
+test.describe("scenario briefing reflow", () => {
+  for (const viewport of [
+    { id: "small", width: 320, height: 700 },
+    { id: "landscape", width: 667, height: 375 },
+    { id: "tablet", width: 1100, height: 800 },
+    { id: "desktop", width: 1440, height: 900 },
+  ]) {
+    test(`${viewport.id} keeps the learner flow within the page`, async ({
+      page,
+      ui,
+    }) => {
+      await page.setViewportSize({
+        width: viewport.width,
+        height: viewport.height,
+      });
+      await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
+
+      await expect(
+        page.getByRole("button", { name: "Continue lab" }),
+      ).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Your task" })).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    });
+  }
+
+  test("200% text keeps the next action and guidance available", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = "200%";
+    });
+    await page.waitForTimeout(100);
+
+    const action = page.getByRole("button", { name: "Continue lab" });
+    await action.scrollIntoViewIfNeeded();
+    await expect(action).toBeVisible();
+    await expect(page.getByText("Guidance is available while you work.")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
   });
 });
 
@@ -984,7 +1121,7 @@ test.describe("coarse pointer and mobile overflow", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("inline replay stays inside the mobile timeline", async ({
+  test("replay stays inside the mobile recap", async ({
     page,
     ui,
   }) => {
@@ -994,10 +1131,9 @@ test.describe("coarse pointer and mobile overflow", () => {
       runState: "replay",
     });
 
-    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await page.getByRole("button", { name: "Watch replay" }).click();
     await expect(page.locator(".run-artifact-player")).toBeVisible();
     await expect(page.getByRole("dialog")).toHaveCount(0);
-    await expectTimelineSurfaceWidths(page);
     expect(
       await coarsePointerTargetViolations(page),
       "expanded inline replay coarse-pointer controls smaller than 44px",

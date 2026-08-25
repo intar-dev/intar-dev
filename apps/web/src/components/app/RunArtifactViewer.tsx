@@ -482,7 +482,7 @@ export function AsciicastReplaySurface({
       <div className={minimal ? "p-0" : "p-4"}>
         <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
           <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-sm text-destructive">
-            {playerError}
+            {replayPlayerErrorCopy(playerError, minimal)}
           </div>
         </div>
       </div>
@@ -525,6 +525,10 @@ export function AsciicastReplaySurface({
       </div>
     </div>
   );
+}
+
+export function replayPlayerErrorCopy(error: string, minimal: boolean) {
+  return minimal ? "Replay could not be loaded. Try again soon." : error;
 }
 
 export function ReadOnlyTextSurface({

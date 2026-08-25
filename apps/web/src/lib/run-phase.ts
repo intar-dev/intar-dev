@@ -115,45 +115,45 @@ function hasVmReadyTerminal(vm: ScenarioRunRecord["vms"][number]) {
 function runViewPhaseTitle(phase: RunViewPhase): string {
   switch (phase) {
     case "launching":
-      return "Queued";
+      return "Starting";
     case "booting":
-      return "Booting";
+      return "Preparing";
     case "waiting_for_target":
-      return "Waiting for target";
+      return "Preparing";
     case "running":
       return "Running";
     case "solved":
       return "Solved";
     case "deleting":
-      return "Destroying";
+      return "Ending";
     case "archiving":
-      return "Archiving";
+      return "Saving";
     case "completed":
-      return "Completed";
+      return "Saved";
     case "failed":
-      return "Failed";
+      return "Stopped";
   }
 }
 
 function vmViewPhaseTitle(phase: VmViewPhase): string {
   switch (phase) {
     case "launching":
-      return "Launching";
+      return "Starting";
     case "booting":
-      return "Booting";
+      return "Preparing";
     case "waiting_for_target":
-      return "Waiting for target";
+      return "Preparing";
     case "running":
       return "Running";
     case "solved":
       return "Solved";
     case "deleting":
-      return "Destroying";
+      return "Ending";
     case "archiving":
-      return "Archiving";
+      return "Saving";
     case "completed":
-      return "Completed";
+      return "Saved";
     case "failed":
-      return "Failed";
+      return "Stopped";
   }
 }

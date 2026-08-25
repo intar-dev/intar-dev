@@ -3,82 +3,123 @@ import { paginatedScenarioFixtures } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectRouteScreenshot } from "./support/screenshot";
 
-const runStates = [
-  "launching",
-  "booting",
-  "waiting",
-  "running",
-  "disconnected",
-  "solved",
-  "failed",
-  "ending",
-  "rendering",
-  "archived",
-  "replay-failed",
-  "replay",
-] as const;
-
 test.describe("focused visual states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  for (const runState of runStates) {
-    test(`run · ${runState}`, async ({ page, ui }) => {
-      await ui.open({
-        ...routeCase("run-workspace"),
-        theme: "dark",
-        runState,
-      });
-      if (runState === "disconnected") {
-        await expect(
-          page.getByText("The terminal session ended. Reconnect to continue.", {
-            exact: true,
-          }),
-        ).toBeVisible();
-        await expect(
-          page.getByRole("button", { name: "Reconnect terminal" }),
-        ).toBeVisible();
-      }
-      await expectRouteScreenshot(page, `run-${runState}-dark-desktop`);
-    });
-  }
-
-  test("run · ending · light", async ({ page, ui }) => {
+  test("run · running guidance popover", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
-      theme: "light",
-      runState: "ending",
+      theme: "dark",
+      runState: "running",
     });
-    await expectRouteScreenshot(page, "run-ending-light-desktop");
+    await page.locator("[data-run-learning-panel-trigger]").click();
+    const panel = page.locator("[data-run-learning-panel-content]");
+    await expect(
+      panel.getByRole("heading", { name: "Checks and guidance" }),
+    ).toBeVisible();
+    await expect(panel.getByText("0/2 verified", { exact: true })).toBeVisible();
+    await expectRouteScreenshot(page, "run-running-guidance-dark-desktop");
   });
 
-  test("run · dense multi-probe history", async ({ page, ui }) => {
+  test("run · booting guidance panel", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "booting",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Preparing your workspace" }),
+    ).toBeVisible();
+    await page.locator("[data-run-learning-panel-trigger]").click();
+    await expect(
+      page
+        .locator("[data-run-learning-panel-content]")
+        .getByRole("heading", { name: "Work order" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-booting-guidance-dark-desktop");
+  });
+
+  test("run · solved guidance panel", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "solved",
+    });
+    await page.locator("[data-run-learning-panel-trigger]").click();
+    const panel = page.locator("[data-run-learning-panel-content]");
+    await expect(
+      panel.getByRole("heading", { name: "Lab solved" }),
+    ).toBeVisible();
+    await expect(
+      panel.getByRole("button", { name: "Finish and save" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-solved-guidance-dark-desktop");
+  });
+
+  test("run · saving recap", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Saving your run…" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-saving-recap-dark-desktop");
+  });
+
+  test("run · settled recap", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "archived",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Solved" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Final checks" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-settled-recap-dark-desktop");
+  });
+
+  test("run · dense checks and hints", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       variant: "long",
-      runState: "ending",
+      runState: "running",
     });
+    await page.locator("[data-run-learning-panel-trigger]").click();
+    const panel = page.locator("[data-run-learning-panel-content]");
+    await expect(panel.getByText("Hints", { exact: true })).toBeVisible();
+    await panel
+      .getByRole("button", { name: "Reveal", exact: true })
+      .first()
+      .click();
     await expect(
-      page.getByRole("heading", { name: "Needs repair" }),
+      panel.getByText("Inspect the service boundary", { exact: true }),
     ).toHaveCount(1);
+    await panel
+      .getByRole("button", { name: "Reveal", exact: true })
+      .click();
     await expect(
-      page.getByRole("heading", { name: "Verified" }),
-    ).toHaveCount(1);
-    await expect(
-      page.locator('ol[aria-label="Run timeline"] ul > li'),
-    ).toHaveCount(6);
-    await expectRouteScreenshot(page, "run-probes-dense-dark-desktop");
+      panel.getByText("Inspect the service boundary", { exact: true }),
+    ).toHaveCount(2);
+    await expect(panel.getByText("2/2 used", { exact: true })).toBeVisible();
+    await expectRouteScreenshot(page, "run-dense-checks-hints-dark-desktop");
   });
 
-  test("run · inline replay", async ({ page, ui }) => {
+  test("run · replay recap", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "replay",
     });
-    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Solved" })).toBeVisible();
+    await page.getByRole("button", { name: "Watch replay" }).click();
     await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
-    await expectRouteScreenshot(page, "run-replay-inline-dark-desktop");
+    await expectRouteScreenshot(page, "run-replay-recap-dark-desktop");
   });
 
   test("runs · finishing in background", async ({ page, ui }) => {
@@ -254,21 +295,22 @@ test.describe("focused visual states", () => {
 test.describe("focused mobile workspace", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
-  test("objectives dock", async ({ page, ui }) => {
+  test("running guidance sheet", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "running",
     });
-    const statusAction = page.getByRole("button", {
-      name: /^Objectives\b/i,
-    });
-    await expect(statusAction.first()).toBeVisible();
-    await statusAction.first().click();
-    await expectRouteScreenshot(page, "run-status-dock-dark-mobile");
+    await page.locator("[data-run-learning-panel-trigger]").click();
+    await expect(
+      page
+        .locator("[data-run-learning-panel-content]")
+        .getByRole("heading", { name: "Checks and guidance" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-running-guidance-dark-mobile");
   });
 
-  test("startup work order dock", async ({ page, ui }) => {
+  test("booting guidance sheet", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -277,49 +319,13 @@ test.describe("focused mobile workspace", () => {
     await expect(
       page.getByRole("heading", { name: "Preparing your workspace" }),
     ).toBeVisible();
-    await page
-      .getByRole("button", { name: /^Work order\b/i })
-      .click();
-    await expectRouteScreenshot(page, "run-startup-work-order-dark-mobile");
-  });
-
-  test("run ending timeline", async ({ page, ui }) => {
-    await ui.open({
-      ...routeCase("run-workspace"),
-      theme: "dark",
-      runState: "ending",
-    });
-    await expectRouteScreenshot(page, "run-ending-dark-mobile");
-  });
-
-  test("run dense multi-probe history", async ({ page, ui }) => {
-    await ui.open({
-      ...routeCase("run-workspace"),
-      theme: "dark",
-      variant: "long",
-      runState: "ending",
-    });
+    await page.locator("[data-run-learning-panel-trigger]").click();
     await expect(
-      page.getByRole("heading", { name: "Needs repair" }),
-    ).toHaveCount(1);
-    await expect(
-      page.getByRole("heading", { name: "Verified" }),
-    ).toHaveCount(1);
-    await expect(
-      page.locator('ol[aria-label="Run timeline"] ul > li'),
-    ).toHaveCount(6);
-    await expectRouteScreenshot(page, "run-probes-dense-dark-mobile");
-  });
-
-  test("run inline replay", async ({ page, ui }) => {
-    await ui.open({
-      ...routeCase("run-workspace"),
-      theme: "dark",
-      runState: "replay",
-    });
-    await page.getByRole("button", { name: "Replay", exact: true }).click();
-    await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
-    await expectRouteScreenshot(page, "run-replay-inline-dark-mobile");
+      page
+        .locator("[data-run-learning-panel-content]")
+        .getByRole("heading", { name: "Work order" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-booting-guidance-dark-mobile");
   });
 });
 

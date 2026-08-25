@@ -33,7 +33,7 @@ describe("scenario startup milestones", () => {
 
     expect(steps.map((step) => step.label)).toEqual([
       "Request accepted",
-      "Starting the VM",
+      "Starting your workspace",
       "Checking the workspace",
       "Opening the shell",
     ]);

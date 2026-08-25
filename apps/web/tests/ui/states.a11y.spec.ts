@@ -1,11 +1,9 @@
+import type { Locator, Page } from "@playwright/test";
 import { buildTemporaryNativeSshCommand } from "@/lib/native-ssh";
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
-import {
-  coarsePointerTargetViolations,
-  expectNoHorizontalOverflow,
-} from "./support/layout";
+import { expectNoHorizontalOverflow } from "./support/layout";
 
 const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
   username: "route-test-only",
@@ -15,6 +13,56 @@ const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
     "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key",
   keyFilename: "intar-route-test-only.key",
 });
+
+const TECHNICAL_LEARNER_RUN_COPY = [
+  "nginx-listening",
+  "health-endpoint",
+  "tcp_connect",
+  "http_request",
+  "connection refused on 127.0.0.1:80",
+  "debian-13",
+  "10.40.0.18",
+  "run-active",
+  "SHA-256",
+  "SSH target",
+  "Run timeline",
+  "Transcript",
+  "Command log",
+] as const;
+
+function runLearningTrigger(page: Page): Locator {
+  return page.locator("[data-run-learning-panel-trigger]");
+}
+
+function runLearningPanel(page: Page): Locator {
+  return page.locator("[data-run-learning-panel-content]");
+}
+
+async function expectOnlyAppBarHeading(page: Page, title: string) {
+  const headings = page.locator("h1");
+  await expect(headings).toHaveCount(1);
+  await expect(page.locator("header").first().getByRole("heading", { level: 1 })).toHaveText(
+    title,
+  );
+  await expect(headings).toHaveText(title);
+}
+
+async function expectMinimumTarget(control: Locator, description: string) {
+  const bounds = await control.boundingBox();
+  expect(bounds, `${description} must be visible`).not.toBeNull();
+  expect(bounds!.width, `${description} must be at least 44px wide`).toBeGreaterThanOrEqual(
+    44,
+  );
+  expect(bounds!.height, `${description} must be at least 44px tall`).toBeGreaterThanOrEqual(
+    44,
+  );
+}
+
+async function expectLearnerSafeRunCopy(scope: Locator) {
+  for (const technicalCopy of TECHNICAL_LEARNER_RUN_COPY) {
+    await expect(scope).not.toContainText(technicalCopy);
+  }
+}
 
 test.describe("focused state accessibility", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -561,7 +609,81 @@ test.describe("focused state accessibility", () => {
       .toEqual([]);
   });
 
-  test("startup milestones expose one current ordered step", async ({
+  test("desktop guidance is a learner-safe header popover with keyboard return", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    const trigger = runLearningTrigger(page);
+    await expect(trigger).toHaveText("Checks 0/2");
+    await expect(trigger).toHaveAccessibleName(
+      "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+    );
+    await expectMinimumTarget(trigger, "header lab guidance trigger");
+    await expect(page.getByRole("complementary", { name: "Run console" })).toHaveCount(
+      0,
+    );
+    await expect(
+      page.getByRole("button", { name: /^Objectives\b/i }),
+    ).toHaveCount(0);
+    await expect(page.locator('ol[aria-label="Run timeline"]')).toHaveCount(0);
+
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+
+    const panel = runLearningPanel(page);
+    await expect(panel).toBeVisible();
+    await expect(
+      panel.getByRole("heading", { name: "Checks and guidance" }),
+    ).toBeVisible();
+    await expect(panel.locator("#run-learning-checks-heading")).toHaveText(
+      "Checks",
+    );
+    await expect(panel.getByText("Hints", { exact: true })).toBeVisible();
+    await expect(panel.getByText("Full solution", { exact: true })).toBeVisible();
+    await expect(panel).toContainText("Start the web server");
+    await expect(panel).toContainText("Make the site reachable");
+    await expect(panel).not.toContainText("systemctl status nginx");
+    await expectLearnerSafeRunCopy(panel);
+    await expect(page.locator('[data-slot="sheet-content"]')).toHaveCount(0);
+    await expect(page.locator('[data-slot="sheet-overlay"]')).toHaveCount(0);
+
+    const [triggerBox, panelBox] = await Promise.all([
+      trigger.boundingBox(),
+      panel.boundingBox(),
+    ]);
+    expect(triggerBox).not.toBeNull();
+    expect(panelBox).not.toBeNull();
+    expect(panelBox!.y).toBeGreaterThanOrEqual(
+      triggerBox!.y + triggerBox!.height - 2,
+    );
+
+    await panel.getByRole("button", { name: "Reveal" }).first().click();
+    await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+    await expect(panel).toContainText("systemctl status nginx");
+    await expect(trigger).toHaveAccessibleName(
+      "Checks. 0 of 2 checks verified. 1 of 2 hints revealed.",
+    );
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    await page.keyboard.press("Space");
+    await expect(runLearningPanel(page)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+  });
+
+  test("booting guidance exposes a work order without infrastructure detail", async ({
     page,
     ui,
   }, testInfo) => {
@@ -571,36 +693,163 @@ test.describe("focused state accessibility", () => {
       runState: "booting",
     });
 
-    const currentStep = page.locator('ol li[aria-current="step"]');
-    await expect(currentStep).toHaveCount(1);
-    await expect(currentStep).toContainText("Starting the VM");
-    await expect(page.getByRole("progressbar")).toHaveCount(0);
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    const trigger = runLearningTrigger(page);
+    await expect(trigger).toHaveText("Work order");
+    await expect(trigger).toHaveAccessibleName(
+      "Work order. 0 of 2 checks verified. 0 of 2 hints revealed.",
+    );
+    await expectMinimumTarget(trigger, "booting work order trigger");
+    await trigger.click();
+
+    const panel = runLearningPanel(page);
+    await expect(
+      panel.getByRole("heading", { name: "Work order" }),
+    ).toBeVisible();
+    await expect(panel).toContainText(
+      "Checks will appear when the lab is ready.",
+    );
+    await expect(panel).toContainText("Start the web server");
+    await expect(panel).toContainText("Make the site reachable");
+    await expectLearnerSafeRunCopy(panel);
+    await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
 
-  for (const runState of [
-    "ending",
-    "rendering",
-    "replay-failed",
-    "replay",
+  test("solved guidance puts finish and save before the learning details", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "solved",
+    });
+
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    const trigger = runLearningTrigger(page);
+    await expect(trigger).toHaveText("Solved 2/2");
+    await expect(trigger).toHaveAccessibleName(
+      "Solved. 2 of 2 checks verified. 0 of 2 hints revealed.",
+    );
+    await trigger.click();
+
+    const panel = runLearningPanel(page);
+    const finish = panel.getByRole("button", { name: "Finish and save" });
+    const checks = panel.getByText("Checks", { exact: true });
+    await expect(finish).toBeVisible();
+    await expect(checks).toBeVisible();
+    const [finishBox, checksBox] = await Promise.all([
+      finish.boundingBox(),
+      checks.boundingBox(),
+    ]);
+    expect(finishBox).not.toBeNull();
+    expect(checksBox).not.toBeNull();
+    expect(finishBox!.y).toBeLessThan(checksBox!.y);
+
+    await finish.click();
+    await expect(
+      page.getByRole("heading", { name: "Saving your run…" }),
+    ).toBeVisible();
+    await expect(runLearningTrigger(page)).toHaveCount(0);
+    await expectLearnerSafeRunCopy(page.locator("main"));
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  for (const recap of [
+    {
+      runState: "ending",
+      title: "Saving your run…",
+      replay: null,
+    },
+    {
+      runState: "rendering",
+      title: "Saving your run…",
+      replay: null,
+    },
+    {
+      runState: "failed",
+      title: "Could not finish",
+      replay: null,
+    },
+    {
+      runState: "replay-failed",
+      title: "Solved",
+      replay: "Replay unavailable.",
+    },
+    {
+      runState: "replay",
+      title: "Solved",
+      replay: "Watch replay",
+    },
   ] as const) {
-    test(`run timeline · ${runState}`, async ({ page, ui }, testInfo) => {
+    test(`saved run recap · ${recap.runState}`, async ({ page, ui }, testInfo) => {
       await ui.open({
         ...routeCase("run-workspace"),
         theme: "dark",
-        runState,
+        runState: recap.runState,
       });
 
+      await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
       await expect(
-        page.getByRole("heading", { name: "Run timeline" }),
+        page.getByRole("heading", { name: recap.title, exact: true }),
       ).toBeVisible();
-      await expect(page.getByRole("dialog")).toHaveCount(0);
-      await expect(
-        page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
-      ).toHaveCount(runState === "ending" || runState === "rendering" ? 1 : 0);
+      await expect(runLearningTrigger(page)).toHaveCount(0);
+      await expect(page.locator('ol[aria-label="Run timeline"]')).toHaveCount(0);
+      await expect(page.locator("main")).not.toContainText("Run timeline");
+      await expect(page.locator("main")).not.toContainText("Command log");
+      await expect(page.locator("main")).not.toContainText("Transcript");
+      await expectLearnerSafeRunCopy(page.locator("main"));
+
+      if (recap.replay) {
+        await expect(page.getByText(recap.replay, { exact: true })).toBeVisible();
+      } else {
+        await expect(page.getByText("Watch replay", { exact: true })).toHaveCount(
+          0,
+        );
+      }
+      if (recap.title === "Saving your run…") {
+        await expect(page.getByText("Your recap will be ready in a moment.")).toBeVisible();
+        await expect(page.getByRole("heading", { name: "Final checks" })).toHaveCount(
+          0,
+        );
+      } else {
+        await expect(page.getByRole("heading", { name: "Final checks" })).toBeVisible();
+        await expect(page.getByText("What next?", { exact: true })).toBeVisible();
+      }
+
+      await expectNoHorizontalOverflow(page);
       await expectNoAxeViolations(page, testInfo);
     });
   }
+
+  test("cancelled runs use the ended-early recap without teardown detail", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "archived",
+    });
+    ui.server.state.run.outcome = "cancelled";
+    ui.server.state.run.solvedAt = null;
+    ui.server.state.run.solveDurationMs = null;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    await expect(
+      page.getByRole("heading", { name: "Ended early", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Try this lab again" }),
+    ).toBeVisible();
+    await expectLearnerSafeRunCopy(page.locator("main"));
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
 
   test("disconnected terminal recovers after reconnecting", async ({
     page,
@@ -647,62 +896,45 @@ test.describe("focused state accessibility", () => {
 test.describe("focused mobile state accessibility", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
-  test("objectives sheet", async ({ page, ui }, testInfo) => {
+  test("guidance opens as a bottom sheet and returns keyboard focus", async ({
+    page,
+    ui,
+  }, testInfo) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "running",
     });
-    const trigger = page.getByRole("button", {
-      name: /^Objectives\b/i,
-    });
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    const trigger = runLearningTrigger(page);
     await expect(trigger).toBeVisible();
-    await trigger.click();
+    await expectMinimumTarget(trigger, "mobile lab guidance trigger");
+    await trigger.focus();
+    await page.keyboard.press("Space");
 
-    const sheet = page.getByRole("dialog");
+    const sheet = page.getByRole("dialog", { name: "Lab guidance" });
+    const panel = runLearningPanel(page);
+    await expect(sheet).toBeVisible();
+    await expect(sheet).toHaveAttribute("data-side", "bottom");
+    await expect(panel).toBeVisible();
     await expect(
-      sheet.getByRole("heading", { name: "Objectives" }),
+      panel.getByRole("heading", { name: "Checks and guidance" }),
     ).toBeVisible();
-    expect(
-      await coarsePointerTargetViolations(page),
-      "open objectives sheet coarse-pointer controls smaller than 44px",
-    ).toEqual([]);
+    await expectMinimumTarget(
+      sheet.getByRole("button", { name: "Close lab guidance" }),
+      "mobile guidance close button",
+    );
+    await expectMinimumTarget(
+      panel.getByRole("button", { name: "Reveal" }).first(),
+      "mobile hint reveal button",
+    );
+    await expectLearnerSafeRunCopy(panel);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
-  });
 
-  test("startup work order sheet", async ({ page, ui }, testInfo) => {
-    await ui.open({
-      ...routeCase("run-workspace"),
-      theme: "dark",
-      runState: "booting",
-    });
-    const trigger = page.getByRole("button", {
-      name: /^Work order\b/i,
-    });
-    await expect(trigger).toBeVisible();
-    await trigger.click();
-
-    await expect(
-      page.getByRole("dialog").locator('[data-slot="sheet-title"]'),
-    ).toHaveText("Work order");
-    await expectNoAxeViolations(page, testInfo);
-  });
-
-  test("run ending timeline", async ({ page, ui }, testInfo) => {
-    await ui.open({
-      ...routeCase("run-workspace"),
-      theme: "dark",
-      runState: "ending",
-    });
-
-    await expect(
-      page.getByRole("heading", { name: "Run timeline" }),
-    ).toBeVisible();
-    await expect(
-      page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
-    ).toHaveCount(1);
-    await expectNoAxeViolations(page, testInfo);
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+    await expect(trigger).toBeFocused();
   });
 
   test("native SSH dialog stays reachable on a short phone", async ({
@@ -735,10 +967,10 @@ test.describe("focused mobile state accessibility", () => {
   });
 });
 
-test.describe("run console content width", () => {
+test.describe("run guidance at tablet width", () => {
   test.use({ viewport: { width: 1100, height: 900 } });
 
-  test("uses the dock below the rail width and a rail above it", async ({
+  test("keeps the same header popover above the mobile sheet breakpoint", async ({
     page,
     ui,
   }, testInfo) => {
@@ -748,29 +980,45 @@ test.describe("run console content width", () => {
       runState: "running",
     });
 
-    const dock = page.getByRole("button", { name: /^Objectives\b/i });
-    const rail = page.getByRole("complementary", { name: "Run console" });
-    await expect(dock).toBeVisible();
-    await expect(rail).toHaveCount(0);
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    const trigger = runLearningTrigger(page);
+    await expect(trigger).toBeVisible();
+    await expectMinimumTarget(trigger, "tablet lab guidance trigger");
+    await trigger.click();
 
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(rail).toBeVisible();
-    await expect(dock).toHaveCount(0);
+    await expect(runLearningPanel(page)).toBeVisible();
+    await expect(page.locator('[data-slot="sheet-content"]')).toHaveCount(0);
+    await expect(page.locator('[data-slot="sheet-overlay"]')).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+});
 
-    const hintDisclosure = rail.getByRole("button", { name: /Need a hint?/i });
-    await hintDisclosure.focus();
-    await page.setViewportSize({ width: 1100, height: 900 });
-    await expect(dock).toBeVisible();
-    await expect(dock).toBeFocused();
+test.describe("run guidance at 200% text", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
 
-    await dock.click();
-    const detailsDisclosure = page
-      .getByRole("dialog", { name: "Objectives" })
-      .getByRole("button", { name: /Run details/i });
-    await detailsDisclosure.focus();
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(rail).toBeVisible();
-    await expect(rail).toBeFocused();
+  test("keeps the header control and checks operable", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = "200%";
+    });
+
+    const trigger = runLearningTrigger(page);
+    await expect(trigger).toBeVisible();
+    await expectMinimumTarget(trigger, "200% lab guidance trigger");
+    await trigger.click();
+    const panel = runLearningPanel(page);
+    await expect(panel).toBeVisible();
+    await expect(
+      panel.locator("[data-run-learning-sticky-summary]"),
+    ).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
@@ -779,7 +1027,7 @@ test.describe("run console content width", () => {
 test.describe("short run workspace", () => {
   test.use({ viewport: { width: 667, height: 375 }, hasTouch: true });
 
-  test("keeps the objectives dock reachable in landscape", async ({
+  test("keeps check indicators reachable while the guidance sheet scrolls", async ({
     page,
     ui,
   }, testInfo) => {
@@ -789,18 +1037,88 @@ test.describe("short run workspace", () => {
       runState: "running",
     });
 
-    const dock = page.getByRole("button", { name: /^Objectives\b/i });
-    await expect(dock).toBeVisible();
-    const bounds = await dock.boundingBox();
-    expect(bounds).not.toBeNull();
-    expect(bounds!.width).toBeGreaterThan(600);
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    const trigger = runLearningTrigger(page);
+    await expectMinimumTarget(trigger, "landscape lab guidance trigger");
+    await trigger.click();
+
+    const sheet = page.getByRole("dialog", { name: "Lab guidance" });
+    const panel = runLearningPanel(page);
+    await expect(sheet).toBeVisible();
+    // Sheet enters from below; assert its settled layout, not its 200ms entry transform.
+    await page.waitForTimeout(250);
+    const sheetBox = await sheet.boundingBox();
+    expect(sheetBox).not.toBeNull();
+    expect(sheetBox!.y).toBeGreaterThanOrEqual(0);
+    expect(sheetBox!.y + sheetBox!.height).toBeLessThanOrEqual(375);
+
+    const scroll = await panel.evaluate((content) => {
+      const scroller = content.parentElement;
+      if (!(scroller instanceof HTMLElement)) {
+        throw new Error("guidance panel needs a scrollable parent");
+      }
+      scroller.scrollTop = scroller.scrollHeight;
+      return {
+        clientHeight: scroller.clientHeight,
+        scrollHeight: scroller.scrollHeight,
+        scrollTop: scroller.scrollTop,
+      };
+    });
+    expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+    expect(scroll.scrollTop).toBeGreaterThan(0);
+    const stickySummary = sheet.locator(
+      "[data-run-learning-sticky-summary]",
+    );
+    await expect(stickySummary).toBeVisible();
+    await expect(stickySummary).toHaveAccessibleName(
+      "Show checks. 0 of 2 verified.",
+    );
+    await expectMinimumTarget(stickySummary, "sticky check summary");
+    await stickySummary.focus();
+    await expect(stickySummary).toBeFocused();
+    await stickySummary.click();
+    const scrolledBack = await panel.evaluate((content) => {
+      const scroller = content.parentElement;
+      return scroller instanceof HTMLElement ? scroller.scrollTop : -1;
+    });
+    expect(scrolledBack).toBeGreaterThanOrEqual(0);
+    expect(scrolledBack).toBeLessThan(scroll.scrollTop);
+    const close = sheet.getByRole("button", { name: "Close lab guidance" });
+    await expectMinimumTarget(close, "landscape guidance close button");
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
+    await close.click();
+    await expect(sheet).toBeHidden();
+    await expect(trigger).toBeFocused();
   });
 });
 
 test.describe("small-screen access management", () => {
   test.use({ viewport: { width: 320, height: 844 }, hasTouch: true });
+
+  test("keeps lab guidance usable at 320px in light mode", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "running",
+    });
+
+    await expectOnlyAppBarHeading(page, "Repair a broken nginx service");
+    const trigger = runLearningTrigger(page);
+    await expect(trigger).toHaveText("Checks 0/2");
+    await expectMinimumTarget(trigger, "small-screen lab guidance trigger");
+    await trigger.click();
+
+    const sheet = page.getByRole("dialog", { name: "Lab guidance" });
+    await expect(sheet).toBeVisible();
+    await expect(runLearningPanel(page)).toBeVisible();
+    await expectLearnerSafeRunCopy(runLearningPanel(page));
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
 
   test("keeps active invite actions on screen", async ({
     page,

@@ -4,10 +4,9 @@ scenario "broken-nginx" {
   tags              = ["nginx", "systemd", "linux"]
   difficulty        = "easy"
   estimated_minutes = 15
-  description       = "Fix a misconfigured nginx server"
+  description       = "Bring a stopped website back online."
   briefing          = <<-MD
-    The web team pushed a small cleanup and the default site stopped responding.
-    Bring nginx back online and make sure the default site is enabled again.
+    A routine change left the website down. Find what is wrong and get the default website working again.
   MD
 
   hint "start-with-the-service" {
@@ -46,9 +45,9 @@ scenario "broken-nginx" {
       kind        = "service"
       service     = "nginx"
       state       = "running"
-      description = "Nginx should be running to serve the default site"
-      title       = "Start nginx"
-      body        = "The HTTP server process needs to be active before the site can answer requests."
+      description = "The web server is running"
+      title       = "Start the web server"
+      body        = "Get the web server running so people can use the website again."
 
       hint "status" {
         body = "`systemctl status nginx` shows whether nginx is active and why it failed."
@@ -60,9 +59,9 @@ scenario "broken-nginx" {
       host        = "127.0.0.1"
       port        = 80
       protocol    = "tcp"
-      description = "HTTP port 80 should be listening"
-      title       = "Open HTTP"
-      body        = "Once nginx is running, confirm it is listening on the standard HTTP port."
+      description = "The site is reachable"
+      title       = "Make the site reachable"
+      body        = "Make sure people can reach the website again."
 
       hint "ss" {
         body = "`ss -ltnp` can show which process, if any, is bound to port 80."
@@ -72,9 +71,9 @@ scenario "broken-nginx" {
     probe "default-site-enabled" {
       kind        = "file_exists"
       path        = "/etc/nginx/sites-enabled/default"
-      description = "Default site should be enabled in /etc/nginx/sites-enabled"
+      description = "The default site is restored"
       title       = "Restore the default site"
-      body        = "The default site must be present in nginx's enabled-sites directory."
+      body        = "Bring back the standard site so visitors see the website they expect."
 
       hint "symlink" {
         body = "Compare `/etc/nginx/sites-available/default` with `/etc/nginx/sites-enabled/default`."

@@ -128,6 +128,37 @@ describe("scenario run content gating", () => {
     });
   });
 
+  it("keeps same-named probe hints independent across machines", () => {
+    const multiVmHints = [
+      hint("probe:web:http-ok:first", "probe", "http-ok"),
+      hint("probe:web:http-ok:second", "probe", "http-ok"),
+      hint("probe:worker:http-ok:first", "probe", "http-ok"),
+      hint("probe:worker:http-ok:second", "probe", "http-ok"),
+    ];
+
+    expect(
+      buildScenarioRunHintViews({
+        hints: multiVmHints,
+        revealedHintKeys: [],
+      })
+        .filter((view) => view.unlocked)
+        .map((view) => view.key),
+    ).toEqual([
+      "probe:web:http-ok:first",
+      "probe:worker:http-ok:first",
+    ]);
+    expect(
+      decideScenarioRunHintReveal({
+        hints: multiVmHints,
+        revealedHintKeys: ["probe:web:http-ok:first"],
+        requestedHintKey: "probe:worker:http-ok:first",
+      }),
+    ).toEqual({
+      allowed: true,
+      hintKey: "probe:worker:http-ok:first",
+    });
+  });
+
   it("rejects unknown and already revealed hint keys", () => {
     expect(
       decideScenarioRunHintReveal({

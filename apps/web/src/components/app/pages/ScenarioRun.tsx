@@ -1,20 +1,17 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   StatusToken,
   type StatusTone,
 } from "@/components/app/patterns/StatusToken";
-import { RunStatusDock } from "@/components/app/patterns/RunStatusDock";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -23,23 +20,9 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { presentScenarioRun } from "@/lib/run-phase";
-import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
-import { RunTimeline } from "@/components/app/run/RunTimeline";
-import { shouldShowDesktopRunRail } from "@/components/app/run/run-workspace-layout";
-import { RunCompletionActions } from "@/components/app/run/RunCompletionActions";
 import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
-import { computeLeaseDeadline } from "@/lib/run-lease";
-import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
-import {
-  isVerificationPassed,
-  repairObjectiveTitle,
-} from "@/lib/verification-copy";
-import {
-  RepairProgressSection,
-  RunConsole,
-} from "@/components/app/run/RunConsole";
-import { AssistDrawer } from "@/components/app/run/AssistDrawer";
-import { ResolutionCard } from "@/components/app/run/ResolutionCard";
+import { RunLearningPanel } from "@/components/app/run/RunLearningPanel";
+import { RunRecap } from "@/components/app/run/RunRecap";
 import {
   DeleteRunDialog,
   ScenarioCancelDialog,
@@ -62,7 +45,6 @@ import {
   type ScenarioRunResponse,
   type ScenarioDestroyAcceptedResponse,
 } from "@/components/app/run/run-types";
-import { cn } from "@/lib/utils";
 import type {
   CourseLocation,
   ScenarioCatalogWireResponse,
@@ -77,49 +59,40 @@ export function ScenarioRun() {
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
-  const [workspaceContent, setWorkspaceContent] = useState<HTMLDivElement | null>(
-    null,
+  const recapHeadingRef = useRef<HTMLHeadingElement>(null);
+  const focusRecapAfterShutdownRef = useRef(false);
+  const runMutationFenceRef = useRef(0);
+  const runQueryKey = useMemo(
+    () => ["scenarios", "run", runId] as const,
+    [runId],
   );
-  const runRailRef = useRef<HTMLElement>(null);
-  const runDockTriggerRef = useRef<HTMLButtonElement>(null);
-  const responsiveFocusTargetRef = useRef<"dock" | "rail" | null>(null);
-  const timelineHeadingRef = useRef<HTMLHeadingElement>(null);
-  const focusTimelineAfterShutdownRef = useRef(false);
-  const recordResponsiveFocus = useCallback(
-    (showRail: boolean) => {
-      const active = document.activeElement;
-      if (!(active instanceof HTMLElement)) return;
-
-      if (showRail && active.closest("[data-run-status-dock]")) {
-        responsiveFocusTargetRef.current = "rail";
-      } else if (!showRail && runRailRef.current?.contains(active)) {
-        responsiveFocusTargetRef.current = "dock";
-      }
-    },
-    [],
-  );
-  const desktopRunRail = useDesktopRunRail(
-    workspaceContent,
-    recordResponsiveFocus,
-  );
-
-  useLayoutEffect(() => {
-    const target = responsiveFocusTargetRef.current;
-    if (!target) return;
-    responsiveFocusTargetRef.current = null;
-    (target === "rail" ? runRailRef.current : runDockTriggerRef.current)?.focus({
-      preventScroll: true,
-    });
-  }, [desktopRunRail]);
+  const beginRunMutation = useCallback(async () => {
+    runMutationFenceRef.current += 1;
+    await queryClient.cancelQueries({ queryKey: runQueryKey, exact: true });
+  }, [queryClient, runQueryKey]);
+  const endRunMutation = useCallback(() => {
+    runMutationFenceRef.current = Math.max(0, runMutationFenceRef.current - 1);
+    if (runMutationFenceRef.current === 0) {
+      void queryClient.invalidateQueries({
+        queryKey: runQueryKey,
+        exact: true,
+      });
+    }
+  }, [queryClient, runQueryKey]);
 
   const attempt = useQuery({
-    queryKey: ["scenarios", "run", runId],
-    queryFn: async () => {
+    queryKey: runQueryKey,
+    queryFn: async ({ signal }) => {
+      if (runMutationFenceRef.current > 0) {
+        const cached = queryClient.getQueryData<ScenarioRunResponse>(runQueryKey);
+        if (cached) return cached;
+      }
       const response = await fetch(
         `/api/scenarios/runs/${encodeURIComponent(runId)}`,
         {
           method: "GET",
           credentials: "include",
+          signal,
         },
       );
 
@@ -172,6 +145,7 @@ export function ScenarioRun() {
   });
 
   const destroyScenario = useMutation({
+    onMutate: beginRunMutation,
     mutationFn: async () => {
       let response: Response;
       try {
@@ -212,7 +186,7 @@ export function ScenarioRun() {
       return body;
     },
     onSuccess: (body) => {
-      focusTimelineAfterShutdownRef.current = true;
+      focusRecapAfterShutdownRef.current = true;
       queryClient.setQueryData(["scenarios", "run", runId], {
         run: presentScenarioRun(body.run),
       });
@@ -223,6 +197,7 @@ export function ScenarioRun() {
         queryKey: ["scenario-runs", "list"],
       });
     },
+    onSettled: endRunMutation,
   });
 
   const deleteRun = useMutation({
@@ -265,6 +240,7 @@ export function ScenarioRun() {
   });
 
   const revealHint = useMutation({
+    onMutate: beginRunMutation,
     mutationFn: async (hintKey: string) => {
       const response = await fetch(
         `/api/scenarios/runs/${encodeURIComponent(runId)}/hints/reveal`,
@@ -287,9 +263,11 @@ export function ScenarioRun() {
     onSuccess: (run) => {
       queryClient.setQueryData(["scenarios", "run", runId], { run });
     },
+    onSettled: endRunMutation,
   });
 
   const revealSolution = useMutation({
+    onMutate: beginRunMutation,
     mutationFn: async () => {
       const response = await fetch(
         `/api/scenarios/runs/${encodeURIComponent(runId)}/solution/reveal`,
@@ -310,6 +288,7 @@ export function ScenarioRun() {
     onSuccess: (run) => {
       queryClient.setQueryData(["scenarios", "run", runId], { run });
     },
+    onSettled: endRunMutation,
   });
 
   const attemptData = attempt.data?.run ?? null;
@@ -360,17 +339,7 @@ export function ScenarioRun() {
     attemptData !== null &&
     attemptData.phase === "solved" &&
     attemptData.canDestroy;
-  const leaseDeadlineMs =
-    attemptData !== null && attemptData.outcome === "in_progress"
-      ? computeLeaseDeadline(
-          attemptData.createdAt,
-          attemptData.vms.map((vm) => vm.provisioning?.leaseDurationSeconds),
-        )
-      : null;
   const selectedProbes = selectedVm?.scenarioProbes ?? [];
-  const passedCheckCount = selectedProbes.filter(
-    (probe) => isVerificationPassed(probe.status),
-  ).length;
   const infrastructureTeardownPending = Boolean(
     attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
   );
@@ -406,16 +375,16 @@ export function ScenarioRun() {
 
   useEffect(() => {
     if (
-      !focusTimelineAfterShutdownRef.current ||
+      !focusRecapAfterShutdownRef.current ||
       !attemptData ||
       attemptData.activity === "foreground"
     ) {
       return;
     }
 
-    focusTimelineAfterShutdownRef.current = false;
+    focusRecapAfterShutdownRef.current = false;
     const frame = window.requestAnimationFrame(() => {
-      timelineHeadingRef.current?.focus({ preventScroll: true });
+      recapHeadingRef.current?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [attemptData?.activity]);
@@ -442,10 +411,10 @@ export function ScenarioRun() {
     });
   }, [attemptData?.vms, terminalVisible]);
 
-  const requestDestroyScenario = () => {
+  const requestDestroyScenario = useCallback(() => {
     destroyScenario.reset();
     destroyScenario.mutate();
-  };
+  }, [destroyScenario]);
 
   const showEndRunAction =
     showCancelAction &&
@@ -459,9 +428,55 @@ export function ScenarioRun() {
     attemptData?.outcome === "in_progress" &&
     attemptData.activity === "foreground",
   );
+  const runLearningAction = useMemo(() => {
+    if (!attemptData || attemptData.activity !== "foreground") {
+      return undefined;
+    }
+    return (
+      <RunLearningPanel
+        phase={attemptData.phase}
+        probes={selectedProbes}
+        vmName={selectedVm?.scenarioVmName ?? null}
+        objectives={attemptData.objectives}
+        hints={attemptData.hints}
+        solution={attemptData.solution}
+        onRevealHint={(hintKey) => revealHint.mutate(hintKey)}
+        pendingHintKey={
+          revealHint.isPending ? (revealHint.variables ?? null) : null
+        }
+        hintError={
+          revealHint.error instanceof Error ? revealHint.error.message : null
+        }
+        failedHintKey={
+          revealHint.error ? (revealHint.variables ?? null) : null
+        }
+        onRevealSolution={() => revealSolution.mutate()}
+        solutionPending={revealSolution.isPending}
+        solutionError={
+          revealSolution.error instanceof Error
+            ? revealSolution.error.message
+            : null
+        }
+        onFinishAndSave={
+          showResolutionCard ? requestDestroyScenario : undefined
+        }
+        finishPending={destroyScenario.isPending}
+        finishError={Boolean(destroyScenario.error)}
+      />
+    );
+  }, [
+    attemptData,
+    selectedProbes,
+    revealHint,
+    revealSolution,
+    showResolutionCard,
+    requestDestroyScenario,
+    destroyScenario.isPending,
+    destroyScenario.error,
+  ]);
 
   usePageChrome({
-    title: attemptData?.title,
+    title: attemptData?.title ?? "Lab run",
     status: useMemo(() => {
       if (!attemptData) return undefined;
       if (attemptData.outcome === "in_progress") {
@@ -472,9 +487,6 @@ export function ScenarioRun() {
               word={attemptData.phaseTitle}
               compactWord={showBackgroundStatus ? "Ending" : "Starting"}
               pulse
-              live={!showSelectedVmPreparation && !showBackgroundStatus}
-              startedAt={attemptData.createdAt}
-              leaseDeadlineMs={leaseDeadlineMs}
             />
           );
         }
@@ -484,9 +496,6 @@ export function ScenarioRun() {
               tone="success"
               word="Solved"
               compactWord="Solved"
-              live
-              startedAt={attemptData.createdAt}
-              leaseDeadlineMs={leaseDeadlineMs}
             />
           );
         }
@@ -495,9 +504,6 @@ export function ScenarioRun() {
             tone="live"
             word={attemptData.phaseTitle}
             compactWord="Live"
-            live
-            startedAt={attemptData.createdAt}
-            leaseDeadlineMs={leaseDeadlineMs}
           />
         );
       }
@@ -521,10 +527,10 @@ export function ScenarioRun() {
       }
     }, [
       attemptData,
-      leaseDeadlineMs,
       showSelectedVmPreparation,
       showBackgroundStatus,
     ]),
+    action: runLearningAction,
     menu: useMemo(() => {
       if (!showSshMenuItem && !showEndRunAction && !canDeleteRun) {
         return undefined;
@@ -597,8 +603,8 @@ export function ScenarioRun() {
           pending={destroyScenario.isPending}
           retry={acceptanceRetryNeeded}
           error={
-            destroyScenario.error instanceof Error
-              ? destroyScenario.error.message
+            destroyScenario.error
+              ? "The run could not be ended. Your work is still open."
               : null
           }
         />
@@ -607,9 +613,13 @@ export function ScenarioRun() {
         <DeleteRunDialog
           trigger={false}
           open={deleteRunDialogOpen}
-          onOpenChange={setDeleteRunDialogOpen}
+          onOpenChange={(open) => {
+            setDeleteRunDialogOpen(open);
+            if (!open) deleteRun.reset();
+          }}
           onConfirm={() => deleteRun.mutate()}
           pending={deleteRun.isPending}
+          error={Boolean(deleteRun.error)}
         />
       ) : null}
       {selectedVm && selectedVmSessionRequest ? (
@@ -623,134 +633,13 @@ export function ScenarioRun() {
     </>
   );
 
-  const renderRunRail = () => {
-    if (!attemptData) return null;
-
-    if (showSelectedVmPreparation) {
-      return (
-        <RunConsole>
-          <section aria-labelledby="startup-work-order-heading">
-            <p className="text-eyebrow">Work order</p>
-            <h2
-              id="startup-work-order-heading"
-              className="mt-2 font-heading text-base font-semibold"
-            >
-              Repair objectives
-            </h2>
-            {attemptData.objectives.length ? (
-              <ol className="mt-3 space-y-3">
-                {attemptData.objectives.map((objective, index) => (
-                  <li
-                    key={`${objective.probeName}:${index}`}
-                    className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2 text-sm"
-                  >
-                    <span className="font-heading font-semibold text-primary tabular-nums">
-                      {String(index + 1).padStart(2, "0")}
-                    </span>
-                    <span className="font-medium leading-6">
-                      {repairObjectiveTitle(objective, index)}
-                    </span>
-                  </li>
-                ))}
-              </ol>
-            ) : (
-              <p className="mt-3 text-sm text-muted-foreground">
-                Review the briefing before the shell opens.
-              </p>
-            )}
-          </section>
-          <section aria-labelledby="startup-briefing-heading">
-            <p className="text-eyebrow">Briefing</p>
-            <h2 id="startup-briefing-heading" className="sr-only">
-              Incident briefing
-            </h2>
-            <Markdown className="mt-3 max-h-56 space-y-3 overflow-y-auto pr-1 text-sm leading-6 text-muted-foreground">
-              {attemptData.briefingMarkdown}
-            </Markdown>
-          </section>
-          <section aria-labelledby="startup-machine-heading">
-            <div className="flex items-center justify-between gap-3">
-              <p id="startup-machine-heading" className="text-eyebrow">
-                Current machine
-              </p>
-              <StatusToken
-                tone="pending"
-                word={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
-                pulse
-              />
-            </div>
-            <p className="mt-2 text-sm font-semibold">
-              {selectedVm?.scenarioVmName ?? attemptData.scenarioName}
-            </p>
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              {selectedVm?.phaseDetail ?? attemptData.phaseDetail}
-            </p>
-          </section>
-        </RunConsole>
-      );
-    }
-
-    return (
-      <RunConsole>
-        {showResolutionCard ? (
-          <ResolutionCard
-            scenarioTitle={attemptData.title}
-            solveDurationMs={attemptData.solveDurationMs}
-            assisted={attemptData.solution.assisted}
-            pending={destroyScenario.isPending}
-            onEndScenario={requestDestroyScenario}
-          />
-        ) : (
-          <>
-            <RepairProgressSection
-              key={selectedVm?.scenarioVmName ?? "checks"}
-              probes={selectedProbes}
-              objectives={attemptData.objectives}
-            />
-            <AssistDrawer
-              hints={attemptData.hints}
-              objectives={attemptData.objectives}
-              solution={attemptData.solution}
-              onRevealHint={(hintKey) => revealHint.mutate(hintKey)}
-              pendingHintKey={
-                revealHint.isPending ? (revealHint.variables ?? null) : null
-              }
-              hintError={
-                revealHint.error instanceof Error
-                  ? revealHint.error.message
-                  : null
-              }
-              onRevealSolution={() => revealSolution.mutate()}
-              solutionPending={revealSolution.isPending}
-              solutionError={
-                revealSolution.error instanceof Error
-                  ? revealSolution.error.message
-                  : null
-              }
-            />
-          </>
-        )}
-        <RunDetailsSection
-          runId={runId}
-          objectives={attemptData.objectives}
-          vmName={selectedVm?.scenarioVmName ?? null}
-          hostname={selectedVm?.hostname ?? null}
-          provisioning={selectedVm?.provisioning ?? null}
-          terminalTarget={selectedVm?.terminalTarget ?? null}
-        />
-      </RunConsole>
-    );
-  };
-
   const errorAlerts = (
     <>
       {attempt.error ? (
         <Alert variant="destructive">
-          <AlertTitle>Could not load scenario run</AlertTitle>
+          <AlertTitle>Could not load this lab</AlertTitle>
           <AlertDescription>
-            {attempt.error instanceof Error
-              ? attempt.error.message
-              : "Failed to load scenario run"}
+            Refresh the page or return to My runs and try again.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -759,9 +648,7 @@ export function ScenarioRun() {
         <Alert variant="destructive">
           <AlertTitle>Could not end run</AlertTitle>
           <AlertDescription>
-            {destroyScenario.error instanceof Error
-              ? destroyScenario.error.message
-              : "The active run could not be ended."}
+            Your work is still open. Try ending the run again.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -773,13 +660,12 @@ export function ScenarioRun() {
       <PageShell width="content">
         {runDialogs}
         {errorAlerts}
-        {attemptData.phase === "completed" ? (
-          <RunCompletionActions
-            courseLocation={attemptData.courseLocation}
-            nextScenario={nextCourseScenario}
-          />
-        ) : null}
-        <RunTimeline run={attemptData} headingRef={timelineHeadingRef} />
+        <RunRecap
+          run={attemptData}
+          courseLocation={attemptData.courseLocation}
+          nextScenario={nextCourseScenario}
+          headingRef={recapHeadingRef}
+        />
       </PageShell>
     );
   }
@@ -791,101 +677,50 @@ export function ScenarioRun() {
       <div className="shrink-0 space-y-3 empty:hidden">{errorAlerts}</div>
 
       {attemptData ? (
-        <div
-          ref={setWorkspaceContent}
-          className={cn(
-            "grid min-h-0 flex-1 gap-3",
-            desktopRunRail &&
-              "grid-cols-[minmax(0,1fr)_22rem] grid-rows-[minmax(0,1fr)]",
-          )}
+        <section
+          aria-label="Terminal"
+          className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-3"
         >
-          <section
-            aria-label="Terminal"
-            className="relative flex min-h-0 min-w-0 flex-col gap-3"
-          >
-            <ScenarioVmSelector
-              vms={attemptData.vms}
-              selectedVmId={selectedVmId}
-              onSelect={setSelectedVmId}
-            />
+          <ScenarioVmSelector
+            vms={attemptData.vms}
+            selectedVmId={selectedVmId}
+            onSelect={setSelectedVmId}
+          />
 
-            {selectedVm && selectedVmShellReady && terminalVisible ? (
-              <div className="relative min-h-[16rem] min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
-                <WebSshTerminal
-                  vmName={selectedVm.scenarioVmName}
-                  sessionRequest={selectedVmSessionRequest!}
-                  variant="embedded"
-                  title={`${selectedVm.scenarioVmName} shell`}
-                  showCloseButton={false}
-                  onClose={() => setTerminalVisible(false)}
-                />
-              </div>
-            ) : (
-              <div className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                {showSelectedVmPreparation ? (
-                  <div className="m-auto w-full max-w-2xl py-2">
-                    <ScenarioStepScreen
-                      title={bootScreenCopy.title}
-                      description={bootScreenCopy.description}
-                      steps={bootSteps}
-                    />
-                  </div>
-                ) : (
-                  <ScenarioShellStatusCard
-                    phase={selectedVm?.phase ?? attemptData.phase}
-                    title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
-                    description={
-                      selectedVm?.phaseDetail ?? attemptData.phaseDetail
-                    }
-                    pending={
-                      !selectedVmShellReady &&
-                      Boolean(selectedVm && selectedVm.phase !== "failed")
-                    }
-                  />
-                )}
-              </div>
-            )}
-
-            {!desktopRunRail ? (
-              <div
-                aria-hidden="true"
-                className="h-[calc(4.5rem+env(safe-area-inset-bottom))] shrink-0"
+          {selectedVm && selectedVmShellReady && terminalVisible ? (
+            <div className="relative min-h-[16rem] min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
+              <WebSshTerminal
+                vmName={selectedVm.scenarioVmName}
+                sessionRequest={selectedVmSessionRequest!}
+                variant="embedded"
+                title={`${selectedVm.scenarioVmName} shell`}
+                showCloseButton={false}
+                onClose={() => setTerminalVisible(false)}
               />
-            ) : null}
-          </section>
-
-          {desktopRunRail ? (
-            <aside
-              ref={runRailRef}
-              aria-label="Run console"
-              tabIndex={-1}
-              className="min-h-0 overflow-y-auto pr-1"
-            >
-              {renderRunRail()}
-            </aside>
+            </div>
           ) : (
-            <RunStatusDock
-              triggerRef={runDockTriggerRef}
-              label={
-                showSelectedVmPreparation ? "Work order" : "Objectives"
-              }
-              description={
-                showSelectedVmPreparation
-                  ? "Review the repair objectives while the workspace starts."
-                  : "Repair status, hints, and run details."
-              }
-              status={
-                showSelectedVmPreparation
-                  ? (selectedVm?.phaseDetail ?? attemptData.phaseDetail)
-                  : selectedProbes.length
-                    ? `${passedCheckCount}/${selectedProbes.length} verified`
-                    : attemptData.phaseDetail
-              }
-            >
-              {renderRunRail()}
-            </RunStatusDock>
+            <div className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+              {showSelectedVmPreparation ? (
+                <div className="m-auto w-full max-w-2xl py-2">
+                  <ScenarioStepScreen
+                    title={bootScreenCopy.title}
+                    description={bootScreenCopy.description}
+                    steps={bootSteps}
+                  />
+                </div>
+              ) : (
+                <ScenarioShellStatusCard
+                  phase={selectedVm?.phase ?? attemptData.phase}
+                  title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
+                  pending={
+                    !selectedVmShellReady &&
+                    Boolean(selectedVm && selectedVm.phase !== "failed")
+                  }
+                />
+              )}
+            </div>
           )}
-        </div>
+        </section>
       ) : null}
     </div>
   );
@@ -973,70 +808,18 @@ function ActiveRunStatus({
   word,
   compactWord,
   pulse = false,
-  live = false,
-  startedAt,
-  leaseDeadlineMs,
 }: {
   tone: StatusTone;
   word: string;
   compactWord: string;
   pulse?: boolean;
-  live?: boolean;
-  startedAt: number;
-  leaseDeadlineMs: number | null;
 }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-2.5">
-      <StatusToken
-        tone={tone}
-        word={word}
-        compactWord={compactWord}
-        pulse={pulse}
-        live={live}
-        clock={leaseDeadlineMs === null ? { startedAt } : undefined}
-      />
-      {leaseDeadlineMs !== null ? (
-        <>
-          <span aria-hidden="true" className="h-3 w-px bg-border" />
-          <LeaseCountdown deadlineMs={leaseDeadlineMs} className="text-xs" />
-        </>
-      ) : null}
-    </span>
+    <StatusToken
+      tone={tone}
+      word={word}
+      compactWord={compactWord}
+      pulse={pulse}
+    />
   );
-}
-
-function useDesktopRunRail(
-  node: HTMLDivElement | null,
-  onBeforeChange: (showRail: boolean) => void,
-) {
-  const [matches, setMatches] = useState(false);
-
-  useLayoutEffect(() => {
-    if (!node) {
-      setMatches(false);
-      return;
-    }
-    const update = (width: number) => {
-      const showRail = shouldShowDesktopRunRail(width);
-      setMatches((current) => {
-        if (current !== showRail) onBeforeChange(showRail);
-        return showRail;
-      });
-    };
-    update(node.getBoundingClientRect().width);
-
-    if (typeof ResizeObserver === "undefined") {
-      const onResize = () => update(node.getBoundingClientRect().width);
-      window.addEventListener("resize", onResize);
-      return () => window.removeEventListener("resize", onResize);
-    }
-
-    const observer = new ResizeObserver(() => {
-      update(node.getBoundingClientRect().width);
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [node, onBeforeChange]);
-
-  return matches;
 }

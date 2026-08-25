@@ -30,10 +30,9 @@ export function ScenarioVmSelector(props: {
         return (
           <button
             key={vm.id}
-            type="button"
-            onClick={() => props.onSelect(vm.id)}
-            title={`${vm.hostname} · ${vm.phaseTitle}`}
-            aria-pressed={active}
+              type="button"
+              onClick={() => props.onSelect(vm.id)}
+              aria-pressed={active}
             className={cn(
               "-mb-px flex min-h-11 shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-left text-sm font-medium transition-colors",
               active

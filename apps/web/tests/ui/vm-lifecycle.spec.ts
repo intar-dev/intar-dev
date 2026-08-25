@@ -1,7 +1,7 @@
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 
-test("startup keeps the workspace useful and replaces milestones with the shell", async ({
+test("the boot screen keeps the work order reachable and does not steal focus when the shell opens", async ({
   page,
   ui,
 }) => {
@@ -14,49 +14,43 @@ test("startup keeps the workspace useful and replaces milestones with the shell"
   await expect(
     page.getByRole("heading", { name: "Preparing your workspace" }),
   ).toBeVisible();
+  await expect(page.getByText(/Review the work order while/i)).toBeVisible();
+
+  const trigger = page.getByRole("button", {
+    name: "Work order. 0 of 2 checks verified. 0 of 2 hints revealed.",
+  });
+  await expect(trigger).toHaveText("Work order");
+
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const panel = page.locator("[data-run-learning-panel-content]");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole("heading", { name: "Work order" })).toBeVisible();
   await expect(
-    page.getByText("Review the work order while the VM starts."),
+    panel
+      .locator('section[aria-labelledby="run-learning-work-order-heading"]')
+      .getByText("Start the web server"),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: /Work order/ })).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(panel.getByText("nginx-listening")).toHaveCount(0);
+
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+  await expect(trigger).toBeFocused();
 
   const focusTarget = page.getByRole("link", { name: "Courses" }).first();
   await focusTarget.focus();
   ui.server.setRunState("running");
 
   await expect(page.locator(".xterm")).toBeVisible({ timeout: 1_000 });
+  await expect(
+    page.getByRole("button", {
+      name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+    }),
+  ).toBeVisible();
   await expect(focusTarget).toBeFocused();
 });
 
-test("a solved run gives the learner a concise resolution", async ({
-  page,
-  ui,
-}) => {
-  await ui.open({
-    ...routeCase("run-workspace"),
-    theme: "dark",
-    runState: "solved",
-  });
-
-  await page
-    .getByRole("button", { name: /Objectives.*2\/2 verified/ })
-    .click();
-  const objectives = page.getByRole("dialog", { name: "Objectives" });
-  await expect(objectives.getByText("Resolved", { exact: true })).toBeVisible();
-  await expect(
-    objectives.getByRole("heading", {
-      name: "Repair a broken nginx service",
-    }),
-  ).toBeVisible();
-  await expect(
-    objectives.getByText(
-      "All objectives are verified. Finish the run to save your replay.",
-    ),
-  ).toBeVisible();
-  await expect(objectives.getByText(/repair-nginx/)).toHaveCount(0);
-});
-
-test("a healthy single-machine run keeps terminal controls and status concise", async ({
+test("the desktop guidance popover keeps checks, progressive hints, and solution help learner-safe", async ({
   page,
   ui,
 }) => {
@@ -66,37 +60,346 @@ test("a healthy single-machine run keeps terminal controls and status concise", 
     runState: "running",
   });
 
-  await expect(
-    page.getByRole("button", { name: /Objectives.*0\/2 verified/ }),
-  ).toBeVisible();
+  const trigger = page.getByRole("button", {
+    name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+  });
+  await expect(trigger).toHaveText("Checks 0/2");
+  await expect(page.getByRole("complementary", { name: "Run console" })).toHaveCount(
+    0,
+  );
   await expect(page.getByRole("group", { name: "Machines" })).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: /Reconnect terminal/i }),
   ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Maximize/i })).toHaveCount(0);
+  await expect(page.getByText("Run timeline", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Technical details", { exact: true })).toHaveCount(0);
+
+  await trigger.click();
+  const panel = page.locator("[data-run-learning-panel-content]");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole("heading", { name: "Checks and guidance" })).toBeVisible();
+  await expect(panel.getByText("0/2 verified", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Needs repair", { exact: true })).toHaveCount(1);
+  await expect(panel.getByText("Checking", { exact: true })).toHaveCount(1);
+  await expect(panel.getByText("Inspect the service boundary")).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: /Maximize/i }),
-  ).toHaveCount(0);
+    panel.getByRole("button", { name: "Reveal", exact: true }),
+  ).toHaveCount(2);
+
+  for (const forbidden of [
+    "nginx-listening",
+    "health-endpoint",
+    "tcp_connect",
+    "http_request",
+    "127.0.0.1",
+    "repair-nginx-web-7f3a",
+    "ssh-ed25519",
+    "SHA-256",
+    "SSH target",
+  ]) {
+    await expect(panel).not.toContainText(forbidden);
+  }
+
+  const revealResponse = page.waitForResponse(
+    (response) =>
+      /\/api\/scenarios\/runs\/run-active\/hints\/reveal$/.test(
+        new URL(response.url()).pathname,
+      ) && response.status() === 200,
+  );
+  await panel
+    .getByRole("button", { name: "Reveal", exact: true })
+    .first()
+    .click();
+  await revealResponse;
+  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(panel.getByText("systemctl status nginx")).toBeVisible();
+
+  await panel
+    .getByRole("button", { name: "Reveal the full solution" })
+    .click();
+  const confirmation = page.getByRole("dialog", {
+    name: "Reveal the full solution?",
+  });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "Reveal solution" }).click();
   await expect(
-    page.getByTitle("Time remaining before this sandbox is torn down"),
-  ).toHaveCount(1);
+    panel.getByText("You used the full solution for this run."),
+  ).toBeVisible();
   await expect(
-    page.getByRole("status").filter({ hasText: "Running" }),
-  ).toHaveCount(1);
+    panel.getByText("Validate the nginx configuration, restore the unit, and restart it."),
+  ).toBeVisible();
+});
+
+test("an older poll cannot hide a newly revealed hint", async ({ page, ui }) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "running",
+  });
+
+  const staleRun = structuredClone(ui.server.state.run);
+  let intercepted = false;
+  let markStalePollStarted: (() => void) | null = null;
+  const stalePollStarted = new Promise<void>((resolve) => {
+    markStalePollStarted = resolve;
+  });
+  await page.route("**/api/scenarios/runs/run-active", async (route) => {
+    if (route.request().method() !== "GET" || intercepted) {
+      await route.fallback();
+      return;
+    }
+    intercepted = true;
+    markStalePollStarted?.();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({ status: 200, json: { run: staleRun } }).catch(() => {});
+  });
+
+  await stalePollStarted;
+  await page
+    .getByRole("button", {
+      name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+    })
+    .click();
+  const panel = page.locator("[data-run-learning-panel-content]");
+  const revealResponse = page.waitForResponse(
+    (response) =>
+      /\/api\/scenarios\/runs\/run-active\/hints\/reveal$/.test(
+        new URL(response.url()).pathname,
+      ) && response.status() === 200,
+  );
+  await panel
+    .getByRole("button", { name: "Reveal", exact: true })
+    .first()
+    .click();
+  await revealResponse;
+  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+
+  await page.waitForTimeout(1_100);
+  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Checks. 0 of 2 checks verified. 1 of 2 hints revealed.",
+    }),
+  ).toBeVisible();
+});
+
+test("the Broken Nginx contract exposes three outcomes and five progressive hints", async ({
+  page,
+  ui,
+}) => {
+  const route = routeCase("run-workspace");
+  ui.configure({
+    sessionRole: route.sessionRole,
+    runState: "running",
+  });
+  const run = ui.server.state.run as {
+    objectives: Array<Record<string, unknown>>;
+    hints: Array<Record<string, unknown>>;
+    scenarioProbes: Array<Record<string, unknown>>;
+    vms: Array<{ scenarioProbes: Array<Record<string, unknown>> }>;
+  };
+  const thirdProbe = {
+    id: "default-site-enabled",
+    label: "hidden internal path check",
+    kind: "file_exists",
+    phase: "scenario",
+    status: "fail",
+    error: "hidden /etc/nginx/sites-enabled/default detail",
+    value: { path: "/etc/nginx/sites-enabled/default" },
+  };
+  run.objectives = [
+    ...run.objectives,
+    {
+      probeName: "default-site-enabled",
+      vmName: "web",
+      label: "hidden internal label",
+      title: "Restore the default site",
+      bodyMarkdown: "hidden technical objective body",
+      hintCount: 1,
+    },
+  ];
+  run.scenarioProbes.push(thirdProbe);
+  run.vms[0]?.scenarioProbes.push(thirdProbe);
+  run.hints.push(
+    {
+      key: "scenario:hint-2",
+      scope: "scenario",
+      probeName: null,
+      id: "hint-2",
+      title: null,
+      revealed: false,
+      unlocked: false,
+      bodyMarkdown: null,
+    },
+    {
+      key: "probe:health-endpoint:hint-1",
+      scope: "probe",
+      probeName: "health-endpoint",
+      id: "hint-health-1",
+      title: null,
+      revealed: false,
+      unlocked: true,
+      bodyMarkdown: null,
+    },
+    {
+      key: "probe:default-site-enabled:hint-1",
+      scope: "probe",
+      probeName: "default-site-enabled",
+      id: "hint-site-1",
+      title: null,
+      revealed: false,
+      unlocked: true,
+      bodyMarkdown: null,
+    },
+  );
+
+  await page.goto(route.path, { waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const trigger = page.getByRole("button", {
+    name: "Checks. 0 of 3 checks verified. 0 of 5 hints revealed.",
+  });
+  await expect(trigger).toHaveText("Checks 0/3");
+  await trigger.click();
+  const panel = page.locator("[data-run-learning-panel-content]");
+  const checks = panel.locator(
+    'section[aria-labelledby="run-learning-checks-heading"]',
+  );
+  await expect(checks.getByText("Start the web server")).toBeVisible();
+  await expect(checks.getByText("Make the site reachable")).toBeVisible();
+  await expect(checks.getByText("Restore the default site")).toBeVisible();
+  await expect(panel.getByText("0/5 used", { exact: true })).toBeVisible();
+  await expect(panel).not.toContainText("/etc/nginx/sites-enabled/default");
+  await expect(panel).not.toContainText("hidden technical objective body");
+});
+
+test("hint and solution failures use generic learner-safe messages", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "running",
+  });
+  ui.server.state.variant = "error";
+  await page.route(
+    "**/api/scenarios/runs/run-active/hints/reveal",
+    async (route) => {
+      await route.fulfill({
+        status: 503,
+        json: { error: "worker-19 rejected POST /hints/reveal" },
+      });
+    },
+  );
+  await page.route(
+    "**/api/scenarios/runs/run-active/solution/reveal",
+    async (route) => {
+      await route.fulfill({
+        status: 503,
+        json: { error: "control-plane task 7c02c91 failed" },
+      });
+    },
+  );
 
   await page
-    .getByRole("button", { name: /Objectives.*0\/2 verified/ })
+    .getByRole("button", {
+      name: "Checks. 0 of 2 checks verified. 0 of 2 hints revealed.",
+    })
     .click();
-  const objectives = page.getByRole("dialog", { name: "Objectives" });
-  const progress = objectives.getByRole("region", { name: "Objectives" });
-  await expect(progress.getByText("0/2 verified", { exact: true })).toBeVisible();
+  const panel = page.locator("[data-run-learning-panel-content]");
+
+  await panel
+    .getByRole("button", { name: "Reveal", exact: true })
+    .first()
+    .click();
   await expect(
-    progress.getByText("Needs repair", { exact: true }),
-  ).toHaveCount(2);
+    panel.getByRole("alert").filter({
+      hasText: "Could not reveal this hint. Try again.",
+    }),
+  ).toBeVisible();
+  await expect(panel).not.toContainText("worker-19");
+  await expect(panel).not.toContainText("POST /hints/reveal");
+
+  await panel
+    .getByRole("button", { name: "Reveal the full solution" })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Reveal the full solution?" })
+    .getByRole("button", { name: "Reveal solution" })
+    .click();
   await expect(
-    objectives.getByText(/Verification .*unavailable/i),
-  ).toHaveCount(0);
+    panel.getByRole("alert").filter({
+      hasText: "Could not reveal the solution. Try again.",
+    }),
+  ).toBeVisible();
+  await expect(panel).not.toContainText("control-plane task 7c02c91");
+});
+
+test("a solved lab makes finishing the first learner action", async ({ page, ui }) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "solved",
+  });
+
+  const trigger = page.getByRole("button", {
+    name: "Solved. 2 of 2 checks verified. 0 of 2 hints revealed.",
+  });
+  await expect(trigger).toHaveText("Solved 2/2");
+  await trigger.click();
+
+  const panel = page.locator("[data-run-learning-panel-content]");
+  await expect(panel.getByRole("heading", { name: "Lab solved" })).toBeVisible();
+  const finish = panel.getByRole("button", { name: "Finish and save" });
+  await expect(finish).toBeVisible();
+  await expect(panel.getByText("Verified", { exact: true })).toHaveCount(2);
+  expect(
+    await finish.evaluate((button) => {
+      const checks = button
+        .closest("[data-run-learning-panel-content]")
+        ?.querySelector('[aria-labelledby="run-learning-checks-heading"]');
+      return Boolean(
+        checks &&
+          (button.compareDocumentPosition(checks) &
+            Node.DOCUMENT_POSITION_FOLLOWING),
+      );
+    }),
+  ).toBe(true);
+  const text = await panel.innerText();
+
+  for (const forbidden of [
+    "nginx-listening",
+    "health-endpoint",
+    "tcp_connect",
+    "http_request",
+    "connection refused",
+    "repair-nginx-web-7f3a",
+    "10.40.0.18",
+  ]) {
+    expect(text).not.toContain(forbidden);
+  }
+});
+
+test("the final check transition uses one useful live announcement", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "running",
+  });
+
+  ui.server.setRunState("solved");
+  const completion = page
+    .locator('[aria-live="polite"]')
+    .filter({ hasText: "All 2 checks are verified." });
+  await expect(completion).toHaveCount(1);
+  await expect(completion).toHaveText("All 2 checks are verified.");
   await expect(
-    progress.getByText(/Checking|Retrying|Recheck/),
+    page.getByRole("status").filter({ hasText: "Solved" }),
   ).toHaveCount(0);
 });
 
@@ -144,7 +447,7 @@ test("a delayed old terminal connection cannot replace a newer VM connection", a
   ).toHaveCount(0);
 });
 
-test("end acceptance stays on one timeline through saved replay", async ({
+test("ending a lab moves from a calm saving state to a learner recap and replay", async ({
   page,
   ui,
 }) => {
@@ -167,55 +470,43 @@ test("end acceptance stays on one timeline through saved replay", async ({
 
   await expect(page).toHaveURL(/\/runs\/run-active$/);
   await expect(dialog).toBeHidden();
-  const heading = page.getByRole("heading", { name: "Run timeline" });
-  await expect(heading).toBeVisible();
-  await expect(heading).toBeFocused();
-  await expect(page.getByRole("list", { name: "Run timeline" })).toBeVisible();
+  const savingHeading = page.getByRole("heading", { name: "Saving your run…" });
+  await expect(savingHeading).toBeVisible();
+  await expect(savingHeading).toBeFocused();
   await expect(
-    page.getByRole("heading", { name: "Shutting down workspace" }),
+    page.getByText("Your recap will be ready in a moment."),
   ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Preparing terminal recordings" }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Bring the service back online").first(),
-  ).toBeVisible();
-
-  const headingHandle = await heading.elementHandle();
-  expect(headingHandle).not.toBeNull();
+  for (const forbidden of [
+    "Run timeline",
+    "Shutting down workspace",
+    "Preparing terminal recordings",
+    "Building terminal session history",
+    "Transcript",
+    "Command log",
+  ]) {
+    await expect(page.getByText(forbidden, { exact: true })).toHaveCount(0);
+  }
 
   ui.server.setRunState("rendering");
-  await expect(
-    page.getByRole("heading", { name: "Saving run history" }),
-  ).toBeVisible({ timeout: 5_000 });
-  await expect(
-    page.getByRole("heading", { name: "Building terminal session history" }),
-  ).toBeVisible();
+  await expect(savingHeading).toBeVisible({ timeout: 5_000 });
 
   ui.server.setRunState("replay");
-  await expect(page.getByRole("heading", { name: "Run saved" })).toBeVisible({
+  const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
+  await expect(recap.getByRole("heading", { name: "Solved" })).toBeVisible({
     timeout: 5_000,
   });
-  await expect(
-    page.getByRole("heading", { name: "Terminal session" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Preparing terminal recordings" }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole("heading", { name: "Building terminal session history" }),
-  ).toHaveCount(0);
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  expect(await headingHandle?.evaluate((element) => element.isConnected)).toBe(
-    true,
-  );
+  await expect(recap.getByRole("heading", { name: "Final checks" })).toBeVisible();
+  await expect(recap.getByText("2/2 verified", { exact: true })).toBeVisible();
+  await expect(recap.getByText("Hints used", { exact: true })).toBeVisible();
+  await expect(recap.getByText("Full solution", { exact: true })).toBeVisible();
+  await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
 
   expect(
     ui.server.requests.some((request) =>
       request.includes("/artifacts/run-vm-web:0/content"),
     ),
   ).toBe(false);
-  await page.getByRole("button", { name: "Replay", exact: true }).click();
+  await recap.getByRole("button", { name: "Watch replay" }).click();
   await expect
     .poll(() =>
       ui.server.requests.some((request) =>
@@ -226,33 +517,86 @@ test("end acceptance stays on one timeline through saved replay", async ({
   expect(
     ui.server.requests.some((request) => request.includes("%3A")),
   ).toBe(false);
-  await expect(page.locator(".run-artifact-player")).toBeVisible();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-
+  await expect(recap.locator(".run-artifact-player")).toBeVisible();
+  await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
+  await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);
   expect(
-    ui.server.requests.some((request) =>
-      request.includes("/sessions/1/transcript"),
-    ),
+    ui.server.requests.some((request) => request.includes("/transcript")),
   ).toBe(false);
-  await page.getByRole("button", { name: "Transcript", exact: true }).click();
+});
+
+test("a replay stays one disclosure and names only learner-facing parts", async ({
+  page,
+  ui,
+}) => {
+  const route = routeCase("run-workspace");
+  ui.configure({
+    sessionRole: route.sessionRole,
+    runState: "replay",
+  });
+  const run = ui.server.state.run as {
+    vms: Array<Record<string, unknown>>;
+  };
+  const firstVm = run.vms[0];
+  if (!firstVm) throw new Error("run VM fixture missing");
+  run.vms = [
+    firstVm,
+    {
+      ...structuredClone(firstVm),
+      id: "run-vm-worker",
+      ordinal: 2,
+      scenarioVmId: "scenario-vm-worker",
+      scenarioVmName: "worker",
+      runtimeVmName: "run-active-worker",
+      hostname: "worker.intar.test",
+      sessionTimeline: [
+        {
+          index: 2,
+          startTimestampMs: 1_783_670_400_000,
+          durationMs: 60_000,
+          exitCode: 0,
+          castFilename: "worker-session.cast",
+          castArtifactId: "run-vm-worker:0",
+          transcriptTruncated: false,
+        },
+      ],
+    },
+  ];
+
+  await page.goto(route.path, { waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
+  await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
+  await recap.getByRole("button", { name: "Watch replay" }).click();
+  await expect(recap.locator('[aria-label="Replay parts"]')).toBeVisible();
+  await expect(recap.getByRole("button", { name: /Part 1/ })).toBeVisible();
+  await expect(recap.getByRole("button", { name: /Part 2/ })).toBeVisible();
+
+  await recap.getByRole("button", { name: /Part 2/ }).click();
   await expect
     .poll(() =>
       ui.server.requests.some((request) =>
-        request.includes("/sessions/1/transcript"),
+        request.includes("/artifacts/run-vm-worker:0/content"),
       ),
     )
     .toBe(true);
-  await expect(page.locator(".cm-content").last()).toContainText(
-    "systemctl status nginx",
-  );
+  await expect(recap.locator(".run-artifact-player")).toBeVisible();
 
-  await page.getByRole("button", { name: /Command log/ }).click();
-  await expect(
-    page.locator("pre").filter({ hasText: "systemctl status nginx" }),
-  ).toBeVisible();
+  const text = await recap.innerText();
+  for (const forbidden of [
+    "run-active-worker",
+    "worker.intar.test",
+    "worker-session.cast",
+    "Transcript",
+    "Command log",
+    "Exit status",
+  ]) {
+    expect(text).not.toContain(forbidden);
+  }
 });
 
-test("a rejected shutdown stays in the confirmation dialog", async ({
+test("a rejected shutdown stays in the confirmation dialog with learner-safe copy", async ({
   page,
   ui,
 }) => {
@@ -280,12 +624,15 @@ test("a rejected shutdown stays in the confirmation dialog", async ({
   await dialog.getByRole("button", { name: "End run" }).click();
 
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Run could not be ended")).toBeVisible();
+  await expect(
+    dialog.getByText("Run could not be ended", { exact: true }),
+  ).toBeVisible();
   await expect(dialog).toContainText(
-    "Workspace shutdown could not be accepted.",
+    "The run could not be ended. Your work is still open.",
   );
+  await expect(dialog).not.toContainText("Workspace shutdown could not be accepted.");
   await expect(page).toHaveURL(/\/runs\/run-active$/);
-  await expect(page.getByRole("heading", { name: "Run timeline" })).toHaveCount(
+  await expect(page.getByRole("heading", { name: "Saving your run…" })).toHaveCount(
     0,
   );
 });
@@ -323,6 +670,42 @@ test("deleting a private run preserves its organization course context", async (
   );
 });
 
+test("a failed saved-run deletion stays generic and recoverable", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "archived",
+  });
+  await page.route("**/api/scenarios/runs/run-active", async (route) => {
+    if (route.request().method() === "DELETE") {
+      await route.fulfill({
+        status: 503,
+        json: { error: "D1 delete transaction failed on shard 7" },
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.getByRole("button", { name: "Page actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete run…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete this run?" });
+  await dialog.getByRole("button", { name: "Delete run" }).click();
+
+  await expect(
+    dialog.getByText("Run could not be deleted", { exact: true }),
+  ).toBeVisible();
+  await expect(dialog).toContainText(
+    "Nothing was removed. Try again when you are ready.",
+  );
+  await expect(dialog).not.toContainText("D1");
+  await expect(dialog).not.toContainText("shard 7");
+  await expect(page).toHaveURL(/\/runs\/run-active$/);
+});
+
 test("deleting an organization run without a course location returns its catalog", async ({
   page,
   ui,
@@ -344,7 +727,7 @@ test("deleting an organization run without a course location returns its catalog
   await expect(page).toHaveURL("/organizations/org-platform/courses");
 });
 
-test("a saved run gives a course return and its verified next lab", async ({
+test("a saved solved run gives one next learner action without audit details", async ({
   page,
   ui,
 }) => {
@@ -354,22 +737,20 @@ test("a saved run gives a course return and its verified next lab", async ({
     runState: "archived",
   });
 
+  const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
+  await expect(recap.getByRole("heading", { name: "Solved" })).toBeVisible();
   await expect(
-    page.getByRole("link", { name: "Back to Linux operations" }),
-  ).toHaveAttribute("href", "/courses/operations");
-  await expect(
-    page.getByRole("link", {
-      name: "Next: Trace an intermittent DNS failure",
+    recap.getByRole("link", {
+      name: "Next lab: Trace an intermittent DNS failure",
     }),
   ).toHaveAttribute("href", "/courses/operations/repair-dns");
-  await expect(
-    page.locator(
-      'section[aria-labelledby="run-timeline-heading"] .text-eyebrow',
-    ),
-  ).toHaveText("Repair a broken nginx service");
+  await expect(recap.getByText("Lab recap", { exact: true })).toBeVisible();
+  await expect(recap.getByText("Run timeline", { exact: true })).toHaveCount(0);
+  await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
+  await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);
 });
 
-test("a saved run without current course context still has a safe exit", async ({
+test("a saved run without course context still has a safe exit", async ({
   page,
   ui,
 }) => {
@@ -386,53 +767,76 @@ test("a saved run without current course context still has a safe exit", async (
     "href",
     "/runs",
   );
-  await expect(page.getByRole("link", { name: /^Next:/ })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /^Next lab:/ })).toHaveCount(0);
 });
 
-for (const terminalCase of [
+for (const recapCase of [
   {
     state: "archived",
-    status: "Run saved",
-    recording: "No terminal sessions recorded",
+    title: "Solved",
+    replay: null,
   },
   {
     state: "replay-failed",
-    status: "Run saved",
-    recording: "Replay unavailable",
+    title: "Solved",
+    replay: "Replay unavailable.",
   },
   {
     state: "failed",
-    status: "Run ended with an error",
-    recording: "No terminal sessions recorded",
+    title: "Could not finish",
+    replay: null,
   },
 ] as const) {
-  test(`direct ${terminalCase.state} visits use the final timeline`, async ({
+  test(`direct ${recapCase.state} visits use a learner recap`, async ({
     page,
     ui,
   }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
-      runState: terminalCase.state,
+      runState: recapCase.state,
     });
 
-    await expect(
-      page.getByRole("heading", { name: "Run timeline" }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: terminalCase.status }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: terminalCase.recording }),
-    ).toBeVisible();
-    await expect(
-      page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
-    ).toHaveCount(0);
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
+    await expect(recap.getByRole("heading", { name: recapCase.title })).toBeVisible();
+    if (recapCase.replay) {
+      await expect(recap.getByText(recapCase.replay, { exact: true })).toBeVisible();
+    } else {
+      await expect(recap.getByRole("heading", { name: "Watch replay" })).toHaveCount(
+        0,
+      );
+    }
+    await expect(recap.getByText("Run timeline", { exact: true })).toHaveCount(0);
+    await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
+    await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);
   });
 }
 
-test("replay, transcript, and command failures stay inline", async ({
+test("a settled cancelled run tells the learner it ended early", async ({
+  page,
+  ui,
+}) => {
+  const route = routeCase("run-workspace");
+  ui.configure({
+    sessionRole: route.sessionRole,
+    runState: "archived",
+  });
+  const run = ui.server.state.run as Record<string, unknown>;
+  run.outcome = "cancelled";
+  run.solvedAt = null;
+  run.solveDurationMs = null;
+
+  await page.goto(route.path, { waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
+  await expect(recap.getByRole("heading", { name: "Ended early" })).toBeVisible();
+  await expect(
+    recap.getByRole("link", { name: "Try this lab again" }),
+  ).toHaveAttribute("href", "/courses/operations/repair-nginx");
+});
+
+test("a replay failure stays inline and never exposes a server message", async ({
   page,
   ui,
 }) => {
@@ -441,33 +845,25 @@ test("replay, transcript, and command failures stay inline", async ({
     theme: "dark",
     runState: "replay",
   });
-  await page.route("**/artifacts/run-vm-web:0/content", async (route) => {
-    await route.fulfill({
-      status: 503,
-      json: { error: "Fixture replay failure" },
-    });
-  });
-  await page.route("**/sessions/1/transcript", async (route) => {
-    await route.fulfill({
-      status: 503,
-      json: { error: "Fixture transcript failure" },
-    });
-  });
   ui.server.state.variant = "error";
+  await page.route("**/api/runs/run-active/artifacts/run-vm-web:0/content", async (route) => {
+    await route.fulfill({
+      status: 503,
+      json: { error: "artifact run-vm-web:0 was not ready on host-eu-1" },
+    });
+  });
 
-  await page.getByRole("button", { name: "Replay", exact: true }).click();
-  await expect(page.getByText(/Replay could not be loaded/)).toContainText(
-    "Fixture replay failure",
-  );
-  await page.getByRole("button", { name: "Transcript", exact: true }).click();
-  await expect(page.getByText(/Transcript could not be loaded/)).toContainText(
-    "Fixture transcript failure",
-  );
-  await page.getByRole("button", { name: /Command log/ }).click();
-  await expect(page.getByText(/Command log could not be loaded/)).toContainText(
-    "Fixture replay failure",
-  );
-  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
+  await recap.getByRole("button", { name: "Watch replay" }).click();
+  await expect(
+    recap.getByText("Replay could not be loaded. Try again soon.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(recap).not.toContainText("host-eu-1");
+  await expect(recap).not.toContainText("run-vm-web:0");
+  await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
+  await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);
 });
 
 test("My runs moves cleanup into history without a completion toast", async ({

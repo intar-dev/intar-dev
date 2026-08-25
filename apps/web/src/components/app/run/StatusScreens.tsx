@@ -131,7 +131,6 @@ export function ScenarioStepScreen(props: {
 export function ScenarioShellStatusCard(props: {
   phase: ScenarioRunRecord["phase"];
   title: string;
-  description: string;
   pending?: boolean;
 }) {
   const isTransient =
@@ -164,7 +163,9 @@ export function ScenarioShellStatusCard(props: {
               : "Shell unavailable"}
           </p>
           <p className="text-sm leading-6 text-muted-foreground">
-            {props.description}
+            {props.phase === "failed"
+              ? "This lab stopped before the browser terminal opened. End the run and try again."
+              : "The browser terminal will open when your workspace is ready."}
           </p>
         </div>
       </CardContent>

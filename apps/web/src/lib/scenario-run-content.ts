@@ -22,11 +22,17 @@ type ScenarioRunHintGroupRef = {
   probeName: string | null;
 };
 
-function scenarioRunHintGroupKey(hint: {
-  scope: "scenario" | "probe";
-  probeName: string | null;
-}): string {
-  return hint.scope === "scenario" ? "scenario" : `probe:${hint.probeName ?? ""}`;
+function scenarioRunHintGroupKey(hint: ScenarioRunHintGroupRef): string {
+  if (hint.scope === "scenario") return "scenario";
+  const vmName = scenarioRunHintVmName(hint.key);
+  return vmName
+    ? `probe:${vmName}:${hint.probeName ?? ""}`
+    : `probe:${hint.probeName ?? ""}`;
+}
+
+function scenarioRunHintVmName(key: string): string | null {
+  const parts = key.split(":");
+  return parts[0] === "probe" && parts.length >= 4 ? (parts[1] ?? null) : null;
 }
 
 export interface ScenarioRunSolutionView {

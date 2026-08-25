@@ -92,7 +92,7 @@ export function scenarioRunContentSnapshot(
       })),
       ...scenario.probes.flatMap((probe) =>
         probe.hints.map((hint) => ({
-          key: `probe:${probe.name}:${hint.id}`,
+          key: `probe:${probe.scenarioVmName}:${probe.name}:${hint.id}`,
           scope: "probe" as const,
           probeName: probe.name,
           id: hint.id,
