@@ -19,7 +19,6 @@ export interface ProbeTransitionRow {
   vmId: string;
   runtimeVmName: string;
   observedAt: number;
-  verificationUnavailable: boolean;
   probes: Array<{
     id: string;
     label: string;
@@ -29,8 +28,8 @@ export interface ProbeTransitionRow {
   }>;
 }
 
-// One status entry per probe, order-independent. Raw value/error churn stays
-// ignored, but entering or leaving a verifier outage is a visible transition.
+// One status entry per probe, order-independent. A valid run-state report
+// proves the observer is available, so raw value/error churn stays ignored.
 export function probeStatusSignature(vm: {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
@@ -40,7 +39,7 @@ export function probeStatusSignature(vm: {
     .map((probe) => `${probe.phase}:${probe.id}=${probe.status}`)
     .sort()
     .join("|");
-  return `${statuses}|verification=${verificationUnavailable(probes) ? "unavailable" : "available"}`;
+  return statuses;
 }
 
 export function probeTransitionVms(
@@ -79,7 +78,6 @@ export async function recordProbeTransitions(
         const passing = probes.filter((probe) =>
           isVerificationPassed(probe.status),
         );
-        const unavailable = verificationUnavailable(probes);
         const observedAt = vm.runtimeObservedAt ?? params.observedAt;
         return {
           id: createAppId(),
@@ -89,8 +87,8 @@ export async function recordProbeTransitions(
           // The unique (runId, vmId, messageId) index dedups replays of the
           // same observation; one transition per VM per observed millisecond.
           messageId: String(observedAt),
-          collectionState: unavailable ? "error" : vm.phase,
-          collectionError: unavailable ? "Verification unavailable" : null,
+          collectionState: vm.phase,
+          collectionError: null,
           summaryJson: JSON.stringify({
             pass: passing.length,
             fail: failing.length,
@@ -153,22 +151,9 @@ export async function listProbeSnapshotsForUserRun(
       vmId: row.vmId,
       runtimeVmName: row.runtimeVmName,
       observedAt: row.observedAt,
-      verificationUnavailable:
-        row.collectionState === "error" ||
-        Boolean(row.collectionError?.trim()) ||
-        probes.some((probe) => probe.status.trim().toLowerCase() === "error"),
       probes,
     };
   });
-}
-
-function verificationUnavailable(probes: readonly ScenarioProbeStatus[]) {
-  return probes.some(
-    (probe) =>
-      !isVerificationPassed(probe.status) &&
-      (probe.status.trim().toLowerCase() === "error" ||
-        Boolean(probe.error?.trim())),
-  );
 }
 
 function parseSnapshotProbes(raw: string): ProbeTransitionRow["probes"] {

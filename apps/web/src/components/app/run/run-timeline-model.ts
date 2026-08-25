@@ -38,7 +38,6 @@ export type RunTimelineItem =
       vmName: string;
       changes: RunTimelineProbeChange[];
       summary: ProbeProgressSummary;
-      verificationUnavailable: boolean;
     })
   | (RunTimelineItemBase & {
       type: "session";
@@ -197,7 +196,6 @@ function buildProbeItems(
   probeSnapshots: readonly ProbeSnapshotRow[],
 ): RunTimelineItem[] {
   const lastByVm = new Map<string, Map<string, string>>();
-  const lastUnavailableByVm = new Map<string, boolean>();
   const vmNames = new Map(
     run.vms.map((vm) => [vm.id, machineName(vm)] as const),
   );
@@ -219,15 +217,6 @@ function buildProbeItems(
 
   for (const row of rows) {
     const previous = lastByVm.get(row.vmId);
-    const previousUnavailable = lastUnavailableByVm.get(row.vmId) ?? false;
-    const verificationUnavailable = Boolean(
-      row.verificationUnavailable ||
-        row.probes.some(
-          (probe) => probe.status.trim().toLowerCase() === "error",
-        ),
-    );
-    const availabilityBecameUnavailable =
-      verificationUnavailable && !previousUnavailable;
     const next = new Map(row.probes.map((probe) => [probe.id, probe.status]));
     const changes = row.probes
       .filter((probe) => {
@@ -246,16 +235,12 @@ function buildProbeItems(
       }));
 
     lastByVm.set(row.vmId, next);
-    lastUnavailableByVm.set(row.vmId, verificationUnavailable);
     const summary = summarizeProbeProgress(
       row.probes.map((probe) => probe.status),
     );
     const initialUnreportedOnly =
       !previous && changes.length > 0 && changes.every(isUnreportedStatus);
-    if (
-      (!changes.length && !availabilityBecameUnavailable) ||
-      (initialUnreportedOnly && !availabilityBecameUnavailable)
-    ) {
+    if (!changes.length || initialUnreportedOnly) {
       continue;
     }
 
@@ -268,7 +253,6 @@ function buildProbeItems(
       vmName: vmNames.get(row.vmId) ?? row.runtimeVmName,
       changes,
       summary,
-      verificationUnavailable,
     });
   }
 

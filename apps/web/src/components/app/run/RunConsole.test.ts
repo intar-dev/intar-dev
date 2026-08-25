@@ -36,7 +36,7 @@ describe("run console probe diagnostics", () => {
     expect(markup).not.toContain('data-slot="badge"');
   });
 
-  it("keeps a probe error inside the two-state result model", () => {
+  it("keeps a command failure inside the two-state result model", () => {
     const noisyOutput = "probe-output-".repeat(2_000);
     const hiddenError = "command exited with status 1";
     const markup = renderToStaticMarkup(
@@ -53,9 +53,7 @@ describe("run console probe diagnostics", () => {
     );
 
     expect(markup).toContain("Needs repair");
-    expect(markup).toContain(
-      "Verification unavailable. We cannot confirm all progress right now.",
-    );
+    expect(markup).not.toContain("Verification unavailable");
     expect(markup).not.toContain("Retrying");
     expect(markup).not.toContain("Checking");
     expect(markup).not.toContain(hiddenError);
@@ -63,6 +61,27 @@ describe("run console probe diagnostics", () => {
     expect(markup).not.toContain("kubectl");
     expect(markup).not.toContain("stdout:");
     expect(markup).not.toContain("stderr:");
+  });
+
+  it.each([
+    "service",
+    "k8s_pod_state",
+    "command_json_path",
+    "systemd_unit",
+    "tcp_connect",
+    "http_request",
+  ])("treats a %s probe error as a repair result", (kind) => {
+    const hiddenError = "connection refused on 127.0.0.1:80";
+    const markup = renderToStaticMarkup(
+      createElement(RepairProgressSection, {
+        objectives: [objective()],
+        probes: [{ ...commandProbe({ error: hiddenError }), kind }],
+      }),
+    );
+
+    expect(markup).toContain("Needs repair");
+    expect(markup).not.toContain("Verification unavailable");
+    expect(markup).not.toContain(hiddenError);
   });
 
   it("marks a completed repair objective as verified", () => {
@@ -116,8 +135,8 @@ describe("run console probe diagnostics", () => {
 
     expect(checking).toContain("Needs repair");
     expect(retrying).toContain("Needs repair");
-    expect(retrying).toContain("Verification unavailable");
     for (const markup of [checking, retrying]) {
+      expect(markup).not.toContain("Verification unavailable");
       expect(markup).not.toContain("Checking");
       expect(markup).not.toContain("Retrying");
       expect(markup).not.toContain("Recheck");

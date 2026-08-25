@@ -6,7 +6,6 @@ export interface ProbeSnapshotRow {
   vmId: string;
   runtimeVmName: string;
   observedAt: number;
-  verificationUnavailable?: boolean;
   probes: Array<{
     id: string;
     label: string;

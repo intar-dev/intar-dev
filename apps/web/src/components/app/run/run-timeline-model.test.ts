@@ -183,29 +183,16 @@ describe("run timeline model", () => {
     ]);
   });
 
-  it("keeps verifier outages separate from the two probe results", () => {
+  it("does not infer an outage from a legacy probe error status", () => {
     const items = buildRunTimelineItems(
       scenarioRun([runVm({ phase: "running" })], { phase: "running" }),
-      [
-        snapshot("needs-repair", 1_000, [probe("check", "Check", "fail")]),
-        {
-          ...snapshot("unavailable", 2_000, [
-            probe("check", "Check", "error"),
-          ]),
-          verificationUnavailable: true,
-        },
-      ],
+      [snapshot("legacy-error", 1_000, [probe("check", "Check", "error")])],
     ).filter((item) => item.type === "probe_changes");
 
-    expect(items).toHaveLength(2);
-    expect(items[1]).toMatchObject({
-      id: "probe:unavailable",
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
       summary: "Needs repair",
-      changes: [],
-      verificationUnavailable: true,
     });
-    expect(JSON.stringify(items)).not.toContain("Retrying");
-    expect(JSON.stringify(items)).not.toContain("Checking");
   });
 
   it("treats cleanup exit 129 as a normal recorded terminal close", () => {

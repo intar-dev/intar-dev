@@ -1249,7 +1249,6 @@ function projectRosterMember(params: {
 interface CurrentWorkshopProbeSnapshot {
   status: "pass" | "fail" | "unknown";
   detail: string | null;
-  verificationUnavailable: boolean;
   checkedAt: number;
   observedAt: number;
 }
@@ -1428,10 +1427,6 @@ function parseCurrentProviderProbeReport(params: {
     const snapshot: CurrentWorkshopProbeSnapshot = {
       status,
       detail: typeof error === "string" ? error : null,
-      verificationUnavailable:
-        status !== "pass" &&
-        typeof error === "string" &&
-        Boolean(error.trim()),
       checkedAt,
       observedAt: params.observedAt,
     };
@@ -1481,10 +1476,6 @@ function parseCurrentWorkshopProbeReport(params: {
     const snapshot: CurrentWorkshopProbeSnapshot = {
       status,
       detail: typeof message === "string" ? message : null,
-      verificationUnavailable:
-        status !== "pass" &&
-        typeof message === "string" &&
-        Boolean(message.trim()),
       checkedAt,
       observedAt: params.observedAt,
     };
@@ -1499,12 +1490,9 @@ function parseCurrentWorkshopProbeReport(params: {
 function currentWorkshopProbeReportUnavailable(
   report: CurrentWorkshopProbeReport | null,
 ) {
-  return (
-    !report?.hasValidReport ||
-    [...report.probes.values()].some(
-      (probe) => probe.verificationUnavailable,
-    )
-  );
+  // Individual probe errors are valid repair observations. A missing or
+  // invalid report is the only available collection-level failure signal.
+  return !report?.hasValidReport;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -28,12 +28,6 @@ export function RepairProgressSection(props: {
     isVerificationPassed(probe.status),
   ).length;
   const total = props.probes.length;
-  const verificationUnavailable = props.probes.some(
-    (probe) =>
-      !isVerificationPassed(probe.status) &&
-      (probe.status.trim().toLowerCase() === "error" ||
-        Boolean(probe.error?.trim())),
-  );
 
   return (
     <section aria-labelledby="repair-objectives-heading">
@@ -50,11 +44,6 @@ export function RepairProgressSection(props: {
           </span>
         ) : null}
       </div>
-      {verificationUnavailable ? (
-        <p className="mt-2 text-xs text-muted-foreground" role="status">
-          Verification unavailable. We cannot confirm all progress right now.
-        </p>
-      ) : null}
       {total ? (
         <ol className="mt-3 divide-y border-y">
           {props.probes.map((probe, index) => {

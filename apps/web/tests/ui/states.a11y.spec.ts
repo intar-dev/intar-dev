@@ -55,9 +55,9 @@ test.describe("focused state accessibility", () => {
     };
     const vm = hostRuns.liveVms[0];
     if (!vm) throw new Error("admin host fixture is missing its live VM");
-    vm.probe_state = {
-      collection_state: "error",
-      collection_error: "RAW_COLLECTOR_FAILURE_MUST_NOT_RENDER",
+    const probeState = {
+      collection_state: "ready",
+      collection_error: null as string | null,
       generated_at: "2026-08-24T12:00:00Z",
       updated_at: "2026-08-24T12:00:00Z",
       summary: { total: 2, pass: 1, fail: 0, unknown: 1 },
@@ -86,6 +86,7 @@ test.describe("focused state accessibility", () => {
         },
       ],
     };
+    vm.probe_state = probeState;
     vm.scenario_meta = {
       scenarioName: "repair-nginx",
       scenarioDescription: "Repair the service.",
@@ -109,14 +110,26 @@ test.describe("focused state accessibility", () => {
     await card.getByRole("button", { name: "Details" }).click();
     await expect(card).toContainText("1 Verified");
     await expect(card).toContainText("1 Needs repair");
-    await expect(card).toContainText("Verification unavailable");
+    await expect(card).not.toContainText("Verification unavailable");
     await expect(card).toContainText("Restore the service");
     await expect(card).toContainText("Verify the repair");
     await expect(card).not.toContainText(/Checking|Retrying|Recheck/);
-    await expect(card).not.toContainText("RAW_COLLECTOR_FAILURE_MUST_NOT_RENDER");
     await expect(card).not.toContainText("RAW_PROBE_FAILURE_MUST_NOT_RENDER");
     await expect(card).not.toContainText("raw-passing-probe-id");
     await expect(card).not.toContainText("raw-error-probe-id");
+
+    probeState.collection_state = "error";
+    probeState.collection_error = "RAW_COLLECTOR_FAILURE_MUST_NOT_RENDER";
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+    const refreshedCard = page
+      .getByRole("article")
+      .filter({ has: page.getByRole("heading", { name: vm.name as string }) });
+    await refreshedCard.getByRole("button", { name: "Details" }).click();
+    await expect(refreshedCard).toContainText("Verification unavailable");
+    await expect(refreshedCard).not.toContainText(
+      "RAW_COLLECTOR_FAILURE_MUST_NOT_RENDER",
+    );
     await expectNoAxeViolations(page, testInfo);
   });
 

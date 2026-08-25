@@ -1304,7 +1304,7 @@ describe("standalone workshops", () => {
       expect.arrayContaining([
         expect.objectContaining({
           moduleId: "01-core",
-          verificationUnavailable: true,
+          verificationUnavailable: false,
           probes: [
             expect.objectContaining({
               label: "Verification objective 1",
@@ -1324,10 +1324,10 @@ describe("standalone workshops", () => {
       .set({
         reportJson: workshopVmProbeReport({
           executionId: "mismatched-execution",
-          observedAt: observedAt + 2,
+          observedAt: observedAt + 3,
           probes: [],
         }),
-        observedAt: observedAt + 2,
+        observedAt: observedAt + 3,
       })
       .where(eq(runtimeVmActualState.runtimeVmId, runtime.currentRuntimeVmId));
     const unavailable = await getWorkshopSessionProjection({
@@ -1364,14 +1364,14 @@ describe("standalone workshops", () => {
         {
           id: "service-ready",
           status: "unknown",
-          observed_at_unix_ms: observedAt + 3,
+          observed_at_unix_ms: observedAt + 4,
           error: "RAW_PROVIDER_ERROR_MUST_NOT_RENDER",
         },
       ],
       completedModuleIdsJson: [],
       reportJson: {},
-      reportedAt: observedAt + 3,
-      receivedAt: observedAt + 3,
+      reportedAt: observedAt + 4,
+      receivedAt: observedAt + 4,
     });
     await drizzle(env.DB).insert(runtimeActualState).values({
       executionId: runtime.currentExecutionId,
@@ -1382,8 +1382,8 @@ describe("standalone workshops", () => {
       sequence: 1,
       phase: "ready",
       health: "unknown",
-      observedAt: observedAt + 3,
-      updatedAt: observedAt + 3,
+      observedAt: observedAt + 4,
+      updatedAt: observedAt + 4,
     });
     const providerUnavailable = await getWorkshopSessionProjection({
       sessionId: setup.sessionId,
@@ -1397,7 +1397,7 @@ describe("standalone workshops", () => {
       expect.arrayContaining([
         expect.objectContaining({
           moduleId: "01-core",
-          verificationUnavailable: true,
+          verificationUnavailable: false,
           probes: [
             expect.objectContaining({
               label: "Verification objective 1",
@@ -1411,6 +1411,7 @@ describe("standalone workshops", () => {
     expect(JSON.stringify(providerUnavailableProgress)).not.toContain(
       "RAW_PROVIDER_ERROR_MUST_NOT_RENDER",
     );
+
   });
 
   it("revokes live room, terminal, application, and helper access with organization membership", async () => {

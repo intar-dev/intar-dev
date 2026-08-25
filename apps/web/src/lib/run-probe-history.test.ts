@@ -82,7 +82,7 @@ describe("probeStatusSignature", () => {
     expect(probeStatusSignature(a)).not.toBe(probeStatusSignature(b));
   });
 
-  it("differs when verification becomes unavailable", () => {
+  it("ignores a probe error because the report still arrived", () => {
     const available = withProbes(baseState(["a"]), "a", [
       probe("p1", "fail"),
     ]).vms[0]!;
@@ -90,10 +90,11 @@ describe("probeStatusSignature", () => {
       { ...probe("p1", "fail"), error: "collector unavailable" },
     ]).vms[0]!;
 
-    expect(probeStatusSignature(available)).not.toBe(
+    expect(probeStatusSignature(available)).toBe(
       probeStatusSignature(unavailable),
     );
   });
+
 });
 
 describe("probeTransitionVms", () => {
@@ -126,7 +127,7 @@ describe("probeTransitionVms", () => {
     expect(probeTransitionVms(current, next)).toEqual([]);
   });
 
-  it("records a verifier outage without changing the binary probe result", () => {
+  it("ignores probe-error churn without changing the binary result", () => {
     const current = withProbes(baseState(["a"]), "a", [
       probe("p1", "fail"),
     ]);
@@ -134,8 +135,7 @@ describe("probeTransitionVms", () => {
       { ...probe("p1", "fail"), error: "collector unavailable" },
     ]);
 
-    expect(probeTransitionVms(current, next).map((vm) => vm.id)).toEqual([
-      "a",
-    ]);
+    expect(probeTransitionVms(current, next)).toEqual([]);
   });
+
 });

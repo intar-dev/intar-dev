@@ -164,6 +164,33 @@ describe("run lifecycle", () => {
     expect(next.vms[0]?.scenarioProbes[0]?.status).toBe("pass");
   });
 
+  it("keeps a probe message as ordinary repair-result detail", () => {
+    const mismatch = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "running",
+        observedAt: 1_000,
+        probes: [
+          {
+            id: "nginx-running",
+            phase: "scenario",
+            status: "fail",
+            message: "connection refused",
+            checked_at_unix_ms: 1_000,
+          },
+        ],
+      }),
+    });
+    expect(mismatch.vms[0]?.scenarioProbes[0]).toMatchObject({
+      status: "fail",
+      error: "connection refused",
+    });
+    expect(mismatch.vms[0]).not.toHaveProperty("verificationCollectionError");
+  });
+
   it("applies host reports to only the matching run vm", () => {
     const current = initialRunState();
     const next = applyHostReportToRunState({

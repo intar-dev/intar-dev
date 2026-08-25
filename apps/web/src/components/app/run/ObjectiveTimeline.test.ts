@@ -64,22 +64,12 @@ describe("objective timeline copy", () => {
     });
   });
 
-  it("records verifier outages without adding a third probe result", () => {
-    const events = toTimelineEvents(
-      [
-        objectiveSnapshot("fail", 1_000),
-        {
-          ...objectiveSnapshot("error", 2_000),
-          verificationUnavailable: true,
-        },
-      ],
-      [],
-    );
+  it("does not infer an outage from a legacy probe error status", () => {
+    const events = toTimelineEvents([objectiveSnapshot("error", 1_000)], []);
 
+    expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
-      observedAt: 2_000,
-      changes: [],
-      verificationUnavailable: true,
+      changes: [{ to: "error" }],
     });
   });
 });

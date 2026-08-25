@@ -260,12 +260,6 @@ function TimelineEvent({
             title={item.summary}
             meta={showMachine ? item.vmName : undefined}
           />
-          {item.verificationUnavailable ? (
-            <p className="text-xs font-medium text-destructive" role="status">
-              Verification unavailable. We could not confirm progress at this
-              point.
-            </p>
-          ) : null}
           {item.changes.length ? (
             <ProbeChanges changes={item.changes} />
           ) : null}

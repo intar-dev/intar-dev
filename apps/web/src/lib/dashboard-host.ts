@@ -397,13 +397,12 @@ function buildProbeState(
   if (!probes.length || !hasReportedProbeResults(probes)) {
     return null;
   }
-  const verificationUnavailable = isVerificationCollectionUnavailable(probes);
 
   return {
-    collection_state: verificationUnavailable ? "error" : "ready",
-    collection_error: verificationUnavailable
-      ? "Verification unavailable"
-      : null,
+    // A decoded probe report proves the observer is available. Individual
+    // probe errors remain repair results.
+    collection_state: "ready",
+    collection_error: null,
     generated_at: new Date(run.updatedAt).toISOString(),
     updated_at: new Date(run.updatedAt).toISOString(),
     summary: summarizeDashboardProbes(probes),
@@ -419,17 +418,6 @@ function buildProbeState(
       value: probe.value,
     })),
   };
-}
-
-export function isVerificationCollectionUnavailable(
-  probes: ReadonlyArray<{ status: string; error: string | null }>,
-) {
-  return probes.some(
-    (probe) =>
-      !isVerificationPassed(probe.status) &&
-      (probe.status.trim().toLowerCase() === "error" ||
-        Boolean(probe.error?.trim())),
-  );
 }
 
 export function summarizeDashboardProbes(

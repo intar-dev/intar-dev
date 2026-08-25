@@ -21,7 +21,6 @@ interface TimelineEvent {
   vmName: string;
   observedAt: number;
   changes: ProbeChange[];
-  verificationUnavailable: boolean;
 }
 
 // Diff consecutive snapshots per VM into "probe X: fail → pass" events.
@@ -30,7 +29,6 @@ export function toTimelineEvents(
   objectives: ScenarioObjective[],
 ): TimelineEvent[] {
   const lastByVm = new Map<string, Map<string, string>>();
-  const lastUnavailableByVm = new Map<string, boolean>();
   const events: TimelineEvent[] = [];
   const allProbes = rows.flatMap((row) => row.probes);
   const labels = buildVerificationLabelMap({
@@ -45,15 +43,6 @@ export function toTimelineEvents(
 
   for (const row of rows) {
     const previous = lastByVm.get(row.vmId);
-    const previousUnavailable = lastUnavailableByVm.get(row.vmId) ?? false;
-    const verificationUnavailable = Boolean(
-      row.verificationUnavailable ||
-        row.probes.some(
-          (probe) => probe.status.trim().toLowerCase() === "error",
-        ),
-    );
-    const availabilityBecameUnavailable =
-      verificationUnavailable && !previousUnavailable;
     const nextStatuses = new Map(
       row.probes.map((probe) => [probe.id, probe.status]),
     );
@@ -73,21 +62,16 @@ export function toTimelineEvents(
         to: probe.status,
       }));
     lastByVm.set(row.vmId, nextStatuses);
-    lastUnavailableByVm.set(row.vmId, verificationUnavailable);
     const initialUnreportedOnly =
       !previous &&
       changes.length > 0 &&
       changes.every((change) => isUnreportedStatus(change.to));
-    if (
-      (changes.length || availabilityBecameUnavailable) &&
-      (!initialUnreportedOnly || availabilityBecameUnavailable)
-    ) {
+    if (changes.length && !initialUnreportedOnly) {
       events.push({
         id: row.id,
         vmName: row.runtimeVmName,
         observedAt: row.observedAt,
         changes,
-        verificationUnavailable,
       });
     }
   }
@@ -146,12 +130,6 @@ export function ObjectiveTimeline({
             <span className="mx-1.5">·</span>
             <span className="font-medium text-foreground">{event.vmName}</span>
           </p>
-          {event.verificationUnavailable ? (
-            <p className="font-medium text-destructive" role="status">
-              Verification unavailable. We could not confirm progress at this
-              point.
-            </p>
-          ) : null}
           {event.changes.length ? (
             <ul className="space-y-0.5">
               {event.changes.map((change) => (

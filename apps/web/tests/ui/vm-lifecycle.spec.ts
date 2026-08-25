@@ -93,6 +93,9 @@ test("a healthy single-machine run keeps terminal controls and status concise", 
     progress.getByText("Needs repair", { exact: true }),
   ).toHaveCount(2);
   await expect(
+    objectives.getByText(/Verification .*unavailable/i),
+  ).toHaveCount(0);
+  await expect(
     progress.getByText(/Checking|Retrying|Recheck/),
   ).toHaveCount(0);
 });
