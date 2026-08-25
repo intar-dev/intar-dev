@@ -30,62 +30,64 @@ export function RunDetailsSection({
   const resources = provisioning?.resources;
 
   return (
-    <section aria-label="Details">
-      <DisclosureRow title="Details" contentClassName="space-y-6">
-        {vmName ? (
-          <div className="space-y-2">
-            <p className="text-eyebrow">Machine</p>
-            <dl className="space-y-2 text-xs">
-              <DetailRow label="Name">{vmName}</DetailRow>
-              {hostname ? (
-                <DetailRow label="Hostname">
-                  <code>{hostname}</code>
-                </DetailRow>
-              ) : null}
-              {provisioning?.image ? (
-                <DetailRow label="Image">
-                  <code className="break-all">{provisioning.image}</code>
-                </DetailRow>
-              ) : null}
-              {provisioning?.imageSha256 ? (
-                <DetailRow label="SHA-256">
-                  <code title={provisioning.imageSha256}>
-                    {provisioning.imageSha256.slice(0, 16)}…
-                  </code>
-                </DetailRow>
-              ) : null}
-              {resources ? (
-                <DetailRow label="Resources">
-                  {(resources.cpuMillis / 1000).toLocaleString(undefined, {
-                    maximumFractionDigits: 3,
-                  })} CPU · {resources.vcpuCount} vCPU ·{" "}
-                  {formatBytes(resources.memoryMib * 1024 * 1024)} RAM ·{" "}
-                  {formatBytes(resources.diskMib * 1024 * 1024)} disk
-                </DetailRow>
-              ) : null}
-              {typeof provisioning?.leaseDurationSeconds === "number" &&
-              provisioning.leaseDurationSeconds > 0 ? (
-                <DetailRow label="Lease">
-                  {Math.round(provisioning.leaseDurationSeconds / 60)} min
-                </DetailRow>
-              ) : null}
-              {terminalTarget?.host ? (
-                <DetailRow label="SSH target">
-                  <code>
-                    {terminalTarget.username}@{terminalTarget.host}:
-                    {terminalTarget.port}
-                  </code>
-                </DetailRow>
-              ) : null}
-            </dl>
-          </div>
-        ) : null}
+    <DisclosureRow
+      title="Run details"
+      density="compact"
+      contentClassName="space-y-5"
+    >
+      {vmName ? (
         <div className="space-y-2">
-          <p className="text-eyebrow">Timeline</p>
-          <ObjectiveTimeline runId={runId} objectives={objectives} />
+          <p className="text-eyebrow">Machine</p>
+          <dl className="space-y-2 text-xs">
+            <DetailRow label="Name">{vmName}</DetailRow>
+            {hostname ? (
+              <DetailRow label="Hostname">
+                <code>{hostname}</code>
+              </DetailRow>
+            ) : null}
+            {provisioning?.image ? (
+              <DetailRow label="Image">
+                <code className="break-all">{provisioning.image}</code>
+              </DetailRow>
+            ) : null}
+            {provisioning?.imageSha256 ? (
+              <DetailRow label="SHA-256">
+                <code title={provisioning.imageSha256}>
+                  {provisioning.imageSha256.slice(0, 16)}…
+                </code>
+              </DetailRow>
+            ) : null}
+            {resources ? (
+              <DetailRow label="Resources">
+                {(resources.cpuMillis / 1000).toLocaleString(undefined, {
+                  maximumFractionDigits: 3,
+                })} CPU · {resources.vcpuCount} vCPU ·{" "}
+                {formatBytes(resources.memoryMib * 1024 * 1024)} RAM ·{" "}
+                {formatBytes(resources.diskMib * 1024 * 1024)} disk
+              </DetailRow>
+            ) : null}
+            {typeof provisioning?.leaseDurationSeconds === "number" &&
+            provisioning.leaseDurationSeconds > 0 ? (
+              <DetailRow label="Lease">
+                {Math.round(provisioning.leaseDurationSeconds / 60)} min
+              </DetailRow>
+            ) : null}
+            {terminalTarget?.host ? (
+              <DetailRow label="SSH target">
+                <code>
+                  {terminalTarget.username}@{terminalTarget.host}:
+                  {terminalTarget.port}
+                </code>
+              </DetailRow>
+            ) : null}
+          </dl>
         </div>
-      </DisclosureRow>
-    </section>
+      ) : null}
+      <div className="space-y-2">
+        <p className="text-eyebrow">Timeline</p>
+        <ObjectiveTimeline runId={runId} objectives={objectives} />
+      </div>
+    </DisclosureRow>
   );
 }
 

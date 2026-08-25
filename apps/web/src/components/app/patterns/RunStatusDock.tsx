@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, type Ref } from "react";
 import { Activity, ChevronUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,21 +14,27 @@ export function RunStatusDock({
   label,
   description,
   status,
+  triggerRef,
   children,
 }: {
   label: string;
   description?: string;
   status?: ReactNode;
+  triggerRef?: Ref<HTMLButtonElement>;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
-      <div className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-40 lg:hidden">
+      <div
+        data-run-status-dock
+        className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-40 md:left-auto md:w-96"
+      >
         <SheetTrigger
           render={
             <Button
+              ref={triggerRef}
               type="button"
               variant="outline"
               className="h-auto min-h-14 w-full justify-start gap-3 border-terminal-border bg-terminal-surface px-4 py-2.5 text-terminal-foreground shadow-lg"
@@ -47,7 +53,11 @@ export function RunStatusDock({
           <ChevronUp className="size-4" />
         </SheetTrigger>
       </div>
-      <SheetContent side="bottom" className="max-h-[88dvh] overflow-y-auto p-0">
+      <SheetContent
+        data-run-status-dock
+        side="bottom"
+        className="max-h-[88dvh] overflow-y-auto p-0"
+      >
         <SheetHeader className="border-b px-4 py-4 text-left">
           <SheetTitle>{label}</SheetTitle>
           {description ? (

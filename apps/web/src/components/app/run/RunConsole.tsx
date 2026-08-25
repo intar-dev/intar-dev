@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { CheckCircle2, CircleAlert } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
-import { Badge } from "@/components/ui/badge";
 import {
   isVerificationPassed,
   repairObjectiveTitle,
@@ -22,7 +21,6 @@ export function RunConsole({ children }: { children: ReactNode }) {
 // Learners work from repair objectives, not probe implementation details. The
 // verification engine stays automatic and invisible behind this progress list.
 export function RepairProgressSection(props: {
-  vmName: string | null;
   probes: ScenarioProbeStatus[];
   objectives: ScenarioObjective[];
 }) {
@@ -30,7 +28,6 @@ export function RepairProgressSection(props: {
     isVerificationPassed(probe.status),
   ).length;
   const total = props.probes.length;
-  const needsRepair = total - passed;
   const verificationUnavailable = props.probes.some(
     (probe) =>
       !isVerificationPassed(probe.status) &&
@@ -39,20 +36,17 @@ export function RepairProgressSection(props: {
   );
 
   return (
-    <section aria-label="Repair progress">
+    <section aria-labelledby="repair-objectives-heading">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-eyebrow">
-          {props.vmName ? `${props.vmName} repair progress` : "Repair progress"}
+        <p id="repair-objectives-heading" className="text-eyebrow">
+          Objectives
         </p>
         {total ? (
           <span
-            className="flex flex-wrap items-center justify-end gap-2 tabular-nums"
-            aria-label={`${passed} verified, ${needsRepair} need repair`}
+            className="shrink-0 text-xs text-muted-foreground tabular-nums"
+            aria-label={`${passed} of ${total} objectives verified`}
           >
-            <Badge variant="success">{passed} Verified</Badge>
-            <Badge variant="destructive">
-              {needsRepair} Needs repair
-            </Badge>
+            {passed}/{total} verified
           </span>
         ) : null}
       </div>
@@ -62,7 +56,7 @@ export function RepairProgressSection(props: {
         </p>
       ) : null}
       {total ? (
-        <ol className="mt-2 divide-y border-y">
+        <ol className="mt-3 divide-y border-y">
           {props.probes.map((probe, index) => {
             const objectiveIndex = props.objectives.findIndex(
               (candidate) => candidate.probeName === probe.id,
@@ -97,39 +91,31 @@ function CheckRow(props: {
 }) {
   const { probe, objective } = props;
   const title = repairObjectiveTitle(objective, props.objectiveIndex);
-  const presentation = objectivePresentation(probe);
+  const passed = isVerificationPassed(probe.status);
 
   return (
-    <li className="flex gap-3 py-3">
+    <li className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 py-3">
       <StatusIcon status={probe.status} />
       <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="flex items-start justify-between gap-3">
-          <p className="text-sm font-medium text-foreground">{title}</p>
-          <Badge variant={presentation.variant} className="shrink-0">
-            {presentation.label}
-          </Badge>
-        </div>
-        {objective?.bodyMarkdown ? (
+        <p className="text-sm font-medium text-foreground">{title}</p>
+        {!passed && objective?.bodyMarkdown ? (
           <Markdown className="max-w-[68ch] space-y-1 text-sm leading-5 text-muted-foreground">
             {objective.bodyMarkdown}
           </Markdown>
         ) : null}
       </div>
+      <span
+        className={`pt-0.5 text-xs font-medium whitespace-nowrap ${
+          passed ? "text-success" : "text-destructive"
+        }`}
+      >
+        {verificationStatusLabel(probe.status)}
+      </span>
     </li>
   );
 }
 
-function objectivePresentation(probe: ScenarioProbeStatus) {
-  return {
-    label: verificationStatusLabel(probe.status),
-    variant: isVerificationPassed(probe.status)
-      ? ("success" as const)
-      : ("destructive" as const),
-  };
-}
-
-// Status never relies on color alone: each shape is paired with a visible
-// status badge in the same row.
+// Status never relies on color alone: each icon is paired with visible text.
 function StatusIcon({ status }: { status: string }) {
   if (isVerificationPassed(status)) {
     return (

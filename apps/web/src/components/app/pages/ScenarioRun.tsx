@@ -1,19 +1,31 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { Maximize2, Minimize2, Trash2 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { StatusToken } from "@/components/app/patterns/StatusToken";
+import {
+  StatusToken,
+  type StatusTone,
+} from "@/components/app/patterns/StatusToken";
 import { RunStatusDock } from "@/components/app/patterns/RunStatusDock";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import { presentScenarioRun } from "@/lib/run-phase";
 import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
 import { RunTimeline } from "@/components/app/run/RunTimeline";
+import { shouldShowDesktopRunRail } from "@/components/app/run/run-workspace-layout";
 import { RunCompletionActions } from "@/components/app/run/RunCompletionActions";
 import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
 import { computeLeaseDeadline } from "@/lib/run-lease";
@@ -65,10 +77,40 @@ export function ScenarioRun() {
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
-  const [maximized, setMaximized] = useState(false);
+  const [workspaceContent, setWorkspaceContent] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const runRailRef = useRef<HTMLElement>(null);
+  const runDockTriggerRef = useRef<HTMLButtonElement>(null);
+  const responsiveFocusTargetRef = useRef<"dock" | "rail" | null>(null);
   const timelineHeadingRef = useRef<HTMLHeadingElement>(null);
   const focusTimelineAfterShutdownRef = useRef(false);
-  const desktopRunRail = useDesktopRunRail();
+  const recordResponsiveFocus = useCallback(
+    (showRail: boolean) => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) return;
+
+      if (showRail && active.closest("[data-run-status-dock]")) {
+        responsiveFocusTargetRef.current = "rail";
+      } else if (!showRail && runRailRef.current?.contains(active)) {
+        responsiveFocusTargetRef.current = "dock";
+      }
+    },
+    [],
+  );
+  const desktopRunRail = useDesktopRunRail(
+    workspaceContent,
+    recordResponsiveFocus,
+  );
+
+  useLayoutEffect(() => {
+    const target = responsiveFocusTargetRef.current;
+    if (!target) return;
+    responsiveFocusTargetRef.current = null;
+    (target === "rail" ? runRailRef.current : runDockTriggerRef.current)?.focus({
+      preventScroll: true,
+    });
+  }, [desktopRunRail]);
 
   const attempt = useQuery({
     queryKey: ["scenarios", "run", runId],
@@ -329,28 +371,6 @@ export function ScenarioRun() {
   const passedCheckCount = selectedProbes.filter(
     (probe) => isVerificationPassed(probe.status),
   ).length;
-  const currentProbe =
-    selectedProbes.find((probe) => !isVerificationPassed(probe.status)) ?? null;
-  const currentObjectiveIndex = currentProbe
-    ? (attemptData?.objectives.findIndex(
-        (objective) => objective.probeName === currentProbe.id,
-      ) ?? -1)
-    : -1;
-  const currentObjective =
-    currentObjectiveIndex >= 0
-      ? (attemptData?.objectives[currentObjectiveIndex] ?? null)
-      : null;
-  const currentCheckLabel =
-    selectedProbes.length > 0 && passedCheckCount === selectedProbes.length
-      ? "All objectives verified"
-      : currentProbe
-        ? repairObjectiveTitle(
-            currentObjective,
-            currentObjectiveIndex >= 0
-              ? currentObjectiveIndex
-              : Math.max(0, selectedProbes.indexOf(currentProbe)),
-          )
-        : attemptData?.phaseDetail || "Waiting for run status";
   const infrastructureTeardownPending = Boolean(
     attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
   );
@@ -447,34 +467,37 @@ export function ScenarioRun() {
       if (attemptData.outcome === "in_progress") {
         if (showSelectedVmPreparation || showBackgroundStatus) {
           return (
-            <StatusToken
+            <ActiveRunStatus
               tone="pending"
               word={attemptData.phaseTitle}
+              compactWord={showBackgroundStatus ? "Ending" : "Starting"}
               pulse
               live={!showSelectedVmPreparation && !showBackgroundStatus}
-              clock={{ startedAt: attemptData.createdAt }}
+              startedAt={attemptData.createdAt}
+              leaseDeadlineMs={leaseDeadlineMs}
             />
           );
         }
         if (attemptData.phase === "solved") {
           return (
-            <StatusToken
+            <ActiveRunStatus
               tone="success"
               word="Solved"
+              compactWord="Solved"
               live
-              clock={{
-                startedAt: attemptData.createdAt,
-                frozenMs: attemptData.solveDurationMs,
-              }}
+              startedAt={attemptData.createdAt}
+              leaseDeadlineMs={leaseDeadlineMs}
             />
           );
         }
         return (
-          <StatusToken
+          <ActiveRunStatus
             tone="live"
             word={attemptData.phaseTitle}
+            compactWord="Live"
             live
-            clock={{ startedAt: attemptData.createdAt }}
+            startedAt={attemptData.createdAt}
+            leaseDeadlineMs={leaseDeadlineMs}
           />
         );
       }
@@ -496,23 +519,16 @@ export function ScenarioRun() {
         default:
           return <StatusToken tone="muted" word="Ended early" />;
       }
-    }, [attemptData, showSelectedVmPreparation, showBackgroundStatus]),
-    action: useMemo(
-      () =>
-        showEndRunAction ? (
-          <Button
-            size="sm"
-            variant="destructive"
-            onClick={() => setCancelDialogOpen(true)}
-          >
-            <Trash2 className="size-3.5" />
-            {acceptanceRetryNeeded ? "Retry end" : "End run"}
-          </Button>
-        ) : undefined,
-      [showEndRunAction, acceptanceRetryNeeded],
-    ),
+    }, [
+      attemptData,
+      leaseDeadlineMs,
+      showSelectedVmPreparation,
+      showBackgroundStatus,
+    ]),
     menu: useMemo(() => {
-      if (!showSshMenuItem && !canDeleteRun) return undefined;
+      if (!showSshMenuItem && !showEndRunAction && !canDeleteRun) {
+        return undefined;
+      }
       return (
         <>
           {showSshMenuItem ? (
@@ -521,6 +537,17 @@ export function ScenarioRun() {
               onClick={() => setSshDialogOpen(true)}
             >
               SSH command…
+            </DropdownMenuItem>
+          ) : null}
+          {showSshMenuItem && (showEndRunAction || canDeleteRun) ? (
+            <DropdownMenuSeparator />
+          ) : null}
+          {showEndRunAction ? (
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => setCancelDialogOpen(true)}
+            >
+              {acceptanceRetryNeeded ? "Retry end…" : "End run…"}
             </DropdownMenuItem>
           ) : null}
           {canDeleteRun ? (
@@ -533,7 +560,13 @@ export function ScenarioRun() {
           ) : null}
         </>
       );
-    }, [showSshMenuItem, canDeleteRun, selectedVmShellReady]),
+    }, [
+      showSshMenuItem,
+      showEndRunAction,
+      canDeleteRun,
+      selectedVmShellReady,
+      acceptanceRetryNeeded,
+    ]),
   });
 
   // The browser tab carries live-run state while the user is elsewhere.
@@ -552,24 +585,6 @@ export function ScenarioRun() {
       }
     };
   }, [runIsLive, scenarioName]);
-
-  const maximizeToggle = (
-    <Button
-      type="button"
-      size="sm"
-      variant="outline"
-      className="hidden lg:inline-flex"
-      aria-pressed={maximized}
-      aria-label={maximized ? "Restore layout" : "Maximize terminal"}
-      onClick={() => setMaximized((current) => !current)}
-    >
-      {maximized ? (
-        <Minimize2 className="size-3.5" />
-      ) : (
-        <Maximize2 className="size-3.5" />
-      )}
-    </Button>
-  );
 
   const runDialogs = (
     <>
@@ -678,26 +693,17 @@ export function ScenarioRun() {
     return (
       <RunConsole>
         {showResolutionCard ? (
-          <div>
-            <ResolutionCard
-              runId={runId}
-              scenarioTitle={attemptData.title}
-              createdAt={attemptData.createdAt}
-              solveDurationMs={attemptData.solveDurationMs}
-              hints={attemptData.hints}
-              objectives={attemptData.objectives}
-              assisted={attemptData.solution.assisted}
-              pending={destroyScenario.isPending}
-              onEndScenario={requestDestroyScenario}
-            />
-          </div>
+          <ResolutionCard
+            scenarioTitle={attemptData.title}
+            solveDurationMs={attemptData.solveDurationMs}
+            assisted={attemptData.solution.assisted}
+            pending={destroyScenario.isPending}
+            onEndScenario={requestDestroyScenario}
+          />
         ) : (
           <>
-            {/* Keyed per machine so row open/close state never leaks across
-                VM switches. */}
             <RepairProgressSection
               key={selectedVm?.scenarioVmName ?? "checks"}
-              vmName={selectedVm?.scenarioVmName ?? null}
               probes={selectedProbes}
               objectives={attemptData.objectives}
             />
@@ -783,17 +789,14 @@ export function ScenarioRun() {
     <div className="flex h-[calc(100dvh-var(--app-bar-h,3rem))] min-h-[28rem] flex-col gap-3 overflow-hidden px-[var(--workspace-inset)] py-3">
       {runDialogs}
       <div className="shrink-0 space-y-3 empty:hidden">{errorAlerts}</div>
-      {attemptData ? (
-        <p className="shrink-0 font-heading text-sm font-semibold text-balance lg:hidden">
-          {attemptData.title}
-        </p>
-      ) : null}
 
       {attemptData ? (
         <div
+          ref={setWorkspaceContent}
           className={cn(
-            "grid min-h-0 flex-1 gap-3 lg:grid-rows-[minmax(0,1fr)]",
-            !maximized && "lg:grid-cols-[minmax(0,1fr)_22rem]",
+            "grid min-h-0 flex-1 gap-3",
+            desktopRunRail &&
+              "grid-cols-[minmax(0,1fr)_22rem] grid-rows-[minmax(0,1fr)]",
           )}
         >
           <section
@@ -815,15 +818,6 @@ export function ScenarioRun() {
                   title={`${selectedVm.scenarioVmName} shell`}
                   showCloseButton={false}
                   onClose={() => setTerminalVisible(false)}
-                  headerActions={
-                    <>
-                      <LeaseCountdown
-                        deadlineMs={leaseDeadlineMs}
-                        className="text-xs"
-                      />
-                      {maximizeToggle}
-                    </>
-                  }
                 />
               </div>
             ) : (
@@ -834,74 +828,57 @@ export function ScenarioRun() {
                       title={bootScreenCopy.title}
                       description={bootScreenCopy.description}
                       steps={bootSteps}
-                      topRight={
-                        <StatusToken
-                          tone="pending"
-                          word="Elapsed"
-                          clock={{ startedAt: attemptData.createdAt }}
-                        />
-                      }
                     />
                   </div>
                 ) : (
-                  <>
-                    {/* The lease keeps ticking without a terminal — keep the
-                        countdown's only home visible in this state too. */}
-                    <div className="flex shrink-0 justify-end empty:hidden">
-                      <LeaseCountdown
-                        deadlineMs={leaseDeadlineMs}
-                        className="text-xs"
-                      />
-                    </div>
-                    <ScenarioShellStatusCard
-                      phase={selectedVm?.phase ?? attemptData.phase}
-                      title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
-                      description={
-                        selectedVm?.phaseDetail ?? attemptData.phaseDetail
-                      }
-                      pending={
-                        !selectedVmShellReady &&
-                        Boolean(selectedVm && selectedVm.phase !== "failed")
-                      }
-                    />
-                  </>
+                  <ScenarioShellStatusCard
+                    phase={selectedVm?.phase ?? attemptData.phase}
+                    title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
+                    description={
+                      selectedVm?.phaseDetail ?? attemptData.phaseDetail
+                    }
+                    pending={
+                      !selectedVmShellReady &&
+                      Boolean(selectedVm && selectedVm.phase !== "failed")
+                    }
+                  />
                 )}
               </div>
             )}
 
-            <div
-              aria-hidden="true"
-              className="h-[calc(4.5rem+env(safe-area-inset-bottom))] shrink-0 lg:hidden"
-            />
+            {!desktopRunRail ? (
+              <div
+                aria-hidden="true"
+                className="h-[calc(4.5rem+env(safe-area-inset-bottom))] shrink-0"
+              />
+            ) : null}
           </section>
 
           {desktopRunRail ? (
             <aside
+              ref={runRailRef}
               aria-label="Run console"
-              className={cn(
-                "min-h-0 overflow-y-auto pr-1",
-                maximized && "hidden",
-              )}
+              tabIndex={-1}
+              className="min-h-0 overflow-y-auto pr-1"
             >
               {renderRunRail()}
             </aside>
           ) : (
             <RunStatusDock
+              triggerRef={runDockTriggerRef}
               label={
-                showSelectedVmPreparation
-                  ? "Work order and briefing"
-                  : "Run checks and assistance"
+                showSelectedVmPreparation ? "Work order" : "Objectives"
               }
               description={
                 showSelectedVmPreparation
-                  ? "Review the objectives, incident context, and current machine state while the VM starts."
-                  : "Review live checks, hints, solution, and machine details without leaving the shell."
+                  ? "Review the repair objectives while the workspace starts."
+                  : "Repair status, hints, and run details."
               }
               status={
                 showSelectedVmPreparation
                   ? (selectedVm?.phaseDetail ?? attemptData.phaseDetail)
                   : selectedProbes.length
-                    ? `${passedCheckCount}/${selectedProbes.length} checks · ${currentCheckLabel}`
+                    ? `${passedCheckCount}/${selectedProbes.length} verified`
                     : attemptData.phaseDetail
               }
             >
@@ -991,20 +968,75 @@ async function navigateToRunCourse(
   await navigate({ to: "/courses" });
 }
 
-function useDesktopRunRail() {
-  const [matches, setMatches] = useState(() =>
-    typeof window === "undefined"
-      ? false
-      : window.matchMedia("(min-width: 64rem)").matches,
+function ActiveRunStatus({
+  tone,
+  word,
+  compactWord,
+  pulse = false,
+  live = false,
+  startedAt,
+  leaseDeadlineMs,
+}: {
+  tone: StatusTone;
+  word: string;
+  compactWord: string;
+  pulse?: boolean;
+  live?: boolean;
+  startedAt: number;
+  leaseDeadlineMs: number | null;
+}) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-2.5">
+      <StatusToken
+        tone={tone}
+        word={word}
+        compactWord={compactWord}
+        pulse={pulse}
+        live={live}
+        clock={leaseDeadlineMs === null ? { startedAt } : undefined}
+      />
+      {leaseDeadlineMs !== null ? (
+        <>
+          <span aria-hidden="true" className="h-3 w-px bg-border" />
+          <LeaseCountdown deadlineMs={leaseDeadlineMs} className="text-xs" />
+        </>
+      ) : null}
+    </span>
   );
+}
 
-  useEffect(() => {
-    const media = window.matchMedia("(min-width: 64rem)");
-    const update = () => setMatches(media.matches);
-    update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
+function useDesktopRunRail(
+  node: HTMLDivElement | null,
+  onBeforeChange: (showRail: boolean) => void,
+) {
+  const [matches, setMatches] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!node) {
+      setMatches(false);
+      return;
+    }
+    const update = (width: number) => {
+      const showRail = shouldShowDesktopRunRail(width);
+      setMatches((current) => {
+        if (current !== showRail) onBeforeChange(showRail);
+        return showRail;
+      });
+    };
+    update(node.getBoundingClientRect().width);
+
+    if (typeof ResizeObserver === "undefined") {
+      const onResize = () => update(node.getBoundingClientRect().width);
+      window.addEventListener("resize", onResize);
+      return () => window.removeEventListener("resize", onResize);
+    }
+
+    const observer = new ResizeObserver(() => {
+      update(node.getBoundingClientRect().width);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [node, onBeforeChange]);
 
   return matches;
 }

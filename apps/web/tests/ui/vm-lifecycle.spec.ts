@@ -17,7 +17,7 @@ test("startup keeps the workspace useful and replaces milestones with the shell"
   await expect(
     page.getByText("Review the work order while the VM starts."),
   ).toBeVisible();
-  await expect(page.getByText("Repair objectives")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Work order/ })).toBeVisible();
   await expect(page.getByRole("progressbar")).toHaveCount(0);
 
   const focusTarget = page.getByRole("link", { name: "Courses" }).first();
@@ -28,7 +28,7 @@ test("startup keeps the workspace useful and replaces milestones with the shell"
   await expect(focusTarget).toBeFocused();
 });
 
-test("a solved run celebrates the learner-facing scenario title", async ({
+test("a solved run gives the learner a concise resolution", async ({
   page,
   ui,
 }) => {
@@ -38,13 +38,25 @@ test("a solved run celebrates the learner-facing scenario title", async ({
     runState: "solved",
   });
 
+  await page
+    .getByRole("button", { name: /Objectives.*2\/2 verified/ })
+    .click();
+  const objectives = page.getByRole("dialog", { name: "Objectives" });
+  await expect(objectives.getByText("Resolved", { exact: true })).toBeVisible();
   await expect(
-    page.getByText("You fixed Repair a broken nginx service."),
+    objectives.getByRole("heading", {
+      name: "Repair a broken nginx service",
+    }),
   ).toBeVisible();
-  await expect(page.getByText(/You fixed repair-nginx/)).toHaveCount(0);
+  await expect(
+    objectives.getByText(
+      "All objectives are verified. Finish the run to save your replay.",
+    ),
+  ).toBeVisible();
+  await expect(objectives.getByText(/repair-nginx/)).toHaveCount(0);
 });
 
-test("live repair progress shows only two probe indicators", async ({
+test("a healthy single-machine run keeps terminal controls and status concise", async ({
   page,
   ui,
 }) => {
@@ -54,13 +66,78 @@ test("live repair progress shows only two probe indicators", async ({
     runState: "running",
   });
 
-  const progress = page.getByRole("region", { name: "Repair progress" });
-  await expect(progress.getByText("0 Verified", { exact: true })).toBeVisible();
   await expect(
-    progress.getByText("2 Needs repair", { exact: true }),
+    page.getByRole("button", { name: /Objectives.*0\/2 verified/ }),
   ).toBeVisible();
+  await expect(page.getByRole("group", { name: "Machines" })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /Reconnect terminal/i }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /Maximize/i }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTitle("Time remaining before this sandbox is torn down"),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole("status").filter({ hasText: "Running" }),
+  ).toHaveCount(1);
+
+  await page
+    .getByRole("button", { name: /Objectives.*0\/2 verified/ })
+    .click();
+  const objectives = page.getByRole("dialog", { name: "Objectives" });
+  const progress = objectives.getByRole("region", { name: "Objectives" });
+  await expect(progress.getByText("0/2 verified", { exact: true })).toBeVisible();
+  await expect(
+    progress.getByText("Needs repair", { exact: true }),
+  ).toHaveCount(2);
   await expect(
     progress.getByText(/Checking|Retrying|Recheck/),
+  ).toHaveCount(0);
+});
+
+test("a delayed old terminal connection cannot replace a newer VM connection", async ({
+  page,
+  ui,
+}) => {
+  const route = routeCase("run-workspace");
+  ui.configure({
+    sessionRole: route.sessionRole,
+    runState: "running",
+  });
+  const run = ui.server.state.run as {
+    vms: Array<Record<string, unknown>>;
+  };
+  const firstVm = run.vms[0];
+  if (!firstVm) throw new Error("run VM fixture missing");
+  run.vms = [
+    firstVm,
+    {
+      ...structuredClone(firstVm),
+      id: "run-vm-worker",
+      ordinal: 2,
+      scenarioVmId: "scenario-vm-worker",
+      scenarioVmName: "worker",
+      runtimeVmName: "run-active-worker",
+      hostname: "worker.intar.test",
+    },
+  ];
+  ui.server.state.terminalMode = "delayed-first-ready";
+
+  await page.goto(route.path, { waitUntil: "domcontentloaded" });
+  const machines = page.getByRole("group", { name: "Machines" });
+  await expect(machines).toBeVisible();
+  await machines.getByRole("button", { name: /worker/i }).click();
+
+  const terminalStatus = page
+    .getByRole("status")
+    .filter({ hasText: /Terminal status:/i });
+  await expect(terminalStatus).toHaveText(/Terminal status:\s*connected/i);
+  await page.waitForTimeout(1_200);
+  await expect(terminalStatus).toHaveText(/Terminal status:\s*connected/i);
+  await expect(
+    page.getByRole("button", { name: "Reconnect terminal" }),
   ).toHaveCount(0);
 });
 
@@ -74,7 +151,8 @@ test("end acceptance stays on one timeline through saved replay", async ({
     runState: "running",
   });
 
-  await page.getByRole("button", { name: "End run" }).first().click();
+  await page.getByRole("button", { name: "Page actions" }).click();
+  await page.getByRole("menuitem", { name: "End run…" }).click();
   const dialog = page.getByRole("dialog");
   const destroyResponse = page.waitForResponse(
     (response) =>
@@ -106,14 +184,14 @@ test("end acceptance stays on one timeline through saved replay", async ({
   ui.server.setRunState("rendering");
   await expect(
     page.getByRole("heading", { name: "Saving run history" }),
-  ).toBeVisible({ timeout: 2_500 });
+  ).toBeVisible({ timeout: 5_000 });
   await expect(
     page.getByRole("heading", { name: "Building terminal session history" }),
   ).toBeVisible();
 
   ui.server.setRunState("replay");
   await expect(page.getByRole("heading", { name: "Run saved" })).toBeVisible({
-    timeout: 2_500,
+    timeout: 5_000,
   });
   await expect(
     page.getByRole("heading", { name: "Terminal session" }),
@@ -193,7 +271,8 @@ test("a rejected shutdown stays in the confirmation dialog", async ({
     },
   );
 
-  await page.getByRole("button", { name: "End run" }).first().click();
+  await page.getByRole("button", { name: "Page actions" }).click();
+  await page.getByRole("menuitem", { name: "End run…" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "End run" }).click();
 

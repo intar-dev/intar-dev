@@ -9,7 +9,6 @@ describe("run console probe diagnostics", () => {
     const hiddenRawOutput = "raw-kubernetes-document-must-not-render";
     const markup = renderToStaticMarkup(
       createElement(RepairProgressSection, {
-        vmName: "workshop",
         objectives: [objective()],
         probes: [
           commandProbe({
@@ -20,9 +19,8 @@ describe("run console probe diagnostics", () => {
       }),
     );
 
-    expect(markup).toContain("Repair progress");
-    expect(markup).toContain("0 Verified");
-    expect(markup).toContain("1 Needs repair");
+    expect(markup).toContain("Objectives");
+    expect(markup).toContain("0/1 verified");
     expect(markup).toContain("Restore the web rollout");
     expect(markup).toContain("Run one current, Ready replica.");
     expect(markup).toContain("Needs repair");
@@ -34,6 +32,8 @@ describe("run console probe diagnostics", () => {
     expect(markup).not.toContain("Observed");
     expect(markup).not.toContain("Exit code");
     expect(markup).not.toContain("command_json_path");
+    expect(markup).not.toContain("workshop repair progress");
+    expect(markup).not.toContain('data-slot="badge"');
   });
 
   it("keeps a probe error inside the two-state result model", () => {
@@ -41,7 +41,6 @@ describe("run console probe diagnostics", () => {
     const hiddenError = "command exited with status 1";
     const markup = renderToStaticMarkup(
       createElement(RepairProgressSection, {
-        vmName: "workshop",
         objectives: [objective()],
         probes: [
           commandProbe({
@@ -69,22 +68,21 @@ describe("run console probe diagnostics", () => {
   it("marks a completed repair objective as verified", () => {
     const markup = renderToStaticMarkup(
       createElement(RepairProgressSection, {
-        vmName: "workshop",
         objectives: [objective()],
         probes: [commandProbe({ status: "pass", matchedValues: ["true"] })],
       }),
     );
 
-    expect(markup).toContain("1 Verified");
-    expect(markup).toContain("0 Needs repair");
+    expect(markup).toContain("1/1 verified");
     expect(markup).toContain("Verified");
+    expect(markup).not.toContain("Run one current, Ready replica.");
+    expect(markup).not.toContain('data-slot="badge"');
     expect(markup).not.toContain("$.passed");
   });
 
   it("uses a neutral title when authored objective copy is missing", () => {
     const markup = renderToStaticMarkup(
       createElement(RepairProgressSection, {
-        vmName: "workshop",
         objectives: [
           {
             ...objective(),
@@ -105,14 +103,12 @@ describe("run console probe diagnostics", () => {
   it("maps pending and error states to needs repair", () => {
     const checking = renderToStaticMarkup(
       createElement(RepairProgressSection, {
-        vmName: "workshop",
         objectives: [objective()],
         probes: [commandProbe({ status: "pending" })],
       }),
     );
     const retrying = renderToStaticMarkup(
       createElement(RepairProgressSection, {
-        vmName: "workshop",
         objectives: [objective()],
         probes: [commandProbe({ status: "ERROR" })],
       }),

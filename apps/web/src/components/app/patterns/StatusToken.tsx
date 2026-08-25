@@ -16,6 +16,8 @@ interface StatusTokenProps {
   tone: StatusTone;
   /** Always visible — state is never conveyed by the dot color alone. */
   word: string;
+  /** Short visible label below 640px; assistive technology still gets one word. */
+  compactWord?: string;
   /** Preformatted static elapsed/duration text. */
   elapsed?: string | null;
   /** Self-ticking clock; freezes at frozenMs when set. Overrides `elapsed`. */
@@ -35,6 +37,7 @@ interface StatusTokenProps {
 export function StatusToken({
   tone,
   word,
+  compactWord,
   elapsed,
   clock,
   pulse = false,
@@ -55,7 +58,14 @@ export function StatusToken({
         role={live ? "status" : undefined}
         className="truncate text-xs font-medium"
       >
-        {word}
+        {compactWord ? (
+          <>
+            <span className="sm:hidden">{compactWord}</span>
+            <span className="hidden sm:inline">{word}</span>
+          </>
+        ) : (
+          word
+        )}
       </span>
       {clock ? (
         <TickingClock startedAt={clock.startedAt} frozenMs={clock.frozenMs} />

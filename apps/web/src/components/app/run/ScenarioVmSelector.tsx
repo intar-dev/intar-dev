@@ -8,16 +8,20 @@ const PHASE_DOT: Partial<Record<ScenarioRunVmRecord["phase"], string>> = {
   completed: "bg-muted-foreground",
 };
 
-// Segmented machine tabs, sitting flush above the terminal. The single-machine
-// form still makes the selected VM and its current state explicit.
+// A single VM is already named by the terminal. Only render a switcher when
+// there is an actual choice to make.
 export function ScenarioVmSelector(props: {
   vms: ScenarioRunVmRecord[];
   selectedVmId: string | null;
   onSelect: (vmId: string) => void;
 }) {
+  if (props.vms.length < 2) {
+    return null;
+  }
+
   return (
     <div
-      className="flex w-fit flex-wrap gap-1 rounded-xl bg-muted p-1"
+      className="flex min-w-0 overflow-x-auto border-b border-border"
       role="group"
       aria-label="Machines"
     >
@@ -31,10 +35,10 @@ export function ScenarioVmSelector(props: {
             title={`${vm.hostname} · ${vm.phaseTitle}`}
             aria-pressed={active}
             className={cn(
-              "flex min-h-11 items-center gap-2 rounded-lg px-3.5 py-2 text-left text-sm font-medium transition-colors",
+              "-mb-px flex min-h-11 shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-left text-sm font-medium transition-colors",
               active
-                ? "bg-background text-foreground shadow-xs"
-                : "text-muted-foreground hover:text-foreground",
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
             )}
           >
             <span
@@ -44,11 +48,9 @@ export function ScenarioVmSelector(props: {
               )}
               aria-hidden="true"
             />
-            <span className="min-w-0">
-              <span className="block truncate">{vm.scenarioVmName}</span>
-              <span className="block truncate text-xs font-normal text-muted-foreground">
-                {vm.phaseTitle}
-              </span>
+            <span className="truncate">{vm.scenarioVmName}</span>
+            <span className="truncate text-xs font-normal text-muted-foreground">
+              {vm.phaseTitle}
             </span>
           </button>
         );

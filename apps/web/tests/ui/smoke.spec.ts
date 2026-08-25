@@ -281,12 +281,31 @@ test("assigned helper opens only the learner-consented browser terminal", async 
   await page.goto("/workshops/workshop-live");
 
   await page.getByRole("button", { name: "Open terminal" }).click();
-  await expect(
-    page.getByRole("dialog").getByText(/assisting Mina Learner/i),
-  ).toBeVisible();
-  expect(ui.server.requests).toContain(
-    "POST /api/workshops/workshop-live/terminal",
-  );
+  const terminalDialog = page.getByRole("dialog");
+  await expect(terminalDialog.getByText(/assisting Mina Learner/i)).toBeVisible();
+  const terminalStatus = terminalDialog
+    .getByRole("status")
+    .filter({ hasText: /Terminal status:/i });
+  await expect(terminalStatus).toHaveText(/Terminal status:\s*connected/i);
+
+  // Closing the old socket during a manual reconnect must not let its delayed
+  // close event overwrite the replacement connection.
+  const terminalRequest = "POST /api/workshops/workshop-live/terminal";
+  const requestCountBeforeReconnect = ui.server.requests.filter(
+    (request) => request === terminalRequest,
+  ).length;
+  await terminalDialog.getByRole("button", { name: "Reconnect" }).click();
+  await expect
+    .poll(
+      () =>
+        ui.server.requests.filter((request) => request === terminalRequest)
+          .length,
+    )
+    .toBe(requestCountBeforeReconnect + 1);
+  await expect(terminalStatus).toHaveText(/Terminal status:\s*connected/i);
+  await page.waitForTimeout(100);
+  await expect(terminalStatus).toHaveText(/Terminal status:\s*connected/i);
+  expect(ui.server.requests).toContain(terminalRequest);
 });
 
 test("presenter can synchronize the first slide from an empty deck state", async ({
@@ -509,6 +528,9 @@ test("run workspace opens a deterministic terminal transport", async ({
   await expect(
     page.getByRole("status").filter({ hasText: /Terminal status:/i }),
   ).toHaveText(/Terminal status:\s*connected/i);
+  await expect(
+    page.getByRole("button", { name: "Reconnect terminal" }),
+  ).toHaveCount(0);
 });
 
 test("organization workspace keeps the active tab in the URL", async ({

@@ -17,7 +17,11 @@ export type RunFixtureState =
   | "replay-failed"
   | "replay";
 
-export type TerminalMode = "connected" | "disconnected" | "error";
+export type TerminalMode =
+  | "connected"
+  | "disconnected"
+  | "error"
+  | "delayed-first-ready";
 
 export interface MockApiState {
   sessionRole: SessionRole;

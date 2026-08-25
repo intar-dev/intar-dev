@@ -32,7 +32,7 @@ export function LeaseCountdown({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 text-sm tabular-nums",
+        "inline-flex items-center gap-1.5 text-sm whitespace-nowrap tabular-nums",
         TONE[info.state],
         className,
       )}
@@ -42,7 +42,7 @@ export function LeaseCountdown({
       {info.state === "expired" ? (
         <span>Lease expired</span>
       ) : (
-        <span>{formatCountdown(info.remainingMs)}</span>
+        <span>{formatCountdown(info.remainingMs)} left</span>
       )}
     </span>
   );

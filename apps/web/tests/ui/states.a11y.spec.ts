@@ -360,30 +360,71 @@ test.describe("focused state accessibility", () => {
       await expectNoAxeViolations(page, testInfo);
     });
   }
+
+  test("disconnected terminal recovers after reconnecting", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "disconnected",
+    });
+
+    const recoveryNotice = page.getByText(
+      "The terminal session ended. Reconnect to continue.",
+      { exact: true },
+    );
+    const reconnect = page.getByRole("button", {
+      name: "Reconnect terminal",
+    });
+    await expect(recoveryNotice).toBeVisible();
+    await expect(reconnect).toBeVisible();
+    const reconnectBounds = await reconnect.boundingBox();
+    expect(reconnectBounds).not.toBeNull();
+    expect(reconnectBounds!.height).toBeGreaterThanOrEqual(44);
+
+    ui.server.state.terminalMode = "connected";
+    const reconnectRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        /\/api\/scenarios\/runs\/run-active\/ssh$/.test(
+          new URL(request.url()).pathname,
+        ),
+    );
+    await reconnect.click();
+    await reconnectRequest;
+
+    await expect(
+      page.getByRole("status").filter({ hasText: /Terminal status:/i }),
+    ).toHaveText(/Terminal status:\s*connected/i);
+    await expect(recoveryNotice).toHaveCount(0);
+    await expectNoAxeViolations(page, testInfo);
+  });
 });
 
 test.describe("focused mobile state accessibility", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
-  test("run checks sheet", async ({ page, ui }, testInfo) => {
+  test("objectives sheet", async ({ page, ui }, testInfo) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "running",
     });
     const trigger = page.getByRole("button", {
-      name: /Run checks and assistance/i,
+      name: /^Objectives\b/i,
     });
     await expect(trigger).toBeVisible();
     await trigger.click();
 
     const sheet = page.getByRole("dialog");
     await expect(
-      sheet.getByRole("heading", { name: "Run checks and assistance" }),
+      sheet.getByRole("heading", { name: "Objectives" }),
     ).toBeVisible();
     expect(
       await coarsePointerTargetViolations(page),
-      "open run checks sheet coarse-pointer controls smaller than 44px",
+      "open objectives sheet coarse-pointer controls smaller than 44px",
     ).toEqual([]);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
@@ -396,14 +437,14 @@ test.describe("focused mobile state accessibility", () => {
       runState: "booting",
     });
     const trigger = page.getByRole("button", {
-      name: /Work order and briefing/i,
+      name: /^Work order\b/i,
     });
     await expect(trigger).toBeVisible();
     await trigger.click();
 
     await expect(
-      page.getByRole("heading", { name: "Work order and briefing" }),
-    ).toBeVisible();
+      page.getByRole("dialog").locator('[data-slot="sheet-title"]'),
+    ).toHaveText("Work order");
     await expectNoAxeViolations(page, testInfo);
   });
 
@@ -420,6 +461,70 @@ test.describe("focused mobile state accessibility", () => {
     await expect(
       page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
     ).toHaveCount(1);
+    await expectNoAxeViolations(page, testInfo);
+  });
+});
+
+test.describe("run console content width", () => {
+  test.use({ viewport: { width: 1100, height: 900 } });
+
+  test("uses the dock below the rail width and a rail above it", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+
+    const dock = page.getByRole("button", { name: /^Objectives\b/i });
+    const rail = page.getByRole("complementary", { name: "Run console" });
+    await expect(dock).toBeVisible();
+    await expect(rail).toHaveCount(0);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(rail).toBeVisible();
+    await expect(dock).toHaveCount(0);
+
+    const hintDisclosure = rail.getByRole("button", { name: /Need a hint?/i });
+    await hintDisclosure.focus();
+    await page.setViewportSize({ width: 1100, height: 900 });
+    await expect(dock).toBeVisible();
+    await expect(dock).toBeFocused();
+
+    await dock.click();
+    const detailsDisclosure = page
+      .getByRole("dialog", { name: "Objectives" })
+      .getByRole("button", { name: /Run details/i });
+    await detailsDisclosure.focus();
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(rail).toBeVisible();
+    await expect(rail).toBeFocused();
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+});
+
+test.describe("short run workspace", () => {
+  test.use({ viewport: { width: 667, height: 375 }, hasTouch: true });
+
+  test("keeps the objectives dock reachable in landscape", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+
+    const dock = page.getByRole("button", { name: /^Objectives\b/i });
+    await expect(dock).toBeVisible();
+    const bounds = await dock.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.width).toBeGreaterThan(600);
+    await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
 });

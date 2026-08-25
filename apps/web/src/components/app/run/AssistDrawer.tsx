@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Eye, LifeBuoy, LockKeyhole } from "lucide-react";
+import { Eye, LockKeyhole } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { repairObjectiveTitle } from "@/lib/verification-copy";
@@ -101,47 +101,37 @@ export function AssistDrawer(props: {
   const revealedCount = props.hints.filter((hint) => hint.revealed).length;
 
   return (
-    <section aria-label="Assist">
-      <DisclosureRow
-        leading={
-          <LifeBuoy
-            className="size-4 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
-        }
-        title="Assist"
-        meta={
-          props.hints.length
-            ? `${revealedCount}/${props.hints.length}`
-            : undefined
-        }
-        contentClassName="space-y-6"
-      >
-        {props.hintError ? (
-          <p className="text-xs text-destructive">{props.hintError}</p>
-        ) : null}
-        {groups.map((group) => (
-          <HintLadder
-            key={group.key}
-            group={group}
-            onReveal={props.onRevealHint}
-            pendingHintKey={props.pendingHintKey}
-          />
-        ))}
-        {!props.hints.length ? (
-          <p className="text-sm text-muted-foreground">
-            This scenario ships no hints. The machine itself is the
-            documentation.
-          </p>
-        ) : null}
-        <SolutionFooter
-          solution={props.solution}
-          onReveal={props.onRevealSolution}
-          pending={props.solutionPending}
-          error={props.solutionError}
+    <DisclosureRow
+      title="Need a hint?"
+      meta={
+        props.hints.length ? `${revealedCount}/${props.hints.length}` : undefined
+      }
+      density="compact"
+      contentClassName="space-y-5"
+    >
+      {props.hintError ? (
+        <p className="text-xs text-destructive">{props.hintError}</p>
+      ) : null}
+      {groups.map((group) => (
+        <HintLadder
+          key={group.key}
+          group={group}
+          onReveal={props.onRevealHint}
+          pendingHintKey={props.pendingHintKey}
         />
-      </DisclosureRow>
-    </section>
+      ))}
+      {!props.hints.length ? (
+        <p className="text-sm text-muted-foreground">
+          This scenario ships no hints. The machine itself is the documentation.
+        </p>
+      ) : null}
+      <SolutionFooter
+        solution={props.solution}
+        onReveal={props.onRevealSolution}
+        pending={props.solutionPending}
+        error={props.solutionError}
+      />
+    </DisclosureRow>
   );
 }
 

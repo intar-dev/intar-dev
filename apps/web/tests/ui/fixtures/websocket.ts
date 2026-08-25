@@ -33,12 +33,24 @@ export async function installTerminalWebSocketMock(
   page: Page,
   server: MockApiServer,
 ) {
+  let connectionCount = 0;
   await page.routeWebSocket("ws://terminal.example.test/terminal/**", (ws) => {
+    connectionCount += 1;
+    const connectionOrdinal = connectionCount;
     ws.onMessage((message) => {
       if (typeof message !== "string") return;
       try {
         const control = JSON.parse(message) as { type?: string };
-        if (control.type === "open") onOpen(ws, server);
+        if (control.type === "open") {
+          if (
+            server.state.terminalMode === "delayed-first-ready" &&
+            connectionOrdinal === 1
+          ) {
+            setTimeout(() => onOpen(ws, server), 1_000);
+          } else {
+            onOpen(ws, server);
+          }
+        }
       } catch {
         // Terminal input is binary; malformed text frames are ignored here.
       }

@@ -1,7 +1,6 @@
 import "@xterm/xterm/css/xterm.css";
 
 import {
-  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -37,7 +36,6 @@ interface WebSshTerminalProps {
   title?: string;
   onClose?: () => void;
   showCloseButton?: boolean;
-  headerActions?: ReactNode;
 }
 
 interface VmBrowserTerminalSessionResponse {
@@ -108,12 +106,12 @@ export function WebSshTerminal({
   title: titleOverride,
   onClose,
   showCloseButton = true,
-  headerActions,
 }: WebSshTerminalProps) {
   const terminalContainerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitGridRef = useRef<(() => void) | null>(null);
   const websocketRef = useRef<WebSocket | null>(null);
+  const connectionGenerationRef = useRef(0);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const resizeSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -125,6 +123,7 @@ export function WebSshTerminal({
     () => titleOverride ?? `Web SSH · ${vmName}`,
     [titleOverride, vmName],
   );
+  const needsRecovery = status === "disconnected" || status === "error";
   const sessionRequestUrl = sessionRequest?.url ?? null;
   const sessionRequestBodyJson = useMemo(() => {
     if (!sessionRequest?.body) {
@@ -134,7 +133,7 @@ export function WebSshTerminal({
     return JSON.stringify(sessionRequest.body);
   }, [sessionRequest?.body]);
 
-  const disconnect = useCallback(async () => {
+  const closeCurrentSocket = useCallback(() => {
     if (resizeSendTimerRef.current !== null) {
       clearTimeout(resizeSendTimerRef.current);
       resizeSendTimerRef.current = null;
@@ -156,6 +155,13 @@ export function WebSshTerminal({
       }
     }
   }, []);
+
+  const disconnect = useCallback(() => {
+    // Invalidate callbacks before closing the socket. A delayed close from an
+    // old connection must not clear a newer live connection.
+    connectionGenerationRef.current += 1;
+    closeCurrentSocket();
+  }, [closeCurrentSocket]);
 
   const ensureTerminal = useCallback(() => {
     if (terminalRef.current) {
@@ -252,47 +258,64 @@ export function WebSshTerminal({
   }, []);
 
   const connect = useCallback(async () => {
+    const connectionGeneration = connectionGenerationRef.current + 1;
+    connectionGenerationRef.current = connectionGeneration;
     setError(null);
     setStatus("connecting");
-
-    // xterm measures and rasterizes text onto a canvas at construction time.
-    // Wait for the self-hosted face so it never locks in fallback metrics.
-    await loadReplayTerminalFont();
-    const terminal = ensureTerminal();
-    terminal.clear();
-    terminal.writeln("[intar] Creating terminal session...");
-
-    await disconnect();
-    // Fit before the websocket dance so `open` carries the real grid.
-    fitGridRef.current?.();
+    let terminal: Terminal | null = null;
 
     try {
+      // xterm measures and rasterizes text onto a canvas at construction time.
+      // Wait for the self-hosted face so it never locks in fallback metrics.
+      await loadReplayTerminalFont();
+      if (connectionGenerationRef.current !== connectionGeneration) return;
+
+      terminal = ensureTerminal();
+      const connectedTerminal = terminal;
+      connectedTerminal.clear();
+      connectedTerminal.writeln("[intar] Creating terminal session...");
+
+      // The generation was invalidated before the old socket is closed, so
+      // its delayed close callback cannot overwrite this attempt.
+      closeCurrentSocket();
+      // Fit before the websocket dance so `open` carries the real grid.
+      fitGridRef.current?.();
+
       const sessionBundle = await createSessionWithRetries({
         sessionRequestBodyJson,
         sessionRequestUrl,
-        terminal,
+        terminal: connectedTerminal,
       });
-      terminal.writeln(
+      if (connectionGenerationRef.current !== connectionGeneration) return;
+      connectedTerminal.writeln(
         `[intar] Route ${sessionBundle.routeUsername} ready. Opening terminal...`,
       );
 
       const websocket = await connectBrowserTerminalWithRetries({
         session: sessionBundle,
-        terminal,
+        terminal: connectedTerminal,
+        isCurrent: () =>
+          connectionGenerationRef.current === connectionGeneration,
         onRemoteClose: (message) => {
+          if (connectionGenerationRef.current !== connectionGeneration) return;
           if (message) {
-            terminal.writeln(`\r\n[intar] ${message}`);
+            connectedTerminal.writeln(`\r\n[intar] ${message}`);
           }
           websocketRef.current = null;
           setStatus("disconnected");
         },
         onRemoteError: (message) => {
-          terminal.writeln(`\r\n[intar] ERROR: ${message}`);
+          if (connectionGenerationRef.current !== connectionGeneration) return;
+          connectedTerminal.writeln(`\r\n[intar] ERROR: ${message}`);
           websocketRef.current = null;
           setError(message);
           setStatus("error");
         },
       });
+      if (connectionGenerationRef.current !== connectionGeneration) {
+        websocket.close();
+        return;
+      }
       websocketRef.current = websocket;
 
       fitGridRef.current?.();
@@ -300,30 +323,31 @@ export function WebSshTerminal({
       // is an idempotent SIGWINCH.
       sendTerminalControl(websocket, {
         type: "resize",
-        cols: terminal.cols,
-        rows: terminal.rows,
+        cols: connectedTerminal.cols,
+        rows: connectedTerminal.rows,
       });
-      terminal.writeln("[intar] Connected.");
+      connectedTerminal.writeln("[intar] Connected.");
       setStatus("connected");
     } catch (connectError) {
-      await disconnect();
+      if (connectionGenerationRef.current !== connectionGeneration) return;
+      closeCurrentSocket();
       const message =
         connectError instanceof Error
           ? connectError.message
           : "failed to establish terminal session";
-      terminal.writeln(`\r\n[intar] ERROR: ${message}`);
+      terminal?.writeln(`\r\n[intar] ERROR: ${message}`);
       setError(message);
       setStatus("error");
     }
   }, [
-    disconnect,
+    closeCurrentSocket,
     ensureTerminal,
     sessionRequestBodyJson,
     sessionRequestUrl,
   ]);
 
   const closeTerminal = useCallback(() => {
-    void disconnect();
+    disconnect();
     // Let the dialog commit its closed state before the parent removes it so
     // Base UI can restore focus to the element that opened the terminal.
     window.setTimeout(() => onClose?.(), 0);
@@ -333,7 +357,7 @@ export function WebSshTerminal({
     void connect();
 
     return () => {
-      void disconnect();
+      disconnect();
       resizeCleanupRef.current?.();
       resizeCleanupRef.current = null;
       terminalRef.current?.dispose();
@@ -363,24 +387,11 @@ export function WebSshTerminal({
               Terminal status: {status}
             </p>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                void connect();
-              }}
-              disabled={status === "connecting"}
-            >
-              {status === "connecting" ? "Connecting..." : "Reconnect"}
+          {showCloseButton ? (
+            <Button size="sm" variant="outline" onClick={closeTerminal}>
+              Close
             </Button>
-            {headerActions}
-            {showCloseButton ? (
-              <Button size="sm" variant="outline" onClick={closeTerminal}>
-                Close
-              </Button>
-            ) : null}
-          </div>
+          ) : null}
         </div>
 
         <div className="min-h-0 flex-1 bg-terminal-background p-2">
@@ -392,19 +403,13 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        {error || status === "disconnected" ? (
-          <div className="flex shrink-0 border-t px-4 py-3">
-            <p
-              role={error ? "alert" : "status"}
-              aria-live={error ? "assertive" : "polite"}
-              aria-atomic="true"
-              className={`text-xs ${
-                error ? "text-destructive" : "text-muted-foreground"
-              }`}
-            >
-              {error ?? "Terminal session ended."}
-            </p>
-          </div>
+        {needsRecovery ? (
+          <TerminalRecoveryNotice
+            error={error}
+            onReconnect={() => {
+              void connect();
+            }}
+          />
         ) : null}
       </div>
     );
@@ -431,34 +436,29 @@ export function WebSshTerminal({
               role="status"
               aria-live="polite"
               aria-atomic="true"
-              className="text-xs"
+              className={
+                status === "connected"
+                  ? "sr-only"
+                  : "text-xs text-muted-foreground"
+              }
             >
               Terminal status: {status}
             </DialogDescription>
           </div>
-          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-            <Button
-              size="sm"
-              variant="outline"
-              className="w-full sm:w-auto"
-              onClick={() => {
-                void connect();
-              }}
-              disabled={status === "connecting"}
-            >
-              {status === "connecting" ? "Connecting..." : "Reconnect"}
-            </Button>
-            {headerActions}
-            {showCloseButton ? (
-              <DialogClose
-                render={
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="w-full sm:w-auto"
-                  />
-                }
+          <div className="flex items-center gap-2">
+            {status === "connected" ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  void connect();
+                }}
               >
+                Reconnect
+              </Button>
+            ) : null}
+            {showCloseButton ? (
+              <DialogClose render={<Button size="sm" variant="outline" />}>
                 Close
               </DialogClose>
             ) : null}
@@ -474,22 +474,51 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        {error || status === "disconnected" ? (
-          <div className="flex border-t px-4 py-3">
-            <p
-              role={error ? "alert" : "status"}
-              aria-live={error ? "assertive" : "polite"}
-              aria-atomic="true"
-              className={`text-xs ${
-                error ? "text-destructive" : "text-muted-foreground"
-              }`}
-            >
-              {error ?? "Terminal session ended."}
-            </p>
-          </div>
+        {needsRecovery ? (
+          <TerminalRecoveryNotice
+            error={error}
+            onReconnect={() => {
+              void connect();
+            }}
+          />
         ) : null}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function TerminalRecoveryNotice({
+  error,
+  onReconnect,
+}: {
+  error: string | null;
+  onReconnect: () => void;
+}) {
+  const hasError = error !== null;
+
+  return (
+    <div className="flex shrink-0 flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <p
+        role={hasError ? "alert" : "status"}
+        aria-live={hasError ? "assertive" : "polite"}
+        aria-atomic="true"
+        className={`text-sm ${
+          hasError ? "text-destructive" : "text-muted-foreground"
+        }`}
+      >
+        {hasError
+          ? "The terminal connection needs recovery. Reconnect to try again."
+          : "The terminal session ended. Reconnect to continue."}
+      </p>
+      <Button
+        size="sm"
+        variant="outline"
+        className="min-h-11 w-full shrink-0 sm:w-auto"
+        onClick={onReconnect}
+      >
+        Reconnect terminal
+      </Button>
+    </div>
   );
 }
 
@@ -563,6 +592,7 @@ async function createSessionWithRetries(input: {
 async function connectBrowserTerminalWithRetries(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
+  isCurrent: () => boolean;
   onRemoteClose: (message?: string) => void;
   onRemoteError: (message: string) => void;
 }): Promise<WebSocket> {
@@ -594,6 +624,7 @@ async function connectBrowserTerminalWithRetries(input: {
 async function connectBrowserTerminal(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
+  isCurrent: () => boolean;
   onRemoteClose: (message?: string) => void;
   onRemoteError: (message: string) => void;
 }): Promise<WebSocket> {
@@ -604,6 +635,7 @@ async function connectBrowserTerminal(input: {
   try {
     const ready = new Promise<void>((resolve, reject) => {
       let resolved = false;
+      let terminalEnded = false;
 
       const handleMessage = (event: MessageEvent) => {
         if (typeof event.data === "string") {
@@ -617,7 +649,10 @@ async function connectBrowserTerminal(input: {
               resolve();
               return;
             case "exit":
-              input.onRemoteClose(`Session ended (exit ${control.code}).`);
+              if (!terminalEnded) {
+                terminalEnded = true;
+                input.onRemoteClose(`Session ended (exit ${control.code}).`);
+              }
               try {
                 websocket.close();
               } catch {
@@ -626,8 +661,10 @@ async function connectBrowserTerminal(input: {
               return;
             case "error":
               if (!resolved) {
+                terminalEnded = true;
                 reject(new Error(control.message));
-              } else {
+              } else if (!terminalEnded) {
+                terminalEnded = true;
                 input.onRemoteError(control.message);
               }
               try {
@@ -639,7 +676,7 @@ async function connectBrowserTerminal(input: {
           }
         }
 
-        if (event.data instanceof ArrayBuffer) {
+        if (event.data instanceof ArrayBuffer && input.isCurrent()) {
           input.terminal.write(decodeTerminalOutput(event.data));
         }
       };
@@ -647,6 +684,9 @@ async function connectBrowserTerminal(input: {
       const handleClose = () => {
         if (!resolved) {
           reject(new Error("websocket closed before terminal opened"));
+        } else if (!terminalEnded) {
+          terminalEnded = true;
+          input.onRemoteClose();
         }
       };
 

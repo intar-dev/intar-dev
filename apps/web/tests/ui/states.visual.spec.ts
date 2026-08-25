@@ -28,6 +28,16 @@ test.describe("focused visual states", () => {
         theme: "dark",
         runState,
       });
+      if (runState === "disconnected") {
+        await expect(
+          page.getByText("The terminal session ended. Reconnect to continue.", {
+            exact: true,
+          }),
+        ).toBeVisible();
+        await expect(
+          page.getByRole("button", { name: "Reconnect terminal" }),
+        ).toBeVisible();
+      }
       await expectRouteScreenshot(page, `run-${runState}-dark-desktop`);
     });
   }
@@ -241,14 +251,14 @@ test.describe("focused visual states", () => {
 test.describe("focused mobile workspace", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
-  test("run status dock", async ({ page, ui }) => {
+  test("objectives dock", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "running",
     });
     const statusAction = page.getByRole("button", {
-      name: /checks|status|run details/i,
+      name: /^Objectives\b/i,
     });
     await expect(statusAction.first()).toBeVisible();
     await statusAction.first().click();
@@ -265,7 +275,7 @@ test.describe("focused mobile workspace", () => {
       page.getByRole("heading", { name: "Preparing your workspace" }),
     ).toBeVisible();
     await page
-      .getByRole("button", { name: /Work order and briefing/i })
+      .getByRole("button", { name: /^Work order\b/i })
       .click();
     await expectRouteScreenshot(page, "run-startup-work-order-dark-mobile");
   });
