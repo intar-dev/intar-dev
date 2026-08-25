@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -29,6 +30,10 @@ use russh::{
     server::{self, Auth, Msg, Server as _, Session},
 };
 use serde::Serialize;
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 use stargate_core::{
     AdminAuthSettings, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
     IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode,
@@ -90,6 +95,60 @@ async fn public_ssh_profile_key_route_happy_path() -> Result<()> {
     let harness = Harness::start().await?;
     let output = harness.public_exec_with_profile_key("hostname").await?;
     assert!(output.contains("exec:hostname"), "{output}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_session_reissue_with_same_key_keeps_existing_ssh_connection() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .assert_native_reissue_with_same_key_keeps_existing_ssh_connection()
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_session_reissue_with_new_key_revokes_old_ssh_connection() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .assert_native_reissue_with_new_key_revokes_old_ssh_connection()
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_native_route_reissue_with_new_key_revokes_old_ssh_connection() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .assert_expired_native_reissue_with_new_key_revokes_old_ssh_connection()
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_prior_native_key_is_replaced_and_revoked() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .assert_malformed_prior_native_key_is_replaced_and_revoked()
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_target_or_metadata_change_revokes_existing_ssh_connection() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .assert_native_target_or_metadata_change_revokes_existing_ssh_connection()
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_and_browser_route_overwrites_revoke_existing_sessions() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .assert_native_and_browser_route_overwrites_revoke_existing_sessions()
+        .await?;
     Ok(())
 }
 
@@ -682,6 +741,7 @@ struct WorkspaceAppBrowserSession {
 
 struct Harness {
     _temp_dir: TempDir,
+    database_path: PathBuf,
     admin_task: tokio::task::JoinHandle<()>,
     public_task: tokio::task::JoinHandle<()>,
     public_ssh_task: tokio::task::JoinHandle<()>,
@@ -832,6 +892,7 @@ impl Harness {
 
         let harness = Self {
             _temp_dir: temp_dir,
+            database_path,
             admin_task,
             public_task,
             public_ssh_task,
@@ -927,7 +988,21 @@ impl Harness {
         authorized_client_public_keys_openssh: Vec<String>,
         route_lifetime: Duration,
     ) -> Result<reqwest::Response> {
-        let request = IssueTerminalSessionRequest {
+        let request = self.terminal_session_request(
+            mode,
+            authorized_client_public_keys_openssh,
+            route_lifetime,
+        )?;
+        self.send_terminal_session_request(&request).await
+    }
+
+    fn terminal_session_request(
+        &self,
+        mode: TerminalSessionMode,
+        authorized_client_public_keys_openssh: Vec<String>,
+        route_lifetime: Duration,
+    ) -> Result<IssueTerminalSessionRequest> {
+        Ok(IssueTerminalSessionRequest {
             route_username: self.route_username.clone(),
             target_username: self.target_username.clone(),
             target_ip: "127.0.0.1".to_owned(),
@@ -945,14 +1020,19 @@ impl Harness {
                 vm_id: Some("vm-01".to_owned()),
                 user_id: Some("user-01".to_owned()),
             },
-        };
-        let response = reqwest::Client::new()
+        })
+    }
+
+    async fn send_terminal_session_request(
+        &self,
+        request: &IssueTerminalSessionRequest,
+    ) -> Result<reqwest::Response> {
+        Ok(reqwest::Client::new()
             .post(format!("http://{}/v1/terminal-sessions", self.admin_addr))
             .header("x-stargate-admin-assertion", self.admin_token()?)
-            .json(&request)
+            .json(request)
             .send()
-            .await?;
-        Ok(response)
+            .await?)
     }
 
     async fn delete_route(&self) -> Result<()> {
@@ -1243,6 +1323,227 @@ impl Harness {
         Ok(())
     }
 
+    async fn assert_native_reissue_with_same_key_keeps_existing_ssh_connection(
+        &self,
+    ) -> Result<()> {
+        let session = self.issue_native_terminal_session(true).await?;
+        session.native.context("missing native bundle")?;
+        let (_connection, mut channel) = self
+            .open_public_shell_with_private_key(&self.profile_client_private_key_openssh)
+            .await?;
+        wait_for_native_channel_data(&mut channel, "shell ready").await?;
+
+        // A comment may change across browser refreshes without changing the key.
+        let reissued = self
+            .issue_terminal_session_with_keys(
+                TerminalSessionMode::Native,
+                vec![format!(
+                    "{} browser-refresh",
+                    self.profile_client_public_key_openssh
+                )],
+            )
+            .await?;
+        assert_eq!(
+            reissued
+                .native
+                .context("missing native bundle after same-key reissue")?
+                .authorized_key_count,
+            1
+        );
+
+        channel
+            .data_bytes(b"same-key-reissue-still-connected\n".to_vec())
+            .await?;
+        wait_for_native_channel_data(&mut channel, "same-key-reissue-still-connected").await?;
+        Ok(())
+    }
+
+    async fn assert_native_reissue_with_new_key_revokes_old_ssh_connection(&self) -> Result<()> {
+        let session = self.issue_native_terminal_session(true).await?;
+        session.native.context("missing native bundle")?;
+        let (_old_connection, mut old_channel) = self
+            .open_public_shell_with_private_key(&self.profile_client_private_key_openssh)
+            .await?;
+        wait_for_native_channel_data(&mut old_channel, "shell ready").await?;
+
+        let mut rng = russh::keys::key::safe_rng();
+        let replacement_key =
+            russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
+        let replacement_private_key_openssh = replacement_key
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)?
+            .to_string();
+        let replacement_public_key_openssh = replacement_key.public_key().to_openssh()?;
+
+        let reissued = self
+            .issue_terminal_session_with_keys(
+                TerminalSessionMode::Native,
+                vec![replacement_public_key_openssh],
+            )
+            .await?;
+        assert_eq!(
+            reissued
+                .native
+                .context("missing native bundle after key rotation")?
+                .authorized_key_count,
+            1
+        );
+        wait_for_native_channel_close(&mut old_channel).await?;
+
+        let mut old_key_session = self.open_public_ssh_session().await?;
+        assert!(
+            !self
+                .authenticate_public_key(
+                    &mut old_key_session,
+                    &self.profile_client_private_key_openssh,
+                )
+                .await?,
+            "the replaced native public key remained authorized after reissue"
+        );
+
+        let output = self
+            .ssh_exec_with_private_key(&replacement_private_key_openssh, "hostname")
+            .await?;
+        assert!(
+            output.contains("exec:hostname"),
+            "replacement native public key could not reach the target: {output}"
+        );
+        Ok(())
+    }
+
+    async fn assert_expired_native_reissue_with_new_key_revokes_old_ssh_connection(
+        &self,
+    ) -> Result<()> {
+        let initial = self
+            .issue_terminal_session_raw_with_lifetime(
+                TerminalSessionMode::Native,
+                vec![self.profile_client_public_key_openssh.clone()],
+                Duration::from_secs(2),
+            )
+            .await?;
+        assert!(initial.status().is_success(), "{}", initial.text().await?);
+
+        let (_old_connection, mut old_channel) = self
+            .open_public_shell_with_private_key(&self.profile_client_private_key_openssh)
+            .await?;
+        wait_for_native_channel_data(&mut old_channel, "shell ready").await?;
+
+        // The e2e harness does not run the periodic expiry worker. This keeps
+        // the expired record in SQLite while its old SSH connection is still
+        // live, which is the reissue edge the rotation lookup must cover.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let (_, replacement_public_key_openssh) = new_client_keypair()?;
+        let reissued = self
+            .issue_terminal_session_with_keys(
+                TerminalSessionMode::Native,
+                vec![replacement_public_key_openssh],
+            )
+            .await?;
+        reissued
+            .native
+            .context("missing native bundle after expired route reissue")?;
+        wait_for_native_channel_close(&mut old_channel).await?;
+        Ok(())
+    }
+
+    async fn assert_malformed_prior_native_key_is_replaced_and_revoked(&self) -> Result<()> {
+        let session = self.issue_native_terminal_session(true).await?;
+        session.native.context("missing native bundle")?;
+        let (_old_connection, mut old_channel) = self
+            .open_public_shell_with_private_key(&self.profile_client_private_key_openssh)
+            .await?;
+        wait_for_native_channel_data(&mut old_channel, "shell ready").await?;
+
+        // Valid JSON with an invalid OpenSSH key models an old or corrupted
+        // persisted route without preventing the replacement from being read.
+        self.replace_authorized_client_keys_json(r#"["ssh-ed25519 not-a-key"]"#)
+            .await?;
+        let (_, replacement_public_key_openssh) = new_client_keypair()?;
+        let reissued = self
+            .issue_terminal_session_with_keys(
+                TerminalSessionMode::Native,
+                vec![replacement_public_key_openssh],
+            )
+            .await?;
+        reissued
+            .native
+            .context("missing native bundle after malformed route replacement")?;
+        wait_for_native_channel_close(&mut old_channel).await?;
+        Ok(())
+    }
+
+    async fn assert_native_target_or_metadata_change_revokes_existing_ssh_connection(
+        &self,
+    ) -> Result<()> {
+        let session = self.issue_native_terminal_session(true).await?;
+        session.native.context("missing native bundle")?;
+        let (_old_connection, mut old_channel) = self
+            .open_public_shell_with_private_key(&self.profile_client_private_key_openssh)
+            .await?;
+        wait_for_native_channel_data(&mut old_channel, "shell ready").await?;
+
+        let mut replacement = self.terminal_session_request(
+            TerminalSessionMode::Native,
+            vec![self.profile_client_public_key_openssh.clone()],
+            Duration::from_secs(60 * 60),
+        )?;
+        replacement.target_username = "replacement-target-user".to_owned();
+        replacement.metadata.run_id = Some("run-02".to_owned());
+        let response = self.send_terminal_session_request(&replacement).await?;
+        assert!(response.status().is_success(), "{}", response.text().await?);
+        wait_for_native_channel_close(&mut old_channel).await?;
+        Ok(())
+    }
+
+    async fn assert_native_and_browser_route_overwrites_revoke_existing_sessions(
+        &self,
+    ) -> Result<()> {
+        let session = self.issue_native_terminal_session(true).await?;
+        session.native.context("missing native bundle")?;
+        let (_native_connection, mut native_channel) = self
+            .open_public_shell_with_private_key(&self.profile_client_private_key_openssh)
+            .await?;
+        wait_for_native_channel_data(&mut native_channel, "shell ready").await?;
+
+        let browser = self
+            .issue_terminal_session_with_keys(TerminalSessionMode::Browser, Vec::new())
+            .await?;
+        browser
+            .browser
+            .context("missing browser bundle after native overwrite")?;
+        wait_for_native_channel_close(&mut native_channel).await?;
+
+        let mut websocket = self.open_browser_terminal().await?;
+        browser_open_terminal(&mut websocket).await?;
+        let native = self.issue_native_terminal_session(true).await?;
+        native
+            .native
+            .context("missing native bundle after browser overwrite")?;
+        assert_websocket_closes(&mut websocket, Duration::from_secs(2)).await?;
+        Ok(())
+    }
+
+    async fn replace_authorized_client_keys_json(&self, value: &str) -> Result<()> {
+        let options = SqliteConnectOptions::new().filename(&self.database_path);
+        let pool: SqlitePool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let updated = sqlx::query(
+            "UPDATE routes SET authorized_client_public_keys_json = ? WHERE route_username = ?",
+        )
+        .bind(value)
+        .bind(&self.route_username)
+        .execute(&pool)
+        .await?
+        .rows_affected();
+        pool.close().await;
+        anyhow::ensure!(
+            updated == 1,
+            "failed to corrupt the native route for this test"
+        );
+        Ok(())
+    }
+
     async fn open_browser_terminal(
         &self,
     ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
@@ -1275,27 +1576,68 @@ impl Harness {
         Ok(websocket)
     }
 
-    async fn ssh_exec(&self, command: &str) -> Result<String> {
+    async fn open_public_ssh_session(&self) -> Result<client::Handle<TestClient>> {
         let config = client_config(&self.public_host_public);
-        let route_key = Arc::new(russh::keys::decode_secret_key(
-            &self.profile_client_private_key_openssh,
-            None,
-        )?);
-        let mut session = russh::client::connect(
+        russh::client::connect(
             config,
             self.public_ssh_addr,
             TestClient {
                 expected_server_key: self.public_host_public.clone(),
             },
         )
-        .await?;
+        .await
+    }
+
+    async fn authenticate_public_key(
+        &self,
+        session: &mut client::Handle<TestClient>,
+        private_key_openssh: &str,
+    ) -> Result<bool> {
+        let route_key = Arc::new(russh::keys::decode_secret_key(private_key_openssh, None)?);
         let auth_result = session
             .authenticate_publickey(
                 &self.route_username,
                 PrivateKeyWithHashAlg::new(route_key, None),
             )
             .await?;
-        assert!(auth_result.success());
+        Ok(auth_result.success())
+    }
+
+    async fn open_public_shell_with_private_key(
+        &self,
+        private_key_openssh: &str,
+    ) -> Result<(client::Handle<TestClient>, Channel<client::Msg>)> {
+        let mut session = self.open_public_ssh_session().await?;
+        assert!(
+            self.authenticate_public_key(&mut session, private_key_openssh)
+                .await?,
+            "native SSH authentication failed"
+        );
+
+        let channel = session.channel_open_session().await?;
+        channel
+            .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+            .await?;
+        channel.request_shell(true).await?;
+        Ok((session, channel))
+    }
+
+    async fn ssh_exec(&self, command: &str) -> Result<String> {
+        self.ssh_exec_with_private_key(&self.profile_client_private_key_openssh, command)
+            .await
+    }
+
+    async fn ssh_exec_with_private_key(
+        &self,
+        private_key_openssh: &str,
+        command: &str,
+    ) -> Result<String> {
+        let mut session = self.open_public_ssh_session().await?;
+        assert!(
+            self.authenticate_public_key(&mut session, private_key_openssh)
+                .await?,
+            "native SSH authentication failed"
+        );
 
         let mut channel = session.channel_open_session().await?;
         channel.exec(true, command).await?;
@@ -1348,6 +1690,16 @@ impl Drop for Harness {
     }
 }
 
+fn new_client_keypair() -> Result<(String, String)> {
+    let mut rng = russh::keys::key::safe_rng();
+    let key = russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
+    Ok((
+        key.to_openssh(russh::keys::ssh_key::LineEnding::LF)?
+            .to_string(),
+        key.public_key().to_openssh()?,
+    ))
+}
+
 async fn assert_websocket_closes(
     websocket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     within: Duration,
@@ -1363,6 +1715,42 @@ async fn assert_websocket_closes(
     .await
     .context("websocket remained open past its authorization expiry")?;
     Ok(())
+}
+
+async fn wait_for_native_channel_data(
+    channel: &mut Channel<client::Msg>,
+    expected: &str,
+) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    if std::str::from_utf8(&data)?.contains(expected) {
+                        return Ok(());
+                    }
+                }
+                Some(ChannelMsg::Close) | Some(ChannelMsg::Eof) | None => {
+                    anyhow::bail!("native SSH channel closed before receiving {expected:?}")
+                }
+                Some(_) => continue,
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for native SSH channel data")?
+}
+
+async fn wait_for_native_channel_close(channel: &mut Channel<client::Msg>) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Close) | Some(ChannelMsg::Eof) | None => return Ok(()),
+                Some(_) => continue,
+            }
+        }
+    })
+    .await
+    .context("native SSH session did not close after key rotation")?
 }
 
 async fn browser_open_terminal(

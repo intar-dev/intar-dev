@@ -516,32 +516,52 @@ async fn run_bridge_inner(
     events_tx: &tokio_mpsc::Sender<BridgeEvent>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<u32> {
-    let mut session = client::connect(
-        client_config(),
-        target.addr,
-        StrictHostKey {
-            expected: target.expected_host_key,
-        },
-    )
-    .await
-    .with_context(|| format!("failed connecting to target {}", target.addr))?;
+    let mut session = tokio::select! {
+        _ = cancel.cancelled() => return Ok(255),
+        result = client::connect(
+            client_config(),
+            target.addr,
+            StrictHostKey {
+                expected: target.expected_host_key,
+            },
+        ) => result.with_context(|| format!("failed connecting to target {}", target.addr))?,
+    };
+    if cancel.is_cancelled() {
+        return Ok(255);
+    }
 
-    let auth_result = session
-        .authenticate_publickey(
+    let auth_result = tokio::select! {
+        _ = cancel.cancelled() => return Ok(255),
+        result = session.authenticate_publickey(
             route.target_username,
             PrivateKeyWithHashAlg::new(target.private_key, None),
-        )
-        .await
-        .context("target public-key authentication failed")?;
+        ) => result.context("target public-key authentication failed")?,
+    };
     if !auth_result.success() {
         bail!("target public-key authentication was rejected");
     }
+    if cancel.is_cancelled() {
+        return Ok(255);
+    }
 
-    let channel = session
-        .channel_open_session()
-        .await
-        .context("failed opening target session channel")?;
-    configure_channel(&channel, mode).await?;
+    let channel = tokio::select! {
+        _ = cancel.cancelled() => return Ok(255),
+        result = session.channel_open_session() => result.context("failed opening target session channel")?,
+    };
+    if cancel.is_cancelled() {
+        return Ok(255);
+    }
+    {
+        let configure = configure_channel(&channel, mode);
+        tokio::pin!(configure);
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(255),
+            result = &mut configure => result?,
+        }
+    }
+    if cancel.is_cancelled() {
+        return Ok(255);
+    }
     let (read_half, write_half) = channel.split();
     let status = bridge_channel(read_half, write_half, input_rx, events_tx, cancel).await;
 

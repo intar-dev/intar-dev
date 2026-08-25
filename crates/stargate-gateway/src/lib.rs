@@ -49,6 +49,10 @@ pub struct PublicGatewayState {
 pub struct GatewayState {
     pub store: SqliteRouteStore,
     pub sessions: SessionRegistry,
+    // Terminal route updates replace authorization as well as connection
+    // details. Keep the read, replacement, and revocation together so two
+    // concurrent issuers cannot decide from different previous records.
+    pub(crate) terminal_route_mutation: Arc<tokio::sync::Mutex<()>>,
     pub(crate) workspace_app_tunnels: WorkspaceAppTunnelPool,
     pub admin_auth: AssertionValidator,
     pub public_web: PublicGatewayState,
@@ -66,6 +70,7 @@ impl GatewayState {
         Ok(Self {
             store,
             sessions: SessionRegistry::default(),
+            terminal_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             workspace_app_tunnels: WorkspaceAppTunnelPool::default(),
             admin_auth: AssertionValidator::new(admin_auth)?,
             public_web: PublicGatewayState {

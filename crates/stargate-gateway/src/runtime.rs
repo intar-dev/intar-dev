@@ -43,6 +43,10 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
+            // Terminal issuance holds the same mutex through its previous-row
+            // read, upsert, and revoke. The expiry sweep must not delete a
+            // freshly reissued route between those steps.
+            let _terminal_route_mutation = expiry_gateway.terminal_route_mutation.lock().await;
             match expiry_gateway
                 .store
                 .delete_expired_routes(time::OffsetDateTime::now_utc())
@@ -57,6 +61,7 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
                     tracing::warn!(error = %error, "failed to delete expired routes");
                 }
             }
+            drop(_terminal_route_mutation);
             match expiry_gateway
                 .store
                 .delete_expired_workspace_app_routes(time::OffsetDateTime::now_utc())

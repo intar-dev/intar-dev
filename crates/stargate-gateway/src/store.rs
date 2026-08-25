@@ -17,6 +17,15 @@ pub struct SqliteRouteStore {
     pool: SqlitePool,
 }
 
+/// The route state visible to a terminal-route replacement. This deliberately
+/// includes expired records: their live SSH sessions can still be present
+/// until the expiry worker observes and terminates them.
+pub(crate) enum RouteRotationPrevious {
+    Missing,
+    Present(Box<RouteRecord>),
+    Malformed,
+}
+
 impl SqliteRouteStore {
     pub async fn connect<P: AsRef<Path>>(database_path: P) -> Result<Self> {
         let path = database_path.as_ref();
@@ -140,6 +149,55 @@ impl SqliteRouteStore {
         .map_err(sqlx_error)?;
 
         row.map(row_to_route).transpose()
+    }
+
+    pub(crate) async fn get_route_for_rotation(
+        &self,
+        route_username: &str,
+    ) -> Result<RouteRotationPrevious> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                route_username,
+                target_username,
+                target_ip,
+                target_port,
+                authorized_client_public_keys_json,
+                target_host_key_openssh,
+                target_private_key_openssh,
+                expires_at,
+                host_id,
+                run_id,
+                vm_id,
+                user_id,
+                created_at,
+                updated_at
+            FROM routes
+            WHERE route_username = ?
+            "#,
+        )
+        .bind(route_username)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?;
+
+        let Some(row) = row else {
+            return Ok(RouteRotationPrevious::Missing);
+        };
+        match row_to_route(row) {
+            Ok(route) => Ok(RouteRotationPrevious::Present(Box::new(route))),
+            Err(error) => {
+                // A valid replacement request must be able to repair an old
+                // malformed row. The issuer treats this as an authorization
+                // change and revokes any sessions bound to it.
+                tracing::warn!(
+                    route_username,
+                    error = %error,
+                    "terminal route record is malformed during replacement"
+                );
+                Ok(RouteRotationPrevious::Malformed)
+            }
+        }
     }
 
     pub async fn delete_route(&self, route_username: &str) -> Result<bool> {

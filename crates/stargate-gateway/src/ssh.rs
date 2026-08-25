@@ -173,11 +173,12 @@ impl server::Handler for SshConnection {
         // (which owns a disconnect handle) is visible in the same registry.
         // Route deletion therefore catches one of the two entries throughout
         // the auth-to-channel transition.
-        let connection_lease = self.state.sessions.register(
-            route.route_username.clone(),
-            SessionKind::NativeSsh,
-            Some(session.handle()),
-        );
+        let Some(connection_lease) =
+            admission.register_child(SessionKind::NativeSsh, Some(session.handle()))
+        else {
+            session.disconnect(Disconnect::ByApplication, "route revoked", "en-US")?;
+            return Ok(());
+        };
         if admission.token().is_cancelled() || connection_lease.token().is_cancelled() {
             connection_lease.terminate();
             session.disconnect(Disconnect::ByApplication, "route revoked", "en-US")?;
@@ -264,11 +265,22 @@ impl server::Handler for SshConnection {
             .ok_or_else(|| anyhow::anyhow!("route missing for shell request"))?;
         let pty = self.pty_for(channel);
         let handle = session.handle();
-        let lease = self.state.sessions.register(
-            route.route_username.clone(),
-            SessionKind::NativeSsh,
-            Some(handle.clone()),
-        );
+        let Some(connection) = self.connection_lease.as_ref() else {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        };
+        let Some(lease) = connection.register_child(SessionKind::NativeSsh, Some(handle.clone()))
+        else {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        };
+        if lease.token().is_cancelled() {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         let (controller, events) = spawn_pty_bridge(
             route,
             PtyBridgeOptions {
@@ -308,11 +320,22 @@ impl server::Handler for SshConnection {
             .ok_or_else(|| anyhow::anyhow!("route missing for exec request"))?;
         let command = std::str::from_utf8(data)?.to_owned();
         let handle = session.handle();
-        let lease = self.state.sessions.register(
-            route.route_username.clone(),
-            SessionKind::NativeSsh,
-            Some(handle.clone()),
-        );
+        let Some(connection) = self.connection_lease.as_ref() else {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        };
+        let Some(lease) = connection.register_child(SessionKind::NativeSsh, Some(handle.clone()))
+        else {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        };
+        if lease.token().is_cancelled() {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
 
         let active = if let Some(pty) = self.channels.get(&channel).and_then(|state| match state {
             ChannelState::Pending { pty } => pty.clone(),
@@ -423,15 +446,25 @@ impl SshConnection {
         &self,
         username: &str,
     ) -> anyhow::Result<Option<(RouteRecord, SessionLease)>> {
-        let admission =
-            self.state
-                .sessions
-                .register(username.to_owned(), SessionKind::NativeSsh, None);
-        let cancel = admission.token();
-        let route = tokio::select! {
-            _ = cancel.cancelled() => None,
-            route = self.state.store.get_route(username) => route?,
+        // Coordinate the admission with terminal-route replacement. Without
+        // this, a new-key client can register under the old session generation
+        // after the route upsert but before replacement revokes that generation.
+        // Key verification happens after this scope, so the mutation lock is
+        // held only for the registry admission and SQLite lookup.
+        let (route, admission) = {
+            let _terminal_route_mutation = self.state.terminal_route_mutation.lock().await;
+            let admission =
+                self.state
+                    .sessions
+                    .register(username.to_owned(), SessionKind::NativeSsh, None);
+            let cancel = admission.token();
+            let route = tokio::select! {
+                _ = cancel.cancelled() => None,
+                route = self.state.store.get_route(username) => route?,
+            };
+            (route, admission)
         };
+        let cancel = admission.token();
         let Some(route) = route else {
             return Ok(None);
         };
@@ -511,5 +544,122 @@ async fn forward_bridge_events(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, net::SocketAddr, task::Poll};
+
+    use futures_util::poll;
+    use stargate_core::{
+        AdminAuthSettings, RegisteredRoute, RouteMetadata, SessionKind, TerminalTokenSettings,
+        WebSettings,
+    };
+    use time::OffsetDateTime;
+
+    use super::SshConnection;
+    use crate::{GatewayState, SqliteRouteStore};
+
+    const FIRST_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR";
+    const SECOND_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA8ax6Yk1ZMSRpAkk8cIriNXtVufy6mxst2stQk66n+d";
+
+    #[tokio::test]
+    async fn native_admission_waits_for_route_rotation_before_registering() -> anyhow::Result<()> {
+        let (_temp_dir, state) = test_gateway_state().await?;
+        state.store.upsert_route(test_route(FIRST_KEY)).await?;
+        let connection = SshConnection {
+            state: state.clone(),
+            peer_addr: None,
+            route: None,
+            route_admission: None,
+            connection_lease: None,
+            channels: HashMap::new(),
+        };
+
+        // Hold the exact lock used by replacement. A pre-fix admission would
+        // already register in generation zero while this future is polled.
+        // Rotate before releasing it, then require the admission to observe
+        // the new route and its new, live session generation.
+        let held = state.terminal_route_mutation.lock().await;
+        let mut admission = Box::pin(connection.load_route_with_admission("run-01-web"));
+        assert!(matches!(poll!(admission.as_mut()), Poll::Pending));
+        state.store.upsert_route(test_route(SECOND_KEY)).await?;
+        state.sessions.terminate_username("run-01-web").await;
+        drop(held);
+
+        let Some((route, lease)) = admission.await? else {
+            anyhow::bail!("admission was cancelled by the rotation it waited for");
+        };
+        assert_eq!(
+            route.authorized_client_public_keys_openssh,
+            vec![SECOND_KEY.to_owned()]
+        );
+        assert!(
+            !lease.token().is_cancelled(),
+            "new-key admission was registered in the old cancelled generation"
+        );
+        assert!(
+            lease.register_child(SessionKind::NativeSsh, None).is_some(),
+            "new-key admission could not create a bridge in the current generation"
+        );
+        Ok(())
+    }
+
+    fn test_route(key: &str) -> RegisteredRoute {
+        RegisteredRoute {
+            route_username: "run-01-web".to_owned(),
+            target_username: "ubuntu".to_owned(),
+            target_ip: "127.0.0.1".to_owned(),
+            target_port: 22,
+            authorized_client_public_keys_openssh: vec![key.to_owned()],
+            target_host_key_openssh: "target-host-key".to_owned(),
+            target_private_key_openssh: "target-private-key".to_owned(),
+            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            metadata: RouteMetadata {
+                host_id: Some("host-01".to_owned()),
+                run_id: Some("run-01".to_owned()),
+                vm_id: Some("vm-01".to_owned()),
+                user_id: Some("user-01".to_owned()),
+            },
+        }
+    }
+
+    async fn test_gateway_state() -> anyhow::Result<(tempfile::TempDir, GatewayState)> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = SqliteRouteStore::connect(temp_dir.path().join("stargate.db")).await?;
+        let mut rng = russh::keys::key::safe_rng();
+        let public_host_key =
+            russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
+        let web = WebSettings {
+            bind: "127.0.0.1:0".parse::<SocketAddr>()?,
+            public_base_url: "https://stargate.example.test".parse()?,
+            public_ssh_host: "stargate.example.test".to_owned(),
+            public_ssh_port: 22,
+            allowed_origins: vec!["https://intar.example.test".to_owned()],
+            workspace_app_base_domain: None,
+            workspace_app_bootstrap_ttl_seconds: 60,
+            workspace_app_session_ttl_seconds: 60,
+        };
+        let state = GatewayState::new(
+            store,
+            AdminAuthSettings {
+                assertion_header: "x-stargate-admin-assertion".to_owned(),
+                audience: "stargate-admin".to_owned(),
+                issuer: "https://issuer.example.test".to_owned(),
+                jwks_url: None,
+                hs256_secret: Some("test-secret".to_owned()),
+            },
+            &web,
+            public_host_key.public_key().clone(),
+            TerminalTokenSettings {
+                issuer: "stargate".to_owned(),
+                audience: "stargate-terminal".to_owned(),
+                hs256_secret: "terminal-secret".to_owned(),
+            },
+        )?;
+        Ok((temp_dir, state))
     }
 }
