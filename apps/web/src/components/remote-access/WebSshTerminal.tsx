@@ -262,7 +262,6 @@ export function WebSshTerminal({
     connectionGenerationRef.current = connectionGeneration;
     setError(null);
     setStatus("connecting");
-    let terminal: Terminal | null = null;
 
     try {
       // xterm measures and rasterizes text onto a canvas at construction time.
@@ -270,10 +269,8 @@ export function WebSshTerminal({
       await loadReplayTerminalFont();
       if (connectionGenerationRef.current !== connectionGeneration) return;
 
-      terminal = ensureTerminal();
-      const connectedTerminal = terminal;
+      const connectedTerminal = ensureTerminal();
       connectedTerminal.clear();
-      connectedTerminal.writeln("[intar] Creating terminal session...");
 
       // The generation was invalidated before the old socket is closed, so
       // its delayed close callback cannot overwrite this attempt.
@@ -284,29 +281,21 @@ export function WebSshTerminal({
       const sessionBundle = await createSessionWithRetries({
         sessionRequestBodyJson,
         sessionRequestUrl,
-        terminal: connectedTerminal,
       });
       if (connectionGenerationRef.current !== connectionGeneration) return;
-      connectedTerminal.writeln(
-        `[intar] Route ${sessionBundle.routeUsername} ready. Opening terminal...`,
-      );
 
       const websocket = await connectBrowserTerminalWithRetries({
         session: sessionBundle,
         terminal: connectedTerminal,
         isCurrent: () =>
           connectionGenerationRef.current === connectionGeneration,
-        onRemoteClose: (message) => {
+        onRemoteClose: () => {
           if (connectionGenerationRef.current !== connectionGeneration) return;
-          if (message) {
-            connectedTerminal.writeln(`\r\n[intar] ${message}`);
-          }
           websocketRef.current = null;
           setStatus("disconnected");
         },
         onRemoteError: (message) => {
           if (connectionGenerationRef.current !== connectionGeneration) return;
-          connectedTerminal.writeln(`\r\n[intar] ERROR: ${message}`);
           websocketRef.current = null;
           setError(message);
           setStatus("error");
@@ -326,7 +315,6 @@ export function WebSshTerminal({
         cols: connectedTerminal.cols,
         rows: connectedTerminal.rows,
       });
-      connectedTerminal.writeln("[intar] Connected.");
       setStatus("connected");
     } catch (connectError) {
       if (connectionGenerationRef.current !== connectionGeneration) return;
@@ -335,7 +323,6 @@ export function WebSshTerminal({
         connectError instanceof Error
           ? connectError.message
           : "failed to establish terminal session";
-      terminal?.writeln(`\r\n[intar] ERROR: ${message}`);
       setError(message);
       setStatus("error");
     }
@@ -525,7 +512,6 @@ function TerminalRecoveryNotice({
 async function createSessionWithRetries(input: {
   sessionRequestBodyJson: string | null;
   sessionRequestUrl: string | null;
-  terminal: Terminal;
 }): Promise<VmBrowserTerminalSessionResponse> {
   let lastError = "unknown error";
 
@@ -578,9 +564,6 @@ async function createSessionWithRetries(input: {
         throw new Error(`session bootstrap failed: ${lastError}`);
       }
 
-      input.terminal.writeln(
-        `[intar] Session bootstrap still warming up (${attempt}/${SSH_CONNECT_RETRY_ATTEMPTS})...`,
-      );
       const backoffMs = SSH_CONNECT_RETRY_BASE_MS * Math.pow(2, attempt - 1);
       await sleep(Math.min(backoffMs, 5_000));
     }
@@ -593,7 +576,7 @@ async function connectBrowserTerminalWithRetries(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
   isCurrent: () => boolean;
-  onRemoteClose: (message?: string) => void;
+  onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
 }): Promise<WebSocket> {
   let lastError = "unknown error";
@@ -610,9 +593,6 @@ async function connectBrowserTerminalWithRetries(input: {
         throw new Error(`terminal connection failed: ${lastError}`);
       }
 
-      input.terminal.writeln(
-        `[intar] Terminal transport still warming up (${attempt}/${SSH_CONNECT_RETRY_ATTEMPTS})...`,
-      );
       const backoffMs = SSH_CONNECT_RETRY_BASE_MS * Math.pow(2, attempt - 1);
       await sleep(Math.min(backoffMs, 5_000));
     }
@@ -625,7 +605,7 @@ async function connectBrowserTerminal(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
   isCurrent: () => boolean;
-  onRemoteClose: (message?: string) => void;
+  onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
 }): Promise<WebSocket> {
   const websocket = new WebSocket(input.session.browser.websocketUrl);
@@ -651,7 +631,7 @@ async function connectBrowserTerminal(input: {
             case "exit":
               if (!terminalEnded) {
                 terminalEnded = true;
-                input.onRemoteClose(`Session ended (exit ${control.code}).`);
+                input.onRemoteClose();
               }
               try {
                 websocket.close();

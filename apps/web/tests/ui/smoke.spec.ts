@@ -528,6 +528,12 @@ test("run workspace opens a deterministic terminal transport", async ({
   await expect(
     page.getByRole("status").filter({ hasText: /Terminal status:/i }),
   ).toHaveText(/Terminal status:\s*connected/i);
+  await expect
+    .poll(() => page.locator(".xterm").textContent())
+    .toContain("intar workshop shell");
+  await expect
+    .poll(() => page.locator(".xterm").textContent())
+    .not.toContain("[intar]");
   await expect(
     page.getByRole("button", { name: "Reconnect terminal" }),
   ).toHaveCount(0);
