@@ -69,6 +69,27 @@ fn test_probe_row() -> VmProbeStateRow {
     }
 }
 
+fn test_archive_job_row(
+    run_id: &str,
+    vm_name: &str,
+    created_at_ms: i64,
+    next_attempt_at_ms: i64,
+) -> ArchiveJobRow {
+    ArchiveJobRow {
+        run_id: run_id.to_string(),
+        vm_name: vm_name.to_string(),
+        vm_created_at_ms: 1,
+        delete_requested_at_ms: 2,
+        deleted_at_ms: 3,
+        artifacts_dir: format!("/tmp/{run_id}/{vm_name}/artifacts"),
+        next_attempt_at_ms,
+        retry_count: 0,
+        last_error: None,
+        created_at_ms,
+        updated_at_ms: created_at_ms,
+    }
+}
+
 async fn open_test_db_thread(path: PathBuf) -> Db {
     let (tx, rx) = mpsc::channel::<Op>(16);
     let (init_tx, init_rx) = oneshot::channel::<Result<Vec<VmRow>>>();
@@ -283,5 +304,183 @@ fn desired_state_cache_round_trips_single_row() {
     assert_eq!(
         load_desired_state(&conn).expect("load desired state"),
         Some(second)
+    );
+}
+
+#[test]
+fn due_archive_jobs_keep_later_same_run_work_behind_a_retrying_head() {
+    let path = test_db_path();
+    let conn = open_prepared_connection(&path).expect("open db");
+    let first = test_archive_job_row("run-a", "vm-1", 10, 0);
+    let later = test_archive_job_row("run-a", "vm-2", 11, 0);
+    let independent = test_archive_job_row("run-b", "vm-1", 12, 0);
+    upsert_archive_job(&conn, &first).expect("insert first same-run archive job");
+    upsert_archive_job(&conn, &later).expect("insert later same-run archive job");
+    upsert_archive_job(&conn, &independent).expect("insert independent archive job");
+
+    let initially_due = load_due_archive_jobs(&conn, 0, 4).expect("load initial due jobs");
+    assert_eq!(
+        initially_due
+            .iter()
+            .map(|job| format!("{}/{}", job.run_id, job.vm_name))
+            .collect::<Vec<_>>(),
+        vec!["run-a/vm-1", "run-b/vm-1"]
+    );
+
+    // A duplicate queue wake must not move the durable run head behind a
+    // later VM. The upsert refreshes attempt data but preserves its original
+    // queued timestamp.
+    let mut retried_first = first.clone();
+    retried_first.next_attempt_at_ms = 100;
+    retried_first.retry_count = 1;
+    retried_first.last_error = Some("retry".to_string());
+    retried_first.created_at_ms = 99;
+    retried_first.updated_at_ms = 20;
+    upsert_archive_job(&conn, &retried_first).expect("reschedule first same-run archive job");
+    let while_retrying = load_due_archive_jobs(&conn, 20, 4).expect("load while retrying");
+    assert_eq!(
+        while_retrying
+            .iter()
+            .map(|job| format!("{}/{}", job.run_id, job.vm_name))
+            .collect::<Vec<_>>(),
+        vec!["run-b/vm-1"]
+    );
+
+    let retry_due = load_due_archive_jobs(&conn, 100, 4).expect("load retried head");
+    assert!(
+        retry_due
+            .iter()
+            .any(|job| job.run_id == "run-a" && job.vm_name == "vm-1")
+    );
+    assert_eq!(
+        retry_due
+            .iter()
+            .find(|job| job.run_id == "run-a" && job.vm_name == "vm-1")
+            .expect("retrying head is present")
+            .created_at_ms,
+        10,
+        "upserting a retry must retain the original queued timestamp"
+    );
+    assert!(
+        !retry_due
+            .iter()
+            .any(|job| job.run_id == "run-a" && job.vm_name == "vm-2"),
+        "later same-run job must stay blocked until the retrying head is removed"
+    );
+
+    delete_archive_job(&conn, "run-a", "vm-1").expect("delete completed head");
+    let after_head_completion =
+        load_due_archive_jobs(&conn, 100, 4).expect("load newly exposed same-run job");
+    assert!(
+        after_head_completion
+            .iter()
+            .any(|job| job.run_id == "run-a" && job.vm_name == "vm-2"),
+        "later same-run job becomes eligible only after its head completes"
+    );
+}
+
+#[test]
+fn due_archive_jobs_use_insertion_order_when_the_clock_moves_backward() {
+    let path = test_db_path();
+    let conn = open_prepared_connection(&path).expect("open db");
+    let first = test_archive_job_row("run-a", "vm-z", 200, 100);
+    let later_with_older_clock = test_archive_job_row("run-a", "vm-a", 100, 0);
+    upsert_archive_job(&conn, &first).expect("insert first archive job");
+    upsert_archive_job(&conn, &later_with_older_clock)
+        .expect("insert later archive job with a backward clock");
+
+    assert!(
+        load_due_archive_jobs(&conn, 0, 4)
+            .expect("load while first head is delayed")
+            .is_empty(),
+        "a later row with an older timestamp must not overtake the durable run head"
+    );
+    assert_eq!(
+        load_due_archive_jobs(&conn, 100, 4)
+            .expect("load durable head")
+            .into_iter()
+            .map(|job| job.vm_name)
+            .collect::<Vec<_>>(),
+        vec!["vm-z"]
+    );
+}
+
+#[test]
+fn due_archive_jobs_use_insertion_order_when_timestamps_match() {
+    let path = test_db_path();
+    let conn = open_prepared_connection(&path).expect("open db");
+    let first = test_archive_job_row("run-a", "vm-z", 100, 100);
+    let later_same_millisecond = test_archive_job_row("run-a", "vm-a", 100, 0);
+    upsert_archive_job(&conn, &first).expect("insert first archive job");
+    upsert_archive_job(&conn, &later_same_millisecond)
+        .expect("insert later archive job in the same millisecond");
+
+    assert!(
+        load_due_archive_jobs(&conn, 0, 4)
+            .expect("load while first head is delayed")
+            .is_empty(),
+        "VM-name order must not choose a later same-millisecond row as the head"
+    );
+    assert_eq!(
+        load_due_archive_jobs(&conn, 100, 4)
+            .expect("load durable head")
+            .into_iter()
+            .map(|job| job.vm_name)
+            .collect::<Vec<_>>(),
+        vec!["vm-z"]
+    );
+}
+
+#[test]
+fn archive_job_upsert_preserves_its_rowid_and_created_timestamp() {
+    let path = test_db_path();
+    let conn = open_prepared_connection(&path).expect("open db");
+    let first = test_archive_job_row("run-a", "vm-z", 10, 100);
+    let later = test_archive_job_row("run-a", "vm-a", 20, 0);
+    upsert_archive_job(&conn, &first).expect("insert first archive job");
+    upsert_archive_job(&conn, &later).expect("insert later archive job");
+    let original_rowid: i64 = conn
+        .query_row(
+            "SELECT rowid FROM archive_jobs WHERE run_id = ?1 AND vm_name = ?2;",
+            rusqlite::params!["run-a", "vm-z"],
+            |row| row.get(0),
+        )
+        .expect("load first archive job rowid");
+
+    let mut retried_first = first;
+    retried_first.created_at_ms = -1_000;
+    retried_first.next_attempt_at_ms = 200;
+    retried_first.retry_count = 1;
+    retried_first.updated_at_ms = 30;
+    upsert_archive_job(&conn, &retried_first).expect("upsert first archive job retry");
+
+    let (rowid, created_at_ms): (i64, i64) = conn
+        .query_row(
+            "SELECT rowid, created_at_ms FROM archive_jobs WHERE run_id = ?1 AND vm_name = ?2;",
+            rusqlite::params!["run-a", "vm-z"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("reload first archive job identity");
+    assert_eq!(
+        rowid, original_rowid,
+        "upsert must keep initial insertion order"
+    );
+    assert_eq!(
+        created_at_ms, 10,
+        "upsert must keep the original queued timestamp for timing"
+    );
+    assert!(
+        load_due_archive_jobs(&conn, 100, 4)
+            .expect("load while retried head is delayed")
+            .is_empty(),
+        "the retried first row must remain the head even while a later row is due"
+    );
+    assert_eq!(
+        load_due_archive_jobs(&conn, 200, 4)
+            .expect("load retried durable head")
+            .into_iter()
+            .map(|job| job.vm_name)
+            .collect::<Vec<_>>(),
+        vec!["vm-z"]
     );
 }

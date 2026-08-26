@@ -366,6 +366,33 @@ pub(super) async fn cleanup_tracked_vm_local_only(
     cleanup_tracked_vm_with_mode(inner, name, false, CleanupMode::LocalOnly).await
 }
 
+/// Legacy rows predate per-VM artifact spools and therefore write into one
+/// run-owned spool. Their prepare/capture phase must stay inside the existing
+/// per-run cleanup fence. New rows have isolated spools and intentionally do
+/// not take that fence until the release/local-removal phase below.
+pub(super) fn requires_run_cleanup_lock_for_capture(vm: &VmStatusResponse) -> bool {
+    vm.details
+        .as_ref()
+        .is_some_and(|details| details.spool_dir.is_none())
+}
+
+pub(super) async fn acquire_run_cleanup_lock_for_capture(
+    run_cleanup_locks: &Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    vm: &VmStatusResponse,
+) -> Option<OwnedMutexGuard<()>> {
+    if !requires_run_cleanup_lock_for_capture(vm) {
+        return None;
+    }
+
+    let run_id = vm
+        .details
+        .as_ref()
+        .and_then(|details| details.run_id.as_deref())
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())?;
+    Some(acquire_run_cleanup_lock(run_cleanup_locks, run_id).await)
+}
+
 pub(super) fn spawn_vm_cleanup_task(inner: Arc<Inner>, name: String, require_expired: bool) {
     tokio::spawn(async move {
         match cleanup_tracked_vm(&inner, &name, require_expired).await {
@@ -431,6 +458,13 @@ pub(super) async fn cleanup_tracked_vm_with_mode(
         return Ok(CleanupOutcome::Deleted);
     }
 
+    // A legacy row has no per-VM spool directory, so prepare/capture writes to
+    // the shared run spool. Keep this exact guard through release, archive-job
+    // queueing, and local removal. Per-VM spools retain concurrent capture and
+    // acquire the run guard only at the release boundary.
+    let capture_run_cleanup_guard =
+        acquire_run_cleanup_lock_for_capture(&inner.run_cleanup_locks, &vm).await;
+
     let prepared = match prepare_vm_for_delete(inner, &vm).await {
         Ok(prepared) => prepared,
         Err(e) => {
@@ -444,7 +478,10 @@ pub(super) async fn cleanup_tracked_vm_with_mode(
     // generation/network release decision and local state removal must be one
     // ordered per-run operation. Failed release/archive work leaves the VM row
     // tracked, so a later retry still protects or removes the shared network.
-    let _run_cleanup_guard = acquire_vm_run_cleanup_lock(inner, &vm).await;
+    let _run_cleanup_guard = match capture_run_cleanup_guard {
+        Some(guard) => Some(guard),
+        None => acquire_vm_run_cleanup_lock(inner, &vm).await,
+    };
     if let Err(e) = release_jailed_runtime(inner, &vm).await {
         let message = error_chain_to_string(&e);
         mark_vm_delete_failed(inner, &vm.name, message).await;

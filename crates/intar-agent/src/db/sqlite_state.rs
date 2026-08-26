@@ -24,7 +24,6 @@ ON CONFLICT(run_id, vm_name) DO UPDATE SET
   next_attempt_at_ms = excluded.next_attempt_at_ms,
   retry_count = excluded.retry_count,
   last_error = excluded.last_error,
-  created_at_ms = excluded.created_at_ms,
   updated_at_ms = excluded.updated_at_ms;
 "#,
         params![
@@ -65,9 +64,21 @@ SELECT
   last_error,
   created_at_ms,
   updated_at_ms
-FROM archive_jobs
-WHERE next_attempt_at_ms <= ?1
-ORDER BY next_attempt_at_ms ASC, updated_at_ms ASC, vm_name ASC
+FROM archive_jobs AS job
+WHERE job.next_attempt_at_ms <= ?1
+  -- A run has one durable archive head. If an earlier VM in this run is
+  -- retrying in the future, later rows must stay hidden rather than being
+  -- dispatched by the next ten-second sweep.
+  AND NOT EXISTS (
+    SELECT 1
+    FROM archive_jobs AS prior
+    WHERE prior.run_id = job.run_id
+      -- `rowid` is the durable first-insertion sequence. UPSERT updates keep
+      -- it unchanged, unlike wall-clock values which can collide or move
+      -- backward.
+      AND prior.rowid < job.rowid
+  )
+ORDER BY job.next_attempt_at_ms ASC, job.updated_at_ms ASC, job.vm_name ASC
 LIMIT ?2;
 "#,
         )
@@ -346,6 +357,9 @@ CREATE TABLE IF NOT EXISTS archive_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_archive_jobs_due
   ON archive_jobs(next_attempt_at_ms, updated_at_ms);
+
+CREATE INDEX IF NOT EXISTS idx_archive_jobs_run_head
+  ON archive_jobs(run_id);
 
 CREATE TABLE IF NOT EXISTS desired_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),

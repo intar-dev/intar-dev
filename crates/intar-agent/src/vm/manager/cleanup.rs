@@ -231,8 +231,69 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
                 .await
                 {
                     Ok(Ok(())) => {
-                        tokio::time::sleep(Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS))
-                            .await;
+                        // Pinned Cloud Hypervisor v53 returns from vm.shutdown
+                        // only after it has dropped the running VM and retained
+                        // the reusable configuration. vm.info=Created is the
+                        // proof for that exact state. A missing VM is also
+                        // definitive; every other result is fail-closed.
+                        //
+                        // This deadline starts after the shutdown response, so
+                        // an inconclusive probe preserves the existing full
+                        // grace period before StopVm drains the complete
+                        // cgroup and exports the recording disk.
+                        let grace_deadline = tokio::time::Instant::now()
+                            + Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS);
+                        let probe_result = wait_for_post_shutdown_probe_grace(
+                            grace_deadline,
+                            client.vm_info(),
+                            |probe_result| {
+                                let shutdown_proven =
+                                    post_shutdown_vm_info_proves_stopped(probe_result);
+                                match probe_result {
+                                    Ok(info) if v53_post_shutdown_state_is_proven(info) => {
+                                        info!(
+                                            vm = vm_name,
+                                            socket = ch_socket_path,
+                                            "cloud-hypervisor shutdown was proven by pinned-v53 vm.info"
+                                        );
+                                    }
+                                    Err(error) if vm_info_confirms_vm_absent(error) => {
+                                        info!(
+                                            vm = vm_name,
+                                            socket = ch_socket_path,
+                                            "cloud-hypervisor shutdown was proven by absent vm.info"
+                                        );
+                                    }
+                                    Ok(info) => {
+                                        warn!(
+                                            vm = vm_name,
+                                            socket = ch_socket_path,
+                                            state = ?info.state,
+                                            "cloud-hypervisor vm.info did not prove pinned-v53 shutdown; preserving grace period"
+                                        );
+                                    }
+                                    Err(error) => {
+                                        warn!(
+                                            error = %error,
+                                            vm = vm_name,
+                                            socket = ch_socket_path,
+                                            "cloud-hypervisor vm.info was inconclusive after shutdown; preserving grace period"
+                                        );
+                                    }
+                                }
+                                shutdown_proven
+                            },
+                        )
+                        .await;
+
+                        if probe_result.is_err() {
+                            warn!(
+                                vm = vm_name,
+                                socket = ch_socket_path,
+                                timeout_seconds = DELETE_SHUTDOWN_GRACE_SECONDS,
+                                "cloud-hypervisor vm.info timed out after shutdown; preserving grace period"
+                            );
+                        }
                     }
                     Ok(Err(e)) => {
                         warn!(
@@ -276,18 +337,80 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
     }
 }
 
+/// Wait until the supplied post-response deadline unless the `vm.info`
+/// response proves that pinned Cloud Hypervisor v53 has stopped the VM. The
+/// deadline is a Tokio instant so the timer and its timeout use the same clock.
+pub(super) async fn wait_for_post_shutdown_probe_grace<Probe, IsProven>(
+    grace_deadline: tokio::time::Instant,
+    probe: Probe,
+    is_proven: IsProven,
+) -> std::result::Result<Probe::Output, tokio::time::error::Elapsed>
+where
+    Probe: Future,
+    IsProven: FnOnce(&Probe::Output) -> bool,
+{
+    let probe_result = tokio::time::timeout_at(grace_deadline, probe).await;
+    let shutdown_proven = probe_result.as_ref().is_ok_and(is_proven);
+
+    if !shutdown_proven {
+        tokio::time::sleep_until(grace_deadline).await;
+    }
+
+    probe_result
+}
+
+/// Only these two `vm.info` responses can bypass the post-response shutdown
+/// barrier. Every other response is inconclusive and must retain it.
+pub(super) fn post_shutdown_vm_info_proves_stopped(
+    probe_result: &std::result::Result<
+        cloud_hypervisor_client::VmInfo,
+        cloud_hypervisor_client::Error,
+    >,
+) -> bool {
+    match probe_result {
+        Ok(info) => v53_post_shutdown_state_is_proven(info),
+        Err(error) => vm_info_confirms_vm_absent(error),
+    }
+}
+
+/// Pinned Cloud Hypervisor v53 returns `Created` after a successful
+/// `vm.shutdown`: it has synchronously dropped the running VM while retaining
+/// only the reusable configuration. Do not accept other states here; they do
+/// not prove that the VM has stopped.
+pub(super) fn v53_post_shutdown_state_is_proven(info: &cloud_hypervisor_client::VmInfo) -> bool {
+    matches!(info.state, cloud_hypervisor_client::VmState::Created)
+}
+
+/// A 404 from `vm.info` is the pinned runtime's definitive post-delete
+/// response. It proves that no VM configuration remains, while other HTTP and
+/// transport failures must retain the grace period.
+pub(super) fn vm_info_confirms_vm_absent(error: &cloud_hypervisor_client::Error) -> bool {
+    matches!(
+        error,
+        cloud_hypervisor_client::Error::HttpStatus { status: 404, .. }
+    )
+}
+
 pub(super) async fn copy_vm_log_to_spool(
     vm: &VmStatusResponse,
     source_name: &str,
     destination: &Path,
 ) -> Result<()> {
-    if destination.exists() {
+    // A final artifact is only made visible after its contents and directory
+    // entry have been synced. This is intentionally checked before touching
+    // the jailed source: a cleanup retry can run after jailerd has destroyed
+    // the source tree.
+    if artifact_final_is_published(destination)? {
         return Ok(());
     }
 
     let Some(details) = vm.details.as_ref() else {
         return Ok(());
     };
+    // A process crash can leave only one of our private temporary files. Clean
+    // it before opening the source so retries do not accumulate stale partial
+    // artifacts when the source has since been removed.
+    remove_stale_artifact_temps(destination)?;
     let (source, ownership) = if let Some(jail_root) = details.jail_root_path.as_deref() {
         (
             PathBuf::from(jail_root).join("logs").join(source_name),
@@ -303,50 +426,263 @@ pub(super) async fn copy_vm_log_to_spool(
     // best-effort without accidentally swallowing an agent-owned spool error.
     // Once the jailed file is open, all destination creation and copy errors
     // remain actionable and continue to fail artifact preparation.
-    let mut source_file = match tokio::fs::File::open(&source).await {
+    let source_file = match tokio::fs::File::open(&source).await {
         Ok(source_file) => source_file,
         Err(error) => {
             return handle_vm_log_source_open_error(ownership, &source, destination, error);
         }
     };
-    let mut destination_options = tokio::fs::OpenOptions::new();
-    destination_options.write(true).create_new(true);
-    #[cfg(unix)]
-    destination_options.mode(0o600);
-    let mut destination_file = match destination_options.open(destination).await {
-        Ok(destination_file) => destination_file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
-        Err(error) => {
-            return Err(anyhow::anyhow!(
-                "failed to create {} while copying {}: {error}",
-                destination.display(),
-                source.display()
-            ));
-        }
-    };
+    let source_file = source_file.into_std().await;
+    let source_for_copy = source.clone();
+    let destination_for_copy = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut source_file = source_file;
+        copy_reader_to_artifact_atomically(
+            &mut source_file,
+            &source_for_copy,
+            &destination_for_copy,
+        )
+    })
+    .await
+    .context("VM log copy task panicked")?
+}
 
-    if let Err(error) = tokio::io::copy(&mut source_file, &mut destination_file).await {
-        drop(destination_file);
-        let cleanup_error = match tokio::fs::remove_file(destination).await {
-            Ok(()) => None,
-            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(cleanup_error) => Some(cleanup_error),
-        };
-        return Err(match cleanup_error {
-            Some(cleanup_error) => anyhow::anyhow!(
-                "failed to copy {} to {}: {error}; failed to remove partial destination: {cleanup_error}",
-                source.display(),
+const ARTIFACT_TEMP_MARKER: &str = ".part.";
+
+/// A final artifact exists only after [`copy_reader_to_artifact_atomically`]
+/// has synced the completed file and atomically renamed it into place. Keep
+/// this idempotent path for cleanup retries: their jail-owned sources may have
+/// been removed after a prior successful publication.
+pub(super) fn artifact_final_is_published(destination: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            sync_artifact_parent(destination)?;
+            Ok(true)
+        }
+        Ok(_) => anyhow::bail!(
+            "artifact destination {} exists but is not a regular file",
+            destination.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(anyhow::anyhow!(
+            "failed to inspect artifact destination {}: {error}",
+            destination.display()
+        )),
+    }
+}
+
+fn artifact_parent(destination: &Path) -> Result<&Path> {
+    destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "artifact destination has no parent directory: {}",
                 destination.display()
-            ),
-            None => anyhow::anyhow!(
-                "failed to copy {} to {}: {error}",
-                source.display(),
+            )
+        })
+}
+
+fn artifact_temp_prefix(destination: &Path) -> Result<String> {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "artifact destination filename is not UTF-8: {}",
                 destination.display()
-            ),
-        });
+            )
+        })?;
+    Ok(format!(".{file_name}{ARTIFACT_TEMP_MARKER}"))
+}
+
+/// Linux is the supported agent host and requires a directory fsync to make
+/// the post-rename name durable. Other platforms do not provide a portable
+/// directory-sync contract, so retain the atomic rename without pretending to
+/// provide a stronger guarantee there.
+#[cfg(target_os = "linux")]
+fn sync_artifact_parent(destination: &Path) -> Result<()> {
+    let parent = artifact_parent(destination)?;
+    std::fs::File::open(parent)
+        .with_context(|| {
+            format!(
+                "failed to open artifact directory {} for sync",
+                parent.display()
+            )
+        })?
+        .sync_all()
+        .with_context(|| format!("failed to sync artifact directory {}", parent.display()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_artifact_parent(_destination: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Remove only abandoned temporary files for this exact destination. The run
+/// cleanup lock serializes same-run cleanup, so a matching temp cannot belong
+/// to a concurrent publisher.
+pub(super) fn remove_stale_artifact_temps(destination: &Path) -> Result<()> {
+    let parent = artifact_parent(destination)?;
+    let prefix = artifact_temp_prefix(destination)?;
+    let entries = std::fs::read_dir(parent).with_context(|| {
+        format!(
+            "failed to create temporary artifact for {}",
+            destination.display()
+        )
+    })?;
+    let mut removed_any = false;
+
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to inspect temporary artifacts for {}",
+                destination.display()
+            )
+        })?;
+        let file_name = entry.file_name();
+        if !file_name
+            .to_str()
+            .is_some_and(|file_name| file_name.starts_with(&prefix))
+        {
+            continue;
+        }
+
+        let temporary = entry.path();
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "failed to inspect temporary artifact {}",
+                temporary.display()
+            )
+        })?;
+        if !file_type.is_file() {
+            anyhow::bail!(
+                "stale temporary artifact is not a regular file: {}",
+                temporary.display()
+            );
+        }
+        std::fs::remove_file(&temporary).with_context(|| {
+            format!(
+                "failed to remove stale temporary artifact {}",
+                temporary.display()
+            )
+        })?;
+        removed_any = true;
     }
 
+    if removed_any {
+        sync_artifact_parent(destination)
+            .context("failed to sync artifact directory after stale temporary cleanup")?;
+    }
     Ok(())
+}
+
+fn create_unique_artifact_temp(destination: &Path) -> Result<(PathBuf, std::fs::File)> {
+    let parent = artifact_parent(destination)?;
+    remove_stale_artifact_temps(destination)?;
+    let prefix = artifact_temp_prefix(destination)?;
+
+    for _ in 0..8 {
+        let mut suffix = [0_u8; 16];
+        getrandom_fill(&mut suffix).context("generate unique artifact temporary suffix")?;
+        let temporary = parent.join(format!("{prefix}{:032x}", u128::from_be_bytes(suffix)));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&temporary) {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to create temporary artifact {} for {}: {error}",
+                    temporary.display(),
+                    destination.display()
+                ));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to reserve a unique temporary artifact for {}",
+        destination.display()
+    )
+}
+
+fn remove_artifact_temp_after_error(temporary: &Path, destination: &Path) -> Result<()> {
+    match std::fs::remove_file(temporary) {
+        Ok(()) => sync_artifact_parent(destination).with_context(|| {
+            format!(
+                "failed to sync artifact directory after removing temporary {}",
+                temporary.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(
+            "failed to remove temporary artifact {}: {error}",
+            temporary.display()
+        )),
+    }
+}
+
+/// Copy one artifact through a private file in the artifact directory. A
+/// failed copy can leave only a removable `.part` file; the final path is not
+/// visible until the complete file has been synced and atomically renamed.
+pub(super) fn copy_reader_to_artifact_atomically<R>(
+    source: &mut R,
+    source_path: &Path,
+    destination: &Path,
+) -> Result<()>
+where
+    R: std::io::Read,
+{
+    if artifact_final_is_published(destination)? {
+        return Ok(());
+    }
+
+    let (temporary, mut output) = create_unique_artifact_temp(destination)?;
+    let write_result = (|| -> Result<()> {
+        std::io::copy(source, &mut output).with_context(|| {
+            format!(
+                "failed to copy {} to {}",
+                source_path.display(),
+                destination.display()
+            )
+        })?;
+        output.sync_all().with_context(|| {
+            format!("failed to sync temporary artifact {}", temporary.display())
+        })?;
+        Ok(())
+    })();
+    drop(output);
+
+    let result = write_result.and_then(|()| {
+        std::fs::rename(&temporary, destination).with_context(|| {
+            format!(
+                "failed to atomically publish artifact {}",
+                destination.display()
+            )
+        })?;
+        sync_artifact_parent(destination).with_context(|| {
+            format!(
+                "failed to sync artifact directory after publishing {}",
+                destination.display()
+            )
+        })
+    });
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => match remove_artifact_temp_after_error(&temporary, destination) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(anyhow::anyhow!(
+                "{error:#}; temporary artifact cleanup also failed: {cleanup_error:#}"
+            )),
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,13 +776,15 @@ pub(super) fn extract_recordings_to_spool_blocking(
         let file_name = entry.file_name();
         if file_name.ends_with(".krec") {
             let raw_destination = artifacts_dir.join(&file_name);
-            if !raw_destination.exists() {
-                let mut source = entry.to_file();
-                let mut destination_file = std::fs::File::create(&raw_destination)
-                    .with_context(|| format!("failed to create {}", raw_destination.display()))?;
-                std::io::copy(&mut source, &mut destination_file)
-                    .with_context(|| format!("failed to extract {}", raw_destination.display()))?;
-            }
+            let mut source = entry.to_file();
+            copy_reader_to_artifact_atomically(&mut source, recording_disk_path, &raw_destination)
+                .with_context(|| {
+                    format!(
+                        "failed to extract recording {} to {}",
+                        file_name,
+                        raw_destination.display()
+                    )
+                })?;
         }
     }
 

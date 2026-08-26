@@ -2,6 +2,8 @@ use super::*;
 use intar_jailer_protocol::{ArtifactAccess, ArtifactSource, SourceArtifacts};
 use std::sync::Condvar;
 
+#[cfg(target_os = "linux")]
+mod staging;
 mod templates;
 #[derive(Default)]
 struct FakeBackend {

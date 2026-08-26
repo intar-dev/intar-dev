@@ -14,10 +14,13 @@ use tracing::warn;
 
 use super::krec::{ParsedKrec, parse_krec};
 use super::replay_compose::compose_session;
-use super::transcript::render_transcript;
+use super::transcript::{render_transcript, trim_transcript_to_byte_limit};
 
 pub(crate) const SESSION_CAST_KIND: &str = "ssh_recording_segment";
 pub(crate) const TIMELINE_VERSION: u32 = 1;
+/// The control plane accepts at most 4 MiB of decoded transcript text per
+/// timeline. The HTTP request can be larger because JSON escaping adds bytes.
+pub(crate) const TIMELINE_TRANSCRIPT_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Wire payload for `POST /agent/runs/{runId}/vms/{vmName}/timeline`.
 #[derive(Debug, Serialize)]
@@ -48,12 +51,12 @@ pub(crate) struct RenderedSessionMedia {
     pub(crate) timeline: TimelineDocument,
 }
 
-/// Renders every parseable `.krec` in `artifacts_dir`. Returns `None` when
-/// there is nothing to render. A session that fails to parse is skipped so
-/// one corrupt reconnect does not cost the whole timeline. The emulation is
-/// CPU-bound and runs on a blocking thread.
-pub(crate) async fn render_session_media(
+/// Renders recordings from `artifacts_dir` into a separate `output_dir`.
+/// Archive retries use a private output directory so a detached blocking
+/// renderer can never write the deterministic cast paths owned by a retry.
+pub(crate) async fn render_session_media_into(
     artifacts_dir: &Path,
+    output_dir: &Path,
 ) -> Result<Option<RenderedSessionMedia>> {
     let mut krec_paths = Vec::new();
     let mut dir = match tokio::fs::read_dir(artifacts_dir).await {
@@ -86,7 +89,7 @@ pub(crate) async fn render_session_media(
     // lexicographic order is the chronological order.
     krec_paths.sort();
 
-    let artifacts_dir = artifacts_dir.to_path_buf();
+    let output_dir = output_dir.to_path_buf();
     let rendered = tokio::task::spawn_blocking(move || -> Result<Option<RenderedSessionMedia>> {
         let mut cast_paths = Vec::new();
         let mut sessions = Vec::new();
@@ -108,7 +111,7 @@ pub(crate) async fn render_session_media(
             let cast_filename = format!("session-{index:02}.cast");
             let cast = compose_session(&session)
                 .with_context(|| format!("failed to compose {}", path.display()))?;
-            let cast_path = artifacts_dir.join(&cast_filename);
+            let cast_path = output_dir.join(&cast_filename);
             std::fs::write(&cast_path, cast)
                 .with_context(|| format!("failed to write cast at {}", cast_path.display()))?;
             cast_paths.push(cast_path);
@@ -129,6 +132,8 @@ pub(crate) async fn render_session_media(
             return Ok(None);
         }
 
+        apply_timeline_transcript_budget(&mut sessions, TIMELINE_TRANSCRIPT_MAX_BYTES);
+
         Ok(Some(RenderedSessionMedia {
             cast_paths,
             timeline: TimelineDocument {
@@ -141,6 +146,72 @@ pub(crate) async fn render_session_media(
     .context("replay rendering task panicked")??;
 
     Ok(rendered)
+}
+
+/// Applies a fair, deterministic total transcript limit without removing any
+/// timeline or cast entry. When the aggregate is over budget, nonempty
+/// sessions receive equal byte increments. Short transcripts stop taking
+/// increments and their unused share is redistributed. A final one-byte
+/// remainder goes to earlier sessions in chronological order. Each affected
+/// transcript then keeps its newest complete lines where possible.
+fn apply_timeline_transcript_budget(sessions: &mut [TimelineSession], max_total_bytes: usize) {
+    let total_bytes = sessions.iter().fold(0_usize, |total, session| {
+        total.saturating_add(session.transcript.len())
+    });
+    if total_bytes <= max_total_bytes {
+        return;
+    }
+
+    let byte_limits = fair_transcript_byte_limits(sessions, max_total_bytes);
+    for (session, byte_limit) in sessions.iter_mut().zip(byte_limits) {
+        trim_transcript_to_byte_limit(
+            &mut session.transcript,
+            &mut session.transcript_truncated,
+            byte_limit,
+        );
+    }
+
+    debug_assert!(
+        sessions.iter().fold(0_usize, |total, session| {
+            total.saturating_add(session.transcript.len())
+        }) <= max_total_bytes
+    );
+}
+
+fn fair_transcript_byte_limits(sessions: &[TimelineSession], max_total_bytes: usize) -> Vec<usize> {
+    let transcript_lengths = sessions
+        .iter()
+        .map(|session| session.transcript.len())
+        .collect::<Vec<_>>();
+    let mut limits = vec![0; sessions.len()];
+    let mut remaining = max_total_bytes;
+    let mut active = transcript_lengths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, length)| (*length > 0).then_some(index))
+        .collect::<Vec<_>>();
+
+    while remaining > 0 && !active.is_empty() {
+        let equal_increment = remaining / active.len();
+        if equal_increment == 0 {
+            for index in active.into_iter().take(remaining) {
+                limits[index] += 1;
+            }
+            break;
+        }
+
+        let mut consumed = 0;
+        for &index in &active {
+            let available = transcript_lengths[index] - limits[index];
+            let increment = available.min(equal_increment);
+            limits[index] += increment;
+            consumed += increment;
+        }
+        remaining -= consumed;
+        active.retain(|&index| limits[index] < transcript_lengths[index]);
+    }
+
+    limits
 }
 
 fn parse_krec_file(path: &Path) -> Result<ParsedKrec> {
@@ -223,7 +294,22 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
-    use super::{TIMELINE_VERSION, parse_cast, render_session_media};
+    use super::{
+        TIMELINE_TRANSCRIPT_MAX_BYTES, TIMELINE_VERSION, TimelineSession,
+        apply_timeline_transcript_budget, parse_cast, render_session_media_into,
+    };
+
+    fn timeline_session(index: u32, transcript: String) -> TimelineSession {
+        TimelineSession {
+            index,
+            start_timestamp_ms: 1_700_000_000_000 + u64::from(index),
+            duration_ms: u64::from(index),
+            exit_code: Some(0),
+            cast_filename: format!("session-{index:02}.cast"),
+            transcript,
+            transcript_truncated: false,
+        }
+    }
 
     fn krec_fixture(width: u16, height: u16, start_ms: u64, events: &[(u64, &str)]) -> String {
         let mut out = format!(
@@ -250,7 +336,7 @@ mod tests {
         )
         .await?;
 
-        let rendered = render_session_media(dir.path())
+        let rendered = render_session_media_into(dir.path(), dir.path())
             .await?
             .expect("session media should render");
         assert_eq!(rendered.cast_paths.len(), 2);
@@ -315,7 +401,7 @@ mod tests {
         )
         .await?;
 
-        let rendered = render_session_media(dir.path())
+        let rendered = render_session_media_into(dir.path(), dir.path())
             .await?
             .expect("healthy session should render");
         assert_eq!(rendered.timeline.sessions.len(), 1);
@@ -327,7 +413,71 @@ mod tests {
     #[tokio::test]
     async fn returns_none_when_no_sessions_exist() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        assert!(render_session_media(dir.path()).await?.is_none());
+        assert!(
+            render_session_media_into(dir.path(), dir.path())
+                .await?
+                .is_none()
+        );
         Ok(())
+    }
+
+    #[test]
+    fn total_transcript_budget_fairly_trims_multiple_sessions_without_dropping_entries() {
+        let mut sessions = (1..=3)
+            .map(|index| {
+                timeline_session(
+                    index,
+                    format!(
+                        "old-session-{index}-{}\nrecent-session-{index}\n",
+                        "x".repeat(100)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        apply_timeline_transcript_budget(&mut sessions, 240);
+
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions.iter().all(|session| session.transcript_truncated));
+        assert!(
+            sessions
+                .iter()
+                .all(|session| session.transcript.len() <= 80)
+        );
+        assert!(sessions.iter().enumerate().all(|(offset, session)| {
+            let index = offset + 1;
+            session.index == index as u32
+                && session.cast_filename == format!("session-{index:02}.cast")
+                && session
+                    .transcript
+                    .contains(&format!("recent-session-{index}\n"))
+        }));
+        assert!(
+            sessions
+                .iter()
+                .map(|session| session.transcript.len())
+                .sum::<usize>()
+                <= 240
+        );
+    }
+
+    #[test]
+    fn total_transcript_budget_is_a_noop_when_the_document_fits() {
+        let mut sessions = vec![
+            timeline_session(1, "first\n".to_string()),
+            timeline_session(2, "second\n".to_string()),
+        ];
+        let before = sessions
+            .iter()
+            .map(|session| (session.transcript.clone(), session.transcript_truncated))
+            .collect::<Vec<_>>();
+
+        apply_timeline_transcript_budget(&mut sessions, TIMELINE_TRANSCRIPT_MAX_BYTES);
+
+        let after = sessions
+            .iter()
+            .map(|session| (session.transcript.clone(), session.transcript_truncated))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
     }
 }

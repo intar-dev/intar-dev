@@ -1,4 +1,5 @@
 use super::*;
+use tar::{Builder as TarBuilder, EntryType as TarEntryType, Header as TarHeader, HeaderMode};
 
 #[derive(Debug, Clone)]
 pub(super) struct PreparedVmDeletion {
@@ -87,6 +88,15 @@ pub(super) enum ArchiveUploadOutcome {
     DiscardedMissingRemote,
 }
 
+/// A durable archive job either reached its terminal cleanup boundary or was
+/// rescheduled. A reschedule is not an outer worker error, but it is a strict
+/// ordering barrier for later VMs in the same run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArchiveJobProcessOutcome {
+    Completed,
+    RetryScheduled,
+}
+
 /// Private control-plane milestones. They are deliberately learner-safe: the
 /// server projects only their aggregate rank, never paths, artifact names, or
 /// retry details.
@@ -96,6 +106,91 @@ pub(super) enum ArchiveStage {
     RawFilesSaved,
     ReplayPrepared,
     ReplaySkipped,
+}
+
+/// Successful remote operations in the stage-enabled archive protocol. The
+/// control plane deliberately accepts idempotent retries, so the agent keeps
+/// this client-side ordering guard as the authoritative happy-path sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArchiveRemoteEvent {
+    RawUploadComplete,
+    RawFilesStage,
+    CastRegistration,
+    CastUploadComplete,
+    TimelineSubmitted,
+    ReplayStage,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveRemoteOrderState {
+    AwaitRawUpload,
+    AwaitRawStage,
+    AwaitCastRegistrationOrReplayStage,
+    AwaitCastUpload,
+    AwaitTimeline,
+    AwaitReplayStageOrComplete,
+    AwaitComplete,
+    Complete,
+}
+
+#[derive(Debug)]
+pub(super) struct ArchiveRemoteOrder {
+    state: ArchiveRemoteOrderState,
+    #[cfg(test)]
+    events: Vec<ArchiveRemoteEvent>,
+}
+
+impl ArchiveRemoteOrder {
+    pub(super) fn new() -> Self {
+        Self {
+            state: ArchiveRemoteOrderState::AwaitRawUpload,
+            #[cfg(test)]
+            events: Vec::new(),
+        }
+    }
+
+    pub(super) fn observe(&mut self, event: ArchiveRemoteEvent) -> Result<()> {
+        let next_state = match (self.state, event) {
+            (ArchiveRemoteOrderState::AwaitRawUpload, ArchiveRemoteEvent::RawUploadComplete) => {
+                ArchiveRemoteOrderState::AwaitRawStage
+            }
+            (ArchiveRemoteOrderState::AwaitRawStage, ArchiveRemoteEvent::RawFilesStage) => {
+                ArchiveRemoteOrderState::AwaitCastRegistrationOrReplayStage
+            }
+            (
+                ArchiveRemoteOrderState::AwaitCastRegistrationOrReplayStage,
+                ArchiveRemoteEvent::CastRegistration,
+            ) => ArchiveRemoteOrderState::AwaitCastUpload,
+            (ArchiveRemoteOrderState::AwaitCastUpload, ArchiveRemoteEvent::CastUploadComplete) => {
+                ArchiveRemoteOrderState::AwaitTimeline
+            }
+            (ArchiveRemoteOrderState::AwaitTimeline, ArchiveRemoteEvent::TimelineSubmitted) => {
+                ArchiveRemoteOrderState::AwaitReplayStageOrComplete
+            }
+            (
+                ArchiveRemoteOrderState::AwaitCastRegistrationOrReplayStage
+                | ArchiveRemoteOrderState::AwaitReplayStageOrComplete,
+                ArchiveRemoteEvent::ReplayStage,
+            ) => ArchiveRemoteOrderState::AwaitComplete,
+            (ArchiveRemoteOrderState::AwaitReplayStageOrComplete, ArchiveRemoteEvent::Complete)
+            | (ArchiveRemoteOrderState::AwaitComplete, ArchiveRemoteEvent::Complete) => {
+                ArchiveRemoteOrderState::Complete
+            }
+            (state, event) => {
+                anyhow::bail!("archive remote operation {event:?} is out of order after {state:?}");
+            }
+        };
+        self.state = next_state;
+        #[cfg(test)]
+        self.events.push(event);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn events(&self) -> &[ArchiveRemoteEvent] {
+        &self.events
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -151,6 +246,9 @@ pub(super) async fn queue_archive_job(inner: &Inner, prepared: &PreparedVmDeleti
 }
 
 pub(super) async fn retry_archive_jobs(inner: &Inner) -> Result<()> {
+    // Keep this guard until every selected job has finished. It makes the
+    // durable due-row scan exclusive, so a timer tick or a queued wake cannot
+    // dispatch the same row twice while this batch is still in flight.
     let _guard = inner.archive_jobs_lock.lock().await;
     let jobs = inner
         .db
@@ -159,18 +257,84 @@ pub(super) async fn retry_archive_jobs(inner: &Inner) -> Result<()> {
         .context("failed to load due archive jobs")?;
     let filled_batch = archive_batch_needs_follow_up(jobs.len());
 
-    for job in jobs {
-        process_archive_job(inner, job).await?;
-    }
+    // A VM run is a single ordered remote protocol. Its archive jobs stay in
+    // one lane, while independent runs can make progress together.
+    let results =
+        process_archive_job_lanes(archive_job_lanes(jobs), ARCHIVE_RUN_CONCURRENCY, |job| {
+            process_archive_job(inner, job)
+        })
+        .await;
 
-    // `Notify` coalesces adjacent queue insertions into one permit. When this
-    // scan filled the bounded batch, schedule another immediate scan so the
-    // next due job does not wait for the ten-second recovery sweep.
-    if filled_batch {
+    // `Notify` coalesces adjacent queue insertions into one permit. A full
+    // batch or a completed run head can expose another independent due job.
+    // A retry-scheduled head deliberately does not wake another scan: the
+    // SQLite head-of-run predicate keeps its later VMs blocked until retry.
+    let completed_run_head = results
+        .iter()
+        .any(|result| matches!(result, Ok(ArchiveJobProcessOutcome::Completed)));
+    if filled_batch || completed_run_head {
         inner.archive_jobs_notify.notify_one();
     }
 
+    // Do not cancel other lanes when one database update fails. They have
+    // already acquired their own durable jobs and must reach a clean retry or
+    // completion boundary before the exclusive scan guard is released.
+    for result in results {
+        result?;
+    }
+
     Ok(())
+}
+
+/// Partitions a due batch into FIFO lanes. A lane is scoped to one run, so
+/// requests for the same run never overlap. The outer order follows the
+/// database's due ordering rather than lexical run IDs, which keeps backlog
+/// fairness deterministic.
+pub(super) fn archive_job_lanes(jobs: Vec<ArchiveJobRow>) -> Vec<Vec<ArchiveJobRow>> {
+    let mut run_order = Vec::new();
+    let mut jobs_by_run = BTreeMap::<String, Vec<ArchiveJobRow>>::new();
+
+    for job in jobs {
+        if !jobs_by_run.contains_key(&job.run_id) {
+            run_order.push(job.run_id.clone());
+        }
+        jobs_by_run.entry(job.run_id.clone()).or_default().push(job);
+    }
+
+    run_order
+        .into_iter()
+        .filter_map(|run_id| jobs_by_run.remove(&run_id))
+        .collect()
+}
+
+/// Runs independent archive lanes concurrently without aborting an active
+/// lane when another lane fails. Within a lane, a retryable failure stops the
+/// later jobs for that run, preserving their remote ordering for the next
+/// durable scan.
+pub(super) async fn process_archive_job_lanes<T, F, Fut>(
+    lanes: Vec<Vec<T>>,
+    max_concurrent_lanes: usize,
+    process_job: F,
+) -> Vec<Result<ArchiveJobProcessOutcome>>
+where
+    F: Fn(T) -> Fut + Clone,
+    Fut: std::future::Future<Output = Result<ArchiveJobProcessOutcome>>,
+{
+    stream::iter(lanes)
+        .map(move |lane| {
+            let process_job = process_job.clone();
+            async move {
+                for job in lane {
+                    if process_job(job).await? == ArchiveJobProcessOutcome::RetryScheduled {
+                        return Ok(ArchiveJobProcessOutcome::RetryScheduled);
+                    }
+                }
+                Ok(ArchiveJobProcessOutcome::Completed)
+            }
+        })
+        .buffer_unordered(max_concurrent_lanes.max(1))
+        .collect()
+        .await
 }
 
 pub(super) async fn wait_for_archive_worker_signal(notify: &Notify) {
@@ -181,7 +345,10 @@ pub(super) fn archive_batch_needs_follow_up(job_count: usize) -> bool {
     job_count == ARCHIVE_JOB_BATCH_SIZE
 }
 
-pub(super) async fn process_archive_job(inner: &Inner, job: ArchiveJobRow) -> Result<()> {
+pub(super) async fn process_archive_job(
+    inner: &Inner,
+    job: ArchiveJobRow,
+) -> Result<ArchiveJobProcessOutcome> {
     let attempt_started_at = Instant::now();
     let attempt_started_unix_ms = now_unix_ms();
     // `updated_at_ms` is the durable moment this attempt became due: initial
@@ -241,6 +408,7 @@ pub(super) async fn process_archive_job(inner: &Inner, job: ArchiveJobRow) -> Re
                     elapsed_since_unix_ms(job.delete_requested_at_ms, completed_at_ms,),
                 "archive job completed"
             );
+            Ok(ArchiveJobProcessOutcome::Completed)
         }
         Err(error) => {
             let retry_count = job.retry_count.saturating_add(1);
@@ -280,10 +448,9 @@ pub(super) async fn process_archive_job(inner: &Inner, job: ArchiveJobRow) -> Re
                     elapsed_since_unix_ms(job.delete_requested_at_ms, failed_at_ms,),
                 "archive job attempt finished with a retry"
             );
+            Ok(ArchiveJobProcessOutcome::RetryScheduled)
         }
     }
-
-    Ok(())
 }
 
 pub(super) fn elapsed_since_unix_ms(started_at_ms: i64, now_ms: i64) -> i64 {
@@ -505,6 +672,20 @@ pub(super) async fn upload_vm_run_artifacts(
 ) -> Result<ArchiveUploadOutcome> {
     let access_token = bootstrap_agent_access_token(&inner.bridge, &inner.http).await?;
     let mut artifacts = collect_local_artifacts(&prepared.artifacts_dir).await?;
+    let raw_session_count = replay_raw_session_count(&artifacts);
+    let raw_recordings_bundled =
+        bundle_raw_recordings_when_manifest_exceeds_limit(&prepared.artifacts_dir, &mut artifacts)
+            .await?;
+    if raw_recordings_bundled {
+        info!(
+            event = "scenario_run_raw_recordings_bundled",
+            vm = vm_name,
+            run_id = prepared.run_id,
+            raw_session_count,
+            artifact_count = artifacts.len(),
+            "bundled raw recordings to keep the initial archive manifest within the worker limit"
+        );
+    }
 
     let initial_begin = begin_run_upload(inner, prepared, &artifacts, &access_token).await?;
     if initial_begin == RunUploadBeginOutcome::MissingRemote {
@@ -515,19 +696,111 @@ pub(super) async fn upload_vm_run_artifacts(
         );
         return Ok(ArchiveUploadOutcome::DiscardedMissingRemote);
     }
-    upload_artifact_set(inner, vm_name, prepared, &artifacts, &access_token).await?;
-    let mut raw_files_stage_reported = false;
-    if initial_begin.archive_progress_enabled() {
-        report_archive_stage(inner, prepared, ArchiveStage::RawFilesSaved, &access_token).await?;
-        raw_files_stage_reported = true;
+    let archive_progress_enabled = initial_begin.archive_progress_enabled();
+    let mut remote_order = archive_progress_enabled.then(ArchiveRemoteOrder::new);
+    let render_replay = replay_render_is_supported(raw_session_count);
+
+    // The spool is stable and its raw artifact set is registered. Rendering
+    // writes into this attempt's private directory, while the upload below
+    // reads only the already-described raw paths, so the two can safely
+    // overlap. A raw failure can therefore schedule its retry immediately:
+    // the detached renderer never owns the deterministic final cast paths.
+    let replay_render = if render_replay {
+        Some(
+            start_replay_render(
+                prepared.artifacts_dir.clone(),
+                next_artifact_ordinal(&artifacts),
+            )
+            .await?,
+        )
+    } else {
+        warn!(
+            event = "scenario_run_replay_skipped",
+            stage = "session_limit",
+            vm = vm_name,
+            run_id = prepared.run_id,
+            raw_session_count,
+            max_raw_session_count = MAX_REPLAY_RAW_SESSION_COUNT,
+            "skipping replay rendering because the raw session count exceeds the supported limit"
+        );
+        None
+    };
+
+    if let Err(error) =
+        upload_artifact_set(inner, vm_name, prepared, &artifacts, &access_token).await
+    {
+        if let Some(replay_render) = replay_render {
+            let cleanup = detach_replay_render_after_early_failure(
+                replay_render,
+                vm_name.to_string(),
+                prepared.run_id.clone(),
+            );
+            drop(cleanup);
+        }
+        return Err(error);
     }
+    if let Some(order) = remote_order.as_mut() {
+        order.observe(ArchiveRemoteEvent::RawUploadComplete)?;
+    }
+
+    if archive_progress_enabled {
+        if let Err(error) =
+            report_archive_stage(inner, prepared, ArchiveStage::RawFilesSaved, &access_token).await
+        {
+            if let Some(replay_render) = replay_render {
+                let cleanup = detach_replay_render_after_early_failure(
+                    replay_render,
+                    vm_name.to_string(),
+                    prepared.run_id.clone(),
+                );
+                drop(cleanup);
+            }
+            return Err(error);
+        }
+        if let Some(order) = remote_order.as_mut() {
+            order.observe(ArchiveRemoteEvent::RawFilesStage)?;
+        }
+    }
+
+    let Some(mut replay_render) = replay_render else {
+        if archive_progress_enabled {
+            report_archive_stage(
+                inner,
+                prepared,
+                archive_stage_after_replay(false, false),
+                &access_token,
+            )
+            .await?;
+            if let Some(order) = remote_order.as_mut() {
+                order.observe(ArchiveRemoteEvent::ReplayStage)?;
+            }
+        }
+        complete_run_upload(inner, prepared, &access_token).await?;
+        if let Some(order) = remote_order.as_mut() {
+            order.observe(ArchiveRemoteEvent::Complete)?;
+        }
+        return Ok(ArchiveUploadOutcome::Uploaded);
+    };
 
     // Render and attach session media before sealing the run. Once completion
     // is acknowledged the control plane rejects every new artifact mutation,
     // which makes hard deletion race-free with respect to this archive job.
-    match render_replay_artifacts(&prepared.artifacts_dir, next_artifact_ordinal(&artifacts)).await
-    {
-        Ok(Some((casts, timeline))) => {
+    match await_replay_render(&mut replay_render).await {
+        Ok(Some(rendered)) => {
+            let (casts, timeline) = match publish_replay_artifacts(
+                &prepared.artifacts_dir,
+                replay_render.first_ordinal,
+                rendered,
+            )
+            .await
+            {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    discard_replay_render_output_dir(&replay_render.output_dir).await;
+                    return Err(error);
+                }
+            };
+            discard_replay_render_output_dir(&replay_render.output_dir).await;
             let new_start = artifacts.len();
             artifacts.extend(casts);
             let replay_begin = begin_run_upload(inner, prepared, &artifacts, &access_token).await?;
@@ -539,6 +812,9 @@ pub(super) async fn upload_vm_run_artifacts(
                 );
                 return Ok(ArchiveUploadOutcome::DiscardedMissingRemote);
             }
+            if let Some(order) = remote_order.as_mut() {
+                order.observe(ArchiveRemoteEvent::CastRegistration)?;
+            }
             upload_artifact_set(
                 inner,
                 vm_name,
@@ -547,6 +823,9 @@ pub(super) async fn upload_vm_run_artifacts(
                 &access_token,
             )
             .await?;
+            if let Some(order) = remote_order.as_mut() {
+                order.observe(ArchiveRemoteEvent::CastUploadComplete)?;
+            }
             let replay_stage =
                 match submit_run_timeline(inner, prepared, &timeline, &access_token).await {
                     Ok(()) => archive_stage_after_replay(true, true),
@@ -562,24 +841,22 @@ pub(super) async fn upload_vm_run_artifacts(
                         archive_stage_after_replay(true, false)
                     }
                 };
-            // A replay re-registration may be the first successful capability
-            // handshake after a web rollout. Catch up the already-complete raw
-            // milestone first, then preserve the server's monotonic order.
-            if replay_begin.archive_progress_enabled() {
-                if !raw_files_stage_reported {
-                    report_archive_stage(
-                        inner,
-                        prepared,
-                        ArchiveStage::RawFilesSaved,
-                        &access_token,
-                    )
-                    .await?;
-                }
+            if let Some(order) = remote_order.as_mut() {
+                order.observe(ArchiveRemoteEvent::TimelineSubmitted)?;
+            }
+            if replay_stage_reporting_enabled(
+                archive_progress_enabled,
+                replay_begin.archive_progress_enabled(),
+            ) {
                 report_archive_stage(inner, prepared, replay_stage, &access_token).await?;
+                if let Some(order) = remote_order.as_mut() {
+                    order.observe(ArchiveRemoteEvent::ReplayStage)?;
+                }
             }
         }
         Ok(None) => {
-            if raw_files_stage_reported {
+            discard_replay_render_output_dir(&replay_render.output_dir).await;
+            if archive_progress_enabled {
                 report_archive_stage(
                     inner,
                     prepared,
@@ -587,9 +864,13 @@ pub(super) async fn upload_vm_run_artifacts(
                     &access_token,
                 )
                 .await?;
+                if let Some(order) = remote_order.as_mut() {
+                    order.observe(ArchiveRemoteEvent::ReplayStage)?;
+                }
             }
         }
         Err(error) => {
+            discard_replay_render_output_dir(&replay_render.output_dir).await;
             warn!(
                 event = "scenario_run_replay_failed",
                 stage = "session_render",
@@ -598,7 +879,7 @@ pub(super) async fn upload_vm_run_artifacts(
                 run_id = prepared.run_id,
                 "failed to render session media; archiving run without a replay"
             );
-            if raw_files_stage_reported {
+            if archive_progress_enabled {
                 report_archive_stage(
                     inner,
                     prepared,
@@ -606,11 +887,17 @@ pub(super) async fn upload_vm_run_artifacts(
                     &access_token,
                 )
                 .await?;
+                if let Some(order) = remote_order.as_mut() {
+                    order.observe(ArchiveRemoteEvent::ReplayStage)?;
+                }
             }
         }
     }
 
     complete_run_upload(inner, prepared, &access_token).await?;
+    if let Some(order) = remote_order.as_mut() {
+        order.observe(ArchiveRemoteEvent::Complete)?;
+    }
 
     Ok(ArchiveUploadOutcome::Uploaded)
 }
@@ -776,6 +1063,14 @@ pub(super) async fn upload_artifact_set(
         let access_token = access_token.to_string();
         let vm_name = vm_name.to_string();
         async move {
+            // The per-job stream is useful for files of one VM, but this
+            // permit is shared by every archive job on the host. It prevents
+            // two concurrent runs from multiplying transfer fan-out.
+            let _transfer_permit = inner
+                .archive_transfer_sem
+                .acquire()
+                .await
+                .expect("archive transfer semaphore must remain open");
             upload_single_artifact(inner, &prepared, &artifact, &access_token)
                 .await
                 .with_context(|| format!("failed to upload {} for {}", artifact.filename, vm_name))
@@ -796,16 +1091,486 @@ pub(super) fn next_artifact_ordinal(artifacts: &[LocalArtifact]) -> u32 {
         .saturating_add(1)
 }
 
+/// The control plane accepts at most 500 replay sessions. Raw recordings stay
+/// fully archived beyond this boundary, but generating casts/timeline would
+/// otherwise create a permanently retrying manifest that it cannot accept.
+pub(super) const MAX_REPLAY_RAW_SESSION_COUNT: usize = 500;
+
+/// Must match the Worker `MAX_BEGIN_ARTIFACTS` contract. A large raw session
+/// set is compacted before the first begin request so every recording remains
+/// available without making the manifest permanently retryable.
+pub(super) const MAX_INITIAL_ARCHIVE_ARTIFACTS: usize = 1024;
+pub(super) const RAW_RECORDINGS_TAR_FILENAME: &str = "ssh-recordings-raw.tar";
+pub(super) const RAW_RECORDINGS_TAR_KIND: &str = "ssh_recording_raw_bundle";
+pub(super) const RAW_RECORDINGS_TAR_CONTENT_TYPE: &str = "application/x-tar";
+const RAW_RECORDINGS_TAR_TEMP_PREFIX: &str = ".ssh-recordings-raw.tar.build.";
+const RAW_RECORDINGS_TAR_TEMP_CREATE_RETRIES: usize = 8;
+
+pub(super) fn replay_raw_session_count(artifacts: &[LocalArtifact]) -> usize {
+    artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "ssh_recording_raw")
+        .count()
+}
+
+/// Replaces individual raw-recording descriptors only when their initial
+/// manifest would exceed the Worker limit. The source files remain in the
+/// spool for replay rendering; the tar is a supplementary upload artifact.
+pub(super) async fn bundle_raw_recordings_when_manifest_exceeds_limit(
+    artifacts_dir: &Path,
+    artifacts: &mut Vec<LocalArtifact>,
+) -> Result<bool> {
+    if artifacts.len() <= MAX_INITIAL_ARCHIVE_ARTIFACTS {
+        return Ok(false);
+    }
+
+    let raw_artifacts = artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "ssh_recording_raw")
+        .cloned()
+        .collect::<Vec<_>>();
+    if raw_artifacts.is_empty() {
+        anyhow::bail!(
+            "initial archive manifest has {} artifacts, exceeding the {} limit without raw recordings to bundle",
+            artifacts.len(),
+            MAX_INITIAL_ARCHIVE_ARTIFACTS
+        );
+    }
+
+    let sources = raw_recordings_tar_sources(&raw_artifacts)?;
+    let bundle_path = artifacts_dir.join(RAW_RECORDINGS_TAR_FILENAME);
+    let bundle_path_for_write = bundle_path.clone();
+    tokio::task::spawn_blocking(move || {
+        write_raw_recordings_tar_atomically(&bundle_path_for_write, &sources)
+    })
+    .await
+    .context("raw recordings tar task panicked")??;
+
+    let bundle = describe_local_artifact(
+        0,
+        RAW_RECORDINGS_TAR_KIND,
+        &bundle_path,
+        RAW_RECORDINGS_TAR_CONTENT_TYPE,
+    )
+    .await?;
+
+    let mut compacted = Vec::with_capacity(artifacts.len() - raw_artifacts.len() + 1);
+    let mut bundle = Some(bundle);
+    for artifact in std::mem::take(artifacts) {
+        if artifact.kind == "ssh_recording_raw" {
+            if let Some(bundle) = bundle.take() {
+                compacted.push(bundle);
+            }
+        } else {
+            compacted.push(artifact);
+        }
+    }
+    if compacted.len() > MAX_INITIAL_ARCHIVE_ARTIFACTS {
+        anyhow::bail!(
+            "bundled archive manifest still has {} artifacts, exceeding the {} limit",
+            compacted.len(),
+            MAX_INITIAL_ARCHIVE_ARTIFACTS
+        );
+    }
+    for (index, artifact) in compacted.iter_mut().enumerate() {
+        artifact.ordinal = u32::try_from(index + 1).context("archive artifact ordinal overflow")?;
+    }
+    *artifacts = compacted;
+    Ok(true)
+}
+
+fn raw_recordings_tar_sources(raw_artifacts: &[LocalArtifact]) -> Result<Vec<(String, PathBuf)>> {
+    let mut sources = Vec::with_capacity(raw_artifacts.len());
+    for artifact in raw_artifacts {
+        let filename = artifact
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "raw recording path has no UTF-8 filename: {}",
+                    artifact.path.display()
+                )
+            })?;
+        if filename != artifact.filename || !filename.ends_with(".krec") {
+            anyhow::bail!(
+                "raw recording descriptor does not name a safe .krec source: {}",
+                artifact.path.display()
+            );
+        }
+        sources.push((filename.to_string(), artifact.path.clone()));
+    }
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    if sources
+        .windows(2)
+        .any(|pair| pair[0].0.as_str() == pair[1].0.as_str())
+    {
+        anyhow::bail!("raw recording bundle has duplicate archive filenames");
+    }
+    Ok(sources)
+}
+
+fn write_raw_recordings_tar_atomically(
+    destination: &Path,
+    sources: &[(String, PathBuf)],
+) -> Result<()> {
+    if sources.is_empty() {
+        anyhow::bail!("raw recordings tar requires at least one source");
+    }
+    remove_stale_raw_recordings_tar_temps(destination)?;
+    if artifact_final_is_published(destination)? {
+        return Ok(());
+    }
+
+    let (temporary, output) = create_raw_recordings_tar_temp(destination)?;
+    let write_result = (|| -> Result<()> {
+        let mut archive = TarBuilder::new(output);
+        archive.mode(HeaderMode::Deterministic);
+        for (filename, source) in sources {
+            let metadata = std::fs::symlink_metadata(source)
+                .with_context(|| format!("failed to inspect raw recording {}", source.display()))?;
+            if !metadata.file_type().is_file() {
+                anyhow::bail!("raw recording is not a regular file: {}", source.display());
+            }
+            let mut input = std::fs::File::open(source)
+                .with_context(|| format!("failed to open raw recording {}", source.display()))?;
+            let mut header = TarHeader::new_gnu();
+            header.set_entry_type(TarEntryType::Regular);
+            header.set_size(metadata.len());
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, Path::new(filename), &mut input)
+                .with_context(|| {
+                    format!("failed to append raw recording {filename} to tar bundle")
+                })?;
+        }
+        let output = archive
+            .into_inner()
+            .context("failed to finish raw recordings tar bundle")?;
+        output.sync_all().with_context(|| {
+            format!("failed to sync raw recordings tar {}", temporary.display())
+        })?;
+        drop(output);
+        std::fs::rename(&temporary, destination).with_context(|| {
+            format!(
+                "failed to atomically publish raw recordings tar {}",
+                destination.display()
+            )
+        })?;
+        sync_raw_recordings_tar_parent(destination)
+    })();
+
+    match write_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(cleanup_error) = std::fs::remove_file(&temporary)
+                && cleanup_error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(anyhow::anyhow!(
+                    "{error:#}; failed to remove incomplete raw recordings tar {}: {cleanup_error}",
+                    temporary.display()
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn remove_stale_raw_recordings_tar_temps(destination: &Path) -> Result<()> {
+    let parent = raw_recordings_tar_parent(destination)?;
+    for entry in std::fs::read_dir(parent).with_context(|| {
+        format!(
+            "failed to scan raw recordings tar directory {}",
+            parent.display()
+        )
+    })? {
+        let entry = entry.context("failed to inspect raw recordings tar temporary file")?;
+        let file_name = entry.file_name();
+        if !file_name
+            .to_str()
+            .is_some_and(|name| name.starts_with(RAW_RECORDINGS_TAR_TEMP_PREFIX))
+        {
+            continue;
+        }
+        let temporary = entry.path();
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", temporary.display()))?
+            .is_file()
+        {
+            anyhow::bail!(
+                "raw recordings tar temporary path is not a regular file: {}",
+                temporary.display()
+            );
+        }
+        std::fs::remove_file(&temporary).with_context(|| {
+            format!(
+                "failed to remove stale raw recordings tar temporary file {}",
+                temporary.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn create_raw_recordings_tar_temp(destination: &Path) -> Result<(PathBuf, std::fs::File)> {
+    let parent = raw_recordings_tar_parent(destination)?;
+    for _ in 0..RAW_RECORDINGS_TAR_TEMP_CREATE_RETRIES {
+        let mut suffix = [0_u8; 16];
+        getrandom_fill(&mut suffix).context("generate raw recordings tar temporary suffix")?;
+        let temporary = parent.join(format!(
+            "{RAW_RECORDINGS_TAR_TEMP_PREFIX}{:032x}",
+            u128::from_be_bytes(suffix)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&temporary) {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to create raw recordings tar temporary file {}: {error}",
+                    temporary.display()
+                ));
+            }
+        }
+    }
+    anyhow::bail!(
+        "failed to reserve a raw recordings tar temporary file for {}",
+        destination.display()
+    )
+}
+
+fn raw_recordings_tar_parent(destination: &Path) -> Result<&Path> {
+    destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "raw recordings tar destination has no parent directory: {}",
+                destination.display()
+            )
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn sync_raw_recordings_tar_parent(destination: &Path) -> Result<()> {
+    let parent = raw_recordings_tar_parent(destination)?;
+    std::fs::File::open(parent)
+        .with_context(|| {
+            format!(
+                "failed to open raw recordings tar directory {}",
+                parent.display()
+            )
+        })?
+        .sync_all()
+        .with_context(|| {
+            format!(
+                "failed to sync raw recordings tar directory {}",
+                parent.display()
+            )
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_raw_recordings_tar_parent(_destination: &Path) -> Result<()> {
+    Ok(())
+}
+
+pub(super) fn replay_render_is_supported(raw_session_count: usize) -> bool {
+    raw_session_count <= MAX_REPLAY_RAW_SESSION_COUNT
+}
+
+/// The raw begin response is the authority for opt-in. A later response can
+/// only suppress the final replay stage; it can never upgrade a legacy raw
+/// upload into granular progress reporting mid-attempt.
+pub(super) fn replay_stage_reporting_enabled(
+    initial_archive_progress_enabled: bool,
+    replay_archive_progress_enabled: bool,
+) -> bool {
+    initial_archive_progress_enabled && replay_archive_progress_enabled
+}
+
+const REPLAY_RENDER_ATTEMPT_PREFIX: &str = ".replay-render-";
+const REPLAY_RENDER_ATTEMPT_CREATE_RETRIES: usize = 8;
+
+pub(super) type ReplayRenderResult = Result<Option<replay_media::RenderedSessionMedia>>;
+
+pub(super) struct ReplayRenderTask {
+    output_dir: PathBuf,
+    first_ordinal: u32,
+    task: JoinHandle<ReplayRenderResult>,
+}
+
+#[cfg(test)]
+pub(super) fn replay_render_task_for_test(
+    output_dir: PathBuf,
+    task: JoinHandle<ReplayRenderResult>,
+) -> ReplayRenderTask {
+    ReplayRenderTask {
+        output_dir,
+        first_ordinal: 1,
+        task,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn replay_render_output_dir_for_test(render_task: &ReplayRenderTask) -> &Path {
+    &render_task.output_dir
+}
+
+pub(super) async fn start_replay_render(
+    artifacts_dir: PathBuf,
+    first_ordinal: u32,
+) -> Result<ReplayRenderTask> {
+    let output_dir = create_replay_render_output_dir(&artifacts_dir).await?;
+    let render_artifacts_dir = artifacts_dir;
+    let render_output_dir = output_dir.clone();
+    let task = tokio::spawn(async move {
+        render_replay_artifacts(&render_artifacts_dir, &render_output_dir).await
+    });
+    Ok(ReplayRenderTask {
+        output_dir,
+        first_ordinal,
+        task,
+    })
+}
+
+pub(super) async fn await_replay_render(render_task: &mut ReplayRenderTask) -> ReplayRenderResult {
+    (&mut render_task.task)
+        .await
+        .context("replay rendering task panicked")?
+}
+
+/// Keeps a renderer alive after a retryable raw-upload or stage failure, but
+/// releases the archive lane immediately. Its attempt-private output can be
+/// safely removed only after the blocking renderer has stopped writing it.
+pub(super) fn detach_replay_render_after_early_failure(
+    render_task: ReplayRenderTask,
+    vm_name: String,
+    run_id: String,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut render_task = render_task;
+        if let Err(error) = await_replay_render(&mut render_task).await {
+            warn!(
+                event = "scenario_run_replay_failed",
+                stage = "session_render_after_raw_failure",
+                error = %error,
+                vm = vm_name,
+                run_id,
+                "replay renderer failed after a retryable raw archive failure"
+            );
+        }
+        discard_replay_render_output_dir(&render_task.output_dir).await;
+    })
+}
+
+pub(super) async fn create_replay_render_output_dir(artifacts_dir: &Path) -> Result<PathBuf> {
+    for _ in 0..REPLAY_RENDER_ATTEMPT_CREATE_RETRIES {
+        let mut suffix = [0_u8; 16];
+        getrandom_fill(&mut suffix).context("generate unique replay render attempt suffix")?;
+        let output_dir = artifacts_dir.join(format!(
+            "{REPLAY_RENDER_ATTEMPT_PREFIX}{:032x}",
+            u128::from_be_bytes(suffix)
+        ));
+        match tokio::fs::create_dir(&output_dir).await {
+            Ok(()) => return Ok(output_dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to create private replay render directory {}: {error}",
+                    output_dir.display()
+                ));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to reserve a private replay render directory under {}",
+        artifacts_dir.display()
+    )
+}
+
+async fn discard_replay_render_output_dir(output_dir: &Path) {
+    match tokio::fs::remove_dir_all(output_dir).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(
+                path = %output_dir.display(),
+                error = %error,
+                "failed to remove private replay render output"
+            );
+        }
+    }
+}
+
 pub(super) async fn render_replay_artifacts(
     artifacts_dir: &Path,
+    output_dir: &Path,
+) -> ReplayRenderResult {
+    replay_media::render_session_media_into(artifacts_dir, output_dir).await
+}
+
+/// Publishes a completed private render under the stable cast names before
+/// generating descriptors for a second `begin` call. The directory is a
+/// child of `artifacts_dir`, so each rename is an atomic same-filesystem move.
+pub(super) async fn publish_replay_artifacts(
+    artifacts_dir: &Path,
     first_ordinal: u32,
-) -> Result<Option<(Vec<LocalArtifact>, replay_media::TimelineDocument)>> {
-    let Some(rendered) = replay_media::render_session_media(artifacts_dir).await? else {
-        return Ok(None);
-    };
-    let mut artifacts = Vec::with_capacity(rendered.cast_paths.len());
+    rendered: replay_media::RenderedSessionMedia,
+) -> Result<(Vec<LocalArtifact>, replay_media::TimelineDocument)> {
+    if rendered.cast_paths.len() != rendered.timeline.sessions.len() {
+        anyhow::bail!(
+            "rendered replay has {} casts for {} timeline sessions",
+            rendered.cast_paths.len(),
+            rendered.timeline.sessions.len()
+        );
+    }
+
+    let mut final_paths = Vec::with_capacity(rendered.cast_paths.len());
+    for (path, session) in rendered.cast_paths.iter().zip(&rendered.timeline.sessions) {
+        let filename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "rendered cast path has no utf-8 filename: {}",
+                    path.display()
+                )
+            })?;
+        if filename != session.cast_filename {
+            anyhow::bail!(
+                "rendered cast {} does not match timeline filename {}",
+                path.display(),
+                session.cast_filename
+            );
+        }
+        let final_path = artifacts_dir.join(filename);
+        tokio::fs::rename(path, &final_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to atomically publish rendered cast {}",
+                    final_path.display()
+                )
+            })?;
+        final_paths.push(final_path);
+    }
+
+    let mut artifacts = Vec::with_capacity(final_paths.len());
     let mut ordinal = first_ordinal;
-    for path in &rendered.cast_paths {
+    for path in &final_paths {
         artifacts.push(
             describe_local_artifact(
                 ordinal,
@@ -817,7 +1582,8 @@ pub(super) async fn render_replay_artifacts(
         );
         ordinal = ordinal.saturating_add(1);
     }
-    Ok(Some((artifacts, rendered.timeline)))
+
+    Ok((artifacts, rendered.timeline))
 }
 
 /// Hands the rendered timeline (session metadata + transcripts) to the

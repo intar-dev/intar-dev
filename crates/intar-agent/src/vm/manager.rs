@@ -376,7 +376,11 @@ const KINO_HOST_READY_PORT: u32 = 18_081;
 const KINO_VSOCK_CID_MIN: u32 = 10_000;
 const ARTIFACT_UPLOAD_PART_BYTES: usize = 16 * 1024 * 1024;
 const ARTIFACT_UPLOAD_CONCURRENCY: usize = 4;
+// Several archive jobs may run at once, but transfer pressure must stay
+// bounded for the whole host rather than multiplying per job.
+const ARCHIVE_HOST_TRANSFER_CONCURRENCY: usize = 4;
 const ARCHIVE_JOB_BATCH_SIZE: usize = 4;
+const ARCHIVE_RUN_CONCURRENCY: usize = 2;
 const ARCHIVE_RETRY_BASE_MS: i64 = 5_000;
 const ARCHIVE_RETRY_MAX_MS: i64 = 5 * 60 * 1000;
 const ARCHIVE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -600,6 +604,10 @@ struct Inner {
     delete_requests: Mutex<BTreeSet<String>>,
     cleanup_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     run_cleanup_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    /// Caps all artifact transfers on this host. Individual archive jobs may
+    /// fan out over their artifacts, but every transfer consumes this shared
+    /// permit until its multipart upload is complete.
+    archive_transfer_sem: Semaphore,
     archive_jobs_lock: Mutex<()>,
     /// A permit is retained when the archive worker is between waits, so a
     /// durable queue insertion never has to wait for the ten-second sweep.

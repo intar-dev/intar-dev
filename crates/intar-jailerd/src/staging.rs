@@ -327,7 +327,8 @@ pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -
         bail!("jailed recording disk ownership or mode changed")
     }
     let temporary = format!(".recording-export-{}", Uuid::new_v4());
-    let operation = (|| -> Result<()> {
+    let transfer_started_at = Instant::now();
+    let operation = (|| -> Result<RecordingExportTransfer> {
         let output_fd = rustix::fs::openat(
             &parent_fd,
             temporary.as_str(),
@@ -335,7 +336,14 @@ pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -
             Mode::RUSR | Mode::WUSR,
         )?;
         let mut output = File::from(output_fd);
-        std::io::copy(&mut source, &mut output).context("copy drained recording export")?;
+        let transfer = clone_or_copy_drained_recording(&mut source, &mut output)?;
+        let output_metadata = output
+            .metadata()
+            .context("read transferred recording export metadata")?;
+        ensure!(
+            output_metadata.len() == source_metadata.len(),
+            "drained recording export size changed during transfer"
+        );
         rustix::fs::fchmod(&output, Mode::RUSR | Mode::WUSR)?;
         rustix::fs::fchown(
             &output,
@@ -352,12 +360,99 @@ pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -
         }
         rustix::fs::renameat(&parent_fd, temporary.as_str(), &parent_fd, file_name)?;
         rustix::fs::fsync(&parent_fd)?;
-        Ok(())
+        Ok(transfer)
     })();
-    if operation.is_err() {
-        let _ = rustix::fs::unlinkat(&parent_fd, temporary.as_str(), rustix::fs::AtFlags::empty());
+    match operation {
+        Ok(transfer) => {
+            tracing::info!(
+                event = "scenario_recording_export",
+                generation = %record.generation,
+                bytes = source_metadata.len(),
+                transfer = ?transfer,
+                elapsed_ms = transfer_started_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+                "published drained recording export"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            let _ =
+                rustix::fs::unlinkat(&parent_fd, temporary.as_str(), rustix::fs::AtFlags::empty());
+            Err(error)
+        }
     }
-    operation
+}
+
+/// Transfer a drained recording through the same source and destination file
+/// descriptors that carry the export transaction. A successful `FICLONE`
+/// shares extents exactly; unsupported clone routes retain the established
+/// byte-copy behavior. Other clone failures stay fail-closed.
+#[cfg(target_os = "linux")]
+pub(super) fn clone_or_copy_drained_recording(
+    source: &mut File,
+    output: &mut File,
+) -> Result<RecordingExportTransfer> {
+    clone_or_copy_drained_recording_with(source, output, |source, output| {
+        rustix::fs::ioctl_ficlone(output, source)
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RecordingExportTransfer {
+    Reflinked,
+    Copied,
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn clone_or_copy_drained_recording_with<F>(
+    source: &mut File,
+    output: &mut File,
+    clone: F,
+) -> Result<RecordingExportTransfer>
+where
+    F: FnOnce(&File, &File) -> rustix::io::Result<()>,
+{
+    match clone(source, output) {
+        Ok(()) => Ok(RecordingExportTransfer::Reflinked),
+        Err(error) if reflink_route_is_unavailable(error) => {
+            // FICLONE is atomic with concurrent writes, but an unsupported
+            // route may still leave the newly-created output with state that
+            // is unsuitable for the legacy copy path. Reset the exclusively
+            // held temporary inode before copying from the pinned source.
+            output
+                .set_len(0)
+                .context("clear unavailable recording reflink before copy fallback")?;
+            source
+                .seek(SeekFrom::Start(0))
+                .context("rewind drained recording export for copy fallback")?;
+            output
+                .seek(SeekFrom::Start(0))
+                .context("rewind recording export output for copy fallback")?;
+            std::io::copy(source, output).context("copy drained recording export")?;
+            Ok(RecordingExportTransfer::Copied)
+        }
+        Err(error) => Err(error).context("exact-reflink drained recording export"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reflink_route_is_unavailable(error: rustix::io::Errno) -> bool {
+    matches!(
+        error,
+        // Linux documents these errors for unavailable FICLONE support or a
+        // cross-filesystem route. The descriptors are already opened with
+        // the required access and validated as regular files, so the legacy
+        // copy remains safe for precisely these cases.
+        rustix::io::Errno::BADF
+            | rustix::io::Errno::INVAL
+            | rustix::io::Errno::NOTTY
+            | rustix::io::Errno::NOSYS
+            | rustix::io::Errno::OPNOTSUPP
+            | rustix::io::Errno::XDEV
+    )
 }
 
 #[cfg(not(target_os = "linux"))]

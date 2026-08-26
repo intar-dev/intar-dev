@@ -28,6 +28,7 @@ const TRANSCRIPT_SCROLLBACK_LIMIT: usize = 10_000;
 const TRANSCRIPT_MAX_BYTES: usize = 1_000_000;
 
 const TRUNCATION_MARKER: &str = "[transcript truncated: earliest output omitted]";
+const TRUNCATION_PREFIX: &str = "[transcript truncated: earliest output omitted]\n";
 
 pub(crate) struct Transcript {
     pub(crate) text: String,
@@ -86,6 +87,73 @@ pub(crate) fn render_transcript(session: &ParsedKrec) -> Transcript {
     Transcript { text, truncated }
 }
 
+/// Shrinks a transcript to `max_bytes`, retaining its newest output. This is
+/// used for the timeline-wide budget after each session has applied its own
+/// storage cap. The output is always valid UTF-8 and, when possible, starts at
+/// a complete line rather than in the middle of one.
+pub(crate) fn trim_transcript_to_byte_limit(
+    text: &mut String,
+    truncated: &mut bool,
+    max_bytes: usize,
+) {
+    if text.len() <= max_bytes {
+        return;
+    }
+
+    if max_bytes < TRUNCATION_PREFIX.len() {
+        // The boolean remains an unambiguous truncation signal when there is
+        // not enough room for the marker itself.
+        text.clear();
+        *truncated = true;
+        return;
+    }
+
+    // A transcript rendered with the per-session cap already has this marker.
+    // Do not stack another marker before dropping more of its oldest output.
+    let body = if *truncated {
+        text.strip_prefix(TRUNCATION_PREFIX)
+            .unwrap_or(text.as_str())
+    } else {
+        text.as_str()
+    };
+    let body_limit = max_bytes - TRUNCATION_PREFIX.len();
+    let retained = newest_suffix_at_line_boundary(body, body_limit);
+
+    let mut replacement = String::with_capacity(max_bytes);
+    replacement.push_str(TRUNCATION_MARKER);
+    replacement.push('\n');
+    replacement.push_str(retained);
+    debug_assert!(replacement.len() <= max_bytes);
+
+    *text = replacement;
+    *truncated = true;
+}
+
+fn newest_suffix_at_line_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+
+    // Move forward to a UTF-8 character boundary. Moving forward (rather than
+    // backward) guarantees the retained suffix remains within the byte limit.
+    let mut start = text.len() - max_bytes;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+
+    // Prefer a following complete-line boundary. If the remaining range has
+    // only the terminating newline, retain the valid suffix instead of
+    // discarding all useful output.
+    if let Some(newline) = text[start..].find('\n') {
+        let line_start = start + newline + 1;
+        if line_start < text.len() {
+            return &text[line_start..];
+        }
+    }
+
+    &text[start..]
+}
+
 fn clamp_cols(cols: u16) -> usize {
     usize::from(cols.max(1)).min(MAX_NATIVE_COLS)
 }
@@ -97,7 +165,10 @@ fn clamp_rows(rows: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::super::krec::{KrecEvent, KrecEventData, ParsedKrec};
-    use super::{TRANSCRIPT_MAX_BYTES, TRUNCATION_MARKER, render_transcript};
+    use super::{
+        TRANSCRIPT_MAX_BYTES, TRUNCATION_MARKER, TRUNCATION_PREFIX, render_transcript,
+        trim_transcript_to_byte_limit,
+    };
 
     fn session(width: u16, height: u16, events: Vec<KrecEvent>) -> ParsedKrec {
         ParsedKrec {
@@ -193,5 +264,42 @@ mod tests {
         assert!(transcript.text.starts_with(TRUNCATION_MARKER));
         assert!(transcript.text.len() <= TRANSCRIPT_MAX_BYTES + TRUNCATION_MARKER.len() + 1);
         assert!(transcript.text.contains(&format!("{wide}4999")));
+    }
+
+    #[test]
+    fn total_budget_trim_keeps_a_complete_recent_multibyte_line() {
+        let discarded = format!("discard-{}", "界".repeat(20));
+        let recent = "recent caf\u{e9} \u{1f980}\n";
+        let mut text = format!("{discarded}\n{recent}");
+        let mut truncated = false;
+
+        // This starts in the final byte of the last multibyte character in
+        // `discarded`. The retained output must still begin on a valid UTF-8
+        // and line boundary.
+        let max_bytes = TRUNCATION_PREFIX.len() + recent.len() + 2;
+        trim_transcript_to_byte_limit(&mut text, &mut truncated, max_bytes);
+
+        assert_eq!(text, format!("{TRUNCATION_MARKER}\n{recent}"));
+        assert!(truncated);
+        assert!(text.len() <= max_bytes);
+    }
+
+    #[test]
+    fn total_budget_trim_prefers_a_following_line_boundary() {
+        let retained = "recent-one\nrecent-two\n";
+        let mut text = format!(
+            "{}\n{retained}",
+            "discard-this-long-partial-line-".repeat(4)
+        );
+        let mut truncated = false;
+
+        trim_transcript_to_byte_limit(
+            &mut text,
+            &mut truncated,
+            TRUNCATION_PREFIX.len() + retained.len() + 3,
+        );
+
+        assert_eq!(text, format!("{TRUNCATION_MARKER}\n{retained}"));
+        assert!(truncated);
     }
 }

@@ -210,6 +210,66 @@ async fn run_lock_serializes_cleanup_and_launch_without_blocking_other_runs() {
     launch_task.await.expect("same-run launch completed");
 }
 
+#[tokio::test]
+async fn legacy_capture_uses_the_run_lock_but_per_vm_spools_do_not() {
+    let locks = Arc::new(Mutex::new(BTreeMap::new()));
+    let legacy = test_vm_status("vm-legacy", Some("run-1"));
+    assert!(requires_run_cleanup_lock_for_capture(&legacy));
+
+    let legacy_capture_guard = acquire_run_cleanup_lock_for_capture(&locks, &legacy)
+        .await
+        .expect("legacy capture must hold the run lock");
+    let (attempting_tx, attempting_rx) = tokio::sync::oneshot::channel();
+    let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+    let same_run_locks = Arc::clone(&locks);
+    let same_run_legacy = legacy.clone();
+    let capture_task = tokio::spawn(async move {
+        let _ = attempting_tx.send(());
+        let _capture_guard =
+            acquire_run_cleanup_lock_for_capture(&same_run_locks, &same_run_legacy)
+                .await
+                .expect("legacy sibling capture must use the run lock");
+        let _ = acquired_tx.send(());
+    });
+    attempting_rx.await.expect("legacy sibling capture started");
+    assert!(
+        timeout(Duration::from_millis(25), &mut acquired_rx)
+            .await
+            .is_err(),
+        "legacy sibling capture entered the shared run spool before its predecessor completed"
+    );
+
+    drop(legacy_capture_guard);
+    timeout(Duration::from_secs(1), &mut acquired_rx)
+        .await
+        .expect("legacy sibling capture should continue after the run lock releases")
+        .expect("legacy sibling capture should report lock acquisition");
+    capture_task
+        .await
+        .expect("legacy sibling capture completed");
+
+    let mut per_vm_spool = test_vm_status("vm-isolated", Some("run-1"));
+    per_vm_spool
+        .details
+        .as_mut()
+        .expect("fixture has VM details")
+        .spool_dir = Some("/tmp/run-1/vm-isolated".to_string());
+    assert!(!requires_run_cleanup_lock_for_capture(&per_vm_spool));
+
+    let release_phase_guard = acquire_run_cleanup_lock(&locks, "run-1").await;
+    let capture_guard = timeout(
+        Duration::from_millis(25),
+        acquire_run_cleanup_lock_for_capture(&locks, &per_vm_spool),
+    )
+    .await
+    .expect("per-VM capture must not wait for another cleanup release phase");
+    assert!(
+        capture_guard.is_none(),
+        "per-VM artifact spools must retain concurrent capture"
+    );
+    drop(release_phase_guard);
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn probe_replay_preserves_stored_envelope_payload() {

@@ -231,6 +231,242 @@ fn vm_info_status_classification() {
 }
 
 #[test]
+fn pinned_v53_shutdown_proof_requires_created_or_definitively_absent_vm() {
+    let created = cloud_hypervisor_client::VmInfo {
+        config: cloud_hypervisor_client::VmConfig::default(),
+        state: cloud_hypervisor_client::VmState::Created,
+        memory_actual_size: None,
+    };
+    assert!(v53_post_shutdown_state_is_proven(&created));
+
+    for state in [
+        cloud_hypervisor_client::VmState::Running,
+        cloud_hypervisor_client::VmState::Paused,
+        cloud_hypervisor_client::VmState::Shutdown,
+    ] {
+        assert!(
+            !v53_post_shutdown_state_is_proven(&cloud_hypervisor_client::VmInfo {
+                state,
+                ..created.clone()
+            }),
+            "only pinned-v53 Created proves a completed shutdown"
+        );
+    }
+
+    let absent = ChError::HttpStatus {
+        status: 404,
+        body: "VM is not created".to_string(),
+    };
+    assert!(vm_info_confirms_vm_absent(&absent));
+
+    let inconclusive = ChError::HttpStatus {
+        status: 500,
+        body: "temporary API failure".to_string(),
+    };
+    assert!(!vm_info_confirms_vm_absent(&inconclusive));
+}
+
+#[tokio::test(start_paused = true)]
+async fn post_shutdown_grace_only_skips_the_two_definitive_v53_proofs() {
+    let grace = Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS);
+    let created = cloud_hypervisor_client::VmInfo {
+        config: cloud_hypervisor_client::VmConfig::default(),
+        state: cloud_hypervisor_client::VmState::Created,
+        memory_actual_size: None,
+    };
+
+    let created_classified = Arc::new(Notify::new());
+    let created_classified_for_probe = Arc::clone(&created_classified);
+    let created_for_fast_path = created.clone();
+    let created_started_at = tokio::time::Instant::now();
+    let created_deadline = created_started_at + grace;
+    let created_task = tokio::spawn(async move {
+        wait_for_post_shutdown_probe_grace(
+            created_deadline,
+            async move { Ok::<_, ChError>(created_for_fast_path) },
+            move |probe_result| {
+                let proven = post_shutdown_vm_info_proves_stopped(probe_result);
+                created_classified_for_probe.notify_one();
+                proven
+            },
+        )
+        .await
+    });
+    created_classified.notified().await;
+    assert!(
+        created_task.is_finished(),
+        "Created must skip the post-response shutdown grace"
+    );
+    assert_eq!(tokio::time::Instant::now(), created_started_at);
+    assert!(
+        created_task
+            .await
+            .expect("Created grace task must not panic")
+            .is_ok()
+    );
+
+    let absent_classified = Arc::new(Notify::new());
+    let absent_classified_for_probe = Arc::clone(&absent_classified);
+    let absent_started_at = tokio::time::Instant::now();
+    let absent_deadline = absent_started_at + grace;
+    let absent_task = tokio::spawn(async move {
+        wait_for_post_shutdown_probe_grace(
+            absent_deadline,
+            async move {
+                Err::<cloud_hypervisor_client::VmInfo, _>(ChError::HttpStatus {
+                    status: 404,
+                    body: "VM is not created".to_string(),
+                })
+            },
+            move |probe_result| {
+                let proven = post_shutdown_vm_info_proves_stopped(probe_result);
+                absent_classified_for_probe.notify_one();
+                proven
+            },
+        )
+        .await
+    });
+    absent_classified.notified().await;
+    assert!(
+        absent_task.is_finished(),
+        "a definitive vm.info 404 must skip the post-response shutdown grace"
+    );
+    assert_eq!(tokio::time::Instant::now(), absent_started_at);
+    assert!(
+        absent_task
+            .await
+            .expect("absent-VM grace task must not panic")
+            .is_ok()
+    );
+
+    let running_classified = Arc::new(Notify::new());
+    let running_classified_for_probe = Arc::clone(&running_classified);
+    let running_started_at = tokio::time::Instant::now();
+    let running_deadline = running_started_at + grace;
+    let running_task = tokio::spawn(async move {
+        wait_for_post_shutdown_probe_grace(
+            running_deadline,
+            async move {
+                Ok::<_, ChError>(cloud_hypervisor_client::VmInfo {
+                    state: cloud_hypervisor_client::VmState::Running,
+                    ..created.clone()
+                })
+            },
+            move |probe_result| {
+                let proven = post_shutdown_vm_info_proves_stopped(probe_result);
+                running_classified_for_probe.notify_one();
+                proven
+            },
+        )
+        .await
+    });
+    running_classified.notified().await;
+    assert!(
+        !running_task.is_finished(),
+        "Running must not pass the shutdown grace early"
+    );
+    tokio::time::advance(grace - Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !running_task.is_finished(),
+        "Running must retain the entire five-second shutdown grace"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(running_task.is_finished());
+    assert_eq!(tokio::time::Instant::now(), running_started_at + grace);
+    assert!(
+        running_task
+            .await
+            .expect("Running grace task must not panic")
+            .is_ok()
+    );
+
+    let failure_classified = Arc::new(Notify::new());
+    let failure_classified_for_probe = Arc::clone(&failure_classified);
+    let failure_started_at = tokio::time::Instant::now();
+    let failure_deadline = failure_started_at + grace;
+    let failure_task = tokio::spawn(async move {
+        wait_for_post_shutdown_probe_grace(
+            failure_deadline,
+            async move {
+                Err::<cloud_hypervisor_client::VmInfo, _>(ChError::HttpStatus {
+                    status: 500,
+                    body: "temporary API failure".to_string(),
+                })
+            },
+            move |probe_result| {
+                let proven = post_shutdown_vm_info_proves_stopped(probe_result);
+                failure_classified_for_probe.notify_one();
+                proven
+            },
+        )
+        .await
+    });
+    failure_classified.notified().await;
+    assert!(
+        !failure_task.is_finished(),
+        "a 500 vm.info response must not pass the shutdown grace early"
+    );
+    tokio::time::advance(grace - Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !failure_task.is_finished(),
+        "a 500 vm.info response must retain the entire five-second shutdown grace"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(failure_task.is_finished());
+    assert_eq!(tokio::time::Instant::now(), failure_started_at + grace);
+    assert!(
+        failure_task
+            .await
+            .expect("500 grace task must not panic")
+            .is_ok()
+    );
+
+    let timeout_probe_started = Arc::new(Notify::new());
+    let timeout_probe_started_for_probe = Arc::clone(&timeout_probe_started);
+    let timeout_started_at = tokio::time::Instant::now();
+    let timeout_deadline = timeout_started_at + grace;
+    let timeout_task = tokio::spawn(async move {
+        wait_for_post_shutdown_probe_grace(
+            timeout_deadline,
+            async move {
+                timeout_probe_started_for_probe.notify_one();
+                std::future::pending::<
+                    std::result::Result<cloud_hypervisor_client::VmInfo, ChError>,
+                >()
+                .await
+            },
+            post_shutdown_vm_info_proves_stopped,
+        )
+        .await
+    });
+    timeout_probe_started.notified().await;
+    assert!(
+        !timeout_task.is_finished(),
+        "a pending vm.info probe must not pass the shutdown grace early"
+    );
+    tokio::time::advance(grace - Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !timeout_task.is_finished(),
+        "a probe timeout must retain the entire five-second shutdown grace"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(timeout_task.is_finished());
+    assert_eq!(tokio::time::Instant::now(), timeout_started_at + grace);
+    assert!(
+        timeout_task
+            .await
+            .expect("timeout grace task must not panic")
+            .is_err()
+    );
+}
+
+#[test]
 fn delete_status_confirms_absence() {
     assert!(ch_delete_confirms_absence_status(204));
     assert!(ch_delete_confirms_absence_status(404));

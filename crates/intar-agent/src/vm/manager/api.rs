@@ -52,6 +52,7 @@ impl VmManager {
             delete_requests: Mutex::new(BTreeSet::new()),
             cleanup_locks: Mutex::new(BTreeMap::new()),
             run_cleanup_locks: Mutex::new(BTreeMap::new()),
+            archive_transfer_sem: Semaphore::new(ARCHIVE_HOST_TRANSFER_CONCURRENCY),
             archive_jobs_lock: Mutex::new(()),
             archive_jobs_notify: Notify::new(),
         };
