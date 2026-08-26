@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
+import { buildArtifactObjectKey } from "@/control-plane/agent-run-artifacts/storage";
 import { handleAgentBootstrap, sha256Hex } from "@/control-plane/auth";
 import {
   agentBootstrapTokens,
@@ -16,6 +17,7 @@ import {
   runtimeTerminalSessions,
   runtimeVms,
   scenarioRunArtifacts,
+  scenarioRunSessionTranscripts,
   scenarioRuns,
   user,
   workshopSessionMembers,
@@ -29,6 +31,7 @@ import {
 import { AppError } from "@/lib/app-error";
 import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { listWorkshopArtifactsForOwner } from "@/lib/workshops/artifacts";
+import { deriveScenarioRunReplayState } from "@/lib/scenario-runs/activity";
 import { getScenarioRunForUser } from "@/lib/scenario-runs";
 import {
   drizzleQueryToD1Statement,
@@ -97,6 +100,1129 @@ describe("domain-neutral agent artifact ingestion", () => {
     expect(scenario?.state).toBe("completed");
   });
 
+  it("archives a zero-byte raw recording bundle without treating it as a timeline segment", async () => {
+    const token = await seedScenarioRuntime();
+    const bundle = {
+      ...artifactDescriptor("ssh_recording_raw_bundle", "recordings.tar"),
+      contentType: "application/x-tar",
+    };
+    expect(
+      (await beginUpload(token, "scenario-execution", "scenario-vm", bundle))
+        .status,
+    ).toBe(200);
+    const upload = await agentRequest(
+      token,
+      "/agent/runs/scenario-execution/vms/scenario-vm/artifacts/1/multipart-begin",
+      "POST",
+    );
+    expect(upload.status).toBe(200);
+    await expect(upload.json()).resolves.toMatchObject({ done: true });
+
+    const db = drizzle(env.DB);
+    const [runtimeArtifact, legacyArtifact, run] = await Promise.all([
+      db.select().from(runtimeArtifacts),
+      db.select().from(scenarioRunArtifacts),
+      db
+        .select({ stateJson: scenarioRuns.stateJson })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, "scenario-execution")),
+    ]);
+    expect(runtimeArtifact[0]).toMatchObject({
+      kind: "ssh_recording_raw_bundle",
+      contentType: "application/x-tar",
+      uploadStatus: "uploaded",
+    });
+    expect(legacyArtifact[0]?.uploadStatus).toBe("uploaded");
+    const state = JSON.parse(run[0]?.stateJson ?? "{}") as Parameters<
+      typeof deriveScenarioRunReplayState
+    >[0];
+    expect(state.vms[0]?.hasRecording).toBe(true);
+    expect(deriveScenarioRunReplayState(state)).toBe("preparing");
+
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          {
+            version: 1,
+            sessions: [
+              {
+                index: 1,
+                startTimestampMs: 1_000,
+                durationMs: 100,
+                castFilename: "recordings.tar",
+                transcript: "not a replay segment",
+              },
+            ],
+          },
+        )
+      ).status,
+    ).toBe(409);
+  });
+
+  it("batches a contiguous artifact manifest and keeps dual-ledger retries idempotent", async () => {
+    const token = await seedScenarioRuntime();
+    const artifacts = [
+      artifactDescriptor("console_log", "one.log", 0, 1),
+      artifactDescriptor("console_log", "two.log", 0, 2),
+      artifactDescriptor("console_log", "three.log", 0, 3),
+    ];
+
+    const first = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      artifacts,
+    );
+    expect(first.status).toBe(200);
+
+    const db = drizzle(env.DB);
+    const [runtimeRows, legacyRows] = await Promise.all([
+      db.select().from(runtimeArtifacts).orderBy(runtimeArtifacts.ordinal),
+      db
+        .select()
+        .from(scenarioRunArtifacts)
+        .orderBy(scenarioRunArtifacts.ordinal),
+    ]);
+    expect(runtimeRows.map((artifact) => artifact.ordinal)).toEqual([1, 2, 3]);
+    expect(legacyRows.map((artifact) => artifact.ordinal)).toEqual([1, 2, 3]);
+    expect(legacyRows.map((artifact) => artifact.r2Key)).toEqual(
+      runtimeRows.map((artifact) => artifact.r2Key),
+    );
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/artifacts/3/multipart-begin",
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+
+    const retry = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      artifacts,
+    );
+    expect(retry.status).toBe(200);
+    await expect(db.select().from(runtimeArtifacts)).resolves.toHaveLength(3);
+    await expect(db.select().from(scenarioRunArtifacts)).resolves.toHaveLength(
+      3,
+    );
+
+    const conflict = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      artifacts.map((artifact) =>
+        artifact.ordinal === 2
+          ? { ...artifact, filename: "changed.log" }
+          : artifact,
+      ),
+    );
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({
+      error: "artifact 2 metadata does not match existing upload",
+    });
+    await expect(db.select().from(runtimeArtifacts)).resolves.toHaveLength(3);
+    await expect(db.select().from(scenarioRunArtifacts)).resolves.toHaveLength(
+      3,
+    );
+  });
+
+  it("does not reserve a racing conflicting manifest's extra ordinals", async () => {
+    const token = await seedScenarioRuntime();
+    const winner = artifactDescriptor("console_log", "winner.log");
+    const conflicting = [
+      { ...winner, filename: "conflicting.log" },
+      artifactDescriptor("console_log", "must-not-land.log", 0, 2),
+    ];
+
+    let releaseFirstBatch: () => void = () => undefined;
+    const firstBatchGate = new Promise<void>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+    let signalFirstBatch: () => void = () => undefined;
+    const firstBatchReached = new Promise<void>((resolve) => {
+      signalFirstBatch = resolve;
+    });
+    let delayFirstBatch = true;
+    const delayedD1 = new Proxy(env.DB, {
+      get(target, property, receiver) {
+        if (property === "batch") {
+          return async (...statements: Parameters<D1Database["batch"]>) => {
+            if (delayFirstBatch) {
+              delayFirstBatch = false;
+              signalFirstBatch();
+              await firstBatchGate;
+            }
+            return target.batch(...statements);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as D1Database;
+    const delayedEnv = new Proxy(env, {
+      get(target, property, receiver) {
+        return property === "DB"
+          ? delayedD1
+          : Reflect.get(target, property, receiver);
+      },
+    }) as Cloudflare.Env;
+
+    const conflictingRequest = beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      conflicting,
+      undefined,
+      delayedEnv,
+    );
+    await firstBatchReached;
+    const winningResponse = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      [winner],
+    );
+    releaseFirstBatch();
+    const conflictingResponse = await conflictingRequest;
+
+    expect(winningResponse.status).toBe(200);
+    expect(conflictingResponse.status).toBe(409);
+    const db = drizzle(env.DB);
+    const [runtimeRows, legacyRows] = await Promise.all([
+      db.select().from(runtimeArtifacts).orderBy(runtimeArtifacts.ordinal),
+      db
+        .select()
+        .from(scenarioRunArtifacts)
+        .orderBy(scenarioRunArtifacts.ordinal),
+    ]);
+    expect(runtimeRows.map((row) => row.ordinal)).toEqual([1]);
+    expect(legacyRows.map((row) => row.ordinal)).toEqual([1]);
+    expect(runtimeRows[0]?.filename).toBe("winner.log");
+    expect(legacyRows[0]?.filename).toBe("winner.log");
+  });
+
+  it("rejects a dual-ledger divergence before it reserves a later ordinal", async () => {
+    const token = await seedScenarioRuntime();
+    const first = artifactDescriptor("console_log", "one.log");
+    expect(
+      (
+        await beginUploadArtifacts(token, "scenario-execution", "scenario-vm", [
+          first,
+        ])
+      ).status,
+    ).toBe(200);
+
+    const db = drizzle(env.DB);
+    await db
+      .update(scenarioRunArtifacts)
+      .set({ filename: "diverged.log" })
+      .where(eq(scenarioRunArtifacts.ordinal, 1));
+
+    const response = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      [first, artifactDescriptor("console_log", "must-not-land.log", 0, 2)],
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "artifact 1 metadata does not match existing upload",
+    });
+    const [runtimeRows, legacyRows] = await Promise.all([
+      db.select().from(runtimeArtifacts).orderBy(runtimeArtifacts.ordinal),
+      db
+        .select()
+        .from(scenarioRunArtifacts)
+        .orderBy(scenarioRunArtifacts.ordinal),
+    ]);
+    expect(runtimeRows.map((row) => row.ordinal)).toEqual([1]);
+    expect(legacyRows.map((row) => row.ordinal)).toEqual([1]);
+  });
+
+  it("requires both modern scenario ledgers while allowing a matching subset retry", async () => {
+    const token = await seedScenarioRuntime();
+    const first = artifactDescriptor("console_log", "one.log");
+    const second = artifactDescriptor("console_log", "two.log", 0, 2);
+    expect(
+      (
+        await beginUploadArtifacts(token, "scenario-execution", "scenario-vm", [
+          first,
+          second,
+        ])
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await beginUploadArtifacts(token, "scenario-execution", "scenario-vm", [
+          first,
+        ])
+      ).status,
+    ).toBe(200);
+
+    const db = drizzle(env.DB);
+    await db
+      .delete(scenarioRunArtifacts)
+      .where(eq(scenarioRunArtifacts.ordinal, 2));
+    const splitLedger = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      [
+        first,
+        second,
+        artifactDescriptor("console_log", "must-not-land.log", 0, 3),
+      ],
+    );
+    expect(splitLedger.status).toBe(409);
+    await expect(splitLedger.json()).resolves.toMatchObject({
+      error: "artifact 2 metadata does not match existing upload",
+    });
+    await expect(db.select().from(runtimeArtifacts)).resolves.toHaveLength(2);
+    await expect(db.select().from(scenarioRunArtifacts)).resolves.toHaveLength(
+      1,
+    );
+  });
+
+  it("bounds begin bodies, descriptor count, descriptor fields, and R2 keys", async () => {
+    const token = await seedScenarioRuntime();
+    const descriptors = Array.from({ length: 1024 }, (_, index) =>
+      artifactDescriptor(
+        "console_log",
+        `artifact-${index + 1}.log`,
+        0,
+        index + 1,
+      ),
+    );
+    expect(
+      (
+        await beginUploadArtifacts(
+          token,
+          "scenario-execution",
+          "scenario-vm",
+          descriptors,
+        )
+      ).status,
+    ).toBe(200);
+
+    const db = drizzle(env.DB);
+    await expect(db.select().from(runtimeArtifacts)).resolves.toHaveLength(
+      1024,
+    );
+    await expect(db.select().from(scenarioRunArtifacts)).resolves.toHaveLength(
+      1024,
+    );
+    expect(
+      (
+        await beginUploadArtifacts(token, "scenario-execution", "scenario-vm", [
+          ...descriptors,
+          artifactDescriptor("console_log", "too-many.log", 0, 1025),
+        ])
+      ).status,
+    ).toBe(400);
+
+    for (const invalid of [
+      artifactDescriptor("k".repeat(65), "valid.log"),
+      artifactDescriptor("console_log", "🙂".repeat(64)),
+      {
+        ...artifactDescriptor("console_log", "valid.log"),
+        contentType: "a".repeat(256),
+      },
+      {
+        ...artifactDescriptor("console_log", "valid.log"),
+        sha256: "A".repeat(64),
+      },
+      {
+        ...artifactDescriptor("console_log", "valid.log"),
+        sizeBytes: Number.MAX_SAFE_INTEGER + 1,
+      },
+    ]) {
+      expect(
+        (
+          await beginUploadArtifacts(
+            token,
+            "scenario-execution",
+            "scenario-vm",
+            [invalid],
+          )
+        ).status,
+      ).toBe(400);
+    }
+
+    const oversizedResponse = await agentRawRequest(
+      token,
+      "/agent/runs/begin",
+      "POST",
+      JSON.stringify({
+        runId: "scenario-execution",
+        vmName: "scenario-vm",
+        artifacts: [],
+        padding: "x".repeat(2 * 1024 * 1024),
+      }),
+    );
+    expect(oversizedResponse.status).toBe(413);
+
+    const boundaryKey = buildArtifactObjectKey({
+      runId: "r".repeat(128),
+      vmId: "v".repeat(128),
+      ordinal: 1024,
+      kind: "k".repeat(64),
+      filename: "f".repeat(255),
+    });
+    expect(
+      new TextEncoder().encode(boundaryKey).byteLength,
+    ).toBeLessThanOrEqual(1024);
+    expect(() =>
+      buildArtifactObjectKey({
+        runId: "r".repeat(128),
+        vmId: "v".repeat(128),
+        ordinal: 1024,
+        kind: "k".repeat(64),
+        filename: "f".repeat(1_000),
+      }),
+    ).toThrow(/R2 key byte limit/);
+  });
+
+  it("retries an exact pre-limit manifest through the normal archiving transition", async () => {
+    const token = await seedScenarioRuntime();
+    const artifacts = oversizedArtifactDescriptors();
+    await seedScenarioArtifactManifest(artifacts);
+
+    const db = drizzle(env.DB);
+    const [storedRun] = await db
+      .select({ stateJson: scenarioRuns.stateJson })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, "scenario-execution"));
+    const archivedState = JSON.parse(
+      storedRun?.stateJson ?? "{}",
+    ) as Parameters<typeof recomputeRunState>[0];
+    const preArchivingState = recomputeRunState({
+      ...archivedState,
+      vms: archivedState.vms.map((vm) => ({
+        ...vm,
+        phase: "destroying",
+      })),
+    });
+    const preparedAt = Date.now();
+    await db
+      .update(runtimeExecutions)
+      .set({
+        state: "ready",
+        archiveRequestedAt: null,
+        updatedAt: preparedAt,
+      })
+      .where(eq(runtimeExecutions.id, "scenario-execution"));
+    await db
+      .update(runtimeVms)
+      .set({ archiveStageRank: null, updatedAt: preparedAt })
+      .where(eq(runtimeVms.id, "scenario-runtime-vm"));
+    await db
+      .update(scenarioRuns)
+      .set({
+        state: preArchivingState.phase,
+        stateRank: RUN_PHASE_ORDER[preArchivingState.phase],
+        stateJson: JSON.stringify(preArchivingState),
+        updatedAt: preparedAt,
+      })
+      .where(eq(scenarioRuns.runId, "scenario-execution"));
+
+    const before = await scenarioArtifactLedgerSnapshot(db);
+    expect(before.runtimeExecution).toMatchObject({ state: "ready" });
+    expect(before.scenarioRun).toMatchObject({ state: "tearing_down" });
+    const response = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      artifacts,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      archiveProgressVersion: 1,
+    });
+    const after = await scenarioArtifactLedgerSnapshot(db);
+    expect(after.runtime).toEqual(before.runtime);
+    expect(after.legacy).toEqual(before.legacy);
+    expect(after.runtimeExecution).toMatchObject({
+      state: "archiving",
+      archiveRequestedAt: expect.any(Number),
+    });
+    expect(after.runtimeVm).toMatchObject({ archiveStageRank: 1 });
+    expect(after.scenarioRun).toMatchObject({ state: "archiving" });
+    const transitionedState = JSON.parse(
+      after.scenarioRun?.stateJson ?? "{}",
+    ) as {
+      vms: Array<{ id: string; phase: string }>;
+    };
+    expect(
+      transitionedState.vms.find((vm) => vm.id === "scenario-vm-id")?.phase,
+    ).toBe("archived");
+  });
+
+  it("rejects a mismatched legacy ledger for an oversized retry without mutation", async () => {
+    const token = await seedScenarioRuntime();
+    const artifacts = oversizedArtifactDescriptors();
+    await seedScenarioArtifactManifest(artifacts);
+
+    const db = drizzle(env.DB);
+    await db
+      .update(scenarioRunArtifacts)
+      .set({ filename: "diverged.log" })
+      .where(eq(scenarioRunArtifacts.ordinal, artifacts.length));
+    const before = await scenarioArtifactLedgerSnapshot(db);
+    const response = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      artifacts,
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "artifact manifest does not match existing upload",
+    });
+    await expect(scenarioArtifactLedgerSnapshot(db)).resolves.toEqual(before);
+  });
+
+  it("rejects a new oversized manifest", async () => {
+    const token = await seedScenarioRuntime();
+    const response = await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      oversizedArtifactDescriptors(),
+    );
+
+    expect(response.status).toBe(400);
+    const db = drizzle(env.DB);
+    const snapshot = await scenarioArtifactLedgerSnapshot(db);
+    expect(snapshot.runtime).toEqual([]);
+    expect(snapshot.legacy).toEqual([]);
+  });
+
+  it("batches a multi-session scenario timeline before one ordered state update", async () => {
+    const token = await seedScenarioRuntime();
+    const artifacts = [
+      artifactDescriptor("ssh_recording_segment", "session-1.cast", 0, 1),
+      artifactDescriptor("ssh_recording_segment", "session-2.cast", 0, 2),
+      artifactDescriptor("ssh_recording_segment", "session-3.cast", 0, 3),
+    ];
+    expect(
+      (
+        await beginUploadArtifacts(
+          token,
+          "scenario-execution",
+          "scenario-vm",
+          artifacts,
+        )
+      ).status,
+    ).toBe(200);
+    for (const artifact of artifacts) {
+      expect(
+        (
+          await agentRequest(
+            token,
+            `/agent/runs/scenario-execution/vms/scenario-vm/artifacts/${artifact.ordinal}/multipart-begin`,
+            "POST",
+          )
+        ).status,
+      ).toBe(200);
+    }
+
+    const timeline = {
+      version: 1,
+      sessions: [
+        {
+          index: 1,
+          startTimestampMs: 1_000,
+          durationMs: 100,
+          exitCode: 0,
+          castFilename: "session-1.cast",
+          transcript: "one",
+        },
+        {
+          index: 2,
+          startTimestampMs: 1_200,
+          durationMs: 100,
+          exitCode: 0,
+          castFilename: "session-2.cast",
+          transcript: "two",
+        },
+        {
+          index: 3,
+          startTimestampMs: 1_400,
+          durationMs: 100,
+          exitCode: 0,
+          castFilename: "session-3.cast",
+          transcript: "three",
+        },
+      ],
+    };
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          timeline,
+        )
+      ).status,
+    ).toBe(200);
+
+    const db = drizzle(env.DB);
+    const [terminalRows, transcriptRows, artifactRows, runRows] =
+      await Promise.all([
+        db
+          .select()
+          .from(runtimeTerminalSessions)
+          .orderBy(runtimeTerminalSessions.ordinal),
+        db
+          .select()
+          .from(scenarioRunSessionTranscripts)
+          .orderBy(scenarioRunSessionTranscripts.sessionIndex),
+        db.select().from(runtimeArtifacts).orderBy(runtimeArtifacts.ordinal),
+        db
+          .select({ stateJson: scenarioRuns.stateJson })
+          .from(scenarioRuns)
+          .where(eq(scenarioRuns.runId, "scenario-execution")),
+      ]);
+    expect(terminalRows.map((session) => session.ordinal)).toEqual([1, 2, 3]);
+    expect(terminalRows.map((session) => session.recordingArtifactId)).toEqual(
+      artifactRows.map((artifact) => artifact.id),
+    );
+    expect(transcriptRows.map((session) => session.transcript)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+    const state = JSON.parse(runRows[0]?.stateJson ?? "{}") as {
+      vms: Array<{ id: string; sessionTimeline?: Array<{ index: number }> }>;
+    };
+    expect(
+      state.vms
+        .find((vm) => vm.id === "scenario-vm-id")
+        ?.sessionTimeline?.map((session) => session.index),
+    ).toEqual([1, 2, 3]);
+
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          timeline,
+        )
+      ).status,
+    ).toBe(200);
+    await expect(
+      db.select().from(runtimeTerminalSessions),
+    ).resolves.toHaveLength(3);
+    await expect(
+      db.select().from(scenarioRunSessionTranscripts),
+    ).resolves.toHaveLength(3);
+  });
+
+  it("merges concurrent scenario timelines for different VMs", async () => {
+    const token = await seedScenarioRuntime({ vms: 2 });
+    const firstArtifact = artifactDescriptor(
+      "ssh_recording_segment",
+      "first-session.cast",
+    );
+    const secondArtifact = artifactDescriptor(
+      "ssh_recording_segment",
+      "second-session.cast",
+    );
+    for (const [vmName, artifact] of [
+      ["scenario-vm", firstArtifact],
+      ["scenario-vm-2", secondArtifact],
+    ] as const) {
+      expect(
+        (await beginUpload(token, "scenario-execution", vmName, artifact))
+          .status,
+      ).toBe(200);
+      expect(
+        (
+          await agentRequest(
+            token,
+            `/agent/runs/scenario-execution/vms/${vmName}/artifacts/1/multipart-begin`,
+            "POST",
+          )
+        ).status,
+      ).toBe(200);
+    }
+
+    const [firstTimeline, secondTimeline] = await Promise.all([
+      agentRequest(
+        token,
+        "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+        "POST",
+        {
+          version: 1,
+          sessions: [
+            {
+              index: 1,
+              startTimestampMs: 1_000,
+              durationMs: 100,
+              castFilename: firstArtifact.filename,
+              transcript: "first transcript",
+            },
+          ],
+        },
+      ),
+      agentRequest(
+        token,
+        "/agent/runs/scenario-execution/vms/scenario-vm-2/timeline",
+        "POST",
+        {
+          version: 1,
+          sessions: [
+            {
+              index: 1,
+              startTimestampMs: 2_000,
+              durationMs: 100,
+              castFilename: secondArtifact.filename,
+              transcript: "second transcript",
+            },
+          ],
+        },
+      ),
+    ]);
+    expect(firstTimeline.status).toBe(200);
+    expect(secondTimeline.status).toBe(200);
+
+    const db = drizzle(env.DB);
+    const [terminalRows, transcriptRows, runRows] = await Promise.all([
+      db
+        .select()
+        .from(runtimeTerminalSessions)
+        .where(eq(runtimeTerminalSessions.executionId, "scenario-execution"))
+        .orderBy(runtimeTerminalSessions.runtimeVmId),
+      db
+        .select()
+        .from(scenarioRunSessionTranscripts)
+        .where(eq(scenarioRunSessionTranscripts.runId, "scenario-execution"))
+        .orderBy(scenarioRunSessionTranscripts.vmId),
+      db
+        .select({ stateJson: scenarioRuns.stateJson })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, "scenario-execution")),
+    ]);
+    expect(terminalRows.map((row) => row.runtimeVmId)).toEqual([
+      "scenario-runtime-vm",
+      "scenario-runtime-vm-2",
+    ]);
+    expect(transcriptRows).toHaveLength(2);
+    expect(transcriptRows.map((row) => row.transcript)).toEqual(
+      expect.arrayContaining(["first transcript", "second transcript"]),
+    );
+    const state = JSON.parse(runRows[0]?.stateJson ?? "{}") as {
+      vms: Array<{
+        id: string;
+        sessionTimeline?: Array<{ castFilename: string }>;
+      }>;
+    };
+    expect(
+      state.vms.find((vm) => vm.id === "scenario-vm-id")?.sessionTimeline,
+    ).toMatchObject([{ castFilename: "first-session.cast" }]);
+    expect(
+      state.vms.find((vm) => vm.id === "scenario-vm-2-id")?.sessionTimeline,
+    ).toMatchObject([{ castFilename: "second-session.cast" }]);
+  });
+
+  it("does not publish a partial timeline when its D1 batch fails", async () => {
+    const token = await seedScenarioRuntime();
+    const artifacts = [
+      artifactDescriptor("ssh_recording_segment", "session-1.cast", 0, 1),
+      artifactDescriptor("ssh_recording_segment", "session-2.cast", 0, 2),
+    ];
+    await beginUploadArtifacts(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      artifacts,
+    );
+    for (const artifact of artifacts) {
+      await agentRequest(
+        token,
+        `/agent/runs/scenario-execution/vms/scenario-vm/artifacts/${artifact.ordinal}/multipart-begin`,
+        "POST",
+      );
+    }
+
+    const db = drizzle(env.DB);
+    await db.insert(scenarioRunSessionTranscripts).values({
+      id: "scenario-vm-id:session:2",
+      runId: "scenario-execution",
+      vmId: "different-vm",
+      sessionIndex: 2,
+      transcript: "existing transcript",
+      createdAt: Date.now(),
+    });
+
+    await expect(
+      agentRequest(
+        token,
+        "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+        "POST",
+        {
+          version: 1,
+          sessions: [
+            {
+              index: 1,
+              startTimestampMs: 1_000,
+              durationMs: 100,
+              castFilename: "session-1.cast",
+              transcript: "one",
+            },
+            {
+              index: 2,
+              startTimestampMs: 1_200,
+              durationMs: 100,
+              castFilename: "session-2.cast",
+              transcript: "two",
+            },
+          ],
+        },
+      ),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+
+    const [terminalRows, transcriptRows, runRows] = await Promise.all([
+      db
+        .select()
+        .from(runtimeTerminalSessions)
+        .where(eq(runtimeTerminalSessions.runtimeVmId, "scenario-runtime-vm")),
+      db
+        .select()
+        .from(scenarioRunSessionTranscripts)
+        .where(eq(scenarioRunSessionTranscripts.vmId, "scenario-vm-id")),
+      db
+        .select({ stateJson: scenarioRuns.stateJson })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, "scenario-execution")),
+    ]);
+    expect(terminalRows).toHaveLength(0);
+    expect(transcriptRows).toHaveLength(0);
+    const state = JSON.parse(runRows[0]?.stateJson ?? "{}") as {
+      vms: Array<{ id: string; sessionTimeline?: unknown }>;
+    };
+    expect(
+      state.vms.find((vm) => vm.id === "scenario-vm-id")?.sessionTimeline,
+    ).toBeNull();
+  });
+
+  it("rolls back every timeline row and state after a later D1 statement fails", async () => {
+    const token = await seedScenarioRuntime();
+    const db = drizzle(env.DB);
+    const now = Date.now();
+    const artifacts = Array.from({ length: 51 }, (_, index) => {
+      const ordinal = index + 1;
+      return {
+        id: `scenario-vm-id:${ordinal}`,
+        ordinal,
+        filename: `session-${ordinal}.cast`,
+        r2Key: `test/segments/${ordinal}.cast`,
+      };
+    });
+    await env.DB.batch(
+      artifacts
+        .flatMap((artifact) => [
+          db.insert(runtimeArtifacts).values({
+            id: artifact.id,
+            executionId: "scenario-execution",
+            runtimeVmId: "scenario-runtime-vm",
+            ordinal: artifact.ordinal,
+            kind: "ssh_recording_segment",
+            filename: artifact.filename,
+            contentType: "application/x-asciicast",
+            sizeBytes: 0,
+            sha256: "a".repeat(64),
+            r2Key: artifact.r2Key,
+            uploadStatus: "uploaded",
+            createdAt: now,
+            uploadedAt: now,
+          }),
+          db.insert(scenarioRunArtifacts).values({
+            id: artifact.id,
+            runId: "scenario-execution",
+            vmId: "scenario-vm-id",
+            ordinal: artifact.ordinal,
+            kind: "ssh_recording_segment",
+            filename: artifact.filename,
+            contentType: "application/x-asciicast",
+            sizeBytes: 0,
+            sha256: "a".repeat(64),
+            r2Key: artifact.r2Key,
+            uploadStatus: "uploaded",
+            createdAt: now,
+            uploadedAt: now,
+          }),
+        ])
+        .map((statement) => drizzleQueryToD1Statement(env.DB, statement)),
+    );
+
+    const timeline = {
+      version: 1,
+      sessions: artifacts.map((artifact) => ({
+        index: artifact.ordinal,
+        startTimestampMs: artifact.ordinal * 1_000,
+        durationMs: 100,
+        castFilename: artifact.filename,
+        transcript: `transcript ${artifact.ordinal}`,
+      })),
+    };
+    const conflictingId = "scenario-vm-id:session:51";
+    await db.insert(scenarioRunSessionTranscripts).values({
+      id: conflictingId,
+      runId: "scenario-execution",
+      vmId: "different-vm",
+      sessionIndex: 51,
+      transcript: "existing transcript",
+      createdAt: now,
+    });
+
+    await expect(
+      agentRequest(
+        token,
+        "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+        "POST",
+        timeline,
+      ),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+
+    const [partialTerminalRows, partialTranscriptRows, partialRunRows] =
+      await Promise.all([
+        db
+          .select()
+          .from(runtimeTerminalSessions)
+          .where(
+            eq(runtimeTerminalSessions.runtimeVmId, "scenario-runtime-vm"),
+          ),
+        db
+          .select()
+          .from(scenarioRunSessionTranscripts)
+          .where(eq(scenarioRunSessionTranscripts.vmId, "scenario-vm-id")),
+        db
+          .select({ stateJson: scenarioRuns.stateJson })
+          .from(scenarioRuns)
+          .where(eq(scenarioRuns.runId, "scenario-execution")),
+      ]);
+    expect(partialTerminalRows).toHaveLength(0);
+    expect(partialTranscriptRows).toHaveLength(0);
+    const partialState = JSON.parse(partialRunRows[0]?.stateJson ?? "{}") as {
+      vms: Array<{ id: string; sessionTimeline?: unknown }>;
+    };
+    expect(
+      partialState.vms.find((vm) => vm.id === "scenario-vm-id")
+        ?.sessionTimeline,
+    ).toBeNull();
+
+    await db
+      .delete(scenarioRunSessionTranscripts)
+      .where(eq(scenarioRunSessionTranscripts.id, conflictingId));
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          timeline,
+        )
+      ).status,
+    ).toBe(200);
+
+    const [terminalRows, transcriptRows, runRows] = await Promise.all([
+      db
+        .select()
+        .from(runtimeTerminalSessions)
+        .where(eq(runtimeTerminalSessions.runtimeVmId, "scenario-runtime-vm")),
+      db
+        .select()
+        .from(scenarioRunSessionTranscripts)
+        .where(eq(scenarioRunSessionTranscripts.vmId, "scenario-vm-id")),
+      db
+        .select({ stateJson: scenarioRuns.stateJson })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, "scenario-execution")),
+    ]);
+    expect(terminalRows).toHaveLength(51);
+    expect(transcriptRows).toHaveLength(51);
+    const state = JSON.parse(runRows[0]?.stateJson ?? "{}") as {
+      vms: Array<{ id: string; sessionTimeline?: Array<{ index: number }> }>;
+    };
+    expect(
+      state.vms
+        .find((vm) => vm.id === "scenario-vm-id")
+        ?.sessionTimeline?.map((session) => session.index),
+    ).toEqual(artifacts.map((artifact) => artifact.ordinal));
+  });
+
+  it("rejects multibyte and aggregate transcript payloads above their byte budgets", async () => {
+    const token = await seedScenarioRuntime();
+    const tooLargeMultibyteTranscript = "🙂".repeat(375_001);
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          {
+            version: 1,
+            sessions: [
+              {
+                index: 1,
+                startTimestampMs: 1_000,
+                durationMs: 100,
+                castFilename: "session-1.cast",
+                transcript: tooLargeMultibyteTranscript,
+              },
+            ],
+          },
+        )
+      ).status,
+    ).toBe(400);
+
+    const mebibyte = 1024 * 1024;
+    const individuallyValidTranscript = "a".repeat(mebibyte);
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          {
+            version: 1,
+            sessions: Array.from({ length: 5 }, (_, index) => ({
+              index: index + 1,
+              startTimestampMs: 1_000 + index * 100,
+              durationMs: 100,
+              castFilename: `session-${index + 1}.cast`,
+              transcript: individuallyValidTranscript,
+            })),
+          },
+        )
+      ).status,
+    ).toBe(400);
+  });
+
+  it("requires dense timeline indexes in request order", async () => {
+    const token = await seedScenarioRuntime();
+    for (const indexes of [[2], [1, 3], [2, 1], [1, 1]]) {
+      expect(
+        (
+          await agentRequest(
+            token,
+            "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+            "POST",
+            {
+              version: 1,
+              sessions: indexes.map((index, offset) => ({
+                index,
+                startTimestampMs: 1_000 + offset * 100,
+                durationMs: 100,
+                castFilename: `session-${offset + 1}.cast`,
+                transcript: "transcript",
+              })),
+            },
+          )
+        ).status,
+      ).toBe(400);
+    }
+  });
+
+  it("requires every timeline cast to be an uploaded recording segment", async () => {
+    const token = await seedScenarioRuntime();
+    const segment = artifactDescriptor(
+      "ssh_recording_segment",
+      "session-1.cast",
+    );
+    await beginUpload(token, "scenario-execution", "scenario-vm", segment);
+    const timeline = {
+      version: 1,
+      sessions: [
+        {
+          index: 1,
+          startTimestampMs: 1_000,
+          durationMs: 100,
+          castFilename: "session-1.cast",
+          transcript: "transcript",
+        },
+      ],
+    };
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          timeline,
+        )
+      ).status,
+    ).toBe(409);
+
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/artifacts/1/multipart-begin",
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          timeline,
+        )
+      ).status,
+    ).toBe(200);
+  });
+
+  it("rejects a non-recording artifact as timeline media", async () => {
+    const token = await seedScenarioRuntime();
+    await beginUpload(
+      token,
+      "scenario-execution",
+      "scenario-vm",
+      artifactDescriptor("console_log", "session-1.cast"),
+    );
+    await agentRequest(
+      token,
+      "/agent/runs/scenario-execution/vms/scenario-vm/artifacts/1/multipart-begin",
+      "POST",
+    );
+
+    expect(
+      (
+        await agentRequest(
+          token,
+          "/agent/runs/scenario-execution/vms/scenario-vm/timeline",
+          "POST",
+          {
+            version: 1,
+            sessions: [
+              {
+                index: 1,
+                startTimestampMs: 1_000,
+                durationMs: 100,
+                castFilename: "session-1.cast",
+                transcript: "transcript",
+              },
+            ],
+          },
+        )
+      ).status,
+    ).toBe(409);
+  });
+
   it("records monotonic archive stages from begin through final sealing", async () => {
     const token = await seedScenarioRuntime();
     const descriptor = artifactDescriptor("console_log", "console.log");
@@ -105,8 +1231,14 @@ describe("domain-neutral agent artifact ingestion", () => {
     // /begin is the durable archive hand-off, so rank one does not depend on
     // a separate best-effort stage callback.
     expect(
-      (await beginUpload(token, "scenario-execution", "scenario-vm", descriptor))
-        .status,
+      (
+        await beginUpload(
+          token,
+          "scenario-execution",
+          "scenario-vm",
+          descriptor,
+        )
+      ).status,
     ).toBe(200);
     await expectArchiveStageRank(db, "scenario-runtime-vm", 1);
 
@@ -339,8 +1471,14 @@ describe("domain-neutral agent artifact ingestion", () => {
     );
 
     expect(
-      (await beginUpload(fixture.token1, "execution-1", "workshop-vm-1", descriptor))
-        .status,
+      (
+        await beginUpload(
+          fixture.token1,
+          "execution-1",
+          "workshop-vm-1",
+          descriptor,
+        )
+      ).status,
     ).toBe(200);
     await agentRequest(
       fixture.token1,
@@ -415,6 +1553,90 @@ describe("domain-neutral agent artifact ingestion", () => {
     expect(
       await env.VM_RUN_ARTIFACTS_BUCKET.get(terminal?.transcriptR2Key ?? ""),
     ).not.toBeNull();
+  });
+
+  it("bounds concurrent workshop transcript uploads", async () => {
+    const fixture = await seedWorkshopRuntime({ generations: 1 });
+    const artifacts = Array.from({ length: 6 }, (_, index) =>
+      artifactDescriptor(
+        "ssh_recording_segment",
+        `session-${index + 1}.cast`,
+        0,
+        index + 1,
+      ),
+    );
+    await beginUploadArtifacts(
+      fixture.token1,
+      "execution-1",
+      "workshop-vm-1",
+      artifacts,
+    );
+    for (const artifact of artifacts) {
+      await agentRequest(
+        fixture.token1,
+        `/agent/runs/execution-1/vms/workshop-vm-1/artifacts/${artifact.ordinal}/multipart-begin`,
+        "POST",
+      );
+    }
+
+    const bucket = env.VM_RUN_ARTIFACTS_BUCKET;
+    const originalPut = bucket.put.bind(bucket);
+    let inFlightPuts = 0;
+    let maxInFlightPuts = 0;
+    const boundedBucket = new Proxy(bucket, {
+      get(target, property) {
+        if (property === "put") {
+          return async (...args: Parameters<R2Bucket["put"]>) => {
+            inFlightPuts += 1;
+            maxInFlightPuts = Math.max(maxInFlightPuts, inFlightPuts);
+            try {
+              await Promise.resolve();
+              return await originalPut(...args);
+            } finally {
+              inFlightPuts -= 1;
+            }
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const boundedEnv = new Proxy(env, {
+      get(target, property) {
+        return property === "VM_RUN_ARTIFACTS_BUCKET"
+          ? boundedBucket
+          : Reflect.get(target, property);
+      },
+    }) as Cloudflare.Env;
+
+    expect(
+      (
+        await agentRequest(
+          fixture.token1,
+          "/agent/runs/execution-1/vms/workshop-vm-1/timeline",
+          "POST",
+          {
+            version: 1,
+            sessions: artifacts.map((artifact, index) => ({
+              index: index + 1,
+              startTimestampMs: 1_000 + index * 100,
+              durationMs: 100,
+              castFilename: artifact.filename,
+              transcript: `transcript ${index + 1}`,
+            })),
+          },
+          boundedEnv,
+        )
+      ).status,
+    ).toBe(200);
+    expect(maxInFlightPuts).toBe(4);
+
+    await expect(
+      drizzle(env.DB)
+        .select()
+        .from(runtimeTerminalSessions)
+        .where(eq(runtimeTerminalSessions.runtimeVmId, "runtime-vm-1")),
+    ).resolves.toHaveLength(6);
   });
 
   it("rejects the wrong host and a superseded generation that is not archiving", async () => {
@@ -498,29 +1720,48 @@ describe("domain-neutral agent artifact ingestion", () => {
   });
 });
 
-async function seedScenarioRuntime(): Promise<string> {
+async function seedScenarioRuntime(input?: { vms?: 1 | 2 }): Promise<string> {
   const db = drizzle(env.DB);
   const now = Date.now();
   await db.insert(user).values(userRow("scenario-owner"));
   await grantActiveBetaAccess("scenario-owner");
   await db.insert(agentHosts).values(hostRow("scenario-host", null));
-  const initial = buildInitialRunState({
-    vms: [
-      {
-        id: "scenario-vm-id",
-        ordinal: 0,
-        scenarioVmId: "scenario-vm-spec",
+  const scenarioVmDefinitions = [
+    {
+      id: "scenario-vm-id",
+      ordinal: 0,
+      scenarioVmId: "scenario-vm-spec",
+      scenarioVmName: "vm",
+      runtimeVmName: "scenario-vm",
+      hostname: "vm",
+      launchSummary: {
         scenarioVmName: "vm",
-        runtimeVmName: "scenario-vm",
         hostname: "vm",
-        launchSummary: {
-          scenarioVmName: "vm",
-          hostname: "vm",
-          probePhaseMap: {},
-          probeDescriptors: [],
-        },
+        probePhaseMap: {},
+        probeDescriptors: [],
       },
-    ],
+    },
+    ...(input?.vms === 2
+      ? [
+          {
+            id: "scenario-vm-2-id",
+            ordinal: 1,
+            scenarioVmId: "scenario-vm-spec-2",
+            scenarioVmName: "vm-2",
+            runtimeVmName: "scenario-vm-2",
+            hostname: "vm-2",
+            launchSummary: {
+              scenarioVmName: "vm-2",
+              hostname: "vm-2",
+              probePhaseMap: {},
+              probeDescriptors: [],
+            },
+          },
+        ]
+      : []),
+  ];
+  const initial = buildInitialRunState({
+    vms: scenarioVmDefinitions,
   });
   const archiving = recomputeRunState({
     ...initial,
@@ -543,7 +1784,7 @@ async function seedScenarioRuntime(): Promise<string> {
     tagsJson: [],
     hintsJson: [],
     solutionMarkdown: "Solution",
-    vmCount: 1,
+    vmCount: scenarioVmDefinitions.length,
     state: archiving.phase,
     stateRank: RUN_PHASE_ORDER[archiving.phase],
     activeKey: null,
@@ -557,7 +1798,20 @@ async function seedScenarioRuntime(): Promise<string> {
     statements: [drizzleQueryToD1Statement(env.DB, runInsert)],
     mode: "create",
   });
-  await db.insert(runtimeVms).values(runtimeVmRow(1, "scenario"));
+  await db.insert(runtimeVms).values([
+    runtimeVmRow(1, "scenario"),
+    ...(input?.vms === 2
+      ? [
+          {
+            ...runtimeVmRow(1, "scenario"),
+            id: "scenario-runtime-vm-2",
+            vmId: "scenario-vm-2-id",
+            ordinal: 1,
+            runtimeVmName: "scenario-vm-2",
+          },
+        ]
+      : []),
+  ]);
   return issueAgentToken("scenario-host");
 }
 
@@ -566,26 +1820,32 @@ async function seedWorkshopRuntime(input: {
 }): Promise<{ token1: string; token2: string }> {
   const db = drizzle(env.DB);
   const now = Date.now();
-  await db.insert(user).values([
-    userRow("learner"),
-    userRow("facilitator"),
-    userRow("runner-owner"),
-  ]);
+  await db
+    .insert(user)
+    .values([
+      userRow("learner"),
+      userRow("facilitator"),
+      userRow("runner-owner"),
+    ]);
   await db.insert(organization).values({
     id: "organization",
     name: "Organization",
     slug: "organization",
     createdAt: new Date(now),
   });
-  await db.insert(member).values([
-    memberRow("learner", "member"),
-    memberRow("facilitator", "member"),
-    memberRow("runner-owner", "owner"),
-  ]);
-  await db.insert(agentHosts).values([
-    hostRow("host-1", "organization"),
-    hostRow("host-2", "organization"),
-  ]);
+  await db
+    .insert(member)
+    .values([
+      memberRow("learner", "member"),
+      memberRow("facilitator", "member"),
+      memberRow("runner-owner", "owner"),
+    ]);
+  await db
+    .insert(agentHosts)
+    .values([
+      hostRow("host-1", "organization"),
+      hostRow("host-2", "organization"),
+    ]);
   await db.insert(workshopTemplates).values({
     id: "workshop-template",
     organizationId: "organization",
@@ -749,15 +2009,26 @@ async function beginUpload(
   artifact: ReturnType<typeof artifactDescriptor>,
   options?: { archiveProgressVersion?: number | null },
 ): Promise<Response> {
+  return beginUploadArtifacts(token, runId, vmName, [artifact], options);
+}
+
+async function beginUploadArtifacts(
+  token: string,
+  runId: string,
+  vmName: string,
+  artifacts: ReturnType<typeof artifactDescriptor>[],
+  options?: { archiveProgressVersion?: number | null },
+  requestEnv: Cloudflare.Env = env,
+): Promise<Response> {
   const body: {
     runId: string;
     vmName: string;
-    artifacts: [ReturnType<typeof artifactDescriptor>];
+    artifacts: ReturnType<typeof artifactDescriptor>[];
     archiveProgressVersion?: number;
   } = {
     runId,
     vmName,
-    artifacts: [artifact],
+    artifacts,
   };
   // The default models the new agent. Explicit null models an old payload
   // without the capability field; any other supplied value stays visible to
@@ -774,7 +2045,7 @@ async function beginUpload(
       },
       body: JSON.stringify(body),
     }),
-    env,
+    requestEnv,
   );
   if (!response) throw new Error("agent artifact route was not matched");
   return response;
@@ -785,6 +2056,7 @@ async function agentRequest(
   path: string,
   method: string,
   body?: unknown,
+  requestEnv: Cloudflare.Env = env,
 ): Promise<Response> {
   const response = await handleAgentRunArtifactRequest(
     new Request(`http://localhost${path}`, {
@@ -795,7 +2067,7 @@ async function agentRequest(
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
-    env,
+    requestEnv,
   );
   if (!response) throw new Error("agent artifact route was not matched");
   return response;
@@ -849,9 +2121,14 @@ async function grantActiveBetaAccess(userId: string): Promise<void> {
   });
 }
 
-function artifactDescriptor(kind: string, filename: string, sizeBytes = 0) {
+function artifactDescriptor(
+  kind: string,
+  filename: string,
+  sizeBytes = 0,
+  ordinal = 1,
+) {
   return {
-    ordinal: 1,
+    ordinal,
     kind,
     filename,
     contentType: "text/plain",
@@ -860,6 +2137,115 @@ function artifactDescriptor(kind: string, filename: string, sizeBytes = 0) {
       sizeBytes === 0
         ? "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         : "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+  };
+}
+
+function oversizedArtifactDescriptors(): Array<
+  ReturnType<typeof artifactDescriptor>
+> {
+  return Array.from({ length: 1025 }, (_, index) =>
+    artifactDescriptor(
+      "console_log",
+      `pre-limit-${index + 1}.log`,
+      0,
+      index + 1,
+    ),
+  );
+}
+
+async function seedScenarioArtifactManifest(
+  artifacts: ReadonlyArray<ReturnType<typeof artifactDescriptor>>,
+): Promise<void> {
+  const db = drizzle(env.DB);
+  const createdAt = Date.now();
+  const statements = artifacts.flatMap((artifact) => {
+    const r2Key = buildArtifactObjectKey({
+      runId: "scenario-execution",
+      vmId: "scenario-vm-id",
+      ordinal: artifact.ordinal,
+      kind: artifact.kind,
+      filename: artifact.filename,
+    });
+    const values = {
+      id: `scenario-vm-id:${artifact.ordinal}`,
+      ordinal: artifact.ordinal,
+      kind: artifact.kind,
+      filename: artifact.filename,
+      contentType: artifact.contentType,
+      sizeBytes: artifact.sizeBytes,
+      sha256: artifact.sha256,
+      r2Key,
+      uploadStatus: "pending" as const,
+      createdAt,
+      uploadedAt: null,
+    };
+    return [
+      drizzleQueryToD1Statement(
+        env.DB,
+        db.insert(runtimeArtifacts).values({
+          ...values,
+          executionId: "scenario-execution",
+          runtimeVmId: "scenario-runtime-vm",
+        }),
+      ),
+      drizzleQueryToD1Statement(
+        env.DB,
+        db.insert(scenarioRunArtifacts).values({
+          ...values,
+          runId: "scenario-execution",
+          vmId: "scenario-vm-id",
+        }),
+      ),
+    ];
+  });
+  // Keep test setup below the D1 invocation statement budget as well.
+  for (let start = 0; start < statements.length; start += 500) {
+    await env.DB.batch(statements.slice(start, start + 500));
+  }
+}
+
+async function scenarioArtifactLedgerSnapshot(db: ReturnType<typeof drizzle>) {
+  const [runtime, legacy, runtimeExecution, runtimeVm, scenarioRun] =
+    await Promise.all([
+      db.select().from(runtimeArtifacts).orderBy(runtimeArtifacts.ordinal),
+      db
+        .select()
+        .from(scenarioRunArtifacts)
+        .orderBy(scenarioRunArtifacts.ordinal),
+      db
+        .select({
+          state: runtimeExecutions.state,
+          archiveRequestedAt: runtimeExecutions.archiveRequestedAt,
+          updatedAt: runtimeExecutions.updatedAt,
+        })
+        .from(runtimeExecutions)
+        .where(eq(runtimeExecutions.id, "scenario-execution"))
+        .limit(1),
+      db
+        .select({
+          archiveStageRank: runtimeVms.archiveStageRank,
+          artifactWritesSealed: runtimeVms.artifactWritesSealed,
+          updatedAt: runtimeVms.updatedAt,
+        })
+        .from(runtimeVms)
+        .where(eq(runtimeVms.id, "scenario-runtime-vm"))
+        .limit(1),
+      db
+        .select({
+          state: scenarioRuns.state,
+          stateJson: scenarioRuns.stateJson,
+          updatedAt: scenarioRuns.updatedAt,
+        })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, "scenario-execution"))
+        .limit(1),
+    ]);
+  return {
+    runtime,
+    legacy,
+    runtimeExecution: runtimeExecution[0] ?? null,
+    runtimeVm: runtimeVm[0] ?? null,
+    scenarioRun: scenarioRun[0] ?? null,
   };
 }
 

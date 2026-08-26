@@ -18,6 +18,7 @@ import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
 } from "@/components/app/patterns/CollectionPagination";
+import { scenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
 import type {
   AgentHostApi,
   AgentVmRunArtifact,
@@ -219,29 +220,51 @@ export function ScenarioRunArchiveCard(props: {
                   >
                     {(visibleArtifacts) => (
                       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                        {visibleArtifacts.map((artifact) => (
-                          <button
-                            key={artifact.id}
-                            type="button"
-                            className={`min-h-16 rounded-xl border px-4 py-4 text-left text-sm transition-colors ${
-                              props.viewer?.artifact.id === artifact.id
-                                ? "border-primary/40 bg-primary/10 text-foreground"
-                                : "border-border bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground"
-                            }`}
-                            onClick={() => {
-                              props.onStreamArtifact(artifact);
-                            }}
-                          >
-                            <span className="block font-medium">
-                              {artifact.ordinal}.{" "}
-                              {artifactKindLabel(artifact.kind)}
-                            </span>
-                            <span className="mt-1 block text-xs">
-                              {artifact.filename} •{" "}
-                              {formatBytes(artifact.sizeBytes)}
-                            </span>
-                          </button>
-                        ))}
+                        {visibleArtifacts.map((artifact) => {
+                          const className = `min-h-16 rounded-xl border px-4 py-4 text-left text-sm transition-colors ${
+                            props.viewer?.artifact.id === artifact.id
+                              ? "border-primary/40 bg-primary/10 text-foreground"
+                              : "border-border bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground"
+                          }`;
+
+                          if (artifact.kind === "ssh_recording_raw_bundle") {
+                            return (
+                              <a
+                                key={artifact.id}
+                                className={className}
+                                href={`${scenarioRunArtifactContentPath(props.run.id, artifact.id)}?download=1`}
+                              >
+                                <span className="block font-medium">
+                                  {artifact.ordinal}. Raw Recording Bundle
+                                </span>
+                                <span className="mt-1 block text-xs">
+                                  {artifact.filename} •{" "}
+                                  {formatBytes(artifact.sizeBytes)} • Download
+                                </span>
+                              </a>
+                            );
+                          }
+
+                          return (
+                            <button
+                              key={artifact.id}
+                              type="button"
+                              className={className}
+                              onClick={() => {
+                                props.onStreamArtifact(artifact);
+                              }}
+                            >
+                              <span className="block font-medium">
+                                {artifact.ordinal}.{" "}
+                                {artifactKindLabel(artifact.kind)}
+                              </span>
+                              <span className="mt-1 block text-xs">
+                                {artifact.filename} •{" "}
+                                {formatBytes(artifact.sizeBytes)}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </PaginatedCollection>
