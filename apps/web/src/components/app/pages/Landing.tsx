@@ -157,7 +157,7 @@ export function Landing() {
         <a href="https://docs.intar.dev" className={footerLinkClassName}>
           Documentation
         </a>
-        <a href="mailto:marketing@intar.dev" className={footerLinkClassName}>
+        <a href="mailto:hello@intar.dev" className={footerLinkClassName}>
           Sponsorships
         </a>
       </footer>

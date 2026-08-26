@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router"
 import {
   ArrowRight,
   CircleDot,
+  MessageCircle,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -377,6 +378,27 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
 
   return (
     <PageShell width="default" density="comfortable">
+      {!courseId ? (
+        <Alert
+          role="note"
+          className="border-brand-border bg-brand-subtle text-foreground"
+        >
+          <MessageCircle aria-hidden="true" />
+          <AlertTitle>Need help during the beta?</AlertTitle>
+          <AlertDescription className="text-foreground">
+            Join us on{" "}
+            <a
+              href="https://discord.gg/BgknKxJKa"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Discord
+            </a>{" "}
+            or email <a href="mailto:hello@intar.dev">hello@intar.dev</a>.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {courseLoadFailed ? (
         <Alert variant="destructive">
           <RefreshCw aria-hidden="true" />
