@@ -1,4 +1,6 @@
-# Scenario Host Jailer
+---
+title: Scenario Host Jailer
+---
 
 Scenario hosts use a privileged `intar-jailerd` supervisor and a one-shot
 `intar-jailer`. `intar-agent` remains unprivileged: it reconciles desired state

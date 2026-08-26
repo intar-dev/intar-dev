@@ -1,4 +1,6 @@
-# Multicloud Workshops operations
+---
+title: Multicloud Workshops operations
+---
 
 This runbook operates the provider-neutral learner runtime for `agent_kvm`,
 Hetzner Cloud, and GCP Compute. It covers reviewed production deployment,

@@ -1,4 +1,6 @@
-# Builder Host Onboarding
+---
+title: Builder Host Onboarding
+---
 
 `intar-builder` runs on a dedicated Linux VM and receives image build assignments
 from the control plane over the bridge. Builder hosts are separate from scenario

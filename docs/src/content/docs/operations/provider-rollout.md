@@ -1,4 +1,6 @@
-# Provider Worker rollout
+---
+title: Provider Worker rollout
+---
 
 Hetzner and GCP are built with the Astro application but deployed as independent
 route-less Workers. A web-only change does not deploy either provider.

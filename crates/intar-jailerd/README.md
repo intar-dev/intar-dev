@@ -103,4 +103,4 @@ fully drained. The installer rejects live VM units, populated Intar cgroups,
 and lingering VMM/helper processes, and leaves the agent stopped. Run the
 privileged self-test and agent doctor before enabling scheduling. Current
 operations and exact HCL CPU semantics are documented in
-[Scenario Host Jailer](../../docs/operations/scenario-host-jailer.md).
+[Scenario Host Jailer](../../docs/src/content/docs/operations/scenario-host-jailer.md).

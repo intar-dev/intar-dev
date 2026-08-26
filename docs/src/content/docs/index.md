@@ -1,4 +1,7 @@
-# Intar documentation
+---
+title: Intar documentation
+description: Architecture, authoring contracts, and operations runbooks for the Intar platform.
+---
 
 - `architecture/` describes stable component and data-flow boundaries.
 - `authoring/` contains Course, Scenario, and Workshop content contracts.

@@ -1,4 +1,6 @@
-# ADR 0001: Clean-slate multi-cloud Workshop runtime
+---
+title: "ADR 0001: Clean-slate multi-cloud Workshop runtime"
+---
 
 - Status: accepted
 - Date: 2026-08-01

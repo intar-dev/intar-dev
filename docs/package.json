@@ -1,0 +1,26 @@
+{
+  "name": "@intar/docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "check": "astro check",
+    "build": "bun run check && astro build",
+    "preview": "astro preview",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.38.2",
+    "astro": "6.1.2"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.9",
+    "typescript": "6.0.3",
+    "wrangler": "4.126.0"
+  }
+}

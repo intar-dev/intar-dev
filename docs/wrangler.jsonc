@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "intar-docs",
+  "compatibility_date": "2026-08-20",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    {
+      "pattern": "docs.intar.dev/*",
+      "zone_name": "intar.dev"
+    }
+  ]
+}

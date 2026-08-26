@@ -1,4 +1,6 @@
-# Multi-cloud Workshop runtime
+---
+title: Multi-cloud Workshop runtime
+---
 
 The Workshop runtime is a provider-neutral control loop. It deliberately does
 not reuse Course or Scenario domain records. Scenarios keep their existing

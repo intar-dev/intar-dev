@@ -1,4 +1,6 @@
-# Course catalogs
+---
+title: Course catalogs
+---
 
 Courses are authored independently from scenario manifests in the optional
 `content/courses.hcl` file. The order of the blocks is the order shown in the

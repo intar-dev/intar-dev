@@ -34,6 +34,7 @@ function check(
   mkdirSync(join(nodeVersion, ".."), { recursive: true });
   writeFileSync(nodeVersion, "24.17.0\n");
   for (const path of [
+    "docs/wrangler.jsonc",
     "apps/web/wrangler.jsonc",
     "apps/web/wrangler.local.jsonc",
     "apps/web/workers/providers/gcp/wrangler.jsonc",
@@ -50,9 +51,14 @@ function check(
     vitestConfig,
     `export default { compatibilityDate: "${compatibilityDate}" };\n`,
   );
-  const staticHeadersPath = join(root, "apps/web/public/_headers");
-  mkdirSync(join(staticHeadersPath, ".."), { recursive: true });
-  writeFileSync(staticHeadersPath, staticHeaders);
+  for (const path of [
+    "apps/web/public/_headers",
+    "docs/public/_headers",
+  ]) {
+    const staticHeadersPath = join(root, path);
+    mkdirSync(join(staticHeadersPath, ".."), { recursive: true });
+    writeFileSync(staticHeadersPath, staticHeaders);
+  }
   return checkWorkflowSecurity(root);
 }
 
@@ -185,8 +191,9 @@ jobs:
   });
 
   it("rejects Worker compatibility-date drift", () => {
-    expect(check("on: workflow_dispatch\n", "2026-08-23").join("\n")).toContain(
-      "compatibility date must be 2026-08-20",
+    const output = check("on: workflow_dispatch\n", "2026-08-23").join("\n");
+    expect(output).toContain(
+      "docs/wrangler.jsonc: compatibility date must be 2026-08-20",
     );
   });
 
@@ -211,8 +218,12 @@ jobs:
   });
 
   it("rejects static asset security-header drift", () => {
-    expect(
-      check("on: workflow_dispatch\n", "2026-08-20", "/*\n").join("\n"),
-    ).toContain("apps/web/public/_headers: missing");
+    const output = check(
+      "on: workflow_dispatch\n",
+      "2026-08-20",
+      "/*\n",
+    ).join("\n");
+    expect(output).toContain("apps/web/public/_headers: missing");
+    expect(output).toContain("docs/public/_headers: missing");
   });
 });

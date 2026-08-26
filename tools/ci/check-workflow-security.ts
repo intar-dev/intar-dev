@@ -22,6 +22,7 @@ const GO_VERSION = "1.27.0";
 // and its test pool on the newest supported date until that runtime advances.
 const WORKER_COMPATIBILITY_DATE = "2026-08-20";
 const WORKER_COMPATIBILITY_FILES = [
+  "docs/wrangler.jsonc",
   "apps/web/wrangler.jsonc",
   "apps/web/wrangler.local.jsonc",
   "apps/web/workers/providers/gcp/wrangler.jsonc",
@@ -163,29 +164,33 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
       );
     }
   }
-  const staticHeadersPath = "apps/web/public/_headers";
-  let staticHeaders: string;
-  try {
-    staticHeaders = readFileSync(
-      resolve(repositoryRoot, staticHeadersPath),
-      "utf8",
-    );
-  } catch {
-    violations.push(
-      `${staticHeadersPath}: static asset security headers are missing`,
-    );
-    staticHeaders = "";
-  }
-  for (const header of [
-    "Strict-Transport-Security: max-age=31536000",
-    "X-Frame-Options: DENY",
-    "X-Content-Type-Options: nosniff",
-    "Referrer-Policy: no-referrer",
-    "Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()",
-    "Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+  for (const staticHeadersPath of [
+    "apps/web/public/_headers",
+    "docs/public/_headers",
   ]) {
-    if (!staticHeaders.includes(header)) {
-      violations.push(`${staticHeadersPath}: missing ${header}`);
+    let staticHeaders: string;
+    try {
+      staticHeaders = readFileSync(
+        resolve(repositoryRoot, staticHeadersPath),
+        "utf8",
+      );
+    } catch {
+      violations.push(
+        `${staticHeadersPath}: static asset security headers are missing`,
+      );
+      staticHeaders = "";
+    }
+    for (const header of [
+      "Strict-Transport-Security: max-age=31536000",
+      "X-Frame-Options: DENY",
+      "X-Content-Type-Options: nosniff",
+      "Referrer-Policy: no-referrer",
+      "Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()",
+      "Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+    ]) {
+      if (!staticHeaders.includes(header)) {
+        violations.push(`${staticHeadersPath}: missing ${header}`);
+      }
     }
   }
   return violations;

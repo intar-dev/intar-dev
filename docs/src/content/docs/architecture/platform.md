@@ -1,4 +1,6 @@
-# intar Architecture
+---
+title: intar Architecture
+---
 
 This document describes the post-refactor platform shape. The repository is a single
 monorepo with shared Rust contracts, a Cloudflare control plane, a KVM host agent,
@@ -283,5 +285,5 @@ verify metadata HTTP is unreachable, the host gateway rejects guest SSH, and
 same-run peers can reach each other over SSH; then tear the run down and confirm
 archive and replay artifacts land in R2.
 
-See [Scenario Host Jailer](../operations/scenario-host-jailer.md) for the root-owned config,
+See [Scenario Host Jailer](/operations/scenario-host-jailer/) for the root-owned config,
 pinned runtime/hash, readiness boundary, and current host operations.

@@ -1,4 +1,6 @@
-# Workshop manifest v2 authoring
+---
+title: Workshop manifest v2 authoring
+---
 
 Workshops are standalone Intar content. They do not reference Course catalogs,
 Scenarios, assignments, or Scenario runs. Workshop revisions declare their own

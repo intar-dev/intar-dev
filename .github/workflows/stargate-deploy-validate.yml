@@ -6,7 +6,7 @@ on:
       - ".github/workflows/stargate-deploy.yml"
       - ".github/workflows/stargate-deploy-validate.yml"
       - "deploy/stargate/**"
-      - "docs/operations/workshops-rollout.md"
+      - "docs/src/content/docs/operations/workshops-rollout.md"
   push:
     branches:
       - main
@@ -14,7 +14,7 @@ on:
       - ".github/workflows/stargate-deploy.yml"
       - ".github/workflows/stargate-deploy-validate.yml"
       - "deploy/stargate/**"
-      - "docs/operations/workshops-rollout.md"
+      - "docs/src/content/docs/operations/workshops-rollout.md"
   workflow_dispatch:
 
 permissions:
@@ -71,6 +71,6 @@ jobs:
             .github/workflows/stargate-deploy-validate.yml \
             deploy/stargate/scripts/intar-deploy-stargate \
             deploy/stargate/scripts/bootstrap-deploy-user \
-            docs/operations/workshops-rollout.md; then
+            docs/src/content/docs/operations/workshops-rollout.md; then
             exit 1
           fi

@@ -31,9 +31,9 @@ and `bun run check:database-migrations` before committing it.
 
 `content/scenarios/` contains Scenario source. Scenario curriculum can be
 authored independently in an optional
-[`content/courses.hcl`](docs/authoring/course-catalogs.md) manifest.
+[`content/courses.hcl`](docs/src/content/docs/authoring/course-catalogs.md) manifest.
 
 Scenario-host operators should follow the
-[Cloud Hypervisor jailer operations guide](docs/operations/scenario-host-jailer.md),
+[Cloud Hypervisor jailer operations guide](docs/src/content/docs/operations/scenario-host-jailer.md),
 including the exact fractional-CPU contract and separate unprivileged
 doctor/root self-test readiness gates.

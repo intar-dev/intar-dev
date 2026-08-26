@@ -1,4 +1,6 @@
-# Live E2E Proof
+---
+title: Live E2E Proof
+---
 
 This check is the deployed proof required by the refactor plan. It exercises the
 Worker, D1 catalog, R2 image registry, host desired-state cache, agent, Stargate,
