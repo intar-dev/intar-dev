@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearch,
+} from "@tanstack/react-router";
 import {
   ArrowRight,
   CircleDot,
-  MessageCircle,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -278,6 +282,7 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
 
   const clearFilters = () => {
     setSearchText("");
+    setCourseFiltersOpen(false);
     void navigateCatalogSearch(navigate, {
       q: "",
       difficulty: undefined,
@@ -376,37 +381,86 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
     </>
   );
 
-  return (
-    <PageShell width="default" density="comfortable">
-      {!courseId ? (
-        <Alert
-          role="note"
-          className="border-brand-border bg-brand-subtle text-foreground"
-        >
-          <MessageCircle aria-hidden="true" />
-          <AlertTitle>Need help during the beta?</AlertTitle>
-          <AlertDescription className="text-foreground">
-            Join us on{" "}
-            <a
-              href="https://discord.gg/BgknKxJKa"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex min-h-11 items-center px-1 underline-offset-4 hover:underline"
-            >
-              Discord
-            </a>{" "}
-            or email{" "}
-            <a
-              href="mailto:hello@intar.dev"
-              className="inline-flex min-h-11 items-center px-1 underline-offset-4 hover:underline"
-            >
-              hello@intar.dev
-            </a>
-            .
-          </AlertDescription>
-        </Alert>
+  const showCourseFilters = Boolean(
+    courseId &&
+    selectedSection &&
+    (filtersActive ||
+      (selectedSection.course.kind === "general-practice" &&
+        selectedSection.accessibleScenarios.length > 1) ||
+      selectedSection.accessibleScenarios.length > COLLECTION_PAGE_SIZE.cards),
+  );
+  const showCatalogRefinement = Boolean(
+    filtersActive ||
+    allCourses.length > 5 ||
+    allEntries.length > COLLECTION_PAGE_SIZE.cards,
+  );
+  const detailTools = showCourseFilters ? (
+    <div className="space-y-3">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="-ml-2"
+        aria-expanded={courseFiltersOpen}
+        aria-controls={
+          courseFiltersOpen ? "course-scenario-filters" : undefined
+        }
+        onClick={() => setCourseFiltersOpen((open) => !open)}
+      >
+        <SlidersHorizontal className="size-4" aria-hidden />
+        Filter scenarios
+        {filtersActive ? (
+          <span className="text-brand-text">Filters active</span>
+        ) : null}
+      </Button>
+      {courseFiltersOpen ? (
+        <div id="course-scenario-filters" className="border-t pt-4">
+          <FilterBar
+            search={searchText}
+            onSearchChange={setSearchText}
+            searchPlaceholder="Search this course…"
+            searchLabel="Search this course"
+            filtersActive={filtersActive}
+            stackSearchOnMobile
+            onClear={clearFilters}
+            end={
+              <>
+                <span
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  className="text-metadata tabular-nums"
+                >
+                  {selectedSection
+                    ? `${selectedSection.visibleScenarios.length} of ${selectedSection.accessibleScenarios.length} scenarios`
+                    : "Course unavailable"}
+                </span>
+                {selectedSection?.course.kind === "general-practice" &&
+                selectedSection.visibleScenarios.length ? (
+                  <SortSelect
+                    value={searchState.sort}
+                    onChange={(sort) =>
+                      void navigateCatalogSearch(navigate, {
+                        ...searchState,
+                        sort,
+                      })
+                    }
+                  />
+                ) : null}
+              </>
+            }
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              {renderFilterControls()}
+            </div>
+          </FilterBar>
+        </div>
       ) : null}
+    </div>
+  ) : undefined;
 
+  return (
+    <PageShell width={courseId ? "content" : "default"} density="comfortable">
       {courseLoadFailed ? (
         <Alert variant="destructive">
           <RefreshCw aria-hidden="true" />
@@ -549,92 +603,35 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
         </section>
       ) : null}
 
-      {allEntries.length ? (
-        <section className="space-y-4" aria-labelledby="catalog-heading">
-          <div>
-            <p className="text-eyebrow">
-              {courseId ? "Course curriculum" : "Course catalog"}
-            </p>
-            <h2 id="catalog-heading" className="mt-2 text-section-title">
-              {courseId ? "Your curriculum" : "Choose your next course"}
-            </h2>
-          </div>
-          {courseId ? (
-            <details
-              open={courseFiltersOpen}
-              onToggle={(event) =>
-                setCourseFiltersOpen(event.currentTarget.open)
-              }
-              className={
-                courseFiltersOpen
-                  ? "w-full max-w-full rounded-lg border bg-card"
-                  : "w-fit max-w-full rounded-lg border bg-card"
-              }
-            >
-              <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 text-sm font-semibold marker:hidden">
-                <SlidersHorizontal className="size-4" aria-hidden />
-                Filter course
-                {filtersActive ? (
-                  <span className="ml-auto text-brand-text">
-                    Filters active
-                  </span>
-                ) : (
-                  <span className="ml-auto text-muted-foreground">Optional</span>
-                )}
-              </summary>
-              <div className="space-y-4 border-t p-4">
-                <FilterBar
-                  search={searchText}
-                  onSearchChange={setSearchText}
-                  searchPlaceholder="Search this course…"
-                  searchLabel="Search this course"
-                  filtersActive={filtersActive}
-                  stackSearchOnMobile
-                  onClear={clearFilters}
-                  end={
-                    <>
-                      <span
-                        role="status"
-                        aria-live="polite"
-                        aria-atomic="true"
-                        className="text-metadata tabular-nums"
-                      >
-                        {selectedSection
-                          ? `${selectedSection.visibleScenarios.length} of ${selectedSection.accessibleScenarios.length} scenarios`
-                          : "Course unavailable"}
-                      </span>
-                      {selectedSection?.course.kind === "general-practice" &&
-                      selectedSection.visibleScenarios.length ? (
-                        <SortSelect
-                          value={searchState.sort}
-                          onChange={(sort) =>
-                            void navigateCatalogSearch(navigate, {
-                              ...searchState,
-                              sort,
-                            })
-                          }
-                        />
-                      ) : null}
-                    </>
-                  }
-                >
-                  <div className="flex flex-wrap items-center gap-3">
-                    {renderFilterControls()}
-                  </div>
-                </FilterBar>
-              </div>
-            </details>
-          ) : (
-            <>
-              <FilterBar
-                search={searchText}
-                onSearchChange={setSearchText}
-                searchPlaceholder="Search courses and scenarios…"
-                searchLabel="Search courses and scenarios"
-                filtersActive={filtersActive}
-                stackSearchOnMobile
-                onClear={clearFilters}
-                end={
+      {allEntries.length && !courseId ? (
+        <section className="space-y-3" aria-label="Course catalog">
+          <FilterBar
+            search={searchText}
+            onSearchChange={setSearchText}
+            searchPlaceholder="Search courses and scenarios…"
+            searchLabel="Search courses and scenarios"
+            filtersActive={filtersActive}
+            stackSearchOnMobile
+            onClear={clearFilters}
+            end={
+              showCatalogRefinement ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-expanded={courseFiltersOpen}
+                    aria-controls={
+                      courseFiltersOpen ? "catalog-filters" : undefined
+                    }
+                    onClick={() => setCourseFiltersOpen((open) => !open)}
+                  >
+                    <SlidersHorizontal className="size-4" aria-hidden />
+                    Filters
+                    {filtersActive ? (
+                      <span className="text-brand-text">Active</span>
+                    ) : null}
+                  </Button>
                   <span
                     role="status"
                     aria-live="polite"
@@ -643,36 +640,43 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
                   >
                     {catalogView.courses.length} of {allCourses.length} courses
                   </span>
-                }
-              >
-                <div className="hidden flex-wrap items-center gap-3 md:flex">
-                  {renderFilterControls()}
-                </div>
-              </FilterBar>
-              <details className="rounded-lg border bg-card md:hidden">
-                <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 text-sm font-semibold marker:hidden">
-                  <SlidersHorizontal className="size-4" />
-                  Refine results
-                  {filtersActive ? (
-                    <span className="ml-auto text-brand-text">
-                      Filters active
-                    </span>
-                  ) : null}
-                </summary>
-                <div className="flex flex-col items-start gap-4 border-t p-4">
-                  {renderFilterControls()}
-                </div>
-              </details>
-            </>
-          )}
+                </>
+              ) : undefined
+            }
+          />
+          {showCatalogRefinement && courseFiltersOpen ? (
+            <div id="catalog-filters" className="border-t pt-4">
+              <div className="flex flex-wrap items-center gap-3">
+                {renderFilterControls()}
+              </div>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
       {courseLoadFailed ? null : courses.isLoading && !courses.data ? (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 9 }, (_, index) => (
-            <Skeleton key={index} className="h-52 rounded-xl" />
-          ))}
+        <div role="status" className="space-y-3">
+          <span className="sr-only">Loading courses…</span>
+          <div
+            aria-hidden="true"
+            className="flex flex-wrap items-center gap-3"
+          >
+            <Skeleton className="h-11 min-w-56 flex-1 sm:max-w-xs" />
+            <Skeleton className="ml-auto h-9 w-24" />
+          </div>
+          <div
+            aria-hidden="true"
+            className="divide-y overflow-hidden rounded-xl border bg-card"
+          >
+            {Array.from({ length: 3 }, (_, index) => (
+              <div key={index} className="space-y-3 px-4 py-5 sm:px-6 sm:py-6">
+                <Skeleton className="h-3 w-20" />
+                <Skeleton className="h-6 w-56 max-w-full" />
+                <Skeleton className="h-4 w-full max-w-xl" />
+                <Skeleton className="h-1 w-full max-w-2xl" />
+              </div>
+            ))}
+          </div>
         </div>
       ) : !allEntries.length ? (
         <EmptyState
@@ -701,7 +705,9 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
           courses={catalogView.courses}
           selectedCourseKey={
             courseId
-              ? (selectedCourse ? courseCatalogKey(selectedCourse) : courseId)
+              ? selectedCourse
+                ? courseCatalogKey(selectedCourse)
+                : courseId
               : undefined
           }
           selectedSection={selectedSection}
@@ -735,11 +741,12 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
             })
           }
           onClearFilters={clearFilters}
+          detailTools={detailTools}
           resetKey={`${searchState.q}|${searchState.difficulty ?? ""}|${searchState.category ?? ""}|${searchState.tags.join(",")}|${searchState.sort}`}
           renderScenario={(scenario, context) => (
             <CourseCurriculumItem
               scenario={scenario}
-              headingLevel={4}
+              headingLevel={3}
               search={compactCatalogSearch(searchState)}
               sequence={context.sequence}
               isNext={context.isNext}

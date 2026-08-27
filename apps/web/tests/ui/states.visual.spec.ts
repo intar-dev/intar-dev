@@ -198,6 +198,48 @@ test.describe("focused visual states", () => {
         theme: "light",
         variant,
       });
+      if (variant === "error") {
+        const loadError = page.getByText("Could not load courses", {
+          exact: true,
+        });
+        await expect(loadError).toBeVisible({ timeout: 15_000 });
+        await page.bringToFront();
+        await expect(loadError).toBeVisible({ timeout: 15_000 });
+        const alert = page.getByRole("alert").filter({
+          hasText: "Could not load courses",
+        });
+        const screenshot = await alert.screenshot({
+          animations: "disabled",
+          caret: "hide",
+          scale: "css",
+        });
+        expect(screenshot).toMatchSnapshot(
+          "catalog-error-alert-light-desktop.png",
+          { maxDiffPixelRatio: 0.001 },
+        );
+        return;
+      }
+      if (variant === "loading") {
+        await expect(
+          page.getByText("Loading courses…", { exact: true }),
+        ).toHaveCount(1);
+        await expect(
+          page.getByRole("link", {
+            name: "Discord (opens in a new tab)",
+          }),
+        ).toBeVisible();
+        const screenshot = await page.screenshot({
+          animations: "disabled",
+          caret: "hide",
+          fullPage: false,
+          scale: "css",
+        });
+        expect(screenshot).toMatchSnapshot(
+          `catalog-${variant}-light-desktop.png`,
+          { maxDiffPixelRatio: 0.001 },
+        );
+        return;
+      }
       await expectRouteScreenshot(page, `catalog-${variant}-light-desktop`);
     });
   }
@@ -508,6 +550,13 @@ for (const viewport of [
         await expect(
           page.getByRole("heading", { name: "Platform repair sequence" }),
         ).toBeVisible();
+        if (viewport.id === "desktop") {
+          await expect(
+            page.getByRole("link", {
+              name: "Discord (opens in a new tab)",
+            }),
+          ).toBeVisible();
+        }
         await expectRouteScreenshot(
           page,
           `organization-courses-${theme}-${viewport.id}`,
@@ -534,6 +583,13 @@ for (const viewport of [
         await expect(
           generalPractice.locator('a[href*="platform-firewall"]'),
         ).toHaveCount(1);
+        if (viewport.id === "desktop") {
+          await expect(
+            page.getByRole("link", {
+              name: "Discord (opens in a new tab)",
+            }),
+          ).toBeVisible();
+        }
         await expectRouteScreenshot(
           page,
           `organization-general-practice-${theme}-${viewport.id}`,

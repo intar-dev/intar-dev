@@ -340,7 +340,7 @@ async function waitForRouteContent(
 ) {
   if (route.id === "courses") {
     await expect(
-      page.getByRole("heading", { name: "Choose your next course" }),
+      page.getByRole("textbox", { name: "Search courses and scenarios" }),
     ).toBeVisible();
     return;
   }
@@ -374,7 +374,7 @@ async function prepareWarmNavigation(
   if (route.id === "admin") {
     await sidebarLink(page, "Courses").click();
     await expect(
-      page.getByRole("heading", { name: "Choose your next course" }),
+      page.getByRole("textbox", { name: "Search courses and scenarios" }),
     ).toBeVisible();
     return;
   }

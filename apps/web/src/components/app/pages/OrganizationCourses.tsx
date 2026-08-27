@@ -1,11 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Building2 } from "lucide-react";
-import { ContentHeader } from "../patterns/ContentHeader";
-import { MetaLine } from "../patterns/MetaLine";
+import { ArrowLeft } from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
-import { RelativeTime } from "../patterns/RelativeTime";
 import { ErrorState } from "../patterns/StateCard";
 import { usePageChrome } from "../shell/page-chrome";
 import { Button } from "@/components/ui/button";
@@ -78,12 +75,21 @@ function OrganizationCoursesPage({
     staleTime: 5_000,
   });
   const detail = organization.data?.organization;
+  const detailId = detail?.id;
+  const breadcrumbLabels = useMemo(
+    () =>
+      detailId
+        ? { [`/organizations/${detailId}`]: "Organizations" }
+        : undefined,
+    [detailId],
+  );
   usePageChrome({
     title: courseRoute
       ? undefined
       : detail
         ? `${detail.name} courses`
         : undefined,
+    breadcrumbLabels: courseRoute ? undefined : breadcrumbLabels,
   });
 
   useEffect(() => {
@@ -119,37 +125,25 @@ function OrganizationCoursesPage({
   }
 
   return (
-    <PageShell width="workspace">
+    <PageShell width={courseRoute ? "content" : "workspace"}>
       <div className="space-y-6">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="-ml-2"
-          render={
-            <Link to="/organizations/$orgId" params={{ orgId: detail.id }} />
-          }
-        >
-          <ArrowLeft className="size-4" />
-          Organization
-        </Button>
-        <ContentHeader
-          title="Courses"
-          summary={`${detail.name}'s public and private repair catalog.`}
-          meta={
-            <MetaLine
-              items={[
-                <span key="organization" className="inline-flex items-center gap-1.5">
-                  <Building2 className="size-3.5" />
-                  {detail.name}
-                </span>,
-                <span key="created">
-                  created <RelativeTime at={detail.createdAt} />
-                </span>,
-              ]}
-            />
-          }
+        {!courseRoute ? (
+          <Button
+            variant="link"
+            size="sm"
+            className="-ml-1 h-9 px-1 sm:hidden"
+            render={
+              <Link to="/organizations/$orgId" params={{ orgId: detail.id }} />
+            }
+          >
+            <ArrowLeft className="size-4" />
+            Organization
+          </Button>
+        ) : null}
+        <OrganizationScenariosSection
+          detail={detail}
+          courseRoute={courseRoute}
         />
-        <OrganizationScenariosSection detail={detail} courseRoute={courseRoute} />
       </div>
     </PageShell>
   );

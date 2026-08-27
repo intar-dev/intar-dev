@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { safeDynamicPageLabel } from "./AppBar";
+import { breadcrumbTarget, safeDynamicPageLabel } from "./AppBar";
 
 describe("safe dynamic app-bar labels", () => {
   it("never exposes run or scenario route identifiers while data loads", () => {
@@ -30,5 +30,23 @@ describe("safe dynamic app-bar labels", () => {
     expect(safeDynamicPageLabel("/runs")).toBeNull();
     expect(safeDynamicPageLabel("/courses/linux-operations")).toBeNull();
     expect(safeDynamicPageLabel("/admin/hosts")).toBeNull();
+  });
+});
+
+describe("breadcrumbTarget", () => {
+  it("routes organization course scope crumbs to the course catalog", () => {
+    expect(
+      breadcrumbTarget("/organizations/org-a/courses/public"),
+    ).toBe("/organizations/org-a/courses");
+    expect(
+      breadcrumbTarget("/organizations/org-a/courses/private"),
+    ).toBe("/organizations/org-a/courses");
+  });
+
+  it("keeps real route ancestors unchanged", () => {
+    expect(breadcrumbTarget("/courses")).toBe("/courses");
+    expect(
+      breadcrumbTarget("/organizations/org-a/courses/public/linux"),
+    ).toBe("/organizations/org-a/courses/public/linux");
   });
 });

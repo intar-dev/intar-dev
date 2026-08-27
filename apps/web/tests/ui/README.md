@@ -32,13 +32,20 @@ bun run ui:install
 
 ## Updating visual baselines
 
-Do not generate committed baselines on macOS and reuse them on Linux. Browser
-and font rasterization differ even when the browser revision is identical.
-Regenerate them in a Linux/amd64 GitHub Actions job using the same pinned
-Playwright container as the `ui` job, upload `tests/ui/__screenshots__/` as an
-artifact, review every changed image, and then commit the reviewed files. The
-repository intentionally provides no local Docker runner or Docker build for
-this operation.
+Generate and commit visual baselines only on macOS. Do not generate or update
+them in Linux containers, Linux CI jobs, or remote Linux runners. Browser and
+font rasterization differ even when the browser revision is identical.
+
+On a Mac, install the pinned browsers, regenerate the baselines, review every
+changed image, and then commit the reviewed files:
+
+```sh
+bun run ui:install
+bun run test:ui:visual:update
+```
+
+Linux CI may run non-visual smoke and accessibility checks, but it must not
+rewrite or replace the committed macOS baseline images.
 
 The command intentionally fails on missing or changed baselines until the
 reviewed images are committed. The CI UI job uploads

@@ -175,7 +175,7 @@ test("large card collections paginate without repeating items", async ({
     pagination.getByRole("button", { name: "Page 3" }),
   ).toHaveAttribute("aria-current", "page");
 
-  await page.getByText("Filter course").click();
+  await page.getByRole("button", { name: "Filter scenarios" }).click();
   await page.getByRole("textbox", { name: "Search this course" }).fill("Paging");
   await expect(pagination).toContainText("1–9 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(9);
@@ -213,7 +213,7 @@ test("course drill-down uses a course path and keeps filter-only search", async 
   await expect(
     page
       .locator('section[data-course-id="paging-course-10"]')
-      .getByRole("heading", { name: "Paging course 10", level: 3 }),
+      .getByRole("heading", { name: "Paging course 10", level: 2 }),
   ).toBeVisible();
   await expect(page).toHaveURL("/courses/paging-course-10");
 
@@ -285,11 +285,9 @@ test("public courses preserve curriculum order and place standalone work in Gene
 
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Courses");
   await expect(
-    page.getByRole("heading", {
-      level: 2,
-      name: "Choose your next course",
-    }),
+    page.getByRole("textbox", { name: "Search courses and scenarios" }),
   ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Filters" })).toHaveCount(0);
 
   const course = page.locator(
     'li[data-course-id="operations"][data-course-scope="public"]',
@@ -320,8 +318,15 @@ test("public courses preserve curriculum order and place standalone work in Gene
   await expect(
     courseDetail.getByRole("heading", { name: "Linux operations" }),
   ).toBeVisible();
+  await expect(page.getByText("Your curriculum")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Filter scenarios" }),
+  ).toHaveCount(0);
 
-  await courseDetail.getByRole("button", { name: "All courses" }).click();
+  await page
+    .getByRole("navigation", { name: "Breadcrumb" })
+    .getByRole("link", { name: "Courses", exact: true })
+    .click();
   await expect(
     course.getByRole("button", { name: "Linux operations" }),
   ).toBeVisible();
@@ -344,7 +349,6 @@ test("public courses preserve curriculum order and place standalone work in Gene
     "/courses/general-practice/recover-postgres",
   );
   expect(postgresUrl.searchParams.get("q")).toBeNull();
-  await expect(generalPractice).toContainText("Open practice");
 });
 
 test("course progress tracks keep one measure across responsive layouts", async ({
@@ -463,7 +467,9 @@ test("course scenarios return to the selected filtered public course", async ({
   await backToCourse.click();
   await expect(courseDetail).toBeVisible();
   await expect(page.getByText("Filters active")).toBeVisible();
-  await page.getByText("Filter course").click();
+  await page
+    .getByRole("button", { name: /Filter scenarios.*Filters active/ })
+    .click();
   await expect(page.getByRole("textbox", {
     name: "Search this course",
   })).toHaveValue("nginx");
@@ -586,6 +592,25 @@ test("direct organization public and General practice briefing paths resolve", a
     "href",
     "/organizations/org-platform/courses/general-practice",
   );
+});
+
+test("direct organization courses do not report missing while loading", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    path: "/organizations/org-platform/courses/private/operations",
+    sessionRole: "owner",
+    theme: "light",
+    variant: "loading",
+  });
+
+  await expect(
+    page.getByText("Loading organization courses…", { exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole("heading", { name: "Course not available" }),
+  ).toHaveCount(0);
 });
 
 test("a scenario outside the stated course is rejected", async ({ page, ui }) => {
@@ -713,7 +738,13 @@ test("organization catalogs render public courses before scoped courses", async 
   await expect(selectedCourse.locator('a[href*="repair-nginx"]')).toHaveCount(
     0,
   );
-  await page.getByRole("button", { name: "All courses" }).click();
+  await expect(
+    selectedCourse.getByText("Public course", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Breadcrumb" })
+    .getByRole("link", { name: "Platform Repair Crew courses" })
+    .click();
 
   const organizationCourse = page.locator(
     'section[data-course-id="operations"][data-course-scope="org-platform"]',
@@ -737,7 +768,13 @@ test("organization catalogs render public courses before scoped courses", async 
       'a[href="/organizations/org-platform/courses/private/operations/platform-logrotate"]',
     ),
   ).toHaveCount(1);
-  await page.getByRole("button", { name: "All courses" }).click();
+  await expect(
+    selectedCourse.getByText("Private course", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Breadcrumb" })
+    .getByRole("link", { name: "Platform Repair Crew courses" })
+    .click();
 
   await page
     .locator('section[data-course-scope="generated"]')
@@ -759,6 +796,8 @@ test("organization catalogs render public courses before scoped courses", async 
       'a[href="/organizations/org-platform/courses/general-practice/platform-firewall"]',
     ),
   ).toHaveCount(1);
+  await expect(generalPractice.getByText("Public", { exact: true })).toBeVisible();
+  await expect(generalPractice.getByText("Private", { exact: true })).toBeVisible();
 
   const catalog = (await page.evaluate(async () => {
     const response = await fetch("/api/organizations/org-platform/scenarios");

@@ -104,6 +104,7 @@ export function CourseCurriculumItem({
   sequence,
   courseLocation,
   isNext = false,
+  sourceLabel,
 }: {
   scenario: ScenarioCardData;
   className?: string;
@@ -115,6 +116,7 @@ export function CourseCurriculumItem({
   } | undefined;
   courseLocation: CourseLocation | null;
   isNext?: boolean | undefined;
+  sourceLabel?: string | undefined;
 }) {
   const Heading = headingLevel === 4 ? "h4" : "h3";
   const action = curriculumActionLabel(scenario.progress);
@@ -126,20 +128,25 @@ export function CourseCurriculumItem({
       search={search}
       preloadDelay={250}
       className={cn(
-        "group grid min-h-20 min-w-0 grid-cols-[2.5rem_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 outline-none transition-colors hover:bg-muted/55 focus-visible:bg-muted/55 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40 sm:grid-cols-[2.5rem_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-6",
+        "group grid min-h-20 min-w-0 items-start gap-x-3 gap-y-2 px-4 py-4 outline-none transition-colors hover:bg-muted/55 focus-visible:bg-muted/55 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40 sm:items-center sm:gap-x-4 sm:px-6",
+        sequence
+          ? "grid-cols-[2.5rem_minmax(0,1fr)] sm:grid-cols-[2.5rem_minmax(0,1fr)_auto]"
+          : "grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto]",
         isNext && "bg-brand-subtle/70 ring-1 ring-inset ring-brand-border",
         className,
       )}
     >
-      <span
-        aria-hidden="true"
-        className={cn(
-          "flex size-10 self-center items-center justify-center rounded-lg bg-secondary font-mono text-sm font-semibold tabular-nums text-secondary-foreground",
-          isNext && "bg-brand-text text-primary-foreground",
-        )}
-      >
-        {sequence?.position ?? "•"}
-      </span>
+      {sequence ? (
+        <span
+          aria-hidden="true"
+          className={cn(
+            "flex size-10 self-center items-center justify-center rounded-lg bg-secondary font-mono text-sm font-semibold tabular-nums text-secondary-foreground",
+            isNext && "bg-brand-text text-primary-foreground",
+          )}
+        >
+          {sequence.position}
+        </span>
+      ) : null}
       <div className="min-w-0 space-y-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           {isNext ? (
@@ -154,6 +161,7 @@ export function CourseCurriculumItem({
           <MetaLine
             items={[
               sequence && `Step ${sequence.position} of ${sequence.total}`,
+              sourceLabel,
               <MetaDifficulty key="difficulty" difficulty={scenario.difficulty} />,
               `~${scenario.estimatedMinutes} min`,
             ]}
@@ -161,7 +169,14 @@ export function CourseCurriculumItem({
           />
         </div>
       </div>
-      <div className="col-start-2 flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:col-start-3 sm:row-start-1 sm:self-center">
+      <div
+        className={cn(
+          "flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:row-start-1 sm:self-center",
+          sequence
+            ? "col-start-2 sm:col-start-3"
+            : "col-start-1 sm:col-start-2",
+        )}
+      >
         <span className="sr-only">
           {isNext ? "Next course step: " : ""}
         </span>

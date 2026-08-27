@@ -84,6 +84,10 @@ function labelForAncestor(
   return trimSegment(segment);
 }
 
+export function breadcrumbTarget(path: string): string {
+  return path.replace(/\/courses\/(?:public|private)$/, "/courses");
+}
+
 interface Crumb {
   label: string;
   to?: string | undefined;
@@ -102,7 +106,10 @@ function buildCrumbs(
     crumbs.push(
       isLast
         ? { label: labelForFinal(acc, segment, overrides) }
-        : { label: labelForAncestor(acc, segment, overrides), to: acc },
+        : {
+            label: labelForAncestor(acc, segment, overrides),
+            to: breadcrumbTarget(acc),
+          },
     );
   });
   // The sidebar names the section — two segments of context are the ceiling.

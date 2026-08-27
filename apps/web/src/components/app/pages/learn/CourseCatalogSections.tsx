@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   ArrowRight,
   BookOpenCheck,
-  CircleCheck,
   Clock3,
   Search,
 } from "lucide-react";
@@ -45,6 +44,7 @@ export function CourseCatalogBrowser({
   onSelectCourse,
   onShowAllCourses,
   onClearFilters,
+  detailTools,
   renderScenario,
   resetKey,
 }: {
@@ -54,6 +54,7 @@ export function CourseCatalogBrowser({
   onSelectCourse: (courseKey: string) => void;
   onShowAllCourses: () => void;
   onClearFilters?: (() => void) | undefined;
+  detailTools?: ReactNode;
   renderScenario: (
     scenario: ScenarioCatalogWireEntry,
     context: CourseScenarioRendererContext,
@@ -109,6 +110,7 @@ export function CourseCatalogBrowser({
         section={selectedSection}
         onShowAllCourses={onShowAllCourses}
         onClearFilters={onClearFilters}
+        tools={detailTools}
         renderScenario={renderScenario}
         resetKey={
           selectedCourseKey +
@@ -195,9 +197,9 @@ function CourseIndex({
                 className="group grid w-full min-w-0 cursor-pointer gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_23rem] @3xl/course:items-center"
               >
                 <span id={summaryId} className="sr-only">
-                  {section.course.description} {scenarioCount} {" "}
-                  {scenarioCount === 1 ? "scenario" : "scenarios"}, about {" "}
-                  {section.totalEstimatedMinutes} minutes total, {" "}
+                  {section.course.description} {scenarioCount}{" "}
+                  {scenarioCount === 1 ? "scenario" : "scenarios"}, about{" "}
+                  {section.totalEstimatedMinutes} minutes total,{" "}
                   {section.solvedCount} of {scenarioCount} solved.
                 </span>
                 <span className="min-w-0 space-y-2">
@@ -213,7 +215,7 @@ function CourseIndex({
                   <span
                     id={headingId}
                     role="heading"
-                    aria-level={3}
+                    aria-level={2}
                     className="block font-heading text-xl font-bold tracking-[-0.025em] text-balance [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text sm:text-2xl"
                   >
                     {section.course.title}
@@ -266,11 +268,8 @@ function CourseIndex({
                       {scenarioCount === 1 ? "scenario" : "scenarios"}
                     </span>
                     <span className="inline-flex items-center gap-1.5 font-medium">
-                      <Clock3
-                        className="size-4 text-brand-text"
-                        aria-hidden
-                      />
-                      ~{section.totalEstimatedMinutes} min total
+                      <Clock3 className="size-4 text-brand-text" aria-hidden />~
+                      {section.totalEstimatedMinutes} min total
                     </span>
                   </span>
                   <span
@@ -297,12 +296,14 @@ function CourseDetail({
   section,
   onShowAllCourses,
   onClearFilters,
+  tools,
   renderScenario,
   resetKey,
 }: {
   section: CourseCatalogSectionView;
   onShowAllCourses: () => void;
   onClearFilters?: (() => void) | undefined;
+  tools?: ReactNode;
   renderScenario: (
     scenario: ScenarioCatalogWireEntry,
     context: CourseScenarioRendererContext,
@@ -313,9 +314,7 @@ function CourseDetail({
   const heading = useRef<HTMLHeadingElement>(null);
   const scenarioCount = section.accessibleScenarios.length;
   const courseKey = courseCatalogKey(section.course);
-  const curriculumState = getCourseCurriculumState(
-    section.accessibleScenarios,
-  );
+  const curriculumState = getCourseCurriculumState(section.accessibleScenarios);
   const nextVisibleIndex = curriculumState.nextScenarioId
     ? section.visibleScenarios.findIndex(
         (scenario) => scenario.scenarioId === curriculumState.nextScenarioId,
@@ -341,71 +340,53 @@ function CourseDetail({
 
   return (
     <section
-      className="space-y-6"
+      className="space-y-4 sm:space-y-5"
       aria-labelledby={headingId}
       data-course-id={section.course.courseId ?? "general-practice"}
       data-course-scope={courseScope(section)}
       data-course-view="detail"
     >
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="-ml-2"
-        onClick={onShowAllCourses}
-      >
-        <ArrowLeft className="size-4" aria-hidden />
-        All courses
-      </Button>
-
-      <header className="grid gap-5 border-b pb-6 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-end">
-        <div className="min-w-0 space-y-2">
-          <p className="text-eyebrow">{courseEyebrow(section)}</p>
-          <h3
+      <header className="border-b pb-5">
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="-ml-1 h-9 px-1 sm:hidden"
+          onClick={onShowAllCourses}
+        >
+          <ArrowLeft className="size-4" aria-hidden />
+          All courses
+        </Button>
+        <div className="mt-2 min-w-0 space-y-2">
+          <h2
             ref={heading}
             id={headingId}
             tabIndex={-1}
             className="font-heading text-2xl font-bold tracking-[-0.03em] text-balance outline-none [overflow-wrap:anywhere] sm:text-3xl"
           >
             {section.course.title}
-          </h3>
+          </h2>
           <p className="max-w-3xl text-body text-muted-foreground text-pretty">
             {section.course.description}
           </p>
+          <dl className="flex flex-wrap gap-x-2 gap-y-1 pt-1 text-sm text-muted-foreground tabular-nums">
+            <CourseFact
+              label="Scenarios"
+              value={`${scenarioCount} ${scenarioCount === 1 ? "scenario" : "scenarios"}`}
+            />
+            <CourseFact
+              label="Estimated time"
+              value={`~${section.totalEstimatedMinutes} min total`}
+            />
+            <CourseFact
+              label="Solved progress"
+              value={`${section.solvedCount} of ${scenarioCount} solved`}
+            />
+          </dl>
         </div>
-        <dl className="flex flex-wrap gap-x-5 gap-y-2 border-y py-3 text-sm tabular-nums 2xl:justify-end 2xl:border-y-0 2xl:py-0">
-          <CourseMetric
-            icon={<BookOpenCheck className="size-4" aria-hidden />}
-            label="Scenarios"
-            value={
-              scenarioCount +
-              " " +
-              (scenarioCount === 1 ? "scenario" : "scenarios")
-            }
-          />
-          <CourseMetric
-            icon={<Clock3 className="size-4" aria-hidden />}
-            label="Estimated time"
-            value={"~" + section.totalEstimatedMinutes + " min total"}
-          />
-          <CourseMetric
-            icon={<CircleCheck className="size-4" aria-hidden />}
-            label="Solved progress"
-            value={section.solvedCount + " of " + scenarioCount + " solved"}
-          />
-        </dl>
       </header>
 
-      {curriculumState.complete ? (
-        <p
-          role="status"
-          className="flex items-center gap-2 text-sm font-semibold text-success"
-        >
-          <CircleCheck className="size-4" aria-hidden />
-          Course complete · You solved all {scenarioCount}{" "}
-          {scenarioCount === 1 ? "scenario" : "scenarios"}.
-        </p>
-      ) : null}
+      {tools}
 
       {section.visibleScenarios.length ? (
         <PaginatedCollection
@@ -421,9 +402,7 @@ function CourseDetail({
               aria-label={section.course.title + " course steps"}
             >
               {visibleScenarios.map((scenario) => {
-                const position = sequenceByScenarioId?.get(
-                  scenario.scenarioId,
-                );
+                const position = sequenceByScenarioId?.get(scenario.scenarioId);
                 const context: CourseScenarioRendererContext = {
                   courseKey,
                   courseTitle: section.course.title,
@@ -455,9 +434,9 @@ function CourseDetail({
             <Search className="size-4" aria-hidden />
           </span>
           <div>
-            <h4 className="font-heading text-lg font-bold">
+            <h3 className="font-heading text-lg font-bold">
               No scenarios match your filters
-            </h4>
+            </h3>
             <p className="mt-1 text-sm text-muted-foreground">
               Clear the filters to see every scenario in this course.
             </p>
@@ -484,7 +463,7 @@ function CourseUnavailable({
       className="flex min-h-48 flex-col items-start justify-center gap-3 rounded-xl border border-dashed bg-muted/20 p-6"
     >
       <div>
-        <h3 className="font-heading text-xl font-bold">Course not available</h3>
+        <h2 className="font-heading text-xl font-bold">Course not available</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           It may have been unpublished or may not be available in this catalog.
         </p>
@@ -526,22 +505,11 @@ function courseActionLabel(section: CourseCatalogSectionView) {
   return "View scenarios";
 }
 
-function CourseMetric({
-  icon,
-  label,
-  value,
-}: {
-  icon: ReactNode;
-  label: string;
-  value: string;
-}) {
+function CourseFact({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center gap-2 whitespace-nowrap">
+    <div className="inline-flex items-center gap-2 after:text-border after:content-['·'] last:after:hidden">
       <dt className="sr-only">{label}</dt>
-      <dd className="inline-flex items-center gap-1.5 font-medium text-foreground">
-        <span className="text-brand-text">{icon}</span>
-        {value}
-      </dd>
+      <dd>{value}</dd>
     </div>
   );
 }
