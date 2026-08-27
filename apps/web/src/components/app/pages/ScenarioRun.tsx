@@ -28,6 +28,7 @@ import {
 import { presentScenarioRun } from "@/lib/run-phase";
 import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
+import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import { RunLearningPanel } from "@/components/app/run/RunLearningPanel";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
@@ -51,6 +52,7 @@ import type {
   CourseLocation,
   ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
+import { computeLeaseDeadline } from "@/lib/run-lease";
 
 const LazyWebSshTerminal = lazy(() =>
   import("@/components/remote-access/WebSshTerminal").then(
@@ -444,6 +446,13 @@ export function ScenarioRun() {
     attemptData !== null &&
     attemptData.phase === "solved" &&
     attemptData.activity === "foreground";
+  const leaseDeadlineMs =
+    attemptData !== null && attemptData.outcome === "in_progress"
+      ? computeLeaseDeadline(
+          attemptData.createdAt,
+          attemptData.vms.map((vm) => vm.provisioning?.leaseDurationSeconds),
+        )
+      : null;
   const selectedProbes = selectedVm?.scenarioProbes ?? [];
   const infrastructureTeardownPending = Boolean(
     attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
@@ -598,6 +607,8 @@ export function ScenarioRun() {
             tone="pending"
             word="Saving"
             compactWord="Saving"
+            startedAt={attemptData.createdAt}
+            leaseDeadlineMs={leaseDeadlineMs}
             pulse
           />
         );
@@ -609,6 +620,8 @@ export function ScenarioRun() {
               tone="pending"
               word={attemptData.phaseTitle}
               compactWord="Starting"
+              startedAt={attemptData.createdAt}
+              leaseDeadlineMs={leaseDeadlineMs}
               pulse
             />
           );
@@ -619,6 +632,8 @@ export function ScenarioRun() {
               tone="success"
               word="Solved"
               compactWord="Solved"
+              startedAt={attemptData.createdAt}
+              leaseDeadlineMs={leaseDeadlineMs}
             />
           );
         }
@@ -627,6 +642,8 @@ export function ScenarioRun() {
             tone="live"
             word={attemptData.phaseTitle}
             compactWord="Live"
+            startedAt={attemptData.createdAt}
+            leaseDeadlineMs={leaseDeadlineMs}
           />
         );
       }
@@ -640,6 +657,7 @@ export function ScenarioRun() {
       }
     }, [
       attemptData,
+      leaseDeadlineMs,
       showSelectedVmPreparation,
       showBackgroundStatus,
     ]),
@@ -975,19 +993,32 @@ function ActiveRunStatus({
   tone,
   word,
   compactWord,
+  startedAt,
+  leaseDeadlineMs,
   pulse = false,
 }: {
   tone: StatusTone;
   word: string;
   compactWord: string;
+  startedAt: number;
+  leaseDeadlineMs: number | null;
   pulse?: boolean;
 }) {
   return (
-    <StatusToken
-      tone={tone}
-      word={word}
-      compactWord={compactWord}
-      pulse={pulse}
-    />
+    <span className="inline-flex min-w-max shrink-0 items-center gap-2.5">
+      <StatusToken
+        tone={tone}
+        word={word}
+        compactWord={compactWord}
+        pulse={pulse}
+        clock={leaseDeadlineMs === null ? { startedAt } : undefined}
+      />
+      {leaseDeadlineMs !== null ? (
+        <>
+          <span aria-hidden="true" className="h-3 w-px bg-border" />
+          <LeaseCountdown deadlineMs={leaseDeadlineMs} />
+        </>
+      ) : null}
+    </span>
   );
 }

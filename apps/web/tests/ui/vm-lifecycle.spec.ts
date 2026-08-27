@@ -22,6 +22,21 @@ test("the boot screen keeps the work order reachable and does not steal focus wh
   await expect(page.locator("[data-run-sequence-position]")).toHaveText(
     "Stage 2 of 4",
   );
+  const leaseCountdown = page.locator("[data-run-lease-countdown]");
+  await expect(leaseCountdown).toHaveText("1:25:00 left");
+  await expect(leaseCountdown).toBeVisible();
+  const leaseCountdownBox = await leaseCountdown.boundingBox();
+  expect(leaseCountdownBox).not.toBeNull();
+  expect(leaseCountdownBox!.x + leaseCountdownBox!.width).toBeLessThanOrEqual(
+    page.viewportSize()!.width,
+  );
+  const learningChromeBox = await page
+    .locator("[data-run-learning-chrome]")
+    .boundingBox();
+  expect(learningChromeBox).not.toBeNull();
+  expect(leaseCountdownBox!.x + leaseCountdownBox!.width).toBeLessThanOrEqual(
+    learningChromeBox!.x,
+  );
 
   const trigger = page.getByRole("button", {
     name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
@@ -524,6 +539,9 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   const savingHeading = page.getByRole("heading", { name: "Saving your run…" });
   await expect(savingHeading).toBeVisible();
   await expect(savingHeading).toBeFocused();
+  await expect(page.locator("[data-run-lease-countdown]")).toHaveText(
+    "1:25:00 left",
+  );
   await expect(
     page.getByText("Your recap will be ready in a moment."),
   ).toBeVisible();

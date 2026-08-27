@@ -103,7 +103,7 @@ export function ScenarioStepScreen(props: {
                     aria-hidden="true"
                     data-run-sequence-connector
                     className={cn(
-                      "absolute top-9 bottom-[-0.375rem] left-6 w-px",
+                      "absolute top-9 bottom-[-1rem] left-6 w-px",
                       step.state === "done"
                         ? "bg-success/60"
                         : "bg-muted-foreground/40",

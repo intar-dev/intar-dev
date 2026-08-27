@@ -6,6 +6,40 @@ import {
 import { routeCase } from "./routes";
 import { expectRouteScreenshot } from "./support/screenshot";
 
+async function expectRunTimer(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  const timer = page.locator("[data-run-lease-countdown]");
+  await expect(timer).toBeVisible();
+  const timerText = timer.locator("[data-run-lease-countdown-text]");
+  await expect(timerText).toBeVisible();
+  await expect(timerText).toHaveText(/\d/);
+  const box = await timer.boundingBox();
+  const textBox = await timerText.boundingBox();
+  expect(box).not.toBeNull();
+  expect(textBox).not.toBeNull();
+  expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  expect(textBox!.x + textBox!.width).toBeLessThanOrEqual(
+    page.viewportSize()!.width,
+  );
+  const learningChrome = page.locator("[data-run-learning-chrome]");
+  if ((await learningChrome.count()) > 0) {
+    const learningChromeBox = await learningChrome.boundingBox();
+    expect(learningChromeBox).not.toBeNull();
+    expect(textBox!.x + textBox!.width).toBeLessThanOrEqual(
+      learningChromeBox!.x,
+    );
+  }
+}
+
+async function expectConnectedTerminal(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  await expect(
+    page.getByRole("status").filter({ hasText: /Terminal status:/i }),
+  ).toHaveText(/Terminal status:\s*connected/i);
+}
+
 test.describe("focused visual states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
@@ -15,6 +49,8 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "running",
     });
+    await expectRunTimer(page);
+    await expectConnectedTerminal(page);
     await page.locator("[data-run-learning-panel-trigger]").click();
     const panel = page.locator("[data-run-learning-panel-content]");
     await expect(
@@ -30,6 +66,8 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "running",
     });
+    await expectRunTimer(page);
+    await expectConnectedTerminal(page);
     await page.locator("[data-run-check-indicator]").first().hover();
     await expect(
       page.locator("[data-run-check-tooltip][data-open]"),
@@ -43,6 +81,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "booting",
     });
+    await expectRunTimer(page);
     await expect(
       page.getByRole("heading", { name: "Preparing your workspace" }),
     ).toBeVisible();
@@ -61,6 +100,8 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "solved",
     });
+    await expectRunTimer(page);
+    await expectConnectedTerminal(page);
     await expect(
       page.locator("[data-run-completion-bar]"),
     ).toBeVisible();
@@ -79,6 +120,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "ending",
     });
+    await expectRunTimer(page);
     await expect(
       page.getByRole("heading", { name: "Saving your run…" }),
     ).toBeVisible();
@@ -91,6 +133,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "ending",
     });
+    await expectRunTimer(page);
     const currentStep = page
       .getByRole("list", { name: "Saving steps" })
       .locator('[aria-current="step"]');
@@ -136,6 +179,8 @@ test.describe("focused visual states", () => {
       variant: "long",
       runState: "running",
     });
+    await expectRunTimer(page);
+    await expectConnectedTerminal(page);
     await page.locator("[data-run-learning-panel-trigger]").click();
     const panel = page.locator("[data-run-learning-panel-content]");
     await expect(panel.getByText("Hints", { exact: true })).toBeVisible();
@@ -412,6 +457,8 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "running",
     });
+    await expectRunTimer(page);
+    await expectConnectedTerminal(page);
     await page.locator("[data-run-learning-panel-trigger]").click();
     await expect(
       page
@@ -427,6 +474,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "booting",
     });
+    await expectRunTimer(page);
     await expect(
       page.getByRole("heading", { name: "Preparing your workspace" }),
     ).toBeVisible();
@@ -460,6 +508,8 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "solved",
     });
+    await expectRunTimer(page);
+    await expectConnectedTerminal(page);
     await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Finish and save" }),
@@ -473,6 +523,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "ending",
     });
+    await expectRunTimer(page);
     await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-mobile");
   });
@@ -507,6 +558,7 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "booting",
     });
+    await expectRunTimer(page);
     await expect(page.getByRole("list", { name: "Startup steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-booting-sequence-dark-landscape");
   });
@@ -517,6 +569,8 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "solved",
     });
+    await expectRunTimer(page);
+    await expectConnectedTerminal(page);
     await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
     await expect(page.getByRole("region", { name: "Terminal" })).toBeVisible();
     await expectRouteScreenshot(page, "run-solved-workspace-action-dark-landscape");
@@ -528,6 +582,7 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "ending",
     });
+    await expectRunTimer(page);
     await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-landscape");
   });

@@ -1,5 +1,5 @@
 import { ROUTE_CASES } from "./routes";
-import { test } from "./fixtures/test";
+import { expect, test } from "./fixtures/test";
 import { expectRouteScreenshot } from "./support/screenshot";
 
 const themes = ["light", "dark"] as const;
@@ -20,6 +20,16 @@ for (const viewport of viewports) {
       for (const route of ROUTE_CASES) {
         test(`${route.id} · ${theme}`, async ({ page, ui }) => {
           await ui.open({ ...route, theme });
+          if (route.id === "run-workspace") {
+            await expect(
+              page.locator("[data-run-lease-countdown]"),
+            ).toBeVisible();
+            await expect(
+              page
+                .getByRole("status")
+                .filter({ hasText: /Terminal status:/i }),
+            ).toHaveText(/Terminal status:\s*connected/i);
+          }
           await expectRouteScreenshot(
             page,
             `${route.id}-${theme}-${viewport.id}`,

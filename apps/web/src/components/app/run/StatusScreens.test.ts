@@ -41,6 +41,7 @@ describe("ScenarioStepScreen", () => {
     expect(markup).toContain("Done");
     expect(markup).toContain("In progress");
     expect(markup).toContain("Up next");
+    expect(markup.match(/bottom-\[-1rem\]/g)).toHaveLength(2);
     expect(markup).not.toContain('role="progressbar"');
   });
 });
