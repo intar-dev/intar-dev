@@ -2,14 +2,6 @@ import "asciinema-player/dist/bundle/asciinema-player.css";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { Compartment, EditorState } from "@codemirror/state";
-import { search, searchKeymap } from "@codemirror/search";
-import {
-  EditorView,
-  keymap,
-  lineNumbers,
-  type KeyBinding,
-} from "@codemirror/view";
 import type { AsciinemaPlayerInstance } from "asciinema-player";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,6 +38,10 @@ export interface RunArtifactViewerState {
   error: string | null;
   content: string;
   receivedBytes: number;
+  /** True when the inline text is a bounded preview of a larger artifact. */
+  previewTruncated?: boolean;
+  /** Same-origin URL for downloading the complete artifact. */
+  downloadUrl?: string;
 }
 
 interface RunArtifactViewerProps {
@@ -60,76 +56,6 @@ interface RunArtifactViewerProps {
 }
 
 type CastTab = "replay" | "raw";
-
-const editorTheme = EditorView.theme(
-  {
-    "&": {
-      height: "100%",
-      color: "var(--terminal-foreground)",
-      background: "var(--terminal-background)",
-      fontSize: "0.79rem",
-    },
-    ".cm-scroller": {
-      fontFamily:
-        '"Recursive Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace',
-      lineHeight: "1.65",
-    },
-    ".cm-content": {
-      padding: "1rem 0 1.25rem",
-      caretColor: "transparent",
-    },
-    ".cm-focused": {
-      outline: "none",
-    },
-    ".cm-line": {
-      padding: "0 1rem 0 0.875rem",
-    },
-    ".cm-gutters": {
-      background: "var(--terminal-surface)",
-      color: "var(--terminal-muted)",
-      borderRight: "1px solid var(--terminal-border)",
-      paddingRight: "0.25rem",
-    },
-    ".cm-activeLine, .cm-activeLineGutter": {
-      background: "transparent",
-    },
-    ".cm-selectionBackground, ::selection": {
-      background:
-        "color-mix(in oklch, var(--terminal-brand) 24%, transparent)",
-    },
-    ".cm-searchMatch": {
-      background:
-        "color-mix(in oklch, var(--terminal-brand) 12%, transparent)",
-      outline: "1px solid var(--terminal-border)",
-    },
-    ".cm-searchMatch.cm-searchMatch-selected": {
-      background:
-        "color-mix(in oklch, var(--terminal-brand) 24%, transparent)",
-    },
-    ".cm-panels": {
-      background: "var(--terminal-surface)",
-      color: "var(--terminal-foreground)",
-      borderBottom: "1px solid var(--terminal-border)",
-    },
-    ".cm-button": {
-      color: "var(--terminal-foreground)",
-      background: "var(--terminal-surface)",
-      border: "1px solid var(--terminal-border)",
-      borderRadius: "0.375rem",
-    },
-    ".cm-textfield": {
-      background: "var(--terminal-background)",
-      color: "var(--terminal-foreground)",
-      border: "1px solid var(--terminal-border)",
-      borderRadius: "0.375rem",
-    },
-  },
-  { dark: true },
-);
-
-// Vite dedupes CodeMirror at build time, but the published searchKeymap type can
-// still resolve through a nested @codemirror/view install during type-checking.
-const readOnlySearchKeymap = searchKeymap as unknown as readonly KeyBinding[];
 
 export function RunArtifactViewer({
   viewer,
@@ -150,6 +76,7 @@ export function RunArtifactViewer({
 
   const artifactId = viewer?.artifact.id ?? null;
   const isCast = viewer ? isCastArtifact(viewer.artifact) : false;
+  const canReplay = isCast && !viewer?.previewTruncated;
   const lineCount = useMemo(
     () => countLines(viewer?.content ?? ""),
     [viewer?.content],
@@ -157,16 +84,22 @@ export function RunArtifactViewer({
   const progressLabel = viewer
     ? viewer.loading
       ? `Streaming ${formatBytes(viewer.receivedBytes)} of ${formatBytes(viewer.artifact.sizeBytes)}`
-      : "Stream complete"
+      : viewer.previewTruncated
+        ? `Previewing ${formatBytes(viewer.receivedBytes)} of ${formatBytes(viewer.artifact.sizeBytes)}`
+        : "Stream complete"
     : "No file selected";
 
   useEffect(() => {
     setWrapText(true);
     setCopyState("idle");
     if (viewer) {
-      setCastTab(isCastArtifact(viewer.artifact) ? "replay" : "raw");
+      setCastTab(
+        isCastArtifact(viewer.artifact) && !viewer.previewTruncated
+          ? "replay"
+          : "raw",
+      );
     }
-  }, [artifactId]);
+  }, [artifactId, viewer?.previewTruncated]);
 
   useEffect(() => {
     return () => {
@@ -214,7 +147,7 @@ export function RunArtifactViewer({
               {viewer.error}
             </div>
           </div>
-        ) : isCast ? (
+        ) : canReplay ? (
           <AsciicastReplaySurface
             contentId={viewer.artifact.id}
             content={viewer.content}
@@ -268,7 +201,7 @@ export function RunArtifactViewer({
         {viewer && !hideViewerControls ? (
           <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
-              {isCast ? (
+              {canReplay ? (
                 <>
                   <ToolbarTab
                     active={castTab === "replay"}
@@ -310,8 +243,24 @@ export function RunArtifactViewer({
                     ? "Copied"
                     : copyState === "error"
                       ? "Copy failed"
-                      : "Copy file"}
+                      : viewer.previewTruncated
+                        ? "Copy preview"
+                        : "Copy file"}
                 </Button>
+                {viewer.downloadUrl ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    render={
+                      <a
+                        href={viewer.downloadUrl}
+                        download={viewer.artifact.filename}
+                      />
+                    }
+                  >
+                    Download full file
+                  </Button>
+                ) : null}
                 <span
                   role="status"
                   aria-live="polite"
@@ -330,13 +279,15 @@ export function RunArtifactViewer({
                   size="sm"
                   aria-pressed={wrapText}
                   onClick={() => setWrapText((current) => !current)}
-                  disabled={isCast && castTab === "replay"}
+                  disabled={canReplay && castTab === "replay"}
                 >
                   Wrap {wrapText ? "On" : "Off"}
                 </Button>
               </div>
               <span className="text-xs text-muted-foreground">
-                Text panes support selection and `Cmd/Ctrl+F`.
+                {viewer.previewTruncated
+                  ? "The inline preview is capped for speed. Download the full file when needed."
+                  : "Text panes support selection and `Cmd/Ctrl+F`."}
               </span>
             </div>
           </div>
@@ -359,7 +310,7 @@ export function RunArtifactViewer({
                 {viewer.error}
               </div>
             </div>
-          ) : isCast && (hideViewerControls || castTab === "replay") ? (
+          ) : canReplay && (hideViewerControls || castTab === "replay") ? (
             <AsciicastReplaySurface
               contentId={viewer.artifact.id}
               content={viewer.content}
@@ -379,7 +330,7 @@ export function RunArtifactViewer({
         <CardFooter className="flex flex-col items-start gap-1 border-t bg-muted/10 text-xs text-muted-foreground sm:flex-row sm:justify-between">
           <span>{progressLabel}</span>
           <span>
-            {isCast && castTab === "replay"
+            {canReplay && castTab === "replay"
               ? viewer.loading
                 ? "Replay starts when the full cast arrives. Use Raw for live bytes."
                 : "Replay is interactive and backed by the archived cast file."
@@ -543,91 +494,36 @@ export function ReadOnlyTextSurface({
   /** Slim variant for inline embeds: no outer padding or status bar. */
   compact?: boolean;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const editorRef = useRef<EditorView | null>(null);
-  const wrapCompartmentRef = useRef(new Compartment());
   const deferredContent = useDeferredValue(content);
 
-  useEffect(() => {
-    if (!containerRef.current || editorRef.current) {
-      return;
-    }
-
-    editorRef.current = new EditorView({
-      parent: containerRef.current,
-      state: EditorState.create({
-        doc: deferredContent,
-        extensions: [
-          lineNumbers(),
-          search({ top: true }),
-          keymap.of(readOnlySearchKeymap),
-          EditorState.readOnly.of(true),
-          EditorView.editable.of(false),
-          wrapCompartmentRef.current.of(
-            wrapText ? EditorView.lineWrapping : [],
-          ),
-          editorTheme,
-        ],
-      }),
-    });
-
-    return () => {
-      editorRef.current?.destroy();
-      editorRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) {
-      return;
-    }
-
-    const current = editor.state.doc.toString();
-    if (current === deferredContent) {
-      return;
-    }
-
-    if (deferredContent.startsWith(current)) {
-      editor.dispatch({
-        changes: {
-          from: current.length,
-          to: current.length,
-          insert: deferredContent.slice(current.length),
-        },
-      });
-      return;
-    }
-
-    editor.dispatch({
-      changes: {
-        from: 0,
-        to: current.length,
-        insert: deferredContent,
-      },
-    });
-  }, [deferredContent]);
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) {
-      return;
-    }
-
-    editor.dispatch({
-      effects: wrapCompartmentRef.current.reconfigure(
-        wrapText ? EditorView.lineWrapping : [],
-      ),
-    });
-  }, [wrapText]);
+  const textPane = (
+    <div className="relative">
+      <pre
+        tabIndex={0}
+        aria-label="Artifact text content"
+        aria-busy={loading}
+        className={cn(
+          "m-0 overflow-auto bg-terminal-background px-3 py-4 font-mono text-[0.79rem] leading-[1.65] text-terminal-foreground outline-none selection:bg-terminal-brand/25 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+          wrapText ? "whitespace-pre-wrap break-words" : "whitespace-pre",
+          compact
+            ? "min-h-[4rem] max-h-[22rem]"
+            : "min-h-[20rem] max-h-[32rem]",
+        )}
+      >
+        <code>{deferredContent}</code>
+      </pre>
+      {!deferredContent ? (
+        <p className="pointer-events-none absolute inset-x-3 top-4 text-sm text-terminal-muted">
+          {loading ? "Waiting for text…" : "This artifact is empty."}
+        </p>
+      ) : null}
+    </div>
+  );
 
   if (compact) {
     return (
       <div className="overflow-hidden rounded-md border bg-background">
-        <div
-          ref={containerRef}
-          className="max-h-[22rem] min-h-[4rem] overflow-auto"
-        />
+        {textPane}
       </div>
     );
   }
@@ -638,10 +534,7 @@ export function ReadOnlyTextSurface({
         <div className="border-b px-4 py-2 text-sm text-muted-foreground">
           {loading ? "Streaming text" : "Archived text"}
         </div>
-        <div
-          ref={containerRef}
-          className="min-h-[20rem] max-h-[32rem] overflow-auto"
-        />
+        {textPane}
       </div>
     </div>
   );

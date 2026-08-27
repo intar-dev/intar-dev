@@ -9,6 +9,9 @@ import {
   organizationClient,
   usernameClient,
 } from "better-auth/client/plugins";
+import { getClientAppBootstrap } from "./app-bootstrap";
+export { getClientAppBootstrap };
+export type { AppBetaAccessState, AppBootstrapData } from "./app-bootstrap";
 
 const authClientPlugins = [
   usernameClient(),
@@ -132,15 +135,11 @@ export async function getClientSession(): Promise<AppSessionData | null> {
 export async function getClientBetaAccessState(): Promise<
   "active" | "restricted"
 > {
-  const response = await fetch("/api/access-invites/current", {
-    method: "GET",
-    credentials: "same-origin",
-    cache: "no-store",
-  });
-  const body = (await response.json().catch(() => null)) as {
-    state?: unknown;
-  } | null;
-  return response.ok && body?.state === "active" ? "active" : "restricted";
+  try {
+    return (await getClientAppBootstrap()).betaAccess;
+  } catch {
+    return "restricted";
+  }
 }
 
 export async function startGithubSignIn(options?: {

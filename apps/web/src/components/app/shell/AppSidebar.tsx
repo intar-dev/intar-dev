@@ -12,7 +12,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { isAdminUser } from "@/lib/authz";
-import { useMyRuns } from "../hooks/useMyRuns";
+import { useMyRunsSummary } from "../hooks/useMyRuns";
 import { useSession } from "../hooks/useSession";
 import { NAV_SECTIONS, findActiveNavItem } from "./nav-config";
 import { SidebarUserMenu } from "./SidebarUserMenu";
@@ -25,9 +25,8 @@ export function AppSidebar() {
   const { data } = useSession();
   const isAdmin = isAdminUser(data?.user ?? null);
   const activeId = findActiveNavItem(pathname)?.id ?? null;
-  const runs = useMyRuns();
-  const ongoingRunCount =
-    runs.data?.runs.filter((run) => run.activity !== "settled").length ?? 0;
+  const runs = useMyRunsSummary();
+  const ongoingRunCount = runs.data?.activeCount ?? 0;
 
   const sections = NAV_SECTIONS.filter(
     (section) => section.requires !== "admin" || isAdmin,

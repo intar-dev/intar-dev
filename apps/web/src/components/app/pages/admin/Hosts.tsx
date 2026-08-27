@@ -164,7 +164,7 @@ export function AdminHosts() {
         >
           {(visibleHosts) => (
             <div className="divide-y overflow-hidden rounded-xl border bg-card">
-              {visibleHosts.map(({ host, hostVms, hostRuns, capacity }) => {
+              {visibleHosts.map(({ host, hostVms, archiveTotalCount, capacity }) => {
                 const isRemovingThisHost =
                   removeHost.isPending && removeHost.variables === host.id;
                 const isRefreshing = busyKey === `${host.id}:refresh`;
@@ -213,7 +213,7 @@ export function AdminHosts() {
                         <p className="text-caption">
                           {host.role === "builder" ? "Builder" : "Agent"} ·{" "}
                           <span className="font-mono">{host.id}</span> ·{" "}
-                          {hostVms.length} live · {hostRuns.length} archived
+                          {hostVms.length} live · {archiveTotalCount} archived
                         </p>
                       </div>
                       <div className="flex shrink-0 items-center gap-2">

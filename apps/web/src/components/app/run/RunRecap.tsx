@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   type ReactNode,
   type Ref,
   useEffect,
@@ -17,7 +19,6 @@ import {
   Clock3,
   PlayCircle,
 } from "lucide-react";
-import { AsciicastReplaySurface } from "@/components/app/RunArtifactViewer";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { ScenarioStepScreen } from "@/components/app/run/StatusScreens";
 import { Button } from "@/components/ui/button";
@@ -41,7 +42,16 @@ import {
   type RunReplayPart,
 } from "./run-recap-model";
 import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
-import { useStreamedText } from "./useStreamedText";
+import {
+  MAX_INLINE_REPLAY_BYTES,
+  useStreamedText,
+} from "./useStreamedText";
+
+const LazyAsciicastReplaySurface = lazy(() =>
+  import("@/components/app/RunArtifactViewer").then(
+    ({ AsciicastReplaySurface }) => ({ default: AsciicastReplaySurface }),
+  ),
+);
 
 export interface RunRecapProps {
   run: ScenarioRunRecord;
@@ -681,12 +691,32 @@ function ReplayPartSurface({
   const contentUrl = part.castArtifactId
     ? scenarioRunArtifactContentPath(runId, part.castArtifactId)
     : null;
-  const replay = useStreamedText(contentUrl, Boolean(contentUrl));
+  const knownTooLarge =
+    part.sizeBytes !== undefined && part.sizeBytes > MAX_INLINE_REPLAY_BYTES;
+  const replay = useStreamedText(
+    contentUrl,
+    Boolean(contentUrl) && !knownTooLarge,
+  );
 
   return !part.castArtifactId ? (
     <p className="text-sm text-muted-foreground" role="status">
       Replay unavailable.
     </p>
+  ) : knownTooLarge || replay.truncated ? (
+    <div className="space-y-3 rounded-md border bg-muted/20 px-4 py-4">
+      <p className="text-sm text-muted-foreground" role="status">
+        This replay is too large to play in the page.
+      </p>
+      <Button
+        variant="outline"
+        size="sm"
+        render={
+          <a href={contentUrl ?? undefined} download="terminal-session.cast" />
+        }
+      >
+        Download replay
+      </Button>
+    </div>
   ) : replay.error ? (
     <p className="text-sm text-muted-foreground" role="status">
       Replay could not be loaded. Try again soon.
@@ -696,12 +726,23 @@ function ReplayPartSurface({
       className="overflow-hidden rounded-md border border-border/70 bg-terminal-background"
       data-run-recap-replay-surface
     >
-      <AsciicastReplaySurface
-        contentId={part.castArtifactId}
-        content={replay.content}
-        loading={replay.loading}
-        minimal
-      />
+      <Suspense
+        fallback={
+          <div
+            className="flex aspect-video items-center justify-center text-sm text-terminal-muted"
+            role="status"
+          >
+            Opening replay…
+          </div>
+        }
+      >
+        <LazyAsciicastReplaySurface
+          contentId={part.castArtifactId}
+          content={replay.content}
+          loading={replay.loading}
+          minimal
+        />
+      </Suspense>
     </div>
   );
 }

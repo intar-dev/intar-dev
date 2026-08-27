@@ -398,7 +398,7 @@ test.describe("focused state accessibility", () => {
 
   test("authoring invalid validation", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-authoring"), theme: "dark" });
-    const editor = page.locator(".cm-content");
+    const editor = page.getByLabel("Scenario HCL source");
     await expect(editor).toBeVisible();
     await editor.fill('scenario "broken" {');
     await page.getByRole("button", { name: "Validate" }).click();

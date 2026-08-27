@@ -1,7 +1,5 @@
-import {
-  RunArtifactViewer,
-  type RunArtifactViewerState,
-} from "@/components/app/RunArtifactViewer";
+import { lazy, Suspense } from "react";
+import type { RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,11 +21,20 @@ import type {
   AgentHostApi,
   AgentVmRunArtifact,
   AgentVmRunRecord,
+  AgentVmRunSummary,
 } from "./types";
+
+const LazyRunArtifactViewer = lazy(async () => {
+  const { RunArtifactViewer } = await import("@/components/app/RunArtifactViewer");
+  return { default: RunArtifactViewer };
+});
 
 export function ScenarioRunArchiveCard(props: {
   host: AgentHostApi;
-  run: AgentVmRunRecord;
+  run: AgentVmRunSummary;
+  detail: AgentVmRunRecord | null;
+  isDetailLoading: boolean;
+  detailError: string | null;
   viewer: RunArtifactViewerState | null;
   isExpanded: boolean;
   onToggle: () => void;
@@ -87,9 +94,9 @@ export function ScenarioRunArchiveCard(props: {
             <Stat
               size="sm"
               label="Artifacts"
-              value={String(props.run.artifacts.length)}
+              value={String(props.run.artifactCount)}
               detail={
-                props.run.artifacts.length === 1
+                props.run.artifactCount === 1
                   ? "file captured"
                   : "files captured"
               }
@@ -116,6 +123,7 @@ export function ScenarioRunArchiveCard(props: {
             type="button"
             size="sm"
             variant="outline"
+            aria-expanded={props.isExpanded}
             onClick={props.onToggle}
           >
             {props.isExpanded ? "Hide details" : "Details"}
@@ -132,157 +140,179 @@ export function ScenarioRunArchiveCard(props: {
         </div>
       </div>
 
-      <div
-        className={`grid transition-all duration-300 ease-out motion-reduce:transition-none ${
-          props.isExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-        }`}
-      >
-        <div className="overflow-hidden">
-          <div className="grid gap-6 border-t px-4 py-4 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
-            <div className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Stat
-                  size="sm"
-                  label="Created"
-                  value={formatTimestampMs(props.run.vmCreatedAt)}
-                />
-                <Stat
-                  size="sm"
-                  label="Delete requested"
-                  value={formatTimestampMs(props.run.deleteRequestedAt)}
-                />
-                <Stat
-                  size="sm"
-                  label="Upload state"
-                  value={props.run.uploadStatus}
-                />
-                <Stat size="sm" label="Owner" value={props.run.userId} />
-              </div>
-
-              {props.run.uploadError ? (
-                <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-                  {props.run.uploadError}
-                </div>
-              ) : null}
-
-              <div className="rounded-xl bg-muted/40 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-medium">Milestones</p>
-                  <Badge variant="outline">{props.run.events.length}</Badge>
-                </div>
-                {props.run.events.length ? (
-                  <PaginatedCollection
-                    items={props.run.events}
-                    pageSize={COLLECTION_PAGE_SIZE.dense}
-                    itemLabel="milestones"
-                  >
-                    {(visibleEvents) => (
-                      <div className="mt-4 space-y-4">
-                        {visibleEvents.map((event) => (
-                          <div
-                            key={event.id}
-                            className="relative min-h-11 py-1 pl-5 text-sm"
-                          >
-                            <span className="absolute left-0 top-1.5 h-2 w-2 rounded-full bg-primary" />
-                            <p className="font-medium">
-                              {milestoneLabel(event.kind)}
-                            </p>
-                            <p className="text-sm text-muted-foreground">
-                              {event.message ?? "No detail"}
-                            </p>
-                            <p className="text-xs text-muted-foreground">
-                              {formatTimestampMs(event.createdAt)}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </PaginatedCollection>
-                ) : (
-                  <p className="mt-4 text-sm text-muted-foreground">
-                    No run events recorded.
-                  </p>
-                )}
-              </div>
+      {props.isExpanded ? (
+        <div className="border-t px-4 py-4">
+          {props.isDetailLoading ? (
+            <p role="status" className="text-sm text-muted-foreground">
+              Loading run details…
+            </p>
+          ) : props.detailError ? (
+            <div
+              role="alert"
+              className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+            >
+              {props.detailError}
             </div>
+          ) : props.detail ? (
+            <ArchiveRunDetails
+              run={props.detail}
+              viewer={props.viewer}
+              onStreamArtifact={props.onStreamArtifact}
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
 
-            <div className="space-y-4">
-              <div className="rounded-xl bg-muted/40 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-medium">Artifacts</p>
-                  <Badge variant="outline">{props.run.artifacts.length}</Badge>
-                </div>
-                {props.run.artifacts.length ? (
-                  <PaginatedCollection
-                    items={props.run.artifacts}
-                    pageSize={COLLECTION_PAGE_SIZE.list}
-                    itemLabel="artifacts"
-                  >
-                    {(visibleArtifacts) => (
-                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                        {visibleArtifacts.map((artifact) => {
-                          const className = `min-h-16 rounded-xl border px-4 py-4 text-left text-sm transition-colors ${
-                            props.viewer?.artifact.id === artifact.id
-                              ? "border-primary/40 bg-primary/10 text-foreground"
-                              : "border-border bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground"
-                          }`;
+function ArchiveRunDetails(props: {
+  run: AgentVmRunRecord;
+  viewer: RunArtifactViewerState | null;
+  onStreamArtifact: (artifact: AgentVmRunArtifact) => void;
+}) {
+  return (
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
+      <div className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Stat
+            size="sm"
+            label="Created"
+            value={formatTimestampMs(props.run.vmCreatedAt)}
+          />
+          <Stat
+            size="sm"
+            label="Delete requested"
+            value={formatTimestampMs(props.run.deleteRequestedAt)}
+          />
+          <Stat
+            size="sm"
+            label="Upload state"
+            value={props.run.uploadStatus}
+          />
+          <Stat size="sm" label="Owner" value={props.run.userId} />
+        </div>
 
-                          if (artifact.kind === "ssh_recording_raw_bundle") {
-                            return (
-                              <a
-                                key={artifact.id}
-                                className={className}
-                                href={`${scenarioRunArtifactContentPath(props.run.id, artifact.id)}?download=1`}
-                              >
-                                <span className="block font-medium">
-                                  {artifact.ordinal}. Raw Recording Bundle
-                                </span>
-                                <span className="mt-1 block text-xs">
-                                  {artifact.filename} •{" "}
-                                  {formatBytes(artifact.sizeBytes)} • Download
-                                </span>
-                              </a>
-                            );
-                          }
-
-                          return (
-                            <button
-                              key={artifact.id}
-                              type="button"
-                              className={className}
-                              onClick={() => {
-                                props.onStreamArtifact(artifact);
-                              }}
-                            >
-                              <span className="block font-medium">
-                                {artifact.ordinal}.{" "}
-                                {artifactKindLabel(artifact.kind)}
-                              </span>
-                              <span className="mt-1 block text-xs">
-                                {artifact.filename} •{" "}
-                                {formatBytes(artifact.sizeBytes)}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </PaginatedCollection>
-                ) : (
-                  <p className="mt-4 text-sm text-muted-foreground">
-                    No archived files for this run.
-                  </p>
-                )}
-              </div>
-
-              <RunArtifactViewer
-                viewer={props.viewer}
-                emptyDescription="Select an artifact from this run."
-              />
-            </div>
+        {props.run.uploadError ? (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+            {props.run.uploadError}
           </div>
+        ) : null}
+
+        <div className="rounded-xl bg-muted/40 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium">Milestones</p>
+            <Badge variant="outline">{props.run.events.length}</Badge>
+          </div>
+          {props.run.events.length ? (
+            <PaginatedCollection
+              items={props.run.events}
+              pageSize={COLLECTION_PAGE_SIZE.dense}
+              itemLabel="milestones"
+            >
+              {(visibleEvents) => (
+                <div className="mt-4 space-y-4">
+                  {visibleEvents.map((event) => (
+                    <div
+                      key={event.id}
+                      className="relative min-h-11 py-1 pl-5 text-sm"
+                    >
+                      <span className="absolute left-0 top-1.5 h-2 w-2 rounded-full bg-primary" />
+                      <p className="font-medium">{milestoneLabel(event.kind)}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {event.message ?? "No detail"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatTimestampMs(event.createdAt)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </PaginatedCollection>
+          ) : (
+            <p className="mt-4 text-sm text-muted-foreground">
+              No run events recorded.
+            </p>
+          )}
         </div>
       </div>
-    </article>
+
+      <div className="space-y-4">
+        <div className="rounded-xl bg-muted/40 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium">Artifacts</p>
+            <Badge variant="outline">{props.run.artifacts.length}</Badge>
+          </div>
+          {props.run.artifacts.length ? (
+            <PaginatedCollection
+              items={props.run.artifacts}
+              pageSize={COLLECTION_PAGE_SIZE.list}
+              itemLabel="artifacts"
+            >
+              {(visibleArtifacts) => (
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {visibleArtifacts.map((artifact) => {
+                    const className = `min-h-16 rounded-xl border px-4 py-4 text-left text-sm transition-colors ${
+                      props.viewer?.artifact.id === artifact.id
+                        ? "border-primary/40 bg-primary/10 text-foreground"
+                        : "border-border bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground"
+                    }`;
+
+                    if (artifact.kind === "ssh_recording_raw_bundle") {
+                      return (
+                        <a
+                          key={artifact.id}
+                          className={className}
+                          href={`${scenarioRunArtifactContentPath(props.run.id, artifact.id)}?download=1`}
+                        >
+                          <span className="block font-medium">
+                            {artifact.ordinal}. Raw Recording Bundle
+                          </span>
+                          <span className="mt-1 block text-xs">
+                            {artifact.filename} • {formatBytes(artifact.sizeBytes)} • Download
+                          </span>
+                        </a>
+                      );
+                    }
+
+                    return (
+                      <button
+                        key={artifact.id}
+                        type="button"
+                        className={className}
+                        onClick={() => {
+                          props.onStreamArtifact(artifact);
+                        }}
+                      >
+                        <span className="block font-medium">
+                          {artifact.ordinal}. {artifactKindLabel(artifact.kind)}
+                        </span>
+                        <span className="mt-1 block text-xs">
+                          {artifact.filename} • {formatBytes(artifact.sizeBytes)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </PaginatedCollection>
+          ) : (
+            <p className="mt-4 text-sm text-muted-foreground">
+              No archived files for this run.
+            </p>
+          )}
+        </div>
+
+        {props.viewer ? (
+          <Suspense fallback={null}>
+            <LazyRunArtifactViewer
+              viewer={props.viewer}
+              emptyDescription="Select an artifact from this run."
+            />
+          </Suspense>
+        ) : null}
+      </div>
+    </div>
   );
 }

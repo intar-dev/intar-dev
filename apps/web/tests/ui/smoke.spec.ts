@@ -685,7 +685,7 @@ test("authoring editor validates with the browser WASM shell", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("admin-authoring"), theme: "dark" });
-  const editor = page.locator(".cm-content");
+  const editor = page.getByLabel("Scenario HCL source");
   await editor.fill('scenario "broken" {');
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.getByLabel("Validation results")).toContainText(

@@ -21,9 +21,9 @@ import {
   validateScenarioBriefingSearch,
 } from "./pages/tab-search";
 import {
-  getClientBetaAccessState,
-  getClientSession,
-} from "@/lib/auth-client";
+  appBootstrapQueryOptions,
+  appQueryClient,
+} from "@/lib/app-bootstrap";
 import { isAdminUser } from "@/lib/authz";
 
 const rootRoute = createRootRoute({
@@ -654,23 +654,27 @@ function RouteNotFound() {
 }
 
 async function requireAdminRoute() {
-  const session = await getClientSession();
+  const { session } = await loadAppBootstrap();
   if (!session?.user || !isAdminUser(session.user)) {
     throw redirect({ to: "/" });
   }
 }
 
 async function requireSignedInRoute() {
-  const session = await getClientSession();
+  const { betaAccess, session } = await loadAppBootstrap();
   if (!session?.user) {
     throw redirect({ to: "/" });
   }
-  if ((await getClientBetaAccessState()) !== "active") {
+  if (betaAccess !== "active") {
     if (typeof window !== "undefined") {
       window.location.replace("/join");
     }
     throw redirect({ to: "/" });
   }
+}
+
+async function loadAppBootstrap() {
+  return appQueryClient.fetchQuery(appBootstrapQueryOptions());
 }
 
 declare module "@tanstack/react-router" {

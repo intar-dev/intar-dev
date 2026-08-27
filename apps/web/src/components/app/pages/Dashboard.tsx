@@ -1,4 +1,12 @@
-import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  startTransition,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "@tanstack/react-router";
 import { Activity, Archive, CircleAlert, Server, Shapes } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
@@ -8,8 +16,7 @@ import {
 } from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
 import { TableSkeleton } from "@/components/app/patterns/Skeletons";
-import { type RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
-import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
+import type { RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,9 +38,22 @@ import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenario
 import { useHostFleet } from "@/components/app/admin/hosts/useHostFleet";
 import type {
   AgentVmRunArtifact,
+  AgentVmRunRecord,
   ArchivedScenarioRunRecord,
   LiveScenarioRunRecord,
 } from "@/components/app/admin/hosts/types";
+
+const LazyWebSshTerminal = lazy(async () => {
+  const { WebSshTerminal } = await import(
+    "@/components/remote-access/WebSshTerminal"
+  );
+  return { default: WebSshTerminal };
+});
+
+const ARTIFACT_TEXT_PREVIEW_BYTES = 256 * 1024;
+const ARTIFACT_REPLAY_PREVIEW_BYTES = 2 * 1024 * 1024;
+const ARTIFACT_PREVIEW_FLUSH_MS = 50;
+const DASHBOARD_ARCHIVE_PAGE_SIZE = 6;
 
 // Admin overview: fleet-wide KPIs plus the live and archived scenario runs.
 // Host operations live on /admin/hosts.
@@ -49,6 +69,17 @@ export function Dashboard() {
     Record<string, RunArtifactViewerState>
   >({});
   const artifactStreamRef = useRef<Record<string, AbortController>>({});
+  const [archiveDetailsByRun, setArchiveDetailsByRun] = useState<
+    Record<string, AgentVmRunRecord>
+  >({});
+  const [archiveDetailLoadingByRun, setArchiveDetailLoadingByRun] = useState<
+    Record<string, true>
+  >({});
+  const [archiveDetailErrorsByRun, setArchiveDetailErrorsByRun] = useState<
+    Record<string, string>
+  >({});
+  const archiveDetailPendingRef = useRef<Record<string, true>>({});
+  const archiveDetailGenerationRef = useRef<Record<string, number>>({});
   const [activeWebSsh, setActiveWebSsh] = useState<{
     hostId: string;
     runId: string;
@@ -66,7 +97,21 @@ export function Dashboard() {
   } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
 
-  const { hosts, hostRecords, refreshHost, forgetArchivedRun } = useHostFleet();
+  const {
+    hosts,
+    hostRecords,
+    liveLoadedCount,
+    liveTotalCount,
+    archiveTotalCount,
+    hasMoreArchives,
+    hasMoreLive,
+    isLoadingMoreArchives,
+    loadMoreArchivesError,
+    loadMoreArchives,
+    refreshHost,
+    forgetArchivedRun,
+    loadArchivedRunDetail,
+  } = useHostFleet();
   const scenarios = useAdminScenarios();
   const launchableScenarios = scenarios.data?.scenarios ?? [];
 
@@ -75,8 +120,65 @@ export function Dashboard() {
       for (const controller of Object.values(artifactStreamRef.current)) {
         controller.abort();
       }
+      for (const viewerKey of Object.keys(archiveDetailGenerationRef.current)) {
+        archiveDetailGenerationRef.current[viewerKey] =
+          (archiveDetailGenerationRef.current[viewerKey] ?? 0) + 1;
+      }
     };
   }, []);
+
+  const loadArchiveRunDetail = async (hostId: string, runId: string) => {
+    const viewerKey = `${hostId}:${runId}`;
+    if (
+      archiveDetailsByRun[viewerKey] ||
+      archiveDetailPendingRef.current[viewerKey]
+    ) {
+      return;
+    }
+
+    const generation = (archiveDetailGenerationRef.current[viewerKey] ?? 0) + 1;
+    archiveDetailGenerationRef.current[viewerKey] = generation;
+    archiveDetailPendingRef.current[viewerKey] = true;
+    setArchiveDetailLoadingByRun((current) => ({
+      ...current,
+      [viewerKey]: true,
+    }));
+    setArchiveDetailErrorsByRun((current) => {
+      const next = { ...current };
+      delete next[viewerKey];
+      return next;
+    });
+
+    try {
+      const detail = await loadArchivedRunDetail(hostId, runId);
+      if (archiveDetailGenerationRef.current[viewerKey] !== generation) {
+        return;
+      }
+      setArchiveDetailsByRun((current) => ({
+        ...current,
+        [viewerKey]: detail,
+      }));
+    } catch (error) {
+      if (archiveDetailGenerationRef.current[viewerKey] !== generation) {
+        return;
+      }
+      setArchiveDetailErrorsByRun((current) => ({
+        ...current,
+        [viewerKey]:
+          error instanceof Error ? error.message : "failed to load run details",
+      }));
+    } finally {
+      if (archiveDetailGenerationRef.current[viewerKey] !== generation) {
+        return;
+      }
+      delete archiveDetailPendingRef.current[viewerKey];
+      setArchiveDetailLoadingByRun((current) => {
+        const next = { ...current };
+        delete next[viewerKey];
+        return next;
+      });
+    }
+  };
 
   const streamArtifactContent = async (
     hostId: string,
@@ -84,6 +186,9 @@ export function Dashboard() {
     artifact: AgentVmRunArtifact,
   ) => {
     const viewerKey = `${hostId}:${runId}`;
+    const contentUrl = scenarioRunArtifactContentPath(runId, artifact.id);
+    const preview = artifactPreviewRequest(artifact);
+    const previewTruncated = preview.previewTruncated;
     artifactStreamRef.current[viewerKey]?.abort();
 
     const controller = new AbortController();
@@ -96,16 +201,19 @@ export function Dashboard() {
         error: null,
         content: "",
         receivedBytes: 0,
+        previewTruncated,
+        downloadUrl: contentUrl,
       },
     }));
 
     try {
       const response = await fetch(
-        scenarioRunArtifactContentPath(runId, artifact.id),
+        contentUrl,
         {
           method: "GET",
           credentials: "include",
           signal: controller.signal,
+          ...preview.requestInit,
         },
       );
 
@@ -128,6 +236,8 @@ export function Dashboard() {
             error: null,
             content: text,
             receivedBytes: new TextEncoder().encode(text).byteLength,
+            previewTruncated,
+            downloadUrl: contentUrl,
           },
         }));
         return;
@@ -137,12 +247,18 @@ export function Dashboard() {
       const decoder = new TextDecoder();
       let accumulated = "";
       let receivedBytes = 0;
+      let lastPublishedAt = 0;
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         receivedBytes += value.byteLength;
         accumulated += decoder.decode(value, { stream: true });
+        const now = Date.now();
+        if (now - lastPublishedAt < ARTIFACT_PREVIEW_FLUSH_MS) continue;
+        lastPublishedAt = now;
+        const content = accumulated;
+        const publishedBytes = receivedBytes;
         startTransition(() => {
           setArtifactViewerByRun((current) => ({
             ...current,
@@ -150,8 +266,10 @@ export function Dashboard() {
               artifact,
               loading: true,
               error: null,
-              content: accumulated,
-              receivedBytes,
+              content,
+              receivedBytes: publishedBytes,
+              previewTruncated,
+              downloadUrl: contentUrl,
             },
           }));
         });
@@ -165,7 +283,9 @@ export function Dashboard() {
           loading: false,
           error: null,
           content: accumulated,
-          receivedBytes: Math.max(receivedBytes, artifact.sizeBytes),
+          receivedBytes,
+          previewTruncated,
+          downloadUrl: contentUrl,
         },
       }));
     } catch (error) {
@@ -183,6 +303,8 @@ export function Dashboard() {
               : "failed to stream artifact",
           content: current[viewerKey]?.content ?? "",
           receivedBytes: current[viewerKey]?.receivedBytes ?? 0,
+          previewTruncated,
+          downloadUrl: contentUrl,
         },
       }));
     } finally {
@@ -229,7 +351,7 @@ export function Dashboard() {
           ? null
           : current,
       );
-      await Promise.all([hosts.refetch(), refreshHost(hostId)]);
+      await refreshHost(hostId);
     } catch (error) {
       setVmError(
         error instanceof Error ? error.message : "failed to request end run",
@@ -264,6 +386,9 @@ export function Dashboard() {
 
       artifactStreamRef.current[viewerKey]?.abort();
       delete artifactStreamRef.current[viewerKey];
+      archiveDetailGenerationRef.current[viewerKey] =
+        (archiveDetailGenerationRef.current[viewerKey] ?? 0) + 1;
+      delete archiveDetailPendingRef.current[viewerKey];
       setExpandedRuns((current) => {
         const next = { ...current };
         delete next[viewerKey];
@@ -274,11 +399,26 @@ export function Dashboard() {
         delete next[viewerKey];
         return next;
       });
+      setArchiveDetailsByRun((current) => {
+        const next = { ...current };
+        delete next[viewerKey];
+        return next;
+      });
+      setArchiveDetailLoadingByRun((current) => {
+        const next = { ...current };
+        delete next[viewerKey];
+        return next;
+      });
+      setArchiveDetailErrorsByRun((current) => {
+        const next = { ...current };
+        delete next[viewerKey];
+        return next;
+      });
       forgetArchivedRun(hostId, runId);
       setVmNotice(`Deleted archived run ${runId}`);
       setDeleteTarget(null);
       setDeleteConfirm("");
-      await Promise.all([hosts.refetch(), refreshHost(hostId)]);
+      await refreshHost(hostId);
     } catch (error) {
       setVmError(
         error instanceof Error ? error.message : "failed to delete run",
@@ -295,10 +435,7 @@ export function Dashboard() {
     (total, { hostVms }) => total + hostVms.length,
     0,
   );
-  const archivedRunCount = hostRecords.reduce(
-    (total, { hostRuns }) => total + hostRuns.length,
-    0,
-  );
+  const archivedRunCount = archiveTotalCount;
   const enabledScenarioCount = launchableScenarios.filter(
     (scenario) => scenario.enabled,
   ).length;
@@ -461,7 +598,11 @@ export function Dashboard() {
           title="Live scenario runs"
           description="Everything currently running across the fleet."
           actions={
-            <Badge variant="outline">{liveScenarioRuns.length} active</Badge>
+            <Badge variant="outline">
+              {hasMoreLive
+                ? `Newest ${liveLoadedCount} of ${liveTotalCount} runs`
+                : `${liveTotalCount} active`}
+            </Badge>
           }
         >
           {hosts.isPending ? (
@@ -529,7 +670,8 @@ export function Dashboard() {
         description="Finished runs with their captured artifacts."
         actions={
           <Badge variant="outline">
-            {archivedScenarioRuns.length} retained
+            {archivedRunCount} retained
+            {hasMoreArchives ? ` · ${archivedScenarioRuns.length} shown` : ""}
           </Badge>
         }
       >
@@ -538,7 +680,7 @@ export function Dashboard() {
         ) : archivedScenarioRuns.length ? (
           <PaginatedCollection
             items={archivedScenarioRuns}
-            pageSize={COLLECTION_PAGE_SIZE.cards}
+            pageSize={DASHBOARD_ARCHIVE_PAGE_SIZE}
             itemLabel="archived runs"
           >
             {(visibleRuns) => (
@@ -550,13 +692,22 @@ export function Dashboard() {
                       key={viewerKey}
                       host={host}
                       run={run}
+                      detail={archiveDetailsByRun[viewerKey] ?? null}
+                      isDetailLoading={Boolean(
+                        archiveDetailLoadingByRun[viewerKey],
+                      )}
+                      detailError={archiveDetailErrorsByRun[viewerKey] ?? null}
                       viewer={artifactViewerByRun[viewerKey] ?? null}
                       isExpanded={Boolean(expandedRuns[viewerKey])}
                       onToggle={() => {
+                        const isExpanded = Boolean(expandedRuns[viewerKey]);
                         setExpandedRuns((current) => ({
                           ...current,
-                          [viewerKey]: !current[viewerKey],
+                          [viewerKey]: !isExpanded,
                         }));
+                        if (!isExpanded) {
+                          void loadArchiveRunDetail(host.id, run.id);
+                        }
                       }}
                       onDelete={() => {
                         setDeleteConfirm("");
@@ -580,17 +731,40 @@ export function Dashboard() {
             description="Finished runs land here once their recordings upload."
           />
         )}
+        {hasMoreArchives ? (
+          <div className="mt-6 flex flex-col items-center gap-2 border-t pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isLoadingMoreArchives}
+              onClick={() => {
+                void loadMoreArchives().catch(() => {
+                  // The request error is shown directly below this control.
+                });
+              }}
+            >
+              {isLoadingMoreArchives ? "Loading older runs…" : "Load older runs"}
+            </Button>
+            {loadMoreArchivesError ? (
+              <p className="text-sm text-destructive" role="alert">
+                {loadMoreArchivesError.message}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </Section>
 
       {activeWebSsh ? (
-        <WebSshTerminal
-          vmName={activeWebSsh.vmName}
-          sessionRequest={{
-            url: `/api/scenarios/runs/${encodeURIComponent(activeWebSsh.runId)}/ssh`,
-            body: { vmId: activeWebSsh.vmId },
-          }}
-          onClose={() => setActiveWebSsh(null)}
-        />
+        <Suspense fallback={null}>
+          <LazyWebSshTerminal
+            vmName={activeWebSsh.vmName}
+            sessionRequest={{
+              url: `/api/scenarios/runs/${encodeURIComponent(activeWebSsh.runId)}/ssh`,
+              body: { vmId: activeWebSsh.vmId },
+            }}
+            onClose={() => setActiveWebSsh(null)}
+          />
+        </Suspense>
       ) : null}
 
       <Dialog
@@ -687,6 +861,37 @@ export function Dashboard() {
       </Dialog>
     </PageShell>
   );
+}
+
+function isReplayArtifact(
+  artifact: Pick<AgentVmRunArtifact, "contentType" | "filename" | "kind">,
+) {
+  return (
+    artifact.kind === "ssh_recording_segment" ||
+    artifact.contentType.includes("asciicast") ||
+    artifact.filename.endsWith(".cast")
+  );
+}
+
+export function artifactPreviewRequest(
+  artifact: Pick<AgentVmRunArtifact, "contentType" | "filename" | "kind" | "sizeBytes">,
+): { previewTruncated: boolean; requestInit: RequestInit } {
+  const previewTruncated =
+    artifact.sizeBytes >
+    (isReplayArtifact(artifact)
+      ? ARTIFACT_REPLAY_PREVIEW_BYTES
+      : ARTIFACT_TEXT_PREVIEW_BYTES);
+  const previewBytes = isReplayArtifact(artifact)
+    ? ARTIFACT_REPLAY_PREVIEW_BYTES
+    : ARTIFACT_TEXT_PREVIEW_BYTES;
+  return previewTruncated
+    ? {
+        previewTruncated: true,
+        requestInit: {
+          headers: { range: `bytes=0-${previewBytes - 1}` },
+        },
+      }
+    : { previewTruncated: false, requestInit: {} };
 }
 
 function OperationalEmptyState({

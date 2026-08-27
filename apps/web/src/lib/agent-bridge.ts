@@ -228,8 +228,18 @@ export function parseInventory(
   return parseJsonObject(inventoryJson) as AgentInventorySnapshot | null;
 }
 
-export function buildStoredBridgeStatus(host: AgentHostRow): AgentBridgeStatus {
-  const inventory = parseInventory(host.inventory_json);
+/**
+ * Callers which already computed the inventory VM count in D1 can provide it
+ * here and avoid transferring/parsing the full inventory document.
+ */
+export function buildStoredBridgeStatus(
+  host: AgentHostRow,
+  knownInventoryVmCount?: number,
+): AgentBridgeStatus {
+  const inventory =
+    knownInventoryVmCount === undefined
+      ? parseInventory(host.inventory_json)
+      : null;
   const nowMs = Date.now();
   const heartbeatFresh =
     typeof host.last_heartbeat_at === "number" &&
@@ -246,7 +256,9 @@ export function buildStoredBridgeStatus(host: AgentHostRow): AgentBridgeStatus {
         : null,
     agentVersion: host.agent_version,
     activeSessionId: host.active_session_id,
-    inventoryVmCount: Array.isArray(inventory?.vms) ? inventory.vms.length : 0,
+    inventoryVmCount:
+      knownInventoryVmCount ??
+      (Array.isArray(inventory?.vms) ? inventory.vms.length : 0),
   };
 }
 

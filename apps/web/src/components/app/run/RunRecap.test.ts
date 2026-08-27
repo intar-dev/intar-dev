@@ -499,6 +499,27 @@ describe("RunRecap", () => {
     expect(singlePart).not.toContain("Next replay part");
   });
 
+  it("offers a download instead of loading an oversized replay", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ReplayViewer, {
+        runId: "safe-run",
+        parts: [
+          {
+            key: "part-large",
+            machineLabel: null,
+            partLabel: "Part 1",
+            castArtifactId: "cast-large",
+            sizeBytes: 3 * 1024 * 1024,
+          },
+        ],
+      }),
+    );
+
+    expect(markup).toContain("too large to play in the page");
+    expect(markup).toContain("Download replay");
+    expect(markup).not.toContain("run-artifact-player");
+  });
+
   it("names pending and unavailable replay states without a technical explanation", () => {
     const pending = renderToStaticMarkup(
       createElement(RunRecap, {

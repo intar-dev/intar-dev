@@ -1,11 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import { getClientSession } from "@/lib/auth-client";
+import {
+  appBootstrapQueryOptions,
+  type AppBootstrapData,
+} from "@/lib/app-bootstrap";
+
+export function sessionQueryOptions() {
+  return {
+    ...appBootstrapQueryOptions(),
+    select: (bootstrap: AppBootstrapData) => bootstrap.session,
+  };
+}
 
 export function useSession() {
-  return useQuery({
-    queryKey: ["session"],
-    queryFn: getClientSession,
-    staleTime: 30_000,
-    retry: 1,
-  });
+  return useQuery(sessionQueryOptions());
 }

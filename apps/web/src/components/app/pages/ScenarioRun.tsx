@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -7,13 +9,17 @@ import {
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
+import {
+  HttpResponseError,
+  isAccessResponseError,
+  retryHttpResponseError,
+} from "@/components/app/lib/http-response-error";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   StatusToken,
   type StatusTone,
 } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
-import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   DropdownMenuItem,
@@ -23,11 +29,6 @@ import { presentScenarioRun } from "@/lib/run-phase";
 import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
 import { RunLearningPanel } from "@/components/app/run/RunLearningPanel";
-import { RunRecap } from "@/components/app/run/RunRecap";
-import {
-  DeleteRunDialog,
-  ScenarioCancelDialog,
-} from "@/components/app/run/RunDialogs";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
   ScenarioShellStatusCard,
@@ -39,9 +40,10 @@ import {
   hasPendingInfrastructureTeardown,
   hasUsableTerminalTarget,
 } from "@/components/app/run/run-support";
-import { NativeSshDialog } from "@/components/remote-access/NativeSshDialogButton";
 import {
-  POLL_INTERVALS,
+  mergeScenarioRunStatus,
+  scenarioRunStatusRefetchInterval,
+  type ScenarioRunStatus,
   type ScenarioRunResponse,
   type ScenarioDestroyAcceptedResponse,
 } from "@/components/app/run/run-types";
@@ -49,6 +51,37 @@ import type {
   CourseLocation,
   ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
+
+const LazyWebSshTerminal = lazy(() =>
+  import("@/components/remote-access/WebSshTerminal").then(
+    ({ WebSshTerminal }) => ({ default: WebSshTerminal }),
+  ),
+);
+const LazyNativeSshDialog = lazy(() =>
+  import("@/components/remote-access/NativeSshDialogButton").then(
+    ({ NativeSshDialog }) => ({ default: NativeSshDialog }),
+  ),
+);
+const LazyRunRecap = lazy(() =>
+  import("@/components/app/run/RunRecap").then(({ RunRecap }) => ({
+    default: RunRecap,
+  })),
+);
+const LazyScenarioCancelDialog = lazy(() =>
+  import("@/components/app/run/RunDialogs").then(
+    ({ ScenarioCancelDialog }) => ({ default: ScenarioCancelDialog }),
+  ),
+);
+const LazyDeleteRunDialog = lazy(() =>
+  import("@/components/app/run/RunDialogs").then(({ DeleteRunDialog }) => ({
+    default: DeleteRunDialog,
+  })),
+);
+
+interface ScenarioRunStatusPollResult {
+  status: ScenarioRunStatus | null;
+  version: string;
+}
 
 export function ScenarioRun() {
   const navigate = useNavigate();
@@ -69,19 +102,26 @@ export function ScenarioRun() {
     () => ["scenarios", "run", runId] as const,
     [runId],
   );
+  const runStatusQueryKey = useMemo(
+    () => ["scenarios", "run", runId, "status"] as const,
+    [runId],
+  );
   const beginRunMutation = useCallback(async () => {
     runMutationFenceRef.current += 1;
-    await queryClient.cancelQueries({ queryKey: runQueryKey, exact: true });
-  }, [queryClient, runQueryKey]);
+    await Promise.all([
+      queryClient.cancelQueries({ queryKey: runQueryKey, exact: true }),
+      queryClient.cancelQueries({ queryKey: runStatusQueryKey, exact: true }),
+    ]);
+  }, [queryClient, runQueryKey, runStatusQueryKey]);
   const endRunMutation = useCallback(() => {
     runMutationFenceRef.current = Math.max(0, runMutationFenceRef.current - 1);
     if (runMutationFenceRef.current === 0) {
       void queryClient.invalidateQueries({
-        queryKey: runQueryKey,
+        queryKey: runStatusQueryKey,
         exact: true,
       });
     }
-  }, [queryClient, runQueryKey]);
+  }, [queryClient, runStatusQueryKey]);
 
   const attempt = useQuery({
     queryKey: runQueryKey,
@@ -115,18 +155,70 @@ export function ScenarioRun() {
         run: presentScenarioRun(body.run),
       } satisfies ScenarioRunResponse;
     },
+    // Keep this complete record as the source of authored content and
+    // mutation results. The lightweight status query below owns live updates.
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
+  });
+
+  const runStatus = useQuery({
+    queryKey: runStatusQueryKey,
+    enabled:
+      Boolean(attempt.data?.run) &&
+      attempt.data?.run.activity !== "settled" &&
+      runMutationFenceRef.current === 0,
+    queryFn: async ({ signal }): Promise<ScenarioRunStatusPollResult> => {
+      const cached = queryClient.getQueryData<ScenarioRunResponse>(runQueryKey);
+      if (!cached) {
+        throw new Error("Scenario status requested before the run loaded");
+      }
+      const previous = queryClient.getQueryData<ScenarioRunStatusPollResult>(
+        runStatusQueryKey,
+      );
+      const version = previous?.version ?? String(cached.run.updatedAt);
+      const response = await fetch(
+        `/api/scenarios/runs/${encodeURIComponent(runId)}/status?version=${encodeURIComponent(version)}`,
+        {
+          method: "GET",
+          credentials: "include",
+          signal,
+        },
+      );
+      if (response.status === 204) {
+        return { status: null, version };
+      }
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new HttpResponseError(
+          response.status,
+          body?.error ?? `Failed to load scenario status (${response.status})`,
+        );
+      }
+      const body = (await response.json()) as { status: ScenarioRunStatus };
+      return { status: body.status, version: body.status.version };
+    },
     refetchInterval: (query) => {
-      const record = query.state.data?.run;
-      if (!record) return false;
-      // Saving is learner-visible feedback. Poll it more often than a live
-      // terminal so real archive-stage changes appear promptly.
-      if (record.activity === "background") return 1_000;
-      return POLL_INTERVALS[record.phase];
+      const record = queryClient.getQueryData<ScenarioRunResponse>(runQueryKey)?.run;
+      return scenarioRunStatusRefetchInterval(record, query.state.error);
     },
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: "always",
-    staleTime: 1_000,
+    refetchOnWindowFocus: (query) =>
+      !isAccessResponseError(query.state.error, true),
+    staleTime: 0,
+    retry: retryHttpResponseError,
   });
+
+  useEffect(() => {
+    const status = runStatus.data?.status;
+    if (!status || runMutationFenceRef.current > 0) return;
+    queryClient.setQueryData<ScenarioRunResponse>(runQueryKey, (current) => {
+      if (!current || runMutationFenceRef.current > 0) return current;
+      return { run: mergeScenarioRunStatus(current.run, status) };
+    });
+  }, [queryClient, runQueryKey, runStatus.data?.status]);
 
   const completedCourseLocation =
     attempt.data?.run.phase === "completed" &&
@@ -203,6 +295,9 @@ export function ScenarioRun() {
       void queryClient.invalidateQueries({
         queryKey: ["scenario-runs", "list"],
       });
+      void queryClient.invalidateQueries({
+        queryKey: ["scenario-runs", "summary"],
+      });
     },
     onSettled: endRunMutation,
   });
@@ -231,6 +326,9 @@ export function ScenarioRun() {
       void queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] });
       void queryClient.invalidateQueries({
         queryKey: ["scenario-runs", "list"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["scenario-runs", "summary"],
       });
       if (attemptData?.scenarioId) {
         await navigateToRunCourse(
@@ -393,12 +491,23 @@ export function ScenarioRun() {
       return;
     }
     focusedRecapActivityRef.current = attemptData.activity;
-    if (attemptData.activity === "settled") {
-      focusRecapAfterShutdownRef.current = false;
-    }
-    const frame = window.requestAnimationFrame(() => {
-      recapHeadingRef.current?.focus({ preventScroll: true });
-    });
+    let frame = 0;
+    let remainingFrames = 60;
+    const focusWhenMounted = () => {
+      const heading = recapHeadingRef.current;
+      if (heading) {
+        heading.focus({ preventScroll: true });
+        if (attemptData.activity === "settled") {
+          focusRecapAfterShutdownRef.current = false;
+        }
+        return;
+      }
+      remainingFrames -= 1;
+      if (remainingFrames > 0) {
+        frame = window.requestAnimationFrame(focusWhenMounted);
+      }
+    };
+    frame = window.requestAnimationFrame(focusWhenMounted);
     return () => window.cancelAnimationFrame(frame);
   }, [attemptData?.activity]);
 
@@ -598,41 +707,47 @@ export function ScenarioRun() {
 
   const runDialogs = (
     <>
-      {showCancelAction ? (
-        <ScenarioCancelDialog
-          trigger={false}
-          open={cancelDialogOpen}
-          onOpenChange={setCancelDialogOpen}
-          onConfirm={requestDestroyScenario}
-          pending={destroyScenario.isPending}
-          retry={acceptanceRetryNeeded}
-          error={
-            destroyScenario.error
-              ? "The run could not be ended. Your work is still open."
-              : null
-          }
-        />
+      {showCancelAction && cancelDialogOpen ? (
+        <Suspense fallback={null}>
+          <LazyScenarioCancelDialog
+            trigger={false}
+            open={cancelDialogOpen}
+            onOpenChange={setCancelDialogOpen}
+            onConfirm={requestDestroyScenario}
+            pending={destroyScenario.isPending}
+            retry={acceptanceRetryNeeded}
+            error={
+              destroyScenario.error
+                ? "The run could not be ended. Your work is still open."
+                : null
+            }
+          />
+        </Suspense>
       ) : null}
-      {canDeleteRun ? (
-        <DeleteRunDialog
-          trigger={false}
-          open={deleteRunDialogOpen}
-          onOpenChange={(open) => {
-            setDeleteRunDialogOpen(open);
-            if (!open) deleteRun.reset();
-          }}
-          onConfirm={() => deleteRun.mutate()}
-          pending={deleteRun.isPending}
-          error={Boolean(deleteRun.error)}
-        />
+      {canDeleteRun && deleteRunDialogOpen ? (
+        <Suspense fallback={null}>
+          <LazyDeleteRunDialog
+            trigger={false}
+            open={deleteRunDialogOpen}
+            onOpenChange={(open) => {
+              setDeleteRunDialogOpen(open);
+              if (!open) deleteRun.reset();
+            }}
+            onConfirm={() => deleteRun.mutate()}
+            pending={deleteRun.isPending}
+            error={Boolean(deleteRun.error)}
+          />
+        </Suspense>
       ) : null}
-      {selectedVm && selectedVmSessionRequest ? (
-        <NativeSshDialog
-          vmName={selectedVm.scenarioVmName}
-          sessionRequest={selectedVmSessionRequest}
-          open={sshDialogOpen}
-          onOpenChange={setSshDialogOpen}
-        />
+      {selectedVm && selectedVmSessionRequest && sshDialogOpen ? (
+        <Suspense fallback={null}>
+          <LazyNativeSshDialog
+            vmName={selectedVm.scenarioVmName}
+            sessionRequest={selectedVmSessionRequest}
+            open={sshDialogOpen}
+            onOpenChange={setSshDialogOpen}
+          />
+        </Suspense>
       ) : null}
     </>
   );
@@ -664,12 +779,23 @@ export function ScenarioRun() {
       <PageShell width="content">
         {runDialogs}
         {errorAlerts}
-        <RunRecap
-          run={attemptData}
-          courseLocation={attemptData.courseLocation}
-          nextScenario={nextCourseScenario}
-          headingRef={recapHeadingRef}
-        />
+        <Suspense
+          fallback={
+            <section
+              className="mx-auto flex w-full max-w-2xl flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
+              role="status"
+            >
+              Loading your recap…
+            </section>
+          }
+        >
+          <LazyRunRecap
+            run={attemptData}
+            courseLocation={attemptData.courseLocation}
+            nextScenario={nextCourseScenario}
+            headingRef={recapHeadingRef}
+          />
+        </Suspense>
       </PageShell>
     );
   }
@@ -707,14 +833,25 @@ export function ScenarioRun() {
 
           {selectedVm && selectedVmShellReady && terminalVisible ? (
             <div className="relative min-h-0 min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
-              <WebSshTerminal
-                vmName={selectedVm.scenarioVmName}
-                sessionRequest={selectedVmSessionRequest!}
-                variant="embedded"
-                title={`${selectedVm.scenarioVmName} shell`}
-                showCloseButton={false}
-                onClose={() => setTerminalVisible(false)}
-              />
+              <Suspense
+                fallback={
+                  <div
+                    className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
+                    role="status"
+                  >
+                    Opening secure shell…
+                  </div>
+                }
+              >
+                <LazyWebSshTerminal
+                  vmName={selectedVm.scenarioVmName}
+                  sessionRequest={selectedVmSessionRequest!}
+                  variant="embedded"
+                  title={`${selectedVm.scenarioVmName} shell`}
+                  showCloseButton={false}
+                  onClose={() => setTerminalVisible(false)}
+                />
+              </Suspense>
             </div>
           ) : (
             <div

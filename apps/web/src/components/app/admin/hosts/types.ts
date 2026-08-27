@@ -19,7 +19,12 @@ export interface AgentHostApi {
     observedAt: number;
     health: HostHealth;
     capacity: HostCapacityV2;
-    vms: VmActualStateV2[];
+    /**
+     * Full VM inventory is only returned by the host-detail endpoint. Fleet
+     * snapshots intentionally omit it because the dashboard renders runs from
+     * the scenario-run projection instead.
+     */
+    vms?: VmActualStateV2[];
   } | null;
 }
 
@@ -104,7 +109,8 @@ export interface AgentVmRunArtifact {
   uploadedAt: number | null;
 }
 
-export interface AgentVmRunRecord {
+/** Data required to render a collapsed archive card. */
+export interface AgentVmRunSummary {
   id: string;
   hostId: string;
   userId: string;
@@ -122,10 +128,18 @@ export interface AgentVmRunRecord {
   uploadError: string | null;
   createdAt: number;
   updatedAt: number;
-  events: AgentVmRunEvent[];
-  artifacts: AgentVmRunArtifact[];
+  artifactCount: number;
+  eventCount: number;
   scenarioMeta?: VmScenarioMeta | null;
 }
+
+/** Archive detail is loaded only after the operator opens a run. */
+export interface AgentVmRunRecord extends AgentVmRunSummary {
+  events: AgentVmRunEvent[];
+  artifacts: AgentVmRunArtifact[];
+}
+
+export type AgentVmRun = AgentVmRunSummary | AgentVmRunRecord;
 
 export interface HostRunsResponse {
   liveVms: VmStatus[];
@@ -156,7 +170,10 @@ export interface AdminScenarioListResponse {
 export interface HostRecord {
   host: AgentHostApi;
   hostVms: VmStatus[];
-  hostRuns: AgentVmRunRecord[];
+  /** Newest archive summaries present in this bounded fleet snapshot. */
+  hostRuns: AgentVmRun[];
+  /** Total retained archive entries for this host, including unloaded pages. */
+  archiveTotalCount: number;
   capacity: HostCapacityV2 | null;
 }
 
@@ -167,5 +184,5 @@ export interface LiveScenarioRunRecord {
 
 export interface ArchivedScenarioRunRecord {
   host: AgentHostApi;
-  run: AgentVmRunRecord;
+  run: AgentVmRun;
 }

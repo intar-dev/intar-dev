@@ -18,6 +18,7 @@ export interface MockApiServer {
   }>;
   expectedNativeSshNoProfileConflicts: number;
   nativeSshResponseDelayMs: number;
+  scenarioRunStatusRevision: number;
   handle(route: Route): Promise<void>;
   setRunState(state: RunFixtureState): void;
 }
@@ -26,8 +27,12 @@ function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, json: body });
 }
 
-function noContent(route: Route) {
-  return route.fulfill({ status: 204, body: "" });
+function noContent(route: Route, headers?: Record<string, string>) {
+  return route.fulfill({
+    status: 204,
+    body: "",
+    ...(headers ? { headers } : {}),
+  });
 }
 
 const GENERAL_PRACTICE_DESCRIPTION =
@@ -167,6 +172,121 @@ function courseLocationForScenario(
   return null;
 }
 
+type FixtureRecord = Record<string, unknown>;
+
+function records(value: unknown): FixtureRecord[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (entry): entry is FixtureRecord =>
+          entry !== null && typeof entry === "object",
+      )
+    : [];
+}
+
+/**
+ * Match the bounded fleet DTO. The fixture keeps the legacy rich archive
+ * records so other tests can still exercise the old host endpoints; this
+ * projection is what the new dashboard is allowed to receive initially.
+ */
+function fleetSnapshot(state: MockApiState, archiveOffset = 0) {
+  const hostRuns = state.hostRuns as {
+    liveVms?: FixtureRecord[];
+    archivedRuns?: FixtureRecord[];
+  };
+  const archivedRuns = records(hostRuns.archivedRuns);
+  const archiveSummaries = archivedRuns.map((run) => {
+    const { artifacts, events, ...summary } = run;
+    return {
+      ...summary,
+      artifactCount: records(artifacts).length,
+      eventCount: records(events).length,
+    };
+  });
+  const archiveTotalCount = archiveSummaries.length;
+  const archivePage = archiveSummaries.slice(archiveOffset, archiveOffset + 100);
+  const archiveNextOffset =
+    archiveOffset + archivePage.length < archiveTotalCount
+      ? archiveOffset + archivePage.length
+      : null;
+  const liveVms = records(hostRuns.liveVms);
+
+  return {
+    liveLoadedCount: liveVms.length,
+    liveTotalCount: liveVms.length,
+    archiveTotalCount,
+    archiveOffset,
+    archiveNextOffset,
+    hasMoreArchives: archiveNextOffset !== null,
+    hasMoreLive: false,
+    hostRecords: records(state.hosts)
+      .filter((host) => host.disabled !== true)
+      .map((host) => ({
+        host,
+        hostVms: liveVms,
+        hostRuns: archivePage,
+        archiveTotalCount,
+        capacity:
+          host.actualState && typeof host.actualState === "object"
+            ? ((host.actualState as FixtureRecord).capacity ?? null)
+            : null,
+      })),
+  };
+}
+
+function fleetArchiveDetail(state: MockApiState, runId: string) {
+  const hostRuns = state.hostRuns as { archivedRuns?: FixtureRecord[] };
+  const run = records(hostRuns.archivedRuns).find((entry) => entry.id === runId);
+  if (!run) return null;
+  return {
+    ...run,
+    artifactCount: records(run.artifacts).length,
+    eventCount: records(run.events).length,
+  };
+}
+
+/** Build the small run projection used after the first full run response. */
+function scenarioRunStatus(run: FixtureRecord, revision: number) {
+  const baseUpdatedAt =
+    typeof run.updatedAt === "number" ? run.updatedAt : FIXED_NOW - 60_000;
+  const updatedAt = baseUpdatedAt + revision;
+  const vms = records(run.vms).map((vm) => ({
+    id: vm.id,
+    phase: vm.phase,
+    phaseTitle: vm.phaseTitle,
+    phaseDetail: vm.phaseDetail,
+    progressPercent: vm.progressPercent,
+    terminalPhase: vm.terminalPhase,
+    canOpenTerminal: vm.canOpenTerminal,
+    terminalTarget: vm.terminalTarget,
+    bootProbes: records(vm.bootProbes),
+    scenarioProbes: records(vm.scenarioProbes),
+    sessionTimeline: vm.sessionTimeline ?? null,
+    ...(vm.hasRecording === undefined ? {} : { hasRecording: vm.hasRecording }),
+  }));
+  return {
+    version: String(updatedAt),
+    updatedAt,
+    phase: run.phase,
+    phaseTitle: run.phaseTitle,
+    phaseDetail: run.phaseDetail,
+    progressPercent: run.progressPercent,
+    terminalPhase: run.terminalPhase,
+    canOpenTerminal: run.canOpenTerminal,
+    canDestroy: run.canDestroy,
+    terminalTarget: run.terminalTarget,
+    outcome: run.outcome,
+    active: run.active,
+    activity: run.activity,
+    deleteRequestedAt: run.deleteRequestedAt,
+    solvedAt: run.solvedAt,
+    solveDurationMs: run.solveDurationMs,
+    savingStage: run.savingStage,
+    replayState: run.replayState,
+    hasReplay: run.hasReplay,
+    vms,
+  };
+}
+
 function probeSnapshots(variant: MockApiState["variant"]) {
   if (variant === "long") {
     return [
@@ -287,7 +407,9 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     nativeSshRequests: [],
     expectedNativeSshNoProfileConflicts: 0,
     nativeSshResponseDelayMs: 0,
+    scenarioRunStatusRevision: 0,
     setRunState(runState) {
+      server.scenarioRunStatusRevision += 1;
       server.state.runState = runState;
       server.state.run = makeRun(runState);
       const listedRun = server.state.runs.find(
@@ -336,6 +458,14 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       const signature = `${method} ${pathname}`;
       server.requests.push(signature);
 
+      if (pathname === "/api/app/bootstrap" && method === "GET") {
+        const session = sessionFor(server.state.sessionRole);
+        await json(route, {
+          session,
+          betaAccess: session ? "active" : "restricted",
+        });
+        return;
+      }
       if (pathname === "/api/auth/get-session" && method === "GET") {
         await json(route, sessionFor(server.state.sessionRole));
         return;
@@ -470,6 +600,16 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
 
       if (pathname === "/api/workshops" && method === "GET") {
         await json(route, { sessions: server.state.workshopSessions });
+        return;
+      }
+      if (
+        /^\/api\/workshops\/[^/]+\/status$/.test(pathname) &&
+        method === "GET"
+      ) {
+        // Status polling must be safe to leave running in every browser test.
+        // The deterministic fixture does not advance workshop state, so a
+        // private 204 is the truthful unchanged response.
+        await noContent(route, { "cache-control": "private, no-store" });
         return;
       }
       const workshopSessionId = segment(
@@ -768,6 +908,20 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, { assignments: server.state.assignments });
         return;
       }
+      if (pathname === "/api/scenarios/runs/summary" && method === "GET") {
+        const activeRuns = server.state.runs.filter(
+          (run) => run.active === true || run.activity === "background",
+        );
+        const foreground = activeRuns.find(
+          (run) => run.activity === "foreground",
+        );
+        await json(route, {
+          activeCount: activeRuns.length,
+          activeRunId:
+            typeof foreground?.runId === "string" ? foreground.runId : null,
+        });
+        return;
+      }
       if (pathname === "/api/scenarios/runs" && method === "GET") {
         await json(route, { runs: server.state.runs });
         return;
@@ -932,6 +1086,23 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, {
           snapshots: probeSnapshots(server.state.variant),
         });
+        return;
+      }
+
+      const statusRunId = segment(
+        pathname,
+        /^\/api\/scenarios\/runs\/([^/]+)\/status$/,
+      );
+      if (statusRunId && method === "GET") {
+        const status = scenarioRunStatus(
+          server.state.run,
+          server.scenarioRunStatusRevision,
+        );
+        if (url.searchParams.get("version") === status.version) {
+          await noContent(route, { "cache-control": "private, no-store" });
+          return;
+        }
+        await json(route, { status });
         return;
       }
 
@@ -1186,6 +1357,34 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, {
           hosts: server.state.hosts.filter((host) => host.disabled !== true),
         });
+        return;
+      }
+      const fleetDetailRunId = segment(
+        pathname,
+        /^\/api\/admin\/fleet-snapshot\/runs\/([^/]+)$/,
+      );
+      if (fleetDetailRunId && method === "GET") {
+        const run = fleetArchiveDetail(server.state, fleetDetailRunId);
+        if (!run) {
+          await json(route, { error: "archived run not found" }, 404);
+          return;
+        }
+        await json(route, { run });
+        return;
+      }
+      if (pathname === "/api/admin/fleet-snapshot" && method === "GET") {
+        const requestedOffset = url.searchParams.get("archiveOffset");
+        const archiveOffset =
+          requestedOffset === null || requestedOffset === ""
+            ? 0
+            : /^\d+$/.test(requestedOffset)
+              ? Number(requestedOffset)
+              : null;
+        if (archiveOffset === null || !Number.isSafeInteger(archiveOffset)) {
+          await json(route, { error: "archiveOffset must be a non-negative integer" }, 400);
+          return;
+        }
+        await json(route, fleetSnapshot(server.state, archiveOffset));
         return;
       }
       if (pathname === "/api/agent/hosts" && method === "POST") {

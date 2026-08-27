@@ -59,7 +59,15 @@ export default defineConfig({
   projects: [
     {
       name: "chromium-ui",
-      testIgnore: /smoke\.spec\.ts/,
+      testIgnore: /(?:smoke|performance)\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        browserName: "chromium",
+      },
+    },
+    {
+      name: "chromium-performance",
+      testMatch: /performance\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         browserName: "chromium",

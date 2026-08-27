@@ -3,6 +3,7 @@ import {
   connectWorkshopProvider,
   createWorkshopSession,
   createWorkshopRegistryToken,
+  getWorkshopSessionStatus,
   listWorkshopRegistryTokens,
   overrideWorkshopCostCeiling,
   refreshWorkshopCostForecast,
@@ -59,6 +60,26 @@ describe("workshop session API", () => {
         }),
         headers: { "content-type": "application/json" },
       },
+    );
+  });
+
+  it("uses a compact versioned status request and preserves a 204 as null", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getWorkshopSessionStatus("session/two", {
+        version: "status-v1",
+        sessionVersion: 7,
+        managerVersion: "manager-v3",
+      }),
+    ).resolves.toBeNull();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/workshops/session%2Ftwo/status?version=status-v1&sessionVersion=7&managerVersion=manager-v3",
+      { credentials: "include", headers: {} },
     );
   });
 });

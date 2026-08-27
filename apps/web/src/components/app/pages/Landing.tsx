@@ -6,7 +6,7 @@ import {
   CircleDot,
   TerminalSquare,
 } from "lucide-react";
-import hetznerLogo from "@/assets/hetzner-logo.jpg";
+import hetznerLogo from "@/assets/hetzner-logo.webp";
 import namespaceLogo from "@/assets/namespace-logo.png";
 import { BrandMark } from "../patterns/BrandMark";
 import { InlineFeedback } from "../patterns/InlineFeedback";

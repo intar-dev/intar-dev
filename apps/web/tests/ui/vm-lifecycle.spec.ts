@@ -154,31 +154,16 @@ test("the desktop guidance rail keeps progressive hints and solution help learne
   ).toBeVisible();
 });
 
-test("an older poll cannot hide a newly revealed hint", async ({ page, ui }) => {
+test("compact status polls cannot hide a newly revealed hint", async ({
+  page,
+  ui,
+}) => {
   await ui.open({
     ...routeCase("run-workspace"),
     theme: "dark",
     runState: "running",
   });
 
-  const staleRun = structuredClone(ui.server.state.run);
-  let intercepted = false;
-  let markStalePollStarted: (() => void) | null = null;
-  const stalePollStarted = new Promise<void>((resolve) => {
-    markStalePollStarted = resolve;
-  });
-  await page.route("**/api/scenarios/runs/run-active", async (route) => {
-    if (route.request().method() !== "GET" || intercepted) {
-      await route.fallback();
-      return;
-    }
-    intercepted = true;
-    markStalePollStarted?.();
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    await route.fulfill({ status: 200, json: { run: staleRun } }).catch(() => {});
-  });
-
-  await stalePollStarted;
   await page
     .getByRole("button", {
       name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
@@ -198,7 +183,15 @@ test("an older poll cannot hide a newly revealed hint", async ({ page, ui }) => 
   await revealResponse;
   await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
 
-  await page.waitForTimeout(1_100);
+  await expect
+    .poll(
+      () =>
+        ui.server.requests.filter(
+          (request) =>
+            request === "GET /api/scenarios/runs/run-active/status",
+        ).length,
+    )
+    .toBeGreaterThan(1);
   await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
   await expect(
     page.getByRole("button", {
@@ -656,6 +649,7 @@ test("saving stages advance from real server state and announce each change once
   ] as const;
   for (const [stage, label] of changes) {
     ui.server.state.run.savingStage = stage;
+    ui.server.scenarioRunStatusRevision += 1;
     await expect(steps.locator('[aria-current="step"]')).toContainText(label);
     const stageNumber = changes.findIndex(([candidate]) => candidate === stage) + 2;
     await expect(announcement).toHaveText(
@@ -690,6 +684,9 @@ test("saving shows a calm reassurance only after one stage stalls", async ({
   });
 
   const reassurance = page.locator("[data-run-saving-stalled]");
+  await expect(
+    page.getByRole("heading", { name: "Saving your run…" }),
+  ).toBeVisible();
   await expect(reassurance).toHaveCount(0);
   await page.clock.fastForward(30_000);
   await expect(reassurance).toHaveText(
@@ -697,6 +694,7 @@ test("saving shows a calm reassurance only after one stage stalls", async ({
   );
 
   ui.server.state.run.savingStage = "closing_workspace";
+  ui.server.scenarioRunStatusRevision += 1;
   await expect(
     page
       .getByRole("list", { name: "Saving steps" })

@@ -42,6 +42,8 @@ export interface RunReplayPart {
   machineLabel: string | null;
   partLabel: string;
   castArtifactId: string | null;
+  /** Used only to keep oversized casts out of browser memory. */
+  sizeBytes?: number;
 }
 
 export type RunReplayAvailability =
@@ -112,6 +114,11 @@ export function getRunRecapObjectives(
  * exit details never cross this boundary.
  */
 export function getRunReplayParts(run: ScenarioRunRecord): RunReplayPart[] {
+  const replaySizeByArtifactId = new Map(
+    [...run.replayArtifacts, ...run.vms.flatMap((vm) => vm.replayArtifacts)].map(
+      (artifact) => [artifact.id, artifact.sizeBytes] as const,
+    ),
+  );
   const hasMultipleMachines = run.vms.length > 1;
   const orderedVms = run.vms
     .map((vm, sourceIndex) => ({ vm, sourceIndex }))
@@ -145,14 +152,21 @@ export function getRunReplayParts(run: ScenarioRunRecord): RunReplayPart[] {
 
   return orderedSessions
     .filter((entry) => entry.session.castArtifactId)
-    .map((entry, index) => ({
-      key: `replay-${entry.session.castArtifactId}`,
-      machineLabel: hasMultipleMachines
-        ? authoredMachineLabel(entry.vm, entry.vmIndex)
-        : null,
-      partLabel: `Part ${index + 1}`,
-      castArtifactId: entry.session.castArtifactId,
-    }));
+    .map((entry, index) => {
+      const castArtifactId = entry.session.castArtifactId;
+      const sizeBytes = castArtifactId
+        ? replaySizeByArtifactId.get(castArtifactId)
+        : undefined;
+      return {
+        key: `replay-${castArtifactId}`,
+        machineLabel: hasMultipleMachines
+          ? authoredMachineLabel(entry.vm, entry.vmIndex)
+          : null,
+        partLabel: `Part ${index + 1}`,
+        castArtifactId,
+        ...(sizeBytes === undefined ? {} : { sizeBytes }),
+      };
+    });
 }
 
 export function getRunReplayAvailability(

@@ -54,18 +54,10 @@ export default defineConfig({
                 test: /node_modules[\\/]@xterm[\\/]/,
                 priority: 30,
               },
-              {
-                name: "editor",
-                test: /node_modules[\\/]@codemirror[\\/]/,
-                priority: 20,
-              },
             ],
           },
         },
       },
-    },
-    resolve: {
-      dedupe: ["@codemirror/state", "@codemirror/view"],
     },
     ssr: {
       optimizeDeps: {

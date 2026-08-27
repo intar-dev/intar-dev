@@ -391,10 +391,18 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
               href="https://discord.gg/BgknKxJKa"
               target="_blank"
               rel="noreferrer"
+              className="inline-flex min-h-11 items-center px-1 underline-offset-4 hover:underline"
             >
               Discord
             </a>{" "}
-            or email <a href="mailto:hello@intar.dev">hello@intar.dev</a>.
+            or email{" "}
+            <a
+              href="mailto:hello@intar.dev"
+              className="inline-flex min-h-11 items-center px-1 underline-offset-4 hover:underline"
+            >
+              hello@intar.dev
+            </a>
+            .
           </AlertDescription>
         </Alert>
       ) : null}

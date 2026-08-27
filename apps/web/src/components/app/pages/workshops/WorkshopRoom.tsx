@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import {
@@ -47,8 +47,6 @@ import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { ErrorState } from "@/components/app/patterns/StateCard";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
-import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
-import { NativeSshDialogButton } from "@/components/remote-access/NativeSshDialogButton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -65,14 +63,29 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 
+const WebSshTerminal = lazy(async () => {
+  const module = await import("@/components/remote-access/WebSshTerminal");
+  return { default: module.WebSshTerminal };
+});
+
+const NativeSshDialog = lazy(async () => {
+  const module = await import(
+    "@/components/remote-access/NativeSshDialogButton"
+  );
+  return { default: module.NativeSshDialog };
+});
+
 export function WorkshopRoom() {
   const { sessionId } = useParams({ from: "/app/workshops/$sessionId" });
   const queryClient = useQueryClient();
-  const workshop = useWorkshopSession(sessionId);
+  const workshop = useWorkshopSession(sessionId, "room", {
+    polling: "status",
+  });
   const session = workshop.data?.session;
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [nativeSshOpen, setNativeSshOpen] = useState(false);
   const [assistTerminal, setAssistTerminal] = useState<{
     workspaceId: string;
     learnerName: string;
@@ -264,6 +277,7 @@ export function WorkshopRoom() {
                 currentModuleId={currentModule?.id ?? null}
                 busy={busyAction != null}
                 onOpenTerminal={() => setTerminalOpen(true)}
+                onOpenNativeSsh={() => setNativeSshOpen(true)}
                 onOpenApplication={(applicationId) =>
                   void openApplication(applicationId)
                 }
@@ -346,27 +360,45 @@ export function WorkshopRoom() {
       ) : null}
 
       {terminalOpen && session.workspace ? (
-        <WebSshTerminal
-          vmName={session.workspace.vmName}
-          title={`${session.title} · ${session.workspace.vmName}`}
-          sessionRequest={{
-            url: `/api/workshops/${encodeURIComponent(session.id)}/terminal`,
-            body: { workspaceId: session.workspace.id },
-          }}
-          onClose={() => setTerminalOpen(false)}
-        />
+        <Suspense fallback={<RemoteAccessLoading label="Loading terminal" />}>
+          <WebSshTerminal
+            vmName={session.workspace.vmName}
+            title={`${session.title} · ${session.workspace.vmName}`}
+            sessionRequest={{
+              url: `/api/workshops/${encodeURIComponent(session.id)}/terminal`,
+              body: { workspaceId: session.workspace.id },
+            }}
+            onClose={() => setTerminalOpen(false)}
+          />
+        </Suspense>
       ) : null}
 
       {assistTerminal && activeAssistTerminal ? (
-        <WebSshTerminal
-          vmName="workshop"
-          title={`${session.title} · assisting ${assistTerminal.learnerName}`}
-          sessionRequest={{
-            url: `/api/workshops/${encodeURIComponent(session.id)}/terminal`,
-            body: { workspaceId: assistTerminal.workspaceId },
-          }}
-          onClose={() => setAssistTerminal(null)}
-        />
+        <Suspense fallback={<RemoteAccessLoading label="Loading terminal" />}>
+          <WebSshTerminal
+            vmName="workshop"
+            title={`${session.title} · assisting ${assistTerminal.learnerName}`}
+            sessionRequest={{
+              url: `/api/workshops/${encodeURIComponent(session.id)}/terminal`,
+              body: { workspaceId: assistTerminal.workspaceId },
+            }}
+            onClose={() => setAssistTerminal(null)}
+          />
+        </Suspense>
+      ) : null}
+
+      {nativeSshOpen && session.workspace ? (
+        <Suspense fallback={<RemoteAccessLoading label="Loading Native SSH" />}>
+          <NativeSshDialog
+            vmName={session.workspace.vmName}
+            sessionRequest={{
+              url: `/api/workshops/${encodeURIComponent(session.id)}/terminal`,
+              body: { workspaceId: session.workspace.id },
+            }}
+            open={nativeSshOpen}
+            onOpenChange={setNativeSshOpen}
+          />
+        </Suspense>
       ) : null}
     </PageShell>
   );
@@ -558,6 +590,7 @@ function WorkshopWorkspacePanel({
   currentModuleId,
   busy,
   onOpenTerminal,
+  onOpenNativeSsh,
   onOpenApplication,
   onRestore,
 }: {
@@ -566,6 +599,7 @@ function WorkshopWorkspacePanel({
   currentModuleId: string | null;
   busy: boolean;
   onOpenTerminal: () => void;
+  onOpenNativeSsh: () => void;
   onOpenApplication: (applicationId: string) => void;
   onRestore: (checkpointId: string) => void;
 }) {
@@ -603,14 +637,14 @@ function WorkshopWorkspacePanel({
           >
             <TerminalSquare /> Open terminal
           </Button>
-          <NativeSshDialogButton
-            vmName={workspace.vmName}
+          <Button
+            size="sm"
+            variant="outline"
             disabled={!workspace.terminalAvailable}
-            sessionRequest={{
-              url: `/api/workshops/${encodeURIComponent(sessionId)}/terminal`,
-              body: { workspaceId: workspace.id },
-            }}
-          />
+            onClick={onOpenNativeSsh}
+          >
+            Native SSH
+          </Button>
           <Dialog>
             <DialogTrigger
               render={
@@ -697,6 +731,14 @@ function WorkshopWorkspacePanel({
         />
       </div>
     </section>
+  );
+}
+
+function RemoteAccessLoading({ label }: { label: string }) {
+  return (
+    <div role="status" className="sr-only">
+      {label}
+    </div>
   );
 }
 

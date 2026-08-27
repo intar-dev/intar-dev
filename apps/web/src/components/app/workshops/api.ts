@@ -7,6 +7,7 @@ import type {
   WorkshopRegistryTokenSummary,
   WorkshopSessionResponse,
 } from "./types";
+import type { WorkshopSessionStatusResponse } from "@/lib/workshops/status-contract";
 
 export async function workshopRequest<T>(
   path: string,
@@ -39,10 +40,38 @@ export function getWorkshops(): Promise<WorkshopListResponse> {
 export function getWorkshopSession(
   sessionId: string,
   view: "room" | "projector" = "room",
+  init?: RequestInit,
 ): Promise<WorkshopSessionResponse> {
   const suffix = view === "projector" ? "?view=projector" : "";
   return workshopRequest(
     `/api/workshops/${encodeURIComponent(sessionId)}${suffix}`,
+    init,
+  );
+}
+
+export async function getWorkshopSessionStatus(
+  sessionId: string,
+  input: {
+    version: string | null;
+    sessionVersion: number | null;
+    managerVersion: string | null;
+    signal?: AbortSignal;
+  },
+): Promise<WorkshopSessionStatusResponse | null> {
+  const search = new URLSearchParams();
+  if (input.version) search.set("version", input.version);
+  if (input.sessionVersion !== null) {
+    search.set("sessionVersion", String(input.sessionVersion));
+  }
+  if (input.managerVersion) {
+    search.set("managerVersion", input.managerVersion);
+  }
+  const suffix = search.size ? `?${search.toString()}` : "";
+  return (
+    (await workshopRequest<WorkshopSessionStatusResponse | undefined>(
+      `/api/workshops/${encodeURIComponent(sessionId)}/status${suffix}`,
+      input.signal ? { signal: input.signal } : undefined,
+    )) ?? null
   );
 }
 

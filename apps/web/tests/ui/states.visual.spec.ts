@@ -102,6 +102,7 @@ test.describe("focused visual states", () => {
       ["finalizing_recap", "Finalizing recap", "finalizing-recap"],
     ] as const) {
       ui.server.state.run.savingStage = stage;
+      ui.server.scenarioRunStatusRevision += 1;
       await expect(currentStep).toContainText(label);
       await expectRouteScreenshot(
         page,
@@ -349,7 +350,7 @@ test.describe("focused visual states", () => {
 
   test("authoring validation result", async ({ page, ui }) => {
     await ui.open({ ...routeCase("admin-authoring"), theme: "dark" });
-    const editor = page.locator(".cm-content");
+    const editor = page.getByLabel("Scenario HCL source");
     await expect(editor).toBeVisible();
     await editor.fill('scenario "broken" {');
     await page.getByRole("button", { name: "Validate" }).click();

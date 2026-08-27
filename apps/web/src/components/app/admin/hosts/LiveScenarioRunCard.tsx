@@ -1,11 +1,18 @@
+import { lazy, Suspense, useRef, useState } from "react";
 import { CircleHelpIcon } from "lucide-react";
-import { NativeSshDialogButton } from "@/components/remote-access/NativeSshDialogButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatTimestamp } from "./format";
 import { groupVmProbesByScenario, ProbeRows } from "./ProbeRows";
 import { Stat } from "@/components/app/patterns/Stat";
 import type { AgentHostApi, VmProbeSummary, VmStatus } from "./types";
+
+const LazyNativeSshDialog = lazy(async () => {
+  const { NativeSshDialog } = await import(
+    "@/components/remote-access/NativeSshDialogButton"
+  );
+  return { default: NativeSshDialog };
+});
 
 export function LiveScenarioRunCard(props: {
   host: AgentHostApi;
@@ -16,11 +23,13 @@ export function LiveScenarioRunCard(props: {
   onDelete: () => void;
   isDeleting: boolean;
 }) {
+  const [nativeSshOpen, setNativeSshOpen] = useState(false);
+  const nativeSshTriggerRef = useRef<HTMLButtonElement>(null);
   const probeState = props.vmItem.probe_state ?? null;
   const summary = probeState?.summary ?? null;
   const binarySummary = summary ? binaryProbeSummary(summary) : null;
   const scenarioMeta = props.vmItem.scenario_meta ?? null;
-  const groupedProbes = probeState
+  const groupedProbes = props.isExpanded && probeState
     ? groupVmProbesByScenario(probeState.probes, scenarioMeta)
     : null;
   const terminalTarget = props.vmItem.terminal_target ?? {
@@ -122,7 +131,13 @@ export function LiveScenarioRunCard(props: {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Button type="button" size="sm" variant="outline" onClick={props.onToggle}>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            aria-expanded={props.isExpanded}
+            onClick={props.onToggle}
+          >
             {props.isExpanded ? "Hide details" : "Details"}
           </Button>
           <div
@@ -153,18 +168,22 @@ export function LiveScenarioRunCard(props: {
               ) : null}
             </Button>
           </div>
-          <NativeSshDialogButton
-            vmName={props.vmItem.name}
-            sessionRequest={{
-              url: `/api/scenarios/runs/${encodeURIComponent(props.vmItem.run_id ?? "")}/ssh`,
-              body: { vmId: props.vmItem.id },
-            }}
+          <Button
+            ref={nativeSshTriggerRef}
+            type="button"
+            size="sm"
+            variant="outline"
+            aria-haspopup="dialog"
+            aria-expanded={nativeSshOpen}
+            onClick={() => setNativeSshOpen(true)}
             disabled={
               !props.vmItem.run_id ||
               terminalTarget.state !== "ready" ||
               !terminalTarget.host
             }
-          />
+          >
+            Native SSH
+          </Button>
           <Button
             type="button"
             size="sm"
@@ -177,73 +196,88 @@ export function LiveScenarioRunCard(props: {
         </div>
       </div>
 
-      <div
-        className={`grid transition-all duration-300 ease-out motion-reduce:transition-none ${
-          props.isExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-        }`}
-      >
-        <div className="overflow-hidden">
-          <div className="space-y-4 border-t px-4 py-4">
-            {probeState ? (
-              <VerificationCollectionStatus
-                state={probeState.collection_state}
-                generatedAt={probeState.generated_at}
-                error={probeState.collection_error}
-              />
-            ) : null}
-            <div className="space-y-4">
-              {probeState?.probes.length ? (
-                scenarioMeta && groupedProbes ? (
-                  <>
-                    <div className="rounded-xl bg-muted/40 p-4">
-                      <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium">Boot checks</p>
-                        <Badge variant="outline">{groupedProbes.boot.length}</Badge>
-                      </div>
-                      <ProbeRows
-                        probes={groupedProbes.boot}
-                        checkLabelMap={scenarioMeta.checkLabelMap}
-                      />
+      {props.isExpanded ? (
+        <div className="space-y-4 border-t px-4 py-4">
+          {probeState ? (
+            <VerificationCollectionStatus
+              state={probeState.collection_state}
+              generatedAt={probeState.generated_at}
+              error={probeState.collection_error}
+            />
+          ) : null}
+          <div className="space-y-4">
+            {probeState?.probes.length ? (
+              scenarioMeta && groupedProbes ? (
+                <>
+                  <div className="rounded-xl bg-muted/40 p-4">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium">Boot checks</p>
+                      <Badge variant="outline">{groupedProbes.boot.length}</Badge>
                     </div>
+                    <ProbeRows
+                      probes={groupedProbes.boot}
+                      checkLabelMap={scenarioMeta.checkLabelMap}
+                    />
+                  </div>
+                  <div className="rounded-xl bg-muted/40 p-4">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium">Repair checks</p>
+                      <Badge variant="outline">
+                        {groupedProbes.scenario.length}
+                      </Badge>
+                    </div>
+                    <ProbeRows
+                      probes={groupedProbes.scenario}
+                      checkLabelMap={scenarioMeta.checkLabelMap}
+                    />
+                  </div>
+                  {groupedProbes.other.length ? (
                     <div className="rounded-xl bg-muted/40 p-4">
                       <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium">Repair checks</p>
+                        <p className="text-sm font-medium">Other checks</p>
                         <Badge variant="outline">
-                          {groupedProbes.scenario.length}
+                          {groupedProbes.other.length}
                         </Badge>
                       </div>
                       <ProbeRows
-                        probes={groupedProbes.scenario}
+                        probes={groupedProbes.other}
                         checkLabelMap={scenarioMeta.checkLabelMap}
                       />
                     </div>
-                    {groupedProbes.other.length ? (
-                      <div className="rounded-xl bg-muted/40 p-4">
-                        <div className="mb-3 flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium">Other checks</p>
-                          <Badge variant="outline">
-                            {groupedProbes.other.length}
-                          </Badge>
-                        </div>
-                        <ProbeRows
-                          probes={groupedProbes.other}
-                          checkLabelMap={scenarioMeta.checkLabelMap}
-                        />
-                      </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <ProbeRows probes={probeState.probes} />
-                )
+                  ) : null}
+                </>
               ) : (
-                <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
-                  No verification results yet for this VM.
-                </div>
-              )}
-            </div>
+                <ProbeRows probes={probeState.probes} />
+              )
+            ) : (
+              <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
+                No verification results yet for this VM.
+              </div>
+            )}
           </div>
         </div>
-      </div>
+      ) : null}
+
+      {nativeSshOpen ? (
+        <Suspense fallback={null}>
+          <LazyNativeSshDialog
+            vmName={props.vmItem.name}
+            sessionRequest={{
+              url: `/api/scenarios/runs/${encodeURIComponent(props.vmItem.run_id ?? "")}/ssh`,
+              body: { vmId: props.vmItem.id },
+            }}
+            open={nativeSshOpen}
+            onOpenChange={(open) => {
+              setNativeSshOpen(open);
+              if (!open && typeof window !== "undefined") {
+                window.requestAnimationFrame(() => {
+                  nativeSshTriggerRef.current?.focus();
+                });
+              }
+            }}
+          />
+        </Suspense>
+      ) : null}
     </article>
   );
 }
