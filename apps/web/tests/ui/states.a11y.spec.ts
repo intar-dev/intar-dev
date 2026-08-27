@@ -368,6 +368,64 @@ test.describe("focused state accessibility", () => {
     expect(ui.server.requests).toContain("DELETE /api/admin/runs/run-archived");
   });
 
+  test("admin archive can switch between replay artifacts", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({ ...routeCase("admin-overview"), theme: "light" });
+    const hostRuns = ui.server.state.hostRuns as {
+      archivedRuns: Array<Record<string, unknown>>;
+    };
+    const archivedRun = hostRuns.archivedRuns[0];
+    if (!archivedRun) throw new Error("admin archive fixture is missing its run");
+    archivedRun.artifacts = [
+      {
+        id: "artifact-cast-1",
+        ordinal: 1,
+        kind: "ssh_recording_segment",
+        filename: "session-01.cast",
+        contentType: "application/x-asciicast",
+        sizeBytes: 512,
+        sha256: "a".repeat(64),
+        uploadStatus: "uploaded",
+        uploadedAt: Date.now(),
+      },
+      {
+        id: "artifact-cast-2",
+        ordinal: 2,
+        kind: "ssh_recording_segment",
+        filename: "session-02.cast",
+        contentType: "application/x-asciicast",
+        sizeBytes: 1024,
+        sha256: "b".repeat(64),
+        uploadStatus: "uploaded",
+        uploadedAt: Date.now(),
+      },
+    ];
+
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+    const card = page.locator('[data-archive-run="run-archived"]');
+    await card.getByRole("button", { name: "Details" }).click();
+
+    await card.getByRole("button", { name: /session-01\.cast/ }).click();
+    await expect(
+      card.getByRole("button", { name: "Play", exact: true }),
+    ).toBeVisible();
+
+    await card.getByRole("button", { name: /session-02\.cast/ }).click();
+    await expect(
+      card.getByRole("button", { name: "Play", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "This workspace did not load" }),
+    ).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  });
+
   test("host onboarding panel", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
     await page.getByRole("button", { name: "Add host" }).first().click();

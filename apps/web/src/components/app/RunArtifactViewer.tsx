@@ -1,6 +1,13 @@
 import "asciinema-player/dist/bundle/asciinema-player.css";
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import type { AsciinemaPlayerInstance } from "asciinema-player";
 import { Button } from "@/components/ui/button";
@@ -354,79 +361,18 @@ export function AsciicastReplaySurface({
   loading: boolean;
   minimal?: boolean;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const playerRef = useRef<AsciinemaPlayerInstance | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
+
+  const handlePlayerReady = useCallback(() => {
+    setPlayerError(null);
+  }, []);
+  const handlePlayerError = useCallback((message: string) => {
+    setPlayerError(message);
+  }, []);
 
   useEffect(() => {
     setPlayerError(null);
   }, [contentId]);
-
-  useEffect(() => {
-    if (loading || !content.trim() || !containerRef.current) {
-      return;
-    }
-
-    let cancelled = false;
-
-    const mountPlayer = async () => {
-      try {
-        const mod = await import("asciinema-player");
-        if (cancelled || !containerRef.current) {
-          return;
-        }
-
-        playerRef.current?.dispose?.();
-        containerRef.current.innerHTML = "";
-
-        playerRef.current = mod.create(
-          { data: content },
-          containerRef.current,
-          {
-            autoPlay: false,
-            preload: true,
-            controls: true,
-            // The cast plays at its recorded geometry: the player fills the
-            // container width and derives its height from the cast's rows,
-            // preserving the original aspect ratio.
-            fit: "width",
-            terminalLineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
-            idleTimeLimit: REPLAY_IDLE_TIME_LIMIT_SECONDS,
-            terminalFontFamily: REPLAY_TERMINAL_FONT_FAMILY,
-            theme: REPLAY_TERMINAL_THEME,
-          },
-        );
-        playerRef.current.addEventListener("ready", () => {
-          setPlayerError(null);
-        });
-        // The player throws from addEventListener for unknown event names,
-        // and its error event is named "error" (not "errored") - the wrong
-        // name unmounted every successfully created player.
-        playerRef.current.addEventListener("error", () => {
-          setPlayerError(
-            "asciinema player failed to initialize this recording",
-          );
-        });
-      } catch (error) {
-        setPlayerError(
-          error instanceof Error
-            ? error.message
-            : "failed to initialize cast replay",
-        );
-      }
-    };
-
-    void mountPlayer();
-
-    return () => {
-      cancelled = true;
-      playerRef.current?.dispose?.();
-      playerRef.current = null;
-      if (containerRef.current) {
-        containerRef.current.innerHTML = "";
-      }
-    };
-  }, [content, loading]);
 
   if (playerError) {
     return (
@@ -469,12 +415,97 @@ export function AsciicastReplaySurface({
           minimal ? "" : "overflow-hidden rounded-md border bg-background"
         }
       >
-        <div
-          ref={containerRef}
-          className="run-artifact-player w-full overflow-hidden rounded-md bg-terminal-background [&_.ap-player]:w-full"
+        <MountedAsciicastPlayer
+          key={contentId}
+          content={content}
+          onReady={handlePlayerReady}
+          onError={handlePlayerError}
         />
       </div>
     </div>
+  );
+}
+
+function MountedAsciicastPlayer({
+  content,
+  onReady,
+  onError,
+}: {
+  content: string;
+  onReady: () => void;
+  onError: (message: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const playerRef = useRef<AsciinemaPlayerInstance | null>(null);
+
+  useEffect(() => {
+    if (!content.trim() || !containerRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const mountPlayer = async () => {
+      try {
+        const mod = await import("asciinema-player");
+        if (cancelled || !containerRef.current) {
+          return;
+        }
+
+        const player = mod.create(
+          { data: content },
+          containerRef.current,
+          {
+            autoPlay: false,
+            preload: true,
+            controls: true,
+            // The cast plays at its recorded geometry: the player fills the
+            // container width and derives its height from the cast's rows,
+            // preserving the original aspect ratio.
+            fit: "width",
+            terminalLineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
+            idleTimeLimit: REPLAY_IDLE_TIME_LIMIT_SECONDS,
+            terminalFontFamily: REPLAY_TERMINAL_FONT_FAMILY,
+            theme: REPLAY_TERMINAL_THEME,
+          },
+        );
+        playerRef.current = player;
+        player.addEventListener("ready", () => {
+          if (!cancelled && playerRef.current === player) {
+            onReady();
+          }
+        });
+        // The player throws from addEventListener for unknown event names,
+        // and its error event is named "error" (not "errored").
+        player.addEventListener("error", () => {
+          if (!cancelled && playerRef.current === player) {
+            onError("asciinema player failed to initialize this recording");
+          }
+        });
+      } catch (error) {
+        onError(
+          error instanceof Error
+            ? error.message
+            : "failed to initialize cast replay",
+        );
+      }
+    };
+
+    void mountPlayer();
+
+    return () => {
+      cancelled = true;
+      const player = playerRef.current;
+      playerRef.current = null;
+      player?.dispose?.();
+    };
+  }, [content, onError, onReady]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="run-artifact-player w-full overflow-hidden rounded-md bg-terminal-background [&_.ap-player]:w-full"
+    />
   );
 }
 
