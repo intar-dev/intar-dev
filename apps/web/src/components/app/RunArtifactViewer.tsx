@@ -483,6 +483,9 @@ function MountedAsciicastPlayer({
           }
         });
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         onError(
           error instanceof Error
             ? error.message

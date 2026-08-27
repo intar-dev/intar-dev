@@ -417,6 +417,19 @@ test.describe("focused state accessibility", () => {
     ).toBeVisible();
 
     await card.getByRole("button", { name: /session-02\.cast/ }).click();
+    await expect
+      .poll(
+        () =>
+          ui.server.requests.filter(
+            (request) =>
+              request ===
+              "GET /api/admin/runs/run-archived/artifacts/artifact-cast-2/content",
+          ).length,
+      )
+      .toBe(1);
+    await expect(card.locator('[data-slot="card-title"]')).toHaveText(
+      "session-02.cast",
+    );
     await expect(
       card.getByRole("button", { name: "Play", exact: true }),
     ).toBeVisible();
