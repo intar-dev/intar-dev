@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { LoaderCircle } from "lucide-react";
+import type { ReactNode, Ref } from "react";
+import { Check, CircleAlert, LoaderCircle } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -15,23 +15,46 @@ export function ScenarioStepScreen(props: {
   title: string;
   description: string;
   steps: ScenarioStatusStep[];
+  headingId?: string;
+  headingRef?: Ref<HTMLHeadingElement> | undefined;
+  listLabel?: string;
   topRight?: ReactNode;
   statusAnnouncement?: string;
+  footer?: ReactNode;
 }) {
   const currentStep = props.steps.find(
     (step) => step.state === "active" || step.state === "failed",
   );
+  const nextStepIndex = props.steps.findIndex(
+    (step) => step.state === "pending",
+  );
+  const currentStepIndex = currentStep
+    ? props.steps.findIndex((step) => step.id === currentStep.id)
+    : nextStepIndex >= 0
+      ? nextStepIndex
+      : Math.max(0, props.steps.length - 1);
+  const currentStatus = currentStep
+    ? formatScenarioStepState(currentStep.state)
+    : null;
+
   return (
-    <Card>
+    <Card data-run-sequence-screen>
       <CardHeader className="space-y-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-2">
-            <CardTitle
-              as="h2"
-              className="font-heading text-lg font-semibold tracking-tight"
+            {props.steps.length ? (
+              <p className="text-eyebrow" data-run-sequence-position>
+                Stage {currentStepIndex + 1} of {props.steps.length}
+              </p>
+            ) : null}
+            <h2
+              id={props.headingId}
+              ref={props.headingRef}
+              tabIndex={props.headingRef ? -1 : undefined}
+              className="text-card-title font-heading text-lg font-semibold tracking-tight outline-none"
             >
               {props.title}
-            </CardTitle>
+            </h2>
             <CardDescription className="leading-6">
               {props.description}
             </CardDescription>
@@ -47,46 +70,75 @@ export function ScenarioStepScreen(props: {
           aria-live="polite"
           aria-atomic="true"
           className="sr-only"
+          data-run-sequence-announcement
         >
           {props.statusAnnouncement ??
             (currentStep
-              ? `${props.title}: ${currentStep.label}`
+              ? `Stage ${currentStepIndex + 1} of ${props.steps.length}: ${currentStep.label}. ${currentStatus}.`
               : props.title)}
         </p>
-        <ol className="space-y-3">
-          {props.steps.map((step) => (
-            <li
-              key={step.id}
-              aria-current={currentStep?.id === step.id ? "step" : undefined}
-              className={cn(
-                "flex items-start gap-3 rounded-lg px-4 py-3 text-sm",
-                step.state === "done"
-                  ? "bg-success/8"
-                  : step.state === "active"
-                    ? "bg-primary/6"
-                    : step.state === "failed"
-                      ? "bg-destructive/8"
-                      : "bg-muted/40",
-              )}
-            >
-              <span
+        <ol
+          aria-label={props.listLabel}
+          className="space-y-1"
+          data-run-sequence-steps
+        >
+          {props.steps.map((step, index) => {
+            const isCurrent = currentStep?.id === step.id;
+            const statusLabel = formatScenarioStepState(step.state);
+
+            return (
+              <li
+                key={step.id}
+                aria-current={isCurrent ? "step" : undefined}
+                data-run-sequence-step
+                data-state={step.state}
                 className={cn(
-                  "mt-1.5 size-2 shrink-0 rounded-full",
-                  step.state === "done"
-                    ? "bg-success"
-                    : step.state === "active"
-                      ? "bg-primary"
-                      : step.state === "failed"
-                        ? "bg-destructive"
-                        : "bg-border",
+                  "relative grid min-h-12 grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-x-3 rounded-lg px-3 py-3 text-sm",
+                  step.state === "active" && "bg-primary/6",
+                  step.state === "failed" && "bg-destructive/8",
                 )}
-                aria-hidden="true"
-              />
-              <div className="min-w-0 flex-1 space-y-1">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+              >
+                {index < props.steps.length - 1 ? (
+                  <span
+                    aria-hidden="true"
+                    data-run-sequence-connector
+                    className={cn(
+                      "absolute top-9 bottom-[-0.375rem] left-6 w-px",
+                      step.state === "done"
+                        ? "bg-success/60"
+                        : "bg-muted-foreground/40",
+                    )}
+                  />
+                ) : null}
+                <span
+                  aria-hidden="true"
+                  data-run-sequence-marker
+                  className={cn(
+                    "relative z-10 flex size-6 items-center justify-center rounded-full border text-xs font-semibold tabular-nums motion-reduce:transition-none",
+                    step.state === "done"
+                      ? "border-success bg-success text-success-foreground"
+                      : step.state === "active"
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : step.state === "failed"
+                          ? "border-destructive bg-destructive text-destructive-foreground"
+                          : "border-muted-foreground bg-card text-muted-foreground",
+                  )}
+                >
+                  {step.state === "done" ? (
+                    <Check className="size-3.5" />
+                  ) : step.state === "failed" ? (
+                    <CircleAlert className="size-3.5" />
+                  ) : (
+                    index + 1
+                  )}
+                </span>
+                <div
+                  className="min-w-0 space-y-1"
+                  data-run-sequence-copy
+                >
                   <p
                     className={cn(
-                      "font-medium",
+                      "font-medium leading-6",
                       step.state === "done"
                         ? "text-success"
                         : "text-foreground",
@@ -94,35 +146,35 @@ export function ScenarioStepScreen(props: {
                   >
                     {step.label}
                   </p>
-                  <span
-                    className={cn(
-                      "rounded-full px-2 py-0.5 text-[11px] font-medium",
-                      step.state === "done"
-                        ? "bg-success/15 text-success"
-                        : step.state === "active"
-                          ? "bg-primary/10 text-primary"
-                          : step.state === "failed"
-                            ? "bg-destructive/10 text-destructive"
-                            : "bg-muted text-muted-foreground",
-                    )}
-                  >
-                    {formatScenarioStepState(step.state)}
-                  </span>
+                  {isCurrent || step.state === "failed" ? (
+                    <p
+                      className="leading-6 text-muted-foreground"
+                      data-run-sequence-detail
+                    >
+                      {step.detail}
+                    </p>
+                  ) : null}
                 </div>
-                <p
+                <span
+                  data-run-sequence-status
                   className={cn(
-                    "leading-6",
+                    "pt-0.5 text-xs font-medium whitespace-nowrap",
                     step.state === "done"
                       ? "text-success"
-                      : "text-muted-foreground",
+                      : step.state === "active"
+                        ? "text-primary"
+                        : step.state === "failed"
+                          ? "text-destructive"
+                          : "text-muted-foreground",
                   )}
                 >
-                  {step.detail}
-                </p>
-              </div>
-            </li>
-          ))}
+                  {statusLabel}
+                </span>
+              </li>
+            );
+          })}
         </ol>
+        {props.footer}
       </CardContent>
     </Card>
   );

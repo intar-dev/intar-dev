@@ -142,7 +142,7 @@ export function formatScenarioStepState(state: ScenarioStatusStep["state"]) {
     case "failed":
       return "Failed";
     default:
-      return "Pending";
+      return "Up next";
   }
 }
 

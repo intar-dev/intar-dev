@@ -458,6 +458,16 @@ test.describe("focused mobile workspace", () => {
 test.describe("short landscape run workspace", () => {
   test.use({ viewport: { width: 667, height: 375 }, hasTouch: true });
 
+  test("booting sequence fits", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "booting",
+    });
+    await expect(page.getByRole("list", { name: "Startup steps" })).toBeVisible();
+    await expectRouteScreenshot(page, "run-booting-sequence-dark-landscape");
+  });
+
   test("solved action keeps terminal space", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),

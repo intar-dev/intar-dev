@@ -16,6 +16,12 @@ test("the boot screen keeps the work order reachable and does not steal focus wh
     page.getByRole("heading", { name: "Preparing your workspace" }),
   ).toBeVisible();
   await expect(page.getByText(/Review the work order while/i)).toBeVisible();
+  const startupSteps = page.getByRole("list", { name: "Startup steps" });
+  await expect(startupSteps.locator("[data-run-sequence-step]")).toHaveCount(4);
+  await expect(startupSteps.locator('[aria-current="step"]')).toHaveCount(1);
+  await expect(page.locator("[data-run-sequence-position]")).toHaveText(
+    "Stage 2 of 4",
+  );
 
   const trigger = page.getByRole("button", {
     name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
@@ -32,6 +38,17 @@ test("the boot screen keeps the work order reachable and does not steal focus wh
       .locator('section[aria-labelledby="run-learning-work-order-heading"]')
       .getByText("Start the web server"),
   ).toBeVisible();
+  const sequenceBox = await page
+    .locator("[data-run-sequence-screen]")
+    .boundingBox();
+  const guidanceBox = await page
+    .locator("[data-run-guidance-rail]")
+    .boundingBox();
+  expect(sequenceBox).not.toBeNull();
+  expect(guidanceBox).not.toBeNull();
+  expect(sequenceBox!.x + sequenceBox!.width).toBeLessThanOrEqual(
+    guidanceBox!.x - 16,
+  );
   await expect(panel.getByText("nginx-listening")).toHaveCount(0);
 
   await page.keyboard.press("Escape");
@@ -519,7 +536,7 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   ).toBeVisible();
   const savingSteps = page.getByRole("list", { name: "Saving steps" });
   await expect(savingSteps).toBeVisible();
-  await expect(savingSteps.locator("[data-run-saving-step]")).toHaveCount(5);
+  await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
   await expect(
     page.locator('section[aria-labelledby="run-recap-heading"]'),
   ).not.toHaveAttribute("aria-busy");
@@ -601,14 +618,17 @@ test("saving stages advance from real server state and announce each change once
   });
 
   const steps = page.getByRole("list", { name: "Saving steps" });
-  const announcement = page.locator("[data-run-saving-announcement]");
+  const announcement = page.locator("[data-run-sequence-announcement]");
   await expect(steps.locator('[aria-current="step"]')).toContainText(
     "Save requested",
+  );
+  await expect(announcement).toHaveText(
+    "Stage 1 of 5: Save requested. In progress.",
   );
 
   await page.evaluate(() => {
     const target = document.querySelector<HTMLElement>(
-      "[data-run-saving-announcement]",
+      "[data-run-sequence-announcement]",
     );
     if (!target) throw new Error("saving announcement region is missing");
     const state = window as typeof window & {
@@ -637,7 +657,10 @@ test("saving stages advance from real server state and announce each change once
   for (const [stage, label] of changes) {
     ui.server.state.run.savingStage = stage;
     await expect(steps.locator('[aria-current="step"]')).toContainText(label);
-    await expect(announcement).toHaveText(`${label}. In progress.`);
+    const stageNumber = changes.findIndex(([candidate]) => candidate === stage) + 2;
+    await expect(announcement).toHaveText(
+      `Stage ${stageNumber} of 5: ${label}. In progress.`,
+    );
   }
 
   // One unchanged background poll must not repeat the last announcement.
@@ -649,7 +672,11 @@ test("saving stages advance from real server state and announce each change once
           window as typeof window & { __runSavingAnnouncements?: string[] }
         ).__runSavingAnnouncements ?? [],
     ),
-  ).toEqual(changes.map(([, label]) => `${label}. In progress.`));
+  ).toEqual(
+    changes.map(
+      ([, label], index) => `Stage ${index + 2} of 5: ${label}. In progress.`,
+    ),
+  );
 });
 
 test("saving shows a calm reassurance only after one stage stalls", async ({

@@ -884,13 +884,13 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
   });
   const savingSteps = page.getByRole("list", { name: "Saving steps" });
   await expect(savingSteps).toBeVisible();
-  await expect(savingSteps.locator("[data-run-saving-step]")).toHaveCount(5);
+  await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
   await expect(
     savingSteps.locator('[aria-current="step"]'),
   ).toHaveText(/Save requested/);
   expect(
     await savingSteps
-      .locator("[data-run-saving-step] > span")
+      .locator("[data-run-sequence-marker]")
       .first()
       .evaluate((element) => {
         const style = getComputedStyle(element);

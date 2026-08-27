@@ -357,6 +357,65 @@
   opacity: 1 !important;
 }
 
+/* Keep the startup tracker inside the workspace left by the desktop guidance
+   rail. At smaller widths, guidance becomes a bottom sheet instead. */
+@media (min-width: 960px) {
+  body:has([data-run-guidance-rail]) [data-run-sequence-frame] {
+    width: min(42rem, calc(100% - 22rem));
+    transform: translateX(-11rem);
+  }
+}
+
+/* A short landscape viewport trades step detail for a compact rail. The same
+   rule applies to startup and shutdown because they share this sequence UI. */
+@media (max-height: 500px) and (min-width: 640px) {
+  [data-run-sequence-screen] {
+    --card-spacing: 1rem;
+  }
+
+  [data-run-sequence-steps] {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr));
+    gap: 0.5rem;
+  }
+
+  [data-run-sequence-step] {
+    min-height: 5rem;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 1.5rem auto auto;
+    gap: 0.25rem;
+    padding: 0.5rem;
+  }
+
+  [data-run-sequence-connector] {
+    top: 1.25rem;
+    right: -1.75rem;
+    bottom: auto;
+    left: 2rem;
+    width: auto;
+    height: 1px;
+  }
+
+  [data-run-sequence-marker] {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  [data-run-sequence-copy] {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  [data-run-sequence-detail] {
+    display: none;
+  }
+
+  [data-run-sequence-status] {
+    grid-column: 1;
+    grid-row: 3;
+  }
+}
+
 @utility text-display {
   font-family: var(--font-heading);
   font-size: clamp(2.75rem, 7vw, 5.75rem);

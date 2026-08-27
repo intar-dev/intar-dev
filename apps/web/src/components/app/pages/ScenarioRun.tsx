@@ -717,13 +717,26 @@ export function ScenarioRun() {
               />
             </div>
           ) : (
-            <div className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+            <div
+              aria-label={
+                showSelectedVmPreparation
+                  ? "Workspace startup progress"
+                  : undefined
+              }
+              className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+              role={showSelectedVmPreparation ? "region" : undefined}
+              tabIndex={showSelectedVmPreparation ? 0 : undefined}
+            >
               {showSelectedVmPreparation ? (
-                <div className="m-auto w-full max-w-2xl py-4 sm:py-6">
+                <div
+                  className="m-auto w-full max-w-2xl py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:py-6"
+                  data-run-sequence-frame
+                >
                   <ScenarioStepScreen
                     title={bootScreenCopy.title}
                     description={bootScreenCopy.description}
                     steps={bootSteps}
+                    listLabel="Startup steps"
                   />
                 </div>
               ) : (

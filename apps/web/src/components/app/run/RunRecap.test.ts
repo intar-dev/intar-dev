@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  getRunSavingAnnouncement,
   getRunSavingStage,
   getRunSavingStepState,
   ReplayViewer,
@@ -69,6 +70,15 @@ describe("run recap model", () => {
         run({ activity: "background", phase: "archiving", savingStage: null }),
       ),
     ).toBe("closing_workspace");
+
+    expect(getRunSavingAnnouncement("future_stage")).toBe(
+      "Stage 1 of 5: Save requested. In progress.",
+    );
+    expect(
+      RUN_SAVING_STEPS.map((candidate) =>
+        getRunSavingStepState("future_stage", candidate.stage),
+      ),
+    ).toEqual(["active", "up_next", "up_next", "up_next", "up_next"]);
   });
 
   it("maps only authored objective copy to final results", () => {
@@ -366,6 +376,7 @@ describe("RunRecap", () => {
 
     expect(markup).toContain("Saving your run…");
     expect(markup).toContain("Your recap will be ready in a moment.");
+    expect(markup).toContain("Stage 3 of 5");
     expect(markup).not.toContain('aria-busy="true"');
     expect(markup).toContain('aria-label="Saving steps"');
     expect(markup).toContain("Save requested");
@@ -374,10 +385,11 @@ describe("RunRecap", () => {
     expect(markup).toContain("Preparing replay");
     expect(markup).toContain("Finalizing recap");
     expect(markup).toContain('aria-current="step"');
-    expect(markup.match(/data-run-saving-step="true"/g)).toHaveLength(5);
+    expect(markup).toContain('data-run-sequence-screen="true"');
+    expect(markup.match(/data-run-sequence-step="true"/g)).toHaveLength(5);
     expect(markup.match(/data-state="done"/g)).toHaveLength(2);
     expect(markup.match(/data-state="active"/g)).toHaveLength(1);
-    expect(markup.match(/data-state="up_next"/g)).toHaveLength(2);
+    expect(markup.match(/data-state="pending"/g)).toHaveLength(2);
     expect(markup).not.toContain('role="progressbar"');
     expect(RUN_SAVING_STALLED_DELAY_MS).toBe(30_000);
     expect(markup).not.toContain("Archiving");

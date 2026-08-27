@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { AsciicastReplaySurface } from "@/components/app/RunArtifactViewer";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
+import { ScenarioStepScreen } from "@/components/app/run/StatusScreens";
 import { Button } from "@/components/ui/button";
 import {
   CourseCatalogLink,
@@ -39,7 +40,7 @@ import {
   type RunRecapObjective,
   type RunReplayPart,
 } from "./run-recap-model";
-import type { ScenarioRunRecord } from "./run-types";
+import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
 import { useStreamedText } from "./useStreamedText";
 
 export interface RunRecapProps {
@@ -48,7 +49,7 @@ export interface RunRecapProps {
   courseLocation?: CourseLocation | null | undefined;
   /** The next current-course lab, when the catalog can prove one exists. */
   nextScenario?: ScenarioCatalogWireEntry | null | undefined;
-  headingRef?: Ref<HTMLHeadingElement>;
+  headingRef?: Ref<HTMLHeadingElement> | undefined;
   /** Optional override for embedding the recap in another learner flow. */
   nextAction?: ReactNode;
 }
@@ -57,12 +58,36 @@ type RunSavingStage = NonNullable<ScenarioRunRecord["savingStage"]>;
 export const RUN_SAVING_STALLED_DELAY_MS = 30_000;
 
 export const RUN_SAVING_STEPS = [
-  { stage: "save_requested", label: "Save requested" },
-  { stage: "closing_workspace", label: "Closing workspace" },
-  { stage: "saving_files", label: "Saving files" },
-  { stage: "preparing_replay", label: "Preparing replay" },
-  { stage: "finalizing_recap", label: "Finalizing recap" },
-] as const satisfies readonly { stage: RunSavingStage; label: string }[];
+  {
+    stage: "save_requested",
+    label: "Save requested",
+    detail: "Your run is queued to be saved.",
+  },
+  {
+    stage: "closing_workspace",
+    label: "Closing workspace",
+    detail: "Closing your workspace safely.",
+  },
+  {
+    stage: "saving_files",
+    label: "Saving files",
+    detail: "Saving the files from your workspace.",
+  },
+  {
+    stage: "preparing_replay",
+    label: "Preparing replay",
+    detail: "Preparing your terminal replay.",
+  },
+  {
+    stage: "finalizing_recap",
+    label: "Finalizing recap",
+    detail: "Putting your learning recap together.",
+  },
+] as const satisfies readonly {
+  stage: RunSavingStage;
+  label: string;
+  detail: string;
+}[];
 
 type RunSavingStepState = "done" | "active" | "up_next";
 
@@ -81,18 +106,28 @@ export function getRunSavingStage(
 }
 
 export function getRunSavingStepState(
-  stage: RunSavingStage,
+  stage: RunSavingStage | string,
   step: RunSavingStage,
 ): RunSavingStepState {
-  const activeIndex = RUN_SAVING_STEPS.findIndex(
+  const matchedIndex = RUN_SAVING_STEPS.findIndex(
     (candidate) => candidate.stage === stage,
   );
+  const activeIndex = matchedIndex >= 0 ? matchedIndex : 0;
   const stepIndex = RUN_SAVING_STEPS.findIndex(
     (candidate) => candidate.stage === step,
   );
   if (stepIndex < activeIndex) return "done";
   if (stepIndex === activeIndex) return "active";
   return "up_next";
+}
+
+export function getRunSavingAnnouncement(stage: RunSavingStage | string) {
+  const matchedIndex = RUN_SAVING_STEPS.findIndex(
+    (candidate) => candidate.stage === stage,
+  );
+  const activeIndex = matchedIndex >= 0 ? matchedIndex : 0;
+  const activeStep = RUN_SAVING_STEPS[activeIndex] ?? RUN_SAVING_STEPS[0];
+  return `Stage ${activeIndex + 1} of ${RUN_SAVING_STEPS.length}: ${activeStep.label}. In progress.`;
 }
 
 /**
@@ -112,21 +147,14 @@ export function RunRecap({
     return (
       <section
         aria-labelledby="run-recap-heading"
-        className="mx-auto w-full max-w-3xl py-8 md:py-12"
+        className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center py-4 sm:py-6"
       >
-        <p className="text-eyebrow">Lab run</p>
-        <h2
-          id="run-recap-heading"
-          ref={headingRef}
-          tabIndex={-1}
-          className="mt-2 font-heading text-3xl font-semibold tracking-tight outline-none sm:text-4xl"
-        >
-          {recap.title}
-        </h2>
-        <p className="mt-3 max-w-[46ch] text-sm leading-6 text-muted-foreground">
-          {recap.description}
-        </p>
-        <RunSavingProgress stage={getRunSavingStage(run)} />
+        <RunSavingProgress
+          stage={getRunSavingStage(run)}
+          title={recap.title}
+          description={recap.description}
+          headingRef={headingRef}
+        />
       </section>
     );
   }
@@ -266,20 +294,29 @@ export function RunRecap({
   );
 }
 
-function RunSavingProgress({ stage }: { stage: RunSavingStage }) {
-  const activeStep =
-    RUN_SAVING_STEPS.find((step) => step.stage === stage) ??
-    RUN_SAVING_STEPS[0];
+function RunSavingProgress({
+  stage,
+  title,
+  description,
+  headingRef,
+}: {
+  stage: RunSavingStage;
+  title: string;
+  description: string;
+  headingRef?: Ref<HTMLHeadingElement> | undefined;
+}) {
   const previousStageRef = useRef(stage);
-  const [announcement, setAnnouncement] = useState("");
+  const [announcement, setAnnouncement] = useState(() =>
+    getRunSavingAnnouncement(stage),
+  );
   const [isStalled, setIsStalled] = useState(false);
 
   useEffect(() => {
     if (previousStageRef.current !== stage) {
-      setAnnouncement(`${activeStep.label}. In progress.`);
+      setAnnouncement(getRunSavingAnnouncement(stage));
       previousStageRef.current = stage;
     }
-  }, [activeStep.label, stage]);
+  }, [stage]);
 
   useEffect(() => {
     setIsStalled(false);
@@ -290,81 +327,40 @@ function RunSavingProgress({ stage }: { stage: RunSavingStage }) {
     return () => window.clearTimeout(timeout);
   }, [stage]);
 
+  const steps: ScenarioStatusStep[] = RUN_SAVING_STEPS.map((step) => {
+    const savingState = getRunSavingStepState(stage, step.stage);
+
+    return {
+      id: step.stage,
+      label: step.label,
+      detail: step.detail,
+      state: savingState === "up_next" ? "pending" : savingState,
+    };
+  });
+
   return (
-    <div className="mt-8 w-full" data-run-saving-progress>
-      <div className="flex items-center justify-between gap-4 text-xs font-medium">
-        <span>Saving steps</span>
-        <span className="text-muted-foreground">In progress</span>
-      </div>
-      <ol
-        aria-label="Saving steps"
-        className="mt-4 grid gap-3 sm:grid-cols-5 sm:gap-2"
-        data-run-saving-steps
-      >
-        {RUN_SAVING_STEPS.map((step, index) => {
-          const state = getRunSavingStepState(stage, step.stage);
-          const stateLabel =
-            state === "done"
-              ? "Done"
-              : state === "active"
-                ? "In progress"
-                : "Up next";
-          return (
-            <li
-              key={step.stage}
-              aria-current={state === "active" ? "step" : undefined}
-              data-run-saving-step
-              data-state={state}
-              className="flex min-w-0 items-center gap-3 sm:flex-col sm:items-start sm:gap-2"
+    <div className="w-full" data-run-saving-progress>
+      <ScenarioStepScreen
+        title={title}
+        description={description}
+        steps={steps}
+        headingId="run-recap-heading"
+        headingRef={headingRef}
+        listLabel="Saving steps"
+        statusAnnouncement={announcement}
+        footer={
+          isStalled ? (
+            <p
+              className="max-w-[52ch] text-sm leading-6 text-muted-foreground"
+              data-run-saving-stalled
+              role="status"
             >
-              <span
-                aria-hidden="true"
-                className={cn(
-                  "flex size-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold tabular-nums transition-[transform,opacity] duration-150 motion-reduce:transition-none",
-                  state === "done"
-                    ? "scale-100 border-success bg-success text-success-foreground"
-                    : state === "active"
-                      ? "scale-100 border-primary bg-primary text-primary-foreground"
-                      : "scale-95 border-border bg-background text-muted-foreground opacity-70",
-                )}
-              >
-                {state === "done" ? (
-                  <CheckCircle2 className="size-4" />
-                ) : (
-                  index + 1
-                )}
-              </span>
-              <span className="min-w-0 text-sm leading-5 sm:text-xs">
-                <span className="block font-medium text-foreground">
-                  {step.label}
-                </span>
-                <span className="block text-xs text-muted-foreground">
-                  {stateLabel}
-                </span>
-              </span>
-            </li>
-          );
-        })}
-      </ol>
-      {isStalled ? (
-        <p
-          className="mt-5 max-w-[52ch] text-sm leading-6 text-muted-foreground"
-          data-run-saving-stalled
-          role="status"
-        >
-          This is taking longer than usual. Your work is safe, and your recap
-          will appear here.
-        </p>
-      ) : null}
-      <p
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        className="sr-only"
-        data-run-saving-announcement
-      >
-        {announcement}
-      </p>
+              This is taking longer than usual. Your work is safe, and your
+              recap will appear here.
+            </p>
+          ) : null
+        }
+      />
     </div>
   );
 }

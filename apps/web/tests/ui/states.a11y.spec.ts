@@ -917,7 +917,7 @@ test.describe("focused state accessibility", () => {
         await expect(page.locator("header")).not.toContainText("Ending");
         const savingSteps = page.getByRole("list", { name: "Saving steps" });
         await expect(savingSteps).toBeVisible();
-        await expect(savingSteps.locator("[data-run-saving-step]")).toHaveCount(5);
+        await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
         await expect(savingSteps.locator('[aria-current="step"]')).toHaveCount(1);
         await expect(page.getByRole("heading", { name: "Final checks" })).toHaveCount(
           0,
@@ -1370,6 +1370,41 @@ test.describe("long check rows", () => {
 test.describe("run guidance at 200% text", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
+  test("keeps startup progress clear of guidance at 200% text", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "booting",
+    });
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = "200%";
+    });
+
+    await runLearningTrigger(page).click();
+    await expect(
+      page.getByRole("region", { name: "Workspace startup progress" }),
+    ).toBeVisible();
+    const sequence = page.locator("[data-run-sequence-screen]");
+    const guidance = page.locator("[data-run-guidance-rail]");
+    await expect(sequence).toBeVisible();
+    await expect(guidance).toBeVisible();
+    const [sequenceBox, guidanceBox] = await Promise.all([
+      sequence.boundingBox(),
+      guidance.boundingBox(),
+    ]);
+    expect(sequenceBox).not.toBeNull();
+    expect(guidanceBox).not.toBeNull();
+    expect(sequenceBox!.x).toBeGreaterThanOrEqual(0);
+    expect(sequenceBox!.x + sequenceBox!.width).toBeLessThanOrEqual(
+      guidanceBox!.x - 16,
+    );
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
   test("keeps the header control and checks operable", async ({
     page,
     ui,
@@ -1425,6 +1460,26 @@ test.describe("run guidance at 200% text", () => {
 
 test.describe("short run workspace", () => {
   test.use({ viewport: { width: 667, height: 375 }, hasTouch: true });
+
+  test("keeps startup progress inside a short viewport", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "booting",
+    });
+
+    const startupSteps = page.getByRole("list", { name: "Startup steps" });
+    await expect(startupSteps).toBeVisible();
+    const bounds = await startupSteps.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.y).toBeGreaterThanOrEqual(48);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(375);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
 
   test("keeps check indicators reachable while the guidance sheet scrolls", async ({
     page,
