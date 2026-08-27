@@ -14,6 +14,15 @@ export function scenarioRunArtifactContentPath(
   return `/api/runs/${canonicalResourceIdSegment(runId)}/artifacts/${canonicalResourceIdSegment(artifactId)}/content`;
 }
 
+export function adminScenarioRunArtifactContentPath(
+  runId: string,
+  artifactId: string,
+): string {
+  const run = canonicalResourceIdSegment(runId);
+  const artifact = canonicalResourceIdSegment(artifactId);
+  return `/api/admin/runs/${run}/artifacts/${artifact}/content`;
+}
+
 export function workshopArtifactContentPath(
   sessionId: string,
   artifactId: string,

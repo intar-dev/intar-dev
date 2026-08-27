@@ -69,6 +69,7 @@ export async function revokeBetaUser(params: {
           actorUserId: accessAllowlist.revokedBy,
           revocationId: accessAllowlist.revocationId,
           cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
+          runId: sql<string | null>`null`.as("run_id"),
           reason: accessAllowlist.revocationReason,
           createdAt: accessAllowlist.revokedAt,
         })
@@ -220,6 +221,7 @@ export async function completeBetaRevocationCleanup(params: {
           actorUserId: sql<string | null>`null`.as("actor_user_id"),
           revocationId: accessAllowlist.revocationId,
           cleanupAttemptId: accessAllowlist.revocationCleanupAttemptId,
+          runId: sql<string | null>`null`.as("run_id"),
           reason: sql<string>`'cleanup_completed'`.as("reason"),
           createdAt: accessAllowlist.revocationCleanupCompletedAt,
         })
@@ -396,6 +398,7 @@ function cleanupEventSelect(params: {
       cleanupAttemptId: sql<string>`${params.cleanupAttemptId}`.as(
         "cleanup_attempt_id",
       ),
+      runId: sql<string | null>`null`.as("run_id"),
       reason: sql<string>`${params.reason}`.as("reason"),
       createdAt: sql<number>`${params.now}`.as("created_at"),
     })

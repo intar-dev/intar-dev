@@ -335,6 +335,39 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
+  test("admin archive filters and delete action", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({ ...routeCase("admin-overview"), theme: "light" });
+    const archive = page
+      .getByRole("heading", { name: "Run archive" })
+      .locator("xpath=ancestor::section");
+    await archive.scrollIntoViewIfNeeded();
+
+    await archive.getByLabel("Search archived runs").fill("missing owner");
+    await expect(
+      archive.getByRole("heading", { name: "No runs match these filters" }),
+    ).toBeVisible();
+    await archive.getByRole("button", { name: "Clear filters" }).click();
+
+    const card = archive.locator('[data-archive-run="run-archived"]');
+    await expect(card.getByText("@minalearns", { exact: true })).toBeVisible();
+    await card
+      .getByRole("button", { name: "Actions for repair-nginx" })
+      .click();
+    await page.getByRole("menuitem", { name: "Delete run…" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Delete this run?" });
+    await expect(dialog).toContainText("run-archived");
+    await expectNoAxeViolations(page, testInfo);
+
+    await dialog.locator("#delete-run-confirm").fill("run-archived");
+    await dialog.getByRole("button", { name: "Delete run" }).click();
+    await expect(card).toHaveCount(0);
+    expect(ui.server.requests).toContain("DELETE /api/admin/runs/run-archived");
+  });
+
   test("host onboarding panel", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
     await page.getByRole("button", { name: "Add host" }).first().click();

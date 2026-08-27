@@ -279,6 +279,7 @@ export type AccessEventType =
   | "access.revocation_cleanup_stalled"
   | "access.revocation_cleanup_completed"
   | "access.reinvite_allowed"
+  | "run.deleted_by_admin"
   | "user.deleted";
 
 // Event rows contain identifiers and normalized reason codes only. They must
@@ -294,12 +295,14 @@ export const accessEvents = sqliteTable(
     actorUserId: text("actor_user_id"),
     revocationId: text("revocation_id"),
     cleanupAttemptId: text("cleanup_attempt_id"),
+    runId: text("run_id"),
     reason: text("reason"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
   },
   (table) => [
     index("access_events_invite_idx").on(table.inviteId, table.createdAt),
     index("access_events_subject_idx").on(table.subjectUserId, table.createdAt),
+    index("access_events_run_idx").on(table.runId, table.createdAt),
     index("access_events_created_idx").on(table.createdAt),
   ],
 );

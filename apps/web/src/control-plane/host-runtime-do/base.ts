@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { and, desc, eq, exists, isNull } from "drizzle-orm";
+import { and, desc, eq, exists, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
 import { nextPendingHostCpuReservationExpiry } from "@/control-plane/host-cpu-reservations";
@@ -175,6 +175,11 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           solvedAt,
           completedAt,
           failedAt,
+          archiveEnteredAt: ["archiving", "completed", "failed"].includes(
+            merged.phase,
+          )
+            ? sql<number>`coalesce(${scenarioRuns.archiveEnteredAt}, ${now})`
+            : sql<number | null>`${scenarioRuns.archiveEnteredAt}`,
           updatedAt: now,
         })
         .where(

@@ -8,20 +8,28 @@ import {
   useState,
 } from "react";
 import { Link } from "@tanstack/react-router";
-import { Activity, Archive, CircleAlert, Server, Shapes } from "lucide-react";
+import {
+  Activity,
+  Archive,
+  CircleAlert,
+  RefreshCw,
+  Server,
+  Shapes,
+} from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
 } from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
+import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
 import { TableSkeleton } from "@/components/app/patterns/Skeletons";
 import type { RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { scenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
+import { adminScenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
 import {
   Dialog,
   DialogContent,
@@ -35,10 +43,12 @@ import { parseTimestamp } from "@/components/app/admin/hosts/format";
 import { LiveScenarioRunCard } from "@/components/app/admin/hosts/LiveScenarioRunCard";
 import { ScenarioRunArchiveCard } from "@/components/app/admin/hosts/ScenarioRunArchiveCard";
 import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenarios";
+import { useAdminRunArchive } from "@/components/app/admin/hosts/useAdminRunArchive";
 import { useHostFleet } from "@/components/app/admin/hosts/useHostFleet";
 import type {
   AgentVmRunArtifact,
   AgentVmRunRecord,
+  AgentVmRunSummary,
   ArchivedScenarioRunRecord,
   LiveScenarioRunRecord,
 } from "@/components/app/admin/hosts/types";
@@ -54,6 +64,15 @@ const ARTIFACT_TEXT_PREVIEW_BYTES = 256 * 1024;
 const ARTIFACT_REPLAY_PREVIEW_BYTES = 2 * 1024 * 1024;
 const ARTIFACT_PREVIEW_FLUSH_MS = 50;
 const DASHBOARD_ARCHIVE_PAGE_SIZE = 6;
+type ArchiveOutcomeFilter = AgentVmRunSummary["outcome"] | null;
+
+const ARCHIVE_OUTCOME_FILTERS = [
+  ["succeeded", "Succeeded"],
+  ["cancelled", "Cancelled"],
+  ["failed", "Failed"],
+] as const satisfies ReadonlyArray<
+  readonly [Exclude<ArchiveOutcomeFilter, null>, string]
+>;
 
 // Admin overview: fleet-wide KPIs plus the live and archived scenario runs.
 // Host operations live on /admin/hosts.
@@ -96,22 +115,31 @@ export function Dashboard() {
     runId: string;
   } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [archiveSearch, setArchiveSearch] = useState("");
+  const [archiveOutcomeFilter, setArchiveOutcomeFilter] =
+    useState<ArchiveOutcomeFilter>(null);
 
   const {
     hosts,
     hostRecords,
     liveLoadedCount,
     liveTotalCount,
-    archiveTotalCount,
-    hasMoreArchives,
     hasMoreLive,
-    isLoadingMoreArchives,
-    loadMoreArchivesError,
-    loadMoreArchives,
     refreshHost,
-    forgetArchivedRun,
-    loadArchivedRunDetail,
   } = useHostFleet();
+  const {
+    runs: archivedScenarioRuns,
+    totalCount: archiveTotalCount,
+    hasMore: hasMoreArchives,
+    isPending: isArchivePending,
+    error: archiveError,
+    refetch: refreshArchive,
+    isLoadingMore: isLoadingMoreArchives,
+    loadMoreError: loadMoreArchivesError,
+    loadMore: loadMoreArchives,
+    loadRunDetail: loadArchivedRunDetail,
+    forgetRun: forgetArchivedRun,
+  } = useAdminRunArchive();
   const scenarios = useAdminScenarios();
   const launchableScenarios = scenarios.data?.scenarios ?? [];
 
@@ -127,17 +155,51 @@ export function Dashboard() {
     };
   }, []);
 
-  const loadArchiveRunDetail = async (hostId: string, runId: string) => {
+  useEffect(() => {
+    const currentUpdatedAt = new Map(
+      archivedScenarioRuns.map(({ host, run }) => [
+        `${host.id}:${run.id}`,
+        run.updatedAt,
+      ]),
+    );
+    const staleKeys = Object.entries(archiveDetailsByRun)
+      .filter(
+        ([viewerKey, detail]) =>
+          !currentUpdatedAt.has(viewerKey) ||
+          currentUpdatedAt.get(viewerKey) !== detail.updatedAt,
+      )
+      .map(([viewerKey]) => viewerKey);
+    if (!staleKeys.length) return;
+    const stale = new Set(staleKeys);
+    for (const viewerKey of stale) {
+      artifactStreamRef.current[viewerKey]?.abort();
+      delete artifactStreamRef.current[viewerKey];
+      archiveDetailGenerationRef.current[viewerKey] =
+        (archiveDetailGenerationRef.current[viewerKey] ?? 0) + 1;
+      delete archiveDetailPendingRef.current[viewerKey];
+    }
+    setExpandedRuns((current) => omitRecordKeys(current, stale));
+    setArchiveDetailsByRun((current) => omitRecordKeys(current, stale));
+    setArchiveDetailLoadingByRun((current) => omitRecordKeys(current, stale));
+    setArchiveDetailErrorsByRun((current) => omitRecordKeys(current, stale));
+    setArtifactViewerByRun((current) => omitRecordKeys(current, stale));
+  }, [archiveDetailsByRun, archivedScenarioRuns]);
+
+  const loadArchiveRunDetail = async (
+    hostId: string,
+    runId: string,
+    expectedUpdatedAt: number,
+  ) => {
     const viewerKey = `${hostId}:${runId}`;
     if (
-      archiveDetailsByRun[viewerKey] ||
+      archiveDetailsByRun[viewerKey]?.updatedAt === expectedUpdatedAt ||
       archiveDetailPendingRef.current[viewerKey]
     ) {
       return;
     }
 
     const generation = (archiveDetailGenerationRef.current[viewerKey] ?? 0) + 1;
-    archiveDetailGenerationRef.current[viewerKey] = generation;
+      archiveDetailGenerationRef.current[viewerKey] = generation;
     archiveDetailPendingRef.current[viewerKey] = true;
     setArchiveDetailLoadingByRun((current) => ({
       ...current,
@@ -148,9 +210,14 @@ export function Dashboard() {
       delete next[viewerKey];
       return next;
     });
+    setArtifactViewerByRun((current) => {
+      const next = { ...current };
+      delete next[viewerKey];
+      return next;
+    });
 
     try {
-      const detail = await loadArchivedRunDetail(hostId, runId);
+      const detail = await loadArchivedRunDetail(runId);
       if (archiveDetailGenerationRef.current[viewerKey] !== generation) {
         return;
       }
@@ -186,7 +253,7 @@ export function Dashboard() {
     artifact: AgentVmRunArtifact,
   ) => {
     const viewerKey = `${hostId}:${runId}`;
-    const contentUrl = scenarioRunArtifactContentPath(runId, artifact.id);
+    const contentUrl = adminScenarioRunArtifactContentPath(runId, artifact.id);
     const preview = artifactPreviewRequest(artifact);
     const previewTruncated = preview.previewTruncated;
     artifactStreamRef.current[viewerKey]?.abort();
@@ -369,13 +436,14 @@ export function Dashboard() {
     setVmNotice(null);
     try {
       const response = await fetch(
-        `/api/scenarios/runs/${encodeURIComponent(runId)}`,
+        `/api/admin/runs/${encodeURIComponent(runId)}`,
         {
           method: "DELETE",
           credentials: "include",
         },
       );
-      if (!response.ok) {
+      const alreadyDeleted = isMissingArchivedRunStatus(response.status);
+      if (!response.ok && !alreadyDeleted) {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
@@ -414,11 +482,14 @@ export function Dashboard() {
         delete next[viewerKey];
         return next;
       });
-      forgetArchivedRun(hostId, runId);
-      setVmNotice(`Deleted archived run ${runId}`);
+      forgetArchivedRun(runId);
+      setVmNotice(
+        alreadyDeleted
+          ? `Archived run ${runId} was already deleted`
+          : `Deleted archived run ${runId}`,
+      );
       setDeleteTarget(null);
       setDeleteConfirm("");
-      await refreshHost(hostId);
     } catch (error) {
       setVmError(
         error instanceof Error ? error.message : "failed to delete run",
@@ -435,7 +506,7 @@ export function Dashboard() {
     (total, { hostVms }) => total + hostVms.length,
     0,
   );
-  const archivedRunCount = archiveTotalCount;
+  const archivedRunCount = archiveTotalCount ?? archivedScenarioRuns.length;
   const enabledScenarioCount = launchableScenarios.filter(
     (scenario) => scenario.enabled,
   ).length;
@@ -460,24 +531,17 @@ export function Dashboard() {
         ),
     [hostRecords],
   );
-  const archivedScenarioRuns = useMemo<ArchivedScenarioRunRecord[]>(
+  const filteredArchivedScenarioRuns = useMemo(
     () =>
-      hostRecords
-        .flatMap(({ host, hostRuns }) => hostRuns.map((run) => ({ host, run })))
-        .sort((left, right) => {
-          const leftTime =
-            left.run.deletedAt ??
-            left.run.uploadCompletedAt ??
-            left.run.updatedAt ??
-            left.run.createdAt;
-          const rightTime =
-            right.run.deletedAt ??
-            right.run.uploadCompletedAt ??
-            right.run.updatedAt ??
-            right.run.createdAt;
-          return rightTime - leftTime;
-        }),
-    [hostRecords],
+      filterArchivedScenarioRuns(
+        archivedScenarioRuns,
+        archiveSearch,
+        archiveOutcomeFilter,
+      ),
+    [archiveOutcomeFilter, archiveSearch, archivedScenarioRuns],
+  );
+  const archiveFiltersActive = Boolean(
+    archiveSearch.trim() || archiveOutcomeFilter,
   );
   return (
     <PageShell width="workspace" density="compact">
@@ -535,7 +599,11 @@ export function Dashboard() {
         <LedgerRow
           icon={<Archive />}
           label="Run archive"
-          value={String(archivedRunCount)}
+          value={
+            archiveTotalCount === null && hasMoreArchives
+              ? `${archivedRunCount}+`
+              : String(archivedRunCount)
+          }
           detail="Retained sessions"
         />
         <LedgerRow
@@ -576,6 +644,12 @@ export function Dashboard() {
                 ? hosts.error.message
                 : "Failed to load hosts"}
             </AlertDescription>
+          </Alert>
+        ) : null}
+        {archiveError ? (
+          <Alert variant="destructive">
+            <AlertTitle>Could not load run archive</AlertTitle>
+            <AlertDescription>{archiveError.message}</AlertDescription>
           </Alert>
         ) : null}
         {vmError ? (
@@ -669,62 +743,154 @@ export function Dashboard() {
         title="Run archive"
         description="Finished runs with their captured artifacts."
         actions={
-          <Badge variant="outline">
-            {archivedRunCount} retained
-            {hasMoreArchives ? ` · ${archivedScenarioRuns.length} shown` : ""}
-          </Badge>
+          <>
+            <Badge variant="outline">
+              {archiveTotalCount === null
+                ? `${archivedScenarioRuns.length}+ loaded`
+                : `${archivedRunCount} retained`}
+              {hasMoreArchives && archiveTotalCount !== null
+                ? ` · ${archivedScenarioRuns.length} shown`
+                : ""}
+            </Badge>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              disabled={isArchivePending || isLoadingMoreArchives}
+              onClick={() => {
+                void refreshArchive().catch(() => {
+                  // The archive section renders the request error.
+                });
+              }}
+            >
+              <RefreshCw className="size-3.5" />
+              Refresh
+            </Button>
+          </>
         }
+        bodyClassName="space-y-4"
       >
-        {hosts.isPending ? (
+        {isArchivePending ? (
           <TableSkeleton rows={2} />
+        ) : archiveError && !archivedScenarioRuns.length ? (
+          <OperationalEmptyState
+            title="Run archive unavailable"
+            description="Refresh the page to try loading the archive again."
+          />
         ) : archivedScenarioRuns.length ? (
-          <PaginatedCollection
-            items={archivedScenarioRuns}
-            pageSize={DASHBOARD_ARCHIVE_PAGE_SIZE}
-            itemLabel="archived runs"
-          >
-            {(visibleRuns) => (
-              <div className="space-y-4">
-                {visibleRuns.map(({ host, run }) => {
-                  const viewerKey = `${host.id}:${run.id}`;
-                  return (
-                    <ScenarioRunArchiveCard
-                      key={viewerKey}
-                      host={host}
-                      run={run}
-                      detail={archiveDetailsByRun[viewerKey] ?? null}
-                      isDetailLoading={Boolean(
-                        archiveDetailLoadingByRun[viewerKey],
-                      )}
-                      detailError={archiveDetailErrorsByRun[viewerKey] ?? null}
-                      viewer={artifactViewerByRun[viewerKey] ?? null}
-                      isExpanded={Boolean(expandedRuns[viewerKey])}
-                      onToggle={() => {
-                        const isExpanded = Boolean(expandedRuns[viewerKey]);
-                        setExpandedRuns((current) => ({
-                          ...current,
-                          [viewerKey]: !isExpanded,
-                        }));
-                        if (!isExpanded) {
-                          void loadArchiveRunDetail(host.id, run.id);
-                        }
-                      }}
-                      onDelete={() => {
-                        setDeleteConfirm("");
-                        setDeleteTarget({ hostId: host.id, runId: run.id });
-                      }}
-                      onStreamArtifact={(artifact) => {
-                        void streamArtifactContent(host.id, run.id, artifact);
-                      }}
-                      isDeleting={
-                        vmBusyKey === `${host.id}:delete-run:${run.id}`
-                      }
-                    />
-                  );
-                })}
+          <>
+            <FilterBar
+              search={archiveSearch}
+              onSearchChange={setArchiveSearch}
+              searchPlaceholder="Search runs, users, or hosts…"
+              searchLabel="Search archived runs"
+              stackSearchOnMobile
+              filtersActive={archiveFiltersActive}
+              onClear={() => {
+                setArchiveSearch("");
+                setArchiveOutcomeFilter(null);
+              }}
+            >
+              <div
+                className="flex flex-wrap items-center gap-1.5"
+                role="group"
+                aria-label="Filter archived runs by outcome"
+              >
+                {ARCHIVE_OUTCOME_FILTERS.map(([value, label]) => (
+                  <FilterChip
+                    key={value}
+                    active={archiveOutcomeFilter === value}
+                    onClick={() =>
+                      setArchiveOutcomeFilter((current) =>
+                        current === value ? null : value,
+                      )
+                    }
+                  >
+                    {label}
+                  </FilterChip>
+                ))}
               </div>
+            </FilterBar>
+
+            {archiveFiltersActive ? (
+              <p className="text-caption" aria-live="polite">
+                Showing {filteredArchivedScenarioRuns.length} of{" "}
+                {archivedScenarioRuns.length} loaded runs
+                {hasMoreArchives ? ". Load older runs to search more." : "."}
+              </p>
+            ) : null}
+
+            {filteredArchivedScenarioRuns.length ? (
+              <PaginatedCollection
+                items={filteredArchivedScenarioRuns}
+                pageSize={DASHBOARD_ARCHIVE_PAGE_SIZE}
+                itemLabel="archived runs"
+                resetKey={`${archiveSearch.trim().toLowerCase()}|${
+                  archiveOutcomeFilter ?? ""
+                }`}
+              >
+                {(visibleRuns) => (
+                  <div className="divide-y">
+                    {visibleRuns.map(({ host, run }) => {
+                      const viewerKey = `${host.id}:${run.id}`;
+                      return (
+                        <ScenarioRunArchiveCard
+                          key={viewerKey}
+                          host={host}
+                          run={run}
+                          detail={archiveDetailsByRun[viewerKey] ?? null}
+                          isDetailLoading={Boolean(
+                            archiveDetailLoadingByRun[viewerKey],
+                          )}
+                          detailError={
+                            archiveDetailErrorsByRun[viewerKey] ?? null
+                          }
+                          viewer={artifactViewerByRun[viewerKey] ?? null}
+                          isExpanded={Boolean(expandedRuns[viewerKey])}
+                          onToggle={() => {
+                            const isExpanded = Boolean(expandedRuns[viewerKey]);
+                            setExpandedRuns((current) => ({
+                              ...current,
+                              [viewerKey]: !isExpanded,
+                            }));
+                            if (!isExpanded) {
+                              void loadArchiveRunDetail(
+                                host.id,
+                                run.id,
+                                run.updatedAt,
+                              );
+                            }
+                          }}
+                          onDelete={() => {
+                            setDeleteConfirm("");
+                            setDeleteTarget({
+                              hostId: host.id,
+                              runId: run.id,
+                            });
+                          }}
+                          onStreamArtifact={(artifact) => {
+                            void streamArtifactContent(
+                              host.id,
+                              run.id,
+                              artifact,
+                            );
+                          }}
+                          isDeleting={
+                            vmBusyKey === `${host.id}:delete-run:${run.id}`
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </PaginatedCollection>
+            ) : (
+              <OperationalEmptyState
+                title="No runs match these filters"
+                description="Clear a filter or use a different search term."
+              />
             )}
-          </PaginatedCollection>
+          </>
         ) : (
           <OperationalEmptyState
             title="No archived scenario runs yet"
@@ -732,7 +898,7 @@ export function Dashboard() {
           />
         )}
         {hasMoreArchives ? (
-          <div className="mt-6 flex flex-col items-center gap-2 border-t pt-4">
+          <div className="flex flex-col items-center gap-2 border-t pt-4">
             <Button
               type="button"
               variant="outline"
@@ -861,6 +1027,43 @@ export function Dashboard() {
       </Dialog>
     </PageShell>
   );
+}
+
+export function filterArchivedScenarioRuns(
+  runs: readonly ArchivedScenarioRunRecord[],
+  search: string,
+  outcome: ArchiveOutcomeFilter,
+): ArchivedScenarioRunRecord[] {
+  const needle = search.trim().toLowerCase();
+  return runs.filter(({ host, run }) => {
+    if (outcome && run.outcome !== outcome) return false;
+    if (!needle) return true;
+    return [
+      run.id,
+      run.vmName,
+      run.userId,
+      run.ownerName,
+      run.ownerUsername ?? "",
+      host.name,
+      host.id,
+      run.scenarioMeta?.scenarioName ?? "",
+      run.scenarioMeta?.scenarioVmName ?? "",
+      run.scenarioMeta?.hostname ?? "",
+    ].some((value) => value.toLowerCase().includes(needle));
+  });
+}
+
+export function isMissingArchivedRunStatus(status: number) {
+  return status === 404 || status === 410;
+}
+
+function omitRecordKeys<T>(
+  current: Record<string, T>,
+  keys: ReadonlySet<string>,
+): Record<string, T> {
+  const next = { ...current };
+  for (const key of keys) delete next[key];
+  return next;
 }
 
 function isReplayArtifact(

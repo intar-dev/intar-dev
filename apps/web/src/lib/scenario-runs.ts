@@ -25,6 +25,7 @@ export {
 export {
   startScenarioRunForUser,
   destroyScenarioRunForUser,
+  deleteFinishedScenarioRunForAdmin,
   deleteFinishedScenarioRunForUser,
   expireOverdueRunLeases,
   createScenarioSshSessionForUser,

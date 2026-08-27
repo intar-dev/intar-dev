@@ -7,7 +7,9 @@ import {
   eq,
   inArray,
   isNull,
+  lt,
   notInArray,
+  or,
   sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -16,6 +18,7 @@ import {
   hostActualState,
   scenarioRunArtifacts,
   scenarioRuns,
+  user,
 } from "@/db/schema";
 import {
   buildStoredBridgeStatus,
@@ -38,6 +41,8 @@ import type {
   AgentVmRunEvent,
   AgentVmRunRecord,
   AgentVmRunSummary,
+  AdminRunArchivePageResponse,
+  ArchivedScenarioRunRecord,
   HostRecord,
   VmScenarioMeta,
   VmStatus,
@@ -49,6 +54,7 @@ import type { RunStateDocument } from "@/lib/run-state";
  * Older pages are explicit operator requests, never part of the 3s poll.
  */
 export const FLEET_ARCHIVE_SUMMARY_LIMIT = 100;
+export const ADMIN_RUN_ARCHIVE_PAGE_SIZE = 100;
 
 /**
  * Personal hosts are operationally few. Keep the fleet poll hard-bounded so
@@ -61,6 +67,16 @@ export const FLEET_HOST_LIMIT = 100;
 export const FLEET_LIVE_RUN_LIMIT = FLEET_HOST_LIMIT;
 
 const ARCHIVE_PHASES = ["archiving", "completed", "failed"];
+const ADMIN_ARCHIVE_SCOPE = sql`
+  ${scenarioRuns.hiddenAt} IS NULL
+  AND ${scenarioRuns.state} IN ('archiving', 'completed', 'failed')
+`;
+// Archive state writers latch archiveEnteredAt when a row enters the archive.
+// createdAt keeps pre-migration or malformed legacy rows page-stable.
+const ADMIN_ARCHIVE_SORT_AT = sql<number>`coalesce(
+  ${scenarioRuns.archiveEnteredAt},
+  ${scenarioRuns.createdAt}
+)`;
 const RUN_PHASES = [
   "queued",
   "provisioning",
@@ -93,6 +109,8 @@ export interface AdminFleetSnapshot {
 interface FleetRunRow {
   runId: string;
   userId: string;
+  ownerName: string;
+  ownerUsername: string | null;
   hostId: string;
   title: string;
   tagline: string;
@@ -111,6 +129,11 @@ interface FleetRunSource extends FleetRunRow {
   outcome: AgentVmRunSummary["outcome"];
 }
 
+export interface AdminRunArchiveCursor {
+  archiveAt: number;
+  runId: string;
+}
+
 interface ArtifactAggregate {
   artifactCount: number;
   pendingArtifactCount: number;
@@ -121,6 +144,8 @@ interface ArtifactAggregate {
 const fleetRunFields = {
   runId: scenarioRuns.runId,
   userId: scenarioRuns.userId,
+  ownerName: user.name,
+  ownerUsername: user.username,
   hostId: scenarioRuns.hostId,
   title: scenarioRuns.title,
   tagline: scenarioRuns.tagline,
@@ -134,6 +159,12 @@ const fleetRunFields = {
   updatedAt: scenarioRuns.updatedAt,
 } as const;
 
+const adminArchiveRunFields = {
+  ...fleetRunFields,
+  hostName: agentHosts.name,
+  archiveAt: ADMIN_ARCHIVE_SORT_AT,
+} as const;
+
 /**
  * Read the operator dashboard in a fixed number of D1 queries. This is kept
  * separate from the old per-host routes so one browser poll never becomes a
@@ -145,11 +176,13 @@ export async function loadAdminFleetSnapshot(params: {
   now?: number;
   archiveLimit?: number;
   archiveOffset?: number;
+  includeArchiveSummaries?: boolean;
 }): Promise<AdminFleetSnapshot> {
   const db = drizzle(params.d1 ?? env.DB);
   const now = params.now ?? Date.now();
   const archiveLimit = boundedArchiveLimit(params.archiveLimit);
   const archiveOffset = boundedArchiveOffset(params.archiveOffset);
+  const includeArchiveSummaries = params.includeArchiveSummaries !== false;
   const fleetHostIds = boundedFleetHostIds(db, params.userId);
 
   const hostRows = await db
@@ -202,6 +235,7 @@ export async function loadAdminFleetSnapshot(params: {
       .select(fleetRunFields)
       .from(scenarioRuns)
       .innerJoin(fleetHostIds, eq(fleetHostIds.id, scenarioRuns.hostId))
+      .innerJoin(user, eq(user.id, scenarioRuns.userId))
       .where(
         and(
           eq(scenarioRuns.userId, params.userId),
@@ -211,20 +245,23 @@ export async function loadAdminFleetSnapshot(params: {
       )
       .orderBy(desc(scenarioRuns.updatedAt), desc(scenarioRuns.runId))
       .limit(FLEET_LIVE_RUN_LIMIT),
-    db
-      .select(fleetRunFields)
-      .from(scenarioRuns)
-      .innerJoin(fleetHostIds, eq(fleetHostIds.id, scenarioRuns.hostId))
-      .where(
-        and(
-          eq(scenarioRuns.userId, params.userId),
-          isNull(scenarioRuns.hiddenAt),
-          inArray(scenarioRuns.state, ARCHIVE_PHASES),
-        ),
-      )
-      .orderBy(desc(scenarioRuns.updatedAt), desc(scenarioRuns.runId))
-      .limit(archiveLimit)
-      .offset(archiveOffset),
+    includeArchiveSummaries
+      ? db
+          .select(fleetRunFields)
+          .from(scenarioRuns)
+          .innerJoin(fleetHostIds, eq(fleetHostIds.id, scenarioRuns.hostId))
+          .innerJoin(user, eq(user.id, scenarioRuns.userId))
+          .where(
+            and(
+              eq(scenarioRuns.userId, params.userId),
+              isNull(scenarioRuns.hiddenAt),
+              inArray(scenarioRuns.state, ARCHIVE_PHASES),
+            ),
+          )
+          .orderBy(desc(scenarioRuns.updatedAt), desc(scenarioRuns.runId))
+          .limit(archiveLimit)
+          .offset(archiveOffset)
+      : Promise.resolve([]),
     db
       .select({
         hostId: scenarioRuns.hostId,
@@ -290,6 +327,7 @@ export async function loadAdminFleetSnapshot(params: {
   );
   const liveTotalCount = Number(liveCountRows[0]?.liveCount ?? 0);
   const archiveNextOffset =
+    includeArchiveSummaries &&
     archiveOffset + archiveRows.length < archiveTotalCount
       ? archiveOffset + archiveRows.length
       : null;
@@ -328,6 +366,7 @@ export async function loadAdminFleetArchivedRunDetail(params: {
     .select(fleetRunFields)
     .from(scenarioRuns)
     .innerJoin(fleetHostIds, eq(fleetHostIds.id, scenarioRuns.hostId))
+    .innerJoin(user, eq(user.id, scenarioRuns.userId))
     .where(
       and(
         eq(scenarioRuns.userId, params.userId),
@@ -361,6 +400,139 @@ export async function loadAdminFleetArchivedRunDetail(params: {
     artifacts,
     events: buildArchivedRunEvents(source, artifacts, summary.uploadCompletedAt),
   };
+}
+
+/**
+ * Read the global retained-run archive for an authenticated administrator.
+ * The route owns the admin authorization check; this data function accepts no
+ * user scope, so callers cannot accidentally turn it back into a personal list.
+ */
+export async function loadAdminRunArchivePage(params: {
+  cursor?: AdminRunArchiveCursor;
+  d1?: D1Database;
+}): Promise<AdminRunArchivePageResponse> {
+  const db = drizzle(params.d1 ?? env.DB);
+  const beforeCursor = params.cursor
+    ? or(
+        lt(ADMIN_ARCHIVE_SORT_AT, params.cursor.archiveAt),
+        and(
+          eq(ADMIN_ARCHIVE_SORT_AT, params.cursor.archiveAt),
+          lt(scenarioRuns.runId, params.cursor.runId),
+        ),
+      )
+    : undefined;
+  const archiveFilter = and(
+    ADMIN_ARCHIVE_SCOPE,
+    beforeCursor,
+  );
+
+  const rows = await db
+    .select(adminArchiveRunFields)
+    .from(scenarioRuns)
+    .innerJoin(user, eq(user.id, scenarioRuns.userId))
+    .innerJoin(agentHosts, eq(agentHosts.id, scenarioRuns.hostId))
+    .where(archiveFilter)
+    .orderBy(desc(ADMIN_ARCHIVE_SORT_AT), desc(scenarioRuns.runId))
+    .limit(ADMIN_RUN_ARCHIVE_PAGE_SIZE + 1);
+  const hasMore = rows.length > ADMIN_RUN_ARCHIVE_PAGE_SIZE;
+  const pageRows = rows.slice(0, ADMIN_RUN_ARCHIVE_PAGE_SIZE);
+  const sources = pageRows.map((row) => ({
+    host: { id: row.hostId, name: row.hostName },
+    source: toFleetRunSource(row),
+  }));
+  const artifactAggregateByRun = await loadArtifactAggregates(
+    db,
+    sources.map(({ source }) => source.runId),
+  );
+  const runs = sources.map(({ host, source }) => ({
+    host,
+    run: buildArchivedRunSummary(
+      source,
+      artifactAggregateByRun.get(source.runId) ?? emptyArtifactAggregate(),
+    ),
+  })) satisfies ArchivedScenarioRunRecord[];
+  const last = pageRows.at(-1);
+
+  return {
+    runs,
+    totalCount: !params.cursor && !hasMore ? pageRows.length : null,
+    nextCursor:
+      hasMore && last
+        ? encodeAdminRunArchiveCursor({
+            archiveAt: last.archiveAt,
+            runId: last.runId,
+          })
+        : null,
+  };
+}
+
+/** Load global archive detail after an administrator opens one row. */
+export async function loadAdminArchivedRunDetail(params: {
+  runId: string;
+  d1?: D1Database;
+}): Promise<AgentVmRunRecord | null> {
+  const db = drizzle(params.d1 ?? env.DB);
+  const rows = await db
+    .select(fleetRunFields)
+    .from(scenarioRuns)
+    .innerJoin(user, eq(user.id, scenarioRuns.userId))
+    .where(
+      and(
+        eq(scenarioRuns.runId, params.runId),
+        isNull(scenarioRuns.hiddenAt),
+        inArray(scenarioRuns.state, ARCHIVE_PHASES),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+
+  const source = toFleetRunSource(row);
+  const [artifactAggregateByRun, artifactsByRun] = await Promise.all([
+    loadArtifactAggregates(db, [source.runId]),
+    loadArchivedArtifacts(db, [source]),
+  ]);
+  const aggregate =
+    artifactAggregateByRun.get(source.runId) ?? emptyArtifactAggregate();
+  const summary = buildArchivedRunSummary(source, aggregate);
+  const artifacts = artifactsByRun.get(source.runId) ?? [];
+  return {
+    ...summary,
+    artifacts,
+    events: buildArchivedRunEvents(source, artifacts, summary.uploadCompletedAt),
+  };
+}
+
+export function parseAdminRunArchiveCursor(
+  value: string | null,
+): AdminRunArchiveCursor | null | undefined {
+  if (value === null || value === "") return undefined;
+  if (value.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(value)) return null;
+  try {
+    const standard = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = "=".repeat((4 - (standard.length % 4)) % 4);
+    const parsed: unknown = JSON.parse(atob(`${standard}${padding}`));
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 2 ||
+      !Number.isSafeInteger(parsed[0]) ||
+      parsed[0] < 0 ||
+      typeof parsed[1] !== "string" ||
+      !/^[A-Za-z0-9_-]+$/u.test(parsed[1])
+    ) {
+      return null;
+    }
+    return { archiveAt: parsed[0], runId: parsed[1] };
+  } catch {
+    return null;
+  }
+}
+
+function encodeAdminRunArchiveCursor(cursor: AdminRunArchiveCursor): string {
+  return btoa(JSON.stringify([cursor.archiveAt, cursor.runId]))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/u, "");
 }
 
 function personalActiveHostScope(userId: string) {
@@ -585,6 +757,8 @@ function buildArchivedRunSummary(
     id: run.runId,
     hostId: run.hostId,
     userId: run.userId,
+    ownerName: run.ownerName,
+    ownerUsername: run.ownerUsername,
     vmName:
       run.stateDocument.vms.map((vm) => vm.runtimeVmName).join(", ") ||
       run.runId,
@@ -600,7 +774,7 @@ function buildArchivedRunSummary(
       aggregate.pendingArtifactCount,
     ),
     vmCreatedAt: vmCreatedAt.length ? Math.min(...vmCreatedAt) : run.createdAt,
-    deleteRequestedAt: null,
+    deleteRequestedAt: run.deleteRequestedAt,
     deletedAt: isTerminalArchivePhase(run.stateDocument.phase)
       ? run.updatedAt
       : null,
@@ -610,6 +784,7 @@ function buildArchivedRunSummary(
       run.stateDocument.phase === "failed"
         ? run.stateDocument.phaseDetail
         : null,
+    deleteBlockedReason: archivedRunDeleteBlockedReason(run, aggregate),
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     artifactCount: aggregate.artifactCount,
@@ -620,6 +795,25 @@ function buildArchivedRunSummary(
     ...summary,
     eventCount: archivedRunEventCount(run, summary),
   };
+}
+
+function archivedRunDeleteBlockedReason(
+  run: FleetRunSource,
+  aggregate: ArtifactAggregate,
+): AgentVmRunSummary["deleteBlockedReason"] {
+  if (!isTerminalArchivePhase(run.stateDocument.phase)) {
+    return "archive_in_progress";
+  }
+  if (
+    run.stateDocument.vms.length === 0 ||
+    run.stateDocument.vms.some((vm) => vm.phase !== "completed")
+  ) {
+    return "vm_teardown_pending";
+  }
+  if (aggregate.pendingArtifactCount > 0) {
+    return "artifact_upload_pending";
+  }
+  return null;
 }
 
 function buildScenarioMeta(run: FleetRunSource): VmScenarioMeta {

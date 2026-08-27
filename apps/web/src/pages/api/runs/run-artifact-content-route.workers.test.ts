@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -11,10 +12,14 @@ import {
 } from "@/db/schema";
 import { resetD1Database } from "@/test/d1-migrations";
 
-const auth = vi.hoisted(() => vi.fn());
+const auth = vi.hoisted(() => ({
+  user: vi.fn(),
+  admin: vi.fn(),
+}));
 
 vi.mock("@/lib/agent-bridge", () => ({
-  requireUserContext: auth,
+  requireUserContext: auth.user,
+  requireAdminUserContext: auth.admin,
   jsonResponse: (body: unknown, init?: ResponseInit) =>
     new Response(JSON.stringify(body), {
       ...init,
@@ -23,6 +28,7 @@ vi.mock("@/lib/agent-bridge", () => ({
 }));
 
 import { GET } from "./[runId]/artifacts/[artifactId]/content";
+import { GET as adminGet } from "@/pages/api/admin/runs/[runId]/artifacts/[artifactId]/content";
 
 const ARTIFACT_BODY = "cast-data\n";
 const ARTIFACT_R2_KEY = "runs/run-1/vm-1-0.cast";
@@ -31,9 +37,13 @@ describe("scenario run artifact content route", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     await resetD1Database();
-    auth.mockResolvedValue({
+    auth.user.mockResolvedValue({
       ok: true as const,
       context: { userId: "user-1" },
+    });
+    auth.admin.mockResolvedValue({
+      ok: true as const,
+      context: { userId: "admin-user", isAdmin: true },
     });
 
     const db = drizzle(env.DB);
@@ -118,5 +128,77 @@ describe("scenario run artifact content route", () => {
       `bytes 0-0/${new TextEncoder().encode(ARTIFACT_BODY).byteLength}`,
     );
     expect(new TextDecoder().decode(await response.arrayBuffer())).toBe("c");
+  });
+
+  it("lets an admin read another user's archived artifact", async () => {
+    const response = await adminGet({
+      request: new Request(
+        "https://intar.dev/api/admin/runs/run-1/artifacts/vm-1:0/content",
+      ),
+      params: { runId: "run-1", artifactId: "vm-1:0" },
+    } as never);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(new TextDecoder().decode(await response.arrayBuffer())).toBe(
+      ARTIFACT_BODY,
+    );
+  });
+
+  it("denies the admin artifact proxy before storage lookup", async () => {
+    auth.admin.mockResolvedValueOnce({
+      ok: false as const,
+      response: Response.json({ error: "admin required" }, { status: 403 }),
+    });
+
+    const response = await adminGet({
+      request: new Request(
+        "https://intar.dev/api/admin/runs/run-1/artifacts/vm-1:0/content",
+      ),
+      params: { runId: "run-1", artifactId: "vm-1:0" },
+    } as never);
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("keeps forged run and artifact pairs hidden from admins", async () => {
+    const response = await adminGet({
+      request: new Request(
+        "https://intar.dev/api/admin/runs/another-run/artifacts/vm-1:0/content",
+      ),
+      params: { runId: "another-run", artifactId: "vm-1:0" },
+    } as never);
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("does not expose hidden or non-archive artifacts through the admin proxy", async () => {
+    const db = drizzle(env.DB);
+    await db
+      .update(scenarioRuns)
+      .set({ hiddenAt: Date.now() })
+      .where(eq(scenarioRuns.runId, "run-1"));
+
+    let response = await adminGet({
+      request: new Request(
+        "https://intar.dev/api/admin/runs/run-1/artifacts/vm-1:0/content",
+      ),
+      params: { runId: "run-1", artifactId: "vm-1:0" },
+    } as never);
+    expect(response.status).toBe(404);
+
+    await db
+      .update(scenarioRuns)
+      .set({ hiddenAt: null, state: "queued" })
+      .where(eq(scenarioRuns.runId, "run-1"));
+    response = await adminGet({
+      request: new Request(
+        "https://intar.dev/api/admin/runs/run-1/artifacts/vm-1:0/content",
+      ),
+      params: { runId: "run-1", artifactId: "vm-1:0" },
+    } as never);
+    expect(response.status).toBe(404);
   });
 });

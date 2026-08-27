@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  adminScenarioRunArtifactContentPath,
   scenarioRunArtifactContentPath,
   workshopArtifactContentPath,
   workshopTerminalTranscriptPath,
@@ -16,6 +17,12 @@ describe("artifact content paths", () => {
       "/api/runs/urtj68e1n4zyk9o6l7fhtxvp/artifacts/srunvm123:0/content",
     );
     expect(path).not.toContain("%3A");
+  });
+
+  it("builds the admin-only scenario artifact path", () => {
+    expect(adminScenarioRunArtifactContentPath("run-1", "runtimevm1:2")).toBe(
+      "/api/admin/runs/run-1/artifacts/runtimevm1:2/content",
+    );
   });
 
   it("keeps workshop artifact and terminal-session colons literal", () => {

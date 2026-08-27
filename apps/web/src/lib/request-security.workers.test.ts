@@ -52,6 +52,7 @@ const BODYLESS_CUSTOM_MUTATIONS = [
   ["POST", "/api/access-invites/cancel"],
   ["POST", "/api/access-invites/confirm"],
   ["DELETE", "/api/admin/authoring/sources/demo"],
+  ["DELETE", "/api/admin/runs/run-1"],
   ["POST", "/api/admin/builds/build-1/retry"],
   ["POST", "/api/admin/scenarios/demo/enabled"],
   ["DELETE", "/api/admin/scenarios/demo/enabled"],

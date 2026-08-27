@@ -614,3 +614,52 @@ test.describe("wide operational states", () => {
     await expectRouteScreenshot(page, "admin-overview-empty-dark-wide");
   });
 });
+
+for (const viewport of [
+  { id: "desktop", width: 1440, height: 900 },
+  { id: "mobile", width: 390, height: 844 },
+] as const) {
+  test.describe(`admin run archive · ${viewport.id}`, () => {
+    test.use({ viewport: { width: viewport.width, height: viewport.height } });
+
+    test("compact archive", async ({ page, ui }) => {
+      await ui.open({ ...routeCase("admin-overview"), theme: "light" });
+      const archive = page
+        .getByRole("heading", { name: "Run archive" })
+        .locator("xpath=ancestor::section");
+      await archive.scrollIntoViewIfNeeded();
+      await expect(archive).toHaveScreenshot(
+        `admin-run-archive-light-${viewport.id}.png`,
+        {
+          animations: "disabled",
+          caret: "hide",
+          scale: "css",
+        },
+      );
+    });
+
+    if (viewport.id === "desktop") {
+      test("expanded archive", async ({ page, ui }) => {
+        await ui.open({ ...routeCase("admin-overview"), theme: "light" });
+        const archive = page
+          .getByRole("heading", { name: "Run archive" })
+          .locator("xpath=ancestor::section");
+        await archive.getByRole("button", { name: "Details" }).click();
+        await expect(
+          archive.getByRole("button", { name: "Refresh" }),
+        ).toBeVisible();
+        await expect(
+          archive.getByRole("heading", { name: "Artifacts" }),
+        ).toBeVisible();
+        await expect(archive).toHaveScreenshot(
+          "admin-run-archive-expanded-light-desktop.png",
+          {
+            animations: "disabled",
+            caret: "hide",
+            scale: "css",
+          },
+        );
+      });
+    }
+  });
+}

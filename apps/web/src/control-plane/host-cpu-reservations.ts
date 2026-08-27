@@ -1,4 +1,4 @@
-import { and, eq, exists, inArray, isNull } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   hostActualState,
@@ -720,6 +720,7 @@ async function failExpiredUndispatchedRun(
         activeKey:
           run.deleteRequestedAt === null ? null : run.activeKey,
         failedAt: updatedAt,
+        archiveEnteredAt: sql<number>`coalesce(${scenarioRuns.archiveEnteredAt}, ${updatedAt})`,
         updatedAt,
       })
       .where(

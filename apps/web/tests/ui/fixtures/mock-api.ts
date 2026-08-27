@@ -188,7 +188,11 @@ function records(value: unknown): FixtureRecord[] {
  * records so other tests can still exercise the old host endpoints; this
  * projection is what the new dashboard is allowed to receive initially.
  */
-function fleetSnapshot(state: MockApiState, archiveOffset = 0) {
+function fleetSnapshot(
+  state: MockApiState,
+  archiveOffset = 0,
+  includeArchiveSummaries = true,
+) {
   const hostRuns = state.hostRuns as {
     liveVms?: FixtureRecord[];
     archivedRuns?: FixtureRecord[];
@@ -203,8 +207,11 @@ function fleetSnapshot(state: MockApiState, archiveOffset = 0) {
     };
   });
   const archiveTotalCount = archiveSummaries.length;
-  const archivePage = archiveSummaries.slice(archiveOffset, archiveOffset + 100);
+  const archivePage = includeArchiveSummaries
+    ? archiveSummaries.slice(archiveOffset, archiveOffset + 100)
+    : [];
   const archiveNextOffset =
+    includeArchiveSummaries &&
     archiveOffset + archivePage.length < archiveTotalCount
       ? archiveOffset + archivePage.length
       : null;
@@ -242,6 +249,27 @@ function fleetArchiveDetail(state: MockApiState, runId: string) {
     artifactCount: records(run.artifacts).length,
     eventCount: records(run.events).length,
   };
+}
+
+function adminRunArchive(state: MockApiState) {
+  const hostRuns = state.hostRuns as { archivedRuns?: FixtureRecord[] };
+  const hosts = records(state.hosts);
+  const runs = records(hostRuns.archivedRuns).map((run) => {
+    const { artifacts, events, ...summary } = run;
+    const host = hosts.find((entry) => entry.id === run.hostId);
+    return {
+      host: {
+        id: String(run.hostId ?? "unknown-host"),
+        name: String(host?.name ?? run.hostId ?? "Unknown host"),
+      },
+      run: {
+        ...summary,
+        artifactCount: records(artifacts).length,
+        eventCount: records(events).length,
+      },
+    };
+  });
+  return { runs, totalCount: runs.length, nextCursor: null };
 }
 
 /** Build the small run projection used after the first full run response. */
@@ -1130,6 +1158,19 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         });
         return;
       }
+      if (
+        /^\/api\/admin\/runs\/[^/]+\/artifacts\/[^/]+\/content$/.test(
+          pathname,
+        ) &&
+        method === "GET"
+      ) {
+        await route.fulfill({
+          status: 200,
+          contentType: "text/plain; charset=utf-8",
+          body: '{"version":2,"width":120,"height":30,"timestamp":1783670400,"env":{"TERM":"xterm-256color"}}\n[0.05,"o","$ "]\n[0.1,"i","systemctl status nginx\\r"]\n[0.2,"o","systemctl status nginx\\r\\n"]\n',
+        });
+        return;
+      }
 
       if (pathname === "/api/organizations" && method === "GET") {
         await json(route, {
@@ -1359,6 +1400,35 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         });
         return;
       }
+      if (pathname === "/api/admin/runs" && method === "GET") {
+        const cursor = url.searchParams.get("cursor");
+        if (cursor === "invalid") {
+          await json(route, { error: "cursor is invalid" }, 400);
+          return;
+        }
+        await json(route, adminRunArchive(server.state));
+        return;
+      }
+      const adminRunId = segment(pathname, /^\/api\/admin\/runs\/([^/]+)$/);
+      if (adminRunId && method === "GET") {
+        const run = fleetArchiveDetail(server.state, adminRunId);
+        if (!run) {
+          await json(route, { error: "archived run not found" }, 404);
+          return;
+        }
+        await json(route, { run });
+        return;
+      }
+      if (adminRunId && method === "DELETE") {
+        const hostRuns = server.state.hostRuns as {
+          archivedRuns?: FixtureRecord[];
+        };
+        hostRuns.archivedRuns = records(hostRuns.archivedRuns).filter(
+          (run) => run.id !== adminRunId,
+        );
+        await noContent(route, { "cache-control": "private, no-store" });
+        return;
+      }
       const fleetDetailRunId = segment(
         pathname,
         /^\/api\/admin\/fleet-snapshot\/runs\/([^/]+)$/,
@@ -1384,7 +1454,14 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           await json(route, { error: "archiveOffset must be a non-negative integer" }, 400);
           return;
         }
-        await json(route, fleetSnapshot(server.state, archiveOffset));
+        await json(
+          route,
+          fleetSnapshot(
+            server.state,
+            archiveOffset,
+            url.searchParams.get("includeArchiveSummaries") !== "0",
+          ),
+        );
         return;
       }
       if (pathname === "/api/agent/hosts" && method === "POST") {

@@ -114,6 +114,8 @@ export interface AgentVmRunSummary {
   id: string;
   hostId: string;
   userId: string;
+  ownerName: string;
+  ownerUsername: string | null;
   vmName: string;
   state: string;
   outcome: "in_progress" | "succeeded" | "cancelled" | "failed";
@@ -126,6 +128,11 @@ export interface AgentVmRunSummary {
   uploadStartedAt: number | null;
   uploadCompletedAt: number | null;
   uploadError: string | null;
+  deleteBlockedReason:
+    | "archive_in_progress"
+    | "vm_teardown_pending"
+    | "artifact_upload_pending"
+    | null;
   createdAt: number;
   updatedAt: number;
   artifactCount: number;
@@ -182,7 +189,19 @@ export interface LiveScenarioRunRecord {
   vm: VmStatus;
 }
 
+export interface AgentRunArchiveHost {
+  id: string;
+  name: string;
+}
+
 export interface ArchivedScenarioRunRecord {
-  host: AgentHostApi;
+  host: AgentRunArchiveHost;
   run: AgentVmRun;
+}
+
+export interface AdminRunArchivePageResponse {
+  runs: ArchivedScenarioRunRecord[];
+  /** Exact only after the API knows every retained row has been loaded. */
+  totalCount: number | null;
+  nextCursor: string | null;
 }

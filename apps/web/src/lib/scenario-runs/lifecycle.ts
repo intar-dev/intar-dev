@@ -262,6 +262,21 @@ export async function deleteFinishedScenarioRunForUser(params: {
   runId: string;
   userId: string;
 }): Promise<void> {
+  return deleteFinishedScenarioRun(params);
+}
+
+export async function deleteFinishedScenarioRunForAdmin(params: {
+  runId: string;
+  actorUserId: string;
+}): Promise<void> {
+  return deleteFinishedScenarioRun(params);
+}
+
+async function deleteFinishedScenarioRun(params: {
+  runId: string;
+  userId?: string;
+  actorUserId?: string;
+}): Promise<void> {
   const db = drizzle(env.DB);
   const row = await loadRunRow(params.runId, params.userId);
   if (!row) {
@@ -312,11 +327,39 @@ export async function deleteFinishedScenarioRunForUser(params: {
     });
   }
 
-  await deleteScenarioRunRuntimeProjection({
+  const adminAuditStatements = params.actorUserId
+    ? [
+        env.DB.prepare(
+          `DELETE FROM scenario_runs
+           WHERE run_id = ?1
+             AND user_id = ?2
+             AND hidden_at IS NULL`,
+        ).bind(row.runId, row.userId),
+        env.DB.prepare(
+          `INSERT INTO access_events (
+             id, event_type, subject_user_id, actor_user_id, run_id, reason,
+             created_at
+           )
+           SELECT ?1, 'run.deleted_by_admin', ?2, ?3, ?4, 'admin_deleted', ?5
+           WHERE changes() = 1`,
+        ).bind(
+          crypto.randomUUID(),
+          row.userId,
+          params.actorUserId,
+          row.runId,
+          Date.now(),
+        ),
+      ]
+    : undefined;
+  const deletion = await deleteScenarioRunRuntimeProjection({
     d1: env.DB,
     runId: row.runId,
-    userId: params.userId,
+    userId: row.userId,
+    ...(adminAuditStatements ? { statements: adminAuditStatements } : {}),
   });
+  if (!deletion.deleted) {
+    throw appError(404, "scenario_run_not_found", "scenario run not found");
+  }
 }
 
 export async function expireOverdueRunLeases(

@@ -43,6 +43,27 @@
       "when": 1787687535379,
       "tag": "0005_warm_wendell_vaughn",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787846684790,
+      "tag": "0006_magenta_squirrel_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787848524173,
+      "tag": "0007_misty_nightshade",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1787849156846,
+      "tag": "0008_aromatic_raider",
+      "breakpoints": true
     }
   ]
 }

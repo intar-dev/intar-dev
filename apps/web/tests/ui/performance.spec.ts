@@ -121,7 +121,7 @@ test("the sidebar does not fetch the full run archive just to draw its badge", a
   expect(ui.server.requests).not.toContain("GET /api/scenarios/runs");
 });
 
-test("admin uses one bounded fleet snapshot and keeps collapsed archive details out of the DOM", async ({
+test("admin uses a separate bounded archive API and keeps collapsed details out of the DOM", async ({
   page,
   ui,
 }) => {
@@ -135,31 +135,50 @@ test("admin uses one bounded fleet snapshot and keeps collapsed archive details 
   expect(
     requestCount(ui.server.requests, "GET /api/admin/fleet-snapshot"),
   ).toBeGreaterThan(0);
+  expect(requestCount(ui.server.requests, "GET /api/admin/runs")).toBe(1);
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect
+    .poll(() => requestCount(ui.server.requests, "GET /api/admin/runs"))
+    .toBe(2);
   expect(
     ui.server.requests.filter((request) =>
       request.startsWith("GET /api/agent/hosts"),
     ),
   ).toEqual([]);
 
-  const archiveCards = page
-    .locator("article")
-    .filter({ has: page.getByRole("button", { name: "Delete run" }) });
+  const archiveCards = page.locator("[data-archive-run]");
   await expect(page.getByText("9 retained", { exact: true })).toBeVisible();
   await expect(archiveCards).toHaveCount(6);
   await expect(page.getByText("Milestones", { exact: true })).toHaveCount(0);
   await expect(page.getByText("run.log", { exact: true })).toHaveCount(0);
-  expect(await page.locator("*").count()).toBeLessThan(500);
+  // Search and outcome controls add a small fixed cost; archive detail trees
+  // must still remain outside this bounded collapsed DOM.
+  expect(await page.locator("*").count()).toBeLessThan(550);
 
   const card = archiveCard(page);
   await expect(card).toHaveCount(1);
+  await expect(card.getByText("@minalearns", { exact: true })).toBeVisible();
   await card.getByRole("button", { name: "Details" }).click();
   await expect(card.getByText("Milestones", { exact: true })).toBeVisible();
   expect(
     requestCount(
       ui.server.requests,
-      "GET /api/admin/fleet-snapshot/runs/run-archived",
+      "GET /api/admin/runs/run-archived",
     ),
   ).toBe(1);
+});
+
+test("the Hosts page does not fetch the global run archive", async ({ ui }) => {
+  await ui.open({
+    path: "/admin/hosts",
+    sessionRole: "global-admin",
+    theme: "light",
+  });
+
+  expect(ui.server.requests).not.toContain("GET /api/admin/runs");
+  expect(
+    requestCount(ui.server.requests, "GET /api/admin/fleet-snapshot"),
+  ).toBeGreaterThan(0);
 });
 
 test("dashboard fetches the browser terminal module only after Web SSH opens", async ({
@@ -265,6 +284,9 @@ test("dashboard fetches the artifact viewer only after an artifact is selected",
 
     await card.locator("button").filter({ hasText: "run.log" }).click();
     await expect.poll(() => modules.count("artifactViewer")).toBeGreaterThan(0);
+    expect(ui.server.requests).toContain(
+      "GET /api/admin/runs/run-archived/artifacts/artifact-log-1/content",
+    );
   } finally {
     modules.dispose();
   }

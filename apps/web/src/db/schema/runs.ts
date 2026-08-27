@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   index,
   integer,
@@ -52,6 +53,7 @@ export const scenarioRuns = sqliteTable(
     // unique index enforces one active run per user across all scenarios.
     activeKey: text("active_key"),
     stateJson: text("state_json").notNull(),
+    archiveEnteredAt: integer("archive_entered_at"),
     deleteRequestedAt: integer("delete_requested_at"),
     solvedAt: integer("solved_at"),
     completedAt: integer("completed_at"),
@@ -72,6 +74,14 @@ export const scenarioRuns = sqliteTable(
       table.organizationId,
       table.createdAt,
     ),
+    index("scenario_runs_admin_archive_page_idx")
+      .on(
+        sql`coalesce(${table.archiveEnteredAt}, ${table.createdAt})`,
+        table.runId,
+      )
+      .where(
+        sql`${table.hiddenAt} IS NULL AND ${table.state} IN ('archiving', 'completed', 'failed')`,
+      ),
     uniqueIndex("scenario_runs_runtime_execution_uidx").on(
       table.runtimeExecutionId,
     ),

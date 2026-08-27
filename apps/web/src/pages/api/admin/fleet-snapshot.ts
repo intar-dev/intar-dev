@@ -30,6 +30,8 @@ export const GET: APIRoute = async ({ request, url }) => {
     const snapshot = await loadAdminFleetSnapshot({
       userId: authz.context.userId,
       archiveOffset,
+      includeArchiveSummaries:
+        url.searchParams.get("includeArchiveSummaries") !== "0",
     });
     return jsonResponse(snapshot, { headers: PRIVATE_NO_STORE_HEADERS });
   } catch (error) {

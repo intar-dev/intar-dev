@@ -1,7 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { ScenarioRunArchiveCard } from "./ScenarioRunArchiveCard";
+import {
+  archiveOwnerLabel,
+  canDeleteArchivedRun,
+  ScenarioRunArchiveCard,
+} from "./ScenarioRunArchiveCard";
 import type { AgentHostApi, AgentVmRunArtifact, AgentVmRunRecord } from "./types";
 
 const artifactViewerModule = vi.hoisted(() => ({ loadCount: 0 }));
@@ -12,6 +16,56 @@ vi.mock("@/components/app/RunArtifactViewer", () => {
 });
 
 describe("scenario run archive artifacts", () => {
+  it("shows the run owner's username before details open", () => {
+    const detail = run({ ownerUsername: "fleet-owner" });
+    const markup = renderToStaticMarkup(
+      createElement(ScenarioRunArchiveCard, {
+        host: host(),
+        run: detail,
+        detail: null,
+        isDetailLoading: false,
+        detailError: null,
+        viewer: null,
+        isExpanded: false,
+        onToggle: vi.fn(),
+        onDelete: vi.fn(),
+        onStreamArtifact: vi.fn(),
+        isDeleting: false,
+      }),
+    );
+
+    expect(markup).toContain("@fleet-owner");
+    expect(markup).not.toContain("User ID");
+  });
+
+  it("falls back to the account name when a username is unavailable", () => {
+    expect(
+      archiveOwnerLabel(
+        run({ ownerName: "Deleted account", ownerUsername: null }),
+      ),
+    ).toBe("Deleted account");
+    expect(
+      archiveOwnerLabel(run({ ownerName: "", ownerUsername: null })),
+    ).toBe("user-1");
+  });
+
+  it("allows deletion only after archive processing is terminal", () => {
+    expect(
+      canDeleteArchivedRun(
+        run({ deleteBlockedReason: "archive_in_progress" }),
+      ),
+    ).toBe(false);
+    expect(
+      canDeleteArchivedRun(run({ deleteBlockedReason: "vm_teardown_pending" })),
+    ).toBe(false);
+    expect(
+      canDeleteArchivedRun(run({ deleteBlockedReason: "artifact_upload_pending" })),
+    ).toBe(false);
+    expect(
+      canDeleteArchivedRun(run({ deleteBlockedReason: null })),
+    ).toBe(true);
+  });
+
   it("downloads a raw recording bundle instead of passing it to the text viewer", () => {
     const onStreamArtifact = vi.fn();
     const detail = run({
@@ -43,10 +97,13 @@ describe("scenario run archive artifacts", () => {
     );
 
     expect(markup).toContain(
-      'href="/api/runs/run-1/artifacts/vm-1:0/content?download=1"',
+      'href="/api/admin/runs/run-1/artifacts/vm-1:0/content?download=1"',
     );
     expect(markup).toContain("Raw Recording Bundle");
     expect(markup).toContain("Download");
+    const detailsId = markup.match(/aria-controls="([^"]+)"/)?.[1];
+    expect(detailsId).toBeDefined();
+    expect(markup).toContain(`id="${detailsId}"`);
     expect(onStreamArtifact).not.toHaveBeenCalled();
   });
 
@@ -182,6 +239,8 @@ function run(
     id: "run-1",
     hostId: "host-1",
     userId: "user-1",
+    ownerName: "Run owner",
+    ownerUsername: "run-owner",
     vmName: "vm-1",
     state: "deleted",
     outcome: "succeeded",
@@ -194,6 +253,7 @@ function run(
     uploadStartedAt: 0,
     uploadCompletedAt: 0,
     uploadError: null,
+    deleteBlockedReason: null,
     createdAt: 0,
     updatedAt: 0,
     artifactCount: 0,

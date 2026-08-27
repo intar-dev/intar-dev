@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   drizzleQueryToD1Statement,
@@ -235,6 +235,11 @@ export async function updateRunState(
         completedAt:
           nextState.phase === "completed" ? (row.completedAt ?? now) : null,
         failedAt: nextState.phase === "failed" ? (row.failedAt ?? now) : null,
+        archiveEnteredAt: ["archiving", "completed", "failed"].includes(
+          nextState.phase,
+        )
+          ? sql<number>`coalesce(${scenarioRuns.archiveEnteredAt}, ${now})`
+          : sql<number | null>`${scenarioRuns.archiveEnteredAt}`,
         updatedAt: now,
       })
       .where(

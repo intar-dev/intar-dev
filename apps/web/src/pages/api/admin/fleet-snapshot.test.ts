@@ -39,6 +39,7 @@ describe("admin fleet snapshot routes", () => {
     expect(snapshotMock.loadAdminFleetSnapshot).toHaveBeenCalledWith({
       userId: "admin-user",
       archiveOffset: 0,
+      includeArchiveSummaries: true,
     });
   });
 
@@ -64,6 +65,22 @@ describe("admin fleet snapshot routes", () => {
     expect(snapshotMock.loadAdminFleetSnapshot).toHaveBeenCalledWith({
       userId: "admin-user",
       archiveOffset: 100,
+      includeArchiveSummaries: true,
+    });
+  });
+
+  it("can omit archive summaries from the live fleet poll", async () => {
+    const response = await fleetSnapshot(
+      routeContext(
+        "/api/admin/fleet-snapshot?includeArchiveSummaries=0",
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(snapshotMock.loadAdminFleetSnapshot).toHaveBeenCalledWith({
+      userId: "admin-user",
+      archiveOffset: 0,
+      includeArchiveSummaries: false,
     });
   });
 

@@ -495,6 +495,7 @@ export async function redeemBetaInvite(params: {
             actorUserId: accessInviteCodes.redeemerUserId,
             revocationId: sql<string | null>`null`.as("revocation_id"),
             cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
+            runId: sql<string | null>`null`.as("run_id"),
             reason: sql<string | null>`null`.as("reason"),
             createdAt: accessInviteCodes.redeemedAt,
           })
@@ -518,6 +519,7 @@ export async function redeemBetaInvite(params: {
             actorUserId: accessAllowlist.grantedBy,
             revocationId: sql<string | null>`null`.as("revocation_id"),
             cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
+            runId: sql<string | null>`null`.as("run_id"),
             reason: accessAllowlist.grantReason,
             createdAt: accessAllowlist.grantedAt,
           })
@@ -780,6 +782,7 @@ function eventInsertFields(event: typeof accessEvents.$inferInsert) {
     ),
     revocationId: sql<string | null>`null`.as("revocation_id"),
     cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
+    runId: sql<string | null>`${event.runId ?? null}`.as("run_id"),
     reason: sql<string | null>`${event.reason ?? null}`.as("reason"),
     createdAt: sql<number>`${event.createdAt}`.as("created_at"),
   };

@@ -1626,6 +1626,9 @@ export async function persistStoredRunLifecycle(
       solvedAt,
       completedAt: nextPhase === "completed" ? (run.completedAt ?? now) : null,
       failedAt: nextPhase === "failed" ? (run.failedAt ?? now) : null,
+      archiveEnteredAt: ["archiving", "completed", "failed"].includes(nextPhase)
+        ? sql<number>`coalesce(${scenarioRuns.archiveEnteredAt}, ${now})`
+        : sql<number | null>`${scenarioRuns.archiveEnteredAt}`,
       updatedAt: now,
     })
     .where(eq(scenarioRuns.runId, runId));
