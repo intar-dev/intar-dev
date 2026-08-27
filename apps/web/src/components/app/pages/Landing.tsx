@@ -56,7 +56,7 @@ export function Landing() {
 
   return (
     <div className="flex min-h-svh flex-col">
-      <header className="mx-auto flex min-h-16 w-full max-w-7xl items-center justify-between gap-4 px-[var(--page-inset)]">
+      <header className="mx-auto flex min-h-14 w-full max-w-7xl shrink-0 items-center justify-between gap-4 px-[var(--page-inset)] sm:min-h-16">
         <BrandMark />
         <ThemeToggle />
       </header>
@@ -70,9 +70,9 @@ export function Landing() {
         </div>
       ) : null}
 
-      <main className="flex-1">
-        <section className="mx-auto grid w-full max-w-7xl items-center gap-12 px-[var(--page-inset)] py-12 sm:py-20 lg:grid-cols-[minmax(0,1.05fr)_minmax(24rem,0.95fr)] lg:gap-16 lg:py-24">
-          <div className="flex flex-col items-start gap-8">
+      <main className="flex min-h-0 flex-1">
+        <section className="mx-auto grid min-h-0 w-full max-w-7xl flex-1 items-center gap-6 px-[var(--page-inset)] py-2 sm:py-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(24rem,0.95fr)] lg:gap-12 lg:py-0 xl:gap-16">
+          <div className="flex flex-col items-start gap-4 sm:gap-6">
             <SponsorMarks />
 
             <div className="space-y-5">
@@ -148,7 +148,7 @@ export function Landing() {
         </section>
       </main>
 
-      <footer className="mx-auto flex w-full max-w-7xl flex-wrap items-center gap-x-3 gap-y-2 px-[var(--page-inset)] py-8 text-sm text-muted-foreground">
+      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-wrap items-center gap-x-3 gap-y-2 px-[var(--page-inset)] py-2 text-sm text-muted-foreground">
         <span>Built by Stefan Ruzitschka</span>
         <span aria-hidden="true">·</span>
         <a href="https://github.com/intar-dev" className={footerLinkClassName}>
@@ -169,7 +169,7 @@ function SponsorMarks() {
   return (
     <aside
       aria-labelledby="landing-sponsors-heading"
-      className="flex w-full flex-col items-start gap-3 border-b pb-6"
+      className="flex w-full flex-col items-start gap-2 border-b pb-4 sm:gap-3 sm:pb-5"
     >
       <p
         id="landing-sponsors-heading"
@@ -213,7 +213,7 @@ function SponsorMarks() {
 
 function WorkOrder() {
   return (
-    <section className="terminal-surface overflow-hidden rounded-xl border shadow-xl shadow-black/10">
+    <section className="terminal-surface hidden overflow-hidden rounded-xl border shadow-xl shadow-black/10 lg:block">
       <header className="flex items-center justify-between gap-4 border-b border-terminal-border px-4 py-3">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <TerminalSquare className="size-4 text-terminal-brand" />

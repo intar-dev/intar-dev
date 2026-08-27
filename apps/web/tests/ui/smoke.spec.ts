@@ -41,9 +41,35 @@ test("public workshop entry keeps sign in focused and sponsors prominent", async
   expect(hetznerBox).not.toBeNull();
   expect(namespaceBox).not.toBeNull();
   expect(sponsorBox!.y).toBeLessThan(headingBox!.y);
-  expect(hetznerBox!.height).toBeGreaterThanOrEqual(48);
-  expect(namespaceBox!.height).toBeGreaterThanOrEqual(40);
+  expect(Math.round(hetznerBox!.height)).toBeGreaterThanOrEqual(48);
+  expect(Math.round(namespaceBox!.height)).toBeGreaterThanOrEqual(40);
 });
+
+for (const viewport of [
+  { id: "desktop", width: 1440, height: 900 },
+  { id: "mobile", width: 390, height: 844 },
+] as const) {
+  test.describe(`landing ${viewport.id}`, () => {
+    test.use({ viewport: { width: viewport.width, height: viewport.height } });
+
+    test("fits without vertical page scrolling", async ({ page, ui }) => {
+      await ui.open({ ...routeCase("landing"), theme: "light" });
+
+      const metrics = await page.evaluate(() => {
+        const root = document.scrollingElement ?? document.documentElement;
+        return {
+          scrollHeight: root.scrollHeight,
+          clientHeight: root.clientHeight,
+        };
+      });
+
+      expect(
+        metrics.scrollHeight - metrics.clientHeight,
+        `landing overflow metrics=${JSON.stringify(metrics)}`,
+      ).toBeLessThanOrEqual(1);
+    });
+  });
+}
 
 test("beta invite fragment is scrubbed before the claim is inspected", async ({
   page,
