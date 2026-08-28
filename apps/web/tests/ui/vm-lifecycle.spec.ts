@@ -1062,7 +1062,6 @@ test("a saved solved run gives one next learner action without audit details", a
       name: "Next lab: Trace an intermittent DNS failure",
     }),
   ).toHaveAttribute("href", "/courses/operations/repair-dns");
-  await expect(recap.getByText("Lab recap", { exact: true })).toBeVisible();
   await expect(recap.getByText("Run timeline", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);

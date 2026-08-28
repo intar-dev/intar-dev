@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const TOKEN_LIFETIMES = [
@@ -105,8 +106,7 @@ export function WorkshopPublisherTokens({
     <section aria-labelledby="workshop-publisher-heading" className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-eyebrow">Workshop registry</p>
-          <h2 id="workshop-publisher-heading" className="mt-1 text-section-title">
+          <h2 id="workshop-publisher-heading" className="text-section-title">
             Publisher access
           </h2>
           <p className="mt-1 max-w-[68ch] text-sm text-muted-foreground">
@@ -310,7 +310,7 @@ export function WorkshopPublisherTokens({
                   lifetime that covers the publication.
                 </DialogDescription>
               </DialogHeader>
-              <div className="mt-5 grid gap-4">
+              <div className="mt-4 grid gap-3">
                 <label className="space-y-1.5 text-sm font-medium">
                   Token name
                   <Input
@@ -323,25 +323,25 @@ export function WorkshopPublisherTokens({
                 </label>
                 <label className="space-y-1.5 text-sm font-medium">
                   Expires after
-                  <select
+                  <NativeSelect
                     value={lifetimeMinutes}
                     onChange={(event) =>
                       setLifetimeMinutes(event.target.value)
                     }
-                    className="h-11 w-full rounded-lg border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+                    className="w-full"
                   >
                     {TOKEN_LIFETIMES.map((lifetime) => (
                       <option key={lifetime.value} value={lifetime.value}>
                         {lifetime.label}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </label>
                 {createError ? (
                   <InlineFeedback tone="error">{createError}</InlineFeedback>
                 ) : null}
               </div>
-              <DialogFooter className="mt-5">
+              <DialogFooter className="mt-4">
                 <Button
                   type="button"
                   variant="outline"

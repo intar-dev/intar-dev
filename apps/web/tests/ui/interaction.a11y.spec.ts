@@ -76,7 +76,7 @@ async function expectSavedRunAppShell(page: Page) {
     page.getByRole("button", { name: "Page actions" }),
   ).toHaveCount(0);
 
-  if ((page.viewportSize()?.width ?? 0) >= 768) {
+  if ((page.viewportSize()?.width ?? 0) >= 1024) {
     await expect(page.locator("[data-slot='sidebar']")).toHaveCount(1);
   }
 }
@@ -1021,7 +1021,7 @@ test.describe("wide operational density", () => {
 
     expect(liveBox).not.toBeNull();
     expect(archiveBox).not.toBeNull();
-    expect(liveBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(160);
+    expect(liveBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(170);
     expect(
       (archiveBox?.y ?? 0) -
         ((liveBox?.y ?? 0) + (liveBox?.height ?? Number.POSITIVE_INFINITY)),

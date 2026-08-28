@@ -216,7 +216,7 @@ export function AdminAuthoring() {
                   aria-label="Validation results"
                 >
                   <div>
-                    <p className="text-eyebrow">WASM validation</p>
+                    <p className="text-label">WASM validation</p>
                     <h3 className="mt-1 text-card-title">Pipeline result</h3>
                   </div>
                   {validating ? (
@@ -599,7 +599,7 @@ function PreviewMeta({
 }) {
   return (
     <div className={className}>
-      <dt className="text-eyebrow">{label}</dt>
+      <dt className="text-label">{label}</dt>
       <dd
         className={cn(
           "mt-1 break-words",

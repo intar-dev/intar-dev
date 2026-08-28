@@ -178,7 +178,7 @@ export function AdminHosts() {
                 return (
                   <article
                     key={host.id}
-                    className="@container/host-card space-y-4 p-4 sm:p-6"
+                    className="@container/host-card space-y-3 p-4"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 space-y-1.5">
@@ -191,7 +191,7 @@ export function AdminHosts() {
                             }
                             aria-hidden="true"
                           />
-                          <h2 className="truncate font-heading text-lg font-semibold tracking-tight">
+                          <h2 className="truncate text-card-title">
                             {host.name}
                           </h2>
                           <Badge
@@ -441,7 +441,7 @@ export function HostMetric({
 }) {
   return (
     <div className="min-w-0">
-      <dt className="text-eyebrow">{label}</dt>
+      <dt className="text-label">{label}</dt>
       <dd
         className={
           wrapValue

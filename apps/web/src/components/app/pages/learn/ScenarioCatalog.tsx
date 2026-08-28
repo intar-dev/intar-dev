@@ -519,8 +519,7 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
         <section className="space-y-4" aria-labelledby="active-work-heading">
           <div className="flex flex-wrap items-baseline justify-between gap-3">
             <div>
-              <p className="text-eyebrow">Continue</p>
-              <h2 id="active-work-heading" className="mt-2 text-section-title">
+              <h2 id="active-work-heading" className="text-section-title">
                 Active work
               </h2>
             </div>
@@ -563,8 +562,7 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
       {!courseId && assignments.length ? (
         <section className="space-y-4" aria-labelledby="assignments-heading">
           <div>
-            <p className="text-eyebrow">From your organizations</p>
-            <h2 id="assignments-heading" className="mt-2 text-section-title">
+            <h2 id="assignments-heading" className="text-section-title">
               Assignments
             </h2>
           </div>

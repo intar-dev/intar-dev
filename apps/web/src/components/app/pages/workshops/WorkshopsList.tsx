@@ -85,11 +85,10 @@ export function WorkshopsList() {
   return (
     <PageShell width="content" density="comfortable">
       <header className="max-w-2xl space-y-2 py-2">
-        <p className="text-eyebrow">Facilitated practice</p>
-        <p className="font-heading text-2xl font-semibold tracking-[-0.03em] text-balance sm:text-3xl">
+        <p className="text-feature-title text-balance">
           Learn together on live infrastructure.
         </p>
-        <p className="max-w-[68ch] text-sm leading-6 text-muted-foreground">
+        <p className="max-w-[68ch] text-support text-muted-foreground">
           Check in before the start, keep one workspace for the whole session,
           and follow the room’s shared pace.
         </p>
@@ -140,7 +139,7 @@ function WorkshopGroup({
   return (
     <section aria-labelledby={id} className="space-y-3">
       <div>
-        <p className="text-eyebrow">{eyebrow}</p>
+        <p className="text-label">{eyebrow}</p>
         <h2 id={id} className="mt-1 text-section-title">
           {title}
         </h2>
@@ -181,7 +180,7 @@ function WorkshopGroup({
                 </span>
                 <SessionStateBadge state={session.state} />
               </span>
-              <span className="mt-1 block text-sm text-muted-foreground">
+              <span className="mt-1 block text-support text-muted-foreground">
                 {session.organizationName}
                 {session.currentModuleTitle
                   ? ` · ${session.currentModuleTitle}`
@@ -198,7 +197,7 @@ function WorkshopGroup({
                 ]}
               />
             </span>
-            <span className="flex items-center gap-2 text-sm font-semibold text-brand-text">
+            <span className="flex items-center gap-2 text-support font-semibold text-brand-text">
               <span className="hidden sm:inline">
                 {session.state === "live" || session.state === "lobby"
                   ? "Enter room"

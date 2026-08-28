@@ -38,8 +38,7 @@ export function WorkshopAgendaRail({
     <section aria-labelledby="workshop-agenda-heading">
       <div className="mb-3 flex items-end justify-between gap-3">
         <div>
-          <p className="text-eyebrow">Run of show</p>
-          <h2 id="workshop-agenda-heading" className="mt-1 text-section-title">
+          <h2 id="workshop-agenda-heading" className="text-section-title">
             Agenda
           </h2>
         </div>
@@ -133,7 +132,7 @@ export function WorkshopModuleManual({
       <div className="space-y-3 px-4 py-5 sm:px-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-eyebrow">
+            <p className="text-label">
               {module.tier} module · {module.durationMinutes} min
             </p>
             <h2 id="current-module-heading" className="mt-1 text-section-title">
@@ -159,7 +158,7 @@ export function WorkshopModuleManual({
 
       <div className="px-4 py-4 sm:px-6">
         <div className="mb-2 flex items-center justify-between gap-3">
-          <p className="text-eyebrow">Live verification</p>
+          <p className="text-label">Live verification</p>
           <div
             aria-label={`Verified: ${passed}; needs repair: ${needsRepair}`}
             className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-semibold tabular-nums"
@@ -215,7 +214,7 @@ export function WorkshopModuleManual({
 
       {module.hints.length ? (
         <div className="px-4 py-4 sm:px-6">
-          <p className="mb-1 text-eyebrow">Layered hints</p>
+          <p className="mb-1 text-label">Layered hints</p>
           <div className="divide-y">
             {module.hints.map((hint, index) => (
               <DisclosureRow
@@ -280,7 +279,7 @@ export function WorkshopModuleManual({
 
       {module.solutionRevealed && module.solutionMarkdown ? (
         <div className="bg-muted/35 px-4 py-4 sm:px-6">
-          <p className="mb-2 text-eyebrow">Facilitator walkthrough</p>
+          <p className="mb-2 text-label">Facilitator walkthrough</p>
           <Markdown className="max-w-[68ch]">
             {module.solutionMarkdown}
           </Markdown>

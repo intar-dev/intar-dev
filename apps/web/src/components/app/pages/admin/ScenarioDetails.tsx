@@ -483,7 +483,7 @@ function VerificationObjectiveGroup({
 }) {
   return (
     <div className="space-y-2">
-      <p className="text-eyebrow">{title}</p>
+      <p className="text-label">{title}</p>
       {probes.length ? (
         <ol className="divide-y border-y">
           {probes.map((probe, index) => (
@@ -736,7 +736,7 @@ function formatCpu(cpuMillis: number): string {
 function BootMeta({ label, value }: { label: string; value: string }) {
   return (
     <div className="space-y-1">
-      <p className="text-eyebrow">{label}</p>
+      <p className="text-label">{label}</p>
       <p className="font-mono text-xs break-all">{value}</p>
     </div>
   );
@@ -745,7 +745,7 @@ function BootMeta({ label, value }: { label: string; value: string }) {
 function MetaRow(props: { label: string; value: string; mono?: boolean }) {
   return (
     <div>
-      <dt className="text-eyebrow">{props.label}</dt>
+      <dt className="text-label">{props.label}</dt>
       <dd
         className={
           props.mono

@@ -10,8 +10,7 @@ const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
   username: "route-test-only",
   host: "stargate.example.test",
   port: 2222,
-  knownHostsLine:
-    "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key",
+  knownHostsLine: "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key",
   keyFilename: "intar-route-test-only.key",
 });
 
@@ -31,6 +30,10 @@ const TECHNICAL_LEARNER_RUN_COPY = [
   "Command log",
 ] as const;
 
+const FINE_POINTER_DEFAULT_CONTROL_HEIGHT = 40;
+const FINE_POINTER_COMPACT_CONTROL_HEIGHT = 36;
+const COARSE_POINTER_TARGET_SIZE = 44;
+
 async function expectNoVisibleBoxShadow(locator: Locator) {
   const result = await locator.evaluate((element) => {
     const value = getComputedStyle(element).boxShadow;
@@ -39,7 +42,8 @@ async function expectNoVisibleBoxShadow(locator: Locator) {
     );
     return {
       value,
-      visible: value !== "none" && (alphas.length === 0 || alphas.some((a) => a > 0)),
+      visible:
+        value !== "none" && (alphas.length === 0 || alphas.some((a) => a > 0)),
     };
   });
   expect(result.visible, `unexpected visible box shadow: ${result.value}`).toBe(
@@ -85,7 +89,6 @@ async function expectRunWorkspaceHeader(page: Page, title: string) {
   await expect(back).toBeVisible();
   await expect(back).toHaveText("Back");
   await expect(back).toHaveAttribute("href", "/runs");
-  await expectMinimumTarget(back, "Back to My runs link");
 }
 
 async function expectRunWorkspaceChrome(page: Page) {
@@ -94,9 +97,9 @@ async function expectRunWorkspaceChrome(page: Page) {
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Page actions" }),
-  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Page actions" })).toHaveCount(
+    0,
+  );
 }
 
 async function expectStandardRunChrome(
@@ -115,7 +118,7 @@ async function expectStandardRunChrome(
   await expect(page.locator("[data-slot='sidebar-wrapper']")).toHaveCount(1);
   await expect(page.locator("[data-slot='sidebar-inset']")).toHaveCount(1);
   await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
-  if (viewport && viewport.width >= 768) {
+  if (viewport && viewport.width >= 1024) {
     await expect(page.locator("[data-slot='sidebar']")).toHaveCount(1);
   }
   await expect(
@@ -147,20 +150,88 @@ async function expectStandardRunChrome(
   if (options.hasDeleteAction) {
     await expect(allDeleteRunActions).toHaveCount(1);
     await expect(deleteRun).toBeVisible();
-    await expectMinimumTarget(deleteRun, "Delete run app bar action");
   } else {
     await expect(allDeleteRunActions).toHaveCount(0);
   }
 }
 
-async function expectMinimumTarget(control: Locator, description: string) {
+async function expectFinePointerControlHeight(
+  control: Locator,
+  expectedHeight: number,
+  description: string,
+) {
   const bounds = await control.boundingBox();
   expect(bounds, `${description} must be visible`).not.toBeNull();
-  expect(bounds!.width, `${description} must be at least 44px wide`).toBeGreaterThanOrEqual(
-    44,
+  expect(
+    bounds!.height,
+    `${description} must be ${expectedHeight}px tall for a fine pointer`,
+  ).toBeCloseTo(expectedHeight, 0);
+}
+
+async function expectFinePointerControlMinimumHeight(
+  control: Locator,
+  minimumHeight: number,
+  description: string,
+) {
+  const bounds = await control.boundingBox();
+  expect(bounds, `${description} must be visible`).not.toBeNull();
+  expect(
+    bounds!.height,
+    `${description} must be at least ${minimumHeight}px tall for a fine pointer`,
+  ).toBeGreaterThanOrEqual(minimumHeight);
+}
+
+async function expectFinePointerIconControlSize(
+  control: Locator,
+  expectedSize: number,
+  description: string,
+) {
+  const bounds = await control.boundingBox();
+  expect(bounds, `${description} must be visible`).not.toBeNull();
+  expect(
+    bounds!.width,
+    `${description} must be ${expectedSize}px wide for a fine pointer`,
+  ).toBeCloseTo(expectedSize, 0);
+  expect(
+    bounds!.height,
+    `${description} must be ${expectedSize}px tall for a fine pointer`,
+  ).toBeCloseTo(expectedSize, 0);
+}
+
+async function expectCoarsePointerTarget(
+  control: Locator,
+  description: string,
+) {
+  const bounds = await control.boundingBox();
+  expect(bounds, `${description} must be visible`).not.toBeNull();
+  expect(
+    bounds!.width,
+    `${description} must be at least ${COARSE_POINTER_TARGET_SIZE}px wide`,
+  ).toBeGreaterThanOrEqual(COARSE_POINTER_TARGET_SIZE);
+  expect(
+    bounds!.height,
+    `${description} must be at least ${COARSE_POINTER_TARGET_SIZE}px tall`,
+  ).toBeGreaterThanOrEqual(COARSE_POINTER_TARGET_SIZE);
+}
+
+async function expectDesktopCompactRunControls(page: Page) {
+  const back = page
+    .locator("[data-run-navigation]")
+    .getByRole("link", { name: "Back to My runs" });
+  await expectFinePointerControlHeight(
+    back,
+    FINE_POINTER_DEFAULT_CONTROL_HEIGHT,
+    "Back to My runs link",
   );
-  expect(bounds!.height, `${description} must be at least 44px tall`).toBeGreaterThanOrEqual(
-    44,
+  await expectFinePointerControlHeight(
+    runSshButton(page),
+    FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+    "SSH command action",
+  );
+  await expectFinePointerControlHeight(
+    page.getByRole("button", { name: /^End run/ }),
+    FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+    "End run action",
   );
 }
 
@@ -186,8 +257,12 @@ async function expectPersistentDesktopLearningPanel(page: Page) {
   const maxWidth = Math.min(24 * rootFontSize, viewport!.width * 0.4);
   expect(panelBox!.width).toBeLessThanOrEqual(maxWidth + 1);
   expect(panelBox!.width).toBeCloseTo(maxWidth, 0);
-  expect(panelBox!.x).toBeGreaterThanOrEqual(workAreaBox!.x + workAreaBox!.width - 1);
-  expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(viewport!.width + 1);
+  expect(panelBox!.x).toBeGreaterThanOrEqual(
+    workAreaBox!.x + workAreaBox!.width - 1,
+  );
+  expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(
+    viewport!.width + 1,
+  );
 }
 
 async function expectLearnerSafeRunCopy(scope: Locator) {
@@ -348,6 +423,12 @@ test.describe("focused state accessibility", () => {
     ui,
   }, testInfo) => {
     await ui.open({ ...routeCase("workshop-control-room"), theme: "light" });
+    const roster = page.getByRole("region", {
+      name: "Participant roster details",
+    });
+    await expect(roster).toHaveAttribute("tabindex", "0");
+    await roster.focus();
+    await expect(roster).toBeFocused();
     const session = ui.server.state.workshopSession as {
       roster: Array<{
         userId: string;
@@ -373,7 +454,9 @@ test.describe("focused state accessibility", () => {
     expect(probeText).not.toMatch(
       /workspace-ready|talos-members|cilium-connectivity|\bpass\b|\bfail\b|\bpending\b|\bunknown\b/i,
     );
-    await expect(page.getByText("Verification unavailable").first()).toBeVisible();
+    await expect(
+      page.getByText("Verification unavailable").first(),
+    ).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });
 
@@ -472,7 +555,8 @@ test.describe("focused state accessibility", () => {
       archivedRuns: Array<Record<string, unknown>>;
     };
     const archivedRun = hostRuns.archivedRuns[0];
-    if (!archivedRun) throw new Error("admin archive fixture is missing its run");
+    if (!archivedRun)
+      throw new Error("admin archive fixture is missing its run");
     archivedRun.artifacts = [
       {
         id: "artifact-cast-1",
@@ -700,13 +784,13 @@ test.describe("focused state accessibility", () => {
     expect(JSON.stringify(issuedRequest?.body)).not.toContain(
       "OPENSSH PRIVATE KEY",
     );
-    await expect(page.locator("html")).not.toContainText(
-      "OPENSSH PRIVATE KEY",
-    );
+    await expect(page.locator("html")).not.toContainText("OPENSSH PRIVATE KEY");
     expect(
-      await dialog.locator("textarea").evaluateAll((fields) =>
-        fields.map((field) => (field as HTMLTextAreaElement).value),
-      ),
+      await dialog
+        .locator("textarea")
+        .evaluateAll((fields) =>
+          fields.map((field) => (field as HTMLTextAreaElement).value),
+        ),
     ).not.toContain(expect.stringContaining("OPENSSH PRIVATE KEY"));
 
     await page.keyboard.press("Escape");
@@ -719,9 +803,9 @@ test.describe("focused state accessibility", () => {
       dialog.getByRole("button", { name: "Copy" }).first(),
     ).toBeEnabled();
     expect(ui.server.nativeSshRequests).toHaveLength(3);
-    expect(
-      ui.server.nativeSshRequests[2]?.body.clientPublicKeyOpenssh,
-    ).toBe(issuedPublicKey);
+    expect(ui.server.nativeSshRequests[2]?.body.clientPublicKeyOpenssh).toBe(
+      issuedPublicKey,
+    );
 
     await page.keyboard.press("Escape");
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -734,9 +818,9 @@ test.describe("focused state accessibility", () => {
       dialog.getByRole("button", { name: "Copy" }).first(),
     ).toBeEnabled();
     expect(ui.server.nativeSshRequests).toHaveLength(4);
-    expect(
-      ui.server.nativeSshRequests[3]?.body.clientPublicKeyOpenssh,
-    ).toBe(issuedPublicKey);
+    expect(ui.server.nativeSshRequests[3]?.body.clientPublicKeyOpenssh).toBe(
+      issuedPublicKey,
+    );
 
     await page.clock.setFixedTime(Date.parse("2026-07-10T09:15:00.000Z"));
     await page.clock.fastForward(15 * 60_000);
@@ -827,9 +911,9 @@ test.describe("focused state accessibility", () => {
     await ui.settle();
     await page.getByRole("button", { name: /minalearns/i }).click();
     await page.getByRole("menuitem", { name: "Sign out" }).click();
-    await expect.poll(() => ui.server.requests).toContain(
-      "POST /api/auth/sign-out",
-    );
+    await expect
+      .poll(() => ui.server.requests)
+      .toContain("POST /api/auth/sign-out");
     await expect
       .poll(() =>
         page.evaluate(() =>
@@ -841,7 +925,10 @@ test.describe("focused state accessibility", () => {
       .toEqual([]);
   });
 
-  test("loading a run keeps standard app chrome", async ({ page, ui }, testInfo) => {
+  test("loading a run keeps standard app chrome", async ({
+    page,
+    ui,
+  }, testInfo) => {
     const route = routeCase("run-workspace");
     ui.configure({ ...route, runState: "running" });
     let releaseRunResponse: (() => void) | undefined;
@@ -865,6 +952,19 @@ test.describe("focused state accessibility", () => {
       releaseRunResponse?.();
     }
     await ui.settle();
+  });
+
+  test("desktop run controls use the compact fine-pointer scale", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+
+    await expectDesktopCompactRunControls(page);
   });
 
   test("desktop workspace keeps mission visible beside terminal and actions direct", async ({
@@ -897,14 +997,18 @@ test.describe("focused state accessibility", () => {
     const panel = runLearningPanel(page);
     const content = runLearningContent(panel);
     const checks = content.getByRole("region", { name: "Checks" });
-    await expect(content.getByText("Mission briefing", { exact: true })).toBeVisible();
+    await expect(
+      content.getByText("Mission briefing", { exact: true }),
+    ).toBeVisible();
     await expect(checks).toBeVisible();
     await expect(checks).toContainText("Start the web server");
     await expect(checks).toContainText("Needs repair");
     await expect(checks).toContainText("Make the site reachable");
     await expect(checks).toContainText("Checking");
     await expect(content.getByText("Hints", { exact: true })).toBeVisible();
-    await expect(content.getByText("Full solution", { exact: true })).toBeVisible();
+    await expect(
+      content.getByText("Full solution", { exact: true }),
+    ).toBeVisible();
     await expect(panel).not.toContainText("systemctl status nginx");
     await expectLearnerSafeRunCopy(panel);
     await expect(page.locator("[data-run-check-indicator]")).toHaveCount(0);
@@ -913,13 +1017,11 @@ test.describe("focused state accessibility", () => {
     await expect(actions).toBeVisible();
     const ssh = runSshButton(page);
     await expect(ssh).toBeEnabled();
-    await expectMinimumTarget(ssh, "SSH command action");
     const endRun = page.getByRole("button", { name: /^End run/ });
     await expect(endRun).toBeVisible();
-    await expectMinimumTarget(endRun, "End run action");
-    await expect(
-      page.getByRole("button", { name: /^Delete run/ }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Delete run/ })).toHaveCount(
+      0,
+    );
 
     await endRun.click();
     const endRunDialog = page.getByRole("dialog", { name: "End this run?" });
@@ -991,7 +1093,11 @@ test.describe("focused state accessibility", () => {
     const finish = page.getByRole("button", { name: "Finish and save" });
     await expect(completionBar).toBeVisible();
     await expect(finish).toBeVisible();
-    await expectMinimumTarget(finish, "finish and save action");
+    await expectFinePointerControlHeight(
+      finish,
+      FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+      "finish and save action",
+    );
 
     const terminal = page.getByRole("region", { name: "Terminal" });
     const [completionBox, terminalBox] = await Promise.all([
@@ -1000,11 +1106,9 @@ test.describe("focused state accessibility", () => {
     ]);
     expect(completionBox).not.toBeNull();
     expect(terminalBox).not.toBeNull();
-    const completionGap = terminalBox!.y - (
-      completionBox!.y + completionBox!.height
-    );
-    expect(completionGap).toBeGreaterThanOrEqual(12);
-    expect(completionGap).toBeLessThanOrEqual(24);
+    const completionGap =
+      terminalBox!.y - (completionBox!.y + completionBox!.height);
+    expect(completionGap).toBeCloseTo(8, 0);
 
     const panel = runLearningPanel(page);
     await expect(panel).toBeVisible();
@@ -1065,7 +1169,10 @@ test.describe("focused state accessibility", () => {
       hasDeleteAction: true,
     },
   ] as const) {
-    test(`saved run recap · ${recap.runState}`, async ({ page, ui }, testInfo) => {
+    test(`saved run recap · ${recap.runState}`, async ({
+      page,
+      ui,
+    }, testInfo) => {
       await ui.open({
         ...routeCase("run-workspace"),
         theme: "dark",
@@ -1080,33 +1187,45 @@ test.describe("focused state accessibility", () => {
         page.getByRole("heading", { name: recap.title, exact: true }),
       ).toBeVisible();
       await expect(runLearningPanel(page)).toHaveCount(0);
-      await expect(page.locator('ol[aria-label="Run timeline"]')).toHaveCount(0);
+      await expect(page.locator('ol[aria-label="Run timeline"]')).toHaveCount(
+        0,
+      );
       await expect(page.locator("main")).not.toContainText("Run timeline");
       await expect(page.locator("main")).not.toContainText("Command log");
       await expect(page.locator("main")).not.toContainText("Transcript");
       await expectLearnerSafeRunCopy(page.locator("main"));
 
       if (recap.replay) {
-        await expect(page.getByText(recap.replay, { exact: true })).toBeVisible();
+        await expect(
+          page.getByText(recap.replay, { exact: true }),
+        ).toBeVisible();
       } else {
-        await expect(page.getByText("Watch replay", { exact: true })).toHaveCount(
-          0,
-        );
+        await expect(
+          page.getByText("Watch replay", { exact: true }),
+        ).toHaveCount(0);
       }
       if (recap.title === "Saving your run…") {
-        await expect(page.getByText("Your recap will be ready in a moment.")).toBeVisible();
+        await expect(
+          page.getByText("Your recap will be ready in a moment."),
+        ).toBeVisible();
         const savingSteps = page.getByRole("list", { name: "Saving steps" });
         await expect(savingSteps).toBeVisible();
-        await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
-        await expect(savingSteps.locator('[aria-current="step"]')).toHaveCount(1);
-        await expect(page.getByRole("heading", { name: "Final checks" })).toHaveCount(
-          0,
+        await expect(
+          savingSteps.locator("[data-run-sequence-step]"),
+        ).toHaveCount(5);
+        await expect(savingSteps.locator('[aria-current="step"]')).toHaveCount(
+          1,
         );
+        await expect(
+          page.getByRole("heading", { name: "Final checks" }),
+        ).toHaveCount(0);
         await expect(
           page.getByRole("progressbar", { name: "Final checks progress" }),
         ).toHaveCount(0);
       } else {
-        await expect(page.getByRole("heading", { name: "Final checks" })).toBeVisible();
+        await expect(
+          page.getByRole("heading", { name: "Final checks" }),
+        ).toBeVisible();
         const progress = page.getByRole("progressbar", {
           name: "Final checks progress",
         });
@@ -1116,13 +1235,21 @@ test.describe("focused state accessibility", () => {
           "aria-valuetext",
           /\d of 2 final checks verified/,
         );
-        await expect(page.getByText("What next?", { exact: true })).toBeVisible();
+        await expect(
+          page.getByRole("heading", {
+            name: /Keep learning|Give it another try/,
+          }),
+        ).toBeVisible();
       }
 
       if (recap.runState === "replay") {
         const deleteRun = page.getByRole("button", { name: /^Delete run/ });
         await expect(deleteRun).toBeVisible();
-        await expectMinimumTarget(deleteRun, "Delete run action");
+        await expectFinePointerControlHeight(
+          deleteRun,
+          FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+          "Delete run app bar action",
+        );
         await deleteRun.click();
         const deleteRunDialog = page.getByRole("dialog", {
           name: "Delete this run?",
@@ -1164,11 +1291,19 @@ test.describe("focused state accessibility", () => {
     await expect(carousel).toHaveAttribute("role", "region");
     await expect(carousel).toHaveAttribute("aria-roledescription", "carousel");
     await expect(carousel).toHaveAccessibleName("Replay parts");
-    await expect(carousel.locator('[aria-roledescription="slide"]')).toHaveAccessibleName(
-      "Part 1 of 3, web",
+    await expect(
+      carousel.locator('[aria-roledescription="slide"]'),
+    ).toHaveAccessibleName("Part 1 of 3, web");
+    await expectFinePointerIconControlSize(
+      previous,
+      FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+      "previous replay part",
     );
-    await expectMinimumTarget(previous, "previous replay part");
-    await expectMinimumTarget(next, "next replay part");
+    await expectFinePointerIconControlSize(
+      next,
+      FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+      "next replay part",
+    );
     await expect(previous).toBeDisabled();
     await expect(next).toBeEnabled();
     await expect(
@@ -1246,9 +1381,11 @@ test.describe("focused state accessibility", () => {
     });
     await expect(recoveryNotice).toBeVisible();
     await expect(reconnect).toBeVisible();
-    const reconnectBounds = await reconnect.boundingBox();
-    expect(reconnectBounds).not.toBeNull();
-    expect(reconnectBounds!.height).toBeGreaterThanOrEqual(44);
+    await expectFinePointerControlHeight(
+      reconnect,
+      FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+      "Reconnect terminal action",
+    );
 
     ui.server.state.terminalMode = "connected";
     const reconnectRequest = page.waitForRequest(
@@ -1283,14 +1420,20 @@ test.describe("focused mobile state accessibility", () => {
     });
     await expectRunWorkspaceHeader(page, "Repair a broken nginx service");
     await expectRunWorkspaceChrome(page);
+    await expectCoarsePointerTarget(
+      page
+        .locator("[data-run-navigation]")
+        .getByRole("link", { name: "Back to My runs" }),
+      "mobile Back to My runs link",
+    );
     const actions = page.getByRole("group", { name: "Run actions" });
     const ssh = actions.getByRole("button", { name: "SSH command" });
     const endRun = actions.getByRole("button", { name: "End run…" });
     await expect(actions).toBeVisible();
     await expect(ssh).toBeEnabled();
     await expect(endRun).toBeVisible();
-    await expectMinimumTarget(ssh, "mobile SSH command action");
-    await expectMinimumTarget(endRun, "mobile End run action");
+    await expectCoarsePointerTarget(ssh, "mobile SSH command action");
+    await expectCoarsePointerTarget(endRun, "mobile End run action");
     await endRun.click();
     const endRunDialog = page.getByRole("dialog", { name: "End this run?" });
     await expect(endRunDialog).toBeVisible();
@@ -1301,7 +1444,10 @@ test.describe("focused mobile state accessibility", () => {
     await expect(trigger).toHaveAccessibleName(
       "Open mission and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
     );
-    await expectMinimumTarget(trigger, "mobile mission and hints trigger");
+    await expectCoarsePointerTarget(
+      trigger,
+      "mobile mission and hints trigger",
+    );
     await trigger.focus();
     await page.keyboard.press("Space");
 
@@ -1309,16 +1455,19 @@ test.describe("focused mobile state accessibility", () => {
     const content = runLearningContent(sheet);
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("data-side", "bottom");
-    await expect(sheet).toHaveAttribute("data-run-learning-mobile-sheet", "true");
+    await expect(sheet).toHaveAttribute(
+      "data-run-learning-mobile-sheet",
+      "true",
+    );
     await expect(content).toBeVisible();
     await expect(runLearningPanel(page)).toBeHidden();
     await expectNoVisibleBoxShadow(sheet);
     await expect(content.getByRole("region", { name: "Checks" })).toBeVisible();
-    await expectMinimumTarget(
+    await expectCoarsePointerTarget(
       sheet.getByRole("button", { name: "Close mission and hints" }),
       "mobile mission and hints close button",
     );
-    await expectMinimumTarget(
+    await expectCoarsePointerTarget(
       content.getByRole("button", { name: "Reveal" }).first(),
       "mobile hint reveal button",
     );
@@ -1382,14 +1531,17 @@ test.describe("focused mobile state accessibility", () => {
     await expect(
       progress.locator('[data-run-recap-progress-segment="true"]'),
     ).toHaveCount(2);
-    await expect(
-      progress.locator('[data-status="needs_repair"]'),
-    ).toHaveCount(2);
+    await expect(progress.locator('[data-status="needs_repair"]')).toHaveCount(
+      2,
+    );
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("saving progress stays visible on mobile", async ({ page, ui }, testInfo) => {
+  test("saving progress stays visible on mobile", async ({
+    page,
+    ui,
+  }, testInfo) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -1421,7 +1573,7 @@ test.describe("focused mobile state accessibility", () => {
 
     const finish = page.getByRole("button", { name: "Finish and save" });
     await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
-    await expectMinimumTarget(finish, "mobile finish and save action");
+    await expectCoarsePointerTarget(finish, "mobile finish and save action");
     await expect(finish).toBeVisible();
     await runLearningTrigger(page).click();
     const sheet = runLearningSheet(page);
@@ -1527,7 +1679,27 @@ test.describe("run workspace on a touch tablet", () => {
     await expect(checks.getByText("Make the site reachable")).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
+  });
 
+  test("keeps the recap next action at the touch target minimum", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "replay",
+    });
+
+    const nextAction = page
+      .getByRole("heading", { name: "Keep learning" })
+      .locator("..")
+      .getByRole("link");
+    await expect(nextAction).toHaveCount(1);
+    await expectCoarsePointerTarget(
+      nextAction,
+      "touch-tablet recap next action",
+    );
   });
 });
 
@@ -1601,12 +1773,13 @@ test.describe("long check rows", () => {
 
     await expectPersistentDesktopLearningPanel(page);
     const panel = runLearningPanel(page);
-    const checks = runLearningContent(panel).getByRole(
-      "region",
-      { name: "Checks" },
-    );
+    const checks = runLearningContent(panel).getByRole("region", {
+      name: "Checks",
+    });
     await expect(checks.getByRole("listitem")).toHaveCount(12);
-    await expect(checks.getByText("1/12 verified", { exact: true })).toBeVisible();
+    await expect(
+      checks.getByText("1/12 verified", { exact: true }),
+    ).toBeVisible();
     const lastCheck = checks.getByText("Learner check 12", { exact: true });
     const scroller = panel.locator("[data-run-learning-panel-scroll]");
     const terminal = page.locator(".xterm");
@@ -1645,7 +1818,9 @@ test.describe("long check rows", () => {
     await expectPersistentDesktopLearningPanel(page);
     const terminalAfterResize = await terminal.boundingBox();
     expect(terminalAfterResize).not.toBeNull();
-    expect(terminalAfterResize!.width).toBeLessThan(terminalBeforeScroll!.width);
+    expect(terminalAfterResize!.width).toBeLessThan(
+      terminalBeforeScroll!.width,
+    );
     await expect(
       page.getByRole("status").filter({ hasText: /Terminal status:/i }),
     ).toHaveText(/Terminal status:\s*connected/i);
@@ -1712,7 +1887,11 @@ test.describe("run guidance at 200% text", () => {
     const panel = runLearningPanel(page);
     await expectPersistentDesktopLearningPanel(page);
     await expect(runSshButton(page)).toBeVisible();
-    await expectMinimumTarget(runSshButton(page), "200% SSH command action");
+    await expectFinePointerControlMinimumHeight(
+      runSshButton(page),
+      FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+      "200% SSH command action",
+    );
     await expect(
       runLearningContent(panel).getByRole("region", { name: "Checks" }),
     ).toBeVisible();
@@ -1735,7 +1914,11 @@ test.describe("run guidance at 200% text", () => {
 
     const finish = page.getByRole("button", { name: "Finish and save" });
     await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
-    await expectMinimumTarget(finish, "200% finish and save action");
+    await expectFinePointerControlMinimumHeight(
+      finish,
+      FINE_POINTER_COMPACT_CONTROL_HEIGHT,
+      "200% finish and save action",
+    );
     await expect(finish).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
@@ -1791,7 +1974,10 @@ test.describe("short run workspace", () => {
 
     await expectRunWorkspaceHeader(page, "Repair a broken nginx service");
     const trigger = runLearningTrigger(page);
-    await expectMinimumTarget(trigger, "landscape mission and hints trigger");
+    await expectCoarsePointerTarget(
+      trigger,
+      "landscape mission and hints trigger",
+    );
     await trigger.click();
 
     const sheet = runLearningSheet(page);
@@ -1829,8 +2015,13 @@ test.describe("short run workspace", () => {
       return element.scrollTop;
     });
     expect(scrolledBack).toBeGreaterThanOrEqual(0);
-    const close = sheet.getByRole("button", { name: "Close mission and hints" });
-    await expectMinimumTarget(close, "landscape mission and hints close button");
+    const close = sheet.getByRole("button", {
+      name: "Close mission and hints",
+    });
+    await expectCoarsePointerTarget(
+      close,
+      "landscape mission and hints close button",
+    );
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
     await close.click();
@@ -1904,7 +2095,10 @@ test.describe("small-screen access management", () => {
     await expect(trigger).toHaveAccessibleName(
       "Open mission and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
     );
-    await expectMinimumTarget(trigger, "small-screen mission and hints trigger");
+    await expectCoarsePointerTarget(
+      trigger,
+      "small-screen mission and hints trigger",
+    );
     await trigger.click();
 
     const sheet = runLearningSheet(page);
@@ -1928,7 +2122,7 @@ test.describe("small-screen access management", () => {
     const completionBar = page.locator("[data-run-completion-bar]");
     const finish = page.getByRole("button", { name: "Finish and save" });
     await expect(completionBar).toBeVisible();
-    await expectMinimumTarget(finish, "320px finish and save action");
+    await expectCoarsePointerTarget(finish, "320px finish and save action");
     const [barBox, finishBox] = await Promise.all([
       completionBar.boundingBox(),
       finish.boundingBox(),
@@ -1983,6 +2177,10 @@ test.describe("small-screen access management", () => {
       status: "Solved",
       hasDeleteAction: true,
     });
+    await expectCoarsePointerTarget(
+      page.getByRole("button", { name: "Delete run…", exact: true }),
+      "320px Delete run action",
+    );
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
     await carousel.scrollIntoViewIfNeeded();
@@ -1993,11 +2191,11 @@ test.describe("small-screen access management", () => {
     await expect(
       carousel.locator('ol[aria-label="Replay order"] button'),
     ).toHaveCount(3);
-    await expectMinimumTarget(
+    await expectCoarsePointerTarget(
       carousel.getByRole("button", { name: "Previous replay part" }),
       "320px previous replay part",
     );
-    await expectMinimumTarget(
+    await expectCoarsePointerTarget(
       carousel.getByRole("button", { name: "Next replay part" }),
       "320px next replay part",
     );

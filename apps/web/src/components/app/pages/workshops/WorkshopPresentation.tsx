@@ -203,7 +203,7 @@ function PresenterDeck({ session }: { session: WorkshopSessionDetail }) {
           <WorkshopSlideFrame slide={slide} />
           <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card px-3 py-2">
             <Button
-              size="sm"
+              size="icon-sm"
               variant="outline"
               aria-label="Previous slide"
               disabled={busy || boundedOrdinal === 0}
@@ -211,11 +211,11 @@ function PresenterDeck({ session }: { session: WorkshopSessionDetail }) {
             >
               <ArrowLeft />
             </Button>
-            <span className="min-w-20 text-center font-mono text-xs text-muted-foreground tabular-nums">
+            <span className="min-w-20 text-center font-mono text-caption tabular-nums">
               {boundedOrdinal + 1} / {slides.length}
             </span>
             <Button
-              size="sm"
+              size="icon-sm"
               variant="outline"
               aria-label="Next slide"
               disabled={busy || boundedOrdinal === slides.length - 1}
@@ -257,7 +257,7 @@ function PresenterDeck({ session }: { session: WorkshopSessionDetail }) {
             </div>
           </div>
           {error ? (
-            <p role="alert" className="text-sm text-destructive">
+            <p role="alert" className="text-support text-destructive">
               {error}.
             </p>
           ) : null}
@@ -269,7 +269,7 @@ function PresenterDeck({ session }: { session: WorkshopSessionDetail }) {
         >
           <div className="flex items-center gap-2 border-b px-4 py-3">
             <NotebookPen className="size-4 text-muted-foreground" />
-            <h2 id="presenter-notes-heading" className="text-sm font-semibold">
+            <h2 id="presenter-notes-heading" className="text-card-title">
               Presenter notes
             </h2>
           </div>
@@ -277,7 +277,7 @@ function PresenterDeck({ session }: { session: WorkshopSessionDetail }) {
             {slide.notesMarkdown ? (
               <Markdown>{slide.notesMarkdown}</Markdown>
             ) : (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-support text-muted-foreground">
                 No notes for this slide.
               </p>
             )}
@@ -289,7 +289,7 @@ function PresenterDeck({ session }: { session: WorkshopSessionDetail }) {
             busy={busy}
             onAction={runControlAction}
           />
-          <div className="border-t bg-muted/35 px-4 py-3 text-xs text-muted-foreground">
+          <div className="border-t bg-muted/35 px-4 py-3 text-caption">
             <p>
               <kbd className="font-mono">←</kbd>{" "}
               <kbd className="font-mono">→</kbd> navigate ·{" "}
@@ -333,8 +333,8 @@ function PresenterControls({
   return (
     <div className="space-y-3 border-t px-4 py-3">
       <div>
-        <p className="text-eyebrow">Live controls</p>
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="text-label">Live controls</p>
+        <p className="mt-1 text-caption">
           {agendaItem?.title ?? module?.title ?? "This slide has no activity."}
         </p>
       </div>
@@ -427,7 +427,7 @@ function ProjectorDeck({ session }: { session: WorkshopSessionDetail }) {
     <div
       ref={fullscreenRef}
       data-workshop-projector
-      className="flex min-h-svh w-full flex-1 flex-col justify-center gap-3 bg-background p-3 sm:p-4 fullscreen:p-8"
+      className="flex min-h-[100dvh] w-full flex-1 flex-col justify-start gap-3 overflow-y-auto bg-background p-3 sm:p-4 fullscreen:p-8"
     >
       <h1 className="sr-only">{session.title} projector</h1>
       {slide ? (
@@ -446,7 +446,7 @@ function ProjectorDeck({ session }: { session: WorkshopSessionDetail }) {
       )}
       {outcomeModule ? (
         <div className="rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 sm:px-6 sm:py-4">
-          <p className="text-xs font-semibold tracking-[0.14em] text-primary uppercase">
+          <p className="text-caption font-semibold tracking-[0.14em] text-primary uppercase">
             Now · {outcomeModule.title}
           </p>
           <p className="mt-1 font-heading text-xl font-semibold text-balance sm:text-3xl">

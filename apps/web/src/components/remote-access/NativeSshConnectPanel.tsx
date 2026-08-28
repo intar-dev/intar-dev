@@ -503,7 +503,7 @@ function SessionFact(props: {
 }) {
   return (
     <div>
-      <p className="text-eyebrow">{props.label}</p>
+      <p className="text-label">{props.label}</p>
       <p
         className={`mt-1 text-sm ${props.mono ? "font-mono text-xs" : "font-medium"}`}
       >

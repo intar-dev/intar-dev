@@ -25,7 +25,7 @@ export function MetaLine({ items, className }: MetaLineProps) {
   return (
     <p
       className={cn(
-        "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-muted-foreground",
+        "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs leading-4 text-muted-foreground",
         className,
       )}
     >

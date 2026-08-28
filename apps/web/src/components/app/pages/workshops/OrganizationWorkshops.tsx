@@ -50,6 +50,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -124,11 +125,10 @@ export function OrganizationWorkshops() {
   if (!data) return <OrganizationWorkshopsLoading />;
 
   return (
-    <PageShell width="workspace" density="comfortable">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+    <PageShell width="workspace" density="compact">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1">
-          <p className="text-eyebrow">Organization control plane</p>
-          <p className="font-heading text-xl font-semibold tracking-[-0.025em]">
+          <p className="text-page-title">
             {data.organization.name}
           </p>
           <p className="max-w-[68ch] text-sm text-muted-foreground">
@@ -162,7 +162,7 @@ export function OrganizationWorkshops() {
         />
       ) : null}
 
-      <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.72fr)]">
+      <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.72fr)]">
         <TemplateLedger templates={data.templates} />
         <SessionLedger
           organizationId={data.organization.id}
@@ -215,10 +215,9 @@ function ProviderConnectionLedger({
     <section aria-labelledby="workshop-provider-heading" className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
-          <p className="text-eyebrow">BYOK runtime</p>
           <h2
             id="workshop-provider-heading"
-            className="mt-1 text-section-title"
+            className="text-section-title"
           >
             Learner cloud projects
           </h2>
@@ -482,13 +481,13 @@ function ProviderConnectionCard({
       {connection.state === "cleanup_pending" ? (
         <div className="mt-3 rounded-lg border border-warning-border bg-warning-subtle p-3">
           <p className="text-xs font-semibold">Manual cleanup required</p>
-          <p className="mt-1 text-[0.6875rem] text-muted-foreground">
+          <p className="mt-1 text-caption">
             Provider resources are still accumulating cost or could not be
             confirmed deleted. Inspect the dedicated project before recording
             a manual acknowledgement.
           </p>
           {connection.cleanupAcknowledgement ? (
-            <p className="mt-2 text-[0.6875rem] text-muted-foreground">
+            <p className="mt-2 text-caption">
               Owner recorded an unverified manual-cleanup acknowledgement at{" "}
               {formatSessionDate(
                 connection.cleanupAcknowledgement.acknowledgedAt,
@@ -758,12 +757,11 @@ function CapacityLedger({ data }: { data: OrganizationWorkshopsResponse }) {
       aria-labelledby="workshop-capacity-heading"
       className="overflow-hidden rounded-xl border bg-card"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3 sm:px-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3 sm:px-4">
         <div>
-          <p className="text-eyebrow">Preflight</p>
           <h2
             id="workshop-capacity-heading"
-            className="mt-1 text-section-title"
+            className="text-section-title"
           >
             Runner capacity
           </h2>
@@ -783,7 +781,7 @@ function CapacityLedger({ data }: { data: OrganizationWorkshopsResponse }) {
           <Badge variant="outline">No live preflight</Badge>
         )}
       </div>
-      <div className="grid divide-y sm:grid-cols-4 sm:divide-x sm:divide-y-0">
+      <div className="grid grid-cols-2 sm:grid-cols-4">
         <CapacityMetric
           icon={<Users />}
           label="Available seats"
@@ -810,7 +808,7 @@ function CapacityLedger({ data }: { data: OrganizationWorkshopsResponse }) {
         />
       </div>
       {data.capacity ? (
-        <div className="space-y-4 border-t px-4 py-4 sm:px-6">
+        <div className="space-y-3 border-t px-4 py-3 sm:px-4">
           <p className="text-xs text-muted-foreground">
             Each learner reserves {data.capacity.seatResources.cpuMillis}m CPU,{" "}
             {formatWorkshopMib(data.capacity.seatResources.memoryMib)} memory,
@@ -903,8 +901,7 @@ function TemplateLedger({
   return (
     <section aria-labelledby="workshop-templates-heading" className="space-y-3">
       <div>
-        <p className="text-eyebrow">Private catalog</p>
-        <h2 id="workshop-templates-heading" className="mt-1 text-section-title">
+        <h2 id="workshop-templates-heading" className="text-section-title">
           Workshop templates
         </h2>
       </div>
@@ -913,7 +910,7 @@ function TemplateLedger({
           {templates.map((template) => (
             <div
               key={template.id}
-              className="flex items-start gap-4 px-4 py-4 sm:px-6"
+              className="flex items-start gap-3 px-4 py-3 sm:px-4"
             >
               <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
                 <Presentation className="size-4" />
@@ -1019,10 +1016,9 @@ function SessionLedger({
       className="space-y-3"
     >
       <div>
-        <p className="text-eyebrow">Run of record</p>
         <h2
           id="organization-sessions-heading"
-          className="mt-1 text-section-title"
+          className="text-section-title"
         >
           Sessions
         </h2>
@@ -1032,7 +1028,7 @@ function SessionLedger({
           {ordered.map((session) => (
             <div
               key={session.id}
-              className="flex items-center gap-3 px-4 py-4 transition-colors hover:bg-muted/45"
+              className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/45"
             >
               <Link
                 to="/workshops/$sessionId"
@@ -1259,7 +1255,7 @@ function SessionCostActions({
       ) : null}
       {error ? (
         <p
-          className="max-w-56 text-right text-[0.6875rem] text-destructive"
+          className="max-w-56 text-right text-caption text-destructive"
           role="alert"
         >
           {error}
@@ -1418,10 +1414,10 @@ function ScheduleWorkshopDialog({
               }
             }}
           >
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2">
               <label className="space-y-1.5 text-sm font-medium">
                 Template revision
-                <select
+                <NativeSelect
                   value={templateRevisionId}
                   onChange={(event) => {
                     const id = event.target.value;
@@ -1439,7 +1435,7 @@ function ScheduleWorkshopDialog({
                       setProviderConnectionId("");
                     }
                   }}
-                  className="h-11 w-full rounded-lg border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+                  className="w-full"
                 >
                   {readyTemplates.map((template) => (
                     <optgroup key={template.id} label={template.title}>
@@ -1456,7 +1452,7 @@ function ScheduleWorkshopDialog({
                         ))}
                     </optgroup>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
               <label className="space-y-1.5 text-sm font-medium">
                 Start time
@@ -1484,13 +1480,13 @@ function ScheduleWorkshopDialog({
               </legend>
               <label className="mt-1 block space-y-1.5 text-sm font-medium">
                 Certified runtime profile
-                <select
+                <NativeSelect
                   value={runtimeProfileId}
                   onChange={(event) => {
                     setRuntimeProfileId(event.target.value);
                     setProviderConnectionId("");
                   }}
-                  className="h-11 w-full rounded-lg border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+                  className="w-full"
                   required
                 >
                   <option value="" disabled>
@@ -1507,17 +1503,17 @@ function ScheduleWorkshopDialog({
                       {!profile.compatible ? " · certification pending" : ""}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
               {selectedProfile && selectedProfile.providerKind !== "agent_kvm" ? (
                 <label className="mt-3 block space-y-1.5 text-sm font-medium">
                   Provider connection
-                  <select
+                  <NativeSelect
                     value={providerConnectionId}
                     onChange={(event) =>
                       setProviderConnectionId(event.target.value)
                     }
-                    className="h-11 w-full rounded-lg border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+                    className="w-full"
                     required
                   >
                     <option value="" disabled>
@@ -1529,7 +1525,7 @@ function ScheduleWorkshopDialog({
                         {connection.providerDetails.nativeCurrency}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </label>
               ) : null}
               <p className="mt-2 flex items-start gap-2 text-xs text-muted-foreground">
@@ -1779,7 +1775,7 @@ export function RosterEditor({
               </span>
               <label>
                 <span className="sr-only">Role for {member.name}</span>
-                <select
+                <NativeSelect
                   value={choice.role}
                   disabled={viewer}
                   onChange={(event) => {
@@ -1792,7 +1788,7 @@ export function RosterEditor({
                       ),
                     });
                   }}
-                  className="h-9 w-full rounded-lg border border-input bg-card px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-70"
+                  className="w-full"
                 >
                   <option value="participant">Participant</option>
                   <option value="helper">Helper</option>
@@ -1800,7 +1796,7 @@ export function RosterEditor({
                   <option value="excluded" disabled={viewer}>
                     Not enrolled
                   </option>
-                </select>
+                </NativeSelect>
               </label>
               <label
                 className={[
@@ -1847,10 +1843,10 @@ function CapacityMetric({
   value: string;
 }) {
   return (
-    <div className="flex items-center gap-3 px-4 py-4 sm:px-5">
+    <div className="flex items-center gap-3 border-b px-3 py-3 even:border-l last:border-b-0 sm:border-b-0 sm:border-l-0 sm:border-r sm:last:border-r-0 sm:px-4">
       <span className="text-muted-foreground [&_svg]:size-4">{icon}</span>
       <span>
-        <span className="block font-mono text-lg font-semibold tabular-nums">
+        <span className="block font-mono text-base font-semibold tabular-nums">
           {value}
         </span>
         <span className="block text-xs text-muted-foreground">{label}</span>

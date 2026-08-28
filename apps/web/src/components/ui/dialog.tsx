@@ -30,7 +30,7 @@ function DialogOverlay({
       data-slot="dialog-overlay"
       className={cn(
         "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
-        className
+        className,
       )}
       {...props}
     />
@@ -52,17 +52,19 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-2xl border border-border bg-popover p-6 text-sm text-popover-foreground shadow-lg duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
-          className
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl border border-border bg-popover p-5 text-sm text-popover-foreground shadow-lg duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          className,
         )}
         onKeyDown={(event) => {
           onKeyDown?.(event)
           if (event.defaultPrevented || event.key !== "Tab") return
 
           const popup = event.currentTarget
-          const focusable = [...popup.querySelectorAll<HTMLElement>(
-            "a[href], button:not(:disabled), input:not(:disabled):not([type='hidden']), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"
-          )].filter((element) => {
+          const focusable = [
+            ...popup.querySelectorAll<HTMLElement>(
+              "a[href], button:not(:disabled), input:not(:disabled):not([type='hidden']), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
+            ),
+          ].filter((element) => {
             const style = window.getComputedStyle(element)
             return (
               element.getClientRects().length > 0 &&
@@ -84,7 +86,10 @@ function DialogContent({
           if (event.shiftKey && (active === first || !popup.contains(active))) {
             event.preventDefault()
             last?.focus()
-          } else if (!event.shiftKey && (active === last || !popup.contains(active))) {
+          } else if (
+            !event.shiftKey &&
+            (active === last || !popup.contains(active))
+          ) {
             event.preventDefault()
             first?.focus()
           }
@@ -103,8 +108,7 @@ function DialogContent({
               />
             }
           >
-            <XIcon
-            />
+            <XIcon />
             <span className="sr-only">Close</span>
           </DialogPrimitive.Close>
         )}
@@ -135,8 +139,8 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-6 -mb-6 flex flex-col-reverse gap-2 rounded-b-2xl border-t bg-muted/50 p-4 sm:flex-row sm:justify-end",
-        className
+        "-mx-5 -mb-5 flex flex-col-reverse gap-2 rounded-b-2xl border-t bg-muted/50 p-3 sm:flex-row sm:justify-end",
+        className,
       )}
       {...props}
     >
@@ -154,10 +158,7 @@ function DialogTitle({ className, ...props }: DialogPrimitive.Title.Props) {
   return (
     <DialogPrimitive.Title
       data-slot="dialog-title"
-      className={cn(
-        "text-section-title leading-none",
-        className
-      )}
+      className={cn("text-section-title leading-none", className)}
       {...props}
     />
   )
@@ -172,7 +173,7 @@ function DialogDescription({
       data-slot="dialog-description"
       className={cn(
         "text-sm text-muted-foreground *:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-foreground",
-        className
+        className,
       )}
       {...props}
     />

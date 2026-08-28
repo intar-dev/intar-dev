@@ -50,7 +50,7 @@ export function AppSidebar() {
           return (
             <SidebarGroup key={section.id}>
               {section.label ? (
-                <SidebarGroupLabel className="text-eyebrow text-[0.68rem] text-sidebar-foreground/75">
+                <SidebarGroupLabel className="text-label text-sidebar-foreground/75">
                   {section.label}
                 </SidebarGroupLabel>
               ) : null}

@@ -162,19 +162,19 @@ export function Profile() {
           </Avatar>
           <dl className="grid flex-1 gap-x-8 gap-y-4 sm:grid-cols-2">
             <div>
-              <dt className="text-eyebrow">Username</dt>
+              <dt className="text-label">Username</dt>
               <dd className="mt-1 text-sm font-medium">
                 {user?.username ?? "Anonymous"}
               </dd>
             </div>
             <div>
-              <dt className="text-eyebrow">Email</dt>
+              <dt className="text-label">Email</dt>
               <dd className="mt-1 text-sm font-medium">
                 {user?.email ?? "Unknown"}
               </dd>
             </div>
             <div className="sm:col-span-2">
-              <dt className="text-eyebrow">GitHub</dt>
+              <dt className="text-label">GitHub</dt>
               <dd className="mt-1 flex flex-wrap items-center gap-2 text-sm font-medium">
                 {user?.username ? (
                   <span className="font-mono text-xs">@{user.username}</span>
@@ -188,17 +188,17 @@ export function Profile() {
         </div>
         <dl className="mt-6 grid gap-4 border-t pt-6 sm:grid-cols-3">
           <div>
-            <dt className="text-eyebrow">1. Identity</dt>
+            <dt className="text-label">1. Identity</dt>
             <dd className="mt-1 text-sm">Sign in with GitHub.</dd>
           </div>
           <div>
-            <dt className="text-eyebrow">2. Public key</dt>
+            <dt className="text-label">2. Public key</dt>
             <dd className="mt-1 text-sm">
               Add only the public half of your SSH key.
             </dd>
           </div>
           <div>
-            <dt className="text-eyebrow">3. Route access</dt>
+            <dt className="text-label">3. Route access</dt>
             <dd className="mt-1 text-sm">
               Reuse your local identity for native SSH.
             </dd>

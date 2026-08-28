@@ -25,6 +25,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import {
   type OrganizationDetailResponse,
   fetchJson,
@@ -211,9 +212,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   };
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-5">
       {admin ? (
         <Section
+          density="compact"
           title="Organization profile"
           description="The slug remains stable so identity-provider links do not change when you rename the organization."
         >
@@ -252,6 +254,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
 
       {admin ? (
         <Section
+          density="compact"
           title="Organization OIDC"
           description="One verified provider owns sign-in for this organization. New IdP users are provisioned as members after a successful callback."
         >
@@ -266,27 +269,27 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                 : "Failed to load the identity provider"}
             </InlineFeedback>
           ) : provider ? (
-            <div className="space-y-5">
+            <div className="space-y-4">
               <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border bg-muted/20 p-4">
                 <dl className="grid gap-3 text-sm sm:grid-cols-2">
                   <div>
-                    <dt className="text-eyebrow">Issuer</dt>
+                    <dt className="text-label">Issuer</dt>
                     <dd className="mt-1 font-mono text-xs break-all">
                       {provider.issuer}
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-eyebrow">Email domain</dt>
+                    <dt className="text-label">Email domain</dt>
                     <dd className="mt-1 font-medium">{provider.domain}</dd>
                   </div>
                   <div>
-                    <dt className="text-eyebrow">Client</dt>
+                    <dt className="text-label">Client</dt>
                     <dd className="mt-1 font-mono text-xs">
                       {provider.clientIdLastFour}
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-eyebrow">Status</dt>
+                    <dt className="text-label">Status</dt>
                     <dd className="mt-1">
                       <Badge
                         variant={
@@ -405,7 +408,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
             </div>
           ) : (
             <form
-              className="grid gap-4 sm:grid-cols-2"
+              className="grid gap-3 sm:grid-cols-2"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (!register.isPending) register.mutate();
@@ -472,16 +475,16 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       ) : null}
 
       <Section
+        density="compact"
         title="Organization lifecycle"
         description="Organization deletion is blocked while it owns identity, scenarios, runners, builds, or run history."
       >
-        <div className="space-y-4">
+        <div className="space-y-3">
           {owner ? (
             <div className="flex flex-wrap items-center gap-2">
-              <select
+              <NativeSelect
                 value={transferTarget}
                 onChange={(event) => setTransferTarget(event.target.value)}
-                className="h-11 rounded-lg border bg-card px-3 text-sm"
                 aria-label="New owner"
               >
                 <option value="">Choose a new owner…</option>
@@ -492,7 +495,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                       {entry.name}
                     </option>
                   ))}
-              </select>
+              </NativeSelect>
               <Button
                 variant="outline"
                 disabled={!transferTarget || transfer.isPending}
@@ -573,7 +576,7 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <label className="space-y-2 text-sm font-medium">
+    <label className="space-y-1.5 text-sm font-medium">
       <span>{label}</span>
       {children}
     </label>
@@ -591,7 +594,7 @@ function CopyValue({
 }) {
   return (
     <div className="rounded-xl border bg-card p-3">
-      <p className="text-eyebrow">{label}</p>
+      <p className="text-label">{label}</p>
       <div className="mt-2 flex items-center gap-2">
         <code className="min-w-0 flex-1 break-all text-xs">{value}</code>
         <Button

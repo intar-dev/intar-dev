@@ -417,7 +417,7 @@ function WorkshopParticipantSlide({
       className="overflow-hidden rounded-xl border bg-card"
     >
       <div className="flex items-center justify-between gap-3 border-b bg-muted/25 px-4 py-2.5 sm:px-6">
-        <p className="text-eyebrow">Shared slide</p>
+        <p className="text-label">Shared slide</p>
         <Badge variant="outline">
           {slide.ordinal + 1} / {totalSlides}
         </Badge>
@@ -425,12 +425,12 @@ function WorkshopParticipantSlide({
       <div className="grid gap-3 px-4 py-4 sm:px-6 sm:py-5 lg:grid-cols-[minmax(12rem,0.38fr)_minmax(0,1fr)] lg:gap-8">
         <h2
           id="workshop-shared-slide-heading"
-          className="font-heading text-xl font-semibold tracking-[-0.025em] text-balance sm:text-2xl"
+          className="text-page-title"
         >
           {slide.title ?? "Workshop update"}
         </h2>
         {slide.bodyMarkdown ? (
-          <div className="min-w-0 text-sm leading-6">
+          <div className="min-w-0 text-support">
             <Markdown>{slide.bodyMarkdown}</Markdown>
           </div>
         ) : null}
@@ -443,8 +443,8 @@ function WorkshopRoomHeader({ session }: { session: WorkshopSessionDetail }) {
   return (
     <header className="flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0 space-y-1">
-        <p className="text-eyebrow">{session.organizationName}</p>
-        <p className="font-heading text-xl font-semibold tracking-[-0.025em] text-balance">
+        <p className="text-label">{session.organizationName}</p>
+        <p className="text-page-title">
           {session.title}
         </p>
         <MetaLine
@@ -492,11 +492,11 @@ function WorkshopNow({
     return (
       <section className="grid gap-5 rounded-xl border border-dashed px-5 py-6 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-8">
         <div>
-          <p className="text-eyebrow">Next</p>
-          <h2 className="mt-2 font-heading text-2xl font-semibold tracking-[-0.025em]">
+          <p className="text-label">Next</p>
+          <h2 className="mt-2 text-feature-title">
             {formatLobbyOpening(session)}
           </h2>
-          <p className="mt-2 max-w-[68ch] text-sm text-muted-foreground">
+          <p className="mt-2 max-w-[68ch] text-support text-muted-foreground">
             Return here to check your access and prepare your dedicated
             workspace.
           </p>
@@ -510,13 +510,13 @@ function WorkshopNow({
     return (
       <section className="grid gap-5 rounded-xl border border-brand-border bg-brand-subtle px-5 py-6 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-8">
         <div>
-          <p className="text-eyebrow text-brand-text">Lobby open</p>
-          <h2 className="mt-2 font-heading text-2xl font-semibold tracking-[-0.025em]">
+          <p className="text-label text-brand-text">Lobby open</p>
+          <h2 className="mt-2 text-feature-title">
             {session.viewer.checkedIn
               ? "You’re checked in."
               : "Let the room know you’re here."}
           </h2>
-          <p className="mt-2 max-w-[68ch] text-sm text-muted-foreground">
+          <p className="mt-2 max-w-[68ch] text-support text-muted-foreground">
             The facilitator provisions checked-in workspaces before the first
             lab.
           </p>
@@ -542,13 +542,13 @@ function WorkshopNow({
     return (
       <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border bg-muted/35 px-5 py-5 sm:px-8">
         <div>
-          <p className="text-eyebrow">Session record</p>
+          <p className="text-label">Session record</p>
           <h2 className="mt-1 text-section-title">
             {session.state === "ended"
               ? "Workshop ended"
               : "Workshop cancelled"}
           </h2>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 text-support text-muted-foreground">
             Your progress remains available below; live workspaces are closed.
           </p>
         </div>
@@ -565,13 +565,13 @@ function WorkshopNow({
       />
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div className="min-w-0">
-          <p className="text-eyebrow text-brand-text">Now</p>
-          <h2 className="mt-2 max-w-3xl font-heading text-2xl font-semibold tracking-[-0.035em] text-balance sm:text-3xl">
+          <p className="text-label text-brand-text">Now</p>
+          <h2 className="mt-2 max-w-3xl text-feature-title">
             {currentAgenda?.title ??
               currentModule?.title ??
               "Waiting for the next activity"}
           </h2>
-          <p className="mt-3 max-w-[68ch] text-base leading-7 text-muted-foreground text-pretty">
+          <p className="mt-3 max-w-[68ch] text-body text-muted-foreground text-pretty">
             {currentModule?.outcome ??
               (currentAgenda
                 ? `${workshopAgendaKindLabel(currentAgenda.kind)} · ${currentAgenda.durationMinutes} minutes`
@@ -610,7 +610,7 @@ function WorkshopWorkspacePanel({
     >
       <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3 sm:px-6">
         <div>
-          <p className="text-eyebrow">Persistent workspace</p>
+          <p className="text-label">Persistent workspace</p>
           <h2
             id="workshop-workspace-heading"
             className="mt-1 text-section-title"
@@ -623,7 +623,7 @@ function WorkshopWorkspacePanel({
         </Badge>
       </div>
       {workspace.recoveryMessage ? (
-        <div className="flex items-start gap-3 border-b bg-warning-subtle px-4 py-3 text-sm sm:px-6">
+        <div className="flex items-start gap-3 border-b bg-warning-subtle px-4 py-3 text-support sm:px-6">
           <CircleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
           <span>{workspace.recoveryMessage}</span>
         </div>
@@ -687,7 +687,7 @@ function WorkshopWorkspacePanel({
         </div>
 
         <div>
-          <p className="mb-2 text-eyebrow">Workspace applications</p>
+          <p className="mb-2 text-label">Workspace applications</p>
           {workspace.applications.length ? (
             <div className="divide-y rounded-lg border">
               {workspace.applications.map((application) => (
@@ -696,7 +696,7 @@ function WorkshopWorkspacePanel({
                   className="flex min-h-12 items-center gap-3 px-3 py-2"
                 >
                   <AppWindow className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 text-sm font-medium">
+                  <span className="min-w-0 flex-1 text-support font-medium">
                     {application.label}
                   </span>
                   {application.available ? (
@@ -709,7 +709,7 @@ function WorkshopWorkspacePanel({
                       Open <ExternalLink />
                     </Button>
                   ) : (
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-caption">
                       Not released
                     </span>
                   )}
@@ -717,7 +717,7 @@ function WorkshopWorkspacePanel({
               ))}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-support text-muted-foreground">
               Applications appear as modules release them.
             </p>
           )}
@@ -773,17 +773,17 @@ function WorkshopHelpPanel({
           <Hand className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <h2 id="help-heading" className="text-sm font-semibold">
+          <h2 id="help-heading" className="text-card-title">
             Need help?
           </h2>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          <p className="mt-1 text-caption">
             Raise your hand without sharing your terminal. You control any
             assist access separately.
           </p>
         </div>
       </div>
       {grant ? (
-        <div className="mt-3 space-y-2 rounded-lg border border-warning-border bg-warning-subtle p-3 text-xs text-muted-foreground">
+        <div className="mt-3 space-y-2 rounded-lg border border-warning-border bg-warning-subtle p-3 text-caption">
           <p>
             {grant.helperName} has browser-terminal access until{" "}
             {formatClockTime(grant.expiresAt)}.
@@ -826,7 +826,7 @@ function WorkshopHelpPanel({
             value={message}
             onChange={(event) => setMessage(event.target.value)}
             placeholder="What are you stuck on?"
-            className="min-h-20 text-sm"
+            className="min-h-20 text-support"
             maxLength={500}
           />
           <Button type="submit" size="sm" className="w-full" disabled={busy}>
@@ -848,7 +848,7 @@ function WorkshopHelpPanel({
               Lower hand
             </Button>
           </div>
-          {help.message ? <p className="text-sm">{help.message}</p> : null}
+          {help.message ? <p className="text-support">{help.message}</p> : null}
           {help.state === "claimed" && !grant ? (
             <Button
               size="sm"
@@ -873,7 +873,7 @@ function WaitingForRelease({ state }: { state: WorkshopSessionState }) {
       <h2 className="mt-3 text-section-title">
         {state === "lobby" ? "Preflight first" : "Waiting for the next release"}
       </h2>
-      <p className="mt-1 max-w-md text-sm text-muted-foreground">
+      <p className="mt-1 max-w-md text-support text-muted-foreground">
         The facilitator will release participant instructions when the room is
         ready.
       </p>

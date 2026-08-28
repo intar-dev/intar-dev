@@ -76,11 +76,10 @@ export function Landing() {
             <SponsorMarks />
 
             <div className="space-y-5">
-              <p className="text-eyebrow">Hands-on DevOps labs</p>
               <h1 className="text-display max-w-[12ch] text-balance">
                 Repair real systems. Prove the fix.
               </h1>
-              <p className="prose-measure text-body max-w-xl text-muted-foreground sm:text-lg sm:leading-8">
+              <p className="prose-measure max-w-xl text-body text-muted-foreground">
                 Diagnose a live sandbox, repair it in the shell, and watch the
                 checks turn green.
               </p>
@@ -148,7 +147,7 @@ export function Landing() {
         </section>
       </main>
 
-      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-wrap items-center gap-x-3 gap-y-2 px-[var(--page-inset)] py-2 text-sm text-muted-foreground">
+      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-wrap items-center gap-x-3 gap-y-2 px-[var(--page-inset)] py-2 text-support text-muted-foreground">
         <span>Built by Stefan Ruzitschka</span>
         <span aria-hidden="true">·</span>
         <a href="https://github.com/intar-dev" className={footerLinkClassName}>
@@ -215,19 +214,19 @@ function WorkOrder() {
   return (
     <section className="terminal-surface hidden overflow-hidden rounded-xl border shadow-xl shadow-black/10 lg:block">
       <header className="flex items-center justify-between gap-4 border-b border-terminal-border px-4 py-3">
-        <div className="flex items-center gap-2 text-sm font-semibold">
+        <div className="flex items-center gap-2 text-support font-semibold">
           <TerminalSquare className="size-4 text-terminal-brand" />
           Work order · web-204
         </div>
-        <span className="font-mono text-xs text-terminal-muted">RUN-0417</span>
+        <span className="font-mono text-caption text-terminal-muted">RUN-0417</span>
       </header>
       <div className="space-y-6 p-4 sm:p-6">
         <div>
-          <p className="font-mono text-xs text-terminal-brand">INCIDENT</p>
-          <h2 className="mt-2 font-heading text-2xl font-bold tracking-tight">
+          <p className="font-mono text-caption text-terminal-brand">INCIDENT</p>
+          <h2 className="mt-2 text-page-title">
             The service is healthy. The website is not.
           </h2>
-          <p className="mt-2 text-sm leading-6 text-terminal-muted">
+          <p className="mt-2 text-support text-terminal-muted">
             Trace the request path, repair the configuration, and restore the
             public endpoint.
           </p>
@@ -254,7 +253,7 @@ function WorkOrder() {
           />
         </ol>
 
-        <div className="rounded-lg bg-terminal-background p-4 font-mono text-sm leading-7">
+        <div className="rounded-lg bg-terminal-background p-4 text-code">
           <p className="text-terminal-muted">$ curl -I http://web-01</p>
           <p className="text-terminal-destructive">HTTP/1.1 502 Bad Gateway</p>
           <p className="text-terminal-foreground">
@@ -279,11 +278,11 @@ function WorkOrderStep({
   detail: string;
 }) {
   return (
-    <li className="grid grid-cols-[1.25rem_2rem_minmax(0,1fr)_auto] items-center gap-2 py-3 text-sm">
+    <li className="grid grid-cols-[1.25rem_2rem_minmax(0,1fr)_auto] items-center gap-2 py-3 text-support">
       {icon}
-      <span className="font-mono text-xs text-terminal-muted">{number}</span>
+      <span className="font-mono text-caption text-terminal-muted">{number}</span>
       <span className="font-semibold">{label}</span>
-      <span className="hidden text-xs text-terminal-muted sm:block">
+      <span className="hidden text-caption text-terminal-muted sm:block">
         {detail}
       </span>
     </li>

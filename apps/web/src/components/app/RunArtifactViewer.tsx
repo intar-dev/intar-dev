@@ -146,11 +146,11 @@ export function RunArtifactViewer({
       <section>
         {!viewer ? (
           <div className="flex min-h-[22rem] items-center justify-center text-center">
-            <p className="text-sm text-muted-foreground">Replay unavailable.</p>
+            <p className="text-support text-muted-foreground">Replay unavailable.</p>
           </div>
         ) : viewer.error ? (
           <div className="flex min-h-[22rem] items-center justify-center">
-            <div className="max-w-lg text-sm text-destructive">
+            <div className="max-w-lg text-support text-destructive">
               {viewer.error}
             </div>
           </div>
@@ -163,7 +163,7 @@ export function RunArtifactViewer({
           />
         ) : (
           <div className="flex min-h-[22rem] items-center justify-center text-center">
-            <p className="text-sm text-muted-foreground">Replay unavailable.</p>
+            <p className="text-support text-muted-foreground">Replay unavailable.</p>
           </div>
         )}
       </section>
@@ -177,19 +177,19 @@ export function RunArtifactViewer({
           <div className="space-y-2">
             <CardDescription>{title}</CardDescription>
             <div className="space-y-1">
-              <CardTitle className="text-base sm:text-lg">
+              <CardTitle className="text-card-title">
                 {viewer
                   ? (selectedLabel ?? viewer.artifact.filename)
                   : emptyLabel}
               </CardTitle>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-support text-muted-foreground">
                 {viewer ? progressLabel : emptyDescription}
               </p>
             </div>
           </div>
 
           {viewer ? (
-            <dl className="flex max-w-2xl flex-wrap items-start gap-x-4 gap-y-2 text-xs">
+            <dl className="flex max-w-2xl flex-wrap items-start gap-x-4 gap-y-2 text-caption">
               <ArtifactMeta label="Size" value={formatBytes(viewer.artifact.sizeBytes)} />
               {!hideInternalMetadata ? (
                 <>
@@ -291,7 +291,7 @@ export function RunArtifactViewer({
                   Wrap {wrapText ? "On" : "Off"}
                 </Button>
               </div>
-              <span className="text-xs text-muted-foreground">
+              <span className="text-caption">
                 {viewer.previewTruncated
                   ? "The inline preview is capped for speed. Download the full file when needed."
                   : "Text panes support selection and `Cmd/Ctrl+F`."}
@@ -305,15 +305,15 @@ export function RunArtifactViewer({
         <div className="min-h-[22rem] rounded-lg border bg-muted/20">
           {!viewer ? (
             <div className="flex min-h-[22rem] flex-col items-center justify-center px-6 py-8 text-center">
-              <p className="text-sm font-medium">Artifacts open inline.</p>
-              <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+              <p className="text-support font-medium">Artifacts open inline.</p>
+              <p className="mt-2 max-w-md text-support text-muted-foreground">
                 Logs use a read-only text viewer and cast files replay inline,
                 with a raw fallback when needed.
               </p>
             </div>
           ) : viewer.error ? (
             <div className="flex min-h-[22rem] items-center justify-center px-6 py-8">
-              <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-sm text-destructive">
+              <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
                 {viewer.error}
               </div>
             </div>
@@ -334,7 +334,7 @@ export function RunArtifactViewer({
       </CardContent>
 
       {viewer ? (
-        <CardFooter className="flex flex-col items-start gap-1 border-t bg-muted/10 text-xs text-muted-foreground sm:flex-row sm:justify-between">
+        <CardFooter className="flex flex-col items-start gap-1 border-t bg-muted/10 text-caption sm:flex-row sm:justify-between">
           <span>{progressLabel}</span>
           <span>
             {canReplay && castTab === "replay"
@@ -378,7 +378,7 @@ export function AsciicastReplaySurface({
     return (
       <div className={minimal ? "p-0" : "p-4"}>
         <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
-          <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-sm text-destructive">
+          <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
             {replayPlayerErrorCopy(playerError, minimal)}
           </div>
         </div>
@@ -393,11 +393,11 @@ export function AsciicastReplaySurface({
           <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
             <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
           </div>
-          <p className="text-sm font-medium">
+          <p className="text-support font-medium">
             {minimal ? "Preparing replay" : "Preparing replay surface"}
           </p>
           {!minimal ? (
-            <p className="max-w-md text-sm leading-6 text-muted-foreground">
+            <p className="max-w-md text-support text-muted-foreground">
               Cast playback waits for the complete `.cast` stream so timing and
               frame boundaries stay correct. The Raw tab remains available
               while bytes are arriving.
@@ -537,7 +537,7 @@ export function ReadOnlyTextSurface({
         aria-label="Artifact text content"
         aria-busy={loading}
         className={cn(
-          "m-0 overflow-auto bg-terminal-background px-3 py-4 font-mono text-[0.79rem] leading-[1.65] text-terminal-foreground outline-none selection:bg-terminal-brand/25 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+          "m-0 overflow-auto bg-terminal-background px-3 py-4 text-code text-terminal-foreground outline-none selection:bg-terminal-brand/25 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
           wrapText ? "whitespace-pre-wrap break-words" : "whitespace-pre",
           compact
             ? "min-h-[4rem] max-h-[22rem]"
@@ -547,7 +547,7 @@ export function ReadOnlyTextSurface({
         <code>{deferredContent}</code>
       </pre>
       {!deferredContent ? (
-        <p className="pointer-events-none absolute inset-x-3 top-4 text-sm text-terminal-muted">
+        <p className="pointer-events-none absolute inset-x-3 top-4 text-support text-terminal-muted">
           {loading ? "Waiting for text…" : "This artifact is empty."}
         </p>
       ) : null}
@@ -565,7 +565,7 @@ export function ReadOnlyTextSurface({
   return (
     <div className="p-4">
       <div className="overflow-hidden rounded-md border bg-background">
-        <div className="border-b px-4 py-2 text-sm text-muted-foreground">
+        <div className="border-b px-4 py-2 text-support text-muted-foreground">
           {loading ? "Streaming text" : "Archived text"}
         </div>
         {textPane}

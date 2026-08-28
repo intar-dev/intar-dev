@@ -613,7 +613,7 @@ function AppRouteNotFound() {
       <title>Page not found · intar.dev</title>
       <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-4 px-[var(--page-inset)] py-16 text-center">
         <div className="space-y-2">
-          <p className="text-eyebrow">Unknown work order</p>
+          <p className="text-label">Unknown work order</p>
           <p className="text-page-title">That route is not in the manual</p>
           <p className="text-sm leading-6 text-muted-foreground">
             Check the address, or return to the course catalog to choose your
@@ -640,7 +640,7 @@ function RouteNotFound() {
           <SearchX className="size-6" />
         </span>
         <div className="space-y-2">
-          <p className="text-eyebrow">Unknown work order</p>
+          <p className="text-label">Unknown work order</p>
           <h1 className="text-page-title">That route is not in the manual</h1>
           <p className="text-body text-muted-foreground">
             Check the address, or return to the course catalog to choose your

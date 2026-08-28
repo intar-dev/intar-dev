@@ -18,8 +18,10 @@ export function WorkshopSlideFrame({
       aria-label={slide.title ? undefined : `Slide ${slide.ordinal + 1}`}
       data-layout={slide.layout}
       className={cn(
-        "relative isolate flex aspect-video w-full min-w-0 flex-col overflow-hidden rounded-xl border border-terminal-border bg-terminal-background text-terminal-foreground shadow-sm",
-        projector ? "p-8 sm:p-12 lg:p-16" : "p-6 sm:p-10 lg:p-12",
+        "relative isolate flex aspect-video w-full min-w-0 flex-col overflow-hidden rounded-xl border border-terminal-border bg-terminal-background text-terminal-foreground shadow-sm max-sm:aspect-auto max-sm:min-h-[min(30rem,calc(100dvh-8rem))] max-sm:max-h-none max-sm:overflow-visible [@media(max-height:40rem)]:aspect-auto [@media(max-height:40rem)]:min-h-[min(20rem,calc(100dvh-6rem))] [@media(max-height:40rem)]:max-h-none [@media(max-height:40rem)]:overflow-visible",
+        projector
+          ? "max-h-[calc(100dvh-13rem)] p-8 sm:p-12 lg:p-16"
+          : "max-h-[calc(100dvh-10rem)] p-6 sm:p-10 lg:p-12",
       )}
     >
       <div
@@ -29,16 +31,18 @@ export function WorkshopSlideFrame({
       <div
         className={cn(
           "relative flex h-full min-h-0 flex-col",
-          slide.layout === "title" && "justify-end pb-[8%]",
-          slide.layout === "break" && "justify-center",
+          slide.layout === "title" &&
+            "justify-start sm:justify-end sm:pb-[8%] [@media(max-height:40rem)]:justify-start [@media(max-height:40rem)]:pb-0",
+          slide.layout === "break" &&
+            "justify-start sm:justify-center [@media(max-height:40rem)]:justify-start",
           slide.layout !== "title" &&
             slide.layout !== "break" &&
-            "justify-between",
+            "justify-start gap-6 sm:justify-between sm:gap-0 [@media(max-height:40rem)]:justify-start [@media(max-height:40rem)]:gap-6",
         )}
       >
         {slide.title ? (
           <header className="max-w-[88%]">
-            <p className="mb-3 font-mono text-[0.65rem] tracking-[0.16em] text-terminal-brand uppercase sm:text-xs">
+            <p className="mb-3 font-mono text-xs tracking-[0.16em] text-terminal-brand uppercase">
               intar workshop · {String(slide.ordinal + 1).padStart(2, "0")}
             </p>
             <h2
@@ -65,7 +69,7 @@ export function WorkshopSlideFrame({
           />
         ) : null}
         {slide.moduleId ? (
-          <p className="mt-auto pt-6 font-mono text-[0.65rem] text-terminal-muted sm:text-xs">
+          <p className="mt-auto pt-6 font-mono text-xs text-terminal-muted">
             Module {slide.moduleId}
           </p>
         ) : null}
@@ -86,10 +90,10 @@ export function WorkshopSlideMarkdown({
   return (
     <div
       className={cn(
-        "min-h-0 max-w-[74ch] overflow-auto text-terminal-foreground",
+        "min-h-0 max-w-[74ch] overflow-auto text-terminal-foreground max-sm:overflow-visible [@media(max-height:40rem)]:overflow-visible",
         compact
           ? "text-base leading-relaxed sm:text-lg lg:text-xl"
-          : "text-sm leading-relaxed sm:text-base lg:text-lg",
+          : "text-base leading-relaxed lg:text-lg",
         className,
       )}
     >

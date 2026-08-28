@@ -45,7 +45,9 @@ export async function expectNoHorizontalOverflow(page: Page) {
         ) {
           overflowingText.push({
             text: node.data.trim().replace(/\s+/g, " ").slice(0, 80),
-            parent: (node.parentElement?.className ?? "").toString().slice(0, 120),
+            parent: (node.parentElement?.className ?? "")
+              .toString()
+              .slice(0, 120),
             left: Math.round(rect.left),
             right: Math.round(rect.right),
           });
@@ -93,6 +95,7 @@ export async function coarsePointerTargetViolations(page: Page) {
       "button:not([disabled])",
       "input:not([type='hidden']):not([disabled])",
       "select:not([disabled])",
+      "summary",
       "textarea:not([disabled])",
       "[role='button']:not([aria-disabled='true'])",
       "[role='tab']:not([aria-disabled='true'])",

@@ -62,13 +62,13 @@ export function OrganizationSignIn() {
               <Building2 className="size-5" />
             </span>
             <div className="space-y-2">
-              <p className="text-eyebrow text-brand-text">
+              <p className="text-label text-brand-text">
                 Organization access
               </p>
-              <h1 className="text-section-title">
+              <h1 className="text-page-title">
                 Continue with organization OIDC
               </h1>
-              <p className="text-sm leading-6 text-muted-foreground">
+              <p className="text-support text-muted-foreground">
                 Use an existing linked OIDC identity, or explicitly connect
                 your organization provider from an active GitHub beta session.
               </p>
@@ -87,7 +87,7 @@ export function OrganizationSignIn() {
             >
               <label
                 htmlFor="organization-slug"
-                className="text-sm font-medium"
+                className="text-label"
               >
                 Organization slug
               </label>
@@ -121,7 +121,7 @@ export function OrganizationSignIn() {
                   : "Organization sign-in could not be started."}
               </InlineFeedback>
             ) : null}
-            <div className="flex gap-3 rounded-xl bg-muted/40 p-4 text-sm text-muted-foreground">
+            <div className="flex gap-3 rounded-xl bg-muted/40 p-4 text-support text-muted-foreground">
               <ShieldCheck className="mt-0.5 size-4 shrink-0 text-brand-text" />
               <div className="space-y-2">
                 <p>

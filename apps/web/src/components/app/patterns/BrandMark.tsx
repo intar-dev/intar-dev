@@ -16,7 +16,7 @@ export function BrandMark({
     <>
       <img src="/favicon.svg" alt="" className="size-8 shrink-0" />
       {!compact ? (
-        <span className="font-heading text-lg font-bold tracking-[-0.03em]">
+        <span className="text-card-title">
           intar<span className="text-brand-text">.dev</span>
         </span>
       ) : null}

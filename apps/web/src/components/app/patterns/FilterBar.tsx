@@ -69,7 +69,7 @@ export function FilterBar({
           value={search}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder={searchPlaceholder}
-          className="pl-9"
+          className="h-9 pl-9 text-sm"
           aria-label={searchLabel}
         />
       </div>

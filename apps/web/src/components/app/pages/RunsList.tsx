@@ -128,17 +128,16 @@ export function RunsList() {
           }
         />
       ) : (
-        <div className="space-y-12">
+        <div className="space-y-8 md:space-y-10">
           {activeRuns.length ? (
             <section
               className="space-y-4"
               aria-labelledby="active-runs-heading"
             >
               <div>
-                <p className="text-eyebrow">Continue</p>
                 <h2
                   id="active-runs-heading"
-                  className="mt-2 text-section-title"
+                  className="text-section-title"
                 >
                   Active work
                 </h2>
@@ -162,10 +161,9 @@ export function RunsList() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="text-eyebrow">Cleanup continues</p>
                   <h2
                     id="background-runs-heading"
-                    className="mt-1 text-section-title"
+                    className="text-section-title"
                   >
                     Finishing in background
                   </h2>
@@ -189,16 +187,15 @@ export function RunsList() {
 
           {pastRuns.length ? (
             <section
-              className="space-y-6"
+              className="space-y-4"
               aria-labelledby="run-archive-heading"
             >
               <div className="flex items-center gap-3 border-b pb-4">
                 <History className="size-4 text-muted-foreground" />
                 <div>
-                  <p className="text-eyebrow">Past runs</p>
                   <h2
                     id="run-archive-heading"
-                    className="mt-1 text-section-title"
+                    className="text-section-title"
                   >
                     History
                   </h2>
@@ -281,7 +278,7 @@ function SettledRunGroupCard({ group }: { group: SettledRunGroup }) {
 // accent cards with one big Resume action.
 function ActiveRunCard({ run }: { run: MyRunEntry }) {
   return (
-    <article className="flex flex-col gap-4 rounded-xl border border-brand-border bg-brand-subtle p-4 sm:flex-row sm:items-center sm:p-6">
+    <article className="flex flex-col gap-3 rounded-xl border border-brand-border bg-brand-subtle p-4 sm:flex-row sm:items-center sm:p-5">
       <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-card text-brand-text">
         <CircleDot className="size-5 motion-safe:animate-pulse" aria-hidden />
       </span>
@@ -294,7 +291,6 @@ function ActiveRunCard({ run }: { run: MyRunEntry }) {
       {/* Match the run workspace Back link: document navigation avoids the
           current router intent-preload failure on repeated resume cycles. */}
       <Button
-        size="lg"
         className="w-full sm:w-auto"
         render={<a href={`/runs/${encodeURIComponent(run.runId)}`} />}
       >

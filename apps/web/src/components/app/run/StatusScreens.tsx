@@ -43,7 +43,7 @@ export function ScenarioStepScreen(props: {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-2">
             {props.steps.length ? (
-              <p className="text-eyebrow" data-run-sequence-position>
+              <p className="text-label" data-run-sequence-position>
                 Stage {currentStepIndex + 1} of {props.steps.length}
               </p>
             ) : null}
@@ -51,7 +51,7 @@ export function ScenarioStepScreen(props: {
               id={props.headingId}
               ref={props.headingRef}
               tabIndex={props.headingRef ? -1 : undefined}
-              className="text-card-title font-heading text-lg font-semibold tracking-tight outline-none"
+              className="text-section-title outline-none"
             >
               {props.title}
             </h2>
@@ -191,9 +191,11 @@ export function ScenarioShellStatusCard(props: {
     props.phase === "archiving";
 
   return (
-    <Card>
+    <Card as="section" aria-labelledby="scenario-shell-title">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Shell</CardTitle>
+        <CardTitle as="h2" id="scenario-shell-title" className="text-base">
+          Shell
+        </CardTitle>
         <CardDescription>{props.title}</CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-[20rem] flex-col items-center justify-center gap-4 text-center">

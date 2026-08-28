@@ -328,8 +328,7 @@ function ScenarioBriefing({
 
             <section className="space-y-4" aria-labelledby="your-task-heading">
               <div>
-                <p className="text-eyebrow">The situation</p>
-                <h2 id="your-task-heading" className="mt-2 text-section-title">
+                <h2 id="your-task-heading" className="text-section-title">
                   Your task
                 </h2>
               </div>
@@ -341,7 +340,6 @@ function ScenarioBriefing({
             {scenarioData.briefing.objectives.length ? (
               <Card as="section" aria-labelledby="done-when-heading">
                 <CardHeader className="gap-2 border-b">
-                  <p className="text-eyebrow">Success criteria</p>
                   <CardTitle
                     as="h2"
                     id="done-when-heading"
@@ -413,20 +411,18 @@ function ScenarioActionPanel({
 }) {
   return (
     <section
-      className="space-y-4 rounded-xl border border-brand-border bg-brand-subtle p-4 sm:p-6"
+      className="space-y-3 rounded-xl border border-brand-border bg-brand-subtle p-4 sm:p-5"
       aria-labelledby="scenario-next-action"
     >
       <div>
-        <p className="text-eyebrow text-brand-text">Next step</p>
-        <h2 id="scenario-next-action" className="mt-2 text-section-title">
+        <h2 id="scenario-next-action" className="text-section-title">
           {scenario.hasActiveRun
             ? "Continue your lab"
             : "Start your lab"}
         </h2>
       </div>
       <Button
-        size="lg"
-        className="w-full"
+        className="w-full sm:w-auto sm:min-w-44"
         onClick={onPrimaryAction}
         disabled={
           isPending ||
@@ -448,7 +444,7 @@ function ScenarioActionPanel({
           </p>
           <Button
             variant="outline"
-            className="w-full"
+            className="w-full sm:w-auto sm:min-w-44"
             render={
               <Link
                 to="/runs/$runId"
@@ -479,7 +475,7 @@ function ScenarioActionPanel({
             <Button
               type="button"
               variant="outline"
-              className="min-h-11 w-full"
+              className="w-full sm:w-auto"
               onClick={onStopWaiting}
             >
               Stop waiting
@@ -513,7 +509,7 @@ function ScenarioProgressSummary({
       aria-labelledby="your-progress-heading"
     >
       <div className="space-y-1">
-        <p className="text-eyebrow">Your progress</p>
+        <p className="text-label">Your progress</p>
         <h2 id="your-progress-heading" className="text-card-title">
           {hasActiveRun
             ? "Lab in progress"

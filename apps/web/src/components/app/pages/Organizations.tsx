@@ -218,10 +218,9 @@ export function Organizations() {
         <section className="space-y-4" aria-labelledby="organizations-heading">
           <div className="flex items-end justify-between gap-4">
             <div>
-              <p className="text-eyebrow">Your access</p>
               <h2
                 id="organizations-heading"
-                className="mt-1 text-section-title"
+                className="text-section-title"
               >
                 Organizations
               </h2>

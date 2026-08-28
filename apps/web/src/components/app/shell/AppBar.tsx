@@ -139,7 +139,7 @@ export function AppBar() {
   const heading = final ? (
     <h1
       title={final.label}
-      className="min-w-0 truncate text-sm font-medium text-foreground"
+      className="min-w-0 truncate text-card-title"
     >
       {final.label}
     </h1>
@@ -158,7 +158,7 @@ export function AppBar() {
             <li className="hidden shrink-0 items-center gap-1.5 sm:flex">
               <Link
                 to={ancestor.to}
-                className="rounded-sm text-[0.8125rem] text-muted-foreground transition-colors hover:text-foreground"
+                className="rounded-sm text-caption transition-colors hover:text-foreground"
               >
                 {ancestor.label}
               </Link>

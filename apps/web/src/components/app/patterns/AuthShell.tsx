@@ -29,7 +29,7 @@ export function AuthShell({
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-12">
           <section className="order-1 rounded-xl border bg-card p-4 shadow-sm sm:p-8 lg:order-2">
             <header className="space-y-2">
-              <p className="text-eyebrow">{eyebrow}</p>
+              <p className="text-label">{eyebrow}</p>
               <h1 className="text-page-title">{title}</h1>
               <p className="text-body text-muted-foreground">{description}</p>
             </header>
@@ -38,16 +38,16 @@ export function AuthShell({
 
           <div className="order-2 flex max-w-lg flex-col items-start gap-4 lg:order-1 lg:gap-8">
             <div className="space-y-4">
-              <p className="text-eyebrow">Systems workshop access</p>
-              <p className="font-heading text-xl leading-tight font-bold tracking-[-0.03em] text-balance lg:text-4xl lg:tracking-[-0.035em]">
+              <p className="text-label">Systems workshop access</p>
+              <p className="text-feature-title text-balance">
                 One identity from briefing to verified repair.
               </p>
-              <p className="prose-measure text-sm leading-6 text-muted-foreground lg:text-base lg:leading-7">
+              <p className="prose-measure text-support text-muted-foreground">
                 intar.dev uses GitHub identity so your scenarios, terminal
                 sessions, and run history stay connected.
               </p>
             </div>
-            <ol className="hidden w-full border-y text-sm lg:block">
+            <ol className="hidden w-full border-y text-support lg:block">
               {[
                 [
                   "01",
@@ -69,7 +69,7 @@ export function AuthShell({
                   key={number}
                   className="grid grid-cols-[2.5rem_8rem_1fr] gap-3 border-b py-3 last:border-b-0"
                 >
-                  <span className="font-heading text-xs font-semibold text-brand-text tabular-nums">
+                  <span className="font-heading text-caption font-semibold text-brand-text tabular-nums">
                     {number}
                   </span>
                   <span className="font-semibold">{label}</span>

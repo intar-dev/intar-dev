@@ -38,7 +38,7 @@ export function DisclosureRow({
           "group flex w-full items-center text-left",
           density === "compact"
             ? "min-h-9 gap-2 py-1"
-            : "min-h-11 gap-3 py-2",
+            : "min-h-10 gap-3 py-2",
         )}
       >
         {leading}

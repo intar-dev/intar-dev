@@ -190,7 +190,7 @@ export function ScenarioRunArchiveCard(props: {
       {props.isExpanded ? (
         <div
           id={detailsId}
-          className="mt-4 border-t bg-muted/20 px-4 py-5 sm:px-6"
+          className="mt-3 border-t bg-muted/20 px-4 py-4 sm:px-5"
         >
           {props.isDetailLoading ? (
             <p role="status" className="text-sm text-muted-foreground">
@@ -239,8 +239,8 @@ function ArchiveRunDetails(props: {
   onStreamArtifact: (artifact: AgentVmRunArtifact) => void;
 }) {
   return (
-    <div className="space-y-6">
-      <dl className="grid gap-x-5 gap-y-3 border-b pb-5 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="space-y-4">
+      <dl className="grid gap-x-4 gap-y-3 border-b pb-4 sm:grid-cols-2 xl:grid-cols-4">
         <ArchiveDefinition
           label="Created"
           value={formatTimestampMs(props.run.vmCreatedAt)}
@@ -262,7 +262,7 @@ function ArchiveRunDetails(props: {
         </div>
       ) : null}
 
-      <div className="grid gap-8 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
         <section aria-labelledby={`run-${props.run.id}-milestones`}>
           <div className="flex items-center justify-between gap-2">
             <h4
@@ -409,7 +409,7 @@ function ArchiveDefinition({
 }) {
   return (
     <div className="min-w-0">
-      <dt className="text-eyebrow">{label}</dt>
+      <dt className="text-label">{label}</dt>
       <dd className="mt-1 text-sm font-medium break-words tabular-nums">
         {value}
       </dd>

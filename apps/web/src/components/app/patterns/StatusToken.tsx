@@ -56,7 +56,7 @@ export function StatusToken({
       />
       <span
         role={live ? "status" : undefined}
-        className="truncate text-xs font-medium"
+        className="truncate text-sm font-medium"
       >
         {compactWord ? (
           <>

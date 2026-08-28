@@ -96,10 +96,10 @@ export function HostOnboardingPanel({
   };
 
   return (
-    <section className="grid gap-6 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
-      <div className="space-y-4 rounded-2xl border bg-card p-6 shadow-xs">
+    <section className="grid gap-4 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
+      <div className="space-y-4 rounded-xl border bg-card p-4 shadow-xs">
         <div className="space-y-2">
-          <p className="text-eyebrow">{eyebrow}</p>
+          <p className="text-label">{eyebrow}</p>
           <h2 className="text-section-title">{title}</h2>
         </div>
 
@@ -203,25 +203,25 @@ export function HostOnboardingPanel({
         </div>
       </div>
 
-      <div className="rounded-2xl border bg-card p-6 shadow-xs">
+      <div className="rounded-xl border bg-card p-4 shadow-xs">
         {generated ? (
           <div className="space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
                 <div>
-                  <dt className="text-eyebrow">Host ID</dt>
+                  <dt className="text-label">Host ID</dt>
                   <dd className="mt-1 font-mono text-xs break-all">
                     {generated.host.id}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-eyebrow">Role</dt>
+                  <dt className="text-label">Role</dt>
                   <dd className="mt-1 font-medium capitalize">
                     {generated.host.role}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-eyebrow">Bootstrap access</dt>
+                  <dt className="text-label">Bootstrap access</dt>
                   <dd className="mt-1 font-medium">
                     {generated.bootstrapTokenExpiresAt
                       ? `Until ${new Date(generated.bootstrapTokenExpiresAt).toLocaleString()}`
@@ -277,7 +277,7 @@ export function HostOnboardingPanel({
             </ol>
           </div>
         ) : (
-          <div className="flex min-h-[24rem] items-center justify-center rounded-xl bg-muted/40 px-6 text-center text-sm text-muted-foreground">
+          <div className="flex min-h-48 items-center justify-center rounded-xl bg-muted/40 px-4 text-center text-sm text-muted-foreground">
             Generate a host config to reveal the bridge block and install steps.
           </div>
         )}

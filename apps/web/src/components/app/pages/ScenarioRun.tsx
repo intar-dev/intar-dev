@@ -630,6 +630,7 @@ export function ScenarioRun() {
       canDeleteRun ? (
         <Button
           type="button"
+          size="sm"
           variant="destructive"
           onClick={() => setDeleteRunDialogOpen(true)}
         >
@@ -656,6 +657,7 @@ export function ScenarioRun() {
         {showSshAction ? (
           <Button
             type="button"
+            size="sm"
             variant="outline"
             disabled={!selectedVmShellReady}
             onClick={() => setSshDialogOpen(true)}
@@ -666,6 +668,7 @@ export function ScenarioRun() {
         {showEndRunAction ? (
           <Button
             type="button"
+            size="sm"
             variant="destructive"
             onClick={() => setCancelDialogOpen(true)}
           >
@@ -675,6 +678,7 @@ export function ScenarioRun() {
         {canDeleteRun ? (
           <Button
             type="button"
+            size="sm"
             variant="destructive"
             onClick={() => setDeleteRunDialogOpen(true)}
           >
@@ -863,7 +867,7 @@ export function ScenarioRun() {
               ) : null
             }
           />
-          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 sm:p-4 [@media(max-height:500px)]:!p-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-3 [@media(max-height:500px)]:!p-3">
             <div className="shrink-0 space-y-2 empty:hidden">
               {errorAlerts}
             </div>
@@ -879,7 +883,7 @@ export function ScenarioRun() {
 
             <section
               aria-label="Terminal"
-              className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-3"
+              className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-2"
             >
               <ScenarioVmSelector
                 vms={attemptData.vms}
@@ -916,7 +920,7 @@ export function ScenarioRun() {
                       ? "Workspace startup progress"
                       : undefined
                   }
-                  className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+                  className="relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
                   role={showSelectedVmPreparation ? "region" : undefined}
                   tabIndex={showSelectedVmPreparation ? 0 : undefined}
                 >
@@ -961,7 +965,7 @@ function RunPageFrame({ children }: { children: ReactNode }) {
       className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
     >
       <header
-        className="flex h-[3.25rem] shrink-0 items-center border-b bg-background px-3 sm:px-4"
+        className="flex h-12 shrink-0 items-center border-b bg-background px-3"
         data-run-navigation
       >
         {/* Keep this a document navigation. Repeated run/list transitions hit
@@ -969,7 +973,10 @@ function RunPageFrame({ children }: { children: ReactNode }) {
             also guarantees that the terminal transport is released. */}
         <a
           href="/runs"
-          className={buttonVariants({ variant: "ghost", className: "-ml-2" })}
+          className={buttonVariants({
+            variant: "ghost",
+            className: "-ml-2 [@media(pointer:coarse)]:min-h-11",
+          })}
           aria-label="Back to My runs"
           data-run-back
         >
@@ -995,10 +1002,10 @@ function RunWorkspaceHeader({
 }) {
   return (
     <div
-      className="flex shrink-0 flex-wrap items-center gap-3 border-b bg-background px-3 py-3 sm:px-4"
+      className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2"
       data-run-workspace-header
     >
-      <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 font-heading text-lg leading-6 font-semibold tracking-tight">
+      <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-section-title">
         {title}
       </h1>
       <div className="flex max-w-full flex-wrap items-center gap-2">

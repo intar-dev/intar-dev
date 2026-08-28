@@ -283,7 +283,6 @@ export function CollectionPagination({
           type="button"
           size="sm"
           variant="outline"
-          className="min-h-11 px-3"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
         >
@@ -302,7 +301,6 @@ export function CollectionPagination({
               type="button"
               size="icon-sm"
               variant={pageNumber === page ? "secondary" : "ghost"}
-              className="min-h-11 min-w-11"
               aria-label={`Page ${pageNumber}`}
               aria-current={pageNumber === page ? "page" : undefined}
               onClick={() => onPageChange(pageNumber)}
@@ -316,7 +314,6 @@ export function CollectionPagination({
           type="button"
           size="sm"
           variant="outline"
-          className="min-h-11 px-3"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
         >

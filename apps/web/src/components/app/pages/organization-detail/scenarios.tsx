@@ -379,13 +379,13 @@ export function OrganizationScenariosSection({
               organizationId={detail.id}
             />
           ) : (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-support text-muted-foreground">
               No published courses are available yet.
             </p>
           )}
           {admin && !courseRoute && privateEntries.length ? (
             <div className="mt-5 space-y-2 border-t pt-4">
-              <p className="text-eyebrow">Private catalog cleanup</p>
+              <p className="text-label">Private catalog cleanup</p>
               <PaginatedCollection
                 items={privateEntries}
                 pageSize={COLLECTION_PAGE_SIZE.list}
@@ -431,11 +431,11 @@ export function OrganizationScenariosSection({
       {admin && !courseRoute ? (
         <Card>
           <CardHeader className="border-b">
-            <p className="text-eyebrow">Private authoring</p>
+            <p className="text-label">Private authoring</p>
             <CardTitle as="h2" className="text-section-title">
               Upload scenario HCL
             </CardTitle>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-support text-muted-foreground">
               Use a local scenario label. Intar namespaces it as{" "}
               <code>{detail.slug}-&lt;local-id&gt;</code> before the platform
               builder receives it.
@@ -517,7 +517,7 @@ export function OrganizationScenariosSection({
                       >
                         <FileCode2 className="size-4 text-brand-text" />
                         <div className="min-w-0 flex-1">
-                          <p className="font-mono text-sm break-all">
+                          <p className="text-code break-all">
                             {source.scenarioId}
                           </p>
                           <p className="text-caption">
@@ -554,7 +554,7 @@ export function OrganizationScenariosSection({
           <div className="grid gap-4 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)]">
             <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/30 p-6 text-center">
               <FileArchive className="size-6 text-brand-text" />
-              <span className="text-sm font-medium">
+              <span className="text-support font-medium">
                 {bundle?.name ?? "Choose .tar.gz bundle"}
               </span>
               <Input
@@ -568,7 +568,7 @@ export function OrganizationScenariosSection({
               value={bundleMeta}
               onChange={(event) => setBundleMeta(event.target.value)}
               placeholder="Paste bundle metadata JSON, including build_format_version, kino_version, and scenarios."
-              className="min-h-32 font-mono text-xs"
+              className="min-h-32 text-code"
               aria-label="Bundle metadata JSON"
             />
           </div>
@@ -729,14 +729,14 @@ function OrganizationCourseDetail({
         <div className="mt-2 min-w-0 space-y-2">
           <h2
             id={headingId}
-            className="font-heading text-2xl font-bold tracking-[-0.03em] text-balance [overflow-wrap:anywhere] sm:text-3xl"
+            className="text-page-title [overflow-wrap:anywhere]"
           >
             {course.title}
           </h2>
           <p className="max-w-3xl text-body text-muted-foreground text-pretty">
             <CourseDescription>{course.description}</CourseDescription>
           </p>
-          <dl className="flex flex-wrap gap-x-2 gap-y-1 pt-1 text-sm text-muted-foreground tabular-nums">
+          <dl className="flex flex-wrap gap-x-2 gap-y-1 pt-1 text-metadata tabular-nums">
             <CourseFact label="Course type" value={courseKindLabel(course)} />
             <CourseFact
               label="Scenarios"
@@ -835,7 +835,7 @@ function CourseHeading({
 }) {
   return (
     <div>
-      <p className="text-eyebrow">{courseKindLabel(course)}</p>
+      <p className="text-label">{courseKindLabel(course)}</p>
       <h2
         className={
           "mt-1 text-section-title" +
@@ -844,7 +844,7 @@ function CourseHeading({
       >
         {course.title}
       </h2>
-      <p className="mt-2 text-sm text-muted-foreground">
+      <p className="mt-2 text-support text-muted-foreground">
         <CourseDescription links={false}>{course.description}</CourseDescription>
       </p>
     </div>

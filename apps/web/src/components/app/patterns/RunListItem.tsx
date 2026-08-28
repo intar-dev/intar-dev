@@ -132,7 +132,7 @@ export function RunListItem({
         <Button
           variant={activity === "foreground" ? "default" : "outline"}
           size="sm"
-          className="min-h-11 flex-1 sm:flex-none"
+          className="flex-1 sm:flex-none"
           aria-label={actionLabel}
           render={<Link to="/runs/$runId" params={{ runId: run.runId }} />}
         >

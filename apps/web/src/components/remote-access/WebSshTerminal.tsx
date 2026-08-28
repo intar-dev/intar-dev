@@ -500,7 +500,7 @@ function TerminalRecoveryNotice({
       <Button
         size="sm"
         variant="outline"
-        className="min-h-11 w-full shrink-0 sm:w-auto"
+        className="w-full shrink-0 sm:w-auto"
         onClick={onReconnect}
       >
         Reconnect terminal

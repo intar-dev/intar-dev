@@ -113,7 +113,7 @@ export function OrganizationDetail() {
         : "Member";
 
   return (
-    <PageShell width="workspace">
+    <PageShell width="workspace" density="compact">
       <ContentHeader
         title={detail.name}
         badge={
@@ -167,7 +167,7 @@ export function OrganizationDetail() {
       <Tabs
         value={activeTab}
         onValueChange={(value) => setTab(value as OrganizationDetailTab)}
-        className="min-w-0 gap-6"
+        className="min-w-0 gap-4"
       >
         <div className="min-w-0 max-w-full overflow-x-auto border-b px-1 pt-1">
           <TabsList variant="line" className="min-w-max pb-1">

@@ -565,9 +565,9 @@ export function Dashboard() {
           tone={attentionHostCount ? "warning" : "success"}
           action={
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
-              className="h-auto p-0 text-xs font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              className="h-8 min-w-8 px-0 text-caption font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
               render={<Link to="/admin/hosts" />}
             >
               Review hosts
@@ -587,9 +587,9 @@ export function Dashboard() {
           detail="Active scenario VMs"
           action={
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
-              className="h-auto p-0 text-xs font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              className="h-8 min-w-8 px-0 text-caption font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
               render={<a href="#live-runs" />}
             >
               Inspect live work
@@ -614,9 +614,9 @@ export function Dashboard() {
           tone={enabledScenarioCount ? "default" : "warning"}
           action={
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
-              className="h-auto p-0 text-xs font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              className="h-8 min-w-8 px-0 text-caption font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
               render={<Link to="/admin/scenarios" />}
             >
               Open registry
@@ -912,7 +912,7 @@ export function Dashboard() {
               {isLoadingMoreArchives ? "Loading older runs…" : "Load older runs"}
             </Button>
             {loadMoreArchivesError ? (
-              <p className="text-sm text-destructive" role="alert">
+              <p className="text-support text-destructive" role="alert">
                 {loadMoreArchivesError.message}
               </p>
             ) : null}
@@ -990,7 +990,7 @@ export function Dashboard() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <label htmlFor="delete-run-confirm" className="font-mono text-sm">
+            <label htmlFor="delete-run-confirm" className="text-code">
               {deleteTarget?.runId}
             </label>
             <Input
@@ -1106,7 +1106,7 @@ function OperationalEmptyState({
 }) {
   return (
     <div className="rounded-lg bg-muted/30 px-4 py-3">
-      <h3 className="text-sm font-medium">{title}</h3>
+      <h3 className="text-card-title">{title}</h3>
       <p className="mt-1 max-w-2xl text-metadata">{description}</p>
     </div>
   );
@@ -1141,11 +1141,11 @@ function LedgerRow({
         {icon}
       </span>
       <div className="min-w-0 space-y-0.5">
-        <p className="text-sm font-medium">{label}</p>
+        <p className="text-support font-medium">{label}</p>
         <p className="text-metadata">{detail}</p>
       </div>
       <div className="flex min-w-20 flex-col items-end gap-0.5 text-right sm:contents">
-        <p className="text-sm font-semibold tabular-nums sm:col-start-3 sm:justify-self-end">
+        <p className="text-support font-semibold tabular-nums sm:col-start-3 sm:justify-self-end">
           {value}
         </p>
         {action ? (

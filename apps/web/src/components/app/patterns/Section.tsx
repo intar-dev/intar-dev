@@ -29,7 +29,7 @@ export function Section({
       as="section"
       variant={variant}
       size={density === "compact" ? "sm" : "default"}
-      className={cn("block", density === "compact" && "gap-3", className)}
+      className={cn(density === "compact" && "gap-3", className)}
     >
       {title || actions || description ? (
         <div className="flex flex-col gap-2 px-(--card-spacing) sm:flex-row sm:items-start sm:justify-between">

@@ -206,19 +206,19 @@ export function ScenarioRegistry() {
         <div className="space-y-4">
           <dl className="grid gap-4 border-y py-4 sm:grid-cols-3">
             <div>
-              <dt className="text-eyebrow">Registry</dt>
+              <dt className="text-label">Registry</dt>
               <dd className="mt-1 text-section-title tabular-nums">
                 {scenarioList.length}
               </dd>
             </div>
             <div>
-              <dt className="text-eyebrow">Enabled for learners</dt>
+              <dt className="text-label">Enabled for learners</dt>
               <dd className="mt-1 text-section-title text-success tabular-nums">
                 {enabledCount}
               </dd>
             </div>
             <div>
-              <dt className="text-eyebrow">Unavailable</dt>
+              <dt className="text-label">Unavailable</dt>
               <dd className="mt-1 text-section-title tabular-nums">
                 {scenarioList.length - enabledCount}
               </dd>
@@ -469,20 +469,20 @@ function ScenarioRegistryRow({
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         <div>
-          <dt className="text-eyebrow">Inventory</dt>
+          <dt className="text-label">Inventory</dt>
           <dd className="mt-0.5 tabular-nums">
             {scenario.vmCount} VM · {scenario.probeCount} probes
           </dd>
         </div>
         <div>
-          <dt className="text-eyebrow">Guidance</dt>
+          <dt className="text-label">Guidance</dt>
           <dd className="mt-0.5 tabular-nums">
             {scenario.scenarioHintCount} hints · ~{scenario.estimatedMinutes}{" "}
             min
           </dd>
         </div>
         <div className="col-span-2">
-          <dt className="text-eyebrow">Updated</dt>
+          <dt className="text-label">Updated</dt>
           <dd className="mt-0.5 text-metadata">
             {formatRelativeTime(scenario.updatedAt)}
           </dd>
@@ -547,7 +547,7 @@ function StatusDefinition({
 }) {
   return (
     <div className="min-w-0">
-      <dt className="text-eyebrow">{label}</dt>
+      <dt className="text-label">{label}</dt>
       <dd
         className={cn(
           "mt-1 text-sm font-medium break-words",

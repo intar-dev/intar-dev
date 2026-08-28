@@ -24,7 +24,9 @@ export function PageShell({
       data-page-width={width}
       className={cn(
         "mx-auto flex w-full flex-1 flex-col",
-        density === "comfortable" ? "gap-6 sm:gap-8" : "gap-4",
+        density === "comfortable"
+          ? "gap-(--space-xl)"
+          : "gap-(--space-md)",
         width === "narrow" && "max-w-2xl px-[var(--page-inset)] py-4 sm:py-6",
         width === "content" && "max-w-5xl px-[var(--page-inset)] py-4 sm:py-6",
         width === "default" && "max-w-7xl px-[var(--page-inset)] py-4 sm:py-6",

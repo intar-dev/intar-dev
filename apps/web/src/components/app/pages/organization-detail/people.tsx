@@ -15,6 +15,7 @@ import { Section } from "../../patterns/Section";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { NativeSelect } from "@/components/ui/native-select";
 import {
   Table,
   TableBody,
@@ -51,10 +52,11 @@ export function OrganizationOverview({
   return (
     <Section
       variant="flat"
+      density="compact"
       title="Organization control plane"
       description="Identity, private content, and execution capacity stay inside this boundary."
     >
-      <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <OverviewMetric
           label="Members"
           value={detail.members.length}
@@ -102,8 +104,8 @@ function OverviewMetric({
   onClick: () => void;
 }) {
   return (
-    <div className="rounded-lg bg-muted/40 p-4">
-      <dt className="text-eyebrow">{label}</dt>
+    <div className="rounded-lg bg-muted/40 p-3">
+      <dt className="text-label">{label}</dt>
       <dd>
         <span className="mt-1 block text-section-title tabular-nums">
           {value}
@@ -155,6 +157,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
 
   return (
     <Section
+      density="compact"
       title="Members"
       description="Successful sign-in through the verified OIDC provider creates membership automatically."
     >
@@ -168,7 +171,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
             {visibleMembers.map((entry) => (
               <li
                 key={entry.memberId}
-                className="flex flex-wrap items-center gap-4 p-4 sm:p-6"
+                className="flex flex-wrap items-center gap-3 p-3 sm:p-4"
               >
                 <Avatar>
                   <AvatarFallback>{initials(entry.name)}</AvatarFallback>
@@ -184,7 +187,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
                   </p>
                 </div>
                 {admin && entry.role !== "owner" ? (
-                  <select
+                  <NativeSelect
                     value={entry.role}
                     onChange={(event) =>
                       changeRole.mutate({
@@ -193,12 +196,11 @@ export function MembersSection({ detail }: { detail: Detail }) {
                       })
                     }
                     disabled={changeRole.isPending}
-                    className="h-11 rounded-lg border bg-card px-3 text-sm"
                     aria-label={`Role for ${entry.name}`}
                   >
                     <option value="admin">Admin</option>
                     <option value="member">Member</option>
-                  </select>
+                  </NativeSelect>
                 ) : (
                   <Badge
                     variant={entry.role === "member" ? "outline" : "secondary"}
@@ -306,15 +308,15 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
 
   return (
     <Section
+      density="compact"
       title="Assignments"
       description="Assignment markers are separate from catalog visibility: every member can browse the organization library."
       actions={
         admin && assignable.length ? (
           <div className="flex flex-wrap items-center gap-2">
-            <select
+            <NativeSelect
               value={scenarioId}
               onChange={(event) => setScenarioId(event.target.value)}
-              className="h-11 rounded-lg border bg-card px-3 text-sm"
               aria-label="Scenario to assign"
             >
               <option value="">Choose a scenario…</option>
@@ -323,7 +325,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                   {scenario.title}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
             <Button
               disabled={!scenarioId || assign.isPending}
               onClick={() => assign.mutate(scenarioId)}
@@ -348,7 +350,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                 return (
                   <li
                     key={entry.id}
-                    className="flex flex-wrap items-center gap-4 p-4 sm:p-6"
+                    className="flex flex-wrap items-center gap-3 p-3 sm:p-4"
                   >
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
                       <BookOpen className="size-4" />
@@ -432,6 +434,7 @@ export function ProgressSection({ detail }: { detail: Detail }) {
   const data = progress.data?.progress;
   return (
     <Section
+      density="compact"
       title="Progress"
       description="Latest learner status across assigned scenarios."
     >

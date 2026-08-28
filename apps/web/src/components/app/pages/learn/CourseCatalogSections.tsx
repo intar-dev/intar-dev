@@ -195,7 +195,7 @@ function CourseIndex({
                 aria-labelledby={headingId}
                 aria-describedby={summaryId}
                 onClick={() => onSelectCourse(key)}
-                className="group grid w-full min-w-0 cursor-pointer gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_23rem] @3xl/course:items-center"
+                className="group grid w-full min-w-0 cursor-pointer gap-4 px-4 py-4 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-5 sm:py-5 @3xl/course:grid-cols-[minmax(0,1fr)_23rem] @3xl/course:items-center"
               >
                 <span id={summaryId} className="sr-only">
                   <CourseDescription links={false}>
@@ -208,7 +208,7 @@ function CourseIndex({
                 </span>
                 <span className="min-w-0 space-y-2">
                   <span className="flex flex-wrap items-center justify-between gap-3">
-                    <span className="text-eyebrow">
+                    <span className="text-label">
                       {courseEyebrow(section)}
                     </span>
                     <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-text @3xl/course:hidden">
@@ -220,7 +220,7 @@ function CourseIndex({
                     id={headingId}
                     role="heading"
                     aria-level={2}
-                    className="block font-heading text-xl font-bold tracking-[-0.025em] text-balance [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text sm:text-2xl"
+                    className="block text-page-title text-balance [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text"
                   >
                     {section.course.title}
                   </span>
@@ -368,7 +368,7 @@ function CourseDetail({
             ref={heading}
             id={headingId}
             tabIndex={-1}
-            className="font-heading text-2xl font-bold tracking-[-0.03em] text-balance outline-none [overflow-wrap:anywhere] sm:text-3xl"
+            className="text-page-title text-balance outline-none [overflow-wrap:anywhere] sm:text-feature-title"
           >
             {section.course.title}
           </h2>
@@ -440,7 +440,7 @@ function CourseDetail({
             <Search className="size-4" aria-hidden />
           </span>
           <div>
-            <h3 className="font-heading text-lg font-bold">
+            <h3 className="text-section-title">
               No scenarios match your filters
             </h3>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -469,7 +469,7 @@ function CourseUnavailable({
       className="flex min-h-48 flex-col items-start justify-center gap-3 rounded-xl border border-dashed bg-muted/20 p-6"
     >
       <div>
-        <h2 className="font-heading text-xl font-bold">Course not available</h2>
+        <h2 className="text-page-title">Course not available</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           It may have been unpublished or may not be available in this catalog.
         </p>

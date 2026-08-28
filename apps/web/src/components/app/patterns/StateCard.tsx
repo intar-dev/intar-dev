@@ -30,10 +30,10 @@ function StateShell({
   const Heading = headingLevel === 3 ? "h3" : "h2";
 
   return (
-    <Card className={className}>
+    <Card size="sm" className={className}>
       <CardContent
         className={cn(
-          "flex flex-col items-center justify-center gap-3 px-6 py-10 text-center",
+          "flex flex-col items-center justify-center gap-3 py-5 text-center sm:py-6",
           contentClassName,
         )}
       >

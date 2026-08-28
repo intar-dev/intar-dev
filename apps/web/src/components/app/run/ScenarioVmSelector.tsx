@@ -34,7 +34,7 @@ export function ScenarioVmSelector(props: {
               onClick={() => props.onSelect(vm.id)}
               aria-pressed={active}
             className={cn(
-              "-mb-px flex min-h-11 shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-left text-sm font-medium transition-colors",
+              "-mb-px flex min-h-10 shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-left text-sm font-medium transition-colors [@media(pointer:coarse)]:min-h-11",
               active
                 ? "border-foreground text-foreground"
                 : "border-transparent text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",

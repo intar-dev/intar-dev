@@ -17,7 +17,7 @@ export function Stat({ label, value, detail, size = "lg", className }: StatProps
     return (
       <div className={cn("rounded-xl bg-muted/50 px-4 py-3", className)}>
         <p className="text-caption">{label}</p>
-        <p className="mt-1 text-sm font-semibold">{value}</p>
+        <p className="mt-1 text-metadata font-semibold text-foreground">{value}</p>
         {detail ? <p className="text-caption mt-0.5">{detail}</p> : null}
       </div>
     );
@@ -26,12 +26,12 @@ export function Stat({ label, value, detail, size = "lg", className }: StatProps
   return (
     <div
       className={cn(
-        "rounded-2xl border bg-card px-4 py-4 shadow-xs",
+        "rounded-xl border bg-card px-5 py-4 shadow-xs",
         className,
       )}
     >
-      <p className="text-eyebrow">{label}</p>
-      <p className="mt-2 font-heading text-2xl font-bold tracking-tight">
+      <p className="text-label">{label}</p>
+      <p className="mt-1 text-page-title">
         {value}
       </p>
       {detail ? (

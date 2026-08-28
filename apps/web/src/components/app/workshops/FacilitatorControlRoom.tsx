@@ -25,6 +25,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import {
   isVerificationPassed,
   verificationStatusLabel,
@@ -79,10 +80,7 @@ export function FacilitatorControlRoom({
     <section aria-labelledby="control-room-heading" className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-eyebrow">
-            {canManage ? "Facilitator station" : "Helper station"}
-          </p>
-          <h2 id="control-room-heading" className="mt-1 text-section-title">
+          <h2 id="control-room-heading" className="text-section-title">
             Control room
           </h2>
         </div>
@@ -173,7 +171,7 @@ export function FacilitatorControlRoom({
         {canManage ? (
           <aside className="space-y-4" aria-label="Facilitator controls">
             <div className="rounded-xl border bg-card p-4">
-              <p className="text-eyebrow">Capacity</p>
+              <p className="text-label">Capacity</p>
               {session.capacity ? (
                 <>
                   <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
@@ -274,7 +272,7 @@ export function FacilitatorControlRoom({
                 void onAction("announce", { message: announcement.trim() });
               }}
             >
-              <label htmlFor="workshop-announcement" className="text-eyebrow">
+              <label htmlFor="workshop-announcement" className="text-label">
                 Room announcement
               </label>
               <Input
@@ -368,14 +366,10 @@ function WorkshopRuntimeCostCard({
   return (
     <div className="rounded-xl border bg-card p-4">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-eyebrow">
+        <p className="text-label">
           {session.cost.label ?? "Estimated cloud cost"}
         </p>
-        <Badge
-          variant={
-            connection.state === "active" ? "success" : "warning"
-          }
-        >
+        <Badge variant={connection.state === "active" ? "success" : "warning"}>
           {connection.state.replaceAll("_", " ")}
         </Badge>
       </div>
@@ -438,7 +432,7 @@ function WorkshopRuntimeCostCard({
           ) : null}
           {live ? (
             <div className="mt-3 border-t pt-3">
-              <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                 Live estimate
               </p>
               <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
@@ -456,10 +450,7 @@ function WorkshopRuntimeCostCard({
                 />
                 <CapacityFact
                   label="Forecast variance"
-                  value={formatNativeCost(
-                    live.forecastVarianceNanos,
-                    currency,
-                  )}
+                  value={formatNativeCost(live.forecastVarianceNanos, currency)}
                 />
                 <CapacityFact
                   label="Accumulating / cleanup pending"
@@ -490,14 +481,14 @@ function WorkshopRuntimeCostCard({
           The provider price forecast is pending.
         </p>
       )}
-      <p className="mt-3 text-[0.6875rem] text-muted-foreground">
+      <p className="mt-3 text-xs text-muted-foreground">
         Native {currency}. This is an estimate, not an invoice. Traffic,
         credits, promotions, taxes not supplied by the provider, and billing
         adjustments are excluded.
       </p>
       {forecast ? (
         <>
-          <p className="mt-1 text-[0.6875rem] text-muted-foreground">
+          <p className="mt-1 text-xs text-muted-foreground">
             Price observed {formatWorkshopTimestamp(forecast.observedAt)} ·
             forecast expires {formatWorkshopTimestamp(forecast.expiresAt)}.
           </p>
@@ -580,107 +571,118 @@ function RosterMatrix({
 }) {
   const { roster, modules } = session;
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-xs">
-        <caption className="sr-only">
-          Participant presence, workspace state, module progress, named probe
-          results, and explain-back status
-        </caption>
-        <thead>
-          <tr className="border-b bg-muted/35">
-            <th
-              scope="col"
-              className="sticky left-0 z-10 min-w-44 bg-card px-3 py-2 text-left font-semibold"
-            >
-              Participant
-            </th>
-            <th
-              scope="col"
-              className="min-w-24 px-2 py-2 text-left font-semibold"
-            >
-              Workspace
-            </th>
-            {modules.map((module) => (
+    <div>
+      <p className="border-b px-3 py-1.5 text-caption lg:hidden">
+        Scroll horizontally for more
+      </p>
+      <div
+        className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        role="region"
+        aria-label="Participant roster details"
+        tabIndex={0}
+      >
+        <table className="w-full border-collapse text-xs">
+          <caption className="sr-only">
+            Participant presence, workspace state, module progress, named probe
+            results, and explain-back status
+          </caption>
+          <thead>
+            <tr className="border-b bg-muted/35">
               <th
-                key={module.id}
                 scope="col"
-                title={module.title}
-                className="min-w-40 px-2 py-2 text-left font-mono font-medium"
+                className="sticky left-0 z-10 min-w-44 bg-card px-3 py-2 text-left font-semibold"
               >
-                {module.id}
+                Participant
               </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {roster.map((member) => (
-            <tr
-              key={member.userId}
-              className="border-b last:border-b-0 hover:bg-muted/30"
-            >
               <th
-                scope="row"
-                className="sticky left-0 z-10 bg-card px-3 py-2 text-left font-medium"
+                scope="col"
+                className="min-w-24 px-2 py-2 text-left font-semibold"
               >
-                <span className="block truncate">{member.name}</span>
-                <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-normal text-muted-foreground">
-                  <span className="capitalize">{member.role}</span>
-                  <PresenceIndicator member={member} />
-                  {workshopMemberHasWorkspace(member) && member.checkedInAt ? (
-                    <span>checked in</span>
-                  ) : null}
-                </span>
+                Workspace
               </th>
-              <td className="px-2 py-2 text-muted-foreground">
-                <span className="block capitalize">
-                  {member.workspaceState?.replace("_", " ") ?? "not started"}
-                </span>
-                {session.viewer.canFacilitate &&
-                workshopMemberHasWorkspace(member) &&
-                (session.state === "lobby" || session.state === "live") ? (
-                  <ParticipantCatchUpControl
-                    member={member}
-                    checkpoints={session.checkpoints}
-                    busy={busy}
-                    onAction={onAction}
-                  />
-                ) : null}
-                {member.provisionError ? (
-                  <span
-                    className="mt-1 block max-w-40 truncate text-[10px] text-destructive"
-                    title={member.provisionError}
-                  >
-                    {member.provisionError}
-                  </span>
-                ) : null}
-              </td>
-              {modules.map((module) => {
-                const progress = member.progress.find(
-                  (candidate) => candidate.moduleId === module.id,
-                );
-                return (
-                  <td key={module.id} className="px-2 py-2 align-top">
-                    {progress ? (
-                      <RosterModuleCell
-                        memberName={member.name}
-                        module={module}
-                        progress={progress}
-                      />
-                    ) : (
-                      <span
-                        className="text-muted-foreground"
-                        aria-label={`${member.name}, ${module.title}: no progress`}
-                      >
-                        —
-                      </span>
-                    )}
-                  </td>
-                );
-              })}
+              {modules.map((module) => (
+                <th
+                  key={module.id}
+                  scope="col"
+                  title={module.title}
+                  className="min-w-40 px-2 py-2 text-left font-mono font-medium"
+                >
+                  {module.id}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {roster.map((member) => (
+              <tr
+                key={member.userId}
+                className="border-b last:border-b-0 hover:bg-muted/30"
+              >
+                <th
+                  scope="row"
+                  className="sticky left-0 z-10 bg-card px-3 py-2 text-left font-medium"
+                >
+                  <span className="block truncate">{member.name}</span>
+                  <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-normal text-muted-foreground">
+                    <span className="capitalize">{member.role}</span>
+                    <PresenceIndicator member={member} />
+                    {workshopMemberHasWorkspace(member) &&
+                    member.checkedInAt ? (
+                      <span>checked in</span>
+                    ) : null}
+                  </span>
+                </th>
+                <td className="px-2 py-2 text-muted-foreground">
+                  <span className="block capitalize">
+                    {member.workspaceState?.replace("_", " ") ?? "not started"}
+                  </span>
+                  {session.viewer.canFacilitate &&
+                  workshopMemberHasWorkspace(member) &&
+                  (session.state === "lobby" || session.state === "live") ? (
+                    <ParticipantCatchUpControl
+                      member={member}
+                      checkpoints={session.checkpoints}
+                      busy={busy}
+                      onAction={onAction}
+                    />
+                  ) : null}
+                  {member.provisionError ? (
+                    <span
+                      className="mt-1 block max-w-40 truncate text-xs text-destructive"
+                      title={member.provisionError}
+                    >
+                      {member.provisionError}
+                    </span>
+                  ) : null}
+                </td>
+                {modules.map((module) => {
+                  const progress = member.progress.find(
+                    (candidate) => candidate.moduleId === module.id,
+                  );
+                  return (
+                    <td key={module.id} className="px-2 py-2 align-top">
+                      {progress ? (
+                        <RosterModuleCell
+                          memberName={member.name}
+                          module={module}
+                          progress={progress}
+                        />
+                      ) : (
+                        <span
+                          className="text-muted-foreground"
+                          aria-label={`${member.name}, ${module.title}: no progress`}
+                        >
+                          —
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -745,7 +747,7 @@ function ParticipantCatchUpControl({
       <DialogTrigger
         render={
           <Button
-            className="mt-1 h-6 px-1.5 text-[10px]"
+            className="mt-1 h-7 px-2 text-xs"
             size="xs"
             variant={retry ? "destructive" : "ghost"}
             disabled={busy || available.length === 0}
@@ -770,11 +772,11 @@ function ParticipantCatchUpControl({
           htmlFor={`checkpoint-${member.userId}`}
         >
           <span className="font-medium">Starting checkpoint</span>
-          <select
+          <NativeSelect
             id={`checkpoint-${member.userId}`}
             value={checkpointId}
             onChange={(event) => setCheckpointId(event.target.value)}
-            className="h-10 w-full rounded-lg border border-input bg-card px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+            className="w-full"
           >
             {available.map((checkpoint) => (
               <option key={checkpoint.id} value={checkpoint.id}>
@@ -784,7 +786,7 @@ function ParticipantCatchUpControl({
                   : " · clean start"}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         <DialogFooter>
           <DialogClose render={<Button variant="outline" />}>
@@ -829,7 +831,7 @@ function RosterModuleCell({
           className="inline-flex min-w-0 items-center gap-1.5"
         >
           <ModuleStateGlyph state={progress.state} health={progress.health} />
-          <span className="truncate text-[11px] font-medium text-muted-foreground">
+          <span className="truncate text-xs font-medium text-muted-foreground">
             {workshopModuleStateLabel(progress.state)}
           </span>
         </span>
@@ -841,7 +843,7 @@ function RosterModuleCell({
             <li
               key={probe.id}
               title={`Verification objective ${probeIndex + 1}: ${verificationStatusLabel(probe.status)}`}
-              className="flex min-w-0 items-center justify-between gap-2 font-mono text-[10px] leading-4"
+              className="flex min-w-0 items-center justify-between gap-2 font-mono text-xs leading-4"
             >
               <span className="truncate text-muted-foreground">
                 Verification objective {probeIndex + 1}
@@ -851,14 +853,12 @@ function RosterModuleCell({
           ))}
         </ul>
       ) : (
-        <span className="block text-[10px] text-muted-foreground">
-          No probes
-        </span>
+        <span className="block text-xs text-muted-foreground">No probes</span>
       )}
       {progress.verificationUnavailable ? (
         <span
           role="status"
-          className="block text-[10px] font-semibold text-destructive"
+          className="block text-xs font-semibold text-destructive"
         >
           Verification unavailable
         </span>
@@ -898,7 +898,7 @@ function ExplainBackStatusBadge({
   return (
     <span
       title={`Explain-back: ${explainBackStatusLabel(status)}`}
-      className={`shrink-0 rounded border px-1 py-0.5 text-[9px] font-semibold tracking-wide uppercase ${classes}`}
+      className={`shrink-0 rounded border px-1.5 py-0.5 text-xs font-semibold tracking-wide uppercase ${classes}`}
     >
       {status === "completed"
         ? "EB done"

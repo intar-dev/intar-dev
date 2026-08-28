@@ -160,7 +160,7 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
     >
       <div
         data-run-learning-panel-scroll
-        className="min-h-0 flex-1 scroll-py-6 overflow-y-auto overscroll-contain px-5 py-6"
+        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4 py-4"
         role="region"
         aria-label="Mission and hints content"
         tabIndex={0}
@@ -253,7 +253,7 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
             <Button
               type="button"
               variant="outline"
-              size="default"
+              size="sm"
               className="min-h-11 gap-2 px-3"
               aria-label={copy.accessibleLabel}
               data-run-learning-panel-trigger
@@ -274,7 +274,7 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
           <LearningPanelClose />
           <div
             data-run-learning-mobile-scroll
-            className="min-h-0 flex-1 scroll-py-5 overflow-y-auto overscroll-contain px-5"
+            className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4"
             role="region"
             aria-label="Mission and hints content"
             tabIndex={0}
@@ -321,7 +321,7 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
   return (
     <div
       data-run-learning-panel-content
-      className={cn("space-y-8 pb-8", props.className)}
+      className={cn("space-y-6 pb-6", props.className)}
     >
       <MissionBriefing
         headingId={missionHeadingId}
@@ -417,7 +417,7 @@ function MissionBriefing(props: {
 
   return (
     <section aria-labelledby={props.headingId}>
-      <p id={props.headingId} className="text-eyebrow">
+      <p id={props.headingId} className="text-label">
         Mission briefing
       </p>
       {briefing ? (
@@ -440,7 +440,7 @@ function WorkOrder(props: {
   return (
     <section aria-labelledby={props.headingId}>
       <div className="flex items-center justify-between gap-3">
-        <p id={props.headingId} className="text-eyebrow">
+        <p id={props.headingId} className="text-label">
           Work order
         </p>
         <Lightbulb className="size-4 text-primary" aria-hidden="true" />
@@ -481,7 +481,7 @@ function Checks(props: {
   return (
     <section aria-labelledby={props.headingId}>
       <div className="flex items-center justify-between gap-3">
-        <p id={props.headingId} className="text-eyebrow">
+        <p id={props.headingId} className="text-label">
           Checks
         </p>
         <span
@@ -548,7 +548,7 @@ function Hints(props: {
   return (
     <section aria-labelledby={props.headingId}>
       <div className="flex items-center justify-between gap-3">
-        <p id={props.headingId} className="text-eyebrow">
+        <p id={props.headingId} className="text-label">
           Hints
         </p>
         {props.hints.length ? (
@@ -634,7 +634,7 @@ function HintLadder(props: {
           if (canReveal) {
             return (
               <li key={hint.key} className="py-4">
-                <div className="flex min-h-11 items-center justify-between gap-3">
+                <div className="flex min-h-10 items-center justify-between gap-3">
                   {/* Sealed hints expose no authored title or body. */}
                   <p className="text-sm font-medium">{ordinal}</p>
                   <Button
@@ -660,7 +660,7 @@ function HintLadder(props: {
           return (
             <li
               key={hint.key}
-              className="flex min-h-11 items-center gap-2.5 py-4 text-muted-foreground"
+              className="flex min-h-10 items-center gap-2.5 py-4 text-muted-foreground"
             >
               <LockKeyhole className="size-4 shrink-0" aria-hidden="true" />
               {/* This ordinal is not an authored hint title. */}
@@ -692,7 +692,7 @@ function Solution(props: {
       aria-labelledby={props.headingId}
       className="border-t pt-6"
     >
-      <p id={props.headingId} className="text-eyebrow">
+      <p id={props.headingId} className="text-label">
         Full solution
       </p>
       {props.solution.revealed ? (

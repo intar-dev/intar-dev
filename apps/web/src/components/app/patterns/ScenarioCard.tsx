@@ -51,19 +51,19 @@ export function ScenarioCard({
       search={search}
       preloadDelay={250}
       className={cn(
-        "group flex min-h-56 min-w-0 flex-col gap-6 rounded-xl border bg-card p-4 transition-[background-color,border-color,transform] hover:border-brand-border hover:bg-muted/35 active:translate-y-px motion-reduce:transition-none sm:p-6",
+        "group flex min-h-48 min-w-0 flex-col gap-4 rounded-xl border bg-card p-4 transition-[background-color,border-color,transform] hover:border-brand-border hover:bg-muted/35 active:translate-y-px motion-reduce:transition-none sm:p-5",
         scenario.progress.status === "in_progress" && "border-brand-border",
         className,
       )}
     >
       <div className="flex min-w-0 flex-wrap items-start gap-3">
-        <p className="min-w-0 flex-1 truncate text-eyebrow">
+        <p className="min-w-0 flex-1 truncate text-label">
           {scenario.category || "Scenario"}
         </p>
         <ScenarioStatusBadge progress={scenario.progress} />
       </div>
       <div className="space-y-2">
-        <Heading className="min-w-0 font-heading text-lg font-bold tracking-[-0.02em] [overflow-wrap:anywhere] [text-wrap:wrap] transition-colors group-hover:text-brand-text">
+        <Heading className="min-w-0 text-section-title [overflow-wrap:anywhere] [text-wrap:wrap] transition-colors group-hover:text-brand-text">
           {scenario.title}
         </Heading>
         <p className="line-clamp-3 text-body text-muted-foreground">
@@ -150,9 +150,9 @@ export function CourseCurriculumItem({
       <div className="min-w-0 space-y-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           {isNext ? (
-            <span className="text-eyebrow text-brand-text">Next step</span>
+            <span className="text-label text-brand-text">Next step</span>
           ) : null}
-          <Heading className="min-w-0 font-heading text-base font-bold tracking-[-0.015em] [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text sm:text-lg">
+          <Heading className="min-w-0 text-card-title [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text sm:text-section-title">
             {scenario.title}
           </Heading>
         </div>

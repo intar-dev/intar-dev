@@ -246,7 +246,7 @@ function BuildRow(props: {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <StatusBadge status={build.status} />
           <span className="text-metadata">
-            <span className="text-eyebrow">Phase</span> {build.phase}
+            <span className="text-label">Phase</span> {build.phase}
           </span>
           <span className="font-mono text-xs text-muted-foreground">
             {build.arch}
@@ -468,7 +468,7 @@ function BuildCount({
 }) {
   return (
     <div>
-      <p className="text-eyebrow">{label}</p>
+      <p className="text-label">{label}</p>
       <p
         className={cn(
           "mt-1 text-section-title tabular-nums",
@@ -486,7 +486,7 @@ function BuildCount({
 function DetailPair(props: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <dt className="text-eyebrow">{props.label}</dt>
+      <dt className="text-label">{props.label}</dt>
       <dd className="truncate font-mono text-foreground">{props.value}</dd>
     </div>
   );
@@ -517,7 +517,7 @@ function StatusBadge(props: { status: ImageBuildRecord["status"] }) {
 function BuildMeta(props: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <p className="text-eyebrow">{props.label}</p>
+      <p className="text-label">{props.label}</p>
       <p className="truncate text-sm font-medium text-foreground">
         {props.value}
       </p>

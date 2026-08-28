@@ -39,6 +39,7 @@ export function RunCompletionBar({
         </div>
         <Button
           type="button"
+          size="sm"
           data-run-finish-and-save
           className="w-full bg-success text-success-foreground hover:bg-success/90 focus-visible:ring-success sm:w-auto"
           disabled={!canFinish || pending}

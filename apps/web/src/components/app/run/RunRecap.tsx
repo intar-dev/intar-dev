@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { ScenarioStepScreen } from "@/components/app/run/StatusScreens";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   CourseCatalogLink,
   CourseScenarioLink,
@@ -42,10 +42,7 @@ import {
   type RunReplayPart,
 } from "./run-recap-model";
 import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
-import {
-  MAX_INLINE_REPLAY_BYTES,
-  useStreamedText,
-} from "./useStreamedText";
+import { MAX_INLINE_REPLAY_BYTES, useStreamedText } from "./useStreamedText";
 
 const LazyAsciicastReplaySurface = lazy(() =>
   import("@/components/app/RunArtifactViewer").then(
@@ -179,19 +176,18 @@ export function RunRecap({
   return (
     <section
       aria-labelledby="run-recap-heading"
-      className="mx-auto w-full max-w-3xl space-y-8 py-8 md:space-y-12 md:py-10"
+      className="mx-auto w-full max-w-3xl space-y-6 py-6 md:space-y-8 md:py-8"
     >
-      <header className="border-b border-primary/15 pb-8">
-        <p className="text-eyebrow">Lab recap</p>
+      <header className="border-b border-primary/15 pb-6">
         <h2
           id="run-recap-heading"
           ref={headingRef}
           tabIndex={-1}
-          className="mt-2 font-heading text-3xl font-semibold tracking-tight outline-none sm:text-4xl"
+          className="mt-2 text-feature-title outline-none"
         >
           {recap.title}
         </h2>
-        <p className="mt-2 max-w-[54ch] text-sm leading-6 text-muted-foreground">
+        <p className="mt-2 max-w-[54ch] text-support text-muted-foreground">
           {recap.description}
         </p>
       </header>
@@ -199,13 +195,10 @@ export function RunRecap({
       {objectives.length ? (
         <section aria-labelledby="run-recap-checks-heading">
           <div className="flex items-baseline justify-between gap-4">
-            <h2
-              id="run-recap-checks-heading"
-              className="font-heading text-lg font-semibold tracking-tight"
-            >
+            <h2 id="run-recap-checks-heading" className="text-section-title">
               Final checks
             </h2>
-            <span className="text-xs text-muted-foreground tabular-nums">
+            <span className="text-caption tabular-nums">
               {verifiedObjectives}/{objectives.length} verified
             </span>
           </div>
@@ -230,12 +223,12 @@ export function RunRecap({
                     aria-hidden="true"
                   />
                 )}
-                <span className="min-w-0 text-sm font-medium">
+                <span className="min-w-0 text-support font-medium">
                   {objective.title}
                 </span>
                 <span
                   className={cn(
-                    "text-xs font-medium whitespace-nowrap",
+                    "text-caption font-medium whitespace-nowrap",
                     objective.status === "verified"
                       ? "text-success"
                       : "text-destructive",
@@ -252,7 +245,7 @@ export function RunRecap({
       ) : null}
 
       <section aria-label="Learning summary">
-        <dl className="grid gap-x-8 gap-y-4 text-sm sm:grid-cols-3">
+        <dl className="grid gap-x-8 gap-y-4 text-support sm:grid-cols-3">
           {recap.kind === "solved" && run.solveDurationMs !== null ? (
             <div>
               <dt className="inline-flex items-center gap-2 text-caption">
@@ -282,11 +275,7 @@ export function RunRecap({
       <RunReplaySection run={run} />
 
       <section aria-labelledby="run-recap-next-heading">
-        <p className="text-eyebrow">What next?</p>
-        <h2
-          id="run-recap-next-heading"
-          className="mt-1 font-heading text-xl font-semibold tracking-tight"
-        >
+        <h2 id="run-recap-next-heading" className="text-section-title">
           {recap.kind === "solved" ? "Keep learning" : "Give it another try"}
         </h2>
         <div className="mt-4">
@@ -361,7 +350,7 @@ function RunSavingProgress({
         footer={
           isStalled ? (
             <p
-              className="max-w-[52ch] text-sm leading-6 text-muted-foreground"
+              className="max-w-[52ch] text-support text-muted-foreground"
               data-run-saving-stalled
               role="status"
             >
@@ -422,8 +411,10 @@ function DefaultNextAction({
   courseLocation: CourseLocation | null | undefined;
   nextScenario: ScenarioCatalogWireEntry | null | undefined;
 }) {
-  const linkClassName =
-    "inline-flex min-h-11 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground transition-colors hover:bg-brand-text focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40";
+  const linkClassName = cn(
+    buttonVariants({ variant: "default", size: "default" }),
+    "min-h-11 w-full max-w-full whitespace-normal sm:min-h-10 sm:w-auto [@media(pointer:coarse)]:min-h-11",
+  );
 
   if (recapKind === "solved" && courseLocation && nextScenario) {
     return (
@@ -461,7 +452,10 @@ function DefaultNextAction({
   }
 
   return (
-    <Link to={recapKind === "solved" ? "/runs" : "/courses"} className={linkClassName}>
+    <Link
+      to={recapKind === "solved" ? "/runs" : "/courses"}
+      className={linkClassName}
+    >
       {recapKind === "solved" ? "Back to My runs" : "Choose a lab"}
       {recapKind === "solved" ? (
         <ArrowLeft className="size-4" aria-hidden="true" />
@@ -484,18 +478,18 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
     return (
       <section
         aria-labelledby="run-recap-replay-heading"
-        className="border-t pt-4 pb-6"
+        className="border-t pt-4 pb-4"
       >
         <div className="flex items-center gap-2">
-          <PlayCircle className="size-4 text-muted-foreground" aria-hidden="true" />
-          <h2
-            id="run-recap-replay-heading"
-            className="font-heading text-lg font-semibold tracking-tight"
-          >
+          <PlayCircle
+            className="size-4 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <h2 id="run-recap-replay-heading" className="text-section-title">
             Watch replay
           </h2>
         </div>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground" role="status">
+        <p className="mt-2 text-support text-muted-foreground" role="status">
           Your replay is being prepared.
         </p>
       </section>
@@ -506,18 +500,18 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
     return (
       <section
         aria-labelledby="run-recap-replay-heading"
-        className="border-t pt-4 pb-6"
+        className="border-t pt-4 pb-4"
       >
         <div className="flex items-center gap-2">
-          <PlayCircle className="size-4 text-muted-foreground" aria-hidden="true" />
-          <h2
-            id="run-recap-replay-heading"
-            className="font-heading text-lg font-semibold tracking-tight"
-          >
+          <PlayCircle
+            className="size-4 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <h2 id="run-recap-replay-heading" className="text-section-title">
             Watch replay
           </h2>
         </div>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+        <p className="mt-2 text-support text-muted-foreground">
           Replay unavailable.
         </p>
       </section>
@@ -527,17 +521,20 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
   return (
     <section
       aria-labelledby="run-recap-replay-heading"
-      className="border-t pt-4 pb-6"
+      className="border-t pt-4 pb-4"
     >
       <DisclosureRow
         title={
           <span className="flex items-center gap-2">
-            <PlayCircle className="size-4 text-muted-foreground" aria-hidden="true" />
+            <PlayCircle
+              className="size-4 text-muted-foreground"
+              aria-hidden="true"
+            />
             <span id="run-recap-replay-heading">Watch replay</span>
           </span>
         }
         density="comfortable"
-        contentClassName="pt-4 pb-6"
+        contentClassName="pt-3 pb-4"
       >
         <ReplayViewer runId={run.id} parts={parts} />
       </DisclosureRow>
@@ -552,13 +549,13 @@ export function ReplayViewer({
   runId: string;
   parts: RunReplayPart[];
 }) {
-  const firstPart = parts.find((part) => part.castArtifactId) ?? parts[0] ?? null;
+  const firstPart =
+    parts.find((part) => part.castArtifactId) ?? parts[0] ?? null;
   const [selectedKey, setSelectedKey] = useState<string | null>(
     firstPart?.key ?? null,
   );
   const [announcedPart, setAnnouncedPart] = useState<number | null>(null);
-  const selected =
-    parts.find((part) => part.key === selectedKey) ?? firstPart;
+  const selected = parts.find((part) => part.key === selectedKey) ?? firstPart;
   const selectedIndex = selected
     ? parts.findIndex((part) => part.key === selected.key)
     : -1;
@@ -579,7 +576,7 @@ export function ReplayViewer({
 
   if (!selected) {
     return (
-      <p className="text-sm text-muted-foreground" role="status">
+      <p className="text-support text-muted-foreground" role="status">
         Replay unavailable.
       </p>
     );
@@ -595,13 +592,10 @@ export function ReplayViewer({
       aria-roledescription="carousel"
       aria-label="Replay parts"
       data-run-replay-carousel
-      className="space-y-5"
+      className="space-y-4"
     >
       <div className="flex flex-wrap items-center gap-3">
-        <p
-          className="min-w-0 font-heading text-base font-semibold tracking-tight"
-          data-run-replay-position
-        >
+        <p className="min-w-0 text-card-title" data-run-replay-position>
           {selected.partLabel} of {parts.length}
           {selected.machineLabel ? ` · ${selected.machineLabel}` : ""}
         </p>
@@ -609,7 +603,7 @@ export function ReplayViewer({
           <Button
             type="button"
             variant="outline"
-            size="icon"
+            size="icon-sm"
             aria-label="Previous replay part"
             disabled={selectedIndex <= 0}
             onClick={() => selectPart(selectedIndex - 1)}
@@ -619,7 +613,7 @@ export function ReplayViewer({
           <Button
             type="button"
             variant="outline"
-            size="icon"
+            size="icon-sm"
             aria-label="Next replay part"
             disabled={selectedIndex >= parts.length - 1}
             onClick={() => selectPart(selectedIndex + 1)}
@@ -629,7 +623,12 @@ export function ReplayViewer({
         </div>
       </div>
 
-      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      <p
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         {announcedPart === null
           ? ""
           : `Showing Part ${announcedPart + 1} of ${parts.length}`}
@@ -637,14 +636,14 @@ export function ReplayViewer({
 
       <ol
         aria-label="Replay order"
-        className="flex max-w-full gap-3 overflow-x-auto pb-2"
+        className="flex w-full min-w-0 max-w-full gap-3 overflow-x-auto pb-2"
       >
         {parts.map((part, index) => (
           <li key={part.key} className="shrink-0">
             <button
               type="button"
               className={cn(
-                "min-h-11 rounded-lg border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                "min-h-9 rounded-lg border px-3 text-support font-medium transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
                 selected?.key === part.key
                   ? "border-primary bg-primary text-primary-foreground"
                   : "border-border bg-background hover:bg-muted",
@@ -699,12 +698,12 @@ function ReplayPartSurface({
   );
 
   return !part.castArtifactId ? (
-    <p className="text-sm text-muted-foreground" role="status">
+    <p className="text-support text-muted-foreground" role="status">
       Replay unavailable.
     </p>
   ) : knownTooLarge || replay.truncated ? (
     <div className="space-y-3 rounded-md border bg-muted/20 px-4 py-4">
-      <p className="text-sm text-muted-foreground" role="status">
+      <p className="text-support text-muted-foreground" role="status">
         This replay is too large to play in the page.
       </p>
       <Button
@@ -718,7 +717,7 @@ function ReplayPartSurface({
       </Button>
     </div>
   ) : replay.error ? (
-    <p className="text-sm text-muted-foreground" role="status">
+    <p className="text-support text-muted-foreground" role="status">
       Replay could not be loaded. Try again soon.
     </p>
   ) : (
@@ -729,7 +728,7 @@ function ReplayPartSurface({
       <Suspense
         fallback={
           <div
-            className="flex aspect-video items-center justify-center text-sm text-terminal-muted"
+            className="flex aspect-video items-center justify-center text-support text-terminal-muted"
             role="status"
           >
             Opening replay…
