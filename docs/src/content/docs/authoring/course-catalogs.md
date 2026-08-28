@@ -10,6 +10,9 @@ catalog, and the order of `scenarios` is the curriculum order inside the course.
 course "linux-operations" {
   title       = "Linux operations"
   description = "Practice diagnosing and repairing common Linux failures."
+  credit "Based on Klustered" {
+    url = "https://example.test/klustered"
+  }
   scenarios   = ["broken-nginx"]
 }
 ```
@@ -17,6 +20,16 @@ course "linux-operations" {
 Course IDs and scenario IDs must be safe path-style identifiers. Every course
 needs a non-empty title, description, and scenario list. Course IDs must be
 unique, and a scenario may appear in at most one course in a snapshot.
+
+Credits are optional and may be repeated. Each `credit` block has exactly one
+non-empty label and one `url` attribute. URLs must be absolute `https` URLs
+with a host and no embedded credentials. Labels and normalized URLs must be
+unique within a course.
+Published version-1 snapshots omit `credits` when a course has none, so older
+course catalogs remain valid.
+
+Deploy a credit-aware control plane before publishing a catalog with credit
+blocks. Older strict version-1 consumers reject the added `credits` key.
 
 ## Publication semantics
 

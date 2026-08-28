@@ -23,6 +23,7 @@ import {
   getCourseCurriculumState,
   type CourseCatalogSectionView,
 } from "./course-catalog";
+import { CourseCredits } from "./CourseCredits";
 
 export interface CourseScenarioRendererContext {
   courseKey: string;
@@ -366,6 +367,13 @@ function CourseDetail({
           >
             {section.course.title}
           </h2>
+          <CourseCredits
+            credits={
+              section.course.kind === "authored"
+                ? section.course.credits
+                : undefined
+            }
+          />
           <p className="max-w-3xl text-body text-muted-foreground text-pretty">
             {section.course.description}
           </p>

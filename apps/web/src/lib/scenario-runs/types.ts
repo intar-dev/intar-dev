@@ -13,6 +13,7 @@ import {
   type BrowserTerminalSessionResult,
   type NativeTerminalSessionResult,
 } from "@/lib/stargate";
+import type { ScenarioCourseCatalogCredit } from "@/db/schema/shared";
 import type { ScenarioRunActivity, ScenarioRunReplayState } from "./activity";
 import type { ScenarioRunSavingStage } from "./saving-stage";
 
@@ -76,6 +77,7 @@ export type ScenarioCatalogCourseWireEntry =
       organizationId: string | null;
       title: string;
       description: string;
+      credits?: ScenarioCourseCatalogCredit[];
       scenarios: ScenarioCatalogWireEntry[];
     }
   | {
@@ -84,6 +86,7 @@ export type ScenarioCatalogCourseWireEntry =
       organizationId: null;
       title: "General practice";
       description: string;
+      credits?: never;
       scenarios: ScenarioCatalogWireEntry[];
     };
 

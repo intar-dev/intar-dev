@@ -1,4 +1,5 @@
 use super::*;
+use reqwest::Url;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -17,7 +18,20 @@ pub(super) struct BundleCourse {
     course_id: String,
     title: String,
     description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    credits: Vec<BundleCourseCredit>,
     scenario_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+struct BundleCourseCredit {
+    label: String,
+    url: String,
+}
+
+struct ParsedCourseCredit {
+    credit: BundleCourseCredit,
+    normalized_url: String,
 }
 
 pub(super) fn load_build_config(path: Option<&Path>) -> Result<BuildConfig> {
@@ -180,14 +194,6 @@ fn parse_course_block(block: &hcl::Block) -> Result<BundleCourse> {
     };
     validate_safe_cli_slug("course id", &course_id)?;
 
-    if let Some(inner_block) = block.body.blocks().next() {
-        bail!(
-            "course '{}' does not support nested block '{}'",
-            course_id,
-            inner_block.identifier
-        );
-    }
-
     let mut title = None;
     let mut description = None;
     let mut scenario_ids = None;
@@ -218,6 +224,31 @@ fn parse_course_block(block: &hcl::Block) -> Result<BundleCourse> {
         }
     }
 
+    let mut credits = Vec::new();
+    let mut credit_labels = HashSet::new();
+    let mut credit_urls = HashSet::new();
+    for nested in block.body.blocks() {
+        if nested.identifier.as_str() != "credit" {
+            bail!(
+                "course '{}' does not support nested block '{}'",
+                course_id,
+                nested.identifier
+            );
+        }
+        let parsed_credit = parse_course_credit_block(&course_id, nested)?;
+        if !credit_labels.insert(parsed_credit.credit.label.clone()) {
+            bail!(
+                "course '{}' has duplicate credit label '{}'",
+                course_id,
+                parsed_credit.credit.label
+            );
+        }
+        if !credit_urls.insert(parsed_credit.normalized_url) {
+            bail!("course '{}' has duplicate credit url", course_id);
+        }
+        credits.push(parsed_credit.credit);
+    }
+
     let title = required_course_text(&course_id, "title", title)?;
     let description = required_course_text(&course_id, "description", description)?;
     let scenario_ids = scenario_ids
@@ -233,7 +264,123 @@ fn parse_course_block(block: &hcl::Block) -> Result<BundleCourse> {
         course_id,
         title,
         description,
+        credits,
         scenario_ids,
+    })
+}
+
+fn parse_course_credit_block(course_id: &str, block: &hcl::Block) -> Result<ParsedCourseCredit> {
+    let label = match block.labels.as_slice() {
+        [label] => label.as_str(),
+        [] => bail!("course '{}' credit block is missing its label", course_id),
+        _ => bail!(
+            "course '{}' credit block expects exactly one label",
+            course_id
+        ),
+    };
+    let label = required_course_credit_label(course_id, label)?;
+
+    if let Some(nested) = block.body.blocks().next() {
+        bail!(
+            "course '{}' credit '{}' does not support nested block '{}'",
+            course_id,
+            label,
+            nested.identifier
+        );
+    }
+
+    let mut url = None;
+    for attribute in block.body.attributes() {
+        match attribute.key.as_str() {
+            "url" => {
+                if url.is_some() {
+                    bail!(
+                        "course '{}' credit '{}' has duplicate url attribute",
+                        course_id,
+                        label
+                    );
+                }
+                url = Some(extract_course_string(&attribute.expr, "credit url")?);
+            }
+            other => bail!(
+                "course '{}' credit '{}' does not support attribute '{other}'",
+                course_id,
+                label
+            ),
+        }
+    }
+
+    let url = required_course_credit_url(course_id, &label, url)?;
+    Ok(ParsedCourseCredit {
+        credit: BundleCourseCredit {
+            label,
+            url: url.raw,
+        },
+        normalized_url: url.normalized,
+    })
+}
+
+struct ValidatedCourseCreditUrl {
+    raw: String,
+    normalized: String,
+}
+
+fn required_course_credit_label(course_id: &str, label: &str) -> Result<String> {
+    let label = label.trim().to_owned();
+    if label.is_empty() {
+        bail!("course '{}' credit requires a non-empty label", course_id);
+    }
+    if label.chars().any(char::is_control) {
+        bail!(
+            "course '{}' credit label must not contain control characters",
+            course_id
+        );
+    }
+    Ok(label)
+}
+
+fn required_course_credit_url(
+    course_id: &str,
+    label: &str,
+    value: Option<String>,
+) -> Result<ValidatedCourseCreditUrl> {
+    let url = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "course '{}' credit '{}' requires a non-empty url",
+                course_id,
+                label
+            )
+        })?;
+    let parsed = Url::parse(&url).map_err(|_| {
+        anyhow!(
+            "course '{}' credit '{}' url must be an absolute HTTPS URL",
+            course_id,
+            label
+        )
+    })?;
+    let has_https_authority_prefix = url
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+    if !has_https_authority_prefix || parsed.scheme() != "https" || parsed.host_str().is_none() {
+        bail!(
+            "course '{}' credit '{}' url must be an absolute HTTPS URL",
+            course_id,
+            label
+        );
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!(
+            "course '{}' credit '{}' url must not include credentials",
+            course_id,
+            label
+        );
+    }
+    Ok(ValidatedCourseCreditUrl {
+        raw: url,
+        normalized: parsed.to_string(),
     })
 }
 

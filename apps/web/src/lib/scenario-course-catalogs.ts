@@ -3,6 +3,7 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   scenarioCourseCatalogs,
   type ScenarioCourseCatalogCourse,
+  type ScenarioCourseCatalogCredit,
   type ScenarioCourseCatalogSnapshotV1,
   vmScenarios,
 } from "@/db/schema";
@@ -15,6 +16,7 @@ export interface VisibleScenarioCourse {
   title: string;
   description: string;
   scenarioIds: string[];
+  credits?: ScenarioCourseCatalogCredit[];
 }
 
 export interface CourseCatalogReferenceValidation {
@@ -207,6 +209,9 @@ function cloneCourse(
     title: course.title,
     description: course.description,
     scenarioIds: [...course.scenarioIds],
+    ...(course.credits === undefined
+      ? {}
+      : { credits: course.credits.map((credit) => ({ ...credit })) }),
   };
 }
 
@@ -265,12 +270,7 @@ export async function listVisibleScenarioCourses(
 function projectVisibleCourses(
   row: {
     organizationId: string | null;
-    courses: Array<{
-      courseId: string;
-      title: string;
-      description: string;
-      scenarioIds: string[];
-    }>;
+    courses: ScenarioCourseCatalogCourse[];
   },
   availableIds: Set<string>,
   excludedIds: Set<string>,
@@ -292,6 +292,9 @@ function projectVisibleCourses(
       title: course.title,
       description: course.description,
       scenarioIds,
+      ...(course.credits === undefined
+        ? {}
+        : { credits: course.credits.map((credit) => ({ ...credit })) }),
     });
   }
   return courses;

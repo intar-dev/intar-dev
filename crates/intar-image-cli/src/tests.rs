@@ -509,6 +509,53 @@ fn parses_and_normalizes_courses_in_curriculum_order() {
 }
 
 #[test]
+fn parses_and_serializes_labeled_course_credits() {
+    let catalog = parse_bundle_course_catalog(
+        r#"
+course "cluster-operations" {
+  title = "Cluster operations"
+  description = "Repair a small cluster."
+  credit "  Klustered  " {
+    url = " https://example.test/klustered "
+  }
+  credit "Course source" {
+    url = "https://example.test/source"
+  }
+  scenarios = ["workshop-cluster"]
+}
+"#,
+        &known_scenarios(&["workshop-cluster"]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(catalog).unwrap(),
+        serde_json::json!({
+            "version": 1,
+            "mode": "replace",
+            "courses": [
+                {
+                    "course_id": "cluster-operations",
+                    "title": "Cluster operations",
+                    "description": "Repair a small cluster.",
+                    "credits": [
+                        {
+                            "label": "Klustered",
+                            "url": "https://example.test/klustered",
+                        },
+                        {
+                            "label": "Course source",
+                            "url": "https://example.test/source",
+                        },
+                    ],
+                    "scenario_ids": ["workshop-cluster"],
+                },
+            ],
+        })
+    );
+}
+
+#[test]
 fn rejects_invalid_course_fields_and_ids() {
     let known = known_scenarios(&["broken-nginx"]);
     let invalid_catalogs = [
@@ -543,6 +590,171 @@ fn rejects_invalid_course_fields_and_ids() {
         (
             "course \"linux\" {\n  title = \"Title\"\n  description = \"Description\"\n  scenarios = [\"../escape\"]\n}",
             "invalid course scenario id",
+        ),
+    ];
+
+    for (hcl, expected) in invalid_catalogs {
+        let error = parse_bundle_course_catalog(hcl, &known).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(expected),
+            "expected error containing {expected:?}, got {error:#}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_course_credit_blocks() {
+    let known = known_scenarios(&["broken-nginx"]);
+    let invalid_catalogs = [
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit { url = "https://example.test" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "credit block is missing its label",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "one" "two" { url = "https://example.test" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "credit block expects exactly one label",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "   " { url = "https://example.test" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "credit requires a non-empty label",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "bad\u0001label" { url = "https://example.test" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "credit label must not contain control characters",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" { scenarios = ["broken-nginx"] }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "does not support attribute 'scenarios'",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" {
+    url = "https://example.test"
+    url = "https://example.test/other"
+  }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "redefined attribute",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" {
+    nested {}
+  }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "does not support nested block 'nested'",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" {}
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "requires a non-empty url",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" { url = "http://example.test" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "must be an absolute HTTPS URL",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" { url = "https:path" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "must be an absolute HTTPS URL",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" { url = "https://user:password@example.test" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "must not include credentials",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" { url = "https://example.test" }
+  credit " Source " { url = "https://example.test/other" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "duplicate credit label 'Source'",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "Linux"
+  description = "Description"
+  credit "Source" { url = "https://EXAMPLE.test" }
+  credit "Mirror" { url = "https://example.test/" }
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "duplicate credit url",
         ),
     ];
 

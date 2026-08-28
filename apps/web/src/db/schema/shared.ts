@@ -26,11 +26,18 @@ export type ImageBuildStatus =
   | "failed"
   | "stale";
 
+export interface ScenarioCourseCatalogCredit {
+  label: string;
+  url: string;
+}
+
 export interface ScenarioCourseCatalogCourse {
   courseId: string;
   title: string;
   description: string;
   scenarioIds: string[];
+  /** Optional so catalog rows written before course credits remain readable. */
+  credits?: ScenarioCourseCatalogCredit[];
 }
 
 export interface ScenarioCourseCatalogSnapshotV1 {

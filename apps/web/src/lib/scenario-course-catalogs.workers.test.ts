@@ -13,6 +13,7 @@ import {
   user,
   vmScenarios,
   vmScenarioVms,
+  type ScenarioCourseCatalogCredit,
   type ScenarioCourseCatalogSnapshotV1,
 } from "@/db/schema";
 import {
@@ -555,6 +556,66 @@ describe("scenario course catalog reads", () => {
     ]);
   });
 
+  it("preserves credits through storage, merge, visibility, and learner output", async () => {
+    const db = drizzle(env.DB);
+    const credits: ScenarioCourseCatalogCredit[] = [
+      { label: "Rawkode Academy", url: "https://rawkode.academy" },
+      {
+        label: "David Flanagan",
+        url: "https://rawkode.academy/people/rawkode",
+      },
+    ];
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("public-curriculum", ["public-two", "public-one"], credits),
+      ),
+      sourceRevision: "public-credit-rev",
+      organizationId: null,
+      nowUnixMs: 130,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("additional-curriculum", ["public-standalone"]),
+      ),
+      sourceRevision: "additional-course-rev",
+      organizationId: null,
+      nowUnixMs: 140,
+    });
+    credits[0]!.label = "mutated after publish";
+
+    const [stored] = await db
+      .select()
+      .from(scenarioCourseCatalogs)
+      .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
+    expect(
+      stored?.coursesJson.find(
+        (candidate) => candidate.courseId === "public-curriculum",
+      )?.credits,
+    ).toEqual([
+      { label: "Rawkode Academy", url: "https://rawkode.academy" },
+      {
+        label: "David Flanagan",
+        url: "https://rawkode.academy/people/rawkode",
+      },
+    ]);
+
+    const catalog = await listScenarioCatalogForUser("learner");
+    expect(
+      catalog.courses.find(
+        (candidate) => candidate.courseId === "public-curriculum",
+      ),
+    ).toMatchObject({
+      kind: "authored",
+      credits: [
+        { label: "Rawkode Academy", url: "https://rawkode.academy" },
+        {
+          label: "David Flanagan",
+          url: "https://rawkode.academy/people/rawkode",
+        },
+      ],
+    });
+  });
+
   it("nests progress with its scenario and defensively projects each scenario once", async () => {
     const db = drizzle(env.DB);
     await db.insert(user).values({
@@ -726,12 +787,14 @@ function snapshot(
 function course(
   courseId: string,
   scenarioIds: string[],
+  credits?: ScenarioCourseCatalogCredit[],
 ): ScenarioCourseCatalogSnapshotV1["courses"][number] {
   return {
     courseId,
     title: `${courseId} title`,
     description: `${courseId} description`,
     scenarioIds,
+    ...(credits === undefined ? {} : { credits }),
   };
 }
 
