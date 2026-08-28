@@ -315,10 +315,15 @@ export function normalizeCourseCatalogSnapshot(
   const memberIds = new Set<string>();
   const courses: ScenarioCourseCatalogSnapshotV1["courses"] = [];
   for (const valueCourse of value.courses) {
-    if (!isRecord(valueCourse)) return null;
-    const courseKeys = ["course_id", "title", "description", "scenario_ids"];
-    if (Object.hasOwn(valueCourse, "credits")) courseKeys.push("credits");
-    if (!hasExactKeys(valueCourse, courseKeys)) {
+    if (
+      !isRecord(valueCourse) ||
+      !hasExactKeys(valueCourse, [
+        "course_id",
+        "title",
+        "description",
+        "scenario_ids",
+      ])
+    ) {
       return null;
     }
     const courseId = readUntrimmedString(valueCourse.course_id);
@@ -350,72 +355,11 @@ export function normalizeCourseCatalogSnapshot(
       memberIds.add(scenarioId);
       scenarioIds.push(scenarioId);
     }
-    const credits = Object.hasOwn(valueCourse, "credits")
-      ? normalizeCourseCredits(valueCourse.credits)
-      : undefined;
-    if (credits === null) return null;
     courseIds.add(courseId);
-    courses.push({
-      courseId,
-      title,
-      description,
-      scenarioIds,
-      ...(credits === undefined ? {} : { credits }),
-    });
+    courses.push({ courseId, title, description, scenarioIds });
   }
 
   return { version: 1, mode: "replace", courses };
-}
-
-function normalizeCourseCredits(
-  value: unknown,
-): NonNullable<
-  ScenarioCourseCatalogSnapshotV1["courses"][number]["credits"]
-> | null {
-  if (!Array.isArray(value)) return null;
-
-  const labels = new Set<string>();
-  const urls = new Set<string>();
-  const credits: NonNullable<
-    ScenarioCourseCatalogSnapshotV1["courses"][number]["credits"]
-  > = [];
-  for (const valueCredit of value) {
-    if (
-      !isRecord(valueCredit) ||
-      !hasExactKeys(valueCredit, ["label", "url"])
-    ) {
-      return null;
-    }
-    const label = readString(valueCredit.label);
-    const rawUrl = readString(valueCredit.url);
-    if (!label || !rawUrl || hasControlCharacters(label)) return null;
-    if (!/^https:\/\//i.test(rawUrl)) return null;
-
-    let url: URL;
-    try {
-      url = new URL(rawUrl);
-    } catch {
-      return null;
-    }
-    if (
-      url.protocol !== "https:" ||
-      !url.hostname ||
-      url.username ||
-      url.password ||
-      labels.has(label) ||
-      urls.has(url.href)
-    ) {
-      return null;
-    }
-    labels.add(label);
-    urls.add(url.href);
-    credits.push({ label, url: rawUrl });
-  }
-  return credits;
-}
-
-function hasControlCharacters(value: string): boolean {
-  return /[\u0000-\u001F\u007F-\u009F]/.test(value);
 }
 
 function hasExactKeys(

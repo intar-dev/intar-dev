@@ -376,9 +376,6 @@ export async function listScenarioCatalogForUser(
       organizationId: course.organizationId,
       title: course.title,
       description: course.description,
-      ...(course.credits === undefined
-        ? {}
-        : { credits: course.credits.map((credit) => ({ ...credit })) }),
       scenarios: courseScenarios,
     });
   }

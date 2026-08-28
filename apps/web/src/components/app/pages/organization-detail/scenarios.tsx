@@ -45,7 +45,6 @@ import {
   getCourseCurriculumState,
   type CourseCatalogSectionView,
 } from "../learn/course-catalog";
-import { CourseCredits } from "../learn/CourseCredits";
 import { CourseCatalogLink } from "../learn/course-route-links";
 import {
   type OrganizationDetailResponse,
@@ -733,9 +732,6 @@ function OrganizationCourseDetail({
           >
             {course.title}
           </h2>
-          <CourseCredits
-            credits={course.kind === "authored" ? course.credits : undefined}
-          />
           <p className="max-w-3xl text-body text-muted-foreground text-pretty">
             {course.description}
           </p>

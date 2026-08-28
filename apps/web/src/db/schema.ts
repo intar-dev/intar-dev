@@ -124,7 +124,6 @@ export type {
   ImageBuildBundleMeta,
   ImageBuildStatus,
   ImageBuildTimings,
-  ScenarioCourseCatalogCredit,
   ScenarioCourseCatalogCourse,
   ScenarioCourseCatalogSnapshotV1,
   ScenarioRunHintSnapshot,
