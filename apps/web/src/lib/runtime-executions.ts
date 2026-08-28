@@ -180,7 +180,10 @@ export async function deleteScenarioRunRuntimeProjection(input: {
       )
       .bind(runId),
   ]);
-  return { deleted: changes(results[0]) === 1 };
+  // D1 includes rows removed by foreign-key cascades in meta.changes. A run
+  // with SSH keys, transcripts, probes, or artifacts can therefore report
+  // more than one change even though exactly one parent run matched.
+  return { deleted: changes(results[0]) > 0 };
 }
 
 function scenarioRunRuntimeProjectionStatements(

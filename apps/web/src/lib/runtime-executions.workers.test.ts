@@ -11,6 +11,7 @@ import {
   organization,
   runtimeExecutions,
   runtimeVms,
+  scenarioRunSshKeys,
   scenarioRuns,
   user,
   workshopSessionMembers,
@@ -271,6 +272,16 @@ describe("domain-neutral runtime executions", () => {
   it("deletes every runtime generation with its scenario domain", async () => {
     const db = drizzle(env.DB);
     await insertScenarioRun(scenarioRun("scenario-delete"));
+    await db.insert(scenarioRunSshKeys).values({
+      id: "scenario-delete-key",
+      runId: "scenario-delete",
+      vmId: "vm-1",
+      runtimeVmName: "scenario-delete-vm-1",
+      publicKeyOpenssh: "ssh-ed25519 AAAATEST learner@test",
+      privateKeyCiphertextB64: "ciphertext",
+      privateKeyIvB64: "iv",
+      createdAt: 4_000,
+    });
     await createRuntimeRecoveryGeneration({
       sourceExecutionId: "scenario-delete",
       expectedGeneration: 1,
@@ -288,11 +299,15 @@ describe("domain-neutral runtime executions", () => {
       }),
     ).resolves.toEqual({ deleted: true });
 
-    const [runs, executions, slots] = await Promise.all([
+    const [runs, sshKeys, executions, slots] = await Promise.all([
       db
         .select()
         .from(scenarioRuns)
         .where(eq(scenarioRuns.runId, "scenario-delete")),
+      db
+        .select()
+        .from(scenarioRunSshKeys)
+        .where(eq(scenarioRunSshKeys.runId, "scenario-delete")),
       db
         .select()
         .from(runtimeExecutions)
@@ -300,8 +315,29 @@ describe("domain-neutral runtime executions", () => {
       db.select().from(activeRuntimeSlots),
     ]);
     expect(runs).toEqual([]);
+    expect(sshKeys).toEqual([]);
     expect(executions).toEqual([]);
     expect(slots).toEqual([]);
+  });
+
+  it("does not report deletion when the scoped run does not match", async () => {
+    const db = drizzle(env.DB);
+    await insertScenarioRun(scenarioRun("scenario-keep"));
+
+    await expect(
+      deleteScenarioRunRuntimeProjection({
+        d1: env.DB,
+        runId: "scenario-keep",
+        userId: "another-user",
+      }),
+    ).resolves.toEqual({ deleted: false });
+
+    await expect(
+      db
+        .select({ runId: scenarioRuns.runId })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, "scenario-keep")),
+    ).resolves.toEqual([{ runId: "scenario-keep" }]);
   });
 
   it("creates a recovery generation without changing domain identity", async () => {
