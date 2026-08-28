@@ -23,6 +23,7 @@ import {
   getCourseCurriculumState,
   type CourseCatalogSectionView,
 } from "./course-catalog";
+import { CourseDescription } from "./CourseDescription";
 
 export interface CourseScenarioRendererContext {
   courseKey: string;
@@ -197,7 +198,10 @@ function CourseIndex({
                 className="group grid w-full min-w-0 cursor-pointer gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_23rem] @3xl/course:items-center"
               >
                 <span id={summaryId} className="sr-only">
-                  {section.course.description} {scenarioCount}{" "}
+                  <CourseDescription links={false}>
+                    {section.course.description}
+                  </CourseDescription>{" "}
+                  {scenarioCount}{" "}
                   {scenarioCount === 1 ? "scenario" : "scenarios"}, about{" "}
                   {section.totalEstimatedMinutes} minutes total,{" "}
                   {section.solvedCount} of {scenarioCount} solved.
@@ -221,7 +225,9 @@ function CourseIndex({
                     {section.course.title}
                   </span>
                   <span className="block max-w-3xl text-body text-muted-foreground text-pretty">
-                    {section.course.description}
+                    <CourseDescription links={false}>
+                      {section.course.description}
+                    </CourseDescription>
                   </span>
                   <span className="block pt-2">
                     <span className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2 text-sm tabular-nums">
@@ -367,7 +373,7 @@ function CourseDetail({
             {section.course.title}
           </h2>
           <p className="max-w-3xl text-body text-muted-foreground text-pretty">
-            {section.course.description}
+            <CourseDescription>{section.course.description}</CourseDescription>
           </p>
           <dl className="flex flex-wrap gap-x-2 gap-y-1 pt-1 text-sm text-muted-foreground tabular-nums">
             <CourseFact

@@ -45,6 +45,7 @@ import {
   getCourseCurriculumState,
   type CourseCatalogSectionView,
 } from "../learn/course-catalog";
+import { CourseDescription } from "../learn/CourseDescription";
 import { CourseCatalogLink } from "../learn/course-route-links";
 import {
   type OrganizationDetailResponse,
@@ -733,7 +734,7 @@ function OrganizationCourseDetail({
             {course.title}
           </h2>
           <p className="max-w-3xl text-body text-muted-foreground text-pretty">
-            {course.description}
+            <CourseDescription>{course.description}</CourseDescription>
           </p>
           <dl className="flex flex-wrap gap-x-2 gap-y-1 pt-1 text-sm text-muted-foreground tabular-nums">
             <CourseFact label="Course type" value={courseKindLabel(course)} />
@@ -843,7 +844,9 @@ function CourseHeading({
       >
         {course.title}
       </h2>
-      <p className="mt-2 text-sm text-muted-foreground">{course.description}</p>
+      <p className="mt-2 text-sm text-muted-foreground">
+        <CourseDescription links={false}>{course.description}</CourseDescription>
+      </p>
     </div>
   );
 }

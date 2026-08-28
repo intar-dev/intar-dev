@@ -9,7 +9,7 @@ catalog, and the order of `scenarios` is the curriculum order inside the course.
 ```hcl
 course "linux-operations" {
   title       = "Linux operations"
-  description = "Practice diagnosing and repairing common Linux failures."
+  description = "Practice Linux failures adapted from [the upstream course](https://example.test/course)."
   scenarios   = ["broken-nginx"]
 }
 ```
@@ -17,6 +17,10 @@ course "linux-operations" {
 Course IDs and scenario IDs must be safe path-style identifiers. Every course
 needs a non-empty title, description, and scenario list. Course IDs must be
 unique, and a scenario may appear in at most one course in a snapshot.
+
+Descriptions support inline Markdown. Links are active on a course detail page
+and appear as plain link labels in course pickers, where nested links would be
+invalid.
 
 ## Publication semantics
 
