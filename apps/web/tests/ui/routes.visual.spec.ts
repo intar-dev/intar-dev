@@ -29,6 +29,21 @@ for (const viewport of viewports) {
                 .getByRole("status")
                 .filter({ hasText: /Terminal status:/i }),
             ).toHaveText(/Terminal status:\s*connected/i);
+            if (viewport.id === "desktop") {
+              await expect(
+                page.locator("[data-run-learning-panel]"),
+              ).toBeVisible();
+              await expect(
+                page.locator("[data-run-learning-panel-trigger]"),
+              ).not.toBeVisible();
+            } else {
+              await expect(
+                page.locator("[data-run-learning-panel]"),
+              ).not.toBeVisible();
+              await expect(
+                page.locator("[data-run-learning-panel-trigger]"),
+              ).toBeVisible();
+            }
           }
           await expectRouteScreenshot(
             page,

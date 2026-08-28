@@ -592,6 +592,24 @@ test("run workspace opens a deterministic terminal transport", async ({
     theme: "dark",
     runState: "running",
   });
+  const workspaceHeader = page.locator("[data-run-workspace-header]");
+  const actions = page.getByRole("group", { name: "Run actions" });
+  await expect(
+    workspaceHeader.getByRole("heading", {
+      level: 1,
+      name: "Repair a broken nginx service",
+    }),
+  ).toBeVisible();
+  await expect(actions).toBeVisible();
+  await expect(
+    actions.getByRole("button", { name: "SSH command" }),
+  ).toBeEnabled();
+  await expect(
+    actions.getByRole("button", { name: /End run/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Page actions" }),
+  ).toHaveCount(0);
   await expect(page.locator(".xterm")).toBeVisible();
   // The transport live region is sr-only while healthy — assert content, not
   // visibility.

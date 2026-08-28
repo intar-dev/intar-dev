@@ -895,27 +895,14 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
   );
   expect(offenders, "animations active under reduced motion").toEqual([]);
 
-  await page.locator("[data-run-learning-panel-trigger]").click();
-  const rail = page.getByRole("dialog", { name: "Lab guidance" });
-  await expect(rail).toBeVisible();
-  await expectNoVisibleBoxShadow(rail);
-  expect(
-    await rail.evaluate((element) => {
-      const style = getComputedStyle(element);
-      return (
-        style.transitionProperty === "none" ||
-        style.transitionDuration
-          .split(",")
-          .every((entry) => Number.parseFloat(entry) === 0)
-      );
-    }),
-    "guidance rail transition must stop under reduced motion",
-  ).toBe(true);
+  const guidancePanel = page.locator("[data-run-learning-panel]");
+  await expect(guidancePanel).toBeVisible();
+  await expect(page.locator("[data-run-learning-panel-trigger]")).toBeHidden();
+  await expectNoVisibleBoxShadow(guidancePanel);
   await expect(
-    rail.getByRole("heading", { name: "Hints and guidance" }),
+    guidancePanel.getByText("Hints", { exact: true }),
   ).toBeVisible();
 
-  await page.keyboard.press("Escape");
   await ui.open({
     ...routeCase("run-workspace"),
     theme: "dark",

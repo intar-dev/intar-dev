@@ -1,5 +1,5 @@
 import { DENSE_ROUTE_CASES } from "./routes";
-import { test } from "./fixtures/test";
+import { expect, test } from "./fixtures/test";
 import { expectRouteScreenshot } from "./support/screenshot";
 
 const themes = ["light", "dark"] as const;
@@ -15,6 +15,19 @@ test.describe("dense tablet", () => {
     for (const route of DENSE_ROUTE_CASES) {
       test(`${route.id} · ${theme}`, async ({ page, ui }) => {
         await ui.open({ ...route, theme });
+        if (route.id === "run-workspace") {
+          await expect(
+            page.locator("[data-run-learning-panel]"),
+          ).not.toBeVisible();
+          await expect(
+            page.locator("[data-run-learning-panel-trigger]"),
+          ).toBeVisible();
+          await expect(
+            page
+              .getByRole("status")
+              .filter({ hasText: /Terminal status:/i }),
+          ).toHaveText(/Terminal status:\s*connected/i);
+        }
         await expectRouteScreenshot(page, `${route.id}-${theme}-tablet`);
       });
     }

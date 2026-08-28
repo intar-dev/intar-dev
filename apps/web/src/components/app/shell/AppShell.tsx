@@ -13,6 +13,8 @@ export function AppShell() {
   });
   const previousPath = useRef(pathname);
   const projectorMode = /^\/workshops\/[^/]+\/projector\/?$/.test(pathname);
+  const runWorkspaceMode = /^\/runs\/[^/]+\/?$/.test(pathname);
+  const directWorkspaceMode = projectorMode || runWorkspaceMode;
 
   useEffect(() => {
     if (previousPath.current === pathname) return;
@@ -27,11 +29,13 @@ export function AppShell() {
 
   return (
     <PageChromeProvider>
-      {projectorMode ? (
+      {directWorkspaceMode ? (
         <main
           id="main-content"
           tabIndex={-1}
-          className="flex min-h-svh min-w-0 flex-col bg-background focus:outline-none"
+          className={`flex ${
+            runWorkspaceMode ? "min-h-[100dvh]" : "min-h-svh"
+          } min-w-0 flex-col bg-background focus:outline-none`}
         >
           <Outlet />
         </main>

@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures/test";
 import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
 
-test("the boot screen keeps the work order reachable and does not steal focus when the shell opens", async ({
+test("the full-screen boot screen keeps the mission visible and does not steal focus when the shell opens", async ({
   page,
   ui,
 }) => {
@@ -27,63 +27,61 @@ test("the boot screen keeps the work order reachable and does not steal focus wh
   await expect(leaseCountdown).toBeVisible();
   const leaseCountdownBox = await leaseCountdown.boundingBox();
   expect(leaseCountdownBox).not.toBeNull();
-  expect(leaseCountdownBox!.x + leaseCountdownBox!.width).toBeLessThanOrEqual(
-    page.viewportSize()!.width,
-  );
-  const learningChromeBox = await page
-    .locator("[data-run-learning-chrome]")
-    .boundingBox();
-  expect(learningChromeBox).not.toBeNull();
-  expect(leaseCountdownBox!.x + leaseCountdownBox!.width).toBeLessThanOrEqual(
-    learningChromeBox!.x,
-  );
 
-  const trigger = page.getByRole("button", {
-    name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
-  });
-  await expect(trigger).toContainText("Hints 0/2");
-
-  await trigger.focus();
-  await page.keyboard.press("Enter");
-  const panel = page.locator("[data-run-learning-panel-content]");
-  await expect(panel).toBeVisible();
-  await expect(panel.getByRole("heading", { name: "Work order" })).toBeVisible();
+  const runPage = page.locator("[data-run-page]");
+  const runPageBox = await runPage.boundingBox();
+  expect(runPageBox).not.toBeNull();
+  expect(Math.round(runPageBox!.height)).toBe(page.viewportSize()!.height);
   await expect(
-    panel
-      .locator('section[aria-labelledby="run-learning-work-order-heading"]')
-      .getByText("Start the web server"),
+    page.getByRole("link", { name: "Back to My runs" }),
+  ).toHaveAttribute("href", "/runs");
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(0);
+  await expect(page.locator('[data-sidebar="sidebar"]')).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Page actions" }),
+  ).toHaveCount(0);
+
+  const workArea = page.locator("[data-run-work-area]");
+  const panel = page.locator("[data-run-learning-panel]");
+  await expect(panel).toBeVisible();
+  const panelContent = panel.locator("[data-run-learning-panel-content]");
+  await expect(
+    panelContent.getByText("Mission briefing", { exact: true }),
   ).toBeVisible();
-  const sequenceBox = await page
-    .locator("[data-run-sequence-screen]")
-    .boundingBox();
-  const guidanceBox = await page
-    .locator("[data-run-guidance-rail]")
-    .boundingBox();
-  expect(sequenceBox).not.toBeNull();
-  expect(guidanceBox).not.toBeNull();
-  expect(sequenceBox!.x + sequenceBox!.width).toBeLessThanOrEqual(
-    guidanceBox!.x - 16,
+  await expect(panelContent.getByText("Work order", { exact: true })).toBeVisible();
+  await expect(
+    panelContent.getByText("Start the web server", { exact: true }).first(),
+  ).toBeVisible();
+  const workAreaBox = await workArea.boundingBox();
+  const panelBox = await panel.boundingBox();
+  expect(workAreaBox).not.toBeNull();
+  expect(panelBox).not.toBeNull();
+  expect(workAreaBox!.x + workAreaBox!.width).toBeLessThanOrEqual(
+    panelBox!.x + 1,
+  );
+  expect(panelBox!.width).toBeLessThanOrEqual(
+    page.viewportSize()!.width * 0.4 + 1,
+  );
+  expect(leaseCountdownBox!.x + leaseCountdownBox!.width).toBeLessThanOrEqual(
+    workAreaBox!.x + workAreaBox!.width,
   );
   await expect(panel.getByText("nginx-listening")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "SSH command" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "End run…" })).toBeVisible();
 
-  await page.keyboard.press("Escape");
-  await expect(panel).toBeHidden();
-  await expect(trigger).toBeFocused();
-
-  const focusTarget = page.getByRole("link", { name: "Courses" }).first();
+  const focusTarget = page.getByRole("link", { name: "Back to My runs" });
   await focusTarget.focus();
   ui.server.setRunState("running");
 
   await expect(page.locator(".xterm")).toBeVisible({ timeout: 1_000 });
-  await expect(
-    page.getByRole("button", {
-      name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
-    }),
-  ).toBeVisible();
+  await expect(panel).toBeVisible();
+  await expect(page.getByRole("button", { name: "SSH command" })).toBeEnabled();
   await expect(focusTarget).toBeFocused();
 });
 
-test("the desktop guidance rail keeps progressive hints and solution help learner-safe", async ({
+test("the permanent desktop guidance pane keeps progressive hints and solution help learner-safe", async ({
   page,
   ui,
 }) => {
@@ -93,33 +91,30 @@ test("the desktop guidance rail keeps progressive hints and solution help learne
     runState: "running",
   });
 
-  const trigger = page.getByRole("button", {
-    name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
-  });
-  await expect(trigger).toContainText("Hints 0/2");
-  const indicators = page.locator("[data-run-check-indicator]");
-  await expect(indicators).toHaveCount(2);
-  await expect(indicators.first()).toHaveAttribute(
-    "data-status",
-    "needs_repair",
-  );
-  await expect(indicators.nth(1)).toHaveAttribute("data-status", "checking");
-  await expect(page.getByRole("complementary", { name: "Run console" })).toHaveCount(
-    0,
-  );
-  await expect(page.getByRole("group", { name: "Machines" })).toHaveCount(0);
+  const panel = page.locator("[data-run-learning-panel]");
+  const panelContent = panel.locator("[data-run-learning-panel-content]");
+  await expect(panel).toBeVisible();
+  await expect(
+    panelContent.getByText("Mission briefing", { exact: true }),
+  ).toBeVisible();
+  await expect(panelContent.getByText("Checks", { exact: true })).toBeVisible();
+  await expect(panelContent.getByText("0/2 verified", { exact: true })).toBeVisible();
+  await expect(
+    panelContent.getByText("Start the web server", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    panelContent.getByText("Make the site reachable", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "SSH command" })).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Page actions" }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: /Reconnect terminal/i }),
   ).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Maximize/i })).toHaveCount(0);
   await expect(page.getByText("Run timeline", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Technical details", { exact: true })).toHaveCount(0);
-
-  await trigger.click();
-  const panel = page.locator("[data-run-learning-panel-content]");
-  await expect(panel).toBeVisible();
-  await expect(panel.getByRole("heading", { name: "Hints and guidance" })).toBeVisible();
-  await expect(panel.getByText("0/2 verified", { exact: true })).toHaveCount(0);
   await expect(panel.getByText("Inspect the service boundary")).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: "Reveal", exact: true }),
@@ -169,6 +164,90 @@ test("the desktop guidance rail keeps progressive hints and solution help learne
   ).toBeVisible();
 });
 
+test("small screens keep work open and show mission and hints in a bottom sheet", async ({
+  page,
+  ui,
+}) => {
+  await page.setViewportSize({ width: 640, height: 720 });
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "running",
+  });
+
+  const terminal = page.locator(".xterm");
+  const terminalStatus = page
+    .getByRole("status")
+    .filter({ hasText: /Terminal status:/i });
+  await expect(terminal).toBeVisible();
+  await expect(terminalStatus).toHaveText(/Terminal status:\s*connected/i);
+  const terminalRequestsBefore = ui.server.requests.filter(
+    (request) => request === "POST /api/scenarios/runs/run-active/ssh",
+  ).length;
+  await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
+  const trigger = page.getByRole("button", {
+    name: "Open mission and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+  });
+  await expect(trigger).toBeVisible();
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+
+  const sheet = page.locator("[data-run-learning-mobile-sheet]");
+  await expect(sheet).toBeVisible();
+  await expect(terminal).toBeVisible();
+  await expect(terminalStatus).toHaveText(/Terminal status:\s*connected/i);
+  expect(
+    ui.server.requests.filter(
+      (request) => request === "POST /api/scenarios/runs/run-active/ssh",
+    ),
+  ).toHaveLength(terminalRequestsBefore);
+  await expect(
+    sheet.getByText("Mission briefing", { exact: true }),
+  ).toBeVisible();
+  await expect(sheet.getByText("Checks", { exact: true })).toBeVisible();
+  await expect(sheet.getByText("Hints", { exact: true })).toBeVisible();
+  await expect(sheet.getByText("Full solution", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(sheet).toBeHidden();
+  await expect(trigger).toBeFocused();
+  await expect(terminal).toBeVisible();
+});
+
+test("run controls are direct, including SSH and retry end", async ({ page, ui }) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "running",
+  });
+  (ui.server.state.run as { deleteRequestedAt: number | null }).deleteRequestedAt =
+    1;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const actions = page.getByRole("group", { name: "Run actions" });
+  await expect(actions).toBeVisible();
+  await expect(
+    actions.getByRole("button", { name: "SSH command" }),
+  ).toBeEnabled();
+  await expect(
+    actions.getByRole("button", { name: "Retry end…" }),
+  ).toBeVisible();
+  await expect(
+    actions.getByRole("button", { name: "End run…" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Page actions" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("menu")).toHaveCount(0);
+
+  await actions.getByRole("button", { name: "SSH command" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("heading", { name: "Native SSH for web" }),
+  ).toBeVisible();
+});
+
 test("compact status polls cannot hide a newly revealed hint", async ({
   page,
   ui,
@@ -179,12 +258,10 @@ test("compact status polls cannot hide a newly revealed hint", async ({
     runState: "running",
   });
 
-  await page
-    .getByRole("button", {
-      name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
-    })
-    .click();
-  const panel = page.locator("[data-run-learning-panel-content]");
+  const panel = page
+    .locator("[data-run-learning-panel]")
+    .locator("[data-run-learning-panel-content]");
+  await expect(panel).toBeVisible();
   const revealResponse = page.waitForResponse(
     (response) =>
       /\/api\/scenarios\/runs\/run-active\/hints\/reveal$/.test(
@@ -205,14 +282,10 @@ test("compact status polls cannot hide a newly revealed hint", async ({
           (request) =>
             request === "GET /api/scenarios/runs/run-active/status",
         ).length,
-    )
+  )
     .toBeGreaterThan(1);
   await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
-  await expect(
-    page.getByRole("button", {
-      name: "Open lab guidance. 1 of 2 hints revealed. 0 of 2 checks verified.",
-    }),
-  ).toBeVisible();
+  await expect(panel.getByText("1/2 used", { exact: true })).toBeVisible();
 });
 
 test("the Broken Nginx contract exposes three outcomes and five progressive hints", async ({
@@ -288,26 +361,20 @@ test("the Broken Nginx contract exposes three outcomes and five progressive hint
   await page.goto(route.path, { waitUntil: "domcontentloaded" });
   await ui.settle();
 
-  const trigger = page.getByRole("button", {
-    name: "Open lab guidance. 0 of 5 hints revealed. 0 of 3 checks verified.",
-  });
-  await expect(trigger).toContainText("Hints 0/5");
-  const indicators = page.locator("[data-run-check-indicator]");
-  await expect(indicators).toHaveCount(3);
-  await expect(indicators.nth(0)).toHaveAccessibleName(
-    "Open lab guidance. Start the web server. Needs repair.",
-  );
-  await expect(indicators.nth(1)).toHaveAccessibleName(
-    "Open lab guidance. Make the site reachable. Checking.",
-  );
-  await expect(indicators.nth(2)).toHaveAccessibleName(
-    "Open lab guidance. Restore the default site. Needs repair.",
-  );
-  await trigger.click();
-  const panel = page.locator("[data-run-learning-panel-content]");
+  const panel = page
+    .locator("[data-run-learning-panel]")
+    .locator("[data-run-learning-panel-content]");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByText("0/3 verified", { exact: true })).toBeVisible();
   await expect(
-    panel.locator('section[aria-labelledby="run-learning-checks-heading"]'),
-  ).toHaveCount(0);
+    panel.getByText("Start the web server", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    panel.getByText("Make the site reachable", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    panel.getByText("Restore the default site", { exact: true }).first(),
+  ).toBeVisible();
   await expect(panel.getByText("0/5 used", { exact: true })).toBeVisible();
   await expect(panel).not.toContainText("/etc/nginx/sites-enabled/default");
   await expect(panel).not.toContainText("hidden technical objective body");
@@ -342,12 +409,10 @@ test("hint and solution failures use generic learner-safe messages", async ({
     },
   );
 
-  await page
-    .getByRole("button", {
-      name: "Open lab guidance. 0 of 2 hints revealed. 0 of 2 checks verified.",
-    })
-    .click();
-  const panel = page.locator("[data-run-learning-panel-content]");
+  const panel = page
+    .locator("[data-run-learning-panel]")
+    .locator("[data-run-learning-panel-content]");
+  await expect(panel).toBeVisible();
 
   await panel
     .getByRole("button", { name: "Reveal", exact: true })
@@ -383,21 +448,20 @@ test("a solved lab makes finishing the first learner action", async ({ page, ui 
     runState: "solved",
   });
 
-  const trigger = page.getByRole("button", {
-    name: "Open lab guidance. 0 of 2 hints revealed. 2 of 2 checks verified.",
-  });
-  await expect(trigger).toContainText("Hints 0/2");
   const finish = page.getByRole("button", { name: "Finish and save" });
   await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
   await expect(finish).toBeVisible();
-  await trigger.click();
 
-  const panel = page.locator("[data-run-learning-panel-content]");
-  await expect(panel.getByRole("heading", { name: "Lab solved" })).toBeVisible();
+  const panel = page
+    .locator("[data-run-learning-panel]")
+    .locator("[data-run-learning-panel-content]");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByText("Checks", { exact: true })).toBeVisible();
+  await expect(panel.getByText("2/2 verified", { exact: true })).toBeVisible();
   await expect(
     panel.getByRole("button", { name: "Finish and save" }),
   ).toHaveCount(0);
-  await expect(page.locator('[data-run-check-indicator][data-status="verified"]')).toHaveCount(2);
+  await expect(panel.getByText("Verified", { exact: true })).toHaveCount(2);
   const text = await panel.innerText();
 
   for (const forbidden of [
@@ -456,7 +520,7 @@ test("the final check transition uses one useful live announcement", async ({
 
   ui.server.setRunState("solved");
   const completion = page
-    .locator('[aria-live="polite"]')
+    .locator('[data-run-learning-panel] [aria-live="polite"]')
     .filter({ hasText: "All 2 checks are verified." });
   await expect(completion).toHaveCount(1);
   await expect(completion).toHaveText("All 2 checks are verified.");
@@ -523,8 +587,10 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
     runState: "running",
   });
 
-  await page.getByRole("button", { name: "Page actions" }).click();
-  await page.getByRole("menuitem", { name: "End run…" }).click();
+  await expect(
+    page.getByRole("button", { name: "Page actions" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "End run…" }).click();
   const dialog = page.getByRole("dialog");
   const destroyResponse = page.waitForResponse(
     (response) =>
@@ -566,8 +632,9 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   ui.server.state.run.outcome = "succeeded";
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingSteps).toBeVisible();
-  await expect(page.locator("header")).toContainText("Saving");
-  await expect(page.locator("header")).not.toContainText("Solved");
+  const savingHeader = page.locator("[data-run-workspace-header]");
+  await expect(savingHeader).toContainText("Saving");
+  await expect(savingHeader).not.toContainText("Solved");
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
@@ -851,8 +918,7 @@ test("a rejected shutdown stays in the confirmation dialog with learner-safe cop
     },
   );
 
-  await page.getByRole("button", { name: "Page actions" }).click();
-  await page.getByRole("menuitem", { name: "End run…" }).click();
+  await page.getByRole("button", { name: "End run…" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "End run" }).click();
 
@@ -893,8 +959,7 @@ test("deleting a private run preserves its organization course context", async (
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
 
-  await page.getByRole("button", { name: "Page actions" }).click();
-  await page.getByRole("menuitem", { name: "Delete run…" }).click();
+  await page.getByRole("button", { name: "Delete run…" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "Delete run" }).click();
 
@@ -924,8 +989,7 @@ test("a failed saved-run deletion stays generic and recoverable", async ({
     await route.fallback();
   });
 
-  await page.getByRole("button", { name: "Page actions" }).click();
-  await page.getByRole("menuitem", { name: "Delete run…" }).click();
+  await page.getByRole("button", { name: "Delete run…" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete this run?" });
   await dialog.getByRole("button", { name: "Delete run" }).click();
 
@@ -954,8 +1018,7 @@ test("deleting an organization run without a course location returns its catalog
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
 
-  await page.getByRole("button", { name: "Page actions" }).click();
-  await page.getByRole("menuitem", { name: "Delete run…" }).click();
+  await page.getByRole("button", { name: "Delete run…" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Delete run" }).click();
 
   await expect(page).toHaveURL("/organizations/org-platform/courses");

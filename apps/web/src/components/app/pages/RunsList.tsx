@@ -291,10 +291,12 @@ function ActiveRunCard({ run }: { run: MyRunEntry }) {
           In progress · started {formatRelativeTime(run.createdAt)}
         </p>
       </div>
+      {/* Match the run workspace Back link: document navigation avoids the
+          current router intent-preload failure on repeated resume cycles. */}
       <Button
         size="lg"
         className="w-full sm:w-auto"
-        render={<Link to="/runs/$runId" params={{ runId: run.runId }} />}
+        render={<a href={`/runs/${encodeURIComponent(run.runId)}`} />}
       >
         Resume
         <ArrowRight className="size-4" />

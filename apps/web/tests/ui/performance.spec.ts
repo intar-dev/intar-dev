@@ -255,6 +255,9 @@ test("run workspace only fetches the terminal after live status makes a VM ready
       theme: "light",
     });
     await expect(page.locator("[data-run-workspace]")).toBeVisible();
+    expect(ui.server.requests).not.toContain(
+      "GET /api/scenarios/runs/summary",
+    );
     expect(modules.count("terminal")).toBe(0);
 
     ui.server.setRunState("running");
@@ -401,7 +404,7 @@ async function prepareWarmNavigation(
     return;
   }
   if (route.id === "run-active") {
-    await sidebarLink(page, "My runs").click();
+    await page.getByRole("link", { name: "Back to My runs" }).click();
     await expect(
       page.getByRole("heading", { name: "Active work" }),
     ).toBeVisible();

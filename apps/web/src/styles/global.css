@@ -369,15 +369,6 @@
   opacity: 1 !important;
 }
 
-/* Keep the startup tracker inside the workspace left by the desktop guidance
-   rail. At smaller widths, guidance becomes a bottom sheet instead. */
-@media (min-width: 960px) {
-  body:has([data-run-guidance-rail]) [data-run-sequence-frame] {
-    width: min(42rem, calc(100% - 22rem));
-    transform: translateX(-11rem);
-  }
-}
-
 /* A short landscape viewport trades step detail for a compact rail. The same
    rule applies to startup and shutdown because they share this sequence UI. */
 @media (max-height: 500px) and (min-width: 640px) {

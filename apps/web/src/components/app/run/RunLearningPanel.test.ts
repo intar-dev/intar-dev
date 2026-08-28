@@ -7,6 +7,7 @@ import {
   getRunLearningTriggerCopy,
   RunLearningPanel,
   RunLearningPanelContent,
+  RunLearningPanelMobile,
 } from "./RunLearningPanel";
 import type {
   ScenarioObjective,
@@ -16,7 +17,7 @@ import type {
 } from "./run-types";
 
 describe("run learning panel", () => {
-  it("uses learner-facing app-bar labels with check and hint counts", () => {
+  it("uses a stable Mission and hints mobile trigger with learner-safe counts", () => {
     expect(
       getRunLearningTriggerCopy({
         passedChecks: 1,
@@ -25,9 +26,9 @@ describe("run learning panel", () => {
         totalHints: 2,
       }),
     ).toEqual({
-      visibleLabel: "Hints 1/2",
+      visibleLabel: "Mission and hints",
       accessibleLabel:
-        "Open lab guidance. 1 of 2 hints revealed. 1 of 3 checks verified.",
+        "Open mission and hints. 1 of 2 hints revealed. 1 of 3 checks verified.",
     });
     expect(
       getRunLearningTriggerCopy({
@@ -37,9 +38,9 @@ describe("run learning panel", () => {
         totalHints: 0,
       }),
     ).toEqual({
-      visibleLabel: "Guidance",
+      visibleLabel: "Mission and hints",
       accessibleLabel:
-        "Open lab guidance. No hints are available. 3 of 3 checks verified.",
+        "Open mission and hints. No hints are available. 3 of 3 checks verified.",
     });
   });
 
@@ -51,27 +52,36 @@ describe("run learning panel", () => {
     expect(getRunLearningPanelState("failed")).toBe("running");
   });
 
-  it("renders 44px check controls and a compact guidance trigger", () => {
-    const markup = renderToStaticMarkup(
+  it("renders a permanent desktop aside and a separate 44px mobile trigger", () => {
+    const desktopMarkup = renderToStaticMarkup(
       createElement(RunLearningPanel, panelProps()),
     );
+    const mobileMarkup = renderToStaticMarkup(
+      createElement(RunLearningPanelMobile, panelProps()),
+    );
 
-    expect(markup).toContain('data-run-learning-panel-trigger="true"');
-    expect(markup).toContain('data-run-check-indicators="true"');
-    expect(markup).toContain('data-run-check-indicator="true"');
-    expect(markup).toContain('data-run-check-count="true"');
-    expect(markup).toContain('data-run-compact-check-count="true"');
-    expect(markup).toContain('data-status="needs_repair"');
-    expect(markup).toContain("Hints 0/2");
-    expect(markup).toContain(
-      'aria-label="Open lab guidance. 0 of 2 hints revealed. 0 of 1 checks verified."',
+    expect(desktopMarkup).toContain('data-run-learning-panel="true"');
+    expect(desktopMarkup).toContain('data-run-learning-panel-scroll="true"');
+    expect(desktopMarkup).toContain('aria-label="Mission and hints"');
+    expect(desktopMarkup).toContain('aria-label="Mission and hints content"');
+    expect(desktopMarkup).toContain('tabindex="0"');
+    expect(desktopMarkup).toContain("w-[min(24rem,40dvw)]");
+    expect(desktopMarkup).toContain("max-w-[40dvw]");
+    expect(desktopMarkup).toContain("Mission briefing");
+    expect(desktopMarkup).toContain("Repair the service safely.");
+    expect(desktopMarkup).not.toContain('data-run-learning-panel-trigger="true"');
+    expect(desktopMarkup).not.toContain("data-run-guidance-rail");
+    expect(desktopMarkup).not.toContain("data-run-learning-chrome");
+    expect(desktopMarkup).not.toContain("data-run-check-indicators");
+
+    expect(mobileMarkup).toContain('data-run-learning-mobile="true"');
+    expect(mobileMarkup).toContain('data-run-learning-panel-trigger="true"');
+    expect(mobileMarkup).toContain("Mission and hints");
+    expect(mobileMarkup).toContain(
+      'aria-label="Open mission and hints. 0 of 2 hints revealed. 0 of 1 checks verified."',
     );
-    expect(markup).toContain(
-      'aria-label="Open lab guidance. Make the site reachable. Needs repair."',
-    );
-    expect(markup).toContain("size-11");
-    expect(markup).not.toContain("http-ok");
-    expect(markup).not.toContain("nginx_http_request");
+    expect(mobileMarkup).toContain("h-11");
+    expect(mobileMarkup).not.toContain("data-run-guidance-rail");
   });
 
   it("maps raw probes to learner-safe circle labels and states", () => {
@@ -113,7 +123,7 @@ describe("run learning panel", () => {
     expect(JSON.stringify(checks)).not.toContain(rawError);
   });
 
-  it("keeps every check discoverable and shows a total for a long row", () => {
+  it("keeps every check discoverable in the permanent guidance content", () => {
     const probes = Array.from({ length: 8 }, (_, index) =>
       probe({ id: `check-${index + 1}` }),
     );
@@ -122,24 +132,30 @@ describe("run learning panel", () => {
       probeName: item.id,
       title: `Learner check ${index + 1}`,
     }));
-    const markup = renderToStaticMarkup(
-      createElement(RunLearningPanel, {
-        ...panelProps(),
-        probes,
-        objectives,
-      }),
-    );
+    const markup = renderContent({ probes, objectives });
 
-    expect(
-      markup.match(/data-run-check-indicator="true"/g),
-    ).toHaveLength(8);
-    expect(markup).toContain('data-run-check-count="true"');
-    expect(markup).toContain('data-run-check-overflow="true"');
-    expect(markup).toContain('data-run-compact-check-overflow="true"');
-    expect(markup).toContain("0/8");
-    expect(markup).toContain("+3");
-    expect(markup).toContain("+4");
+    expect(markup.match(/Needs repair/g)).toHaveLength(8);
+    expect(markup).toContain("0/8 verified");
     expect(markup).toContain("Learner check 8");
+  });
+
+  it("puts the authored mission briefing before checks, hints, and solution", () => {
+    const markup = renderContent({
+      briefingMarkdown: "Read the **service status** before you change it.",
+    });
+
+    expect(markup).toContain("Mission briefing");
+    expect(markup).toContain("service status");
+    expect(markup.indexOf("Mission briefing")).toBeLessThan(
+      markup.indexOf("service status"),
+    );
+    expect(markup.indexOf("service status")).toBeLessThan(
+      markup.indexOf("Checks"),
+    );
+    expect(markup.indexOf("Checks")).toBeLessThan(markup.indexOf("Hints"));
+    expect(markup.indexOf("Hints")).toBeLessThan(
+      markup.indexOf("Full solution"),
+    );
   });
 
   it("never renders raw probe diagnostics in learner checks", () => {
@@ -304,6 +320,7 @@ describe("run learning panel", () => {
   it("has clear empty states without a technical fallback", () => {
     const markup = renderContent({
       phase: "running",
+      briefingMarkdown: "",
       probes: [],
       objectives: [],
       hints: [],
@@ -311,8 +328,8 @@ describe("run learning panel", () => {
 
     expect(markup).toContain("No checks are available yet.");
     expect(markup).toContain("No hints are available for this lab.");
-    expect(markup).toContain('data-run-learning-sticky-summary="true"');
-    expect(markup).toContain('aria-label="Show checks. 0 of 0 verified."');
+    expect(markup).toContain("No mission briefing is available for this lab.");
+    expect(markup).not.toContain("data-run-learning-sticky-summary");
     expect(markup).not.toContain("probe");
     expect(markup).not.toContain("machine itself");
   });
@@ -332,6 +349,7 @@ function renderContent(
 function panelProps(): ComponentProps<typeof RunLearningPanelContent> {
   return {
     phase: "running",
+    briefingMarkdown: "Repair the service safely.",
     probes: [probe()],
     objectives: [objective()],
     hints: [hint({ key: "first", unlocked: true }), hint({ key: "second" })],

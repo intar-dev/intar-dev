@@ -22,14 +22,6 @@ async function expectRunTimer(
   expect(textBox!.x + textBox!.width).toBeLessThanOrEqual(
     page.viewportSize()!.width,
   );
-  const learningChrome = page.locator("[data-run-learning-chrome]");
-  if ((await learningChrome.count()) > 0) {
-    const learningChromeBox = await learningChrome.boundingBox();
-    expect(learningChromeBox).not.toBeNull();
-    expect(textBox!.x + textBox!.width).toBeLessThanOrEqual(
-      learningChromeBox!.x,
-    );
-  }
 }
 
 async function expectConnectedTerminal(
@@ -40,10 +32,36 @@ async function expectConnectedTerminal(
   ).toHaveText(/Terminal status:\s*connected/i);
 }
 
+async function expectDesktopMissionPane(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  const panel = page.locator("[data-run-learning-panel]");
+  await expect(panel).toBeVisible();
+  await expect(
+    panel.getByText("Mission briefing", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator("[data-run-learning-panel-trigger]"),
+  ).not.toBeVisible();
+  return panel;
+}
+
+async function openMobileMissionAndHints(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  const trigger = page.locator("[data-run-learning-panel-trigger]");
+  await expect(trigger).toBeVisible();
+  await expect(page.locator("[data-run-learning-panel]")).not.toBeVisible();
+  await trigger.click();
+  const sheet = page.locator("[data-run-learning-mobile-sheet]");
+  await expect(sheet).toBeVisible();
+  return sheet;
+}
+
 test.describe("focused visual states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("run · running guidance rail", async ({ page, ui }) => {
+  test("run · running mission pane", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -51,16 +69,12 @@ test.describe("focused visual states", () => {
     });
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
-    await page.locator("[data-run-learning-panel-trigger]").click();
-    const panel = page.locator("[data-run-learning-panel-content]");
-    await expect(
-      panel.getByRole("heading", { name: "Hints and guidance" }),
-    ).toBeVisible();
+    const panel = await expectDesktopMissionPane(page);
     await expect(panel.getByText("0/2 used", { exact: true })).toBeVisible();
     await expectRouteScreenshot(page, "run-running-guidance-dark-desktop");
   });
 
-  test("run · check circle tooltip", async ({ page, ui }) => {
+  test("run · check list in mission pane", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -68,14 +82,19 @@ test.describe("focused visual states", () => {
     });
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
-    await page.locator("[data-run-check-indicator]").first().hover();
+    const panel = await expectDesktopMissionPane(page);
     await expect(
-      page.locator("[data-run-check-tooltip][data-open]"),
-    ).toContainText("Start the web server");
-    await expectRouteScreenshot(page, "run-check-tooltip-dark-desktop");
+      panel.getByText("Checks", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      panel
+        .getByLabel("Checks", { exact: true })
+        .getByText("Start the web server", { exact: true }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-check-list-dark-desktop");
   });
 
-  test("run · booting guidance panel", async ({ page, ui }) => {
+  test("run · booting mission pane", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -85,11 +104,9 @@ test.describe("focused visual states", () => {
     await expect(
       page.getByRole("heading", { name: "Preparing your workspace" }),
     ).toBeVisible();
-    await page.locator("[data-run-learning-panel-trigger]").click();
+    const panel = await expectDesktopMissionPane(page);
     await expect(
-      page
-        .locator("[data-run-learning-panel-content]")
-        .getByRole("heading", { name: "Work order" }),
+      panel.getByText("Work order", { exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-booting-guidance-dark-desktop");
   });
@@ -108,9 +125,10 @@ test.describe("focused visual states", () => {
     await expect(
       page.getByRole("button", { name: "Finish and save" }),
     ).toBeVisible();
+    const panel = await expectDesktopMissionPane(page);
     await expect(
-      page.locator("[data-run-learning-panel-content]"),
-    ).toHaveCount(0);
+      panel.getByText("Full solution", { exact: true }),
+    ).toBeVisible();
     await expectRouteScreenshot(page, "run-solved-workspace-action-dark-desktop");
   });
 
@@ -181,8 +199,7 @@ test.describe("focused visual states", () => {
     });
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
-    await page.locator("[data-run-learning-panel-trigger]").click();
-    const panel = page.locator("[data-run-learning-panel-content]");
+    const panel = await expectDesktopMissionPane(page);
     await expect(panel.getByText("Hints", { exact: true })).toBeVisible();
     await panel
       .getByRole("button", { name: "Reveal", exact: true })
@@ -451,7 +468,7 @@ test.describe("focused visual states", () => {
 test.describe("focused mobile workspace", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
-  test("running guidance sheet", async ({ page, ui }) => {
+  test("running mission and hints sheet", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -459,16 +476,14 @@ test.describe("focused mobile workspace", () => {
     });
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
-    await page.locator("[data-run-learning-panel-trigger]").click();
+    const sheet = await openMobileMissionAndHints(page);
     await expect(
-      page
-        .locator("[data-run-learning-panel-content]")
-        .getByRole("heading", { name: "Checks and guidance" }),
+      sheet.getByText("Mission briefing", { exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-running-guidance-dark-mobile");
   });
 
-  test("booting guidance sheet", async ({ page, ui }) => {
+  test("booting mission and hints sheet", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -478,11 +493,9 @@ test.describe("focused mobile workspace", () => {
     await expect(
       page.getByRole("heading", { name: "Preparing your workspace" }),
     ).toBeVisible();
-    await page.locator("[data-run-learning-panel-trigger]").click();
+    const sheet = await openMobileMissionAndHints(page);
     await expect(
-      page
-        .locator("[data-run-learning-panel-content]")
-        .getByRole("heading", { name: "Work order" }),
+      sheet.getByText("Work order", { exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-booting-guidance-dark-mobile");
   });

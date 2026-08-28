@@ -6,9 +6,11 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
+import { ArrowLeft } from "lucide-react";
 import {
   HttpResponseError,
   isAccessResponseError,
@@ -19,17 +21,16 @@ import {
   StatusToken,
   type StatusTone,
 } from "@/components/app/patterns/StatusToken";
-import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import {
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { presentScenarioRun } from "@/lib/run-phase";
 import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
-import { RunLearningPanel } from "@/components/app/run/RunLearningPanel";
+import {
+  RunLearningPanel,
+  RunLearningPanelMobile,
+} from "@/components/app/run/RunLearningPanel";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
   ScenarioShellStatusCard,
@@ -553,158 +554,141 @@ export function ScenarioRun() {
       attemptData?.outcome === "in_progress" ||
       infrastructureTeardownPending) &&
     !showBackgroundStatus;
-  const showSshMenuItem = Boolean(
+  const showSshAction = Boolean(
     selectedVm &&
     selectedVmSessionRequest &&
     attemptData?.outcome === "in_progress" &&
     attemptData.activity === "foreground",
   );
-  const runLearningAction = useMemo(() => {
-    if (!attemptData || attemptData.activity !== "foreground") {
-      return undefined;
+  const runStatusDisplay = useMemo(() => {
+    if (!attemptData) return undefined;
+    if (showBackgroundStatus) {
+      return (
+        <ActiveRunStatus
+          tone="pending"
+          word="Saving"
+          compactWord="Saving"
+          startedAt={attemptData.createdAt}
+          leaseDeadlineMs={leaseDeadlineMs}
+          pulse
+        />
+      );
     }
-    return (
-      <RunLearningPanel
-        phase={attemptData.phase}
-        probes={selectedProbes}
-        vmName={selectedVm?.scenarioVmName ?? null}
-        objectives={attemptData.objectives}
-        hints={attemptData.hints}
-        solution={attemptData.solution}
-        onRevealHint={(hintKey) => revealHint.mutate(hintKey)}
-        pendingHintKey={
-          revealHint.isPending ? (revealHint.variables ?? null) : null
-        }
-        hintError={
-          revealHint.error instanceof Error ? revealHint.error.message : null
-        }
-        failedHintKey={
-          revealHint.error ? (revealHint.variables ?? null) : null
-        }
-        onRevealSolution={() => revealSolution.mutate()}
-        solutionPending={revealSolution.isPending}
-        solutionError={
-          revealSolution.error instanceof Error
-            ? revealSolution.error.message
-            : null
-        }
-      />
-    );
-  }, [
-    attemptData,
-    selectedProbes,
-    revealHint,
-    revealSolution,
-  ]);
-
-  usePageChrome({
-    title: attemptData?.title ?? "Lab run",
-    status: useMemo(() => {
-      if (!attemptData) return undefined;
-      if (showBackgroundStatus) {
+    if (attemptData.outcome === "in_progress") {
+      if (showSelectedVmPreparation) {
         return (
           <ActiveRunStatus
             tone="pending"
-            word="Saving"
-            compactWord="Saving"
+            word={attemptData.phaseTitle}
+            compactWord="Starting"
             startedAt={attemptData.createdAt}
             leaseDeadlineMs={leaseDeadlineMs}
             pulse
           />
         );
       }
-      if (attemptData.outcome === "in_progress") {
-        if (showSelectedVmPreparation) {
-          return (
-            <ActiveRunStatus
-              tone="pending"
-              word={attemptData.phaseTitle}
-              compactWord="Starting"
-              startedAt={attemptData.createdAt}
-              leaseDeadlineMs={leaseDeadlineMs}
-              pulse
-            />
-          );
-        }
-        if (attemptData.phase === "solved") {
-          return (
-            <ActiveRunStatus
-              tone="success"
-              word="Solved"
-              compactWord="Solved"
-              startedAt={attemptData.createdAt}
-              leaseDeadlineMs={leaseDeadlineMs}
-            />
-          );
-        }
+      if (attemptData.phase === "solved") {
         return (
           <ActiveRunStatus
-            tone="live"
-            word={attemptData.phaseTitle}
-            compactWord="Live"
+            tone="success"
+            word="Solved"
+            compactWord="Solved"
             startedAt={attemptData.createdAt}
             leaseDeadlineMs={leaseDeadlineMs}
           />
         );
       }
-      switch (attemptData.outcome) {
-        case "succeeded":
-          return <StatusToken tone="success" word="Solved" />;
-        case "failed":
-          return <StatusToken tone="danger" word="Failed" />;
-        default:
-          return <StatusToken tone="muted" word="Ended early" />;
-      }
-    }, [
-      attemptData,
-      leaseDeadlineMs,
-      showSelectedVmPreparation,
-      showBackgroundStatus,
-    ]),
-    action: runLearningAction,
-    menu: useMemo(() => {
-      if (!showSshMenuItem && !showEndRunAction && !canDeleteRun) {
-        return undefined;
-      }
       return (
-        <>
-          {showSshMenuItem ? (
-            <DropdownMenuItem
-              disabled={!selectedVmShellReady}
-              onClick={() => setSshDialogOpen(true)}
-            >
-              SSH command…
-            </DropdownMenuItem>
-          ) : null}
-          {showSshMenuItem && (showEndRunAction || canDeleteRun) ? (
-            <DropdownMenuSeparator />
-          ) : null}
-          {showEndRunAction ? (
-            <DropdownMenuItem
-              variant="destructive"
-              onClick={() => setCancelDialogOpen(true)}
-            >
-              {acceptanceRetryNeeded ? "Retry end…" : "End run…"}
-            </DropdownMenuItem>
-          ) : null}
-          {canDeleteRun ? (
-            <DropdownMenuItem
-              variant="destructive"
-              onClick={() => setDeleteRunDialogOpen(true)}
-            >
-              Delete run…
-            </DropdownMenuItem>
-          ) : null}
-        </>
+        <ActiveRunStatus
+          tone="live"
+          word={attemptData.phaseTitle}
+          compactWord="Live"
+          startedAt={attemptData.createdAt}
+          leaseDeadlineMs={leaseDeadlineMs}
+        />
       );
-    }, [
-      showSshMenuItem,
-      showEndRunAction,
-      canDeleteRun,
-      selectedVmShellReady,
-      acceptanceRetryNeeded,
-    ]),
-  });
+    }
+    switch (attemptData.outcome) {
+      case "succeeded":
+        return <StatusToken tone="success" word="Solved" />;
+      case "failed":
+        return <StatusToken tone="danger" word="Failed" />;
+      default:
+        return <StatusToken tone="muted" word="Ended early" />;
+    }
+  }, [
+    attemptData,
+    leaseDeadlineMs,
+    showSelectedVmPreparation,
+    showBackgroundStatus,
+  ]);
+
+  const runActions =
+    showSshAction || showEndRunAction || canDeleteRun ? (
+      <div
+        className="flex flex-wrap items-center gap-2"
+        role="group"
+        aria-label="Run actions"
+        data-run-actions
+      >
+        {showSshAction ? (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!selectedVmShellReady}
+            onClick={() => setSshDialogOpen(true)}
+          >
+            SSH command
+          </Button>
+        ) : null}
+        {showEndRunAction ? (
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={() => setCancelDialogOpen(true)}
+          >
+            {acceptanceRetryNeeded ? "Retry end…" : "End run…"}
+          </Button>
+        ) : null}
+        {canDeleteRun ? (
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={() => setDeleteRunDialogOpen(true)}
+          >
+            Delete run…
+          </Button>
+        ) : null}
+      </div>
+    ) : null;
+
+  const guidanceProps =
+    attemptData?.activity === "foreground"
+      ? {
+          briefingMarkdown: attemptData.briefingMarkdown,
+          phase: attemptData.phase,
+          probes: selectedProbes,
+          vmName: selectedVm?.scenarioVmName ?? null,
+          objectives: attemptData.objectives,
+          hints: attemptData.hints,
+          solution: attemptData.solution,
+          onRevealHint: (hintKey: string) => revealHint.mutate(hintKey),
+          pendingHintKey: revealHint.isPending
+            ? (revealHint.variables ?? null)
+            : null,
+          hintError:
+            revealHint.error instanceof Error ? revealHint.error.message : null,
+          failedHintKey: revealHint.error
+            ? (revealHint.variables ?? null)
+            : null,
+          onRevealSolution: () => revealSolution.mutate(),
+          solutionPending: revealSolution.isPending,
+          solutionError:
+            revealSolution.error instanceof Error
+              ? revealSolution.error.message
+              : null,
+        }
+      : null;
 
   // The browser tab carries live-run state while the user is elsewhere.
   const scenarioName = attemptData?.title ?? null;
@@ -792,122 +776,239 @@ export function ScenarioRun() {
     </>
   );
 
-  if (attemptData && attemptData.activity !== "foreground") {
+  if (!attemptData) {
     return (
-      <PageShell width="content">
+      <RunPageFrame>
         {runDialogs}
-        {errorAlerts}
-        <Suspense
-          fallback={
-            <section
-              className="mx-auto flex w-full max-w-2xl flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
-              role="status"
-            >
-              Loading your recap…
-            </section>
-          }
+        <RunWorkspaceHeader title="Lab run" />
+        <div
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6"
+          role="region"
+          aria-label="Lab status"
+          tabIndex={0}
         >
-          <LazyRunRecap
-            run={attemptData}
-            courseLocation={attemptData.courseLocation}
-            nextScenario={nextCourseScenario}
-            headingRef={recapHeadingRef}
-          />
-        </Suspense>
-      </PageShell>
+          <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4">
+            {errorAlerts}
+            {!attempt.error ? (
+              <p
+                className="m-auto text-sm text-muted-foreground"
+                role="status"
+              >
+                Loading your lab…
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </RunPageFrame>
     );
   }
 
-  // Everything else is the workspace frame: bar + panes, no page scroll.
-  return (
-    <div
-      data-run-workspace
-      className="flex h-[calc(100dvh-var(--app-bar-h,3rem))] min-h-0 flex-col gap-4 overflow-hidden px-4 py-4 lg:gap-6 lg:px-6 lg:py-6 [@media(max-height:500px)]:!gap-3 [@media(max-height:500px)]:!px-3 [@media(max-height:500px)]:!py-3"
-    >
-      {runDialogs}
-      <div className="shrink-0 space-y-2 empty:hidden sm:space-y-3">
-        {errorAlerts}
-      </div>
-
-      {showFinishBar && attemptData ? (
-        <RunCompletionBar
-          canFinish={attemptData.canDestroy}
-          pending={destroyScenario.isPending}
-          error={Boolean(destroyScenario.error)}
-          onFinish={requestDestroyScenario}
+  if (attemptData.activity !== "foreground") {
+    return (
+      <RunPageFrame>
+        {runDialogs}
+        <RunWorkspaceHeader
+          title={attemptData.title}
+          status={runStatusDisplay}
+          actions={runActions}
         />
-      ) : null}
-
-      {attemptData ? (
-        <section
-          aria-label="Terminal"
-          className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-4 lg:gap-6 [@media(max-height:500px)]:!gap-3"
+        <div
+          className="min-h-0 flex-1 overflow-y-auto"
+          role="region"
+          aria-label="Run recap"
+          tabIndex={0}
         >
-          <ScenarioVmSelector
-            vms={attemptData.vms}
-            selectedVmId={selectedVmId}
-            onSelect={setSelectedVmId}
-          />
-
-          {selectedVm && selectedVmShellReady && terminalVisible ? (
-            <div className="relative min-h-0 min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
-              <Suspense
-                fallback={
-                  <div
-                    className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
-                    role="status"
-                  >
-                    Opening secure shell…
-                  </div>
-                }
-              >
-                <LazyWebSshTerminal
-                  vmName={selectedVm.scenarioVmName}
-                  sessionRequest={selectedVmSessionRequest!}
-                  variant="embedded"
-                  title={`${selectedVm.scenarioVmName} shell`}
-                  showCloseButton={false}
-                  onClose={() => setTerminalVisible(false)}
-                />
-              </Suspense>
-            </div>
-          ) : (
-            <div
-              aria-label={
-                showSelectedVmPreparation
-                  ? "Workspace startup progress"
-                  : undefined
-              }
-              className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
-              role={showSelectedVmPreparation ? "region" : undefined}
-              tabIndex={showSelectedVmPreparation ? 0 : undefined}
-            >
-              {showSelectedVmPreparation ? (
-                <div
-                  className="m-auto w-full max-w-2xl py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:py-6"
-                  data-run-sequence-frame
+          <PageShell width="content">
+            {errorAlerts}
+            <Suspense
+              fallback={
+                <section
+                  className="mx-auto flex w-full max-w-2xl flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
+                  role="status"
                 >
-                  <ScenarioStepScreen
-                    title={bootScreenCopy.title}
-                    description={bootScreenCopy.description}
-                    steps={bootSteps}
-                    listLabel="Startup steps"
-                  />
+                  Loading your recap…
+                </section>
+              }
+            >
+              <LazyRunRecap
+                run={attemptData}
+                courseLocation={attemptData.courseLocation}
+                nextScenario={nextCourseScenario}
+                headingRef={recapHeadingRef}
+              />
+            </Suspense>
+          </PageShell>
+        </div>
+      </RunPageFrame>
+    );
+  }
+
+  // A live run owns the viewport: runtime on the left, learning reference on
+  // the right, and no page-level scroll around either surface.
+  return (
+    <RunPageFrame>
+      {runDialogs}
+      <div
+        data-run-workspace
+        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden [@media(min-width:960px)]:grid-cols-[minmax(0,1fr)_min(24rem,40vw)]"
+      >
+        <div
+          data-run-work-area
+          className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+        >
+          <RunWorkspaceHeader
+            title={attemptData.title}
+            status={runStatusDisplay}
+            actions={runActions}
+            mobileGuidance={
+              guidanceProps ? (
+                <RunLearningPanelMobile {...guidanceProps} />
+              ) : null
+            }
+          />
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 sm:p-4 [@media(max-height:500px)]:!p-3">
+            <div className="shrink-0 space-y-2 empty:hidden">
+              {errorAlerts}
+            </div>
+
+            {showFinishBar ? (
+              <RunCompletionBar
+                canFinish={attemptData.canDestroy}
+                pending={destroyScenario.isPending}
+                error={Boolean(destroyScenario.error)}
+                onFinish={requestDestroyScenario}
+              />
+            ) : null}
+
+            <section
+              aria-label="Terminal"
+              className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-3"
+            >
+              <ScenarioVmSelector
+                vms={attemptData.vms}
+                selectedVmId={selectedVmId}
+                onSelect={setSelectedVmId}
+              />
+
+              {selectedVm && selectedVmShellReady && terminalVisible ? (
+                <div className="relative min-h-0 min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
+                  <Suspense
+                    fallback={
+                      <div
+                        className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
+                        role="status"
+                      >
+                        Opening secure shell…
+                      </div>
+                    }
+                  >
+                    <LazyWebSshTerminal
+                      vmName={selectedVm.scenarioVmName}
+                      sessionRequest={selectedVmSessionRequest!}
+                      variant="embedded"
+                      title={`${selectedVm.scenarioVmName} shell`}
+                      showCloseButton={false}
+                      onClose={() => setTerminalVisible(false)}
+                    />
+                  </Suspense>
                 </div>
               ) : (
-                <ScenarioShellStatusCard
-                  phase={selectedVm?.phase ?? attemptData.phase}
-                  title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
-                  pending={
-                    !selectedVmShellReady &&
-                    Boolean(selectedVm && selectedVm.phase !== "failed")
+                <div
+                  aria-label={
+                    showSelectedVmPreparation
+                      ? "Workspace startup progress"
+                      : undefined
                   }
-                />
+                  className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+                  role={showSelectedVmPreparation ? "region" : undefined}
+                  tabIndex={showSelectedVmPreparation ? 0 : undefined}
+                >
+                  {showSelectedVmPreparation ? (
+                    <div
+                      className="m-auto w-full max-w-2xl py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:py-6"
+                      data-run-sequence-frame
+                    >
+                      <ScenarioStepScreen
+                        title={bootScreenCopy.title}
+                        description={bootScreenCopy.description}
+                        steps={bootSteps}
+                        listLabel="Startup steps"
+                      />
+                    </div>
+                  ) : (
+                    <ScenarioShellStatusCard
+                      phase={selectedVm?.phase ?? attemptData.phase}
+                      title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
+                      pending={
+                        !selectedVmShellReady &&
+                        Boolean(selectedVm && selectedVm.phase !== "failed")
+                      }
+                    />
+                  )}
+                </div>
               )}
-            </div>
-          )}
-        </section>
-      ) : null}
+            </section>
+          </div>
+        </div>
+
+        {guidanceProps ? <RunLearningPanel {...guidanceProps} /> : null}
+      </div>
+    </RunPageFrame>
+  );
+}
+
+function RunPageFrame({ children }: { children: ReactNode }) {
+  return (
+    <div
+      data-run-page
+      className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+    >
+      <header
+        className="flex h-[3.25rem] shrink-0 items-center border-b bg-background px-3 sm:px-4"
+        data-run-navigation
+      >
+        {/* Keep this a document navigation. Repeated run/list transitions hit
+            the current router intent-preload bug, and leaving the document
+            also guarantees that the terminal transport is released. */}
+        <a
+          href="/runs"
+          className={buttonVariants({ variant: "ghost", className: "-ml-2" })}
+          aria-label="Back to My runs"
+          data-run-back
+        >
+          <ArrowLeft className="size-4" aria-hidden="true" />
+          Back
+        </a>
+      </header>
+      {children}
+    </div>
+  );
+}
+
+function RunWorkspaceHeader({
+  title,
+  status,
+  actions,
+  mobileGuidance,
+}: {
+  title: string;
+  status?: ReactNode;
+  actions?: ReactNode;
+  mobileGuidance?: ReactNode;
+}) {
+  return (
+    <div
+      className="flex shrink-0 flex-wrap items-center gap-3 border-b bg-background px-3 py-3 sm:px-4"
+      data-run-workspace-header
+    >
+      <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 font-heading text-lg leading-6 font-semibold tracking-tight">
+        {title}
+      </h1>
+      <div className="flex max-w-full flex-wrap items-center gap-2">
+        {status ? <div className="mr-1 min-w-0">{status}</div> : null}
+        {mobileGuidance}
+        {actions}
+      </div>
     </div>
   );
 }
