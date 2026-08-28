@@ -18,10 +18,12 @@ test.describe("all-route accessibility", () => {
 
         if (route.id === "run-workspace") {
           const workspaceHeader = page.locator("[data-run-workspace-header]");
+          const workspace = page.locator("[data-run-page]");
           const back = page
             .locator("[data-run-navigation]")
             .getByRole("link", { name: "Back to My runs" });
 
+          await expect(workspace).toBeVisible();
           await expect(workspaceHeader).toHaveCount(1);
           await expect(
             workspaceHeader.getByRole("heading", {
@@ -33,9 +35,11 @@ test.describe("all-route accessibility", () => {
           await expect(back).toHaveAttribute("href", "/runs");
           await expect(page.locator("header")).toHaveCount(1);
           await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+          // The shell keeps its inert inset mounted so the run can move to its
+          // normal saving/recap chrome without remounting the page.
           await expect(
             page.locator("[data-slot='sidebar-inset']"),
-          ).toHaveCount(0);
+          ).toHaveCount(1);
           await expect(
             page.locator("[data-slot='sidebar-trigger']"),
           ).toHaveCount(0);

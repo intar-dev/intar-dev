@@ -90,7 +90,6 @@ async function expectRunWorkspaceHeader(page: Page, title: string) {
 
 async function expectRunWorkspaceChrome(page: Page) {
   await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
-  await expect(page.locator("[data-slot='sidebar-inset']")).toHaveCount(0);
   await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
@@ -98,6 +97,60 @@ async function expectRunWorkspaceChrome(page: Page) {
   await expect(
     page.getByRole("button", { name: "Page actions" }),
   ).toHaveCount(0);
+}
+
+async function expectStandardRunChrome(
+  page: Page,
+  title: string,
+  options: {
+    status?: string;
+    hasDeleteAction?: boolean;
+  } = {},
+) {
+  const appBar = page.locator("header").filter({
+    has: page.getByRole("heading", { level: 1, name: title, exact: true }),
+  });
+  const viewport = page.viewportSize();
+
+  await expect(page.locator("[data-slot='sidebar-wrapper']")).toHaveCount(1);
+  await expect(page.locator("[data-slot='sidebar-inset']")).toHaveCount(1);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
+  if (viewport && viewport.width >= 768) {
+    await expect(page.locator("[data-slot='sidebar']")).toHaveCount(1);
+  }
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(1);
+  await expect(appBar).toHaveCount(1);
+  await expect(
+    appBar.getByRole("heading", { level: 1, name: title }),
+  ).toBeVisible();
+  await expect(page.locator("[data-run-page]")).toHaveCount(0);
+  await expect(page.locator("[data-run-navigation]")).toHaveCount(0);
+  await expect(page.locator("[data-run-back]")).toHaveCount(0);
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Page actions" })).toHaveCount(
+    0,
+  );
+
+  if (options.status) {
+    await expect(appBar).toContainText(options.status);
+  }
+  const deleteRun = appBar.getByRole("button", {
+    name: "Delete run…",
+    exact: true,
+  });
+  const allDeleteRunActions = page.getByRole("button", {
+    name: "Delete run…",
+    exact: true,
+  });
+  if (options.hasDeleteAction) {
+    await expect(allDeleteRunActions).toHaveCount(1);
+    await expect(deleteRun).toBeVisible();
+    await expectMinimumTarget(deleteRun, "Delete run app bar action");
+  } else {
+    await expect(allDeleteRunActions).toHaveCount(0);
+  }
 }
 
 async function expectMinimumTarget(control: Locator, description: string) {
@@ -788,6 +841,32 @@ test.describe("focused state accessibility", () => {
       .toEqual([]);
   });
 
+  test("loading a run keeps standard app chrome", async ({ page, ui }, testInfo) => {
+    const route = routeCase("run-workspace");
+    ui.configure({ ...route, runState: "running" });
+    let releaseRunResponse: (() => void) | undefined;
+    const runResponseGate = new Promise<void>((resolve) => {
+      releaseRunResponse = resolve;
+    });
+
+    await page.route("**/api/scenarios/runs/run-active", async (request) => {
+      await runResponseGate;
+      await request.fulfill({ json: { run: ui.server.state.run } });
+    });
+    await page.goto(route.path, { waitUntil: "domcontentloaded" });
+
+    try {
+      await expect(
+        page.getByText("Loading your lab…", { exact: true }),
+      ).toBeVisible();
+      await expectStandardRunChrome(page, "Lab run");
+      await expectNoAxeViolations(page, testInfo);
+    } finally {
+      releaseRunResponse?.();
+    }
+    await ui.settle();
+  });
+
   test("desktop workspace keeps mission visible beside terminal and actions direct", async ({
     page,
     ui,
@@ -801,6 +880,19 @@ test.describe("focused state accessibility", () => {
     await expectRunWorkspaceHeader(page, "Repair a broken nginx service");
     await expectRunWorkspaceChrome(page);
     await expectPersistentDesktopLearningPanel(page);
+    expect(
+      await page.evaluate(() => {
+        const shortcut = new KeyboardEvent("keydown", {
+          key: "b",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        window.dispatchEvent(shortcut);
+        return shortcut.defaultPrevented;
+      }),
+      "the hidden sidebar must not capture the terminal's Ctrl+B input",
+    ).toBe(false);
 
     const panel = runLearningPanel(page);
     const content = runLearningContent(panel);
@@ -925,6 +1017,9 @@ test.describe("focused state accessibility", () => {
     await expect(
       page.getByRole("heading", { name: "Saving your run…" }),
     ).toBeVisible();
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Saving",
+    });
     await expect(runLearningPanel(page)).toHaveCount(0);
     await expectLearnerSafeRunCopy(page.locator("main"));
     await expectNoHorizontalOverflow(page);
@@ -936,26 +1031,38 @@ test.describe("focused state accessibility", () => {
       runState: "ending",
       title: "Saving your run…",
       replay: null,
+      status: "Saving",
+      hasDeleteAction: false,
     },
     {
       runState: "rendering",
       title: "Saving your run…",
       replay: null,
+      status: "Saving",
+      hasDeleteAction: false,
     },
     {
       runState: "failed",
       title: "Could not finish",
       replay: null,
+      status: "Failed",
+      // A failed VM still needs infrastructure cleanup, so deletion stays
+      // unavailable under the existing safety rule.
+      hasDeleteAction: false,
     },
     {
       runState: "replay-failed",
       title: "Solved",
       replay: "Replay unavailable.",
+      status: "Solved",
+      hasDeleteAction: true,
     },
     {
       runState: "replay",
       title: "Solved",
       replay: "Watch replay",
+      status: "Solved",
+      hasDeleteAction: true,
     },
   ] as const) {
     test(`saved run recap · ${recap.runState}`, async ({ page, ui }, testInfo) => {
@@ -965,8 +1072,10 @@ test.describe("focused state accessibility", () => {
         runState: recap.runState,
       });
 
-      await expectRunWorkspaceHeader(page, "Repair a broken nginx service");
-      await expectRunWorkspaceChrome(page);
+      await expectStandardRunChrome(page, "Repair a broken nginx service", {
+        status: recap.status,
+        hasDeleteAction: recap.hasDeleteAction,
+      });
       await expect(
         page.getByRole("heading", { name: recap.title, exact: true }),
       ).toBeVisible();
@@ -986,12 +1095,6 @@ test.describe("focused state accessibility", () => {
       }
       if (recap.title === "Saving your run…") {
         await expect(page.getByText("Your recap will be ready in a moment.")).toBeVisible();
-        await expect(page.locator("[data-run-workspace-header]")).toContainText(
-          "Saving",
-        );
-        await expect(
-          page.locator("[data-run-workspace-header]"),
-        ).not.toContainText("Ending");
         const savingSteps = page.getByRole("list", { name: "Saving steps" });
         await expect(savingSteps).toBeVisible();
         await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
@@ -1047,6 +1150,10 @@ test.describe("focused state accessibility", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
 
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Solved",
+      hasDeleteAction: true,
+    });
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
     const previous = carousel.getByRole("button", {
@@ -1096,8 +1203,10 @@ test.describe("focused state accessibility", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
 
-    await expectRunWorkspaceHeader(page, "Repair a broken nginx service");
-    await expectRunWorkspaceChrome(page);
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Ended early",
+      hasDeleteAction: true,
+    });
     await expect(
       page.getByRole("heading", { name: "Ended early", exact: true }),
     ).toBeVisible();
@@ -1260,6 +1369,10 @@ test.describe("focused mobile state accessibility", () => {
       runState: "failed",
     });
 
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Failed",
+      hasDeleteAction: false,
+    });
     const progress = page.getByRole("progressbar", {
       name: "Final checks progress",
     });
@@ -1283,6 +1396,9 @@ test.describe("focused mobile state accessibility", () => {
       runState: "ending",
     });
 
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Saving",
+    });
     const savingSteps = page.getByRole("list", { name: "Saving steps" });
     await expect(savingSteps).toBeVisible();
     const bounds = await savingSteps.boundingBox();
@@ -1748,7 +1864,7 @@ test.describe("short run workspace", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("keeps saving progress inside a short viewport", async ({
+  test("keeps saving progress reachable in a short viewport", async ({
     page,
     ui,
   }, testInfo) => {
@@ -1758,29 +1874,12 @@ test.describe("short run workspace", () => {
       runState: "ending",
     });
 
-    const savingSteps = page.getByRole("list", { name: "Saving steps" });
-    await expect(savingSteps).toBeVisible();
-    const scroll = await savingSteps.evaluate((element) => {
-      let candidate = element.parentElement;
-      while (candidate) {
-        const style = getComputedStyle(candidate);
-        if (/(?:auto|scroll)/.test(style.overflowY)) {
-          const bounds = candidate.getBoundingClientRect();
-          return {
-            clientHeight: candidate.clientHeight,
-            scrollHeight: candidate.scrollHeight,
-            top: bounds.top,
-            bottom: bounds.bottom,
-          };
-        }
-        candidate = candidate.parentElement;
-      }
-      return null;
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Saving",
     });
-    expect(scroll).not.toBeNull();
-    expect(scroll!.top).toBeGreaterThanOrEqual(0);
-    expect(scroll!.bottom).toBeLessThanOrEqual(375);
-    expect(scroll!.scrollHeight).toBeGreaterThanOrEqual(scroll!.clientHeight);
+    const savingSteps = page.getByRole("list", { name: "Saving steps" });
+    await savingSteps.scrollIntoViewIfNeeded();
+    await expect(savingSteps).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
@@ -1854,6 +1953,9 @@ test.describe("small-screen access management", () => {
       runState: "rendering",
     });
 
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Saving",
+    });
     const savingSteps = page.getByRole("list", { name: "Saving steps" });
     await expect(savingSteps).toBeVisible();
     const bounds = await savingSteps.boundingBox();
@@ -1877,6 +1979,10 @@ test.describe("small-screen access management", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
 
+    await expectStandardRunChrome(page, "Repair a broken nginx service", {
+      status: "Solved",
+      hasDeleteAction: true,
+    });
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
     await carousel.scrollIntoViewIfNeeded();

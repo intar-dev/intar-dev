@@ -10,10 +10,10 @@ import {
 import { useRouterState } from "@tanstack/react-router";
 
 /**
- * Everything a page can contribute to the app bar. One writer per route:
- * a page registers its chrome once via usePageChrome; the bar is the only
- * reader. Pages that re-render on timers must memoize their node fields —
- * every new element identity re-renders the bar.
+ * Everything a page can contribute to the app shell. One writer per route:
+ * a page registers its chrome once via usePageChrome. Pages that re-render on
+ * timers must memoize their node fields — every new element identity re-renders
+ * the shell chrome.
  */
 export interface PageChrome {
   /** Human label for the final crumb — the page's h1. */
@@ -26,6 +26,11 @@ export interface PageChrome {
   menu?: ReactNode;
   /** Labels for route ancestors when a catalog supplies human-readable names. */
   breadcrumbLabels?: Readonly<Record<string, string>> | undefined;
+  /**
+   * Lets a live run take over the viewport. This is internal shell state, not
+   * a browser Fullscreen API request.
+   */
+  fullscreen?: boolean | undefined;
 }
 
 interface PageChromeSetters {
@@ -50,6 +55,7 @@ function chromeEquals(a: PageChrome | undefined, b: PageChrome): boolean {
     Object.is(a.status, b.status) &&
     Object.is(a.action, b.action) &&
     Object.is(a.menu, b.menu) &&
+    a.fullscreen === b.fullscreen &&
     equalBreadcrumbLabels(a.breadcrumbLabels, b.breadcrumbLabels)
   );
 }
@@ -101,7 +107,7 @@ export function PageChromeProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** Bar-only reader: the chrome registered for the current pathname. */
+/** Shell reader: the chrome registered for the current pathname. */
 export function usePageChromeValue(pathname: string): PageChrome | undefined {
   return useContext(PageChromeValueContext)?.chrome.get(pathname);
 }
@@ -139,14 +145,38 @@ export function usePageChrome(chrome: PageChrome): void {
     select: (state) =>
       state.resolvedLocation?.pathname ?? state.location.pathname,
   });
-  const { title, status, action, menu, breadcrumbLabels } = chrome;
+  const { title, status, action, menu, breadcrumbLabels, fullscreen } = chrome;
 
   useEffect(() => {
     if (!set || !clear) return;
-    if (title == null && !status && !action && !menu && !breadcrumbLabels) {
+    if (
+      title == null &&
+      !status &&
+      !action &&
+      !menu &&
+      !breadcrumbLabels &&
+      !fullscreen
+    ) {
       return;
     }
-    set(pathname, { title, status, action, menu, breadcrumbLabels });
+    set(pathname, {
+      title,
+      status,
+      action,
+      menu,
+      breadcrumbLabels,
+      fullscreen,
+    });
     return () => clear(pathname);
-  }, [set, clear, pathname, title, status, action, menu, breadcrumbLabels]);
+  }, [
+    set,
+    clear,
+    pathname,
+    title,
+    status,
+    action,
+    menu,
+    breadcrumbLabels,
+    fullscreen,
+  ]);
 }

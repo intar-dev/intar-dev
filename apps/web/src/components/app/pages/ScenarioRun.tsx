@@ -17,6 +17,7 @@ import {
   retryHttpResponseError,
 } from "@/components/app/lib/http-response-error";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import { usePageChrome } from "@/components/app/shell/page-chrome";
 import {
   StatusToken,
   type StatusTone,
@@ -623,6 +624,27 @@ export function ScenarioRun() {
     showBackgroundStatus,
   ]);
 
+  const runIsLive = attemptData?.activity === "foreground";
+  const deleteRunAction = useMemo(
+    () =>
+      canDeleteRun ? (
+        <Button
+          type="button"
+          variant="destructive"
+          onClick={() => setDeleteRunDialogOpen(true)}
+        >
+          Delete run…
+        </Button>
+      ) : undefined,
+    [canDeleteRun],
+  );
+  usePageChrome({
+    title: attemptData?.title ?? "Lab run",
+    status: runIsLive ? undefined : runStatusDisplay,
+    action: runIsLive ? undefined : deleteRunAction,
+    fullscreen: runIsLive,
+  });
+
   const runActions =
     showSshAction || showEndRunAction || canDeleteRun ? (
       <div
@@ -692,7 +714,6 @@ export function ScenarioRun() {
 
   // The browser tab carries live-run state while the user is elsewhere.
   const scenarioName = attemptData?.title ?? null;
-  const runIsLive = attemptData?.activity === "foreground";
   useEffect(() => {
     if (!runIsLive || !scenarioName) return;
     const previous = document.title;
@@ -778,68 +799,44 @@ export function ScenarioRun() {
 
   if (!attemptData) {
     return (
-      <RunPageFrame>
+      <PageShell width="content">
         {runDialogs}
-        <RunWorkspaceHeader title="Lab run" />
-        <div
-          className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6"
-          role="region"
-          aria-label="Lab status"
-          tabIndex={0}
-        >
-          <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4">
-            {errorAlerts}
-            {!attempt.error ? (
-              <p
-                className="m-auto text-sm text-muted-foreground"
-                role="status"
-              >
-                Loading your lab…
-              </p>
-            ) : null}
-          </div>
-        </div>
-      </RunPageFrame>
+        {errorAlerts}
+        {!attempt.error ? (
+          <p
+            className="flex min-h-48 items-center justify-center text-sm text-muted-foreground"
+            role="status"
+          >
+            Loading your lab…
+          </p>
+        ) : null}
+      </PageShell>
     );
   }
 
   if (attemptData.activity !== "foreground") {
     return (
-      <RunPageFrame>
+      <PageShell width="content">
         {runDialogs}
-        <RunWorkspaceHeader
-          title={attemptData.title}
-          status={runStatusDisplay}
-          actions={runActions}
-        />
-        <div
-          className="min-h-0 flex-1 overflow-y-auto"
-          role="region"
-          aria-label="Run recap"
-          tabIndex={0}
-        >
-          <PageShell width="content">
-            {errorAlerts}
-            <Suspense
-              fallback={
-                <section
-                  className="mx-auto flex w-full max-w-2xl flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
-                  role="status"
-                >
-                  Loading your recap…
-                </section>
-              }
+        {errorAlerts}
+        <Suspense
+          fallback={
+            <section
+              className="mx-auto flex w-full max-w-2xl flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
+              role="status"
             >
-              <LazyRunRecap
-                run={attemptData}
-                courseLocation={attemptData.courseLocation}
-                nextScenario={nextCourseScenario}
-                headingRef={recapHeadingRef}
-              />
-            </Suspense>
-          </PageShell>
-        </div>
-      </RunPageFrame>
+              Loading your recap…
+            </section>
+          }
+        >
+          <LazyRunRecap
+            run={attemptData}
+            courseLocation={attemptData.courseLocation}
+            nextScenario={nextCourseScenario}
+            headingRef={recapHeadingRef}
+          />
+        </Suspense>
+      </PageShell>
     );
   }
 

@@ -1,6 +1,19 @@
+import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
 import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
+
+async function expectStandardRunChrome(page: Page) {
+  await expect(page.locator("[data-run-page]")).toHaveCount(0);
+  await expect(page.locator("[data-run-navigation]")).toHaveCount(0);
+  await expect(page.locator("[data-run-back]")).toHaveCount(0);
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar']")).toHaveCount(1);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(1);
+}
 
 test("the full-screen boot screen keeps the mission visible and does not steal focus when the shell opens", async ({
   page,
@@ -605,6 +618,7 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   const savingHeading = page.getByRole("heading", { name: "Saving your run…" });
   await expect(savingHeading).toBeVisible();
   await expect(savingHeading).toBeFocused();
+  await expectStandardRunChrome(page);
   await expect(page.locator("[data-run-lease-countdown]")).toHaveText(
     "1:25:00 left",
   );
@@ -632,9 +646,11 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
   ui.server.state.run.outcome = "succeeded";
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingSteps).toBeVisible();
-  const savingHeader = page.locator("[data-run-workspace-header]");
-  await expect(savingHeader).toContainText("Saving");
-  await expect(savingHeader).not.toContainText("Solved");
+  const appBar = page
+    .locator("header")
+    .filter({ has: page.locator("[data-slot='sidebar-trigger']") });
+  await expect(appBar).toContainText("Saving");
+  await expect(appBar).not.toContainText("Solved");
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
@@ -643,6 +659,8 @@ test("ending a lab moves from a calm saving state to a learner recap and replay"
     timeout: 5_000,
   });
   await expect(settledHeading).toBeFocused();
+  await expectStandardRunChrome(page);
+  await expect(page.getByRole("button", { name: "Delete run…" })).toBeVisible();
   await expect(recap.getByRole("heading", { name: "Final checks" })).toBeVisible();
   await expect(savingSteps).toHaveCount(0);
   await expect(recap).not.toHaveAttribute("aria-busy");
@@ -695,6 +713,7 @@ test("saving stages advance from real server state and announce each change once
     runState: "ending",
   });
 
+  await expectStandardRunChrome(page);
   const steps = page.getByRole("list", { name: "Saving steps" });
   const announcement = page.locator("[data-run-sequence-announcement]");
   await expect(steps.locator('[aria-current="step"]')).toContainText(
@@ -768,6 +787,7 @@ test("saving shows a calm reassurance only after one stage stalls", async ({
     runState: "ending",
   });
 
+  await expectStandardRunChrome(page);
   const reassurance = page.locator("[data-run-saving-stalled]");
   await expect(
     page.getByRole("heading", { name: "Saving your run…" }),
@@ -802,6 +822,7 @@ test("a replay carousel keeps learner-facing parts in order", async ({
   await page.goto(route.path, { waitUntil: "domcontentloaded" });
   await ui.settle();
 
+  await expectStandardRunChrome(page);
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
   await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
   await recap.getByRole("button", { name: "Watch replay" }).click();
@@ -1060,10 +1081,11 @@ test("a saved run without course context still has a safe exit", async ({
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
 
-  await expect(page.getByRole("link", { name: "Back to My runs" })).toHaveAttribute(
-    "href",
-    "/runs",
-  );
+  await expectStandardRunChrome(page);
+  const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
+  await expect(
+    recap.getByRole("link", { name: "Back to My runs" }),
+  ).toHaveAttribute("href", "/runs");
   await expect(page.getByRole("link", { name: /^Next lab:/ })).toHaveCount(0);
 });
 
@@ -1094,6 +1116,7 @@ for (const recapCase of [
       runState: recapCase.state,
     });
 
+    await expectStandardRunChrome(page);
     const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
     await expect(recap.getByRole("heading", { name: recapCase.title })).toBeVisible();
     if (recapCase.replay) {

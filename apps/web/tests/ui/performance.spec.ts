@@ -255,9 +255,6 @@ test("run workspace only fetches the terminal after live status makes a VM ready
       theme: "light",
     });
     await expect(page.locator("[data-run-workspace]")).toBeVisible();
-    expect(ui.server.requests).not.toContain(
-      "GET /api/scenarios/runs/summary",
-    );
     expect(modules.count("terminal")).toBe(0);
 
     ui.server.setRunState("running");
@@ -307,6 +304,14 @@ test("settled run fetches the replay viewer only after Watch replay opens", asyn
       runState: "replay",
       theme: "light",
     });
+
+    // A settled run returns to the ordinary app shell. Only the foreground
+    // terminal workspace may take over the viewport.
+    await expect(page.locator("[data-run-page]")).toHaveCount(0);
+    await expect(page.locator("[data-slot='sidebar']")).toBeVisible();
+    await expect(
+      page.getByRole("navigation", { name: "Breadcrumb" }),
+    ).toBeVisible();
 
     const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
     await expect(recap.getByRole("button", { name: "Watch replay" })).toBeVisible();

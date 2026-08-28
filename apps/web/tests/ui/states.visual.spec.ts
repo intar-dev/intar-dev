@@ -32,6 +32,22 @@ async function expectConnectedTerminal(
   ).toHaveText(/Terminal status:\s*connected/i);
 }
 
+async function expectForegroundRunWorkspace(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  await expect(page.locator("[data-run-page]")).toBeVisible();
+  await expect(page.locator("[data-run-back]")).toBeVisible();
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+}
+
+async function expectStandardRunShell(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  await expect(page.locator("[data-run-page]")).toHaveCount(0);
+  await expect(page.locator("[data-run-back]")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toBeVisible();
+}
+
 async function expectDesktopMissionPane(
   page: Parameters<typeof expectRouteScreenshot>[0],
 ) {
@@ -67,6 +83,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "running",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
     const panel = await expectDesktopMissionPane(page);
@@ -80,6 +97,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "running",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
     const panel = await expectDesktopMissionPane(page);
@@ -100,6 +118,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "booting",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expect(
       page.getByRole("heading", { name: "Preparing your workspace" }),
@@ -117,6 +136,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "solved",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
     await expect(
@@ -138,11 +158,24 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expectRunTimer(page);
+    await expectStandardRunShell(page);
     await expect(
       page.getByRole("heading", { name: "Saving your run…" }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-desktop");
+  });
+
+  test("run · saving recap · light", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "ending",
+    });
+    await expectStandardRunShell(page);
+    await expect(
+      page.getByRole("heading", { name: "Saving your run…" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-saving-recap-light-desktop");
   });
 
   test("run · every saving milestone", async ({ page, ui }) => {
@@ -151,7 +184,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expectRunTimer(page);
+    await expectStandardRunShell(page);
     const currentStep = page
       .getByRole("list", { name: "Saving steps" })
       .locator('[aria-current="step"]');
@@ -178,6 +211,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "archived",
     });
+    await expectStandardRunShell(page);
     await expect(
       page.getByRole("heading", { name: "Solved" }),
     ).toBeVisible();
@@ -190,6 +224,22 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "run-settled-recap-dark-desktop");
   });
 
+  test("run · settled recap · light", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "archived",
+    });
+    await expectStandardRunShell(page);
+    await expect(
+      page.getByRole("heading", { name: "Solved" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Final checks" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-settled-recap-light-desktop");
+  });
+
   test("run · dense checks and hints", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
@@ -197,6 +247,7 @@ test.describe("focused visual states", () => {
       variant: "long",
       runState: "running",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
     const panel = await expectDesktopMissionPane(page);
@@ -224,6 +275,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "replay",
     });
+    await expectStandardRunShell(page);
     ui.server.state.run = makeMultiReplayRun();
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
@@ -474,6 +526,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "running",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
     const sheet = await openMobileMissionAndHints(page);
@@ -489,6 +542,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "booting",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expect(
       page.getByRole("heading", { name: "Preparing your workspace" }),
@@ -506,6 +560,7 @@ test.describe("focused mobile workspace", () => {
       theme: "light",
       runState: "failed",
     });
+    await expectStandardRunShell(page);
     await expect(
       page.getByRole("heading", { name: "Could not finish" }),
     ).toBeVisible();
@@ -521,6 +576,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "solved",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
     await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
@@ -536,7 +592,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expectRunTimer(page);
+    await expectStandardRunShell(page);
     await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-mobile");
   });
@@ -547,6 +603,7 @@ test.describe("focused mobile workspace", () => {
       theme: "dark",
       runState: "replay",
     });
+    await expectStandardRunShell(page);
     ui.server.state.run = makeMultiReplayRun();
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
@@ -571,6 +628,7 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "booting",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expect(page.getByRole("list", { name: "Startup steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-booting-sequence-dark-landscape");
@@ -582,6 +640,7 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "solved",
     });
+    await expectForegroundRunWorkspace(page);
     await expectRunTimer(page);
     await expectConnectedTerminal(page);
     await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
@@ -595,7 +654,7 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expectRunTimer(page);
+    await expectStandardRunShell(page);
     await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-landscape");
   });

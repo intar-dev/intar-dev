@@ -1,4 +1,4 @@
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
 import {
   makeMultiReplayRun,
@@ -30,6 +30,55 @@ async function expectNoVisibleBoxShadow(locator: Locator) {
   expect(result.visible, `unexpected visible box shadow: ${result.value}`).toBe(
     false,
   );
+}
+
+async function expectForegroundRunWorkspaceShell(page: Page) {
+  const workspaceHeader = page.locator("[data-run-workspace-header]");
+  const appBar = page.locator("header").filter({
+    has: page.locator("[data-slot='sidebar-trigger']"),
+  });
+
+  await expect(page.locator("[data-run-page]")).toHaveCount(1);
+  await expect(workspaceHeader).toHaveCount(1);
+  await expect(
+    page
+      .locator("[data-run-navigation]")
+      .getByRole("link", { name: "Back to My runs" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  await expect(appBar).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Page actions" }),
+  ).toHaveCount(0);
+}
+
+async function expectSavedRunAppShell(page: Page) {
+  const appBar = page.locator("header").filter({
+    has: page.locator("[data-slot='sidebar-trigger']"),
+  });
+
+  await expect(page.locator("[data-run-page]")).toHaveCount(0);
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(0);
+  await expect(page.locator("[data-run-navigation]")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
+  await expect(appBar).toHaveCount(1);
+  await expect(
+    appBar.getByRole("heading", {
+      level: 1,
+      name: "Repair a broken nginx service",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Page actions" }),
+  ).toHaveCount(0);
+
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
+    await expect(page.locator("[data-slot='sidebar']")).toHaveCount(1);
+  }
 }
 
 test("keyboard-only landing navigation keeps focus visible", async ({
@@ -872,6 +921,7 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     theme: "dark",
     runState: "running",
   });
+  await expectForegroundRunWorkspaceShell(page);
   expect(
     await page.evaluate(
       () => matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -908,6 +958,7 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     theme: "dark",
     runState: "ending",
   });
+  await expectSavedRunAppShell(page);
   const savingSteps = page.getByRole("list", { name: "Saving steps" });
   await expect(savingSteps).toBeVisible();
   await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
@@ -929,6 +980,19 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
       }),
     "saving-step transitions must stop under reduced motion",
   ).toBe(true);
+});
+
+test("archived run uses the normal app shell", async ({ page, ui }) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "archived",
+  });
+
+  await expectSavedRunAppShell(page);
+  await expect(
+    page.getByRole("button", { name: "Delete run…" }),
+  ).toBeVisible();
 });
 
 test.describe("wide operational density", () => {
@@ -1243,6 +1307,7 @@ test.describe("coarse pointer and mobile overflow", () => {
     ui.server.state.run = makeMultiReplayRun();
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
+    await expectSavedRunAppShell(page);
 
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
@@ -1359,6 +1424,7 @@ test("replay carousel remains ordered at 200% text", async ({ page, ui }) => {
   ui.server.state.run = makeMultiReplayRun();
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
+  await expectSavedRunAppShell(page);
   await page.evaluate(() => {
     document.documentElement.style.fontSize = "200%";
   });
