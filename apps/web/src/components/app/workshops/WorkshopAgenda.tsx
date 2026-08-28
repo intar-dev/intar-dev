@@ -152,7 +152,9 @@ export function WorkshopModuleManual({
           </p>
         </div>
         {module.contentMarkdown ? (
-          <Markdown className="max-w-[68ch]">{module.contentMarkdown}</Markdown>
+          <Markdown className="max-w-[68ch] text-sm leading-6">
+            {module.contentMarkdown}
+          </Markdown>
         ) : null}
       </div>
 
@@ -280,7 +282,7 @@ export function WorkshopModuleManual({
       {module.solutionRevealed && module.solutionMarkdown ? (
         <div className="bg-muted/35 px-4 py-4 sm:px-6">
           <p className="mb-2 text-label">Facilitator walkthrough</p>
-          <Markdown className="max-w-[68ch]">
+          <Markdown className="max-w-[68ch] text-sm leading-6">
             {module.solutionMarkdown}
           </Markdown>
         </div>

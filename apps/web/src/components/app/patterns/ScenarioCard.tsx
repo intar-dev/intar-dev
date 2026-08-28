@@ -128,7 +128,7 @@ export function CourseCurriculumItem({
       search={search}
       preloadDelay={250}
       className={cn(
-        "group grid min-h-20 min-w-0 items-start gap-x-3 gap-y-2 px-4 py-4 outline-none transition-colors hover:bg-muted/55 focus-visible:bg-muted/55 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40 sm:items-center sm:gap-x-4 sm:px-6",
+        "group grid min-h-16 min-w-0 items-start gap-x-3 gap-y-2 px-4 py-3 outline-none transition-colors hover:bg-muted/55 focus-visible:bg-muted/55 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40 sm:items-center sm:gap-x-4 sm:px-6",
         sequence
           ? "grid-cols-[2.5rem_minmax(0,1fr)] sm:grid-cols-[2.5rem_minmax(0,1fr)_auto]"
           : "grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto]",

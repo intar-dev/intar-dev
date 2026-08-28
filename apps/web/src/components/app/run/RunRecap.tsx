@@ -154,7 +154,7 @@ export function RunRecap({
     return (
       <section
         aria-labelledby="run-recap-heading"
-        className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center py-4 sm:py-6"
+        className="mx-auto flex w-full max-w-4xl flex-1 flex-col justify-center py-4 sm:py-6"
       >
         <RunSavingProgress
           stage={getRunSavingStage(run)}
@@ -176,7 +176,7 @@ export function RunRecap({
   return (
     <section
       aria-labelledby="run-recap-heading"
-      className="mx-auto w-full max-w-3xl space-y-6 py-6 md:space-y-8 md:py-8"
+      className="mx-auto w-full max-w-5xl space-y-6 py-6 md:space-y-8 md:py-8"
     >
       <header className="border-b border-primary/15 pb-6">
         <h2
@@ -228,7 +228,7 @@ export function RunRecap({
                 </span>
                 <span
                   className={cn(
-                    "text-caption font-medium whitespace-nowrap",
+                    "text-support font-medium whitespace-nowrap",
                     objective.status === "verified"
                       ? "text-success"
                       : "text-destructive",

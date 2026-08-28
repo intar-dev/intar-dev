@@ -438,6 +438,12 @@
     display: none;
   }
 
+  [data-run-sequence-step][aria-current="step"] [data-run-sequence-detail] {
+    display: block;
+    font-size: 0.75rem;
+    line-height: 1.35;
+  }
+
   [data-run-sequence-status] {
     grid-column: 1;
     grid-row: 3;

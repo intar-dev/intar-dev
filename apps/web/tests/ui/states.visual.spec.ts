@@ -48,6 +48,15 @@ async function expectStandardRunShell(
   await expect(page.locator("[data-slot='sidebar-trigger']")).toBeVisible();
 }
 
+async function collapseDesktopSidebar(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  const sidebar = page.locator("[data-slot='sidebar']").first();
+  await expect(sidebar).toHaveAttribute("data-state", "expanded");
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await expect(sidebar).toHaveAttribute("data-state", "collapsed");
+}
+
 async function expectDesktopMissionPane(
   page: Parameters<typeof expectRouteScreenshot>[0],
 ) {
@@ -594,6 +603,7 @@ test.describe("focused mobile workspace", () => {
     });
     await expectStandardRunShell(page);
     await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
+    await expect(page.locator("[data-run-lease-countdown]")).not.toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-mobile");
   });
 
@@ -616,6 +626,84 @@ test.describe("focused mobile workspace", () => {
     );
     await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
     await expectRouteScreenshot(page, "run-replay-carousel-dark-mobile");
+  });
+});
+
+test.describe("wide short saved recaps", () => {
+  test.use({ viewport: { width: 2048, height: 690 } });
+
+  test("ended early with collapsed navigation", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "archived",
+    });
+    ui.server.state.run.outcome = "cancelled";
+    ui.server.state.run.solvedAt = null;
+    ui.server.state.run.solveDurationMs = null;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expectStandardRunShell(page);
+    await collapseDesktopSidebar(page);
+    await expect(
+      page.getByRole("heading", { name: "Ended early", exact: true }),
+    ).toBeVisible();
+    await expectRouteScreenshot(
+      page,
+      "run-ended-early-recap-dark-wide-short-collapsed",
+    );
+  });
+
+  test("failed with collapsed navigation", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "failed",
+    });
+    await expectStandardRunShell(page);
+    await collapseDesktopSidebar(page);
+    await expect(
+      page.getByRole("heading", { name: "Could not finish", exact: true }),
+    ).toBeVisible();
+    await expectRouteScreenshot(
+      page,
+      "run-failed-recap-dark-wide-short-collapsed",
+    );
+  });
+
+  test("settled with collapsed navigation", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "archived",
+    });
+    await expectStandardRunShell(page);
+    await collapseDesktopSidebar(page);
+    await expect(
+      page.getByRole("heading", { name: "Solved", exact: true }),
+    ).toBeVisible();
+    await expectRouteScreenshot(
+      page,
+      "run-settled-recap-dark-wide-short-collapsed",
+    );
+  });
+
+  test("saving with collapsed navigation", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+    await expectStandardRunShell(page);
+    await collapseDesktopSidebar(page);
+    await expect(
+      page.getByRole("heading", { name: "Saving your run…", exact: true }),
+    ).toBeVisible();
+    await expectRouteScreenshot(
+      page,
+      "run-saving-recap-dark-wide-short-collapsed",
+    );
   });
 });
 

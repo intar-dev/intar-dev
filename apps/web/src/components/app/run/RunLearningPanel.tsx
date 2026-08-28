@@ -599,7 +599,7 @@ function HintLadder(props: {
   return (
     <div className="space-y-3">
       <div className="flex items-baseline justify-between gap-3">
-        <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+        <p className="text-label">
           {props.group.label}
         </p>
         <span className="text-xs text-muted-foreground tabular-nums">

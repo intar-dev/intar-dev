@@ -275,7 +275,9 @@ function PresenterDeck({ session }: { session: WorkshopSessionDetail }) {
           </div>
           <div className="max-h-[calc(100dvh-10rem)] overflow-auto px-4 py-4">
             {slide.notesMarkdown ? (
-              <Markdown>{slide.notesMarkdown}</Markdown>
+              <Markdown className="text-sm leading-6">
+                {slide.notesMarkdown}
+              </Markdown>
             ) : (
               <p className="text-support text-muted-foreground">
                 No notes for this slide.

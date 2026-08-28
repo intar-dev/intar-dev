@@ -386,7 +386,9 @@ export function ScenarioLearnerPreview({
       title="Learner preview"
       description="The briefing learners read before they start."
     >
-      <Markdown className="prose-measure">{briefingMarkdown}</Markdown>
+      <Markdown className="prose-measure text-sm leading-7">
+        {briefingMarkdown}
+      </Markdown>
       <div className="mt-4 divide-y border-t">
         {hints.length ? (
           <DisclosureRow
@@ -406,7 +408,9 @@ export function ScenarioLearnerPreview({
         ) : null}
         <DisclosureRow title="Solution" meta="Learner-gated" density="compact">
           {solutionMarkdown.trim() ? (
-            <Markdown className="prose-measure">{solutionMarkdown}</Markdown>
+            <Markdown className="prose-measure text-sm leading-7">
+              {solutionMarkdown}
+            </Markdown>
           ) : (
             <p className="text-sm text-muted-foreground">
               No solution is configured.
@@ -525,7 +529,7 @@ function VerificationObjective({
           <p className="text-sm text-muted-foreground">{description}</p>
         ) : null}
         {probe.bodyMarkdown?.trim() ? (
-          <Markdown className="prose-measure text-muted-foreground">
+          <Markdown className="prose-measure text-sm leading-7 text-muted-foreground">
             {probe.bodyMarkdown}
           </Markdown>
         ) : null}
@@ -680,7 +684,9 @@ function HintTile({
       <p className="text-sm font-medium">
         {hint.title?.trim() || fallbackTitle}
       </p>
-      <Markdown className="mt-2">{hint.body_markdown}</Markdown>
+      <Markdown className="mt-2 text-sm leading-7">
+        {hint.body_markdown}
+      </Markdown>
     </div>
   );
 }

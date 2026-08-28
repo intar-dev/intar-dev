@@ -10,7 +10,7 @@ export function Markdown({
   className?: string;
 }) {
   return (
-    <div className={cn("space-y-4 text-sm leading-7", className)}>
+    <div className={cn("space-y-4", className ?? "text-body")}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

@@ -155,7 +155,7 @@ function WorkshopGroup({
             key={session.id}
             to="/workshops/$sessionId"
             params={{ sessionId: session.id }}
-            className="group grid min-h-24 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-4 py-4 transition-colors hover:bg-muted/50 sm:gap-4 sm:px-6"
+            className="group grid min-h-20 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/50 sm:gap-4 sm:px-6"
           >
             <span
               className={cn(
@@ -180,14 +180,14 @@ function WorkshopGroup({
                 </span>
                 <SessionStateBadge state={session.state} />
               </span>
-              <span className="mt-1 block text-support text-muted-foreground">
+              <span className="mt-0.5 block text-support text-muted-foreground">
                 {session.organizationName}
                 {session.currentModuleTitle
                   ? ` · ${session.currentModuleTitle}`
                   : ` · ${session.templateTitle}`}
               </span>
               <MetaLine
-                className="mt-1"
+                className="mt-0.5 text-xs"
                 items={[
                   formatSessionTime(session),
                   `${session.participantCount} participant${session.participantCount === 1 ? "" : "s"}`,

@@ -431,7 +431,9 @@ function WorkshopParticipantSlide({
         </h2>
         {slide.bodyMarkdown ? (
           <div className="min-w-0 text-support">
-            <Markdown>{slide.bodyMarkdown}</Markdown>
+            <Markdown className="text-sm leading-6">
+              {slide.bodyMarkdown}
+            </Markdown>
           </div>
         ) : null}
       </div>

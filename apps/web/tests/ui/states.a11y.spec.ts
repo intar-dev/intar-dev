@@ -1553,6 +1553,7 @@ test.describe("focused mobile state accessibility", () => {
     });
     const savingSteps = page.getByRole("list", { name: "Saving steps" });
     await expect(savingSteps).toBeVisible();
+    await expect(page.locator("[data-run-lease-countdown]")).not.toBeVisible();
     const bounds = await savingSteps.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
@@ -2152,10 +2153,36 @@ test.describe("small-screen access management", () => {
     });
     const savingSteps = page.getByRole("list", { name: "Saving steps" });
     await expect(savingSteps).toBeVisible();
+    await expect(page.locator("[data-run-lease-countdown]")).not.toBeVisible();
     const bounds = await savingSteps.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("keeps the ended-early recap usable at 320px", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "archived",
+    });
+    ui.server.state.run.outcome = "cancelled";
+    ui.server.state.run.solvedAt = null;
+    ui.server.state.run.solveDurationMs = null;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(
+      page.getByRole("heading", { name: "Ended early", exact: true }),
+    ).toBeVisible();
+    const nextAction = page.getByRole("link", { name: "Try this lab again" });
+    await nextAction.scrollIntoViewIfNeeded();
+    await expectCoarsePointerTarget(nextAction, "320px ended-early next action");
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });

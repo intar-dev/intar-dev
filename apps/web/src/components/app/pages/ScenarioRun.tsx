@@ -55,6 +55,7 @@ import type {
   ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
 import { computeLeaseDeadline } from "@/lib/run-lease";
+import { cn } from "@/lib/utils";
 
 const LazyWebSshTerminal = lazy(() =>
   import("@/components/remote-access/WebSshTerminal").then(
@@ -571,6 +572,7 @@ export function ScenarioRun() {
           compactWord="Saving"
           startedAt={attemptData.createdAt}
           leaseDeadlineMs={leaseDeadlineMs}
+          compact
           pulse
         />
       );
@@ -1100,6 +1102,7 @@ function ActiveRunStatus({
   compactWord,
   startedAt,
   leaseDeadlineMs,
+  compact = false,
   pulse = false,
 }: {
   tone: StatusTone;
@@ -1107,6 +1110,7 @@ function ActiveRunStatus({
   compactWord: string;
   startedAt: number;
   leaseDeadlineMs: number | null;
+  compact?: boolean;
   pulse?: boolean;
 }) {
   return (
@@ -1116,12 +1120,18 @@ function ActiveRunStatus({
         word={word}
         compactWord={compactWord}
         pulse={pulse}
-        clock={leaseDeadlineMs === null ? { startedAt } : undefined}
+        clock={leaseDeadlineMs === null && !compact ? { startedAt } : undefined}
       />
       {leaseDeadlineMs !== null ? (
         <>
-          <span aria-hidden="true" className="h-3 w-px bg-border" />
-          <LeaseCountdown deadlineMs={leaseDeadlineMs} />
+          <span
+            aria-hidden="true"
+            className={cn("h-3 w-px bg-border", compact && "hidden sm:block")}
+          />
+          <LeaseCountdown
+            deadlineMs={leaseDeadlineMs}
+            {...(compact ? { className: "hidden sm:inline-flex" } : {})}
+          />
         </>
       ) : null}
     </span>

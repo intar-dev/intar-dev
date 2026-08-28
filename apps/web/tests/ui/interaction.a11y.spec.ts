@@ -1240,7 +1240,13 @@ test.describe("scenario briefing reflow", () => {
       await expect(
         page.getByRole("button", { name: "Continue lab" }),
       ).toBeVisible();
-      await expect(page.getByRole("heading", { name: "Your task" })).toBeVisible();
+      const task = page.getByRole("heading", { name: "Your task" });
+      await expect(task).toBeVisible();
+      if (viewport.id === "desktop") {
+        const briefing = task.locator("xpath=ancestor::section");
+        const prose = briefing.locator("[class*='text-body']").first();
+        await expect(prose).toHaveCSS("font-size", "16px");
+      }
       await expectNoHorizontalOverflow(page);
     });
   }
