@@ -179,7 +179,7 @@ gates `ssh.service` on `/run/intar/ssh-ready` before removing baked host keys. O
 first boot the supervisor configures networking and access, generates and
 validates the keys, creates the root-only gate, and then explicitly starts
 `ssh.service`. Image content hashes use build format
-`intar-image-build-v8`, ensuring images with the boot-path supervisor changes,
+`intar-image-build-v9`, ensuring images with the boot-path supervisor changes,
 conditional root resizing, scenario-specific module preload, and faster normal-
 capacity SSH startup are rebuilt rather than reused. When a newer hash is queued
 for the same scenario and architecture, nonterminal older hashes are retired and

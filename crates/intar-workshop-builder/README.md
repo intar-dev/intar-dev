@@ -174,7 +174,10 @@ The supported preparer starts from the pinned clean Debian 13 proof triple and
 constructs a base that contains:
 
 - the Intar `INTARBUILD` seed bootstrap service for the ephemeral SSH key;
-- `/usr/local/bin/kino` and the normal Intar runtime supervisor;
+- `/usr/local/bin/kino`, its `/usr/local/bin/intar` learner CLI symlink and
+  Bash completion, plus the normal Intar runtime supervisor. The image keeps
+  mutually exclusive `INTARBUILD` and `INTARRUN` boot gates so checkpoint
+  proof uses the build seed while learner runs use the normal supervisor;
 - the pinned workshop toolchain and participant repository; `agent_kvm` may
   carry its separately validated image cache, while direct-cloud proof disks
   and runtime bundles carry no OCI layers;

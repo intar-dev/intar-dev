@@ -472,6 +472,11 @@ struct VmTerminalTask {
     join: JoinHandle<()>,
 }
 
+#[derive(Debug)]
+struct VmRunCliBrokerTask {
+    join: JoinHandle<()>,
+}
+
 struct AbortTaskOnDrop(AbortHandle);
 
 impl Drop for AbortTaskOnDrop {
@@ -590,6 +595,7 @@ struct Inner {
     /// control plane only after the ready boundary is durably committed.
     kino_readiness_tx: broadcast::Sender<ProbeUpdateEnvelope>,
     probe_updates_tx: broadcast::Sender<ProbeUpdateEnvelope>,
+    run_cli_broker_tasks: Mutex<BTreeMap<String, VmRunCliBrokerTask>>,
     terminal_tasks: Mutex<BTreeMap<String, VmTerminalTask>>,
     terminal_state_fingerprints: Mutex<BTreeMap<String, String>>,
     terminal_states: RwLock<BTreeMap<String, VmTerminalState>>,
@@ -625,6 +631,8 @@ mod cleanup;
 use cleanup::*;
 mod probes;
 use probes::*;
+mod run_cli;
+use run_cli::*;
 mod jailer_network;
 use jailer_network::*;
 mod network_allocation;

@@ -153,6 +153,7 @@ export interface HostCapabilitiesV2 {
   supports_hard_cpu_quota: boolean;
   supports_landlock: boolean;
   supports_cgroup_v2: boolean;
+  supports_run_cli_v1?: boolean;
 }
 
 export interface VmResourceStateV2 {

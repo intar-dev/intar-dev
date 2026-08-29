@@ -949,6 +949,7 @@ fn bundles_are_byte_for_byte_deterministic() -> Result<(), Box<dyn std::error::E
     let compiled: serde_json::Value = serde_json::from_slice(&compiled)?;
     assert_eq!(compiled["scheduled_duration_minutes"], 240);
     assert_eq!(compiled["format_version"], 2);
+    assert_eq!(compiled["runtime_tool_format_version"], 1);
     assert_eq!(
         compiled["manifest"]["workshop"]["default_lobby_minutes"],
         30

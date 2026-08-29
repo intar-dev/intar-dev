@@ -16,6 +16,9 @@ pub const KINO_DEFAULT_TIMEOUT_SECONDS: u64 = 2;
 pub struct KinoProbeDescriptor {
     pub id: String,
     pub source_probe: String,
+    /// Stable learner-facing alias. Raw Kino probe IDs remain an internal
+    /// transport detail so the guest CLI never needs to print them.
+    pub intar_alias: String,
     pub label: String,
     pub kind: KinoProbeKind,
     pub phase: ProbePhase,
@@ -77,16 +80,18 @@ impl Scenario {
         let mut probe_phase_map = HashMap::new();
         let mut probe_descriptors = Vec::new();
 
-        for probe_name in &vm.probes {
+        for (index, probe_name) in vm.probes.iter().enumerate() {
             let definition = self
                 .kino
                 .probes
                 .get(probe_name)
                 .ok_or_else(|| ScenarioError::ProbeNotFound(probe_name.clone()))?;
+            let intar_alias = format!("check-{}", index + 1);
             probe_phase_map.insert(definition.name.clone(), definition.phase);
             probe_descriptors.push(KinoProbeDescriptor {
                 id: definition.name.clone(),
                 source_probe: definition.name.clone(),
+                intar_alias: intar_alias.clone(),
                 label: definition
                     .description
                     .clone()
@@ -95,7 +100,7 @@ impl Scenario {
                 phase: definition.phase,
             });
 
-            render_probe_block(&mut lines, definition);
+            render_probe_block(&mut lines, definition, &intar_alias);
         }
 
         Ok(DerivedKinoConfig {
@@ -107,11 +112,32 @@ impl Scenario {
     }
 }
 
-fn render_probe_block(lines: &mut Vec<String>, definition: &KinoProbeDefinition) {
+fn render_probe_block(
+    lines: &mut Vec<String>,
+    definition: &KinoProbeDefinition,
+    intar_alias: &str,
+) {
     lines.push(format!("probe {} {{", hcl_string(&definition.name)));
     lines.push(format!(
         "  kind = {}",
         hcl_string(definition.config.kind().as_str())
+    ));
+    // These fields are intentionally generated rather than authored. Kino
+    // exposes only this bounded metadata to the run CLI, which keeps raw
+    // probe IDs and scenario authoring-only text out of learner output.
+    lines.push(format!("  intar_alias = {}", hcl_string(intar_alias)));
+    lines.push(format!(
+        "  intar_label = {}",
+        hcl_string(
+            definition
+                .description
+                .as_deref()
+                .unwrap_or(definition.name.as_str())
+        )
+    ));
+    lines.push(format!(
+        "  intar_phase = {}",
+        hcl_string(definition.phase.as_str())
     ));
 
     match &definition.config {

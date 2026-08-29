@@ -122,13 +122,13 @@ export function parseBridgeMessageV6(
 
   switch (type) {
     case "client_hello":
-      return isClientHello(value) ? value : null;
+      return isClientHello(value) ? withRunCliCapabilityDefault(value) : null;
     case "server_hello":
       return isServerHello(value) ? value : null;
     case "desired_state":
       return isDesiredState(value) ? value : null;
     case "state_report":
-      return isStateReport(value) ? value : null;
+      return isStateReport(value) ? withRunCliCapabilityDefault(value) : null;
     case "vm_report":
       return isVmReport(value) ? value : null;
     case "build_report":
@@ -452,8 +452,39 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
     typeof value.fast_template_store === "boolean" &&
     typeof value.supports_hard_cpu_quota === "boolean" &&
     typeof value.supports_landlock === "boolean" &&
-    typeof value.supports_cgroup_v2 === "boolean"
+    typeof value.supports_cgroup_v2 === "boolean" &&
+    // Old agents did not advertise the learner CLI. Treat an omitted field
+    // as an explicit false capability rather than rejecting their inventory
+    // report or accidentally scheduling a new CLI-required run there.
+    (value.supports_run_cli_v1 === undefined ||
+      typeof value.supports_run_cli_v1 === "boolean")
   );
+}
+
+function withRunCliCapabilityDefault(
+  value: Extract<BridgeMessageV6, { type: "client_hello" | "state_report" }>,
+): Extract<BridgeMessageV6, { type: "client_hello" | "state_report" }> {
+  if (value.type === "client_hello") {
+    if (value.capabilities.supports_run_cli_v1 !== undefined) return value;
+    return {
+      ...value,
+      capabilities: {
+        ...value.capabilities,
+        supports_run_cli_v1: false,
+      },
+    };
+  }
+  if (value.report.capabilities.supports_run_cli_v1 !== undefined) return value;
+  return {
+    ...value,
+    report: {
+      ...value.report,
+      capabilities: {
+        ...value.report.capabilities,
+        supports_run_cli_v1: false,
+      },
+    },
+  };
 }
 
 function isCachedImageStatePayload(value: unknown): boolean {

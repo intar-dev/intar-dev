@@ -18,6 +18,9 @@
     // Planned control-plane maintenance generates a temporary maintenance-on
     // version; committed steady state is open.
     "CONTROL_PLANE_MAINTENANCE": "off",
+    // Keep host capability selection open while CLI-ready images and agents
+    // roll out. Set this to "on" only in the final rollout deployment.
+    "LEARNER_RUN_CLI_V1_ENFORCEMENT": "off",
     "AGENT_JWT_ISSUER": "intar-agent-bridge",
     "AGENT_JWT_AUDIENCE": "agent-connect",
     "STARGATE_ROUTE_TTL_SECONDS": "14400",

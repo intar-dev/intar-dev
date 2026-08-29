@@ -9,6 +9,10 @@ use std::path::Path;
 use tar::{Builder, EntryType, Header, HeaderMode};
 
 pub const COMPILED_MANIFEST_PATH: &str = "workshop.compiled.json";
+/// Bump when a workshop runtime/tooling change must rebuild an otherwise
+/// unchanged source bundle. This is separate from the author-facing workshop
+/// manifest schema version.
+pub const WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION: u8 = 1;
 
 #[derive(Debug, Clone)]
 pub struct WorkshopBundle {
@@ -23,6 +27,7 @@ pub fn build_bundle(root: impl AsRef<Path>) -> Result<WorkshopBundle> {
     let mut entries = BTreeMap::new();
     let compiled = CompiledWorkshop {
         format_version: 2,
+        runtime_tool_format_version: WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION,
         scheduled_duration_minutes: workshop.scheduled_duration_minutes,
         manifest: &workshop.manifest,
     };

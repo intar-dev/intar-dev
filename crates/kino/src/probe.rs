@@ -1,6 +1,6 @@
 use crate::config::{
-    DesiredPodState, PodCondition, PodPhase, PortProtocol, ProbeConfig, ProbeKindConfig,
-    ServiceState,
+    DesiredPodState, IntarProbeMetadata, PodCondition, PodPhase, PortProtocol, ProbeConfig,
+    ProbeKindConfig, ServiceState,
 };
 use jsonpath_rust::JsonPath;
 use k8s_openapi::api::core::v1::Pod;
@@ -10,9 +10,13 @@ use kube::{Api, Client, Config as KubeClientConfig};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::process::Command;
+
+#[cfg(target_os = "linux")]
+use rustix::process::{Pid, Signal, kill_process_group};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProbeKind {
@@ -37,6 +41,7 @@ pub(crate) struct ProbeDefinition {
     kind: ProbeKind,
     every: Duration,
     timeout: Duration,
+    intar: IntarProbeMetadata,
     runner: ProbeRunner,
 }
 
@@ -55,6 +60,11 @@ impl ProbeDefinition {
 
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn intar_metadata(&self) -> &IntarProbeMetadata {
+        &self.intar
     }
 
     pub(crate) fn initial_value(&self) -> ProbeValue {
@@ -523,11 +533,34 @@ struct CommandJsonPathProbe {
 
 impl CommandJsonPathProbe {
     async fn run(&self) -> ProbeRunResult {
-        let output = match Command::new(&self.argv[0])
+        let mut command = Command::new(&self.argv[0]);
+        command
             .args(&self.argv[1..])
-            .output()
-            .await
-        {
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        command.process_group(0);
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return ProbeRunResult {
+                    status: ProbeStatus::Fail,
+                    value: ProbeValue::CommandJsonPath(self.value(
+                        String::new(),
+                        String::new(),
+                        -1,
+                    )),
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+        #[cfg(target_os = "linux")]
+        let mut process_group = ProcessGroupKillGuard::new(child.id());
+        let output = child.wait_with_output().await;
+        #[cfg(target_os = "linux")]
+        process_group.disarm();
+        let output = match output {
             Ok(value) => value,
             Err(error) => {
                 return ProbeRunResult {
@@ -616,6 +649,37 @@ impl CommandJsonPathProbe {
             stdout,
             stderr,
             exit_code,
+        }
+    }
+}
+
+/// Tokio kills the direct child when its output future is dropped. Command
+/// probes may intentionally use a shell, so Linux additionally owns a fresh
+/// process group and kills the entire group on cancellation.
+#[cfg(target_os = "linux")]
+struct ProcessGroupKillGuard {
+    process_group: Option<Pid>,
+}
+
+#[cfg(target_os = "linux")]
+impl ProcessGroupKillGuard {
+    fn new(child_id: Option<u32>) -> Self {
+        let process_group = child_id
+            .and_then(|id| i32::try_from(id).ok())
+            .and_then(Pid::from_raw);
+        Self { process_group }
+    }
+
+    fn disarm(&mut self) {
+        self.process_group = None;
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ProcessGroupKillGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.process_group {
+            let _ = kill_process_group(process_group, Signal::KILL);
         }
     }
 }
@@ -753,6 +817,7 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::FileExists,
                 every: config.every,
                 timeout: config.timeout,
+                intar: config.intar.clone(),
                 runner: ProbeRunner::FileExists(FileExistsProbe { path: path.clone() }),
             },
             ProbeKindConfig::FileRegexCapture { path, pattern } => {
@@ -768,6 +833,7 @@ pub(crate) async fn build_probes(
                     kind: ProbeKind::FileRegexCapture,
                     every: config.every,
                     timeout: config.timeout,
+                    intar: config.intar.clone(),
                     runner: ProbeRunner::FileRegexCapture(FileRegexCaptureProbe {
                         path: path.clone(),
                         pattern: pattern.clone(),
@@ -784,6 +850,7 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::PortOpen,
                 every: config.every,
                 timeout: config.timeout,
+                intar: config.intar.clone(),
                 runner: ProbeRunner::PortOpen(PortOpenProbe {
                     host: host.clone(),
                     port: *port,
@@ -804,6 +871,7 @@ pub(crate) async fn build_probes(
                     kind: ProbeKind::K8sPodState,
                     every: config.every,
                     timeout: config.timeout,
+                    intar: config.intar.clone(),
                     runner: ProbeRunner::K8sPodState(K8sPodStateProbe {
                         namespace: namespace.clone(),
                         selector: selector.clone(),
@@ -821,6 +889,7 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::CommandJsonPath,
                 every: config.every,
                 timeout: config.timeout,
+                intar: config.intar.clone(),
                 runner: ProbeRunner::CommandJsonPath(CommandJsonPathProbe {
                     argv: argv.clone(),
                     json_path: json_path.clone(),
@@ -832,6 +901,7 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::Service,
                 every: config.every,
                 timeout: config.timeout,
+                intar: config.intar.clone(),
                 runner: ProbeRunner::Service(ServiceProbe {
                     service: service.clone(),
                     state: *state,

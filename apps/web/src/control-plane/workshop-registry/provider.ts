@@ -18,7 +18,10 @@ import {
 } from "@/lib/workshops/provider-credential";
 import { invokeProviderOperation } from "@/lib/workshops/provider-service";
 import { requireWorkshopMulticloudRuntimeEnabledForOrganization } from "@/lib/workshops/feature-flag";
-import type { ValidatedWorkshopSourceBundle } from "./archive";
+import {
+  WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION,
+  type ValidatedWorkshopSourceBundle,
+} from "./archive";
 
 export interface AuthoredRuntimeProfileDeclaration {
   id: string;
@@ -136,6 +139,18 @@ export function readRuntimeProfileDeclarations(
   const compiled = record(source.compiledManifest, "compiled manifest");
   if (integer(compiled.format_version, "format_version") !== 2) {
     throw appError(400, "workshop_manifest_version_invalid", "only workshop format v2 is accepted");
+  }
+  if (
+    integer(
+      compiled.runtime_tool_format_version,
+      "runtime_tool_format_version",
+    ) !== WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION
+  ) {
+    throw appError(
+      400,
+      "workshop_runtime_tool_version_invalid",
+      "the workshop runtime tool format is unsupported",
+    );
   }
   const manifest = record(compiled.manifest, "manifest");
   const workspace = record(manifest.workspace, "manifest.workspace");

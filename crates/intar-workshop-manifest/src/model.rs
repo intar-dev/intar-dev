@@ -182,6 +182,10 @@ pub struct ValidatedWorkshop {
 #[derive(Debug, Serialize)]
 pub struct CompiledWorkshop<'a> {
     pub format_version: u8,
+    /// Version the trusted runtime/tooling layer added around unchanged
+    /// workshop source. Bumping this value changes the deterministic source
+    /// bundle hash, so publication rebuilds pin the matching guest tools.
+    pub runtime_tool_format_version: u8,
     pub scheduled_duration_minutes: u32,
     pub manifest: &'a WorkshopManifest,
 }

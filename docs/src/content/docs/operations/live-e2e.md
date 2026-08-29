@@ -205,6 +205,72 @@ export INTAR_LIVE_FORBIDDEN_IPS="10.77.99.10,10.77.99.11"
 just live-e2e
 ```
 
+## Native SSH Run CLI Proof
+
+`just live-e2e` also verifies the learner `intar` command over a real issued
+native SSH route. It creates a fresh one-run Ed25519 client key, writes only the
+returned `known_hosts` line to a temporary strict host-verification file, and
+runs these non-interactive commands through `ssh -T`:
+
+```text
+intar
+intar status
+intar help
+intar check
+intar hints
+intar hint general
+intar solution
+intar solution reveal
+```
+
+For `broken-nginx`, the proof requires a fresh failing check, fixes nginx through
+the same native route, requires a fresh passing check, then waits for the normal
+browser run-status API to show the matching result. It also verifies that the
+hint and assisted solution revealed by the CLI appear in the regular browser run
+response. Bash completion is separately checked with `ssh -tt` and `bash -ic`.
+
+The harness does not use a saved profile key, accept a host key, read stdin, or
+pass a browser cookie into the guest.
+
+## Workshop Native SSH Run CLI Hook
+
+The scenario harness does not create workshop sessions, so it cannot select both
+the KVM and direct-cloud providers itself. For each already-running disposable
+participant workspace, use the native SSH hook below. It runs bare `intar`,
+`status`, `help`, `check`, `hints`, and `solution`; it also reveals one
+currently available participant hint and proves that `intar solution reveal` is
+rejected. It never reveals a Workshop solution. As in normal learner use,
+`intar check` runs a fresh verification. It also uses `ssh -tt` to confirm
+static and dynamic Bash completion, including safe `hint-N` aliases and
+`solution reveal`.
+
+The hook polls the normal learner browser status API after its fresh check and
+hint reveal. It verifies that a learner command does not change the
+facilitator-controlled solution state. It then ends the whole disposable
+Workshop through the facilitator API and proves that both a fresh terminal
+route and the already-issued native SSH route are rejected. Use a released
+current module with at least one check and one available hint. Do not use a
+real Workshop: this proof ends the session.
+
+Run it once with `INTAR_LIVE_WORKSHOP_PROVIDER=kvm` and once with
+`INTAR_LIVE_WORKSHOP_PROVIDER=direct-cloud`:
+
+```sh
+export INTAR_LIVE_BASE_URL="https://intar.dev"
+export INTAR_LIVE_COOKIE="__Secure-better-auth.session_token=..." # participant
+export INTAR_LIVE_WORKSHOP_FACILITATOR_COOKIE="__Secure-better-auth.session_token=..."
+export INTAR_LIVE_WORKSHOP_SESSION_ID="<active participant session ID>"
+export INTAR_LIVE_WORKSHOP_PROVIDER="kvm"
+export INTAR_LIVE_WORKSHOP_TEARDOWN_CONFIRMATION="END DISPOSABLE WORKSHOP"
+
+bun apps/web/scripts/live-e2e-workshop-run-cli.ts
+```
+
+The hook uses a new issued key and the terminal response's exact
+`known_hosts` entry. It records one participant hint reveal and ends the
+session, so use a disposable test workspace. It never discloses the full
+solution; a sealed solution is an expected unavailable result.
+
 ## What It Proves
 
 The harness fails unless all of these are true:
@@ -228,6 +294,9 @@ The harness fails unless all of these are true:
   timeout; the warm-start performance budget remains a separate reflink-host
   gate.
 - Run payloads redact unrevealed hint bodies and solution markdown.
+- Native SSH `intar` commands use a fresh issued key plus strict returned host
+  key, show the scenario status/check/hint/solution flow, and cannot bypass the
+  normal browser/API state.
 - Skip-ahead hint reveal attempts are rejected without mutating reveal state.
 - The next hint reveal returns only that hint body and keeps later hints gated.
 - The solution body appears only after the explicit solution reveal endpoint.

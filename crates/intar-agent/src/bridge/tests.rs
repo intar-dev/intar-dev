@@ -26,6 +26,11 @@ fn desired_vm() -> DesiredVmV2 {
     }
 }
 
+#[test]
+fn host_capabilities_require_an_attested_run_cli_runtime() {
+    assert!(!collect_host_capabilities(None).supports_run_cli_v1);
+}
+
 fn empty_desired_state(version: u64) -> HostDesiredStateV2 {
     HostDesiredStateV2 {
         schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,

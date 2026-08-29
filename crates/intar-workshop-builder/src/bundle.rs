@@ -7,7 +7,10 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use flate2::read::GzDecoder;
-use intar_workshop_manifest::{COMPILED_MANIFEST_PATH, CompiledWorkshop, ValidatedWorkshop};
+use intar_workshop_manifest::{
+    COMPILED_MANIFEST_PATH, CompiledWorkshop, ValidatedWorkshop,
+    WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION,
+};
 
 use crate::config::WorkerConfig;
 use crate::contracts::WorkshopPublicationClaim;
@@ -156,6 +159,7 @@ fn verify_compiled_manifest(root: &Path, workshop: &ValidatedWorkshop) -> Result
         serde_json::from_slice(&source).context("workshop.compiled.json is not valid JSON")?;
     let expected = serde_json::to_value(CompiledWorkshop {
         format_version: 2,
+        runtime_tool_format_version: WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION,
         scheduled_duration_minutes: workshop.scheduled_duration_minutes,
         manifest: &workshop.manifest,
     })

@@ -17,10 +17,16 @@ const DEFAULT_USERNAME: &str = "ubuntu";
 const RECORDING_MOUNT_PATH: &str = "/var/lib/kino-recordings";
 const RECORDING_CONFIG_PATH: &str = "/etc/kino/ssh-recording.hcl";
 const KINO_SHELL_PATH: &str = "/usr/local/bin/kino-shell";
+const INTAR_RUN_CLI_PATH: &str = "/usr/local/bin/intar";
+const INTAR_RUN_CLI_COMPLETION_PATH: &str = "/usr/share/intar/completions/intar.bash";
+const INTAR_BASHRC_PATH: &str = "/etc/bash.bashrc";
 const INTAR_SCENARIO_SUPERVISOR_PATH: &str = "/usr/local/bin/intar-scenario-supervisor.sh";
 const INTAR_BOOTSTRAP_SCRIPT_PATH: &str = "/usr/local/bin/intar-bootstrap.sh";
 const EPHEMERAL_APT_CONFIG_PATH: &str = "/etc/apt/apt.conf.d/99intar-ephemeral";
 const KINO_RUNTIME_CONFIG_PATH: &str = "/run/intar/kino.hcl";
+const KINO_CONTROL_SOCKET_PATH: &str = "/run/intar/kino-control.sock";
+const INTAR_RUN_CLI_BROKER_PATH: &str = "/run/intar/run-cli-broker";
+const INTAR_RUN_CLI_BROKER_URI: &str = "vsock://2:18082";
 const FAILED_STEP_LOG_TAIL_BYTES: usize = 64 * 1024;
 // The virtio-net device and its final udev name are not guaranteed to exist
 // when the scenario supervisor first runs. Bound discovery and configuration
@@ -32,6 +38,37 @@ const GUEST_NETWORK_READY_TIMEOUT_SECONDS: u64 = 30;
 // uptime. Capping this phase at 120 seconds leaves a nominal 240 seconds of the
 // agent's 360-second whole-runtime window for the other first-boot phases.
 const GUEST_SSH_READY_TIMEOUT_SECONDS: u64 = 2 * 60;
+
+/// Inputs for the reusable guest runtime activation layer.
+///
+/// This intentionally accepts only pre-rendered Kino configuration and safe
+/// learner-facing MOTD text. Scenario actions, hints, solutions, and other
+/// authoring content never enter this layer.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeActivationInput<'a> {
+    pub kino_template: &'a str,
+    pub motd: &'a str,
+    pub cpu_millis: u32,
+    pub requires_kubernetes_modules: bool,
+}
+
+/// Render the root-run activation script shared by scenario and KVM workshop
+/// images. The caller must stage the Kino binary at `/tmp/kino` first.
+pub fn render_runtime_activation_script(input: RuntimeActivationInput<'_>) -> Result<String> {
+    let mut script = String::new();
+    writeln!(script, "#!/usr/bin/env bash").context("format error")?;
+    writeln!(script, "set -euo pipefail").context("format error")?;
+    writeln!(script).context("format error")?;
+    append_runtime_activation_log_phase(&mut script)?;
+    append_runtime_activation(
+        &mut script,
+        input.kino_template,
+        input.motd,
+        input.cpu_millis,
+        input.requires_kubernetes_modules,
+    )?;
+    Ok(script)
+}
 
 pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) -> Result<String> {
     let mut script = String::new();
@@ -213,14 +250,92 @@ fn append_script_body(
 
     append_step_scripts(script, step_scripts)?;
 
-    append_runtime_assets(
+    append_runtime_activation(
         script,
         kino_template,
         scenario_motd,
-        vm,
+        vm.cpu_millis,
         requires_kubernetes_modules,
     )?;
+    append_scenario_image_finalization(script)?;
+    append_final_cleanup(script)
+}
 
+/// Append the stable runtime layer used by both published scenario images and
+/// prepared KVM workshop images. It deliberately excludes scenario actions,
+/// package installation, and image cleanup so callers can compose those
+/// lifecycle-specific steps around it.
+fn append_runtime_activation(
+    script: &mut String,
+    kino_template: &str,
+    motd: &str,
+    cpu_millis: u32,
+    requires_kubernetes_modules: bool,
+) -> Result<()> {
+    append_runtime_assets(
+        script,
+        kino_template,
+        motd,
+        cpu_millis,
+        requires_kubernetes_modules,
+    )?;
+    append_ssh_runtime_gate(script)
+}
+
+fn append_runtime_activation_log_phase(script: &mut String) -> Result<()> {
+    writeln!(script, "log_phase() {{").context("format error")?;
+    writeln!(script, "  local phase=\"$1\"").context("format error")?;
+    writeln!(script, "  local status=\"$2\"").context("format error")?;
+    writeln!(
+        script,
+        "  printf '[intar-runtime-activation] ts=%s phase=%s status=%s\\n' \"$(date -Ins)\" \"$phase\" \"$status\""
+    )
+    .context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
+    Ok(())
+}
+
+fn append_ssh_runtime_gate(script: &mut String) -> Result<()> {
+    // A prepared workshop base must support two mutually exclusive boot
+    // paths. Build and checkpoint proof boots attach INTARBUILD, whereas
+    // learner runs attach INTARRUN. Conditions let systemd select the right
+    // path before either service can take over SSH.
+    writeln!(
+        script,
+        "install -d -o root -g root -m 0755 /etc/systemd/system/intar-scenario.service.d /etc/systemd/system/intar-build.service.d"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "cat >/etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf <<'EOF_INTAR_RUNTIME_DISK'"
+    )
+    .context("format error")?;
+    writeln!(script, "[Unit]").context("format error")?;
+    writeln!(script, "ConditionPathExists=/dev/disk/by-label/INTARRUN").context("format error")?;
+    writeln!(script, "ConditionPathExists=!/dev/disk/by-label/INTARBUILD")
+        .context("format error")?;
+    writeln!(script, "EOF_INTAR_RUNTIME_DISK").context("format error")?;
+    writeln!(
+        script,
+        "cat >/etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf <<'EOF_INTAR_BUILD_SEED'"
+    )
+    .context("format error")?;
+    writeln!(script, "[Unit]").context("format error")?;
+    writeln!(script, "ConditionPathExists=/dev/disk/by-label/INTARBUILD")
+        .context("format error")?;
+    writeln!(script, "ConditionPathExists=!/dev/disk/by-label/INTARRUN").context("format error")?;
+    writeln!(script, "EOF_INTAR_BUILD_SEED").context("format error")?;
+    writeln!(
+        script,
+        "chown root:root /etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "chmod 0644 /etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf"
+    )
+    .context("format error")?;
     writeln!(
         script,
         "install -d -o root -g root -m 0755 /etc/systemd/system/ssh.service.d"
@@ -291,8 +406,7 @@ fn append_script_body(
     )
     .context("format error")?;
     writeln!(script, "systemctl set-default multi-user.target").context("format error")?;
-    append_scenario_image_finalization(script)?;
-    append_final_cleanup(script)
+    Ok(())
 }
 
 fn append_scenario_image_finalization(script: &mut String) -> Result<()> {
@@ -304,7 +418,7 @@ fn append_scenario_image_finalization(script: &mut String) -> Result<()> {
     .context("format error")?;
     writeln!(
         script,
-        "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
+        "rm -f /etc/systemd/system/intar-build.service /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
     )
     .context("format error")?;
     writeln!(

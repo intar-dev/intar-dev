@@ -12,6 +12,7 @@ pub mod config;
 pub mod kino;
 pub mod model;
 mod recordings;
+mod run_cli;
 pub mod secrets;
 pub mod state;
 

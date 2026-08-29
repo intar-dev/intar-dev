@@ -4,7 +4,7 @@ pub(super) fn append_runtime_assets(
     script: &mut String,
     kino_template: &str,
     scenario_motd: &str,
-    vm: &VmDefinition,
+    cpu_millis: u32,
     requires_kubernetes_modules: bool,
 ) -> Result<()> {
     writeln!(script, "install -d -m 0755 /etc/kino /etc/intar").context("format error")?;
@@ -93,6 +93,106 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "done").context("format error")?;
     writeln!(script).context("format error")?;
 
+    // Bash is started with `-i` by the Kino SSH wrapper. Put completion in
+    // bash.bashrc (rather than profile.d) so it is also available for plain
+    // interactive SSH sessions. The dynamic branch asks the multicall CLI for
+    // only currently allowed aliases; it is bounded and deliberately silent.
+    writeln!(
+        script,
+        "install -d -o root -g root -m 0755 {}",
+        shell_quote("/usr/share/intar/completions")
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "cat >{} <<'EOF_INTAR_COMPLETION'",
+        shell_quote(INTAR_RUN_CLI_COMPLETION_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "# Bash completion for the Intar run CLI.").context("format error")?;
+    writeln!(script, "_intar_complete() {{").context("format error")?;
+    writeln!(script, "  local cur candidate candidates").context("format error")?;
+    writeln!(script, "  cur=\"${{COMP_WORDS[COMP_CWORD]}}\"").context("format error")?;
+    writeln!(script, "  COMPREPLY=()").context("format error")?;
+    writeln!(script, "  if (( COMP_CWORD == 1 )); then").context("format error")?;
+    writeln!(
+        script,
+        "    COMPREPLY=( $(compgen -W 'status check hints hint solution help' -- \"$cur\") )"
+    )
+    .context("format error")?;
+    writeln!(script, "    return 0").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(script, "  case \"${{COMP_WORDS[1]:-}}\" in").context("format error")?;
+    writeln!(script, "    solution)").context("format error")?;
+    writeln!(script, "      if (( COMP_CWORD == 2 )); then").context("format error")?;
+    writeln!(
+        script,
+        "        COMPREPLY=( $(compgen -W 'reveal' -- \"$cur\") )"
+    )
+    .context("format error")?;
+    writeln!(script, "      fi").context("format error")?;
+    writeln!(script, "      ;;").context("format error")?;
+    writeln!(script, "    hint)").context("format error")?;
+    writeln!(script, "      if (( COMP_CWORD == 2 )); then").context("format error")?;
+    writeln!(script, "        candidates=\"$(/usr/bin/timeout 0.25s {} __complete \"$COMP_CWORD\" \"${{COMP_WORDS[@]}}\" 2>/dev/null)\" || return 0", shell_quote(INTAR_RUN_CLI_PATH)).context("format error")?;
+    writeln!(script, "        while IFS= read -r candidate; do").context("format error")?;
+    writeln!(
+        script,
+        "          [[ \"$candidate\" =~ ^[a-z0-9][a-z0-9-]*$ ]] || continue"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "          [[ \"$candidate\" == \"$cur\"* ]] || continue"
+    )
+    .context("format error")?;
+    writeln!(script, "          COMPREPLY+=(\"$candidate\")").context("format error")?;
+    writeln!(script, "        done <<<\"$candidates\"").context("format error")?;
+    writeln!(script, "      fi").context("format error")?;
+    writeln!(script, "      ;;").context("format error")?;
+    writeln!(script, "  esac").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script, "complete -F _intar_complete intar").context("format error")?;
+    writeln!(script, "EOF_INTAR_COMPLETION").context("format error")?;
+    writeln!(
+        script,
+        "chown root:root {} && chmod 0644 {}",
+        shell_quote(INTAR_RUN_CLI_COMPLETION_PATH),
+        shell_quote(INTAR_RUN_CLI_COMPLETION_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "printf '\\n' >>{}", shell_quote(INTAR_BASHRC_PATH))
+        .context("format error")?;
+    writeln!(
+        script,
+        "cat >>{} <<'EOF_INTAR_BASH_COMPLETION'",
+        shell_quote(INTAR_BASHRC_PATH)
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "# Intar run CLI completion for interactive SSH sessions."
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "if [ -r {} ]; then",
+        shell_quote(INTAR_RUN_CLI_COMPLETION_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "  . {}", shell_quote(INTAR_RUN_CLI_COMPLETION_PATH))
+        .context("format error")?;
+    writeln!(script, "fi").context("format error")?;
+    writeln!(script, "EOF_INTAR_BASH_COMPLETION").context("format error")?;
+    writeln!(
+        script,
+        "chown root:root {} && chmod 0644 {}",
+        shell_quote(INTAR_BASHRC_PATH),
+        shell_quote(INTAR_BASHRC_PATH)
+    )
+    .context("format error")?;
+    writeln!(script).context("format error")?;
+
     writeln!(
         script,
         "cat >{} <<'EOF_KINO_SHELL'",
@@ -165,6 +265,14 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "  log_phase kino_install start").context("format error")?;
     writeln!(script, "  install -m 0755 /tmp/kino /usr/local/bin/kino").context("format error")?;
     writeln!(script, "  /usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
+    writeln!(script, "  ln -sfn kino {}", shell_quote(INTAR_RUN_CLI_PATH))
+        .context("format error")?;
+    writeln!(
+        script,
+        "  {} help >/dev/null 2>&1",
+        shell_quote(INTAR_RUN_CLI_PATH)
+    )
+    .context("format error")?;
     writeln!(script, "  log_phase kino_install end").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
@@ -203,10 +311,17 @@ pub(super) fn append_runtime_assets(
     )
     .context("format error")?;
     writeln!(script, "kino_config_path=\"{KINO_RUNTIME_CONFIG_PATH}\"").context("format error")?;
+    writeln!(script, "kino_control_socket=\"{KINO_CONTROL_SOCKET_PATH}\"")
+        .context("format error")?;
+    writeln!(
+        script,
+        "run_cli_broker_path=\"{INTAR_RUN_CLI_BROKER_PATH}\""
+    )
+    .context("format error")?;
     writeln!(script, "kino_log_path=\"$runtime_state_path/kino.log\"").context("format error")?;
     writeln!(script, "recording_mount_path=\"{RECORDING_MOUNT_PATH}\"").context("format error")?;
     writeln!(script, "recording_user=\"{DEFAULT_USERNAME}\"").context("format error")?;
-    writeln!(script, "vm_cpu_millis={}", vm.cpu_millis).context("format error")?;
+    writeln!(script, "vm_cpu_millis={cpu_millis}").context("format error")?;
     writeln!(
         script,
         "ssh_ready_timeout_seconds={GUEST_SSH_READY_TIMEOUT_SECONDS}"
@@ -447,6 +562,33 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "}}").context("format error")?;
     writeln!(script, "trap cleanup EXIT INT TERM").context("format error")?;
     writeln!(script).context("format error")?;
+    writeln!(script, "configure_run_cli() {{").context("format error")?;
+    writeln!(script, "  log_phase run_cli_config start").context("format error")?;
+    writeln!(
+        script,
+        "  install -d -o root -g root -m 0755 \"$runtime_state_path\""
+    )
+    .context("format error")?;
+    writeln!(script, "  rm -f \"$kino_control_socket\"").context("format error")?;
+    writeln!(
+        script,
+        "  install -D -o root -g root -m 0644 /dev/null \"$run_cli_broker_path\""
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  printf '%s\\n' '{}' >\"$run_cli_broker_path\"",
+        INTAR_RUN_CLI_BROKER_URI
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  chown root:root \"$run_cli_broker_path\" && chmod 0644 \"$run_cli_broker_path\""
+    )
+    .context("format error")?;
+    writeln!(script, "  log_phase run_cli_config end").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
     writeln!(script, "start_kino() {{").context("format error")?;
     writeln!(script, "  log_phase kino_boot start").context("format error")?;
     writeln!(script, "  install -d -m 0755 \"$runtime_state_path\"").context("format error")?;
@@ -457,11 +599,12 @@ pub(super) fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "  chmod 0644 \"$kino_config_path\"").context("format error")?;
     writeln!(script, "  wait_for_vsock_ready").context("format error")?;
+    writeln!(script, "  rm -f \"$kino_control_socket\"").context("format error")?;
     writeln!(script, "  for _ in {{1..100}}; do").context("format error")?;
     writeln!(script, "    : >\"$kino_log_path\"").context("format error")?;
     writeln!(
         script,
-        "    /usr/local/bin/kino --config \"$kino_config_path\" >\"$kino_log_path\" 2>&1 &"
+        "    KINO_CONTROL_SOCKET=\"$kino_control_socket\" /usr/local/bin/kino --config \"$kino_config_path\" >\"$kino_log_path\" 2>&1 &"
     )
     .context("format error")?;
     writeln!(script, "    KINO_PID=\"$!\"").context("format error")?;
@@ -604,7 +747,7 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "start_sshd() {{").context("format error")?;
-    if vm.cpu_millis < 1_000 {
+    if cpu_millis < 1_000 {
         writeln!(script, "  local deadline_seconds now_seconds ssh_active_state ssh_job ssh_properties property value").context("format error")?;
         writeln!(
             script,
@@ -629,7 +772,7 @@ pub(super) fn append_runtime_assets(
         "  install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready"
     )
     .context("format error")?;
-    if vm.cpu_millis >= 1_000 {
+    if cpu_millis >= 1_000 {
         // `systemctl start` waits for the job to finish. The distribution unit's
         // TimeoutStartSec bounds the wait, and a single postcondition check avoids
         // adding up to one second of polling latency to normal-capacity guests.
@@ -814,6 +957,7 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "/usr/bin/setpriv --reuid=\"$recording_uid\" --regid=\"$recording_gid\" --clear-groups /bin/sh -c \"umask 077; printf 'ok\\n' >\\\"$canary_path\\\" && rm -f \\\"$canary_path\\\"\"").context("format error")?;
     writeln!(script, "log_phase recording_canary end").context("format error")?;
     writeln!(script).context("format error")?;
+    writeln!(script, "configure_run_cli").context("format error")?;
     writeln!(script, "configure_guest_network").context("format error")?;
     writeln!(script, "configure_ssh_access").context("format error")?;
     writeln!(script, "start_sshd").context("format error")?;

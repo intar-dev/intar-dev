@@ -432,6 +432,12 @@ fn derives_kino_config_from_vm_probes() {
     assert!(kino.config_hcl.contains("timeout_seconds = 3"));
     assert!(kino.config_hcl.contains("probe \"nginx-running\""));
     assert!(kino.config_hcl.contains("kind = \"service\""));
+    assert!(kino.config_hcl.contains("intar_alias = \"check-1\""));
+    assert!(
+        kino.config_hcl
+            .contains("intar_label = \"Nginx should be running\"")
+    );
+    assert!(kino.config_hcl.contains("intar_phase = \"boot\""));
     assert!(kino.config_hcl.contains("probe \"port-80-open\""));
     assert!(kino.config_hcl.contains("kind = \"port_open\""));
     assert!(kino.config_hcl.contains("host = \"127.0.0.1\""));
@@ -442,6 +448,7 @@ fn derives_kino_config_from_vm_probes() {
     );
     assert_eq!(kino.probe_descriptors.len(), 4);
     assert_eq!(kino.probe_descriptors[0].kind, KinoProbeKind::Service);
+    assert_eq!(kino.probe_descriptors[0].intar_alias, "check-1");
     assert_eq!(
         kino.probe_descriptors[0].label,
         "Nginx should be running".to_string()
@@ -450,6 +457,25 @@ fn derives_kino_config_from_vm_probes() {
     assert!(!kino.config_hcl.contains("Bring nginx back"));
     assert!(!kino.config_hcl.contains("systemctl status nginx"));
     assert!(!kino.config_hcl.contains("Start nginx and restore"));
+}
+
+#[test]
+fn blocks_run_cli_managed_assets() {
+    for path in [
+        "/etc/bash.bashrc",
+        "/usr/local/bin/intar",
+        "/usr/share/intar/completions/intar.bash",
+        "/run/intar/kino-control.sock",
+        "/run/intar/run-cli-broker",
+        "/etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf",
+        "/etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf",
+    ] {
+        assert!(is_managed_path(path), "expected managed path {path}");
+        assert!(
+            text_references_managed_assets(&format!("rm -f {path}")),
+            "expected managed command reference {path}"
+        );
+    }
 }
 
 #[test]
@@ -562,6 +588,22 @@ scenario "missing-description" {
         error,
         ScenarioError::MissingProbeDescription { probe } if probe == "nginx-running"
     ));
+}
+
+#[test]
+fn rejects_probe_descriptions_that_cannot_be_safe_cli_labels() {
+    for description in ["x".repeat(161), "\u{202e}spoofed label".to_string()] {
+        let scenario =
+            Scenario::parse(&supported_hcl().replace("Nginx should be running", &description))
+                .unwrap();
+        let error = scenario.validate_for_repo().unwrap_err();
+        assert!(matches!(
+            error,
+            ScenarioError::InvalidScenarioField { field, message }
+                if field == "kino.probe.nginx-running.description"
+                    && message.contains("visible terminal text")
+        ));
+    }
 }
 
 #[test]

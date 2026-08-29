@@ -9,7 +9,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use intar_contracts::catalog::ImageArchitecture;
-use intar_image_build::{QemuBuildConfig, prepare_scenario_disk, render_scenario_disk_plan};
+use intar_image_build::{
+    QemuBuildConfig, RuntimeActivationInput, prepare_scenario_disk,
+    render_runtime_activation_script, render_scenario_disk_plan,
+};
 use intar_workshop_manifest::RuntimeProviderKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -31,7 +34,18 @@ const SOURCE_ARCHIVE: &str = "learner-source.tar";
 const SOURCE_CHECKSUMS: &str = "learner-source.sha256";
 const PREPARE_SCRIPT: &str = "prepare-authored-image.sh";
 const CLEANUP_SCRIPT: &str = "clean-authored-image.sh";
+const RUNTIME_ACTIVATION_SCRIPT: &str = "activate-intar-runtime.sh";
 const TALOS_IMAGE: &str = "ghcr.io/siderolabs/talos@sha256:f2e2b7e5812b2b59c1acfe6af7516231aeeef79fb1ffff6b57ad987f8dd47a6e";
+const WORKSHOP_RUNTIME_MOTD: &str =
+    "Intar workshop workspace\n\nUse intar check for live verification.\n";
+const ACTIVATE_AND_CLEANUP_COMMAND: &str = concat!(
+    "sudo -- /bin/bash -- /tmp/intar-runtime-activation ",
+    "&& sudo -- /usr/bin/test -L /usr/local/bin/intar ",
+    "&& sudo -- /usr/bin/test \"$(/usr/bin/readlink /usr/local/bin/intar)\" = kino ",
+    "&& sudo -- /usr/bin/test -s /usr/share/intar/completions/intar.bash ",
+    "&& sudo -- /usr/bin/grep -Fqx '# Intar run CLI completion for interactive SSH sessions.' /etc/bash.bashrc ",
+    "&& sudo -- /bin/bash -- /tmp/intar-clean-authored-image"
+);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -284,6 +298,25 @@ pub fn prepare_authored_image(
     );
 
     let source_payload = build_source_payload(&source_root, staging_root, &config.worker)?;
+    let kino_template = crate::kvm::render_probe_config(
+        &bundle.workshop.manifest,
+        config.execution.probe_every_seconds,
+        config.execution.probe_timeout_seconds,
+    )?;
+    let runtime_activation = staging_root.join(RUNTIME_ACTIVATION_SCRIPT);
+    fs::write(
+        &runtime_activation,
+        render_runtime_activation_script(RuntimeActivationInput {
+            kino_template: &kino_template,
+            motd: WORKSHOP_RUNTIME_MOTD,
+            cpu_millis: vm.cpu_millis,
+            // KVM workshop workspaces run the Platform Engineering runtime,
+            // whose Talos and Cilium workload needs the Kubernetes kernel
+            // modules carried by the shared runtime activation layer.
+            requires_kubernetes_modules: true,
+        })?,
+    )
+    .context("failed to render shared KVM workshop runtime activation")?;
     let prepare_script = staging_root.join(PREPARE_SCRIPT);
     let cleanup_script = staging_root.join(CLEANUP_SCRIPT);
     fs::write(
@@ -335,12 +368,13 @@ pub fn prepare_authored_image(
         )?;
         guest.upload(&bootstrap, "/tmp/intar-runtime-bootstrap.sh", 0o700)?;
         guest.upload(&image_lock, "/tmp/intar-runtime-images.lock", 0o600)?;
-        guest.upload(&preparation.kino_binary, "/tmp/intar-kino", 0o700)?;
+        guest.upload(&preparation.kino_binary, "/tmp/kino", 0o700)?;
         guest.upload(
             &preparation.sanitizer_binary,
             "/tmp/intar-workshop-sanitize",
             0o700,
         )?;
+        guest.upload(&runtime_activation, "/tmp/intar-runtime-activation", 0o700)?;
         guest.upload(&prepare_script, "/tmp/intar-prepare-authored-image", 0o700)?;
         guest.run_fixed("sudo -- /bin/bash -- /tmp/intar-prepare-authored-image")?;
         let proof_path = staging_root.join("guest-proof.json");
@@ -349,7 +383,7 @@ pub fn prepare_authored_image(
             .context("guest authored-image proof is invalid")?;
         validate_guest_proof(&guest_proof)?;
         guest.upload(&cleanup_script, "/tmp/intar-clean-authored-image", 0o700)?;
-        guest.run_fixed("sudo -- /bin/bash -- /tmp/intar-clean-authored-image")?;
+        guest.run_fixed(ACTIVATE_AND_CLEANUP_COMMAND)?;
         guest.shutdown()?;
         Ok(guest_proof)
     })();
@@ -367,6 +401,7 @@ pub fn prepare_authored_image(
         source_payload.checksums.as_path(),
         prepare_script.as_path(),
         cleanup_script.as_path(),
+        runtime_activation.as_path(),
         seed_disk.as_path(),
         staging_root.join("guest-proof.json").as_path(),
         staging_root.join("qmp.sock").as_path(),
@@ -756,11 +791,10 @@ tar --extract --file /tmp/intar-learner-source.tar --directory "${{staging}}" --
 )
 printf 'intar-authored-runtime-v1\n' > "${{staging}}/.intar-runtime-owner"
 mv -- "${{staging}}" "${{install_root}}"
-printf '%s  %s\n' '{kino_sha256}' /tmp/intar-kino | sha256sum --check --strict
+printf '%s  %s\n' '{kino_sha256}' /tmp/kino | sha256sum --check --strict
 printf '%s  %s\n' '{sanitizer_sha256}' /tmp/intar-workshop-sanitize | sha256sum --check --strict
-install -o root -g root -m 0755 /tmp/intar-kino /usr/local/bin/kino
+/bin/bash -n /tmp/intar-runtime-activation
 install -D -o root -g root -m 0755 /tmp/intar-workshop-sanitize {sanitizer_path}
-/usr/local/bin/kino --help >/dev/null
 /bin/bash -n {sanitizer_path}
 cmp --silent /tmp/intar-runtime-images.lock "${{install_root}}/scripts/images.lock"
 env -i \
@@ -771,7 +805,6 @@ env -i \
   INTAR_WORKSHOP_LEARNER_USER={learner_user} \
   /bin/bash -- /tmp/intar-runtime-bootstrap.sh
 {verifier}
-/usr/local/bin/kino --help >/dev/null
 docker info >/dev/null
 talos_id="$(docker image inspect --format '{{{{.Id}}}}' '{TALOS_IMAGE}')"
 [[ "${{talos_id}}" =~ ^sha256:[a-f0-9]{{64}}$ ]]
@@ -822,10 +855,9 @@ find /var/log -xdev -type f -exec truncate -s 0 -- {} +
 truncate -s 0 /etc/machine-id
 rm -f -- /tmp/intar-learner-source.tar /tmp/intar-learner-source.sha256
 rm -f -- /tmp/intar-runtime-bootstrap.sh /tmp/intar-runtime-images.lock
-rm -f -- /tmp/intar-kino /tmp/intar-workshop-sanitize
+rm -f -- /tmp/kino /tmp/intar-workshop-sanitize /tmp/intar-runtime-activation
 rm -f -- /tmp/intar-prepare-authored-image /tmp/intar-authored-image-proof.json
 rm -f -- /root/.ssh/authorized_keys /home/ubuntu/.ssh/authorized_keys
-rm -f -- /etc/pam.d/intar-build
 rm -f -- /etc/ssh/ssh_host_*
 find /tmp /var/tmp -mindepth 1 -maxdepth 1 -xdev -exec rm -rf -- {} +
 sync
@@ -1205,8 +1237,11 @@ mod tests {
 
     use std::path::Path;
 
+    use intar_image_build::{RuntimeActivationInput, render_runtime_activation_script};
+
     use super::{
-        PrepareScriptGuest, cleanup_script_source, render_prepare_script, validate_guest_proof,
+        ACTIVATE_AND_CLEANUP_COMMAND, PrepareScriptGuest, WORKSHOP_RUNTIME_MOTD,
+        cleanup_script_source, render_prepare_script, validate_guest_proof,
         validate_image_verifier, validate_install_root, verify_free_space,
     };
 
@@ -1263,6 +1298,10 @@ mod tests {
         assert!(script.contains("--same-permissions"));
         assert!(script.contains("INTAR_WORKSHOP_LEARNER_USER='ubuntu'"));
         assert!(script.contains(
+            "printf '%s  %s\\n' '1111111111111111111111111111111111111111111111111111111111111111' /tmp/kino"
+        ));
+        assert!(script.contains("/bin/bash -n /tmp/intar-runtime-activation"));
+        assert!(script.contains(
             "install -D -o root -g root -m 0755 /tmp/intar-workshop-sanitize \
              '/usr/local/libexec/intar/intar-workshop-sanitize'"
         ));
@@ -1276,6 +1315,64 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    #[test]
+    fn shared_activation_keeps_workshop_build_and_learner_boots_disjoint() {
+        let activation = render_runtime_activation_script(RuntimeActivationInput {
+            kino_template: r#"server {
+  bind = "vsock://__INTAR_KINO_CID__:__INTAR_KINO_PORT__"
+}
+"#,
+            motd: WORKSHOP_RUNTIME_MOTD,
+            cpu_millis: 4_000,
+            requires_kubernetes_modules: true,
+        })
+        .unwrap();
+
+        assert!(
+            activation.contains(
+                "/etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf"
+            )
+        );
+        assert!(activation.contains("ConditionPathExists=/dev/disk/by-label/INTARRUN"));
+        assert!(activation.contains("ConditionPathExists=!/dev/disk/by-label/INTARBUILD"));
+        assert!(
+            activation
+                .contains("/etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf")
+        );
+        assert!(activation.contains("ConditionPathExists=/dev/disk/by-label/INTARBUILD"));
+        assert!(activation.contains("ConditionPathExists=!/dev/disk/by-label/INTARRUN"));
+        assert!(activation.contains("systemctl enable intar-scenario.service"));
+        assert!(activation.contains("vsock://2:18082"));
+        assert!(activation.contains("KINO_CONTROL_SOCKET=\"$kino_control_socket\""));
+        assert!(activation.contains("ln -sfn kino '/usr/local/bin/intar'"));
+        assert!(activation.contains("/usr/share/intar/completions/intar.bash"));
+
+        let staged = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(staged.path(), activation).unwrap();
+        assert!(
+            std::process::Command::new("bash")
+                .arg("-n")
+                .arg(staged.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn activation_is_the_last_guest_command_before_sanitization() {
+        let activation = ACTIVATE_AND_CLEANUP_COMMAND
+            .find("/tmp/intar-runtime-activation")
+            .unwrap();
+        let cleanup = ACTIVATE_AND_CLEANUP_COMMAND
+            .find("/tmp/intar-clean-authored-image")
+            .unwrap();
+        assert!(activation < cleanup);
+        assert!(ACTIVATE_AND_CLEANUP_COMMAND.contains("/usr/local/bin/intar"));
+        assert!(ACTIVATE_AND_CLEANUP_COMMAND.contains("/usr/share/intar/completions/intar.bash"));
+        assert!(ACTIVATE_AND_CLEANUP_COMMAND.contains("/etc/bash.bashrc"));
     }
 
     #[test]
@@ -1310,9 +1407,35 @@ mod tests {
         let staged = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(staged.path(), cleanup_script_source()).unwrap();
         assert!(
-            cleanup_script_source().contains("rm -f -- /etc/pam.d/intar-build"),
-            "authored images must not retain the build-only PAM policy"
+            !cleanup_script_source().contains("rm -f -- /etc/pam.d/intar-build"),
+            "the retained INTARBUILD boot path needs its dedicated PAM policy"
         );
+        assert!(
+            std::process::Command::new("bash")
+                .arg("-n")
+                .arg(staged.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn workshop_sanitizer_preserves_the_dual_mode_run_cli_runtime() {
+        let sanitizer = include_str!("../deploy/intar-workshop-sanitize");
+        for expected in [
+            "/usr/local/bin/intar",
+            "/usr/share/intar/completions/intar.bash",
+            "ConditionPathExists=/dev/disk/by-label/INTARRUN",
+            "ConditionPathExists=!/dev/disk/by-label/INTARBUILD",
+            "ConditionPathExists=/dev/disk/by-label/INTARBUILD",
+            "ConditionPathExists=!/dev/disk/by-label/INTARRUN",
+            "/etc/pam.d/intar-build",
+        ] {
+            assert!(sanitizer.contains(expected), "missing {expected}");
+        }
+        let staged = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(staged.path(), sanitizer).unwrap();
         assert!(
             std::process::Command::new("bash")
                 .arg("-n")

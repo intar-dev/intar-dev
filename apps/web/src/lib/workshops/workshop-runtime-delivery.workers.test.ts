@@ -2121,6 +2121,7 @@ function hostReport(now: number, hostId: string): HostStateReportV2 {
       supports_hard_cpu_quota: true,
       supports_landlock: true,
       supports_cgroup_v2: true,
+      supports_run_cli_v1: true,
     },
     cached_images: [
       {

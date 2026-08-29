@@ -1,6 +1,7 @@
 import { handle } from "@astrojs/cloudflare/handler";
 import { handleAgentBootstrap, handleAgentConnect } from "@/control-plane/auth";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
+import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { handleWorkshopRegistryRequest } from "@/control-plane/workshop-registry/v2";
@@ -62,6 +63,10 @@ export default {
     }
 
     if (url.pathname.startsWith("/agent/runs")) {
+      const runCliResponse = await handleAgentRunCliRequest(request, env);
+      if (runCliResponse) {
+        return respond(runCliResponse);
+      }
       const response = await handleAgentRunArtifactRequest(request, env);
       if (response) {
         return respond(response);

@@ -26,6 +26,7 @@ import {
   recordProviderOperationObservation,
   shouldDiscoverHetznerCreateBeforeRetry,
   sweepWorkshopProviderRuntimes,
+  workshopRuntimeToolFormatSupportsRunCli,
 } from "./provider-runtime";
 import { reconcileProviderCostLedger } from "./provider-cost-ledger";
 import { loadDeferredWorkshopRuntimeReplacementCandidates } from "./runtime-orchestrator";
@@ -40,6 +41,23 @@ beforeEach(async () => {
 });
 
 describe("provider runtime recovery", () => {
+  it("requires the current workshop runtime-tool format before CLI enable", () => {
+    expect(workshopRuntimeToolFormatSupportsRunCli(null)).toBe(false);
+    expect(
+      workshopRuntimeToolFormatSupportsRunCli({ format_version: 2 }),
+    ).toBe(false);
+    expect(
+      workshopRuntimeToolFormatSupportsRunCli({
+        runtime_tool_format_version: 1,
+      }),
+    ).toBe(true);
+    expect(
+      workshopRuntimeToolFormatSupportsRunCli(
+        JSON.stringify({ runtime_tool_format_version: 1 }),
+      ),
+    ).toBe(true);
+  });
+
   it("translates provider-neutral resource kinds before Hetzner reconciliation", () => {
     expect(hetznerResourceKindForReconcile("instance")).toBe("server");
     expect(hetznerResourceKindForReconcile("ipv4")).toBe("primary_ip");

@@ -3,6 +3,10 @@ import { ApiClient } from "./live-e2e/api-client";
 import { combineManifests, loadManifests } from "./live-e2e/manifest";
 import { parseOptions } from "./live-e2e/options";
 import {
+  verifyRunCliViaNativeSsh,
+  type VerifiedNativeRunCliSession,
+} from "./live-e2e/run-cli";
+import {
   loadRequiredImagesFromAdminScenarios,
   publishManifest,
   waitForBuildsSucceeded,
@@ -12,6 +16,7 @@ import {
   startRun,
   verifyDistinctVmTerminalKeys,
   verifyRunContentGating,
+  verifyRunContentGatingBeforeCli,
   verifyTerminalSessions,
   waitForRunReady,
   waitForSameRunPeerIps,
@@ -45,6 +50,10 @@ async function runLiveE2e(options: Options): Promise<void> {
   const scenarioIdsToVerify = [options.scenarioId];
   const runIdsToTeardown: string[] = [];
   const terminalSessionsByRunId = new Map<string, VerifiedTerminalSession[]>();
+  const nativeRunCliSessionsByRunId = new Map<
+    string,
+    VerifiedNativeRunCliSession[]
+  >();
   let selectedHostId: string | null = null;
   let mainError: unknown = null;
 
@@ -116,7 +125,6 @@ async function runLiveE2e(options: Options): Promise<void> {
       );
     }
 
-    await verifyRunContentGating(client, readyRun);
     await verifyDistinctVmTerminalKeys({
       client,
       hostId: host.id,
@@ -124,6 +132,25 @@ async function runLiveE2e(options: Options): Promise<void> {
       timeoutMs: options.waitReadyMs,
       pollMs: options.pollMs,
     });
+
+    if (readyRun.scenarioId === "broken-nginx") {
+      await verifyRunContentGatingBeforeCli(client, readyRun);
+      nativeRunCliSessionsByRunId.set(
+        readyRun.id,
+        [
+          await verifyRunCliViaNativeSsh({
+            client,
+            run: readyRun,
+            options,
+          }),
+        ],
+      );
+    } else {
+      await verifyRunContentGating(client, readyRun);
+      logStep(
+        `native run CLI fail-repair-pass proof is scoped to broken-nginx; retained browser content-gating proof for ${readyRun.scenarioId}`,
+      );
+    }
 
     terminalSessionsByRunId.set(
       readyRun.id,
@@ -153,6 +180,7 @@ async function runLiveE2e(options: Options): Promise<void> {
             teardownRunId,
             options,
             terminalSessionsByRunId.get(teardownRunId) ?? [],
+            nativeRunCliSessionsByRunId.get(teardownRunId) ?? [],
           );
         }
       } catch (teardownError) {

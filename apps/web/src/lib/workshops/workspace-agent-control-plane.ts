@@ -224,6 +224,8 @@ export interface BuildWorkspaceAgentCloudInitInput {
   kinoUrl?: string;
   maxCheckpointBytes?: number;
   maxArtifactBytes?: number;
+  /** Final rollout opt-in; omit every learner CLI guest asset until enabled. */
+  runCliEnabled?: boolean;
 }
 
 export async function revokeWorkspaceAgentGeneration(input: {
@@ -279,6 +281,7 @@ export function buildWorkspaceAgentCloudInit(
     input.maxArtifactBytes,
     128 * 1024 * 1024,
   );
+  const runCliEnabled = input.runCliEnabled === true;
   if (!/^(ssh-|ecdsa-)[^\r\n\0]{16,8192}$/.test(input.sshPublicKey)) {
     throw appError(
       400,
@@ -353,7 +356,7 @@ write_files:
       state_path = "/var/lib/intar-workspace-agent/state.json"
       checkpoint_tmpfs_dir = "/run/intar-workspace-agent/checkpoints"
 ${checkpointApplyProgram ? `      checkpoint_apply_program = ${toml(checkpointApplyProgram)}\n` : ""}      checkpoint_signing_keys = ${signingKeysToml}
-      reconstruction_user = "intar"
+${runCliEnabled ? "      run_cli_enabled = true\n" : ""}      reconstruction_user = "intar"
       reconstruction_home = "/home/intar"
       kino_url = ${toml(kinoUrl)}
       max_checkpoint_bytes = ${maxCheckpointBytes}
@@ -379,6 +382,15 @@ ${checkpointApplyProgram ? `      checkpoint_apply_program = ${toml(checkpointAp
     permissions: "0600"
     content: ${yaml(`${input.kinoBinarySha256}  /usr/local/sbin/kino.new\n`)}
 
+${runCliEnabled ? `  # Kino's learner CLI reads this routing hint. The actual workspace-agent
+  # report credential remains root-only, and the broker validates its peer.
+  - path: /run/intar/run-cli-broker
+    owner: root:root
+    permissions: "0644"
+    content: |
+      unix:///run/intar-workspace-agent/run-cli.sock
+` : ""}
+
   - path: /etc/kino/kino.hcl
     owner: root:root
     permissions: "0644"
@@ -397,6 +409,51 @@ ${indentCloudInit(kinoConfig, 6)}
         output_dir = "/var/lib/kino-recordings"
         real_shell = "/bin/bash"
       }
+
+${runCliEnabled ? `  - path: /usr/share/intar/completions/intar.bash
+    owner: root:root
+    permissions: "0644"
+    content: |
+      # Bash completion for the learner-facing Kino multicall CLI. This is
+      # self-contained so workshop images do not need bash-completion.
+      _intar_complete() {
+        local cur="\${COMP_WORDS[COMP_CWORD]}"
+        local command="\${COMP_WORDS[1]:-}"
+        local candidates candidate
+        COMPREPLY=()
+
+        if [ "\${COMP_CWORD}" -eq 1 ]; then
+          COMPREPLY=( $(compgen -W 'status check hints hint solution help' -- "\${cur}") )
+          return 0
+        fi
+
+        case "\${command}:\${COMP_CWORD}" in
+          solution:2)
+            COMPREPLY=( $(compgen -W 'reveal' -- "\${cur}") )
+            ;;
+          hint:2)
+            candidates="$(/usr/bin/timeout 0.25s /usr/local/bin/intar __complete "\${COMP_CWORD}" "\${COMP_WORDS[@]}" 2>/dev/null)" || return 0
+            while IFS= read -r candidate; do
+              [[ "\${candidate}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || continue
+              [[ "\${candidate}" == "\${cur}"* ]] || continue
+              COMPREPLY+=("\${candidate}")
+            done <<< "\${candidates}"
+            ;;
+        esac
+      }
+      complete -F _intar_complete intar
+
+  - path: /etc/bash.bashrc
+    owner: root:root
+    permissions: "0644"
+    append: true
+    content: |
+      # Intar CLI completion. Kino starts SSH shells with bash -i, which reads
+      # this system-wide Bash startup file.
+      if [ -n "\${BASH_VERSION:-}" ] && [[ \$- == *i* ]] && [ -r /usr/share/intar/completions/intar.bash ]; then
+        . /usr/share/intar/completions/intar.bash
+      fi
+` : ""}
 
   - path: /etc/ssh/sshd_config.d/90-intar-workshop.conf
     owner: root:root
@@ -460,11 +517,17 @@ ${indentCloudInit(kinoConfig, 6)}
       #!/bin/sh
       set -eu
       config=/etc/kino/recording.hcl
-      if [ "\${SSH_ORIGINAL_COMMAND+x}" = x ]; then
-        exec /usr/local/sbin/kino record-ssh --config "\${config}" --shell-startup interactive --command "\${SSH_ORIGINAL_COMMAND}"
+      if [ -n "\${SSH_ORIGINAL_COMMAND:-}" ]; then
+        if [ -t 0 ] && [ -t 1 ]; then
+          exec /usr/local/sbin/kino record-ssh --config "\${config}" --shell-startup interactive --command "\${SSH_ORIGINAL_COMMAND}"
+        fi
+        exec /usr/local/sbin/kino record-command --config "\${config}" --command "\${SSH_ORIGINAL_COMMAND}"
       fi
       if [ "\${1:-}" = -c ]; then
-        exec /usr/local/sbin/kino record-ssh --config "\${config}" --shell-startup interactive --command "\${2:-}"
+        if [ -t 0 ] && [ -t 1 ]; then
+          exec /usr/local/sbin/kino record-ssh --config "\${config}" --shell-startup interactive --command "\${2:-}"
+        fi
+        exec /usr/local/sbin/kino record-command --config "\${config}" --command "\${2:-}"
       fi
       exec /usr/local/sbin/kino record-ssh --config "\${config}" --shell-startup interactive
 
@@ -499,7 +562,7 @@ ${indentCloudInit(kinoConfig, 6)}
       User=intar
       Group=intar
       UMask=0077
-      ExecStartPre=+/usr/libexec/intar-workspace-wait-checkpoint
+${runCliEnabled ? "      Environment=KINO_CONTROL_SOCKET=/run/intar/kino-control.sock\n" : ""}      ExecStartPre=+/usr/libexec/intar-workspace-wait-checkpoint
       ExecStart=/usr/local/sbin/kino --config /etc/kino/kino.hcl
       Restart=on-failure
       RestartSec=2s
@@ -548,8 +611,12 @@ ${indentCloudInit(kinoConfig, 6)}
       WantedBy=multi-user.target
 
 bootcmd:
-  - [mkdir, -p, /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent, /var/lib/kino-recordings, /etc/kino]
-  - [chmod, "0700", /run/intar-workspace-agent, /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent]
+  - [mkdir, -p, /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent, /var/lib/kino-recordings, /etc/kino${runCliEnabled ? ", /run/intar, /usr/share/intar/completions" : ""}]
+${runCliEnabled ? `  - [chown, intar:intar, /run/intar]
+  - [chmod, "0755", /run/intar]
+` : ""}  - [chown, root:intar, /run/intar-workspace-agent]
+  - [chmod, "0750", /run/intar-workspace-agent]
+  - [chmod, "0700", /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent]
 
 runcmd:
   - [curl, --fail, --silent, --show-error, --location, ${yaml(agentBinaryUrl)}, --output, /usr/local/sbin/intar-workspace-agent.new]
@@ -558,7 +625,7 @@ runcmd:
   - [sha256sum, --check, --status, /run/intar-workspace-agent/kino.sha256]
   - [install, --owner=root, --group=root, --mode=0755, /usr/local/sbin/intar-workspace-agent.new, /usr/local/sbin/intar-workspace-agent]
   - [install, --owner=root, --group=root, --mode=0755, /usr/local/sbin/kino.new, /usr/local/sbin/kino]
-  - [rm, --force, /usr/local/sbin/intar-workspace-agent.new]
+${runCliEnabled ? "  - [ln, --symbolic, --force, /usr/local/sbin/kino, /usr/local/bin/intar]\n" : ""}  - [rm, --force, /usr/local/sbin/intar-workspace-agent.new]
   - [rm, --force, /usr/local/sbin/kino.new]
   - [chown, intar:intar, /var/lib/kino-recordings]
   - [chmod, "0700", /var/lib/kino-recordings]
@@ -672,7 +739,7 @@ function renderDirectGuestKinoConfig(
     "  timeout_seconds = 120",
     "}",
   ];
-  for (const probe of probes) {
+  for (const [index, probe] of probes.entries()) {
     if (
       !validKinoIdentifier(probe.moduleId) ||
       !validKinoIdentifier(probe.probeId) ||
@@ -685,6 +752,8 @@ function renderDirectGuestKinoConfig(
       );
     }
     seen.add(probe.probeId);
+    const learnerAlias = `check-${index + 1}`;
+    const learnerLabel = `Check ${index + 1}`;
     lines.push(
       "",
       `probe ${JSON.stringify(probe.probeId)} {`,
@@ -692,6 +761,12 @@ function renderDirectGuestKinoConfig(
       `  argv = ["/usr/libexec/intar-workshop-run-probe", ${JSON.stringify(`/var/lib/intar-workshop-probes/${probe.moduleId}.sh`)}]`,
       '  json_path = "$.passed"',
       "  expected = true",
+      `  intar_alias = ${JSON.stringify(learnerAlias)}`,
+      `  intar_label = ${JSON.stringify(learnerLabel)}`,
+      '  intar_phase = "workshop"',
+      ...(validIntarMetadataIdentifier(probe.moduleId)
+        ? [`  intar_module = ${JSON.stringify(probe.moduleId)}`]
+        : []),
       "}",
     );
   }
@@ -700,6 +775,10 @@ function renderDirectGuestKinoConfig(
 
 function validKinoIdentifier(value: string): boolean {
   return /^[A-Za-z0-9._-]{1,128}$/.test(value);
+}
+
+function validIntarMetadataIdentifier(value: string): boolean {
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
 }
 
 function indentCloudInit(value: string, spaces: number): string {

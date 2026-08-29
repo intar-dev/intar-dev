@@ -644,19 +644,87 @@ describe("workspace agent guest control plane", () => {
       checkpointSigningKeysJson: JSON.stringify({
         "test-key": btoa(String.fromCharCode(...new Uint8Array(32))),
       }),
+      runCliEnabled: true,
     });
     expect(cloudInit).toContain("#cloud-config");
     expect(cloudInit).toContain(
       "https://intar.test/api/runtime/workspace-agent/",
     );
     expect(cloudInit).toContain("require_checkpoint_tmpfs = true");
+    expect(cloudInit).toContain("run_cli_enabled = true");
     expect(cloudInit).toContain('reconstruction_user = "intar"');
     expect(cloudInit).toContain('reconstruction_home = "/home/intar"');
     expect(cloudInit).toMatch(
       /packages:\n(?:  - .+\n)*  - sudo\n(?:  - .+\n)*\nusers:/,
     );
     expect(cloudInit).toContain('probe "module-00-workspace-ready"');
+    const kinoConfig = cloudInitWriteFile(cloudInit, "/etc/kino/kino.hcl");
+    expect(kinoConfig).toContain('intar_alias = "check-1"');
+    expect(kinoConfig).toContain('intar_label = "Check 1"');
+    expect(kinoConfig).toContain('intar_phase = "workshop"');
+    expect(kinoConfig).toContain('intar_module = "00"');
     expect(cloudInit).toContain("intar-kino-shell");
+    const runCliBroker = cloudInitWriteFile(
+      cloudInit,
+      "/run/intar/run-cli-broker",
+    );
+    expect(runCliBroker).toContain('owner: root:root');
+    expect(runCliBroker).toContain('permissions: "0644"');
+    expect(runCliBroker).toContain(
+      "unix:///run/intar-workspace-agent/run-cli.sock",
+    );
+    expect(runCliBroker).not.toContain(issued.capability);
+    expect(runCliBroker).not.toContain("bootstrap_capability");
+    expect(runCliBroker).not.toContain("control_plane_endpoint");
+    expect(runCliBroker).not.toContain("https://intar.test");
+    for (const protectedPath of [
+      "/etc/intar/workspace-agent.toml",
+      "/run/intar-workspace-agent/bootstrap",
+      "/run/intar-workspace-agent/agent.sha256",
+      "/run/intar-workspace-agent/kino.sha256",
+    ]) {
+      const protectedFile = cloudInitWriteFile(cloudInit, protectedPath);
+      expect(protectedFile).toContain('owner: root:root');
+      expect(protectedFile).toContain('permissions: "0600"');
+    }
+    const completion = cloudInitWriteFile(
+      cloudInit,
+      "/usr/share/intar/completions/intar.bash",
+    );
+    expect(completion).toContain(
+      "status check hints hint solution help",
+    );
+    expect(completion).toContain("solution:2)");
+    expect(completion).toContain("hint:2)");
+    expect(completion).toContain(
+      '/usr/bin/timeout 0.25s /usr/local/bin/intar __complete "${COMP_CWORD}" "${COMP_WORDS[@]}" 2>/dev/null',
+    );
+    expect(completion).toContain("^[a-z0-9][a-z0-9-]*$");
+    expect(completion).toMatch(
+      /\[\[ "\$\{candidate\}" == "\$\{cur\}"\* \]\] \|\| continue/,
+    );
+    // intar hint z<Tab> must not suggest unrelated, otherwise valid aliases.
+    const currentHintWord = "z";
+    const dynamicHintCandidates = ["general", "check-1", "hint-1"].filter(
+      (candidate) =>
+        /^[a-z0-9][a-z0-9-]*$/.test(candidate) &&
+        candidate.startsWith(currentHintWord),
+    );
+    expect(dynamicHintCandidates).toEqual([]);
+    expect(completion).not.toContain("--help");
+    expect(completion).not.toContain("--version");
+    expect(completion).not.toContain("--yes");
+    expect(completion).not.toContain(issued.capability);
+    expect(completion).not.toContain("run-cli.sock");
+    const bashRc = cloudInitWriteFile(cloudInit, "/etc/bash.bashrc");
+    expect(bashRc).toContain("append: true");
+    expect(bashRc).toContain(
+      '[ -n "${BASH_VERSION:-}" ] && [[ $- == *i* ]]',
+    );
+    expect(bashRc).toContain(
+      ". /usr/share/intar/completions/intar.bash",
+    );
+    expect(bashRc).not.toContain("/etc/profile.d");
     const probeRunner = cloudInitWriteFile(
       cloudInit,
       "/usr/libexec/intar-workshop-run-probe",
@@ -694,12 +762,27 @@ describe("workspace agent guest control plane", () => {
     expect(checkpointWaiter).toContain(
       `state=/var/lib/intar-workspace-agent/state.json`,
     );
+    const kinoShell = cloudInitWriteFile(
+      cloudInit,
+      "/usr/local/sbin/intar-kino-shell",
+    );
+    // ssh -T host intar sets SSH_ORIGINAL_COMMAND without allocating a
+    // terminal. It must use record-command, not record-ssh.
+    expect(kinoShell).toMatch(
+      /if \[ -n "\$\{SSH_ORIGINAL_COMMAND:-\}" \]; then\n\s+if \[ -t 0 \] && \[ -t 1 \]; then\n\s+exec \/usr\/local\/sbin\/kino record-ssh --config "\$\{config\}" --shell-startup interactive --command "\$\{SSH_ORIGINAL_COMMAND\}"\n\s+fi\n\s+exec \/usr\/local\/sbin\/kino record-command --config "\$\{config\}" --command "\$\{SSH_ORIGINAL_COMMAND\}"/,
+    );
+    expect(kinoShell).toMatch(
+      /if \[ "\$\{1:-\}" = -c \]; then\n\s+if \[ -t 0 \] && \[ -t 1 \]; then\n\s+exec \/usr\/local\/sbin\/kino record-ssh --config "\$\{config\}" --shell-startup interactive --command "\$\{2:-\}"\n\s+fi\n\s+exec \/usr\/local\/sbin\/kino record-command --config "\$\{config\}" --command "\$\{2:-\}"/,
+    );
     const kinoService = cloudInitWriteFile(
       cloudInit,
       "/etc/systemd/system/kino.service",
     );
     expect(kinoService).toContain("User=intar");
     expect(kinoService).toContain("Group=intar");
+    expect(kinoService).toContain(
+      "Environment=KINO_CONTROL_SOCKET=/run/intar/kino-control.sock",
+    );
     expect(kinoService).toContain(
       "ExecStartPre=+/usr/libexec/intar-workspace-wait-checkpoint",
     );
@@ -740,6 +823,19 @@ describe("workspace agent guest control plane", () => {
     expect(cloudInit).toContain("KbdInteractiveAuthentication no");
     expect(cloudInit).toContain("AllowUsers intar");
     expect(cloudInit).toContain("AllowTcpForwarding yes");
+    expect(cloudInit).toContain("[chown, intar:intar, /run/intar]");
+    expect(cloudInit).toContain('[chmod, "0755", /run/intar]');
+    expect(cloudInit).toContain(
+      "[chown, root:intar, /run/intar-workspace-agent]",
+    );
+    expect(cloudInit).toContain(
+      '[chmod, "0750", /run/intar-workspace-agent]',
+    );
+    expect(cloudInit).toContain(
+      "[ln, --symbolic, --force, /usr/local/sbin/kino, /usr/local/bin/intar]",
+    );
+    expect(cloudInit).not.toContain("/usr/local/bin/intar.new");
+    expect(cloudInit).not.toContain("/usr/local/sbin/intar-run-cli");
     expect(cloudInit).toContain("[systemctl, restart, ssh.service]");
     expect(cloudInit).toContain(
       "[systemctl, enable, kino.service, intar-workspace-agent.service]",
@@ -753,6 +849,35 @@ describe("workspace agent guest control plane", () => {
     expect(cloudInit).not.toContain("PermitRootLogin yes");
     expect(cloudInit).not.toContain("Hetzner-Token");
     expect(cloudInit).not.toContain("hcloud_token");
+  });
+
+  it("omits direct-cloud learner CLI assets before the final rollout enable", () => {
+    const cloudInit = buildWorkspaceAgentCloudInit({
+      identity: {
+        executionId: "execution-off",
+        workspaceId: "workspace-off",
+        generation: 1,
+      },
+      endpoint: "https://intar.test/api/runtime/workspace-agent/",
+      bootstrapCapability: "bootstrap-off",
+      sshPublicKey: "ssh-ed25519 AAAATEST intar",
+      agentBinaryUrl: "https://releases.intar.dev/workspace-agent",
+      agentBinarySha256: "b".repeat(64),
+      kinoBinaryUrl: "https://releases.intar.dev/kino",
+      kinoBinarySha256: "c".repeat(64),
+      kinoProbes: [{ moduleId: "00", probeId: "module-00-workspace-ready" }],
+      checkpointSigningKeysJson: JSON.stringify({
+        "test-key": btoa(String.fromCharCode(...new Uint8Array(32))),
+      }),
+      runCliEnabled: false,
+    });
+
+    expect(cloudInit).not.toContain("run_cli_enabled = true");
+    expect(cloudInit).not.toContain("/run/intar/run-cli-broker");
+    expect(cloudInit).not.toContain("/usr/local/bin/intar");
+    expect(cloudInit).not.toContain("/usr/share/intar/completions/intar.bash");
+    expect(cloudInit).not.toContain("/etc/bash.bashrc");
+    expect(cloudInit).not.toContain("KINO_CONTROL_SOCKET=");
   });
 });
 

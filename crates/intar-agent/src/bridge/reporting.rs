@@ -825,6 +825,9 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
         // the authority for KVM availability and complete helper accounting.
         supports_kvm: supports_jailer_v2,
         supports_vsock: true,
+        // The broker relies on the jailer-attested Cloud Hypervisor vsock
+        // device and only exists in the Linux host implementation.
+        supports_run_cli_v1: cfg!(target_os = "linux") && supports_jailer_v2,
         supports_reflink: supports_reflink_for_image_cache(),
         supports_nftables: command_exists("nft"),
         supports_jailer_v2,

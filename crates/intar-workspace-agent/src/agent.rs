@@ -7,10 +7,12 @@ use crate::config::{AgentConfig, REPORT_INTERVAL_SECONDS};
 use crate::kino::{KinoClient, KinoSnapshot};
 use crate::model::{AgentPhase, AgentReport, CONTRACT_VERSION, HealthStatus, ReportResponse};
 use crate::recordings::{remove_uploaded_recording, stage_next_completed_recording};
+use crate::run_cli::{RunCliBroker, RunCliCommand, local_error};
 use crate::secrets::SanitizedError;
 use crate::state::{
     GenerationState, StateError, StateStore, read_bootstrap_capability, remove_bootstrap_capability,
 };
+use intar_contracts::run_cli::{RunCliActionV1, RunCliErrorCodeV1, RunCliResponseV1};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -88,6 +90,31 @@ impl WorkspaceAgent {
             self.apply_checkpoint(&mut state).await?;
         }
 
+        // The final control-plane rollout writes this opt-in only after the
+        // guest binary pin is CLI-capable. The disabled branch keeps an old
+        // bundle usable during rollout without opening a learner broker.
+        let (_run_cli_broker, mut run_cli_commands) = if self.config.run_cli_enabled {
+            // This listener has no copy of the generation identity or report
+            // credential. Each request returns through this loop, which remains
+            // the only writer of state and the only component that can authenticate
+            // to the control plane.
+            let (broker, commands) = RunCliBroker::start(&self.config.reconstruction_user)
+                .await
+                .map_err(|error| {
+                    AgentError::Safe(SanitizedError::new(
+                        format!("failed to start run CLI broker: {error}"),
+                        &[],
+                    ))
+                })?;
+            (Some(broker), commands)
+        } else {
+            // A closed receiver keeps the select branch inert without opening
+            // the root-owned Unix socket.
+            let (sender, commands) = tokio::sync::mpsc::channel(1);
+            drop(sender);
+            (None, commands)
+        };
+
         info!(
             execution_id = %self.config.identity.execution_id,
             generation = self.config.identity.generation,
@@ -108,6 +135,9 @@ impl WorkspaceAgent {
                         warn!(error = %safe.as_str(), "completed terminal recording upload failed; will retry");
                     }
                 }
+                Some(command) = run_cli_commands.recv() => {
+                    self.handle_run_cli_command(&mut state, command).await;
+                }
                 _ = shutdown_signal() => {
                     info!("workspace agent shutdown requested");
                     return Ok(());
@@ -123,6 +153,61 @@ impl WorkspaceAgent {
         }
         self.report_current(&mut state).await?;
         self.upload_next_completed_recording(&state).await
+    }
+
+    async fn handle_run_cli_command(&self, state: &mut GenerationState, command: RunCliCommand) {
+        let request = command.request;
+        let response = self.run_cli_request(state, &request).await;
+        // The caller may have disconnected. The state-owning operation has
+        // already completed, so dropping the one-shot response is safe.
+        let _ = command.response.send(response);
+    }
+
+    async fn run_cli_request(
+        &self,
+        state: &mut GenerationState,
+        request: &intar_contracts::run_cli::RunCliRequestV1,
+    ) -> RunCliResponseV1 {
+        // `StateStore::load` and all state mutations fence this identity. Keep
+        // the check here too: a stale in-memory state can never be used to
+        // proxy a request after a generation replacement.
+        if state.identity() != &self.config.identity {
+            return local_error(
+                &request.request_id,
+                RunCliErrorCodeV1::Unavailable,
+                "This workspace is no longer active. Reconnect through Intar, then try again.",
+                false,
+            );
+        }
+
+        if matches!(request.action, RunCliActionV1::CheckSync) {
+            // A check action needs an immediate report before the control
+            // plane builds its authoritative safe view. This runs inside this
+            // loop so report sequence persistence and generation state cannot
+            // race with another process.
+            if self.report_current(state).await.is_err() {
+                return local_error(
+                    &request.request_id,
+                    RunCliErrorCodeV1::Unavailable,
+                    "Checks are unavailable right now. Try again.",
+                    true,
+                );
+            }
+        }
+
+        match self
+            .control_plane
+            .run_cli(state.report_credential(), request)
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => local_error(
+                &request.request_id,
+                RunCliErrorCodeV1::Unavailable,
+                "The Intar service is unavailable. Try again.",
+                true,
+            ),
+        }
     }
 
     pub async fn upload_artifact(&self, kind: &str, path: &Path) -> Result<String, AgentError> {
@@ -629,8 +714,32 @@ impl std::fmt::Display for SanitizedError {
 
 #[cfg(test)]
 mod tests {
-    use super::{tcp_ready, valid_linux_boot_id};
+    use super::{WorkspaceAgent, tcp_ready, valid_linux_boot_id};
+    use crate::checkpoint::{BuiltinCheckpointApplier, CheckpointApplier};
+    use crate::client::{ClientError, ControlPlane};
+    use crate::config::AgentConfig;
+    use crate::kino::KinoClient;
+    use crate::model::{
+        AgentReport, BootstrapResponse, CheckpointCompression, CheckpointDescriptor,
+        ExecutionIdentity, ReportResponse,
+    };
+    use crate::run_cli::local_error;
+    use crate::secrets::SecretString;
+    use crate::state::StateStore;
+    use axum::response::IntoResponse;
+    use futures_util::future::BoxFuture;
+    use intar_contracts::run_cli::{
+        RUN_CLI_PROTOCOL_VERSION, RunCliActionV1, RunCliErrorCodeV1, RunCliRequestV1,
+        RunCliResultV1,
+    };
+    use prost::Message;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tempfile::TempDir;
+    use url::Url;
 
     #[tokio::test]
     async fn terminal_readiness_requires_a_listening_tcp_socket() {
@@ -651,5 +760,313 @@ mod tests {
         assert!(valid_linux_boot_id("6c585ad0-cf7a-4c1e-a392-37b691c90c5d"));
         assert!(!valid_linux_boot_id("6C585AD0-CF7A-4C1E-A392-37B691C90C5D"));
         assert!(!valid_linux_boot_id("not-a-boot-id"));
+    }
+
+    #[tokio::test]
+    async fn check_sync_reports_inside_the_state_loop_before_forwarding() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Kino fixture");
+        let address = listener.local_addr().expect("Kino fixture address");
+        let router = axum::Router::new().route("/probes", axum::routing::get(kino_snapshot));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve Kino fixture");
+        });
+
+        let temp = TempDir::new().expect("temporary state directory");
+        let identity = execution_identity(2);
+        let config = test_config(
+            temp.path(),
+            identity.clone(),
+            Url::parse(&format!("http://{address}/probes")).expect("Kino URL"),
+        );
+        let control_plane = Arc::new(RecordingControlPlane::default());
+        let agent = test_agent(config, control_plane.clone());
+        let mut state = agent
+            .state_store
+            .install_bootstrap(bootstrap_response(identity))
+            .expect("install state");
+        agent
+            .state_store
+            .mark_checkpoint_applied(&mut state, vec!["00".to_owned()])
+            .expect("mark checkpoint applied");
+        let request = RunCliRequestV1 {
+            protocol_version: RUN_CLI_PROTOCOL_VERSION,
+            request_id: "check-1".to_owned(),
+            action: RunCliActionV1::CheckSync,
+        };
+
+        let response = agent.run_cli_request(&mut state, &request).await;
+        assert_eq!(response.request_id, "check-1");
+        assert_eq!(
+            control_plane.events.lock().expect("events lock").as_slice(),
+            ["report", "cli"]
+        );
+        assert_eq!(control_plane.reports.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            control_plane
+                .credentials
+                .lock()
+                .expect("credentials lock")
+                .as_slice(),
+            [
+                "generation-report-credential",
+                "generation-report-credential"
+            ]
+        );
+        let persisted = agent
+            .state_store
+            .load()
+            .expect("load persisted state")
+            .expect("state exists");
+        assert_eq!(persisted.last_reserved_report_sequence(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cannot_proxy_a_run_cli_request() {
+        let temp = TempDir::new().expect("temporary state directory");
+        let configured_identity = execution_identity(2);
+        let control_plane = Arc::new(RecordingControlPlane::default());
+        let agent = test_agent(
+            test_config(
+                temp.path(),
+                configured_identity,
+                Url::parse("http://127.0.0.1:18081/probes").expect("Kino URL"),
+            ),
+            control_plane.clone(),
+        );
+        let stale_identity = execution_identity(1);
+        let stale_store = StateStore::new(temp.path().join("stale.json"), stale_identity.clone());
+        let mut stale_state = stale_store
+            .install_bootstrap(bootstrap_response(stale_identity))
+            .expect("install stale state");
+        let request = RunCliRequestV1 {
+            protocol_version: RUN_CLI_PROTOCOL_VERSION,
+            request_id: "status-1".to_owned(),
+            action: RunCliActionV1::Status,
+        };
+
+        let response = agent.run_cli_request(&mut stale_state, &request).await;
+        let RunCliResultV1::Error { error } = response.result else {
+            panic!("stale generation must return an error");
+        };
+        assert_eq!(error.code, RunCliErrorCodeV1::Unavailable);
+        assert!(control_plane.events.lock().expect("events lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_check_actions_are_forwarded_without_local_policy_changes() {
+        let temp = TempDir::new().expect("temporary state directory");
+        let identity = execution_identity(2);
+        let control_plane = Arc::new(RecordingControlPlane::default());
+        let agent = test_agent(
+            test_config(
+                temp.path(),
+                identity.clone(),
+                Url::parse("http://127.0.0.1:18081/probes").expect("Kino URL"),
+            ),
+            control_plane.clone(),
+        );
+        let mut state = agent
+            .state_store
+            .install_bootstrap(bootstrap_response(identity))
+            .expect("install state");
+
+        let actions = [
+            RunCliActionV1::Status,
+            RunCliActionV1::Hints,
+            RunCliActionV1::HintReveal {
+                alias: "check-1".to_owned(),
+                expected_ordinal: 1,
+            },
+            RunCliActionV1::Solution,
+            // The server owns the workshop facilitator-only policy; this
+            // privileged guest broker must not make a divergent decision.
+            RunCliActionV1::SolutionReveal,
+        ];
+        for (index, action) in actions.into_iter().enumerate() {
+            let request = RunCliRequestV1 {
+                protocol_version: RUN_CLI_PROTOCOL_VERSION,
+                request_id: format!("action-{}", index + 1),
+                action,
+            };
+            let _ = agent.run_cli_request(&mut state, &request).await;
+        }
+
+        assert_eq!(control_plane.reports.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            control_plane.events.lock().expect("events lock").as_slice(),
+            ["cli", "cli", "cli", "cli", "cli"]
+        );
+        assert_eq!(
+            control_plane.requests.lock().expect("requests lock")[2].action,
+            RunCliActionV1::HintReveal {
+                alias: "check-1".to_owned(),
+                expected_ordinal: 1,
+            }
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingControlPlane {
+        reports: AtomicUsize,
+        events: Mutex<Vec<&'static str>>,
+        credentials: Mutex<Vec<String>>,
+        requests: Mutex<Vec<RunCliRequestV1>>,
+    }
+
+    impl ControlPlane for RecordingControlPlane {
+        fn bootstrap<'a>(
+            &'a self,
+            _identity: &'a ExecutionIdentity,
+            _capability: &'a SecretString,
+        ) -> BoxFuture<'a, Result<BootstrapResponse, ClientError>> {
+            Box::pin(async { Err(ClientError::InvalidCredential) })
+        }
+
+        fn report<'a>(
+            &'a self,
+            credential: &'a SecretString,
+            report: &'a AgentReport,
+        ) -> BoxFuture<'a, Result<ReportResponse, ClientError>> {
+            self.reports.fetch_add(1, Ordering::SeqCst);
+            self.events.lock().expect("events lock").push("report");
+            self.credentials
+                .lock()
+                .expect("credentials lock")
+                .push(credential.expose().to_owned());
+            let sequence = report.sequence;
+            Box::pin(async move {
+                Ok(ReportResponse {
+                    accepted_sequence: sequence,
+                    drain_recordings: false,
+                    next_checkpoint: None,
+                })
+            })
+        }
+
+        fn upload_artifact<'a>(
+            &'a self,
+            _credential: &'a SecretString,
+            _identity: &'a ExecutionIdentity,
+            _kind: &'a str,
+            _path: &'a Path,
+            _max_bytes: u64,
+        ) -> BoxFuture<'a, Result<String, ClientError>> {
+            Box::pin(async { Err(ClientError::InvalidCredential) })
+        }
+
+        fn run_cli<'a>(
+            &'a self,
+            credential: &'a SecretString,
+            request: &'a RunCliRequestV1,
+        ) -> BoxFuture<'a, Result<intar_contracts::run_cli::RunCliResponseV1, ClientError>>
+        {
+            self.events.lock().expect("events lock").push("cli");
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+            self.credentials
+                .lock()
+                .expect("credentials lock")
+                .push(credential.expose().to_owned());
+            let response = local_error(
+                &request.request_id,
+                RunCliErrorCodeV1::Unavailable,
+                "The Intar service is unavailable. Try again.",
+                true,
+            );
+            Box::pin(async move { Ok(response) })
+        }
+    }
+
+    fn execution_identity(generation: u32) -> ExecutionIdentity {
+        ExecutionIdentity {
+            execution_id: "execution-1".to_owned(),
+            workspace_id: "workspace-1".to_owned(),
+            generation,
+        }
+    }
+
+    fn bootstrap_response(identity: ExecutionIdentity) -> BootstrapResponse {
+        BootstrapResponse {
+            contract_version: crate::model::CONTRACT_VERSION,
+            identity,
+            report_credential: SecretString::new("generation-report-credential"),
+            checkpoint: CheckpointDescriptor {
+                checkpoint_id: "00".to_owned(),
+                signed_url: SecretString::new(
+                    "https://assets.intar.dev/checkpoint?signature=secret",
+                ),
+                sha256: "a".repeat(64),
+                size_bytes: 1,
+                compression: CheckpointCompression::None,
+                signature_b64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    [0_u8; 64],
+                ),
+                signing_key_id: "runtime-v1".to_owned(),
+                expires_at_unix_ms: i64::MAX,
+            },
+        }
+    }
+
+    fn test_config(root: &Path, identity: ExecutionIdentity, kino_url: Url) -> AgentConfig {
+        AgentConfig {
+            identity,
+            control_plane_endpoint: Url::parse("https://intar.dev/api/runtime/workspace-agent/")
+                .expect("control plane URL"),
+            bootstrap_capability_path: root.join("bootstrap"),
+            state_path: root.join("state.json"),
+            checkpoint_tmpfs_dir: root.join("checkpoints"),
+            checkpoint_apply_program: None,
+            checkpoint_signing_keys: BTreeMap::from([(
+                "runtime-v1".to_owned(),
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0_u8; 32]),
+            )]),
+            reconstruction_user: "intar".to_owned(),
+            reconstruction_home: PathBuf::from("/home/intar"),
+            kino_url,
+            max_checkpoint_bytes: 1024,
+            max_artifact_bytes: 1024,
+            recording_dir: root.join("recordings"),
+            recording_upload_staging_dir: root.join("recording-staging"),
+            recording_drain_program: root.join("recording-drain"),
+            require_checkpoint_tmpfs: false,
+            run_cli_enabled: false,
+        }
+    }
+
+    fn test_agent(
+        config: AgentConfig,
+        control_plane: Arc<RecordingControlPlane>,
+    ) -> WorkspaceAgent {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let kino = KinoClient::new(config.kino_url.clone()).expect("Kino client");
+        WorkspaceAgent::new_for_test(
+            config,
+            control_plane,
+            reqwest::Client::new(),
+            kino,
+            Arc::new(BuiltinCheckpointApplier::root()) as Arc<dyn CheckpointApplier>,
+        )
+    }
+
+    async fn kino_snapshot() -> axum::response::Response {
+        let bytes = intar_kino_proto::kino_v1::ProbesSnapshotV1 {
+            generated_at_unix_ms: 1,
+            probes: Vec::new(),
+            ssh_host_keys_openssh: vec!["ssh-ed25519 AAAATEST intar".to_owned()],
+        }
+        .encode_to_vec();
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/x-protobuf")],
+            bytes,
+        )
+            .into_response()
     }
 }

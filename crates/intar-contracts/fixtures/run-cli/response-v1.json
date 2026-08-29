@@ -1,0 +1,67 @@
+{
+  "protocol_version": 1,
+  "request_id": "request-01",
+  "result": {
+    "kind": "ok",
+    "view": {
+      "retry_scope": "V4n2sJm8_qR1dK7x",
+      "run": {
+        "kind": "scenario",
+        "title": "Broken Nginx",
+        "context": "webserver"
+      },
+      "checks": [
+        {
+          "probe_id": "nginx-config",
+          "alias": "check-1",
+          "label": "Nginx configuration parses",
+          "status": "pass"
+        },
+        {
+          "probe_id": "nginx-http",
+          "alias": "check-3",
+          "label": "Nginx responds on port 80",
+          "status": "fail"
+        }
+      ],
+      "hint_groups": [
+        {
+          "alias": "general",
+          "label": "General guidance",
+          "revealed_count": 1,
+          "total_count": 2,
+          "can_reveal": true,
+          "entries": [
+            {
+              "ordinal": 1,
+              "state": "revealed",
+              "title": "Read the error first",
+              "body_markdown": "Check the service log before changing configuration."
+            },
+            {
+              "ordinal": 2,
+              "state": "ready"
+            }
+          ]
+        },
+        {
+          "alias": "check-3",
+          "label": "Nginx responds on port 80",
+          "revealed_count": 0,
+          "total_count": 1,
+          "can_reveal": true,
+          "entries": [
+            {
+              "ordinal": 1,
+              "state": "ready"
+            }
+          ]
+        }
+      ],
+      "solution": {
+        "state": "sealed",
+        "assisted": false
+      }
+    }
+  }
+}

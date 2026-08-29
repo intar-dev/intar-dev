@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunCliProbeCheckEventV1",
+  "description": "One event in a bounded local Kino probe-check stream. Every event carries\nthe request envelope so a client can reject cross-request or stale frames.",
+  "type": "object",
+  "properties": {
+    "event": {
+      "$ref": "#/$defs/RunCliProbeCheckEventKindV1"
+    },
+    "protocol_version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1,
+      "minimum": 1
+    },
+    "request_id": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "event"
+  ],
+  "$defs": {
+    "RunCliCheckStatusV1": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "unknown"
+      ]
+    },
+    "RunCliProbeCheckEventKindV1": {
+      "description": "A local Kino check produces exactly one `complete` event after every\nrequested probe has emitted one `probe` completion event.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "check": {
+              "$ref": "#/$defs/RunCliProbeCheckResultV1"
+            },
+            "kind": {
+              "type": "string",
+              "const": "probe"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "check"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "completed_count": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 128,
+              "minimum": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "complete"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "completed_count"
+          ]
+        }
+      ]
+    },
+    "RunCliProbeCheckResultV1": {
+      "type": "object",
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "probe_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "status": {
+          "$ref": "#/$defs/RunCliCheckStatusV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "probe_id",
+        "status",
+        "duration_ms"
+      ]
+    }
+  }
+}

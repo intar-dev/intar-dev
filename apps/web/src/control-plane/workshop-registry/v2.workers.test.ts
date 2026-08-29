@@ -33,6 +33,57 @@ beforeEach(async () => {
 });
 
 describe("workshop registry certification status", () => {
+  it("queues an unchanged workshop again when the runtime tool format changes", async () => {
+    const legacy = await buildWorkshopBundleFixture({
+      mutateManifest(compiled) {
+        Reflect.deleteProperty(compiled, "runtime_tool_format_version");
+      },
+    });
+    const current = await buildWorkshopBundleFixture();
+    expect(current.sha256).not.toBe(legacy.sha256);
+
+    // This simulates the already-published pre-run-CLI bundle. Its source
+    // content is otherwise identical, so a cache key that ignored the runtime
+    // tooling format would return this publication instead of rebuilding it.
+    await env.DB.prepare(
+      `UPDATE workshop_publications
+       SET workshop_slug = 'registry-workshop', content_hash = ?, status = 'published'
+       WHERE id = 'publication-a'`,
+    )
+      .bind(legacy.sha256)
+      .run();
+
+    const form = new FormData();
+    form.set("workshop_id", "registry-workshop");
+    form.set("sha256", current.sha256);
+    form.set(
+      "bundle",
+      new File([arrayBuffer(current.bytes)], "registry-workshop.tar.gz", {
+        type: "application/gzip",
+      }),
+    );
+    const response = await handleWorkshopRegistryRequest(
+      new Request("https://intar.test/registry/v1/workshop-bundles", {
+        method: "POST",
+        headers: { authorization: `Bearer ${REGISTRY_TOKEN}` },
+        body: form,
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(202);
+    await expect(response?.json()).resolves.toMatchObject({
+      status: "queued",
+      publication_id: expect.not.stringMatching(/^publication-a$/),
+    });
+    await expect(
+      env.DB.prepare(
+        `SELECT count(*) AS count FROM workshop_publications
+         WHERE organization_id = 'org-a' AND workshop_slug = 'registry-workshop'`,
+      ).first<{ count: number }>(),
+    ).resolves.toEqual({ count: 2 });
+  });
+
   it("rejects and removes an uploaded bundle when beta access is revoked before the final insert", async () => {
     const fixture = await buildWorkshopBundleFixture();
     const form = new FormData();

@@ -42,6 +42,7 @@ impl VmManager {
             probe_tasks: Mutex::new(BTreeMap::new()),
             kino_readiness_tx,
             probe_updates_tx,
+            run_cli_broker_tasks: Mutex::new(BTreeMap::new()),
             terminal_tasks: Mutex::new(BTreeMap::new()),
             terminal_state_fingerprints: Mutex::new(BTreeMap::new()),
             terminal_states: RwLock::new(BTreeMap::new()),

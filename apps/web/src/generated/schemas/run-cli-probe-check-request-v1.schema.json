@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunCliProbeCheckRequestV1",
+  "description": "A local request from the `intar` CLI to Kino. The broker decides the safe\ninternal probe identifiers; the learner CLI never prints them.",
+  "type": "object",
+  "properties": {
+    "probe_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._-]+$"
+      },
+      "maxItems": 128,
+      "minItems": 1
+    },
+    "protocol_version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1,
+      "minimum": 1
+    },
+    "request_id": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "probe_ids"
+  ]
+}

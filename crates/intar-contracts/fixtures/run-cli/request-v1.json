@@ -1,0 +1,9 @@
+{
+  "protocol_version": 1,
+  "request_id": "request-01",
+  "action": {
+    "kind": "hint_reveal",
+    "alias": "check-3",
+    "expected_ordinal": 1
+  }
+}

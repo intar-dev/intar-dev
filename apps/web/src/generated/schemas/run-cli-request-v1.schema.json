@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunCliRequestV1",
+  "description": "A request from the learner CLI to its generation-fenced broker.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/RunCliActionV1"
+    },
+    "protocol_version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1,
+      "minimum": 1
+    },
+    "request_id": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "action"
+  ],
+  "$defs": {
+    "RunCliActionV1": {
+      "description": "One command-only learner action. A hint reveal names one immutable ladder\nposition, so retrying an interrupted reveal cannot advance to the next\nhint. `check_sync` publishes the result of an already-completed local Kino\ncheck; it does not request a new check itself.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "status"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "hints"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "alias": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]{0,127}$"
+            },
+            "expected_ordinal": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "hint_reveal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "alias",
+            "expected_ordinal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "solution"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "solution_reveal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "check_sync"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    }
+  }
+}

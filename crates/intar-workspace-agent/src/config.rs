@@ -39,6 +39,12 @@ pub struct AgentConfig {
     pub recording_drain_program: PathBuf,
     #[serde(default = "default_true")]
     pub require_checkpoint_tmpfs: bool,
+    /// The final control-plane rollout writes this only after the pinned Kino
+    /// and workspace-agent releases are CLI-capable. Leaving it absent keeps
+    /// older direct-cloud runtime bundles compatible and does not open a
+    /// learner-facing broker.
+    #[serde(default)]
+    pub run_cli_enabled: bool,
 }
 
 impl AgentConfig {
@@ -292,6 +298,13 @@ mod tests {
         )
         .expect("config TOML should deserialize");
         valid.validate().expect("canonical learner identity");
+        assert!(!valid.run_cli_enabled);
+
+        let enabled = AgentConfig {
+            run_cli_enabled: true,
+            ..valid.clone()
+        };
+        enabled.validate().expect("CLI rollout opt-in is valid");
 
         let invalid = AgentConfig {
             reconstruction_home: "/home/someone-else".into(),

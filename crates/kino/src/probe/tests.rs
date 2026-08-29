@@ -273,6 +273,62 @@ async fn command_json_path_probe_fails_when_command_exits_non_zero() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cancelling_a_command_probe_kills_its_process_group_and_grandchild() {
+    use rustix::process::{Pid, test_kill_process};
+    use tokio::time::{Duration, sleep};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let shell_pid = temp.path().join("shell.pid");
+    let child_pid = temp.path().join("child.pid");
+    let script = format!(
+        "printf '%s' \"$$\" > '{}'; sleep 10 & child=$!; printf '%s' \"$child\" > '{}'; wait",
+        shell_pid.display(),
+        child_pid.display(),
+    );
+    let probe = CommandJsonPathProbe {
+        argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), script],
+        json_path: "$.passed".to_owned(),
+        expected: Some(json!(true)),
+    };
+    let task = tokio::spawn(async move { probe.run().await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !shell_pid.exists() || !child_pid.exists() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("shell and child start");
+    let shell = std::fs::read_to_string(&shell_pid)
+        .expect("shell pid")
+        .trim()
+        .parse::<i32>()
+        .expect("parse shell pid");
+    let child = std::fs::read_to_string(&child_pid)
+        .expect("child pid")
+        .trim()
+        .parse::<i32>()
+        .expect("parse child pid");
+    task.abort();
+    let _ = task.await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let shell_alive =
+                Pid::from_raw(shell).is_some_and(|pid| test_kill_process(pid).is_ok());
+            let child_alive =
+                Pid::from_raw(child).is_some_and(|pid| test_kill_process(pid).is_ok());
+            if !shell_alive && !child_alive {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("process group is gone after cancellation");
+}
+
 #[test]
 fn phase_match_uses_pod_status_phase() {
     let pod = Pod {

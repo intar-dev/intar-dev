@@ -14,8 +14,10 @@ import {
   type RequiredScenarioImage,
 } from "@/lib/scenario-host-readiness";
 import {
+  hostSupportsRunCliV1,
   isAvailableScenarioLaunchHost,
 } from "@/lib/scenario-hosts";
+import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import { loadWorkshopManifestForSession } from "./shared";
 
 const HOST_HEARTBEAT_TTL_MS = 90_000;
@@ -163,8 +165,12 @@ export async function calculateWorkshopCapacity(input: {
   manifest: WorkshopManifestV2;
   checkpointId: string;
   now?: number;
+  /** Test seam for the final rollout gate. Production reads the Worker var. */
+  requireRunCli?: boolean;
 }): Promise<Omit<WorkshopCapacityPreflight, "checkedIn" | "provisioned" | "seatsRequired">> {
   const now = input.now ?? Date.now();
+  const requireRunCli =
+    input.requireRunCli ?? learnerRunCliV1EnforcementEnabled(env);
   const resources = workshopSeatResources(input.manifest);
   const requiredImages = checkpointImages(input.manifest, input.checkpointId);
   const hostRows = await env.DB.prepare(
@@ -230,6 +236,17 @@ export async function calculateWorkshopCapacity(input: {
         hostId: host.id,
         reason: "host_report_stale",
         detail: "runner has no fresh bridge state report",
+      });
+      continue;
+    }
+    // Direct-cloud workshops use the workspace-agent path and never reach
+    // this KVM host selector. A KVM learner workspace must have the broker
+    // required by the in-guest `intar` command.
+    if (requireRunCli && !hostSupportsRunCliV1(host.report)) {
+      allocationFailures.push({
+        hostId: host.id,
+        reason: "runtime_capabilities_missing",
+        detail: "runner does not support the learner run CLI",
       });
       continue;
     }

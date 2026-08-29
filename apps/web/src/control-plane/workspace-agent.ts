@@ -1,4 +1,7 @@
 import type { WorkshopManifestV2 } from "@/db/schema";
+import { handleWorkspaceRunCliRequest } from "@/control-plane/run-cli";
+import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
+import { requireWorkshopsEnabledForSession } from "@/lib/workshops/feature-flag";
 import { createAppId } from "@/lib/id";
 import {
   recordRuntimeVmTerminalTarget,
@@ -110,6 +113,15 @@ export async function handleWorkspaceAgentControlPlaneRequest(
   if (path === "/api/runtime/workspace-agent/reports") {
     return handleReport(request, env);
   }
+  if (path === "/api/runtime/workspace-agent/cli") {
+    // Before the final rollout deployment, a direct-cloud workspace may still
+    // be pinned to an older Kino binary. Keep this private endpoint absent so
+    // no pre-enable guest can expose a half-installed learner CLI.
+    if (!learnerRunCliV1EnforcementEnabled(env)) {
+      return jsonResponse({ error: "not found" }, 404);
+    }
+    return handleRunCli(request, env);
+  }
   if (path === "/api/runtime/workspace-agent/artifacts/grants") {
     return handleArtifactGrant(request, env);
   }
@@ -141,6 +153,102 @@ export async function handleWorkspaceAgentControlPlaneRequest(
     return jsonResponse({ error: "not found" }, 404);
   }
   return null;
+}
+
+async function handleRunCli(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  if (request.method !== "POST") return methodNotAllowed();
+  const authenticated = await authenticateGeneration(request, env);
+  if (!authenticated.ok) return authenticated.response;
+  const generation = authenticated.generation;
+  // Certification workspaces are verifier infrastructure, never a learner
+  // terminal. Their report credential therefore cannot reach the run CLI.
+  if (
+    generation.domain_kind !== "workshop" ||
+    !generation.session_id ||
+    !generation.participant_user_id ||
+    !generation.workspace_generation_id
+  ) {
+    return unauthorized();
+  }
+  if (!(await isCurrentParticipantWorkspace(env, generation))) {
+    return unauthorized();
+  }
+  const sessionId = generation.session_id;
+  return handleWorkspaceRunCliRequest({
+    request,
+    subject: {
+      executionId: generation.execution_id,
+      workspaceId: generation.workspace_id,
+      generation: generation.generation,
+      sessionId,
+      userId: generation.participant_user_id,
+    },
+    verifyCurrent: async () => {
+      if (!(await isCurrentParticipantWorkspace(env, generation))) return false;
+      try {
+        await requireWorkshopsEnabledForSession(sessionId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+}
+
+async function isCurrentParticipantWorkspace(
+  env: Cloudflare.Env,
+  generation: AuthenticatedGeneration,
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1
+     FROM workshop_workspaces workspace
+     INNER JOIN workshop_workspace_generations workspace_generation
+       ON workspace_generation.id = workspace.current_generation_id
+      AND workspace_generation.workspace_id = workspace.id
+     INNER JOIN workshop_session_members roster
+       ON roster.session_id = workspace.session_id
+      AND roster.user_id = workspace.user_id
+     INNER JOIN workshop_sessions session
+       ON session.id = workspace.session_id
+     INNER JOIN member organization_member
+       ON organization_member.organization_id = session.organization_id
+      AND organization_member.user_id = workspace.user_id
+     INNER JOIN access_allowlist access
+       ON access.user_id = workspace.user_id
+     INNER JOIN runtime_executions execution
+       ON execution.id = workspace_generation.runtime_execution_id
+     WHERE workspace.id = ?
+       AND workspace.session_id = ?
+       AND workspace.user_id = ?
+       AND workspace_generation.runtime_execution_id = ?
+       AND workspace_generation.ordinal = ?
+       AND workspace_generation.state = 'ready'
+       AND execution.id = ?
+       AND execution.domain_kind = 'workshop'
+       AND execution.domain_id = workspace.id
+       AND execution.generation = workspace_generation.ordinal
+       AND execution.state = 'ready'
+       AND roster.role = 'participant'
+       AND roster.workspace_enabled = 1
+       AND session.state IN ('lobby', 'live')
+       AND organization_member.workshop_access_revoking_at IS NULL
+       AND organization_member.role NOT IN ('owner', 'admin')
+       AND access.state = 'active'
+     LIMIT 1`,
+  )
+    .bind(
+      generation.workspace_id,
+      generation.session_id,
+      generation.participant_user_id,
+      generation.execution_id,
+      generation.generation,
+      generation.execution_id,
+    )
+    .first();
+  return Boolean(row);
 }
 
 async function handleKinoBinary(

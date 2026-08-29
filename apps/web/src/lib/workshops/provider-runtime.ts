@@ -27,8 +27,10 @@ import {
   workshopWorkspaces,
 } from "@/db/schema";
 import { sha256Hex } from "@/control-plane/auth";
+import { WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION } from "@/control-plane/workshop-registry/archive";
 import { AppError, appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
+import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import {
   archiveRuntimeExecution,
   createRuntimeExecution,
@@ -3651,6 +3653,12 @@ async function prepareProviderCreationInput(input: {
   certification?: { publicationId: string; checkpointId: string };
   now: number;
 }): Promise<CreationInput> {
+  const runCliEnabled = learnerRunCliV1EnforcementEnabled(env);
+  if (runCliEnabled) {
+    await requireDirectCloudRunCliBundle(
+      input.context.profile.templateRevisionId,
+    );
+  }
   const accessKeys = await ensureRuntimeVmAccessKeys({
     executionId: input.execution.executionId,
     expectedGeneration: input.execution.generation,
@@ -3699,6 +3707,7 @@ async function prepareProviderCreationInput(input: {
       kinoBinaryUrl: guestTools.kino.url,
       kinoBinarySha256: guestTools.kino.sha256,
       kinoProbes: input.kinoProbes,
+      runCliEnabled,
     }),
     ...(input.certification ? { certification: input.certification } : {}),
     now: input.now,
@@ -6307,6 +6316,52 @@ function parseStoredObject(
       : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * A final-enable direct-cloud workspace may only use a publication built with
+ * the runtime-tool format that pins the CLI-capable Kino release. The format
+ * lives in the existing compiled publication JSON, so no database migration is
+ * needed to keep old bundles out of the enabled path.
+ */
+export function workshopRuntimeToolFormatSupportsRunCli(value: unknown): boolean {
+  const compiled =
+    typeof value === "string"
+      ? parseStoredObject(value)
+      : typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  return (
+    compiled?.runtime_tool_format_version ===
+    WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION
+  );
+}
+
+async function requireDirectCloudRunCliBundle(
+  templateRevisionId: string,
+): Promise<void> {
+  const rows = await drizzle(env.DB)
+    .select({
+      compiledManifest: workshopPublications.compiledManifestJson,
+    })
+    .from(workshopPublications)
+    .where(
+      and(
+        eq(workshopPublications.publishedRevisionId, templateRevisionId),
+        // Certification starts while a new direct-cloud publication is still
+        // building. Its provisional revision is already pinned; only failed
+        // publications must be excluded from the final-enable path.
+        ne(workshopPublications.status, "failed"),
+      ),
+    )
+    .limit(1);
+  if (!workshopRuntimeToolFormatSupportsRunCli(rows[0]?.compiledManifest)) {
+    throw appError(
+      409,
+      "workshop_run_cli_bundle_not_ready",
+      "the selected workshop runtime is not ready for the learner CLI",
+    );
   }
 }
 

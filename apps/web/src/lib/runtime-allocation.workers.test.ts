@@ -205,6 +205,75 @@ describe("shared runtime allocation fence", () => {
       ),
     ).resolves.toEqual({ ok: false, reason: "resource_capacity" });
   });
+
+  it("does not select an otherwise healthy KVM host until it advertises the run CLI", async () => {
+    const now = Date.now();
+    await seedRuntimePool(now);
+    const report = hostReport(now);
+    report.capabilities.supports_run_cli_v1 = false;
+    await drizzle(env.DB)
+      .update(hostActualState)
+      .set({ reportJson: report, updatedAt: now })
+      .where(eq(hostActualState.hostId, "runner"));
+
+    await expect(
+      selectScenarioHosts(
+        [{ imageKey: scenarioImageKey(), imageSha256: "a".repeat(64) }],
+        "academy",
+        undefined,
+        now,
+        true,
+      ),
+    ).resolves.toEqual({ ok: false, reason: "unavailable" });
+  });
+
+  it("keeps KVM allocation open until the explicit CLI enforcement rollout", async () => {
+    const now = Date.now();
+    await seedRuntimePool(now);
+    const report = hostReport(now);
+    report.capabilities.supports_run_cli_v1 = false;
+    await drizzle(env.DB)
+      .update(hostActualState)
+      .set({ reportJson: report, updatedAt: now })
+      .where(eq(hostActualState.hostId, "runner"));
+
+    await expect(
+      selectScenarioHosts(
+        [{ imageKey: scenarioImageKey(), imageSha256: "a".repeat(64) }],
+        "academy",
+        undefined,
+        now,
+      ),
+    ).resolves.toEqual({ ok: true, hostIds: ["runner"] });
+
+    await expect(
+      calculateWorkshopCapacity({
+        organizationId: "academy",
+        manifest: workshopManifest(),
+        checkpointId: "checkpoint-00",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      runners: [expect.objectContaining({ hostId: "runner" })],
+    });
+    await expect(
+      calculateWorkshopCapacity({
+        organizationId: "academy",
+        manifest: workshopManifest(),
+        checkpointId: "checkpoint-00",
+        now,
+        requireRunCli: true,
+      }),
+    ).resolves.toMatchObject({
+      runners: [],
+      allocationFailures: [
+        expect.objectContaining({
+          hostId: "runner",
+          reason: "runtime_capabilities_missing",
+        }),
+      ],
+    });
+  });
 });
 
 async function seedRuntimePool(now: number): Promise<void> {
@@ -363,6 +432,7 @@ function hostReport(now: number): HostStateReportV2 {
       supports_hard_cpu_quota: true,
       supports_landlock: true,
       supports_cgroup_v2: true,
+      supports_run_cli_v1: true,
     },
     cached_images: [
       {

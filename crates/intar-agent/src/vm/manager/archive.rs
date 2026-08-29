@@ -564,6 +564,7 @@ pub(super) async fn prepare_vm_for_delete(
 
 pub(super) async fn teardown_vm_runtime(inner: &Inner, vm: &VmStatusResponse) {
     stop_probe_worker(inner, &vm.name).await;
+    stop_run_cli_broker(inner, &vm.name).await;
     stop_terminal_worker(inner, &vm.name).await;
 
     let Some(details) = vm.details.as_ref() else {

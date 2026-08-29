@@ -5,6 +5,7 @@ const encoder = new TextEncoder();
 export function workshopCompiledFixture() {
   return {
     format_version: 2,
+    runtime_tool_format_version: 1,
     scheduled_duration_minutes: 45,
     manifest: {
       format_version: 2,

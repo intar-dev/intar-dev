@@ -9,15 +9,23 @@ use std::path::Path;
 
 const INTAR_MANAGED_KINO_PATHS: &[&str] = &[
     "/etc/apt/apt.conf.d/99intar-ephemeral",
+    "/etc/bash.bashrc",
     "/etc/cloud/cloud-init.disabled",
     "/etc/kino/kino.hcl.tpl",
     "/etc/kino/ssh-recording.hcl",
     "/etc/ssh/sshd_config.d/90-intar-kino-shell.conf",
+    "/etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf",
     "/etc/systemd/system/intar-scenario.service",
+    "/etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf",
+    "/etc/systemd/system/ssh.service.d/10-intar-gate.conf",
     "/usr/local/bin/intar-bootstrap.sh",
     "/usr/local/bin/intar-scenario-supervisor.sh",
+    "/usr/local/bin/intar",
     "/usr/local/bin/kino",
     "/usr/local/bin/kino-shell",
+    "/usr/share/intar/completions/intar.bash",
+    "/run/intar/kino-control.sock",
+    "/run/intar/run-cli-broker",
     "/etc/shells",
 ];
 
@@ -82,6 +90,16 @@ pub enum ProbePhase {
     Boot,
     #[default]
     Scenario,
+}
+
+impl ProbePhase {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Boot => "boot",
+            Self::Scenario => "scenario",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +393,7 @@ impl Scenario {
                     probe: probe.name.clone(),
                 });
             }
+            validate_intar_probe_label(&probe.name, description)?;
             probe.validate()?;
             validate_hint_scope(&format!("probe '{}'", probe.name), &probe.hints, true)?;
         }
@@ -574,6 +593,27 @@ fn validate_required_scenario_text(field: &str, value: &str) -> Result<(), Scena
     if value.trim().is_empty() {
         return Err(ScenarioError::MissingScenarioField {
             field: field.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_intar_probe_label(probe: &str, value: &str) -> Result<(), ScenarioError> {
+    let has_terminal_controls = value.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    });
+    if value.chars().count() > 160 || has_terminal_controls {
+        return Err(ScenarioError::InvalidScenarioField {
+            field: format!("kino.probe.{probe}.description"),
+            message: "must be visible terminal text of at most 160 characters".to_string(),
         });
     }
     Ok(())

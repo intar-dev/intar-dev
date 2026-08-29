@@ -15,6 +15,10 @@ import type { WorkshopManifestV2 } from "@/db/schema";
 const COMPILED_MANIFEST_PATH = "workshop.compiled.json";
 const MAX_COMPRESSED_BUNDLE_BYTES = 64 * 1024 * 1024;
 export const MAX_COMPILED_MANIFEST_BYTES = 2 * 1024 * 1024;
+// Keep this in lockstep with
+// `intar_workshop_manifest::WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION`. It changes
+// the source-bundle hash without changing the author-facing manifest schema.
+export const WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION = 1;
 const WORKSHOP_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SOURCE_LAYOUTS = new Set([
   "cover",
@@ -438,6 +442,12 @@ function validateCompiledManifest(
 ): { workshopSlug: string; requiredCheckpointIds: string[] } {
   if (compiled.format_version !== 2) {
     throw invalid("unsupported workshop bundle format_version");
+  }
+  if (
+    compiled.runtime_tool_format_version !==
+    WORKSHOP_RUNTIME_TOOL_FORMAT_VERSION
+  ) {
+    throw invalid("unsupported workshop runtime_tool_format_version");
   }
   const scheduledDuration = positiveInteger(
     compiled.scheduled_duration_minutes,

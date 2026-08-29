@@ -44,6 +44,7 @@ describe("workshop source bundle validation", () => {
       requiredCheckpointIds: ["checkpoint-00", "checkpoint-01"],
       compiledManifest: {
         format_version: 2,
+        runtime_tool_format_version: 1,
         scheduled_duration_minutes: 45,
       },
     });
@@ -503,6 +504,17 @@ describe("workshop source bundle validation", () => {
     });
     await expect(validate(fixture)).rejects.toThrow(
       /scheduled_duration_minutes must equal the scheduled agenda duration/,
+    );
+  });
+
+  it("rejects a legacy bundle without the runtime tool format", async () => {
+    const fixture = await buildWorkshopBundleFixture({
+      mutateManifest: (compiled) => {
+        Reflect.deleteProperty(compiled, "runtime_tool_format_version");
+      },
+    });
+    await expect(validate(fixture)).rejects.toThrow(
+      /unsupported workshop runtime_tool_format_version/,
     );
   });
 

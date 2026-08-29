@@ -1,0 +1,12 @@
+{
+  "protocol_version": 1,
+  "request_id": "request-02",
+  "event": {
+    "kind": "probe",
+    "check": {
+      "probe_id": "nginx-config",
+      "status": "pass",
+      "duration_ms": 12
+    }
+  }
+}

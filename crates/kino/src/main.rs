@@ -5,6 +5,10 @@ mod probe;
 mod proto;
 mod ready_push;
 mod recording;
+mod run_cli;
+mod run_cli_control;
+mod run_cli_pending;
+mod run_cli_wire;
 mod scheduler;
 mod state;
 
@@ -60,6 +64,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args_os()
+        .next()
+        .is_some_and(|argv0| run_cli::invoked_as_intar(&argv0))
+    {
+        std::process::exit(run_cli::run_from_environment().await);
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -114,7 +125,11 @@ async fn run_probe_service(app_config: config::AppConfig) -> anyhow::Result<()> 
         .collect::<Vec<Arc<probe::ProbeDefinition>>>();
 
     let store = state::ProbeStore::new(&shared_probes);
-    let probe_tasks = scheduler::spawn_probe_tasks(shared_probes, &store);
+    let probe_executor = scheduler::ProbeExecutor::new(&shared_probes);
+    let probe_tasks = scheduler::spawn_probe_tasks(shared_probes, &store, probe_executor.clone());
+    let control_socket = run_cli_control::start(probe_executor, store.clone())
+        .await
+        .context("failed to start the Kino run CLI control socket")?;
     let ready_push_task = ready_push::spawn_ready_push_task(&store);
 
     let router = http::build_router(store);
@@ -195,6 +210,7 @@ async fn run_probe_service(app_config: config::AppConfig) -> anyhow::Result<()> 
     if let Some(task) = ready_push_task {
         task.abort();
     }
+    control_socket.shutdown().await;
 
     if let Some(result) = server_result {
         result.context("http server terminated unexpectedly")?;

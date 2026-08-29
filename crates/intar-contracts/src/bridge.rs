@@ -228,6 +228,10 @@ pub struct HostCapabilitiesV2 {
     pub supports_hard_cpu_quota: bool,
     pub supports_landlock: bool,
     pub supports_cgroup_v2: bool,
+    /// Whether this host agent can broker the versioned learner run CLI. The
+    /// default keeps older state reports safely ineligible during rollout.
+    #[serde(default)]
+    pub supports_run_cli_v1: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

@@ -9,7 +9,8 @@ use intar_image_scenario::Scenario;
 use tempfile::tempdir;
 
 use super::{
-    FAILED_STEP_LOG_TAIL_BYTES, GeneratedStepScript, append_step_scripts,
+    FAILED_STEP_LOG_TAIL_BYTES, GeneratedStepScript, INTAR_RUN_CLI_COMPLETION_PATH,
+    RuntimeActivationInput, append_step_scripts, render_runtime_activation_script,
     render_scenario_provision_script, shell_quote,
 };
 
@@ -68,6 +69,28 @@ fn render_minimal_supervisor_prefix() -> String {
     format!("{prefix}\n")
 }
 
+fn render_minimal_runtime_activation() -> String {
+    render_runtime_activation_script(RuntimeActivationInput {
+        kino_template: r#"server {
+  bind = "vsock://__INTAR_KINO_CID__:__INTAR_KINO_PORT__"
+}
+
+probe "check-one" {
+  kind = "service"
+  service = "nginx"
+  state = "running"
+  intar_alias = "check-1"
+  intar_label = "Nginx should be running"
+  intar_phase = "scenario"
+}
+"#,
+        motd: "Intar workshop runtime\n",
+        cpu_millis: 1_000,
+        requires_kubernetes_modules: true,
+    })
+    .unwrap()
+}
+
 fn run_bash(script: &str, syntax_only: bool) -> Output {
     let mut command = Command::new("bash");
     if syntax_only {
@@ -99,6 +122,127 @@ fn run_bash(script: &str, syntax_only: bool) -> Output {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn unit_conditions_allow(drop_in: &str, present_paths: &[&str]) -> bool {
+    drop_in
+        .lines()
+        .filter_map(|line| line.strip_prefix("ConditionPathExists="))
+        .all(|condition| {
+            let (expects_present, path) = match condition.strip_prefix('!') {
+                Some(path) => (false, path),
+                None => (true, condition),
+            };
+            let is_present = present_paths.contains(&path);
+            is_present == expects_present
+        })
+}
+
+#[test]
+fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
+    let script = render_minimal_runtime_activation();
+
+    assert!(script.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"));
+    assert!(script.contains("install -m 0755 /tmp/kino /usr/local/bin/kino"));
+    assert!(script.contains("ln -sfn kino '/usr/local/bin/intar'"));
+    assert!(script.contains("'/usr/local/bin/intar' help >/dev/null 2>&1"));
+    assert!(!script.contains("'/usr/local/bin/intar' --"));
+    assert!(script.contains("/usr/share/intar/completions/intar.bash"));
+    assert!(script.contains("/run/intar/run-cli-broker"));
+    assert!(script.contains("vsock://2:18082"));
+    assert!(script.contains("KINO_CONTROL_SOCKET=\"$kino_control_socket\""));
+    assert!(script.contains("systemctl enable intar-scenario.service"));
+    assert!(!script.contains("systemctl disable intar-build.service"));
+    assert!(!script.contains("rm -f /etc/systemd/system/intar-build.service"));
+
+    let (_, runtime_drop_in_and_rest) = script.split_once("<<'EOF_INTAR_RUNTIME_DISK'\n").unwrap();
+    let (runtime_drop_in, _) = runtime_drop_in_and_rest
+        .split_once("\nEOF_INTAR_RUNTIME_DISK")
+        .unwrap();
+    assert_eq!(
+        runtime_drop_in,
+        "[Unit]\nConditionPathExists=/dev/disk/by-label/INTARRUN\nConditionPathExists=!/dev/disk/by-label/INTARBUILD"
+    );
+
+    let (_, build_drop_in_and_rest) = script.split_once("<<'EOF_INTAR_BUILD_SEED'\n").unwrap();
+    let (build_drop_in, _) = build_drop_in_and_rest
+        .split_once("\nEOF_INTAR_BUILD_SEED")
+        .unwrap();
+    assert_eq!(
+        build_drop_in,
+        "[Unit]\nConditionPathExists=/dev/disk/by-label/INTARBUILD\nConditionPathExists=!/dev/disk/by-label/INTARRUN"
+    );
+    let runtime_disk = "/dev/disk/by-label/INTARRUN";
+    let build_seed = "/dev/disk/by-label/INTARBUILD";
+    assert!(unit_conditions_allow(runtime_drop_in, &[runtime_disk]));
+    assert!(unit_conditions_allow(build_drop_in, &[build_seed]));
+    assert!(!unit_conditions_allow(
+        runtime_drop_in,
+        &[runtime_disk, build_seed]
+    ));
+    assert!(!unit_conditions_allow(
+        build_drop_in,
+        &[runtime_disk, build_seed]
+    ));
+
+    let syntax = run_bash(&script, true);
+    assert!(
+        syntax.status.success(),
+        "bash -n rejected runtime activation script: {}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
+}
+
+#[test]
+fn runtime_activation_bash_completion_loads_and_keeps_dynamic_calls_bounded() {
+    let script = render_minimal_runtime_activation();
+    let (_, completion_and_rest) = script.split_once("<<'EOF_INTAR_COMPLETION'\n").unwrap();
+    let (completion, _) = completion_and_rest
+        .split_once("\nEOF_INTAR_COMPLETION")
+        .unwrap();
+    let (_, bashrc_and_rest) = script
+        .split_once("<<'EOF_INTAR_BASH_COMPLETION'\n")
+        .unwrap();
+    let (bashrc, _) = bashrc_and_rest
+        .split_once("\nEOF_INTAR_BASH_COMPLETION")
+        .unwrap();
+
+    assert!(completion.contains("/usr/bin/timeout 0.25s '/usr/local/bin/intar' __complete"));
+    assert!(completion.contains("\"$COMP_CWORD\" \"${COMP_WORDS[@]}\" 2>/dev/null"));
+    assert!(completion.contains("^[a-z0-9][a-z0-9-]*$"));
+    assert!(!completion.contains("--yes"));
+    assert!(!completion.contains("--version"));
+
+    let temporary = tempdir().unwrap();
+    let completion_path = temporary.path().join("intar.bash");
+    let bashrc_path = temporary.path().join("bashrc");
+    std::fs::write(&completion_path, completion).unwrap();
+    let completion_path = completion_path.to_string_lossy().into_owned();
+    let bashrc = bashrc.replace(
+        &shell_quote(INTAR_RUN_CLI_COMPLETION_PATH),
+        &shell_quote(&completion_path),
+    );
+    std::fs::write(&bashrc_path, bashrc).unwrap();
+    let bashrc_path = bashrc_path.to_string_lossy().into_owned();
+
+    let output = Command::new("bash")
+        .args([
+            "--noprofile",
+            "--rcfile",
+            &bashrc_path,
+            "-ic",
+            "COMP_WORDS=(intar hi); COMP_CWORD=1; _intar_complete; printf '%s\\n' \"${COMPREPLY[*]}\"; complete -p intar",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "bash completion harness failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hints hint"));
+    assert!(stdout.contains("complete -F _intar_complete intar"));
 }
 
 #[test]
@@ -775,7 +919,7 @@ packages = ["nginx"]
             assert!(script.contains("initial_boot_files=\"$(find /boot"));
             assert!(script.contains("systemctl disable intar-build.service"));
             assert!(script.contains(
-                "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
+                "rm -f /etc/systemd/system/intar-build.service /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
             ));
             assert!(script.contains("rm -f /home/${bootstrap_username}/.ssh/authorized_keys"));
             assert!(script.contains("final_boot_files=\"$(find /boot"));

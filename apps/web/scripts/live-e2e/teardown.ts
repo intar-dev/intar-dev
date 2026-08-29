@@ -6,6 +6,10 @@ import { scenarioRunArtifactContentPath } from "../../src/lib/artifact-content-p
 import { inspectReplayProbeOutput } from "../live-e2e-terminal";
 import { ApiClient } from "./api-client";
 import {
+  assertNativeRunCliRouteRevoked,
+  type VerifiedNativeRunCliSession,
+} from "./run-cli";
+import {
   HttpError,
   type HostRunsResponse,
   type Options,
@@ -28,6 +32,7 @@ export async function teardownAndVerify(
   runId: string,
   options: Options,
   terminalSessions: VerifiedTerminalSession[],
+  nativeRunCliSessions: VerifiedNativeRunCliSession[] = [],
 ): Promise<void> {
   await client.json(
     `/api/scenarios/runs/${encodeURIComponent(runId)}/destroy`,
@@ -49,6 +54,11 @@ export async function teardownAndVerify(
     tearingDown,
     terminalSessions,
     options,
+  );
+  await Promise.all(
+    nativeRunCliSessions.map((session) =>
+      assertNativeRunCliRouteRevoked(session, options.terminalProbeTimeoutMs),
+    ),
   );
   let completed = await waitForRunComplete(
     client,

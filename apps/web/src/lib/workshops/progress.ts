@@ -1,3 +1,4 @@
+import { env } from "cloudflare:workers";
 import { and, eq, sql } from "drizzle-orm";
 import {
   workshopModuleProgress,
@@ -144,6 +145,261 @@ export async function revealWorkshopHint(params: {
     createdAt: now,
   });
   return progressRecord(updated[0] ?? current);
+}
+
+export interface WorkshopRunCliMutationFence {
+  executionId: string;
+  workspaceId: string;
+  generation: number;
+  sessionId: string;
+  userId: string;
+  /** Present for KVM workshops so the write repeats the jail fence. */
+  hostId?: string;
+  runtimeVmName?: string;
+  jailGeneration?: string;
+}
+
+/**
+ * The learner CLI must fence the write itself, not only the request that
+ * preceded it.  A workspace replacement between read and write therefore
+ * records neither a revealed hint nor an audit event.
+ */
+export async function revealWorkshopHintForRunCli(params: {
+  sessionId: string;
+  userId: string;
+  moduleId: string;
+  hintId: string;
+  mutationFence: WorkshopRunCliMutationFence;
+  /** Test seam for an in-flight workspace-generation replacement. */
+  beforeMutation?: () => Promise<void> | void;
+}): Promise<WorkshopModuleProgressRecord> {
+  const access = await requireWorkshopSessionMember(params);
+  if (!access.workspaceEnabled) {
+    throw appError(
+      403,
+      "workshop_participant_required",
+      "only workshop participants reveal learner hints",
+    );
+  }
+  if (access.state !== "lobby" && access.state !== "live") {
+    throw appError(409, "workshop_progress_closed", "workshop progress is closed");
+  }
+  const { context, module } = await requireParticipantModuleReleased(
+    params.sessionId,
+    params.moduleId,
+  );
+  if (!module.hints.some((hint) => hint.id === params.hintId)) {
+    throw appError(404, "workshop_hint_not_found", "workshop hint not found");
+  }
+  if (
+    params.mutationFence.sessionId !== params.sessionId ||
+    params.mutationFence.userId !== params.userId
+  ) {
+    throw staleWorkshopRunCliFence();
+  }
+
+  await params.beforeMutation?.();
+  const now = Date.now();
+  const guard = workshopRunCliFenceSql(params.mutationFence);
+  const explainBackStatus = module.explainBackPrompt
+    ? "pending"
+    : "not_required";
+  const progress = env.DB.prepare(
+    `INSERT INTO workshop_module_progress (
+       id, session_id, user_id, module_id, technical_status,
+       current_health, explain_back_status, revealed_hint_ids_json,
+       started_at, first_verified_at, caught_up_at,
+       explain_back_completed_at, health_observed_at, completed_at, updated_at
+     )
+     SELECT ?, ?, ?, ?, 'working', 'unknown', ?, json_array(?), ?, NULL, NULL,
+            NULL, NULL, NULL, ?
+     WHERE ${guard.sql}
+     ON CONFLICT(session_id, user_id, module_id) DO UPDATE SET
+       revealed_hint_ids_json = CASE
+         WHEN EXISTS (
+           SELECT 1 FROM json_each(workshop_module_progress.revealed_hint_ids_json)
+           WHERE value = ?
+         ) THEN workshop_module_progress.revealed_hint_ids_json
+         ELSE json_insert(workshop_module_progress.revealed_hint_ids_json, '$[#]', ?)
+       END,
+       updated_at = ?
+     WHERE ${guard.sql}
+     RETURNING id`,
+  ).bind(
+    createAppId(),
+    params.sessionId,
+    params.userId,
+    params.moduleId,
+    explainBackStatus,
+    params.hintId,
+    now,
+    now,
+    ...guard.bindings,
+    params.hintId,
+    params.hintId,
+    now,
+    ...guard.bindings,
+  );
+  const progressObserved = env.DB.prepare(
+    `INSERT INTO workshop_events (
+       id, organization_id, session_id, actor_user_id, type, payload_json, created_at
+     )
+     SELECT ?, ?, ?, ?, 'progress.observed', ?, ?
+     WHERE ${guard.sql}
+       AND NOT EXISTS (
+         SELECT 1 FROM workshop_module_progress
+         WHERE session_id = ? AND user_id = ? AND module_id = ?
+       )`,
+  ).bind(
+    createAppId(),
+    context.organizationId,
+    params.sessionId,
+    params.userId,
+    JSON.stringify({
+      participantUserId: params.userId,
+      moduleId: params.moduleId,
+      technicalStatus: "working",
+      currentHealth: null,
+      explainBackStatus: null,
+    }),
+    now,
+    ...guard.bindings,
+    params.sessionId,
+    params.userId,
+    params.moduleId,
+  );
+  const event = env.DB.prepare(
+    `INSERT INTO workshop_events (
+       id, organization_id, session_id, actor_user_id, type, payload_json, created_at
+     )
+     SELECT ?, ?, ?, ?, 'hint.revealed', ?, ?
+     WHERE ${guard.sql}`,
+  ).bind(
+    createAppId(),
+    context.organizationId,
+    params.sessionId,
+    params.userId,
+    JSON.stringify({ moduleId: params.moduleId, hintId: params.hintId }),
+    now,
+    ...guard.bindings,
+  );
+  const results = await env.DB.batch([progressObserved, progress, event]);
+  if (
+    results[1]?.meta.changes !== 1 ||
+    results[2]?.meta.changes !== 1
+  ) {
+    throw staleWorkshopRunCliFence();
+  }
+  const db = workshopDb();
+  const rows = await db
+    .select()
+    .from(workshopModuleProgress)
+    .where(
+      and(
+        eq(workshopModuleProgress.sessionId, params.sessionId),
+        eq(workshopModuleProgress.userId, params.userId),
+        eq(workshopModuleProgress.moduleId, params.moduleId),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) throw staleWorkshopRunCliFence();
+  return progressRecord(row);
+}
+
+function workshopRunCliFenceSql(
+  fence: WorkshopRunCliMutationFence,
+): { sql: string; bindings: unknown[] } {
+  const kvmFence =
+    fence.hostId && fence.runtimeVmName && fence.jailGeneration
+      ? {
+          sql: `
+            AND execution.host_id = ?
+            AND EXISTS (
+              SELECT 1
+              FROM runtime_vms vm
+              INNER JOIN runtime_vm_actual_state actual
+                ON actual.runtime_vm_id = vm.id
+               AND actual.execution_id = execution.id
+              WHERE vm.execution_id = execution.id
+                AND vm.runtime_vm_name = ?
+                AND actual.host_id = ?
+                AND json_extract(actual.report_json, '$.run_id') = execution.id
+                AND json_extract(actual.report_json, '$.vm_name') = ?
+                AND json_extract(actual.report_json, '$.runtime_constraints.generation') = ?
+            )`,
+          bindings: [
+            fence.hostId,
+            fence.runtimeVmName,
+            fence.hostId,
+            fence.runtimeVmName,
+            fence.jailGeneration,
+          ],
+        }
+      : { sql: "", bindings: [] as unknown[] };
+  return {
+    sql: `EXISTS (
+      SELECT 1
+      FROM runtime_executions execution
+      INNER JOIN workshop_workspaces workspace
+        ON workspace.id = execution.domain_id
+      INNER JOIN workshop_workspace_generations generation
+        ON generation.id = workspace.current_generation_id
+      INNER JOIN workshop_sessions session
+        ON session.id = workspace.session_id
+      INNER JOIN workshop_session_members roster
+        ON roster.session_id = workspace.session_id
+       AND roster.user_id = workspace.user_id
+      INNER JOIN member organization_member
+        ON organization_member.organization_id = session.organization_id
+       AND organization_member.user_id = workspace.user_id
+      INNER JOIN access_allowlist access
+        ON access.user_id = workspace.user_id
+      WHERE execution.id = ?
+        AND execution.domain_kind = 'workshop'
+        AND execution.domain_id = ?
+        AND execution.generation = ?
+        AND execution.state = 'ready'
+        AND workspace.id = ?
+        AND workspace.session_id = ?
+        AND workspace.user_id = ?
+        AND generation.workspace_id = workspace.id
+        AND generation.runtime_execution_id = execution.id
+        AND generation.ordinal = execution.generation
+        AND generation.state = 'ready'
+        AND roster.role = 'participant'
+        AND roster.workspace_enabled = 1
+        AND session.state IN ('lobby', 'live')
+        AND organization_member.workshop_access_revoking_at IS NULL
+        AND organization_member.role NOT IN ('owner', 'admin')
+        AND access.state = 'active'
+        ${kvmFence.sql}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM runtime_executions newer
+          WHERE newer.domain_kind = execution.domain_kind
+            AND newer.domain_id = execution.domain_id
+            AND newer.generation > execution.generation
+        )
+    )`,
+    bindings: [
+      fence.executionId,
+      fence.workspaceId,
+      fence.generation,
+      fence.workspaceId,
+      fence.sessionId,
+      fence.userId,
+      ...kvmFence.bindings,
+    ],
+  };
+}
+
+function staleWorkshopRunCliFence() {
+  return appError(
+    409,
+    "workshop_run_cli_fence_stale",
+    "workshop workspace changed before the CLI action could be applied",
+  );
 }
 
 export async function recordFacilitatorWorkshopProgress(params: {

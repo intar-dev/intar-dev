@@ -127,6 +127,27 @@ describe("bridge v6 protocol", () => {
     expect(parseBridgeMessageV6(JSON.stringify(clientHello))?.type).toBe(
       "client_hello",
     );
+    const legacy = parseBridgeMessageV6(JSON.stringify(clientHello));
+    expect(
+      legacy?.type === "client_hello"
+        ? legacy.capabilities.supports_run_cli_v1
+        : null,
+    ).toBe(false);
+    const capable = parseBridgeMessageV6(
+      JSON.stringify({
+        ...clientHello,
+        capabilities: {
+          ...clientHello.capabilities,
+          supports_run_cli_v1: true,
+        },
+      }),
+    );
+    expect(capable?.type).toBe("client_hello");
+    expect(
+      capable?.type === "client_hello"
+        ? capable.capabilities.supports_run_cli_v1
+        : null,
+    ).toBe(true);
     expect(
       parseBridgeMessageV6(
         JSON.stringify({
@@ -138,6 +159,37 @@ describe("bridge v6 protocol", () => {
         }),
       ),
     ).toBeNull();
+    expect(
+      parseBridgeMessageV6(
+        JSON.stringify({
+          ...clientHello,
+          capabilities: {
+            ...clientHello.capabilities,
+            supports_run_cli_v1: "yes",
+          },
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("defaults an old host state report to no run-CLI support", () => {
+    const report = readFixture<HostStateReportV2>(
+      "host-state-report-v2.json",
+    );
+    delete report.capabilities.supports_run_cli_v1;
+    const parsed = parseBridgeMessageV6(
+      JSON.stringify({
+        type: "state_report",
+        protocol_version: 6,
+        host_id: report.host_id,
+        report,
+      }),
+    );
+    expect(
+      parsed?.type === "state_report"
+        ? parsed.report.capabilities.supports_run_cli_v1
+        : null,
+    ).toBe(false);
   });
 
   it("rejects non-v6 protocol envelopes", () => {

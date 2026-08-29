@@ -61,10 +61,12 @@ import {
   type RequiredScenarioImage,
 } from "@/lib/scenario-host-readiness";
 import {
+  hostSupportsRunCliV1,
   isAvailableScenarioLaunchHost,
   isFreshHostHeartbeat,
   isScenarioLaunchHost,
 } from "@/lib/scenario-hosts";
+import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import { deleteStargateRoute, stargateRouteTtlMs } from "@/lib/stargate";
 import {
   generateScenarioRunSshKeyDraft,
@@ -904,6 +906,16 @@ export async function assertScenarioLaunchHostForUser(
       "scenario images are not ready on this host",
     );
   }
+  if (
+    learnerRunCliV1EnforcementEnabled(env) &&
+    !hostSupportsRunCliV1(host.actualReport)
+  ) {
+    throw appError(
+      409,
+      "scenario_host_unavailable",
+      "host does not support the learner CLI yet",
+    );
+  }
   if (strictCpuCapacity(host.actualReport) === null) {
     throw appError(
       409,
@@ -1269,6 +1281,7 @@ export async function selectScenarioHosts(
   organizationId: string | null = null,
   requiredResources?: RuntimeResourceDemand,
   now = Date.now(),
+  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
 ): Promise<HostSelectionResult> {
   const db = drizzle(env.DB);
   const rows = await db
@@ -1333,7 +1346,8 @@ export async function selectScenarioHosts(
           HOST_HEARTBEAT_TTL_MS,
         ) &&
         hostHealth(row.actualReportedAt ?? null, now) === "healthy" &&
-        strictCpuCapacity(row.actualReport) !== null,
+        strictCpuCapacity(row.actualReport) !== null &&
+        (!requireRunCli || hostSupportsRunCliV1(row.actualReport)),
     );
 
   if (!candidates.length) {

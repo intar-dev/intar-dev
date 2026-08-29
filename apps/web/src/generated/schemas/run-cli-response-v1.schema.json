@@ -1,0 +1,322 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunCliResponseV1",
+  "description": "A response from the broker. The `request_id` lets a client match a complete\nresponse without treating a retried state-changing action as a new action.",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1,
+      "minimum": 1
+    },
+    "request_id": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "result": {
+      "$ref": "#/$defs/RunCliResultV1"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "result"
+  ],
+  "$defs": {
+    "RunCliCheckStatusV1": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "unknown"
+      ]
+    },
+    "RunCliCheckV1": {
+      "description": "A safe check projection. `probe_id` is an internal broker selector and must\nnever be rendered by the learner CLI; `alias` and `label` are the public\nvalues used for CLI text and completion.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "probe_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "status": {
+          "$ref": "#/$defs/RunCliCheckStatusV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "probe_id",
+        "alias",
+        "label",
+        "status"
+      ]
+    },
+    "RunCliErrorCodeV1": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "locked",
+        "unavailable",
+        "conflict",
+        "unauthorized",
+        "protocol_mismatch",
+        "frame_too_large",
+        "internal"
+      ]
+    },
+    "RunCliErrorV1": {
+      "description": "A safe, structured broker failure. `message` is already a learner-safe\nexplanation; implementers must not put broker, host, probe, or secret data\ninto it.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/RunCliErrorCodeV1"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "RunCliHintEntryV1": {
+      "description": "A hint entry. `title` and `body_markdown` are omitted until that exact hint\nhas been revealed; hidden entries must never populate either field.",
+      "type": "object",
+      "properties": {
+        "body_markdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ordinal": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
+        },
+        "state": {
+          "$ref": "#/$defs/RunCliHintStateV1"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "state"
+      ]
+    },
+    "RunCliHintGroupV1": {
+      "description": "One public hint ladder. `alias` is only a safe public target, and callers\nmust use `can_reveal` to offer dynamic completion candidates.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "can_reveal": {
+          "type": "boolean"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunCliHintEntryV1"
+          }
+        },
+        "label": {
+          "type": "string"
+        },
+        "revealed_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "total_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias",
+        "label",
+        "revealed_count",
+        "total_count",
+        "can_reveal",
+        "entries"
+      ]
+    },
+    "RunCliHintStateV1": {
+      "type": "string",
+      "enum": [
+        "revealed",
+        "ready",
+        "locked"
+      ]
+    },
+    "RunCliResultV1": {
+      "description": "The broker either returns one safe full view or one safe structured error.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ok"
+            },
+            "view": {
+              "$ref": "#/$defs/RunCliViewV1"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "view"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/RunCliErrorV1"
+            },
+            "kind": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "error"
+          ]
+        }
+      ]
+    },
+    "RunCliRunKindV1": {
+      "type": "string",
+      "enum": [
+        "scenario",
+        "workshop"
+      ]
+    },
+    "RunCliRunV1": {
+      "description": "Public context needed for a concise CLI header. `context` is a safe display\nlabel (for example a VM or released workshop module), never an identifier.",
+      "type": "object",
+      "properties": {
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/RunCliRunKindV1"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "title"
+      ]
+    },
+    "RunCliSolutionStateV1": {
+      "type": "string",
+      "enum": [
+        "sealed",
+        "revealed",
+        "unavailable"
+      ]
+    },
+    "RunCliSolutionV1": {
+      "description": "Full-solution state. `sealed` is the scenario state that may be explicitly\nrevealed; `unavailable` is used for a workshop solution not released by a\nfacilitator. Only `revealed` may contain `body_markdown`.",
+      "type": "object",
+      "properties": {
+        "assisted": {
+          "type": "boolean"
+        },
+        "body_markdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/RunCliSolutionStateV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "assisted"
+      ]
+    },
+    "RunCliViewV1": {
+      "description": "The full, safe learner projection used by every successful CLI command.",
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunCliCheckV1"
+          }
+        },
+        "hint_groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunCliHintGroupV1"
+          }
+        },
+        "retry_scope": {
+          "description": "Opaque, generation-fenced retry scope for local pending hint state. It\nis not a learner-facing identifier, display value, or credential.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "run": {
+          "$ref": "#/$defs/RunCliRunV1"
+        },
+        "solution": {
+          "$ref": "#/$defs/RunCliSolutionV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "retry_scope",
+        "run",
+        "checks",
+        "hint_groups",
+        "solution"
+      ]
+    }
+  }
+}

@@ -87,7 +87,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -147,8 +147,8 @@ describe("image registry source bundles", () => {
           meta: {
             rev: "abc123",
             kino_version: "0.4.0",
-            build_format_version: "intar-image-build-v8",
-            buildFormatVersion: "intar-image-build-v8",
+            build_format_version: "intar-image-build-v9",
+            buildFormatVersion: "intar-image-build-v9",
             scenarios: [
               {
                 scenarioId: "broken-nginx",
@@ -179,7 +179,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -225,7 +225,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -271,7 +271,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -321,7 +321,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -371,7 +371,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -421,7 +421,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -467,7 +467,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -512,7 +512,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -557,7 +557,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "..",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -597,7 +597,7 @@ describe("image registry source bundles", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v8",
+        build_format_version: "intar-image-build-v9",
         scenarios: [
           {
             scenario_id: "..",
@@ -1072,7 +1072,7 @@ function sourceMeta(extra: Record<string, unknown> = {}) {
   return {
     rev: "abc123",
     kino_version: "0.4.0",
-    build_format_version: "intar-image-build-v8",
+    build_format_version: "intar-image-build-v9",
     scenarios: [
       {
         scenario_id: "broken-nginx",

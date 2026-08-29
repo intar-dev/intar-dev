@@ -770,6 +770,7 @@ pub(super) async fn resume_tracked_vm_on_startup(
         set_state(inner, &vm.name, VmLifecycleState::BootingVm).await;
     }
     stop_probe_worker(inner, &vm.name).await;
+    stop_run_cli_broker(inner, &vm.name).await;
     stop_terminal_worker(inner, &vm.name).await;
 
     let inner_for_task = Arc::clone(inner);
@@ -792,6 +793,9 @@ pub(super) async fn resume_tracked_vm_on_startup(
             start_probe_worker(&inner_for_task, &vm_name, &details)
                 .await
                 .context("failed to restart vm probe worker after startup resume")?;
+            start_run_cli_broker(&inner_for_task, &vm_name, &details)
+                .await
+                .context("failed to restart vm run CLI broker after startup resume")?;
 
             if live_state == TrackedVmLiveState::Created {
                 debug!(vm = vm_name, "restarting boot for startup-recovered vm");

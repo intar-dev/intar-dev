@@ -5,6 +5,7 @@ use crate::model::{
 };
 use crate::secrets::SecretString;
 use futures_util::future::BoxFuture;
+use intar_contracts::run_cli::{RunCliRequestV1, RunCliResponseV1};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -45,6 +46,15 @@ pub trait ControlPlane: Send + Sync {
         path: &'a Path,
         max_bytes: u64,
     ) -> BoxFuture<'a, Result<String, ClientError>>;
+
+    /// Forward one learner CLI action with the generation-scoped report
+    /// credential. The credential remains in the privileged agent; callers
+    /// supply only the safe, framed local request.
+    fn run_cli<'a>(
+        &'a self,
+        credential: &'a SecretString,
+        request: &'a RunCliRequestV1,
+    ) -> BoxFuture<'a, Result<RunCliResponseV1, ClientError>>;
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +63,7 @@ pub struct HttpControlPlane {
     bootstrap_url: url::Url,
     reports_url: url::Url,
     artifact_grants_url: url::Url,
+    run_cli_url: url::Url,
 }
 
 impl HttpControlPlane {
@@ -70,6 +81,7 @@ impl HttpControlPlane {
             artifact_grants_url: config
                 .endpoint("artifacts/grants")
                 .map_err(ClientError::Config)?,
+            run_cli_url: config.endpoint("cli").map_err(ClientError::Config)?,
         })
     }
 
@@ -239,6 +251,36 @@ impl ControlPlane for HttpControlPlane {
             Ok(grant.artifact_id)
         })
     }
+
+    fn run_cli<'a>(
+        &'a self,
+        credential: &'a SecretString,
+        request: &'a RunCliRequestV1,
+    ) -> BoxFuture<'a, Result<RunCliResponseV1, ClientError>> {
+        Box::pin(async move {
+            request
+                .validate()
+                .map_err(|error| ClientError::InvalidRunCliRequest(error.to_string()))?;
+            let response = self
+                .client
+                .post(self.run_cli_url.clone())
+                .header(AUTHORIZATION, Self::bearer(credential)?)
+                .json(request)
+                .send()
+                .await
+                .map_err(ClientError::Request)?;
+            let response = Self::decode_json::<RunCliResponseV1>(response).await?;
+            response
+                .validate()
+                .map_err(|error| ClientError::InvalidRunCliResponse(error.to_string()))?;
+            if response.request_id != request.request_id {
+                return Err(ClientError::InvalidRunCliResponse(
+                    "response request ID does not match request".to_owned(),
+                ));
+            }
+            Ok(response)
+        })
+    }
 }
 
 fn valid_artifact_id(value: &str) -> bool {
@@ -286,6 +328,10 @@ pub enum ClientError {
     ArtifactTooLarge { actual: u64, limit: u64 },
     #[error("control plane returned an invalid artifact grant: {0}")]
     InvalidGrant(String),
+    #[error("run CLI request is invalid: {0}")]
+    InvalidRunCliRequest(String),
+    #[error("control plane returned an invalid run CLI response: {0}")]
+    InvalidRunCliResponse(String),
 }
 
 #[cfg(test)]
@@ -298,6 +344,10 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use axum::routing::post;
     use axum::{Json, Router};
+    use intar_contracts::run_cli::{
+        RUN_CLI_PROTOCOL_VERSION, RunCliActionV1, RunCliErrorCodeV1, RunCliRequestV1,
+        RunCliResultV1,
+    };
     use serde_json::{Value, json};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -326,6 +376,7 @@ mod tests {
             bootstrap_url: endpoint("bootstrap"),
             reports_url: endpoint("reports"),
             artifact_grants_url: endpoint("artifacts/grants"),
+            run_cli_url: endpoint("cli"),
         };
         let identity = ExecutionIdentity {
             execution_id: "exec-1".to_owned(),
@@ -340,6 +391,46 @@ mod tests {
             .expect("first bootstrap succeeds");
         assert_eq!(response.identity, identity);
         assert!(client.bootstrap(&identity, &capability).await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn run_cli_uses_the_internal_report_bearer_without_serializing_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let router = Router::new().route("/cli", post(run_cli_handler));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("test server");
+        });
+
+        let endpoint = |path: &str| {
+            Url::parse(&format!("http://{address}/{path}")).expect("test endpoint should be valid")
+        };
+        let client = HttpControlPlane {
+            client: reqwest::Client::new(),
+            bootstrap_url: endpoint("bootstrap"),
+            reports_url: endpoint("reports"),
+            artifact_grants_url: endpoint("artifacts/grants"),
+            run_cli_url: endpoint("cli"),
+        };
+        let request = RunCliRequestV1 {
+            protocol_version: RUN_CLI_PROTOCOL_VERSION,
+            request_id: "request-1".to_owned(),
+            action: RunCliActionV1::Status,
+        };
+        let credential = SecretString::new("generation-report-credential");
+
+        let response = client
+            .run_cli(&credential, &request)
+            .await
+            .expect("run CLI request succeeds");
+        assert_eq!(response.request_id, request.request_id);
+        let RunCliResultV1::Error { error } = response.result else {
+            panic!("locked control-plane response must remain structured");
+        };
+        assert_eq!(error.code, RunCliErrorCodeV1::Locked);
         server.abort();
     }
 
@@ -382,6 +473,38 @@ mod tests {
                 ),
                 "signing_key_id": "runtime-v1",
                 "expires_at_unix_ms": 4102444800000_i64
+            }
+        }))
+        .into_response()
+    }
+
+    async fn run_cli_handler(headers: HeaderMap, Json(body): Json<Value>) -> Response {
+        let serialized = serde_json::to_string(&body).expect("serialize request body");
+        if headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer generation-report-credential")
+            || serialized.contains("generation-report-credential")
+            || body.get("request_id").and_then(Value::as_str) != Some("request-1")
+            || body
+                .get("action")
+                .and_then(Value::as_object)
+                .and_then(|action| action.get("kind"))
+                .and_then(Value::as_str)
+                != Some("status")
+        {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        Json(json!({
+            "protocol_version": RUN_CLI_PROTOCOL_VERSION,
+            "request_id": "request-1",
+            "result": {
+                "kind": "error",
+                "error": {
+                    "code": "locked",
+                    "message": "Only the workshop facilitator can release the solution.",
+                    "retryable": false
+                }
             }
         }))
         .into_response()

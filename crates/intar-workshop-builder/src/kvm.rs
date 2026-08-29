@@ -1006,7 +1006,7 @@ fn qemu_config(
     }
 }
 
-fn render_probe_config(
+pub(crate) fn render_probe_config(
     manifest: &WorkshopManifest,
     every_seconds: u64,
     timeout_seconds: u64,
@@ -1023,12 +1023,14 @@ fn render_probe_config(
         String::new(),
     ];
     let mut seen = BTreeSet::new();
+    let mut intar_check_index = 0_usize;
     for module in &manifest.modules {
         ensure!(
             is_safe_id(&module.id),
             "module ID '{}' is not probe-safe",
             module.id
         );
+        let label = intar_probe_label(&module.id, &module.outcome)?;
         let verifier = verifier_remote_path(&module.id);
         for probe in &module.probes {
             ensure!(is_safe_id(probe), "probe ID '{probe}' is not safe");
@@ -1036,6 +1038,9 @@ fn render_probe_config(
                 seen.insert(probe.as_str()),
                 "probe ID '{probe}' is duplicated"
             );
+            intar_check_index = intar_check_index
+                .checked_add(1)
+                .context("workshop has too many Intar CLI probes")?;
             lines.extend([
                 format!("probe {} {{", json_string(probe)?),
                 "  kind = \"command_json_path\"".to_string(),
@@ -1046,12 +1051,44 @@ fn render_probe_config(
                 ),
                 "  json_path = \"$.passed\"".to_string(),
                 "  expected = true".to_string(),
+                format!(
+                    "  intar_alias = {}",
+                    json_string(&format!("check-{intar_check_index}"))?
+                ),
+                format!("  intar_label = {}", json_string(&label)?),
+                "  intar_phase = \"workshop\"".to_string(),
+                format!("  intar_module = {}", json_string(&module.id)?),
                 "}".to_string(),
                 String::new(),
             ]);
         }
     }
     Ok(format!("{}\n", lines.join("\n").trim_end()))
+}
+
+/// Render a short, learner-facing check label from the manifest's public
+/// module outcome. Kino validates the same boundary when it reads the HCL,
+/// but failing here keeps malformed workshop source from becoming a sealed
+/// image that cannot start its probe service.
+fn intar_probe_label(module_id: &str, outcome: &str) -> Result<String> {
+    let label = format!("Module {module_id}: {}", outcome.trim());
+    ensure!(
+        !label.is_empty()
+            && label.chars().count() <= 160
+            && label.chars().all(|character| {
+                !character.is_control()
+                    && !matches!(
+                        character,
+                        '\u{061c}'
+                            | '\u{200e}'
+                            | '\u{200f}'
+                            | '\u{202a}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                    )
+            }),
+        "module '{module_id}' outcome cannot be used as a safe Intar CLI label"
+    );
+    Ok(label)
 }
 
 fn json_string(value: &str) -> Result<String> {
@@ -3542,9 +3579,21 @@ done
         assert!(config.contains("probe \"module-00-ready\""));
         assert!(config.contains("/usr/local/lib/intar-workshop/verifiers/00.sh"));
         assert!(config.contains("json_path = \"$.passed\""));
+        assert!(config.contains("intar_alias = \"check-1\""));
+        assert!(config.contains(
+            "intar_label = \"Module 00: Prove the local toolchain and workshop workspace are ready.\""
+        ));
+        assert!(config.contains("intar_phase = \"workshop\""));
+        assert!(config.contains("intar_module = \"00\""));
         assert!(!config.contains("catch-up"));
         assert!(!config.contains("solution"));
         assert!(!config.contains("facilitator"));
+    }
+
+    #[test]
+    fn rejects_unsafe_workshop_outcomes_as_intar_cli_labels() {
+        assert!(intar_probe_label("00", "\u{202e}spoofed").is_err());
+        assert!(intar_probe_label("00", &"x".repeat(200)).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "request_id": "request-02",
+  "probe_ids": [
+    "nginx-config",
+    "nginx-http"
+  ]
+}

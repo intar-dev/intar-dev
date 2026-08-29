@@ -120,6 +120,69 @@ describe("generated contract schemas", () => {
     )).toBe(true);
   });
 
+  it("validates the run CLI request fixture", () => {
+    expect(validateFixture(
+      "schemas/run-cli-request-v1.schema.json",
+      "fixtures/run-cli/request-v1.json",
+    )).toBe(true);
+  });
+
+  it("rejects a zero expected hint ordinal", () => {
+    const fixture = readJson(
+      "fixtures/run-cli/request-v1.json",
+    ) as Record<string, unknown>;
+    (fixture.action as Record<string, unknown>).expected_ordinal = 0;
+    expect(validateValue("schemas/run-cli-request-v1.schema.json", fixture)).toBe(false);
+  });
+
+  it("validates the run CLI response fixture", () => {
+    expect(validateFixture(
+      "schemas/run-cli-response-v1.schema.json",
+      "fixtures/run-cli/response-v1.json",
+    )).toBe(true);
+  });
+
+  it("rejects an unsafe run CLI retry scope", () => {
+    const fixture = readJson(
+      "fixtures/run-cli/response-v1.json",
+    ) as Record<string, any>;
+    fixture.result.view.retry_scope = "scope with whitespace";
+    expect(validateValue("schemas/run-cli-response-v1.schema.json", fixture)).toBe(false);
+  });
+
+  it("validates the local Kino probe-check request fixture", () => {
+    expect(validateFixture(
+      "schemas/run-cli-probe-check-request-v1.schema.json",
+      "fixtures/run-cli/probe-check-request-v1.json",
+    )).toBe(true);
+  });
+
+  it("validates the local Kino probe-check response fixture", () => {
+    expect(validateFixture(
+      "schemas/run-cli-probe-check-response-v1.schema.json",
+      "fixtures/run-cli/probe-check-response-v1.json",
+    )).toBe(true);
+  });
+
+  it("validates local Kino probe-check event fixtures", () => {
+    expect(validateFixture(
+      "schemas/run-cli-probe-check-event-v1.schema.json",
+      "fixtures/run-cli/probe-check-event-v1.json",
+    )).toBe(true);
+    expect(validateFixture(
+      "schemas/run-cli-probe-check-event-v1.schema.json",
+      "fixtures/run-cli/probe-check-complete-v1.json",
+    )).toBe(true);
+  });
+
+  it("rejects a zero local Kino completion count", () => {
+    const fixture = readJson(
+      "fixtures/run-cli/probe-check-complete-v1.json",
+    ) as Record<string, any>;
+    fixture.event.completed_count = 0;
+    expect(validateValue("schemas/run-cli-probe-check-event-v1.schema.json", fixture)).toBe(false);
+  });
+
   it("rejects a v5 bridge protocol version", () => {
     const fixture = readJson(
       "fixtures/bridge/sync-request-v6.json",

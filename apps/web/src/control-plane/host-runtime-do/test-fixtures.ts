@@ -273,6 +273,7 @@ export function clientHello(
       supports_hard_cpu_quota: true,
       supports_landlock: true,
       supports_cgroup_v2: true,
+      supports_run_cli_v1: true,
     },
   };
   if (options && "lastAppliedDesiredVersion" in options) {
@@ -567,6 +568,7 @@ export function stateReport(
         supports_hard_cpu_quota: true,
         supports_landlock: true,
         supports_cgroup_v2: true,
+        supports_run_cli_v1: true,
       },
       cached_images: input.cachedImages ?? [],
       vms: input.vms ?? [],

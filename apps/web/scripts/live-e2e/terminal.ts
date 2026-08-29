@@ -126,12 +126,120 @@ export async function verifyRunContentGating(
   client: ApiClient,
   run: ScenarioRun,
 ): Promise<void> {
+  const initial = await verifyRunContentGatingBeforeCli(client, run);
+
+  const hintReveal = await client.json<RunResponse>(
+    `/api/scenarios/runs/${encodeURIComponent(run.id)}/hints/reveal`,
+    {
+      method: "POST",
+      json: { hintKey: initial.firstHint.key },
+    },
+  );
+  const revealedHint = hintReveal.run.hints.find(
+    (hint) => hint.key === initial.firstHint.key,
+  );
+  if (!revealedHint) {
+    throw new Error(`revealed hint ${initial.firstHint.key} missing from response`);
+  }
+  if (
+    !revealedHint.revealed ||
+    revealedHint.unlocked ||
+    !hasBody(revealedHint.title) ||
+    !hasBody(revealedHint.bodyMarkdown)
+  ) {
+    throw new Error(
+      `hint ${revealedHint.key} did not expose sealed content cleanly after reveal`,
+    );
+  }
+  for (const hint of hintReveal.run.hints) {
+    if (
+      hint.key !== revealedHint.key &&
+      (hint.title !== null || hint.bodyMarkdown !== null)
+    ) {
+      throw new Error(`hint ${hint.key} content was exposed out of order`);
+    }
+  }
+  const advancedHint = hintReveal.run.hints.find(
+    (hint) => hint.key === initial.skipAheadHint.key,
+  );
+  if (!advancedHint?.unlocked) {
+    throw new Error(
+      `revealing ${initial.firstHint.key} did not unlock ${initial.skipAheadHint.key}`,
+    );
+  }
+  for (const hint of hintReveal.run.hints) {
+    if (
+      hint.key === revealedHint.key ||
+      hint.key === initial.skipAheadHint.key
+    ) {
+      continue;
+    }
+    if (hint.unlocked !== initial.initialUnlockState.get(hint.key)) {
+      throw new Error(
+        `revealing ${initial.firstHint.key} changed an unrelated hint ladder at ${hint.key}`,
+      );
+    }
+  }
+
+  const solutionReveal = await client.json<RunResponse>(
+    `/api/scenarios/runs/${encodeURIComponent(run.id)}/solution/reveal`,
+    {
+      method: "POST",
+    },
+  );
+  if (!solutionReveal.run.solution.revealed) {
+    throw new Error("solution was not marked revealed after reveal request");
+  }
+  if (!hasBody(solutionReveal.run.solution.bodyMarkdown)) {
+    throw new Error("solution body was not exposed after reveal");
+  }
+  for (const payload of initial.preRevealPayloads) {
+    assertRawPayloadDoesNotContain(
+      payload.text,
+      solutionReveal.run.solution.bodyMarkdown,
+      payload.label,
+    );
+  }
+  if (initial.expectSolutionAssisted && !solutionReveal.run.solution.assisted) {
+    throw new Error(
+      "pre-solve solution reveal did not mark the run as assisted",
+    );
+  }
+
+  logStep(
+    `content gating verified: skip-ahead rejected, hint ${revealedHint.key} and solution reveal`,
+  );
+}
+
+/**
+ * Verify all browser-facing sealing before a native SSH CLI is allowed to make
+ * the real reveal calls. It intentionally performs only the rejected
+ * skip-ahead request, so CLI E2E can prove its own successful hint and
+ * solution mutations and then compare them with the browser API projection.
+ */
+export async function verifyRunContentGatingBeforeCli(
+  client: ApiClient,
+  run: ScenarioRun,
+): Promise<{
+  firstHint: ScenarioRun["hints"][number];
+  skipAheadHint: ScenarioRun["hints"][number];
+  initialUnlockState: Map<string, boolean>;
+  preRevealPayloads: Array<{ label: string; text: string }>;
+  expectSolutionAssisted: boolean;
+}> {
   if (run.hints.length === 0) {
     throw new Error("run has no authored hints to verify");
   }
 
-  const { first: firstHint, skipAhead: skipAheadHint } =
+  const { first, skipAhead } =
     selectSequentialHintPair(run.hints);
+  const firstHint = run.hints.find((hint) => hint.key === first.key);
+  const skipAheadHint = run.hints.find(
+    (hint) => hint.key === skipAhead.key,
+  );
+  if (!firstHint || !skipAheadHint) {
+    throw new Error("selected hint pair is not present in the run view");
+  }
   const initialUnlockState = new Map(
     run.hints.map((hint) => [hint.key, hint.unlocked]),
   );
@@ -200,83 +308,14 @@ export async function verifyRunContentGating(
       );
     }
   }
-
-  const hintReveal = await client.json<RunResponse>(
-    `/api/scenarios/runs/${encodeURIComponent(run.id)}/hints/reveal`,
-    {
-      method: "POST",
-      json: { hintKey: firstHint.key },
-    },
-  );
-  const revealedHint = hintReveal.run.hints.find(
-    (hint) => hint.key === firstHint.key,
-  );
-  if (!revealedHint) {
-    throw new Error(`revealed hint ${firstHint.key} missing from response`);
-  }
-  if (
-    !revealedHint.revealed ||
-    revealedHint.unlocked ||
-    !hasBody(revealedHint.title) ||
-    !hasBody(revealedHint.bodyMarkdown)
-  ) {
-    throw new Error(
-      `hint ${revealedHint.key} did not expose sealed content cleanly after reveal`,
-    );
-  }
-  for (const hint of hintReveal.run.hints) {
-    if (
-      hint.key !== revealedHint.key &&
-      (hint.title !== null || hint.bodyMarkdown !== null)
-    ) {
-      throw new Error(`hint ${hint.key} content was exposed out of order`);
-    }
-  }
-  const advancedHint = hintReveal.run.hints.find(
-    (hint) => hint.key === skipAheadHint.key,
-  );
-  if (!advancedHint?.unlocked) {
-    throw new Error(
-      `revealing ${firstHint.key} did not unlock ${skipAheadHint.key}`,
-    );
-  }
-  for (const hint of hintReveal.run.hints) {
-    if (hint.key === firstHint.key || hint.key === skipAheadHint.key) continue;
-    if (hint.unlocked !== initialUnlockState.get(hint.key)) {
-      throw new Error(
-        `revealing ${firstHint.key} changed an unrelated hint ladder at ${hint.key}`,
-      );
-    }
-  }
-
-  const solutionReveal = await client.json<RunResponse>(
-    `/api/scenarios/runs/${encodeURIComponent(run.id)}/solution/reveal`,
-    {
-      method: "POST",
-    },
-  );
-  if (!solutionReveal.run.solution.revealed) {
-    throw new Error("solution was not marked revealed after reveal request");
-  }
-  if (!hasBody(solutionReveal.run.solution.bodyMarkdown)) {
-    throw new Error("solution body was not exposed after reveal");
-  }
-  for (const payload of preRevealPayloads) {
-    assertRawPayloadDoesNotContain(
-      payload.text,
-      solutionReveal.run.solution.bodyMarkdown,
-      payload.label,
-    );
-  }
-  if (expectSolutionAssisted && !solutionReveal.run.solution.assisted) {
-    throw new Error(
-      "pre-solve solution reveal did not mark the run as assisted",
-    );
-  }
-
-  logStep(
-    `content gating verified: skip-ahead rejected, hint ${revealedHint.key} and solution reveal`,
-  );
+  logStep("content gating verified before native SSH CLI actions");
+  return {
+    firstHint,
+    skipAheadHint,
+    initialUnlockState,
+    preRevealPayloads,
+    expectSolutionAssisted,
+  };
 }
 
 export async function verifyTerminalSessions(

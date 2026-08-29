@@ -64,3 +64,17 @@ export function isFreshHostHeartbeat(
 ): boolean {
   return typeof value === "number" && nowUnixMs - value <= heartbeatTtlMs;
 }
+
+/**
+ * New learner KVM runs need the private run-CLI broker.  Absence is false so
+ * a pre-rollout inventory cannot be selected merely because its old schema
+ * omitted this capability.
+ */
+export function hostSupportsRunCliV1(
+  report:
+    | { capabilities?: { supports_run_cli_v1?: unknown } }
+    | null
+    | undefined,
+): boolean {
+  return report?.capabilities?.supports_run_cli_v1 === true;
+}

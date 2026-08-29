@@ -170,7 +170,7 @@ function sourceMeta(extra: Record<string, unknown> = {}) {
   return {
     rev: "source-revision",
     kino_version: "0.4.0",
-    build_format_version: "intar-image-build-v8",
+    build_format_version: "intar-image-build-v9",
     scenarios: [
       {
         scenario_id: "org-a-private",

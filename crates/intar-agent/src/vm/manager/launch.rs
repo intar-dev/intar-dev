@@ -915,6 +915,12 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
     start_probe_worker(inner, req.name, &details)
         .await
         .context("failed to start vm probe worker")?;
+    // Bind the private guest-to-host command broker before boot, alongside
+    // Kino's readiness listener. The broker refuses requests until this VM is
+    // durably Running, but a fast SSH guest can never race listener setup.
+    start_run_cli_broker(inner, req.name, &details)
+        .await
+        .context("failed to start vm run CLI broker")?;
 
     debug!("calling cloud-hypervisor vm.boot");
     ch.vm_boot()
