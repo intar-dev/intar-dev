@@ -513,24 +513,30 @@ mod tests {
         .expect("slow probe starts");
         drop(first);
 
-        let mut second = UnixStream::connect(&socket_path)
-            .await
-            .expect("connect second");
         let fast_request = RunCliProbeCheckRequestV1 {
             protocol_version: RUN_CLI_PROTOCOL_VERSION,
             request_id: "fast-request".to_owned(),
             probe_ids: vec!["fast".to_owned()],
         };
-        write_message(&mut second, &fast_request)
-            .await
-            .expect("write fast request");
-        let event = tokio::time::timeout(
-            Duration::from_millis(500),
-            read_message::<RunCliProbeCheckEventV1, _>(&mut second),
-        )
+        // EOF detection and a new accept can race by one scheduler turn. A
+        // busy retry must become available well before the cancelled two-
+        // second probe could finish on its own.
+        let (mut second, event) = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let mut candidate = UnixStream::connect(&socket_path)
+                    .await
+                    .expect("connect retry");
+                if write_message(&mut candidate, &fast_request).await.is_ok()
+                    && let Ok(event) =
+                        read_message::<RunCliProbeCheckEventV1, _>(&mut candidate).await
+                {
+                    break (candidate, event);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .expect("fast request is not blocked by disconnected slow request")
-        .expect("read fast event");
+        .expect("fast request is not blocked by disconnected slow request");
         match event.event {
             RunCliProbeCheckEventKindV1::Probe { check } => {
                 assert_eq!(check.probe_id, "fast");
