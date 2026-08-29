@@ -41,6 +41,12 @@ kino record-command --config /etc/kino/kino.hcl --command 'cat /etc/os-release'
 
 Probe configs support `file_exists`, `file_regex_capture`, `port_open`, `service`, `k8s_pod_state`, and `command_json_path`. Recorder output is written to `recording.output_dir`.
 
+Kino is also the guest's multicall learner CLI. Images install
+`/usr/local/bin/intar` as a symlink to Kino. That command provides status,
+fresh checks, layered hints, released solutions, and Bash completion through
+the private run broker. It is non-interactive, never reads stdin, and exposes
+no JSON output.
+
 ## License
 
 [MIT](../../LICENSE)
