@@ -47,6 +47,10 @@ fresh checks, layered hints, released solutions, and Bash completion through
 the private run broker. It is non-interactive, never reads stdin, and exposes
 no JSON output.
 
+Bash completes command words locally. Dynamic hint completion reads only
+sorted public aliases from a generation-fenced broker cache, never a full run
+view, and fails silently behind a hard 250 ms deadline.
+
 ```text
 intar
 intar status
