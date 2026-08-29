@@ -42,6 +42,8 @@ impl VmManager {
             probe_tasks: Mutex::new(BTreeMap::new()),
             kino_readiness_tx,
             probe_updates_tx,
+            run_cli_access_token: Mutex::new(RunCliAccessTokenCache::default()),
+            run_cli_access_token_refresh: Mutex::new(()),
             run_cli_broker_tasks: Mutex::new(BTreeMap::new()),
             terminal_tasks: Mutex::new(BTreeMap::new()),
             terminal_state_fingerprints: Mutex::new(BTreeMap::new()),
@@ -87,6 +89,24 @@ impl VmManager {
 
     pub fn request_inventory_update(&self) {
         publish_inventory_update(&self.inner);
+    }
+
+    /// Reuse the already-minted bridge bearer for the private run CLI path.
+    /// The token remains only in root-owned agent memory and is never sent to
+    /// a guest, persisted, or included in a debug representation.
+    pub(crate) async fn cache_run_cli_access_token(&self, access_token: &str) {
+        if access_token.is_empty() {
+            return;
+        }
+        self.inner
+            .run_cli_access_token
+            .lock()
+            .await
+            .replace(access_token.to_owned(), Instant::now());
+    }
+
+    pub(crate) async fn clear_run_cli_access_token(&self) {
+        self.inner.run_cli_access_token.lock().await.clear();
     }
 
     /// Project terminal state from the generation-fenced inventory without a

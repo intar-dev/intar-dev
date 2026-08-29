@@ -16,6 +16,13 @@ const RUN_CLI_HOST_PORT: u32 = 18_082;
 const RUN_CLI_READ_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const RUN_CLI_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
+const RUN_CLI_ACCESS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, thiserror::Error)]
+#[error("control-plane rejected agent authentication")]
+struct RunCliAuthenticationRejected;
 
 /// Cloud Hypervisor's hybrid vsock transport forwards a guest connection to
 /// host CID 2, port [`RUN_CLI_HOST_PORT`] to this Unix socket. The socket is
@@ -193,9 +200,24 @@ async fn handle_run_cli_connection(
         run_cli_request_is_current(inner, vm_name, run_id, jail_generation).await,
         "guest run CLI request belongs to a stale VM generation"
     );
-    let response = forward_run_cli_request(inner, vm_name, run_id, jail_generation, &request)
-        .await
-        .context("forward guest run CLI request")?;
+    let response = if matches!(
+        &request.action,
+        intar_contracts::run_cli::RunCliActionV1::Status
+    ) {
+        tokio::select! {
+            response = forward_run_cli_request(inner, vm_name, run_id, jail_generation, &request) => {
+                response.context("forward guest run CLI request")?
+            }
+            peer = wait_for_run_cli_peer_close(&stream) => {
+                peer?;
+                return Ok(());
+            }
+        }
+    } else {
+        forward_run_cli_request(inner, vm_name, run_id, jail_generation, &request)
+            .await
+            .context("forward guest run CLI request")?
+    };
     anyhow::ensure!(
         run_cli_request_is_current(inner, vm_name, run_id, jail_generation).await,
         "guest run CLI response belongs to a stale VM generation"
@@ -221,6 +243,29 @@ async fn handle_run_cli_connection(
     .await
     .context("guest run CLI response write timed out")??;
     Ok(())
+}
+
+/// A Status request is read-only, and the client sends no more bytes after its
+/// one request frame. Completion kills its client at the 250 ms deadline, so
+/// observe EOF while the remote request is in flight and drop that work before
+/// the serialized broker accepts the next Tab press.
+#[cfg(any(target_os = "linux", test))]
+async fn wait_for_run_cli_peer_close(stream: &tokio::net::UnixStream) -> Result<()> {
+    use std::io::ErrorKind;
+
+    let mut byte = [0_u8; 1];
+    loop {
+        stream
+            .readable()
+            .await
+            .context("wait for run CLI peer close")?;
+        match stream.try_read(&mut byte) {
+            Ok(0) => return Ok(()),
+            Ok(_) => anyhow::bail!("run CLI client sent unexpected extra data"),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error).context("read run CLI peer close"),
+        }
+    }
 }
 
 /// `None` means the peer disconnected before completing a request frame.
@@ -264,11 +309,11 @@ async fn forward_run_cli_request(
     jail_generation: &str,
     request: &RunCliRequestV1,
 ) -> Result<RunCliResponseV1> {
-    // Mint a short-lived credential for this request. It is deliberately not
-    // cached in the VM, the listener task, or a log field.
-    let access_token = bootstrap_agent_access_token(&inner.bridge, &inner.http)
-        .await
-        .context("obtain fresh agent access for run CLI")?;
+    // The bridge already mints a short-lived bearer before a host can become
+    // schedulable. Reuse it from root-owned memory so completion needs only
+    // one control-plane round trip and can stay inside its 250 ms budget. A
+    // disconnected or long-lived agent refreshes the cache on demand.
+    let access_token = run_cli_access_token(inner).await?;
     anyhow::ensure!(
         run_cli_request_is_current(inner, vm_name, run_id, jail_generation).await,
         "guest run CLI request became stale before control-plane dispatch"
@@ -277,7 +322,64 @@ async fn forward_run_cli_request(
     let run_id_segment = encode_url_path_segment(run_id);
     let vm_name_segment = encode_url_path_segment(vm_name);
     let url = run_cli_control_url(&inner.bridge.base_url, &run_id_segment, &vm_name_segment);
-    post_run_cli_request(&inner.http, &url, jail_generation, &access_token, request).await
+    match post_run_cli_request(&inner.http, &url, jail_generation, &access_token, request).await {
+        Ok(response) => Ok(response),
+        Err(error)
+            if error
+                .downcast_ref::<RunCliAuthenticationRejected>()
+                .is_some() =>
+        {
+            inner
+                .run_cli_access_token
+                .lock()
+                .await
+                .invalidate_if(&access_token);
+            let refreshed_access_token = run_cli_access_token(inner).await?;
+            anyhow::ensure!(
+                run_cli_request_is_current(inner, vm_name, run_id, jail_generation).await,
+                "guest run CLI request became stale before authenticated retry"
+            );
+            post_run_cli_request(
+                &inner.http,
+                &url,
+                jail_generation,
+                &refreshed_access_token,
+                request,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn run_cli_access_token(inner: &Inner) -> Result<String> {
+    if let Some(access_token) = inner.run_cli_access_token.lock().await.get(Instant::now()) {
+        return Ok(access_token);
+    }
+
+    let _refresh = inner.run_cli_access_token_refresh.lock().await;
+    if let Some(access_token) = inner.run_cli_access_token.lock().await.get(Instant::now()) {
+        return Ok(access_token);
+    }
+
+    let access_token = timeout(
+        RUN_CLI_ACCESS_REFRESH_TIMEOUT,
+        bootstrap_agent_access_token(&inner.bridge, &inner.http),
+    )
+    .await
+    .context("agent access refresh for run CLI timed out")?
+    .context("obtain fresh agent access for run CLI")?;
+    anyhow::ensure!(
+        !access_token.is_empty(),
+        "agent bootstrap returned an empty token"
+    );
+    inner
+        .run_cli_access_token
+        .lock()
+        .await
+        .replace(access_token.clone(), Instant::now());
+    Ok(access_token)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -308,6 +410,9 @@ async fn post_run_cli_request(
         .await
         .with_context(|| format!("submit run CLI request to {display_url}"))?;
     let status = response.status();
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(RunCliAuthenticationRejected.into());
+    }
 
     if let Some(content_length) = response.content_length() {
         anyhow::ensure!(
@@ -421,6 +526,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn run_cli_access_token_cache_is_short_lived_and_redacted() {
+        let now = Instant::now();
+        let secret = "agent-run-cli-secret";
+        let mut cache = RunCliAccessTokenCache::default();
+
+        assert!(cache.get(now).is_none());
+        cache.replace(secret.to_owned(), now);
+        assert_eq!(cache.get(now).as_deref(), Some(secret));
+        cache.invalidate_if("different-token");
+        assert_eq!(cache.get(now).as_deref(), Some(secret));
+        cache.invalidate_if(secret);
+        assert!(cache.get(now).is_none());
+        cache.replace(secret.to_owned(), now);
+        cache.clear();
+        assert!(cache.get(now).is_none());
+        cache.replace(secret.to_owned(), now);
+        assert!(cache.get(now + RUN_CLI_ACCESS_TOKEN_CACHE_TTL).is_none());
+
+        let debug = format!("{cache:?}");
+        assert!(debug.contains("populated: true"));
+        assert!(!debug.contains(secret));
+    }
+
     async fn read_complete_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         use tokio::io::AsyncReadExt as _;
 
@@ -513,6 +642,26 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disconnected_status_client_cancels_slow_forward_work() {
+        let (client, server) = tokio::net::UnixStream::pair().expect("create Unix stream pair");
+        let slow_forward = tokio::time::sleep(Duration::from_secs(30));
+        tokio::pin!(slow_forward);
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                () = &mut slow_forward => panic!("slow forward must be cancelled first"),
+                result = wait_for_run_cli_peer_close(&server) => {
+                    result.expect("peer EOF is a clean cancellation");
+                }
+            }
+        })
+        .await
+        .expect("peer cancellation must not wait for slow forward work");
+    }
+
     #[tokio::test]
     async fn rejected_control_plane_response_never_echoes_the_agent_token() {
         use tokio::io::AsyncWriteExt as _;
@@ -559,6 +708,43 @@ mod tests {
         assert!(
             !error.to_string().contains(secret),
             "agent credentials must not appear in run CLI errors"
+        );
+        server.await.expect("run CLI test server task");
+    }
+
+    #[tokio::test]
+    async fn unauthorized_control_plane_response_is_classified_for_token_refresh() {
+        use tokio::io::AsyncWriteExt as _;
+
+        crate::tls_provider::ensure_ring_provider().expect("install test TLS provider");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind run CLI test server");
+        let address = listener.local_addr().expect("read test server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept run CLI request");
+            let _ = read_complete_http_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write unauthorized response");
+        });
+
+        let error = post_run_cli_request(
+            &HttpClient::new(),
+            &format!("http://{address}/agent/runs/run-1/vms/vm-1/cli"),
+            "generation-1",
+            "stale-agent-token",
+            &request(),
+        )
+        .await
+        .expect_err("unauthorized response must request a token refresh");
+        assert!(
+            error
+                .downcast_ref::<RunCliAuthenticationRejected>()
+                .is_some()
         );
         server.await.expect("run CLI test server task");
     }

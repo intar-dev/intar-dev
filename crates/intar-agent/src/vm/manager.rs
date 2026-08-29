@@ -595,6 +595,9 @@ struct Inner {
     /// control plane only after the ready boundary is durably committed.
     kino_readiness_tx: broadcast::Sender<ProbeUpdateEnvelope>,
     probe_updates_tx: broadcast::Sender<ProbeUpdateEnvelope>,
+    run_cli_access_token: Mutex<RunCliAccessTokenCache>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    run_cli_access_token_refresh: Mutex<()>,
     run_cli_broker_tasks: Mutex<BTreeMap<String, VmRunCliBrokerTask>>,
     terminal_tasks: Mutex<BTreeMap<String, VmTerminalTask>>,
     terminal_state_fingerprints: Mutex<BTreeMap<String, String>>,
@@ -618,6 +621,60 @@ struct Inner {
     /// A permit is retained when the archive worker is between waits, so a
     /// durable queue insertion never has to wait for the ten-second sweep.
     archive_jobs_notify: Notify,
+}
+
+const RUN_CLI_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(90);
+
+#[derive(Default)]
+struct RunCliAccessTokenCache {
+    current: Option<CachedRunCliAccessToken>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct CachedRunCliAccessToken {
+    value: String,
+    valid_until: Instant,
+}
+
+impl std::fmt::Debug for RunCliAccessTokenCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunCliAccessTokenCache")
+            .field("populated", &self.current.is_some())
+            .finish()
+    }
+}
+
+impl RunCliAccessTokenCache {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn get(&self, now: Instant) -> Option<String> {
+        self.current
+            .as_ref()
+            .filter(|cached| now < cached.valid_until)
+            .map(|cached| cached.value.clone())
+    }
+
+    fn replace(&mut self, value: String, now: Instant) {
+        self.current = Some(CachedRunCliAccessToken {
+            value,
+            valid_until: now + RUN_CLI_ACCESS_TOKEN_CACHE_TTL,
+        });
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn invalidate_if(&mut self, value: &str) {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|cached| cached.value == value)
+        {
+            self.current = None;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.current = None;
+    }
 }
 
 mod api;

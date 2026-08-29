@@ -48,6 +48,8 @@ const RETRY_MIN_MS: u64 = 1_000;
 const RETRY_MAX_MS: u64 = 30_000;
 const SERVER_HELLO_TIMEOUT_SECS: u64 = 10;
 const STATE_REPORT_INTERVAL_SECS: u64 = 20;
+const RUN_CLI_ACCESS_REFRESH_INTERVAL_SECS: u64 = 60;
+const RUN_CLI_ACCESS_REFRESH_TIMEOUT_SECS: u64 = 5;
 const INVENTORY_REPORT_JAILER_BUDGET_MS: u64 = 50;
 const OUTBOUND_SEND_BUDGET_MS: u64 = 25;
 #[cfg(test)]
@@ -167,6 +169,7 @@ async fn connect_once(
     reconnect: bool,
 ) -> Result<()> {
     let bootstrap = bootstrap_agent_access(cfg, http).await?;
+    vm.cache_run_cli_access_token(&bootstrap.access_token).await;
     let ws_url = bootstrap
         .ws_url
         .unwrap_or_else(|| default_ws_url(&cfg.base_url, &cfg.host_id));
@@ -290,6 +293,11 @@ async fn connect_once(
         let mut state_report_interval = interval(Duration::from_secs(STATE_REPORT_INTERVAL_SECS));
         state_report_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         state_report_interval.tick().await;
+        let mut run_cli_access_refresh = interval(Duration::from_secs(
+            RUN_CLI_ACCESS_REFRESH_INTERVAL_SECS,
+        ));
+        run_cli_access_refresh.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        run_cli_access_refresh.tick().await;
         loop {
             tokio::select! {
                 inbound = read.next() => {
@@ -315,6 +323,24 @@ async fn connect_once(
                         current_desired_state.as_ref(),
                     )
                     .await?;
+                }
+                _ = run_cli_access_refresh.tick() => {
+                    match timeout(
+                        Duration::from_secs(RUN_CLI_ACCESS_REFRESH_TIMEOUT_SECS),
+                        bootstrap_agent_access(cfg, http),
+                    ).await {
+                        Ok(Ok(access)) => {
+                            vm.cache_run_cli_access_token(&access.access_token).await;
+                        }
+                        Ok(Err(error)) => {
+                            vm.clear_run_cli_access_token().await;
+                            warn!(error = %error, "run CLI access refresh failed; cleared the cached run CLI token");
+                        }
+                        Err(_) => {
+                            vm.clear_run_cli_access_token().await;
+                            warn!("run CLI access refresh timed out; cleared the cached run CLI token");
+                        }
+                    }
                 }
                 update = probe_updates.recv() => {
                     match update {
