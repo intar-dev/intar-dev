@@ -284,7 +284,7 @@ mod tests {
                 output.target_arch,
                 hash
             );
-            assert_eq!(output.kino_version.as_deref(), Some("0.2.4"));
+            assert_eq!(output.kino_version.as_deref(), Some("0.2.5"));
             checked += 1;
         }
         assert!(checked > 0, "expected at least one repo scenario");
