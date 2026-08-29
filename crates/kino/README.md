@@ -47,6 +47,17 @@ fresh checks, layered hints, released solutions, and Bash completion through
 the private run broker. It is non-interactive, never reads stdin, and exposes
 no JSON output.
 
+```text
+intar
+intar status
+intar check
+intar hints
+intar hint <alias>
+intar solution
+intar solution reveal
+intar help
+```
+
 ## License
 
 [MIT](../../LICENSE)
