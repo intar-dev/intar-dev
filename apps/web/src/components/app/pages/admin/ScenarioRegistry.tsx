@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
@@ -16,6 +16,7 @@ import {
 import { Section } from "@/components/app/patterns/Section";
 import {
   MetaDifficulty,
+  MetaLine,
   SCENARIO_DIFFICULTIES,
   type ScenarioDifficulty,
 } from "@/components/app/patterns/MetaLine";
@@ -204,20 +205,20 @@ export function ScenarioRegistry() {
         />
       ) : (
         <div className="space-y-4">
-          <dl className="grid gap-4 border-y py-4 sm:grid-cols-3">
-            <div>
-              <dt className="text-label">Registry</dt>
+          <dl className="grid grid-cols-3 gap-3 border-y py-4 sm:gap-4">
+            <div className="min-w-0">
+              <dt className="text-label">Total scenarios</dt>
               <dd className="mt-1 text-section-title tabular-nums">
                 {scenarioList.length}
               </dd>
             </div>
-            <div>
+            <div className="min-w-0">
               <dt className="text-label">Enabled for learners</dt>
               <dd className="mt-1 text-section-title text-success tabular-nums">
                 {enabledCount}
               </dd>
             </div>
-            <div>
+            <div className="min-w-0">
               <dt className="text-label">Unavailable</dt>
               <dd className="mt-1 text-section-title tabular-nums">
                 {scenarioList.length - enabledCount}
@@ -411,94 +412,91 @@ function ScenarioRegistryRow({
         : "No build";
 
   return (
-    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 xl:grid-cols-[minmax(13rem,1fr)_minmax(20rem,1.4fr)_minmax(16rem,0.9fr)_auto] xl:items-center">
-      <div className="min-w-0 space-y-1">
+    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+      <div className="min-w-0 space-y-3">
         <h3>
           <Link
             to="/admin/scenarios/$scenarioId"
             params={{ scenarioId: scenario.scenarioId }}
-            className="inline-flex min-h-11 items-center text-sm font-semibold hover:underline"
+            className="inline-flex min-h-11 items-center text-sm font-semibold hover:underline sm:min-h-9"
           >
             {scenario.title}
           </Link>
         </h3>
-        <p className="truncate font-mono text-xs text-muted-foreground">
-          {scenario.scenarioId}
-        </p>
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          <MetaDifficulty
-            difficulty={scenario.difficulty}
-            className="text-xs text-muted-foreground"
+        <MetaLine
+          items={[
+            scenario.scenarioId,
+            <MetaDifficulty
+              key="difficulty"
+              difficulty={scenario.difficulty}
+            />,
+            scenario.category,
+            scenario.tags.length ? scenario.tags.join(", ") : null,
+          ]}
+        />
+
+        <dl
+          className="grid grid-cols-2 gap-x-4 gap-y-3 border-t pt-3 text-sm lg:grid-cols-4 lg:gap-x-6"
+          aria-label={`${scenario.title} details`}
+        >
+          <RegistryFact
+            label="Availability"
+            value={scenario.enabled ? "Enabled for learners" : "Unavailable"}
+            tone={scenario.enabled ? "success" : "muted"}
           />
-          <span className="text-sm">{scenario.category}</span>
-        </div>
-        {scenario.tags.length ? (
-          <p className="truncate text-metadata">{scenario.tags.join(", ")}</p>
-        ) : null}
+          <RegistryFact
+            label="Source"
+            value={sourceValue}
+            tone={
+              sourceLoading || sourceUnavailable
+                ? "muted"
+                : source?.status === "draft"
+                  ? "warning"
+                  : "default"
+            }
+          />
+          <RegistryFact
+            label="Latest build"
+            value={buildValue}
+            tone={buildTone(
+              latestBuild?.status,
+              buildLoading || buildUnavailable,
+            )}
+          />
+          <RegistryFact
+            label="Updated"
+            value={formatRelativeTime(scenario.updatedAt)}
+            tone="muted"
+          />
+          <RegistryFact
+            label="Inventory"
+            value={`${scenario.vmCount} VM · ${scenario.probeCount} probes`}
+          />
+          <RegistryFact
+            label="Guidance"
+            value={`${scenario.scenarioHintCount} hints · ~${scenario.estimatedMinutes} min`}
+          />
+          <RegistryFact
+            className="col-span-2"
+            label="Resources"
+            value={
+              <span className="flex flex-wrap gap-x-3 gap-y-1 tabular-nums">
+                {formatScenarioResourceItems(scenario.requiredResources).map(
+                  (resource) => (
+                    <span key={resource}>{resource}</span>
+                  ),
+                )}
+              </span>
+            }
+          />
+        </dl>
       </div>
 
-      <dl
-        className="grid grid-cols-3 gap-3 border-y py-3 text-sm xl:border-y-0 xl:py-0"
-        aria-label={`${scenario.title} status`}
-      >
-        <StatusDefinition
-          label="Availability"
-          value={scenario.enabled ? "Enabled for learners" : "Unavailable"}
-          tone={scenario.enabled ? "success" : "muted"}
-        />
-        <StatusDefinition
-          label="Source"
-          value={sourceValue}
-          tone={
-            sourceLoading || sourceUnavailable
-              ? "muted"
-              : source?.status === "draft"
-                ? "warning"
-                : "default"
-          }
-        />
-        <StatusDefinition
-          label="Latest build"
-          value={buildValue}
-          tone={buildTone(
-            latestBuild?.status,
-            buildLoading || buildUnavailable,
-          )}
-        />
-      </dl>
-
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-        <div>
-          <dt className="text-label">Inventory</dt>
-          <dd className="mt-0.5 tabular-nums">
-            {scenario.vmCount} VM · {scenario.probeCount} probes
-          </dd>
-        </div>
-        <div>
-          <dt className="text-label">Guidance</dt>
-          <dd className="mt-0.5 tabular-nums">
-            {scenario.scenarioHintCount} hints · ~{scenario.estimatedMinutes}{" "}
-            min
-          </dd>
-        </div>
-        <div className="col-span-2">
-          <dt className="text-label">Resources</dt>
-          <dd className="mt-0.5 tabular-nums">
-            {formatScenarioResources(scenario.requiredResources)}
-          </dd>
-        </div>
-        <div className="col-span-2">
-          <dt className="text-label">Updated</dt>
-          <dd className="mt-0.5 text-metadata">
-            {formatRelativeTime(scenario.updatedAt)}
-          </dd>
-        </div>
-      </dl>
-
-      <div className="flex shrink-0 flex-wrap items-center gap-2 xl:flex-col xl:items-stretch">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 lg:flex-col lg:items-stretch">
         <Button
           size="sm"
           variant="outline"
+          className="min-h-11 lg:min-h-9 lg:w-full"
           disabled={disabled}
           onClick={onToggle}
         >
@@ -516,6 +514,7 @@ function ScenarioRegistryRow({
         <Button
           size="sm"
           variant="ghost"
+          className="min-h-11 lg:min-h-9 lg:w-full"
           render={
             <Link
               to="/admin/scenarios/$scenarioId"
@@ -531,15 +530,15 @@ function ScenarioRegistryRow({
   );
 }
 
-export function formatScenarioResources(
+export function formatScenarioResourceItems(
   resources: AdminScenarioSummary["requiredResources"],
-): string {
+): string[] {
   return [
     `${formatCpu(resources.cpuMillis)} CPU`,
     `${resources.vcpuCount.toLocaleString()} vCPU`,
     formatMibResource(resources.memoryMib, "RAM"),
     formatMibResource(resources.diskMib, "disk"),
-  ].join(" · ");
+  ];
 }
 
 function formatCpu(cpuMillis: number): string {
@@ -565,19 +564,21 @@ const BUILD_STATUS_LABELS: Record<ScenarioBuildStatus, string> = {
   stale: "Stale",
 };
 
-type StatusTone = "default" | "muted" | "success" | "warning" | "error";
+type FactTone = "default" | "muted" | "success" | "warning" | "error";
 
-function StatusDefinition({
+function RegistryFact({
   label,
   value,
   tone,
+  className,
 }: {
   label: string;
-  value: string;
-  tone: StatusTone;
+  value: ReactNode;
+  tone?: FactTone;
+  className?: string;
 }) {
   return (
-    <div className="min-w-0">
+    <div className={cn("min-w-0", className)}>
       <dt className="text-label">{label}</dt>
       <dd
         className={cn(
@@ -597,7 +598,7 @@ function StatusDefinition({
 function buildTone(
   status: ScenarioBuildStatus | undefined,
   unavailable: boolean,
-): StatusTone {
+): FactTone {
   if (unavailable || !status) return "muted";
   if (status === "succeeded") return "success";
   if (status === "failed") return "error";
