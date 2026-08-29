@@ -1,9 +1,11 @@
 use super::*;
 
+#[cfg(test)]
+use intar_contracts::run_cli::RUN_CLI_PROTOCOL_VERSION;
 #[cfg(any(target_os = "linux", test))]
 use intar_contracts::run_cli::{
-    RUN_CLI_FRAME_HEADER_BYTES, RUN_CLI_MAX_FRAME_BYTES, RUN_CLI_PROTOCOL_VERSION, RunCliRequestV1,
-    RunCliResponseV1, RunCliResultV1, run_cli_frame_payload_len,
+    RUN_CLI_FRAME_HEADER_BYTES, RUN_CLI_MAX_FRAME_BYTES, RunCliRequestV1, RunCliResponseV1,
+    RunCliResultV1, run_cli_frame_payload_len,
 };
 #[cfg(target_os = "linux")]
 use intar_contracts::run_cli::{decode_run_cli_frame, encode_run_cli_frame};
@@ -74,7 +76,7 @@ pub(super) async fn start_run_cli_broker(
         });
         let mut tasks = inner.run_cli_broker_tasks.lock().await;
         tasks.insert(vm_name.to_string(), VmRunCliBrokerTask { join });
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
