@@ -125,6 +125,21 @@ impl RunCliCompletionCache {
 #[cfg(target_os = "linux")]
 type CompletionCache = Arc<std::sync::RwLock<RunCliCompletionCache>>;
 
+/// State shared by every one-shot connection for a single VM generation.
+/// Keeping it in one owned value makes the listener's concurrency boundaries
+/// explicit and prevents a growing positional parameter list.
+#[cfg(target_os = "linux")]
+struct RunCliBrokerContext {
+    inner: Arc<Inner>,
+    vm_name: String,
+    run_id: String,
+    jail_generation: String,
+    completion_cache: CompletionCache,
+    normal_action_mutex: Arc<Mutex<()>>,
+    normal_action_slots: Arc<Semaphore>,
+    completion_response_slots: Arc<Semaphore>,
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn completion_aliases_from_view(view: &RunCliViewV1) -> Vec<String> {
     normalize_completion_aliases(
@@ -311,21 +326,20 @@ async fn run_run_cli_broker_task(
     let read_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_RUN_CLI_CONNECTIONS));
     let normal_action_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_NORMAL_RUN_CLI_ACTIONS));
     let completion_response_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_COMPLETION_RESPONSES));
+    let context = Arc::new(RunCliBrokerContext {
+        inner: Arc::clone(&inner),
+        vm_name: vm_name.clone(),
+        run_id: run_id.clone(),
+        jail_generation: jail_generation.clone(),
+        completion_cache,
+        normal_action_mutex,
+        normal_action_slots,
+        completion_response_slots,
+    });
     let mut request_tasks = JoinSet::new();
-    let refresh_inner = Arc::clone(&inner);
-    let refresh_vm_name = vm_name.clone();
-    let refresh_run_id = run_id.clone();
-    let refresh_generation = jail_generation.clone();
-    let refresh_cache = Arc::clone(&completion_cache);
+    let refresh_context = Arc::clone(&context);
     request_tasks.spawn(async move {
-        run_completion_cache_refresher(
-            refresh_inner,
-            refresh_vm_name,
-            refresh_run_id,
-            refresh_generation,
-            refresh_cache,
-        )
-        .await;
+        run_completion_cache_refresher(refresh_context).await;
     });
 
     let mut liveness = tokio::time::interval(Duration::from_secs(PROBE_POLL_INTERVAL_SECONDS));
@@ -342,29 +356,14 @@ async fn run_run_cli_broker_task(
                             drop(stream);
                             continue;
                         };
-                        let connection_inner = Arc::clone(&inner);
-                        let connection_vm_name = vm_name.clone();
-                        let connection_run_id = run_id.clone();
-                        let connection_generation = jail_generation.clone();
-                        let connection_cache = Arc::clone(&completion_cache);
-                        let connection_normal_action_mutex = Arc::clone(&normal_action_mutex);
-                        let connection_normal_action_slots = Arc::clone(&normal_action_slots);
-                        let connection_completion_response_slots =
-                            Arc::clone(&completion_response_slots);
+                        let connection_context = Arc::clone(&context);
                         request_tasks.spawn(async move {
                             if let Err(error) = handle_run_cli_connection(
-                                &connection_inner,
-                                &connection_vm_name,
-                                &connection_run_id,
-                                &connection_generation,
-                                &connection_cache,
-                                &connection_normal_action_mutex,
-                                &connection_normal_action_slots,
-                                &connection_completion_response_slots,
+                                &connection_context,
                                 read_permit,
                                 stream,
                             ).await {
-                                debug!(error = %error, vm = connection_vm_name, "guest run CLI request ended without a response");
+                                debug!(error = %error, vm = connection_context.vm_name, "guest run CLI request ended without a response");
                             }
                         });
                     }
@@ -398,14 +397,7 @@ async fn run_run_cli_broker_task(
 
 #[cfg(target_os = "linux")]
 async fn handle_run_cli_connection(
-    inner: &Inner,
-    vm_name: &str,
-    run_id: &str,
-    jail_generation: &str,
-    completion_cache: &CompletionCache,
-    normal_action_mutex: &Arc<Mutex<()>>,
-    normal_action_slots: &Arc<Semaphore>,
-    completion_response_slots: &Arc<Semaphore>,
+    context: &RunCliBrokerContext,
     read_permit: tokio::sync::OwnedSemaphorePermit,
     mut stream: tokio::net::UnixStream,
 ) -> Result<()> {
@@ -425,13 +417,19 @@ async fn handle_run_cli_connection(
     drop(read_permit);
 
     anyhow::ensure!(
-        run_cli_request_is_current(inner, vm_name, run_id, jail_generation).await,
+        run_cli_request_is_current(
+            &context.inner,
+            &context.vm_name,
+            &context.run_id,
+            &context.jail_generation,
+        )
+        .await,
         "guest run CLI request belongs to a stale VM generation"
     );
 
     if matches!(&request.action, RunCliActionV1::Completion) {
         let Ok(_completion_response_slot) =
-            Arc::clone(completion_response_slots).try_acquire_owned()
+            Arc::clone(&context.completion_response_slots).try_acquire_owned()
         else {
             // A blocked learner output pipe must not turn completion into an
             // unbounded task queue. The shell treats this silent miss as no
@@ -445,14 +443,20 @@ async fn handle_run_cli_connection(
             protocol_version: RUN_CLI_PROTOCOL_VERSION,
             request_id: request.request_id.clone(),
             result: RunCliResultV1::Completion {
-                aliases: cached_completion_aliases(completion_cache),
+                aliases: cached_completion_aliases(&context.completion_cache),
             },
         };
         response
             .validate_for_action(&request.action)
             .context("validate local completion response")?;
         anyhow::ensure!(
-            run_cli_request_is_current(inner, vm_name, run_id, jail_generation).await,
+            run_cli_request_is_current(
+                &context.inner,
+                &context.vm_name,
+                &context.run_id,
+                &context.jail_generation,
+            )
+            .await,
             "guest run CLI completion response belongs to a stale VM generation"
         );
         return write_run_cli_response(&mut stream, &response).await;
@@ -461,12 +465,13 @@ async fn handle_run_cli_connection(
     // Preserve the regular action ordering used by the original serialized
     // listener. This guard begins after decoding, so a Completion request is
     // never queued behind a remote action or a state-changing mutation.
-    let Ok(_normal_action_slot) = Arc::clone(normal_action_slots).try_acquire_owned() else {
+    let Ok(_normal_action_slot) = Arc::clone(&context.normal_action_slots).try_acquire_owned()
+    else {
         // Do not create a guest-controlled normal-action queue. Completion is
         // not in this lane and remains available while it is saturated.
         return Ok(());
     };
-    let _normal_action = normal_action_mutex.lock().await;
+    let _normal_action = context.normal_action_mutex.lock().await;
     if matches!(
         &request.action,
         RunCliActionV1::HintReveal { .. }
@@ -476,11 +481,17 @@ async fn handle_run_cli_connection(
         // A state-changing command can change which aliases are ready. Clear
         // before dispatch so the old projection cannot be served while the
         // control plane applies the mutation.
-        clear_completion_cache(completion_cache);
+        clear_completion_cache(&context.completion_cache);
     }
     let response = if matches!(&request.action, RunCliActionV1::Status) {
         tokio::select! {
-            response = forward_run_cli_request(inner, vm_name, run_id, jail_generation, &request) => {
+            response = forward_run_cli_request(
+                &context.inner,
+                &context.vm_name,
+                &context.run_id,
+                &context.jail_generation,
+                &request,
+            ) => {
                 response.context("forward guest run CLI request")?
             }
             peer = wait_for_run_cli_peer_close(&stream) => {
@@ -489,12 +500,24 @@ async fn handle_run_cli_connection(
             }
         }
     } else {
-        forward_run_cli_request(inner, vm_name, run_id, jail_generation, &request)
-            .await
-            .context("forward guest run CLI request")?
+        forward_run_cli_request(
+            &context.inner,
+            &context.vm_name,
+            &context.run_id,
+            &context.jail_generation,
+            &request,
+        )
+        .await
+        .context("forward guest run CLI request")?
     };
     anyhow::ensure!(
-        run_cli_request_is_current(inner, vm_name, run_id, jail_generation).await,
+        run_cli_request_is_current(
+            &context.inner,
+            &context.vm_name,
+            &context.run_id,
+            &context.jail_generation,
+        )
+        .await,
         "guest run CLI response belongs to a stale VM generation"
     );
     response
@@ -506,8 +529,8 @@ async fn handle_run_cli_connection(
     );
 
     match &response.result {
-        RunCliResultV1::Ok { view } => cache_completion_view(completion_cache, view),
-        RunCliResultV1::Error { .. } => clear_completion_cache(completion_cache),
+        RunCliResultV1::Ok { view } => cache_completion_view(&context.completion_cache, view),
+        RunCliResultV1::Error { .. } => clear_completion_cache(&context.completion_cache),
         RunCliResultV1::Completion { .. } => {
             anyhow::bail!("control-plane returned a completion result for a normal CLI action")
         }
@@ -541,23 +564,31 @@ async fn write_run_cli_response(
 /// explicit alias-only Completion action; this path must never receive a full
 /// status view, hint body, probe ID, or solution text.
 #[cfg(target_os = "linux")]
-async fn run_completion_cache_refresher(
-    inner: Arc<Inner>,
-    vm_name: String,
-    run_id: String,
-    jail_generation: String,
-    completion_cache: CompletionCache,
-) {
+async fn run_completion_cache_refresher(context: Arc<RunCliBrokerContext>) {
     loop {
-        if !run_cli_broker_is_current(&inner, &vm_name, &run_id, &jail_generation).await {
-            clear_completion_cache(&completion_cache);
+        if !run_cli_broker_is_current(
+            &context.inner,
+            &context.vm_name,
+            &context.run_id,
+            &context.jail_generation,
+        )
+        .await
+        {
+            clear_completion_cache(&context.completion_cache);
             return;
         }
         // The listener comes up before the VM reaches its durable Running
         // boundary. Do not prewarm from booting state, and do not retain an
         // old generation's aliases while waiting for that boundary.
-        if !run_cli_request_is_current(&inner, &vm_name, &run_id, &jail_generation).await {
-            clear_completion_cache(&completion_cache);
+        if !run_cli_request_is_current(
+            &context.inner,
+            &context.vm_name,
+            &context.run_id,
+            &context.jail_generation,
+        )
+        .await
+        {
+            clear_completion_cache(&context.completion_cache);
             // Startup should prewarm as soon as the atomic Running commit is
             // visible, rather than waiting for the ten-second idle cadence.
             tokio::time::sleep(RUN_CLI_COMPLETION_READY_POLL_INTERVAL).await;
@@ -568,7 +599,8 @@ async fn run_completion_cache_refresher(
         // first so an old completion projection is never served while the
         // remote alias-only request is in flight; the revision fence below
         // prevents that response from replacing a newer normal action.
-        let Some(expected_revision) = clear_completion_cache_for_refresh(&completion_cache) else {
+        let Some(expected_revision) = clear_completion_cache_for_refresh(&context.completion_cache)
+        else {
             // A poisoned lock is fail-closed: foreground completion uses an
             // empty result until the VM is replaced.
             tokio::time::sleep(RUN_CLI_COMPLETION_REFRESH_INTERVAL).await;
@@ -581,19 +613,26 @@ async fn run_completion_cache_refresher(
         };
         let result = timeout(
             RUN_CLI_COMPLETION_REFRESH_TIMEOUT,
-            refresh_completion_cache_once(&inner, &vm_name, &run_id, &jail_generation, &request),
+            refresh_completion_cache_once(&context, &request),
         )
         .await;
 
-        if !run_cli_request_is_current(&inner, &vm_name, &run_id, &jail_generation).await {
-            clear_completion_cache(&completion_cache);
+        if !run_cli_request_is_current(
+            &context.inner,
+            &context.vm_name,
+            &context.run_id,
+            &context.jail_generation,
+        )
+        .await
+        {
+            clear_completion_cache(&context.completion_cache);
             continue;
         }
 
         match result {
             Ok(Ok(aliases)) => {
                 replace_completion_cache_aliases_if_revision(
-                    &completion_cache,
+                    &context.completion_cache,
                     expected_revision,
                     aliases,
                 );
@@ -603,7 +642,7 @@ async fn run_completion_cache_refresher(
                 // failed cache refresh into a way to expose control-plane
                 // details. A stale in-flight refresh also cannot clear a
                 // newer normal-action view because of the revision fence.
-                clear_completion_cache_if_revision(&completion_cache, expected_revision);
+                clear_completion_cache_if_revision(&context.completion_cache, expected_revision);
             }
         }
         tokio::time::sleep(RUN_CLI_COMPLETION_REFRESH_INTERVAL).await;
@@ -612,15 +651,18 @@ async fn run_completion_cache_refresher(
 
 #[cfg(target_os = "linux")]
 async fn refresh_completion_cache_once(
-    inner: &Inner,
-    vm_name: &str,
-    run_id: &str,
-    jail_generation: &str,
+    context: &RunCliBrokerContext,
     request: &RunCliRequestV1,
 ) -> Result<Vec<String>> {
-    let response = forward_run_cli_request(inner, vm_name, run_id, jail_generation, request)
-        .await
-        .context("refresh completion cache")?;
+    let response = forward_run_cli_request(
+        &context.inner,
+        &context.vm_name,
+        &context.run_id,
+        &context.jail_generation,
+        request,
+    )
+    .await
+    .context("refresh completion cache")?;
     response
         .validate_for_action(&request.action)
         .context("validate completion cache response")?;
