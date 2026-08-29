@@ -271,7 +271,7 @@ impl ControlPlane for HttpControlPlane {
                 .map_err(ClientError::Request)?;
             let response = Self::decode_json::<RunCliResponseV1>(response).await?;
             response
-                .validate()
+                .validate_for_action(&request.action)
                 .map_err(|error| ClientError::InvalidRunCliResponse(error.to_string()))?;
             if response.request_id != request.request_id {
                 return Err(ClientError::InvalidRunCliResponse(

@@ -122,13 +122,13 @@ export function parseBridgeMessageV6(
 
   switch (type) {
     case "client_hello":
-      return isClientHello(value) ? withRunCliCapabilityDefault(value) : null;
+      return isClientHello(value) ? withRunCliCapabilityDefaults(value) : null;
     case "server_hello":
       return isServerHello(value) ? value : null;
     case "desired_state":
       return isDesiredState(value) ? value : null;
     case "state_report":
-      return isStateReport(value) ? withRunCliCapabilityDefault(value) : null;
+      return isStateReport(value) ? withRunCliCapabilityDefaults(value) : null;
     case "vm_report":
       return isVmReport(value) ? value : null;
     case "build_report":
@@ -457,31 +457,48 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
     // as an explicit false capability rather than rejecting their inventory
     // report or accidentally scheduling a new CLI-required run there.
     (value.supports_run_cli_v1 === undefined ||
-      typeof value.supports_run_cli_v1 === "boolean")
+      typeof value.supports_run_cli_v1 === "boolean") &&
+    (value.supports_run_cli_completion_v1 === undefined ||
+      typeof value.supports_run_cli_completion_v1 === "boolean")
   );
 }
 
-function withRunCliCapabilityDefault(
+function withRunCliCapabilityDefaults(
   value: Extract<BridgeMessageV6, { type: "client_hello" | "state_report" }>,
 ): Extract<BridgeMessageV6, { type: "client_hello" | "state_report" }> {
   if (value.type === "client_hello") {
-    if (value.capabilities.supports_run_cli_v1 !== undefined) return value;
+    if (
+      value.capabilities.supports_run_cli_v1 !== undefined &&
+      value.capabilities.supports_run_cli_completion_v1 !== undefined
+    ) {
+      return value;
+    }
     return {
       ...value,
       capabilities: {
         ...value.capabilities,
-        supports_run_cli_v1: false,
+        supports_run_cli_v1: value.capabilities.supports_run_cli_v1 ?? false,
+        supports_run_cli_completion_v1:
+          value.capabilities.supports_run_cli_completion_v1 ?? false,
       },
     };
   }
-  if (value.report.capabilities.supports_run_cli_v1 !== undefined) return value;
+  if (
+    value.report.capabilities.supports_run_cli_v1 !== undefined &&
+    value.report.capabilities.supports_run_cli_completion_v1 !== undefined
+  ) {
+    return value;
+  }
   return {
     ...value,
     report: {
       ...value.report,
       capabilities: {
         ...value.report.capabilities,
-        supports_run_cli_v1: false,
+        supports_run_cli_v1:
+          value.report.capabilities.supports_run_cli_v1 ?? false,
+        supports_run_cli_completion_v1:
+          value.report.capabilities.supports_run_cli_completion_v1 ?? false,
       },
     },
   };

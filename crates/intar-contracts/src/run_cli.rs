@@ -23,6 +23,8 @@ pub const RUN_CLI_MAX_REQUEST_ID_BYTES: usize = 128;
 pub const RUN_CLI_MAX_RETRY_SCOPE_BYTES: usize = 128;
 /// Maximum public hint-alias length.
 pub const RUN_CLI_MAX_HINT_ALIAS_BYTES: usize = 128;
+/// Maximum number of safe aliases returned by one cache-only completion lookup.
+pub const RUN_CLI_MAX_COMPLETION_ALIASES: usize = 128;
 /// Maximum number of probes that one local Kino check may select.
 pub const RUN_CLI_MAX_PROBE_IDS: usize = 128;
 /// Maximum internal probe identifier length.
@@ -58,11 +60,13 @@ impl RunCliRequestV1 {
 
 /// One command-only learner action. A hint reveal names one immutable ladder
 /// position, so retrying an interrupted reveal cannot advance to the next
-/// hint. `check_sync` publishes the result of an already-completed local Kino
-/// check; it does not request a new check itself.
+/// hint. `completion` is a cache-only, read-only lookup that may return only
+/// currently allowed public aliases. `check_sync` publishes the result of an
+/// already-completed local Kino check; it does not request a new check itself.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunCliActionV1 {
+    Completion,
     Status,
     Hints,
     HintReveal {
@@ -96,19 +100,73 @@ impl RunCliResponseV1 {
     pub fn validate(&self) -> Result<(), RunCliValidationError> {
         validate_protocol_version(self.protocol_version)?;
         validate_request_id(&self.request_id)?;
-        if let RunCliResultV1::Ok { view } = &self.result {
-            view.validate()?;
+        match &self.result {
+            RunCliResultV1::Ok { view } => view.validate()?,
+            RunCliResultV1::Completion { aliases } => validate_completion_aliases(aliases)?,
+            RunCliResultV1::Error { .. } => {}
         }
         Ok(())
     }
+
+    /// Check that a successful response has the only result shape permitted
+    /// for its request action. In particular, completion must not receive a
+    /// full run view that could contain revealed learner content.
+    pub fn validate_for_action(
+        &self,
+        action: &RunCliActionV1,
+    ) -> Result<(), RunCliValidationError> {
+        self.validate()?;
+        let expected = match action {
+            RunCliActionV1::Completion => {
+                matches!(
+                    &self.result,
+                    RunCliResultV1::Completion { .. } | RunCliResultV1::Error { .. }
+                )
+            }
+            RunCliActionV1::Status
+            | RunCliActionV1::Hints
+            | RunCliActionV1::HintReveal { .. }
+            | RunCliActionV1::Solution
+            | RunCliActionV1::SolutionReveal
+            | RunCliActionV1::CheckSync => {
+                matches!(
+                    &self.result,
+                    RunCliResultV1::Ok { .. } | RunCliResultV1::Error { .. }
+                )
+            }
+        };
+        if expected {
+            Ok(())
+        } else {
+            Err(RunCliValidationError::UnexpectedResultForAction)
+        }
+    }
 }
 
-/// The broker either returns one safe full view or one safe structured error.
+/// The broker either returns one safe full view, one alias-only completion
+/// result, or one safe structured error. A caller must validate the result
+/// against its action before using it.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunCliResultV1 {
-    Ok { view: RunCliViewV1 },
-    Error { error: RunCliErrorV1 },
+    Ok {
+        view: RunCliViewV1,
+    },
+    /// Cache-only completion never transports hint titles, bodies, solution
+    /// text, probe IDs, or other run state to the shell.
+    Completion {
+        #[schemars(
+            length(max = 128),
+            inner(
+                length(min = 1, max = 128),
+                regex(pattern = "^[a-z0-9][a-z0-9-]{0,127}$")
+            )
+        )]
+        aliases: Vec<String>,
+    },
+    Error {
+        error: RunCliErrorV1,
+    },
 }
 
 /// The full, safe learner projection used by every successful CLI command.
@@ -133,15 +191,12 @@ impl RunCliViewV1 {
         validate_retry_scope(&self.retry_scope)?;
         for (index, check) in self.checks.iter().enumerate() {
             validate_probe_id(&check.probe_id, index)?;
-            if !is_run_cli_alias(&check.alias) {
-                return Err(RunCliValidationError::InvalidView);
-            }
+            validate_hint_alias(&check.alias)?;
         }
 
         for group in &self.hint_groups {
-            if !is_run_cli_alias(&group.alias)
-                || usize::from(group.total_count) != group.entries.len()
-            {
+            validate_hint_alias(&group.alias)?;
+            if usize::from(group.total_count) != group.entries.len() {
                 return Err(RunCliValidationError::InvalidView);
             }
 
@@ -208,6 +263,10 @@ pub enum RunCliRunKindV1 {
 pub struct RunCliCheckV1 {
     #[schemars(length(min = 1, max = 128), regex(pattern = "^[A-Za-z0-9._-]+$"))]
     pub probe_id: String,
+    #[schemars(
+        length(min = 1, max = 128),
+        regex(pattern = "^[a-z0-9][a-z0-9-]{0,127}$")
+    )]
     pub alias: String,
     pub label: String,
     pub status: RunCliCheckStatusV1,
@@ -226,6 +285,10 @@ pub enum RunCliCheckStatusV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct RunCliHintGroupV1 {
+    #[schemars(
+        length(min = 1, max = 128),
+        regex(pattern = "^[a-z0-9][a-z0-9-]{0,127}$")
+    )]
     pub alias: String,
     pub label: String,
     pub revealed_count: u16,
@@ -564,6 +627,9 @@ pub enum RunCliValidationError {
     EmptyHintAlias,
     InvalidHintAlias,
     HintAliasTooLong { maximum: usize },
+    TooManyCompletionAliases { maximum: usize },
+    InvalidCompletionAlias { index: usize },
+    CompletionAliasesNotSortedUnique { index: usize },
     InvalidExpectedHintOrdinal,
     EmptyProbeIds,
     TooManyProbeIds { maximum: usize },
@@ -573,6 +639,7 @@ pub enum RunCliValidationError {
     DuplicateProbeId { index: usize },
     InvalidCompletedProbeCount,
     InvalidView,
+    UnexpectedResultForAction,
 }
 
 impl fmt::Display for RunCliValidationError {
@@ -602,6 +669,18 @@ impl fmt::Display for RunCliValidationError {
             ),
             Self::HintAliasTooLong { maximum } => {
                 write!(formatter, "run CLI hint alias exceeds {maximum} bytes")
+            }
+            Self::TooManyCompletionAliases { maximum } => {
+                write!(formatter, "run CLI completion returns more than {maximum} aliases")
+            }
+            Self::InvalidCompletionAlias { index } => {
+                write!(formatter, "run CLI completion alias at index {index} is invalid")
+            }
+            Self::CompletionAliasesNotSortedUnique { index } => {
+                write!(
+                    formatter,
+                    "run CLI completion alias at index {index} is not sorted and unique"
+                )
             }
             Self::InvalidExpectedHintOrdinal => {
                 formatter.write_str("run CLI expected hint ordinal must be at least 1")
@@ -634,6 +713,9 @@ impl fmt::Display for RunCliValidationError {
                 formatter.write_str("run CLI completed probe count is invalid")
             }
             Self::InvalidView => formatter.write_str("run CLI response view is invalid"),
+            Self::UnexpectedResultForAction => {
+                formatter.write_str("run CLI response result is invalid for the request action")
+            }
         }
     }
 }
@@ -800,6 +882,24 @@ fn validate_hint_alias(alias: &str) -> Result<(), RunCliValidationError> {
     } else {
         Ok(())
     }
+}
+
+fn validate_completion_aliases(aliases: &[String]) -> Result<(), RunCliValidationError> {
+    if aliases.len() > RUN_CLI_MAX_COMPLETION_ALIASES {
+        return Err(RunCliValidationError::TooManyCompletionAliases {
+            maximum: RUN_CLI_MAX_COMPLETION_ALIASES,
+        });
+    }
+    let mut previous: Option<&str> = None;
+    for (index, alias) in aliases.iter().enumerate() {
+        validate_hint_alias(alias)
+            .map_err(|_| RunCliValidationError::InvalidCompletionAlias { index })?;
+        if previous.is_some_and(|value| value >= alias.as_str()) {
+            return Err(RunCliValidationError::CompletionAliasesNotSortedUnique { index });
+        }
+        previous = Some(alias.as_str());
+    }
+    Ok(())
 }
 
 fn validate_expected_hint_ordinal(ordinal: u16) -> Result<(), RunCliValidationError> {

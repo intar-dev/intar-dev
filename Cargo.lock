@@ -2193,7 +2193,7 @@ dependencies = [
 
 [[package]]
 name = "intar-agent"
-version = "0.11.10"
+version = "0.11.11"
 dependencies = [
  "anyhow",
  "avt",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "intar-builder"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "intar-image-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "intar-workshop-builder"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "base64",
@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "kino"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "axum",

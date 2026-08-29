@@ -1,13 +1,13 @@
 use intar_contracts::{
     bridge::HostStateReportV2,
     run_cli::{
-        RUN_CLI_FRAME_HEADER_BYTES, RUN_CLI_MAX_HINT_ALIAS_BYTES, RUN_CLI_MAX_PROBE_ID_BYTES,
-        RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES, RUN_CLI_MAX_RETRY_SCOPE_BYTES,
-        RunCliFrameError, RunCliProbeCheckEventKindV1, RunCliProbeCheckEventV1,
-        RunCliProbeCheckRequestV1, RunCliProbeCheckResponseV1, RunCliProbeCheckResultV1,
-        RunCliProbeCheckStreamError, RunCliProbeCheckStreamValidatorV1, RunCliRequestV1,
-        RunCliResponseV1, RunCliValidationError, decode_run_cli_frame, encode_run_cli_frame,
-        run_cli_frame_payload_len,
+        RUN_CLI_FRAME_HEADER_BYTES, RUN_CLI_MAX_COMPLETION_ALIASES, RUN_CLI_MAX_HINT_ALIAS_BYTES,
+        RUN_CLI_MAX_PROBE_ID_BYTES, RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES,
+        RUN_CLI_MAX_RETRY_SCOPE_BYTES, RunCliFrameError, RunCliProbeCheckEventKindV1,
+        RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliProbeCheckResponseV1,
+        RunCliProbeCheckResultV1, RunCliProbeCheckStreamError, RunCliProbeCheckStreamValidatorV1,
+        RunCliRequestV1, RunCliResponseV1, RunCliResultV1, RunCliValidationError,
+        decode_run_cli_frame, encode_run_cli_frame, run_cli_frame_payload_len,
     },
 };
 
@@ -16,6 +16,104 @@ fn run_cli_request_fixture_round_trips() {
     let request: RunCliRequestV1 = fixture("request-v1.json");
     request.validate().expect("fixture request is valid");
     assert_fixture_round_trip(&request, "request-v1.json");
+}
+
+#[test]
+fn run_cli_completion_is_bounded_alias_only_and_action_matched() {
+    let request = RunCliRequestV1 {
+        protocol_version: 1,
+        request_id: "completion-01".to_owned(),
+        action: intar_contracts::run_cli::RunCliActionV1::Completion,
+    };
+    request.validate().expect("completion request is valid");
+    assert_eq!(
+        serde_json::to_value(&request).expect("completion request JSON"),
+        serde_json::json!({
+            "protocol_version": 1,
+            "request_id": "completion-01",
+            "action": { "kind": "completion" },
+        })
+    );
+
+    let response = RunCliResponseV1 {
+        protocol_version: 1,
+        request_id: "completion-01".to_owned(),
+        result: RunCliResultV1::Completion {
+            aliases: vec!["check-3".to_owned(), "general".to_owned()],
+        },
+    };
+    response.validate().expect("completion response is valid");
+    response
+        .validate_for_action(&request.action)
+        .expect("completion result matches completion action");
+    let response_json = serde_json::to_value(&response).expect("completion response JSON");
+    assert_eq!(
+        response_json,
+        serde_json::json!({
+            "protocol_version": 1,
+            "request_id": "completion-01",
+            "result": {
+                "kind": "completion",
+                "aliases": ["check-3", "general"],
+            },
+        })
+    );
+    assert!(response_json["result"].get("view").is_none());
+    assert!(response_json["result"].get("solution").is_none());
+
+    let mut unsorted = response.clone();
+    let RunCliResultV1::Completion { aliases } = &mut unsorted.result else {
+        panic!("completion response result");
+    };
+    *aliases = vec!["general".to_owned(), "check-3".to_owned()];
+    assert_eq!(
+        unsorted.validate(),
+        Err(RunCliValidationError::CompletionAliasesNotSortedUnique { index: 1 })
+    );
+
+    let mut duplicate = response.clone();
+    let RunCliResultV1::Completion { aliases } = &mut duplicate.result else {
+        panic!("completion response result");
+    };
+    *aliases = vec!["general".to_owned(), "general".to_owned()];
+    assert_eq!(
+        duplicate.validate(),
+        Err(RunCliValidationError::CompletionAliasesNotSortedUnique { index: 1 })
+    );
+
+    let mut unsafe_alias = response.clone();
+    let RunCliResultV1::Completion { aliases } = &mut unsafe_alias.result else {
+        panic!("completion response result");
+    };
+    *aliases = vec!["private_id".to_owned()];
+    assert_eq!(
+        unsafe_alias.validate(),
+        Err(RunCliValidationError::InvalidCompletionAlias { index: 0 })
+    );
+
+    let mut excessive = response.clone();
+    let RunCliResultV1::Completion { aliases } = &mut excessive.result else {
+        panic!("completion response result");
+    };
+    *aliases = (0..=RUN_CLI_MAX_COMPLETION_ALIASES)
+        .map(|index| format!("hint-{index}"))
+        .collect();
+    assert_eq!(
+        excessive.validate(),
+        Err(RunCliValidationError::TooManyCompletionAliases {
+            maximum: RUN_CLI_MAX_COMPLETION_ALIASES,
+        })
+    );
+
+    let full_view: RunCliResponseV1 = fixture("response-v1.json");
+    assert_eq!(
+        full_view.validate_for_action(&request.action),
+        Err(RunCliValidationError::UnexpectedResultForAction)
+    );
+    assert_eq!(
+        response.validate_for_action(&intar_contracts::run_cli::RunCliActionV1::Status),
+        Err(RunCliValidationError::UnexpectedResultForAction)
+    );
 }
 
 #[test]
@@ -61,6 +159,30 @@ fn run_cli_response_fixture_round_trips_without_sealed_content() {
         oversized_scope.validate(),
         Err(RunCliValidationError::RetryScopeTooLong {
             maximum: RUN_CLI_MAX_RETRY_SCOPE_BYTES,
+        })
+    );
+
+    let mut oversized_check_alias = value.clone();
+    oversized_check_alias["result"]["view"]["checks"][0]["alias"] =
+        serde_json::json!("x".repeat(RUN_CLI_MAX_HINT_ALIAS_BYTES + 1));
+    let oversized_check_alias: RunCliResponseV1 =
+        serde_json::from_value(oversized_check_alias).expect("response still decodes");
+    assert_eq!(
+        oversized_check_alias.validate(),
+        Err(RunCliValidationError::HintAliasTooLong {
+            maximum: RUN_CLI_MAX_HINT_ALIAS_BYTES,
+        })
+    );
+
+    let mut oversized_hint_group_alias = value.clone();
+    oversized_hint_group_alias["result"]["view"]["hint_groups"][0]["alias"] =
+        serde_json::json!("x".repeat(RUN_CLI_MAX_HINT_ALIAS_BYTES + 1));
+    let oversized_hint_group_alias: RunCliResponseV1 =
+        serde_json::from_value(oversized_hint_group_alias).expect("response still decodes");
+    assert_eq!(
+        oversized_hint_group_alias.validate(),
+        Err(RunCliValidationError::HintAliasTooLong {
+            maximum: RUN_CLI_MAX_HINT_ALIAS_BYTES,
         })
     );
 

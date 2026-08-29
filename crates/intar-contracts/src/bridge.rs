@@ -232,6 +232,11 @@ pub struct HostCapabilitiesV2 {
     /// default keeps older state reports safely ineligible during rollout.
     #[serde(default)]
     pub supports_run_cli_v1: bool,
+    /// Whether this host can serve the bounded learner CLI completion
+    /// protocol. The default keeps older reports safely ineligible during
+    /// rollout.
+    #[serde(default)]
+    pub supports_run_cli_completion_v1: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

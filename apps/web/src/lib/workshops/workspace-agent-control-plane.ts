@@ -432,7 +432,7 @@ ${runCliEnabled ? `  - path: /usr/share/intar/completions/intar.bash
             COMPREPLY=( $(compgen -W 'reveal' -- "\${cur}") )
             ;;
           hint:2)
-            candidates="$(/usr/bin/timeout 0.25s /usr/local/bin/intar __complete "\${COMP_CWORD}" "\${COMP_WORDS[@]}" 2>/dev/null)" || return 0
+            candidates="$(/usr/bin/timeout --signal=KILL 0.25s /usr/local/bin/intar __complete "\${COMP_CWORD}" "\${COMP_WORDS[@]}" 2>/dev/null)" || return 0
             while IFS= read -r candidate; do
               [[ "\${candidate}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || continue
               [[ "\${candidate}" == "\${cur}"* ]] || continue

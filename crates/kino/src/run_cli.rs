@@ -43,7 +43,9 @@ const EXIT_INTERRUPTED: i32 = 130;
 
 const BROKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const COMPLETION_TIMEOUT: Duration = Duration::from_millis(250);
+// Leave headroom for rendering and process teardown before Bash's independent
+// 250 ms hard-kill deadline.
+const COMPLETION_TIMEOUT: Duration = Duration::from_millis(200);
 const LOCAL_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LOCAL_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(310);
 const MAX_BROKER_CONFIG_BYTES: u64 = 1024;
@@ -830,17 +832,12 @@ async fn complete_with_endpoint(
         return CliResult::success(String::new());
     };
     let broker = BrokerClient { endpoint };
-    let Ok(view) = broker
-        .view(RunCliActionV1::Status, COMPLETION_TIMEOUT)
-        .await
-    else {
+    let Ok(aliases) = broker.completion(COMPLETION_TIMEOUT).await else {
         return CliResult::success(String::new());
     };
-    let mut aliases = view
-        .hint_groups
-        .iter()
-        .filter(|group| group.can_reveal && valid_completion_candidate(&group.alias))
-        .map(|group| group.alias.clone())
+    let mut aliases = aliases
+        .into_iter()
+        .filter(|alias| valid_completion_candidate(alias))
         .collect::<Vec<_>>();
     aliases.sort();
     aliases.dedup();
@@ -905,6 +902,15 @@ struct BrokerClient {
 }
 
 impl BrokerClient {
+    async fn completion(&self, timeout: Duration) -> Result<Vec<String>, BrokerFailure> {
+        let request = RunCliRequestV1 {
+            protocol_version: RUN_CLI_PROTOCOL_VERSION,
+            request_id: next_request_id(),
+            action: RunCliActionV1::Completion,
+        };
+        self.completion_request(request, timeout).await
+    }
+
     async fn view(
         &self,
         action: RunCliActionV1,
@@ -916,6 +922,23 @@ impl BrokerClient {
             action,
         };
         self.view_request(request, timeout).await
+    }
+
+    async fn completion_request(
+        &self,
+        request: RunCliRequestV1,
+        timeout: Duration,
+    ) -> Result<Vec<String>, BrokerFailure> {
+        request.validate().map_err(|_| BrokerFailure::Transport)?;
+        let response = self
+            .request(&request, timeout)
+            .await
+            .map_err(|_| BrokerFailure::Transport)?;
+        match response.result {
+            RunCliResultV1::Completion { aliases } => Ok(aliases),
+            RunCliResultV1::Error { error } => Err(BrokerFailure::Remote(error.code)),
+            RunCliResultV1::Ok { .. } => Err(BrokerFailure::Transport),
+        }
     }
 
     async fn view_with_request_id(
@@ -945,6 +968,7 @@ impl BrokerClient {
         match response.result {
             RunCliResultV1::Ok { view } => Ok(view),
             RunCliResultV1::Error { error } => Err(BrokerFailure::Remote(error.code)),
+            RunCliResultV1::Completion { .. } => Err(BrokerFailure::Transport),
         }
     }
 
@@ -1015,7 +1039,7 @@ where
         .await
         .map_err(|_| TransportError::Unavailable)?;
     response
-        .validate()
+        .validate_for_action(&request.action)
         .map_err(|_| TransportError::InvalidResponse)?;
     if response.protocol_version != RUN_CLI_PROTOCOL_VERSION
         || response.request_id != request.request_id
@@ -2070,7 +2094,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_reads_only_ready_safe_aliases() {
+    async fn completion_requests_an_alias_only_result() {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("broker.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind broker socket");
@@ -2078,22 +2102,45 @@ mod tests {
             let (mut stream, _) = listener.accept().await.expect("accept CLI request");
             let request = read_message::<RunCliRequestV1, _>(&mut stream)
                 .await
-                .expect("read status request");
-            assert_eq!(request.action, RunCliActionV1::Status);
+                .expect("read completion request");
+            assert_eq!(request.action, RunCliActionV1::Completion);
+            let response = RunCliResponseV1 {
+                protocol_version: RUN_CLI_PROTOCOL_VERSION,
+                request_id: request.request_id,
+                result: RunCliResultV1::Completion {
+                    aliases: vec!["check-3".to_owned(), "general".to_owned()],
+                },
+            };
+            write_message(&mut stream, &response)
+                .await
+                .expect("write response");
+        });
+        let result = complete_with_endpoint(
+            Some(BrokerEndpoint::Unix(socket_path)),
+            2,
+            vec!["intar".to_owned(), "hint".to_owned(), String::new()],
+        )
+        .await;
+        server.await.expect("broker task");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stderr.is_empty());
+        assert_eq!(result.stdout, "check-3\ngeneral\n");
+    }
+
+    #[tokio::test]
+    async fn completion_rejects_a_full_view_without_printing_its_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind broker socket");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept CLI request");
+            let request = read_message::<RunCliRequestV1, _>(&mut stream)
+                .await
+                .expect("read completion request");
+            assert_eq!(request.action, RunCliActionV1::Completion);
             let mut response_view = view();
-            response_view.hint_groups.push(RunCliHintGroupV1 {
-                alias: "sealed-group".to_owned(),
-                label: "Sealed".to_owned(),
-                revealed_count: 0,
-                total_count: 1,
-                can_reveal: false,
-                entries: vec![intar_contracts::run_cli::RunCliHintEntryV1 {
-                    ordinal: 1,
-                    state: RunCliHintStateV1::Locked,
-                    title: None,
-                    body_markdown: None,
-                }],
-            });
+            response_view.solution.state = RunCliSolutionStateV1::Revealed;
+            response_view.solution.body_markdown = Some("must never print".to_owned());
             let response = RunCliResponseV1 {
                 protocol_version: RUN_CLI_PROTOCOL_VERSION,
                 request_id: request.request_id,
@@ -2114,7 +2161,7 @@ mod tests {
         server.await.expect("broker task");
         assert_eq!(result.exit_code, 0);
         assert!(result.stderr.is_empty());
-        assert_eq!(result.stdout, "general\n");
+        assert!(result.stdout.is_empty());
     }
 
     #[tokio::test]

@@ -7,17 +7,23 @@ use crate::config::{AgentConfig, REPORT_INTERVAL_SECONDS};
 use crate::kino::{KinoClient, KinoSnapshot};
 use crate::model::{AgentPhase, AgentReport, CONTRACT_VERSION, HealthStatus, ReportResponse};
 use crate::recordings::{remove_uploaded_recording, stage_next_completed_recording};
-use crate::run_cli::{RunCliBroker, RunCliCommand, local_error};
+use crate::run_cli::{
+    CompletionCache, RunCliBroker, RunCliCommand, RunCliCommandGate, local_error,
+};
 use crate::secrets::SanitizedError;
 use crate::state::{
     GenerationState, StateError, StateStore, read_bootstrap_capability, remove_bootstrap_capability,
 };
-use intar_contracts::run_cli::{RunCliActionV1, RunCliErrorCodeV1, RunCliResponseV1};
+use intar_contracts::run_cli::{
+    RUN_CLI_PROTOCOL_VERSION, RunCliActionV1, RunCliErrorCodeV1, RunCliRequestV1, RunCliResponseV1,
+    RunCliResultV1,
+};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
@@ -25,6 +31,12 @@ use tracing::{info, warn};
 // publication server. Keep the timeout below the provider report credential
 // lifetime while allowing the full cumulative plan to finish.
 const CHECKPOINT_APPLY_TIMEOUT_SECONDS: u64 = 3 * 60 * 60;
+// Dynamic shell completion must never advertise stale aliases. The broker
+// serves this cache without a network round trip, so keep its lease bounded
+// even if the next regular report is delayed.
+const COMPLETION_CACHE_TTL: Duration = Duration::from_secs(15);
+const COMPLETION_REFRESH_TIMEOUT: Duration = Duration::from_millis(900);
+static NEXT_COMPLETION_REFRESH_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 pub struct WorkspaceAgent {
     config: AgentConfig,
@@ -84,21 +96,25 @@ impl WorkspaceAgent {
     }
 
     pub async fn run(&self) -> Result<(), AgentError> {
-        let mut state = self.bootstrap_or_load().await?;
+        let completion_cache = self
+            .config
+            .run_cli_enabled
+            .then(|| CompletionCache::new(COMPLETION_CACHE_TTL));
+        let command_gate = completion_cache
+            .as_ref()
+            .map(|_| RunCliCommandGate::closed());
 
-        if !state.checkpoint_applied() {
-            self.apply_checkpoint(&mut state).await?;
-        }
-
-        // The final control-plane rollout writes this opt-in only after the
-        // guest binary pin is CLI-capable. The disabled branch keeps an old
-        // bundle usable during rollout without opening a learner broker.
-        let (_run_cli_broker, mut run_cli_commands) = if self.config.run_cli_enabled {
-            // This listener has no copy of the generation identity or report
-            // credential. Each request returns through this loop, which remains
-            // the only writer of state and the only component that can authenticate
-            // to the control plane.
-            let (broker, commands) = RunCliBroker::start(&self.config.reconstruction_user)
+        // Bind the private learner socket before bootstrap, reporting, or a
+        // potentially long checkpoint reconstruction. Completion can safely
+        // return the empty cache throughout startup; the closed gate prevents
+        // normal commands from queuing work that could execute after boot.
+        let (_run_cli_broker, mut run_cli_commands) =
+            if let (Some(cache), Some(gate)) = (completion_cache.as_ref(), command_gate.as_ref()) {
+                let (broker, commands) = RunCliBroker::start(
+                    &self.config.reconstruction_user,
+                    cache.clone(),
+                    gate.clone(),
+                )
                 .await
                 .map_err(|error| {
                     AgentError::Safe(SanitizedError::new(
@@ -106,14 +122,38 @@ impl WorkspaceAgent {
                         &[],
                     ))
                 })?;
-            (Some(broker), commands)
-        } else {
-            // A closed receiver keeps the select branch inert without opening
-            // the root-owned Unix socket.
-            let (sender, commands) = tokio::sync::mpsc::channel(1);
-            drop(sender);
-            (None, commands)
-        };
+                (Some(broker), commands)
+            } else {
+                // A closed receiver keeps the select branch inert without opening
+                // the root-owned Unix socket.
+                let (sender, commands) = tokio::sync::mpsc::channel(1);
+                drop(sender);
+                (None, commands)
+            };
+
+        let mut state = self.bootstrap_or_load().await?;
+
+        if !state.checkpoint_applied() {
+            self.apply_checkpoint(&mut state).await?;
+        }
+
+        if let Some(cache) = completion_cache.as_ref() {
+            // Prewarm only after the guest has published a current Kino
+            // snapshot. The bound listener still returns an empty result on a
+            // control-plane failure.
+            cache.invalidate();
+            match self.report_current(&mut state).await {
+                Ok(()) if self.refresh_completion_cache(&state, cache).await => {}
+                Ok(()) => warn!("run CLI completion cache prewarm failed"),
+                Err(error) => {
+                    let safe = self.sanitize_error(&state, &error.to_string());
+                    warn!(error = %safe.as_str(), "workspace report failed during run CLI completion prewarm");
+                }
+            }
+        }
+        if let Some(gate) = command_gate.as_ref() {
+            gate.open();
+        }
 
         info!(
             execution_id = %self.config.identity.execution_id,
@@ -121,14 +161,34 @@ impl WorkspaceAgent {
             interval_seconds = REPORT_INTERVAL_SECONDS,
             "workspace agent reporting started"
         );
-        let mut ticker = tokio::time::interval(Duration::from_secs(REPORT_INTERVAL_SECONDS));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut report_ticker = tokio::time::interval(Duration::from_secs(REPORT_INTERVAL_SECONDS));
+        report_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        if completion_cache.is_some() {
+            // The prewarm above already performed the interval's first report.
+            // Consume Tokio's immediate tick so it cannot race a just-published
+            // cache with a duplicate report.
+            report_ticker.tick().await;
+        }
         loop {
             tokio::select! {
-                _ = ticker.tick() => {
-                    if let Err(error) = self.report_current(&mut state).await {
-                        let safe = self.sanitize_error(&state, &error.to_string());
-                        warn!(error = %safe.as_str(), "workspace report failed; will retry");
+                _ = report_ticker.tick() => {
+                    if let Some(cache) = completion_cache.as_ref() {
+                        // Do not expose an alias while a new authoritative
+                        // report or its cache refresh is in flight.
+                        cache.invalidate();
+                    }
+                    match self.report_current(&mut state).await {
+                        Ok(()) => {
+                            if let Some(cache) = completion_cache.as_ref()
+                                && !self.refresh_completion_cache(&state, cache).await
+                            {
+                                warn!("run CLI completion cache refresh failed");
+                            }
+                        }
+                        Err(error) => {
+                            let safe = self.sanitize_error(&state, &error.to_string());
+                            warn!(error = %safe.as_str(), "workspace report failed; will retry");
+                        }
                     }
                     if let Err(error) = self.upload_next_completed_recording(&state).await {
                         let safe = self.sanitize_error(&state, &error.to_string());
@@ -136,7 +196,9 @@ impl WorkspaceAgent {
                     }
                 }
                 Some(command) = run_cli_commands.recv() => {
-                    self.handle_run_cli_command(&mut state, command).await;
+                    if let Some(cache) = completion_cache.as_ref() {
+                        self.handle_run_cli_command(&mut state, cache, command).await;
+                    }
                 }
                 _ = shutdown_signal() => {
                     info!("workspace agent shutdown requested");
@@ -155,9 +217,16 @@ impl WorkspaceAgent {
         self.upload_next_completed_recording(&state).await
     }
 
-    async fn handle_run_cli_command(&self, state: &mut GenerationState, command: RunCliCommand) {
+    async fn handle_run_cli_command(
+        &self,
+        state: &mut GenerationState,
+        completion_cache: &CompletionCache,
+        command: RunCliCommand,
+    ) {
         let request = command.request;
-        let response = self.run_cli_request(state, &request).await;
+        let response = self
+            .run_cli_request(state, completion_cache, &request)
+            .await;
         // The caller may have disconnected. The state-owning operation has
         // already completed, so dropping the one-shot response is safe.
         let _ = command.response.send(response);
@@ -166,12 +235,14 @@ impl WorkspaceAgent {
     async fn run_cli_request(
         &self,
         state: &mut GenerationState,
-        request: &intar_contracts::run_cli::RunCliRequestV1,
+        completion_cache: &CompletionCache,
+        request: &RunCliRequestV1,
     ) -> RunCliResponseV1 {
         // `StateStore::load` and all state mutations fence this identity. Keep
         // the check here too: a stale in-memory state can never be used to
         // proxy a request after a generation replacement.
         if state.identity() != &self.config.identity {
+            completion_cache.invalidate();
             return local_error(
                 &request.request_id,
                 RunCliErrorCodeV1::Unavailable,
@@ -180,12 +251,24 @@ impl WorkspaceAgent {
             );
         }
 
+        // The broker routes completion directly to its local cache. Keep this
+        // defensive local branch too: a malformed caller can never make a Tab
+        // press consume the report credential or wait on the control plane.
+        if matches!(request.action, RunCliActionV1::Completion) {
+            return completion_cache.response(&request.request_id);
+        }
+
+        if run_cli_action_mutates_completion_cache(&request.action) {
+            completion_cache.invalidate();
+        }
+
         if matches!(request.action, RunCliActionV1::CheckSync) {
             // A check action needs an immediate report before the control
             // plane builds its authoritative safe view. This runs inside this
             // loop so report sequence persistence and generation state cannot
             // race with another process.
             if self.report_current(state).await.is_err() {
+                completion_cache.invalidate();
                 return local_error(
                     &request.request_id,
                     RunCliErrorCodeV1::Unavailable,
@@ -195,19 +278,87 @@ impl WorkspaceAgent {
             }
         }
 
-        match self
+        let response = match self
             .control_plane
             .run_cli(state.report_credential(), request)
             .await
         {
-            Ok(response) => response,
+            Ok(response)
+                if response.request_id == request.request_id
+                    && response.validate_for_action(&request.action).is_ok() =>
+            {
+                response
+            }
+            Ok(_) => local_error(
+                &request.request_id,
+                RunCliErrorCodeV1::Internal,
+                "The Intar service returned an invalid response. Try again.",
+                true,
+            ),
             Err(_) => local_error(
                 &request.request_id,
                 RunCliErrorCodeV1::Unavailable,
                 "The Intar service is unavailable. Try again.",
                 true,
             ),
+        };
+        if state.identity() != &self.config.identity {
+            completion_cache.invalidate();
+        } else if let RunCliResultV1::Ok { view } = &response.result {
+            if !completion_cache.replace_from_view(view) {
+                completion_cache.invalidate();
+            }
+        } else {
+            completion_cache.invalidate();
         }
+        response
+    }
+
+    /// Refresh aliases only through the explicit narrow completion action.
+    /// This is called from the state-owning report loop, never from a learner
+    /// completion connection.
+    async fn refresh_completion_cache(
+        &self,
+        state: &GenerationState,
+        completion_cache: &CompletionCache,
+    ) -> bool {
+        // Do not retain an older snapshot while an authoritative lookup is in
+        // flight. A timeout or control-plane failure therefore yields no Tab
+        // candidates rather than stale candidates.
+        completion_cache.invalidate();
+        if state.identity() != &self.config.identity {
+            return false;
+        }
+        let request = RunCliRequestV1 {
+            protocol_version: RUN_CLI_PROTOCOL_VERSION,
+            request_id: format!(
+                "completion-refresh-{}",
+                NEXT_COMPLETION_REFRESH_REQUEST.fetch_add(1, Ordering::Relaxed)
+            ),
+            action: RunCliActionV1::Completion,
+        };
+        let response = match tokio::time::timeout(
+            COMPLETION_REFRESH_TIMEOUT,
+            self.control_plane
+                .run_cli(state.report_credential(), &request),
+        )
+        .await
+        {
+            Ok(Ok(response))
+                if response.request_id == request.request_id
+                    && response.validate_for_action(&request.action).is_ok() =>
+            {
+                response
+            }
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => return false,
+        };
+        if state.identity() != &self.config.identity {
+            return false;
+        }
+        let RunCliResultV1::Completion { aliases } = response.result else {
+            return false;
+        };
+        completion_cache.replace_aliases(aliases)
     }
 
     pub async fn upload_artifact(&self, kind: &str, path: &Path) -> Result<String, AgentError> {
@@ -625,6 +776,15 @@ impl WorkspaceAgent {
     }
 }
 
+fn run_cli_action_mutates_completion_cache(action: &RunCliActionV1) -> bool {
+    matches!(
+        action,
+        RunCliActionV1::HintReveal { .. }
+            | RunCliActionV1::SolutionReveal
+            | RunCliActionV1::CheckSync
+    )
+}
+
 fn read_linux_boot_id() -> Result<String, AgentError> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(|error| {
         AgentError::Safe(SanitizedError::new(
@@ -723,14 +883,15 @@ mod tests {
         AgentReport, BootstrapResponse, CheckpointCompression, CheckpointDescriptor,
         ExecutionIdentity, ReportResponse,
     };
-    use crate::run_cli::local_error;
+    use crate::run_cli::{CompletionCache, local_error};
     use crate::secrets::SecretString;
     use crate::state::StateStore;
     use axum::response::IntoResponse;
     use futures_util::future::BoxFuture;
     use intar_contracts::run_cli::{
-        RUN_CLI_PROTOCOL_VERSION, RunCliActionV1, RunCliErrorCodeV1, RunCliRequestV1,
-        RunCliResultV1,
+        RUN_CLI_PROTOCOL_VERSION, RunCliActionV1, RunCliErrorCodeV1, RunCliHintEntryV1,
+        RunCliHintGroupV1, RunCliHintStateV1, RunCliRequestV1, RunCliResponseV1, RunCliResultV1,
+        RunCliRunKindV1, RunCliRunV1, RunCliSolutionStateV1, RunCliSolutionV1, RunCliViewV1,
     };
     use prost::Message;
     use std::collections::BTreeMap;
@@ -798,7 +959,10 @@ mod tests {
             action: RunCliActionV1::CheckSync,
         };
 
-        let response = agent.run_cli_request(&mut state, &request).await;
+        let completion_cache = CompletionCache::new(Duration::from_secs(60));
+        let response = agent
+            .run_cli_request(&mut state, &completion_cache, &request)
+            .await;
         assert_eq!(response.request_id, "check-1");
         assert_eq!(
             control_plane.events.lock().expect("events lock").as_slice(),
@@ -849,12 +1013,20 @@ mod tests {
             action: RunCliActionV1::Status,
         };
 
-        let response = agent.run_cli_request(&mut stale_state, &request).await;
+        let completion_cache = CompletionCache::new(Duration::from_secs(60));
+        assert!(completion_cache.replace_aliases(vec!["general".to_owned()]));
+        let response = agent
+            .run_cli_request(&mut stale_state, &completion_cache, &request)
+            .await;
         let RunCliResultV1::Error { error } = response.result else {
             panic!("stale generation must return an error");
         };
         assert_eq!(error.code, RunCliErrorCodeV1::Unavailable);
         assert!(control_plane.events.lock().expect("events lock").is_empty());
+        assert!(matches!(
+            completion_cache.response("completion-1").result,
+            RunCliResultV1::Completion { ref aliases } if aliases.is_empty()
+        ));
     }
 
     #[tokio::test]
@@ -874,6 +1046,7 @@ mod tests {
             .state_store
             .install_bootstrap(bootstrap_response(identity))
             .expect("install state");
+        let completion_cache = CompletionCache::new(Duration::from_secs(60));
 
         let actions = [
             RunCliActionV1::Status,
@@ -893,7 +1066,9 @@ mod tests {
                 request_id: format!("action-{}", index + 1),
                 action,
             };
-            let _ = agent.run_cli_request(&mut state, &request).await;
+            let _ = agent
+                .run_cli_request(&mut state, &completion_cache, &request)
+                .await;
         }
 
         assert_eq!(control_plane.reports.load(Ordering::SeqCst), 0);
@@ -910,12 +1085,125 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn authoritative_refresh_fails_closed_and_normal_views_publish_aliases_only() {
+        let temp = TempDir::new().expect("temporary state directory");
+        let identity = execution_identity(2);
+        let control_plane = Arc::new(RecordingControlPlane::default());
+        *control_plane
+            .completion_aliases
+            .lock()
+            .expect("completion aliases lock") =
+            Some(vec!["check-3".to_owned(), "general".to_owned()]);
+        *control_plane.normal_view.lock().expect("normal view lock") = Some(cli_view());
+        let agent = test_agent(
+            test_config(
+                temp.path(),
+                identity.clone(),
+                Url::parse("http://127.0.0.1:18081/probes").expect("Kino URL"),
+            ),
+            control_plane.clone(),
+        );
+        let mut state = agent
+            .state_store
+            .install_bootstrap(bootstrap_response(identity))
+            .expect("install state");
+        let cache = CompletionCache::new(Duration::from_secs(60));
+
+        assert!(agent.refresh_completion_cache(&state, &cache).await);
+        assert_eq!(
+            cache.response("completion-1").result,
+            RunCliResultV1::Completion {
+                aliases: vec!["check-3".to_owned(), "general".to_owned()],
+            }
+        );
+
+        // A failed one-second refresh must clear the previous alias set. The
+        // broker may be briefly less helpful, but it must not suggest a hint
+        // which is no longer ready.
+        *control_plane
+            .completion_aliases
+            .lock()
+            .expect("completion aliases lock") = None;
+        assert!(!agent.refresh_completion_cache(&state, &cache).await);
+        assert!(matches!(
+            cache.response("completion-after-error").result,
+            RunCliResultV1::Completion { ref aliases } if aliases.is_empty()
+        ));
+
+        cache.invalidate();
+        let request = RunCliRequestV1 {
+            protocol_version: RUN_CLI_PROTOCOL_VERSION,
+            request_id: "status-1".to_owned(),
+            action: RunCliActionV1::Status,
+        };
+        let response = agent.run_cli_request(&mut state, &cache, &request).await;
+        assert!(matches!(response.result, RunCliResultV1::Ok { .. }));
+        let completion = cache.response("completion-2");
+        assert_eq!(
+            completion.result,
+            RunCliResultV1::Completion {
+                aliases: vec!["check-3".to_owned(), "general".to_owned()],
+            }
+        );
+        let serialized = serde_json::to_string(&completion).expect("serialize completion");
+        assert!(!serialized.contains("body_markdown"));
+        assert!(!serialized.contains("probe_id"));
+        assert!(!serialized.contains("retry_scope"));
+        assert!(
+            control_plane
+                .requests
+                .lock()
+                .expect("requests lock")
+                .iter()
+                .any(|request| matches!(request.action, RunCliActionV1::Completion))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_mutation_invalidates_completion_cache() {
+        let temp = TempDir::new().expect("temporary state directory");
+        let identity = execution_identity(2);
+        let control_plane = Arc::new(RecordingControlPlane::default());
+        let agent = test_agent(
+            test_config(
+                temp.path(),
+                identity.clone(),
+                Url::parse("http://127.0.0.1:18081/probes").expect("Kino URL"),
+            ),
+            control_plane,
+        );
+        let mut state = agent
+            .state_store
+            .install_bootstrap(bootstrap_response(identity))
+            .expect("install state");
+        let cache = CompletionCache::new(Duration::from_secs(60));
+        assert!(cache.replace_aliases(vec!["general".to_owned()]));
+        let request = RunCliRequestV1 {
+            protocol_version: RUN_CLI_PROTOCOL_VERSION,
+            request_id: "hint-1".to_owned(),
+            action: RunCliActionV1::HintReveal {
+                alias: "general".to_owned(),
+                expected_ordinal: 1,
+            },
+        };
+
+        let response = agent.run_cli_request(&mut state, &cache, &request).await;
+        assert!(matches!(response.result, RunCliResultV1::Error { .. }));
+        assert!(matches!(
+            cache.response("completion-1").result,
+            RunCliResultV1::Completion { ref aliases } if aliases.is_empty()
+        ));
+    }
+
     #[derive(Default)]
     struct RecordingControlPlane {
         reports: AtomicUsize,
         events: Mutex<Vec<&'static str>>,
         credentials: Mutex<Vec<String>>,
         requests: Mutex<Vec<RunCliRequestV1>>,
+        completion_aliases: Mutex<Option<Vec<String>>>,
+        normal_view: Mutex<Option<RunCliViewV1>>,
     }
 
     impl ControlPlane for RecordingControlPlane {
@@ -974,13 +1262,103 @@ mod tests {
                 .lock()
                 .expect("credentials lock")
                 .push(credential.expose().to_owned());
-            let response = local_error(
-                &request.request_id,
-                RunCliErrorCodeV1::Unavailable,
-                "The Intar service is unavailable. Try again.",
-                true,
-            );
+            let response = match request.action {
+                RunCliActionV1::Completion => self
+                    .completion_aliases
+                    .lock()
+                    .expect("completion aliases lock")
+                    .clone()
+                    .map(|aliases| RunCliResponseV1 {
+                        protocol_version: RUN_CLI_PROTOCOL_VERSION,
+                        request_id: request.request_id.clone(),
+                        result: RunCliResultV1::Completion { aliases },
+                    })
+                    .unwrap_or_else(|| {
+                        local_error(
+                            &request.request_id,
+                            RunCliErrorCodeV1::Unavailable,
+                            "The Intar service is unavailable. Try again.",
+                            true,
+                        )
+                    }),
+                _ => self
+                    .normal_view
+                    .lock()
+                    .expect("normal view lock")
+                    .clone()
+                    .map(|view| RunCliResponseV1 {
+                        protocol_version: RUN_CLI_PROTOCOL_VERSION,
+                        request_id: request.request_id.clone(),
+                        result: RunCliResultV1::Ok { view },
+                    })
+                    .unwrap_or_else(|| {
+                        local_error(
+                            &request.request_id,
+                            RunCliErrorCodeV1::Unavailable,
+                            "The Intar service is unavailable. Try again.",
+                            true,
+                        )
+                    }),
+            };
             Box::pin(async move { Ok(response) })
+        }
+    }
+
+    fn cli_view() -> RunCliViewV1 {
+        RunCliViewV1 {
+            retry_scope: "scope".to_owned(),
+            run: RunCliRunV1 {
+                kind: RunCliRunKindV1::Workshop,
+                title: "Workshop".to_owned(),
+                context: None,
+            },
+            checks: Vec::new(),
+            hint_groups: vec![
+                RunCliHintGroupV1 {
+                    alias: "general".to_owned(),
+                    label: "General guidance".to_owned(),
+                    revealed_count: 0,
+                    total_count: 1,
+                    can_reveal: true,
+                    entries: vec![RunCliHintEntryV1 {
+                        ordinal: 1,
+                        state: RunCliHintStateV1::Ready,
+                        title: None,
+                        body_markdown: None,
+                    }],
+                },
+                RunCliHintGroupV1 {
+                    alias: "check-3".to_owned(),
+                    label: "Check 3".to_owned(),
+                    revealed_count: 0,
+                    total_count: 1,
+                    can_reveal: true,
+                    entries: vec![RunCliHintEntryV1 {
+                        ordinal: 1,
+                        state: RunCliHintStateV1::Ready,
+                        title: None,
+                        body_markdown: None,
+                    }],
+                },
+                RunCliHintGroupV1 {
+                    alias: "check-4".to_owned(),
+                    label: "Check 4".to_owned(),
+                    revealed_count: 0,
+                    total_count: 1,
+                    can_reveal: false,
+                    entries: vec![RunCliHintEntryV1 {
+                        ordinal: 1,
+                        state: RunCliHintStateV1::Locked,
+                        title: None,
+                        body_markdown: None,
+                    }],
+                },
+            ],
+            solution: RunCliSolutionV1 {
+                state: RunCliSolutionStateV1::Unavailable,
+                assisted: false,
+                body_markdown: None,
+            },
         }
     }
 

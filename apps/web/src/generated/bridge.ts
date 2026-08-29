@@ -154,6 +154,7 @@ export interface HostCapabilitiesV2 {
   supports_landlock: boolean;
   supports_cgroup_v2: boolean;
   supports_run_cli_v1?: boolean;
+  supports_run_cli_completion_v1?: boolean;
 }
 
 export interface VmResourceStateV2 {

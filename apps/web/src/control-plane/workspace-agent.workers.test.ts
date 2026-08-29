@@ -697,7 +697,7 @@ describe("workspace agent guest control plane", () => {
     expect(completion).toContain("solution:2)");
     expect(completion).toContain("hint:2)");
     expect(completion).toContain(
-      '/usr/bin/timeout 0.25s /usr/local/bin/intar __complete "${COMP_CWORD}" "${COMP_WORDS[@]}" 2>/dev/null',
+      '/usr/bin/timeout --signal=KILL 0.25s /usr/local/bin/intar __complete "${COMP_CWORD}" "${COMP_WORDS[@]}" 2>/dev/null',
     );
     expect(completion).toContain("^[a-z0-9][a-z0-9-]*$");
     expect(completion).toMatch(

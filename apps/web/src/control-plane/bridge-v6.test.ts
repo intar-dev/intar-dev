@@ -133,12 +133,18 @@ describe("bridge v6 protocol", () => {
         ? legacy.capabilities.supports_run_cli_v1
         : null,
     ).toBe(false);
+    expect(
+      legacy?.type === "client_hello"
+        ? legacy.capabilities.supports_run_cli_completion_v1
+        : null,
+    ).toBe(false);
     const capable = parseBridgeMessageV6(
       JSON.stringify({
         ...clientHello,
         capabilities: {
           ...clientHello.capabilities,
           supports_run_cli_v1: true,
+          supports_run_cli_completion_v1: true,
         },
       }),
     );
@@ -146,6 +152,11 @@ describe("bridge v6 protocol", () => {
     expect(
       capable?.type === "client_hello"
         ? capable.capabilities.supports_run_cli_v1
+        : null,
+    ).toBe(true);
+    expect(
+      capable?.type === "client_hello"
+        ? capable.capabilities.supports_run_cli_completion_v1
         : null,
     ).toBe(true);
     expect(
@@ -170,6 +181,17 @@ describe("bridge v6 protocol", () => {
         }),
       ),
     ).toBeNull();
+    expect(
+      parseBridgeMessageV6(
+        JSON.stringify({
+          ...clientHello,
+          capabilities: {
+            ...clientHello.capabilities,
+            supports_run_cli_completion_v1: "yes",
+          },
+        }),
+      ),
+    ).toBeNull();
   });
 
   it("defaults an old host state report to no run-CLI support", () => {
@@ -177,6 +199,7 @@ describe("bridge v6 protocol", () => {
       "host-state-report-v2.json",
     );
     delete report.capabilities.supports_run_cli_v1;
+    delete report.capabilities.supports_run_cli_completion_v1;
     const parsed = parseBridgeMessageV6(
       JSON.stringify({
         type: "state_report",
@@ -188,6 +211,11 @@ describe("bridge v6 protocol", () => {
     expect(
       parsed?.type === "state_report"
         ? parsed.report.capabilities.supports_run_cli_v1
+        : null,
+    ).toBe(false);
+    expect(
+      parsed?.type === "state_report"
+        ? parsed.report.capabilities.supports_run_cli_completion_v1
         : null,
     ).toBe(false);
   });

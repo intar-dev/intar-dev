@@ -206,11 +206,11 @@ describe("shared runtime allocation fence", () => {
     ).resolves.toEqual({ ok: false, reason: "resource_capacity" });
   });
 
-  it("does not select an otherwise healthy KVM host until it advertises the run CLI", async () => {
+  it("does not select an otherwise healthy KVM host until it advertises CLI completion", async () => {
     const now = Date.now();
     await seedRuntimePool(now);
     const report = hostReport(now);
-    report.capabilities.supports_run_cli_v1 = false;
+    report.capabilities.supports_run_cli_completion_v1 = false;
     await drizzle(env.DB)
       .update(hostActualState)
       .set({ reportJson: report, updatedAt: now })
@@ -231,7 +231,7 @@ describe("shared runtime allocation fence", () => {
     const now = Date.now();
     await seedRuntimePool(now);
     const report = hostReport(now);
-    report.capabilities.supports_run_cli_v1 = false;
+    report.capabilities.supports_run_cli_completion_v1 = false;
     await drizzle(env.DB)
       .update(hostActualState)
       .set({ reportJson: report, updatedAt: now })
@@ -433,6 +433,7 @@ function hostReport(now: number): HostStateReportV2 {
       supports_landlock: true,
       supports_cgroup_v2: true,
       supports_run_cli_v1: true,
+      supports_run_cli_completion_v1: true,
     },
     cached_images: [
       {

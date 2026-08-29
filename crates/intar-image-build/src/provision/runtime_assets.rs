@@ -134,7 +134,7 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "      ;;").context("format error")?;
     writeln!(script, "    hint)").context("format error")?;
     writeln!(script, "      if (( COMP_CWORD == 2 )); then").context("format error")?;
-    writeln!(script, "        candidates=\"$(/usr/bin/timeout 0.25s {} __complete \"$COMP_CWORD\" \"${{COMP_WORDS[@]}}\" 2>/dev/null)\" || return 0", shell_quote(INTAR_RUN_CLI_PATH)).context("format error")?;
+    writeln!(script, "        candidates=\"$(/usr/bin/timeout --signal=KILL 0.25s {} __complete \"$COMP_CWORD\" \"${{COMP_WORDS[@]}}\" 2>/dev/null)\" || return 0", shell_quote(INTAR_RUN_CLI_PATH)).context("format error")?;
     writeln!(script, "        while IFS= read -r candidate; do").context("format error")?;
     writeln!(
         script,

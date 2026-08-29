@@ -814,6 +814,7 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
     let supports_cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
         .is_ok_and(|value| value.split_whitespace().any(|item| item == "cpu"));
     let supports_jailer_v2 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v2);
+    let supports_run_cli_v1 = cfg!(target_os = "linux") && supports_jailer_v2;
     HostCapabilitiesV2 {
         arch: host_architecture(),
         cloud_hypervisor_sha256: jailer
@@ -827,7 +828,11 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
         supports_vsock: true,
         // The broker relies on the jailer-attested Cloud Hypervisor vsock
         // device and only exists in the Linux host implementation.
-        supports_run_cli_v1: cfg!(target_os = "linux") && supports_jailer_v2,
+        supports_run_cli_v1,
+        // Completion uses the same Linux-only, jailer-attested broker as the
+        // learner CLI. Advertise it separately so the control plane can keep
+        // old agents out of the final rollout.
+        supports_run_cli_completion_v1: supports_run_cli_v1,
         supports_reflink: supports_reflink_for_image_cache(),
         supports_nftables: command_exists("nft"),
         supports_jailer_v2,

@@ -66,15 +66,23 @@ export function isFreshHostHeartbeat(
 }
 
 /**
- * New learner KVM runs need the private run-CLI broker.  Absence is false so
- * a pre-rollout inventory cannot be selected merely because its old schema
- * omitted this capability.
+ * New learner KVM runs need the private run-CLI broker and its completion
+ * protocol. Absence is false so a pre-rollout inventory cannot be selected
+ * merely because its old schema omitted either capability.
  */
 export function hostSupportsRunCliV1(
   report:
-    | { capabilities?: { supports_run_cli_v1?: unknown } }
+    | {
+        capabilities?: {
+          supports_run_cli_v1?: unknown;
+          supports_run_cli_completion_v1?: unknown;
+        };
+      }
     | null
     | undefined,
 ): boolean {
-  return report?.capabilities?.supports_run_cli_v1 === true;
+  return (
+    report?.capabilities?.supports_run_cli_v1 === true &&
+    report?.capabilities?.supports_run_cli_completion_v1 === true
+  );
 }

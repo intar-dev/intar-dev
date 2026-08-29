@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   handleAgentRunCliRequest,
   handleWorkspaceRunCliRequest,
+  runCliSuccessResponse,
 } from "@/control-plane/run-cli";
 import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspace-agent";
 import { handleAgentBootstrap, sha256Hex } from "@/control-plane/auth";
@@ -100,6 +101,149 @@ describe("private KVM run CLI control plane", () => {
       },
     });
     expect(JSON.stringify(response)).not.toContain("raw secret probe output");
+  });
+
+  it("returns only sorted, bounded aliases that can reveal hints", async () => {
+    const token = await seedScenarioRun();
+    const response = await callRunCli(token, {
+      protocol_version: 1,
+      request_id: "completion-1",
+      action: { kind: "completion" },
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(JSON.parse(text)).toEqual({
+      protocol_version: 1,
+      request_id: "completion-1",
+      result: {
+        kind: "completion",
+        aliases: ["check-1", "general"],
+      },
+    });
+    // Completion uses a distinct response shape: it must not become an
+    // alternate route to learner text or private probe identity.
+    expect(text).not.toContain("Broken service");
+    expect(text).not.toContain("Make the web service reachable");
+    expect(text).not.toContain("web-ready");
+    expect(text).not.toContain("Check the service state");
+    expect(text).not.toContain("Inspect the process before changing files.");
+    expect(text).not.toContain("Restart the service and verify it.");
+
+    await drizzle(env.DB)
+      .update(scenarioRuns)
+      .set({
+        revealedHintsJson: [
+          "scenario:first",
+          "scenario:second",
+          "probe:web:web-ready:repair",
+        ],
+      })
+      .where(eq(scenarioRuns.runId, "run-1"));
+    const exhausted = await callRunCli(token, {
+      protocol_version: 1,
+      request_id: "completion-exhausted",
+      action: { kind: "completion" },
+    });
+    await expect(exhausted.json()).resolves.toMatchObject({
+      result: { kind: "completion", aliases: [] },
+    });
+
+    const malformed = await callRunCli(token, {
+      protocol_version: 1,
+      request_id: "completion-malformed",
+      action: { kind: "completion", extra: true },
+    });
+    expect(malformed.status).toBe(400);
+  });
+
+  it("enforces the action result boundary before serialization", async () => {
+    const token = await seedScenarioRun();
+    const status = await callRunCli(token, statusRequest());
+    const statusResult = await status.json<RunCliResponseV1>();
+    if (statusResult.result.kind !== "ok") {
+      throw new Error("expected an ok result fixture");
+    }
+
+    const completionWithView = runCliSuccessResponse(
+      "producer-completion-view",
+      { kind: "completion" },
+      statusResult.result,
+    );
+    const completionWithViewText = await completionWithView.text();
+    expect(JSON.parse(completionWithViewText)).toMatchObject({
+      result: { kind: "error", error: { code: "internal" } },
+    });
+    expect(completionWithViewText).not.toContain("Broken service");
+    expect(completionWithViewText).not.toContain("web-ready");
+
+    const statusWithCompletion = runCliSuccessResponse(
+      "producer-status-completion",
+      { kind: "status" },
+      { kind: "completion", aliases: ["general"] },
+    );
+    const statusWithCompletionText = await statusWithCompletion.text();
+    expect(JSON.parse(statusWithCompletionText)).toMatchObject({
+      result: { kind: "error", error: { code: "internal" } },
+    });
+    expect(statusWithCompletionText).not.toContain("general");
+
+    const validCompletion = runCliSuccessResponse(
+      "producer-completion-valid",
+      { kind: "completion" },
+      { kind: "completion", aliases: ["general", "check-2", "general"] },
+    );
+    await expect(validCompletion.json<RunCliResponseV1>()).resolves.toEqual({
+      protocol_version: 1,
+      request_id: "producer-completion-valid",
+      result: { kind: "completion", aliases: ["check-2", "general"] },
+    });
+  });
+
+  it("bounds workshop completion without exposing workshop content", async () => {
+    await seedWorkshopRunCli();
+    const manifest = workshopManifest();
+    manifest.modules[0]!.hints = Array.from({ length: 130 }, (_, index) => ({
+      id: `hidden-hint-${index + 1}`,
+      title: `Hidden title ${index + 1}`,
+      bodyMarkdown: `Hidden body ${index + 1}`,
+    }));
+    await drizzle(env.DB)
+      .update(workshopTemplateRevisions)
+      .set({ manifestJson: manifest })
+      .where(eq(workshopTemplateRevisions.id, "workshop-revision-1"));
+
+    const response = await handleWorkspaceRunCliRequest({
+      request: new Request("https://intar.test/api/runtime/workspace-agent/cli", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          protocol_version: 1,
+          request_id: "workshop-completion-1",
+          action: { kind: "completion" },
+        }),
+      }),
+      subject: workshopSubject(),
+      requireWorkshopEnabled: async () => {},
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    const body = JSON.parse(text) as {
+      result: { kind: string; aliases?: string[] };
+    };
+    expect(body.result.kind).toBe("completion");
+    expect(body.result.aliases).toHaveLength(128);
+    expect(body.result.aliases).toEqual(
+      [...(body.result.aliases ?? [])].sort(),
+    );
+    expect(new Set(body.result.aliases).size).toBe(128);
+    expect(body.result.aliases).toEqual(
+      expect.arrayContaining(["hint-1", "hint-10", "hint-100"]),
+    );
+    expect(text).not.toContain("Repair lab");
+    expect(text).not.toContain("Hidden title 1");
+    expect(text).not.toContain("Hidden body 1");
+    expect(text).not.toContain("hidden-hint-1");
+    expect(text).not.toContain("Restart the service.");
   });
 
   it("keeps scenario hints sealed and uses the existing sequential reveal service", async () => {

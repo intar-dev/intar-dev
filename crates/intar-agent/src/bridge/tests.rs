@@ -28,7 +28,9 @@ fn desired_vm() -> DesiredVmV2 {
 
 #[test]
 fn host_capabilities_require_an_attested_run_cli_runtime() {
-    assert!(!collect_host_capabilities(None).supports_run_cli_v1);
+    let capabilities = collect_host_capabilities(None);
+    assert!(!capabilities.supports_run_cli_v1);
+    assert!(!capabilities.supports_run_cli_completion_v1);
 }
 
 fn empty_desired_state(version: u64) -> HostDesiredStateV2 {

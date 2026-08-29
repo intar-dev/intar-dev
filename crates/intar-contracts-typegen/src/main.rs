@@ -17,10 +17,11 @@ use intar_contracts::{
         RUNTIME_ENV_FILENAME, RuntimeEnv,
     },
     run_cli::{
-        RUN_CLI_MAX_FRAME_BYTES, RUN_CLI_MAX_HINT_ALIAS_BYTES, RUN_CLI_MAX_PROBE_ID_BYTES,
-        RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES, RUN_CLI_MAX_RETRY_SCOPE_BYTES,
-        RUN_CLI_PROTOCOL_VERSION, RUN_CLI_SCHEMA_VERSION, RunCliProbeCheckEventV1,
-        RunCliProbeCheckRequestV1, RunCliProbeCheckResponseV1, RunCliRequestV1, RunCliResponseV1,
+        RUN_CLI_MAX_COMPLETION_ALIASES, RUN_CLI_MAX_FRAME_BYTES, RUN_CLI_MAX_HINT_ALIAS_BYTES,
+        RUN_CLI_MAX_PROBE_ID_BYTES, RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES,
+        RUN_CLI_MAX_RETRY_SCOPE_BYTES, RUN_CLI_PROTOCOL_VERSION, RUN_CLI_SCHEMA_VERSION,
+        RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliProbeCheckResponseV1,
+        RunCliRequestV1, RunCliResponseV1,
     },
     stargate::{
         IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
@@ -578,6 +579,7 @@ export interface HostCapabilitiesV2 {
   supports_landlock: boolean;
   supports_cgroup_v2: boolean;
   supports_run_cli_v1?: boolean;
+  supports_run_cli_completion_v1?: boolean;
 }
 
 export interface VmResourceStateV2 {
@@ -766,12 +768,14 @@ export const RUN_CLI_MAX_FRAME_BYTES = {RUN_CLI_MAX_FRAME_BYTES};\n\
 export const RUN_CLI_MAX_REQUEST_ID_BYTES = {RUN_CLI_MAX_REQUEST_ID_BYTES};\n\
 export const RUN_CLI_MAX_RETRY_SCOPE_BYTES = {RUN_CLI_MAX_RETRY_SCOPE_BYTES};\n\
 export const RUN_CLI_MAX_HINT_ALIAS_BYTES = {RUN_CLI_MAX_HINT_ALIAS_BYTES};\n\
+export const RUN_CLI_MAX_COMPLETION_ALIASES = {RUN_CLI_MAX_COMPLETION_ALIASES};\n\
 export const RUN_CLI_MAX_PROBE_IDS = {RUN_CLI_MAX_PROBE_IDS};\n\
 export const RUN_CLI_MAX_PROBE_ID_BYTES = {RUN_CLI_MAX_PROBE_ID_BYTES};\n\n"
     );
     format!(
         "{header}{}",
         r#"export type RunCliActionV1 =
+  | { kind: "completion" }
   | { kind: "status" }
   | { kind: "hints" }
   | { kind: "hint_reveal"; alias: string; expected_ordinal: number }
@@ -787,6 +791,7 @@ export interface RunCliRequestV1 {
 
 export type RunCliResultV1 =
   | { kind: "ok"; view: RunCliViewV1 }
+  | { kind: "completion"; aliases: string[] }
   | { kind: "error"; error: RunCliErrorV1 };
 
 export interface RunCliResponseV1 {

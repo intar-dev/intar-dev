@@ -60,6 +60,20 @@ fn bridge_state_report_fixture_round_trips() {
 }
 
 #[test]
+fn old_host_reports_default_run_cli_completion_to_false() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/bridge/host-state-report-v2.json"))
+            .expect("fixture json");
+    value["capabilities"]
+        .as_object_mut()
+        .expect("capabilities object")
+        .remove("supports_run_cli_completion_v1");
+
+    let report: HostStateReportV2 = serde_json::from_value(value).expect("legacy report");
+    assert!(!report.capabilities.supports_run_cli_completion_v1);
+}
+
+#[test]
 fn bridge_vm_report_fixture_round_trips() {
     assert_round_trip::<VmReportV2>(include_str!("../fixtures/bridge/vm-report-v2.json"));
 }

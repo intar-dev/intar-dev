@@ -97,7 +97,7 @@ describe("scenario host launch eligibility", () => {
     expect(isFreshHostHeartbeat(null, 1_762_041_660_000, 90_000)).toBe(false);
   });
 
-  it("treats old host reports as not run-CLI capable", () => {
+  it("requires both learner CLI capabilities", () => {
     expect(hostSupportsRunCliV1(null)).toBe(false);
     expect(
       hostSupportsRunCliV1({
@@ -107,6 +107,14 @@ describe("scenario host launch eligibility", () => {
     expect(
       hostSupportsRunCliV1({
         capabilities: { supports_run_cli_v1: true },
+      }),
+    ).toBe(false);
+    expect(
+      hostSupportsRunCliV1({
+        capabilities: {
+          supports_run_cli_v1: true,
+          supports_run_cli_completion_v1: true,
+        },
       }),
     ).toBe(true);
   });

@@ -473,8 +473,9 @@ fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV2 {
         supports_hard_cpu_quota: false,
         supports_landlock: false,
         supports_cgroup_v2: false,
-        // Builder hosts never broker learner run CLI requests.
+        // Builder hosts never broker learner run CLI requests or completion.
         supports_run_cli_v1: false,
+        supports_run_cli_completion_v1: false,
     }
 }
 
@@ -621,8 +622,9 @@ pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessage
             supports_hard_cpu_quota: false,
             supports_landlock: false,
             supports_cgroup_v2: false,
-            // Builder hosts never broker learner run CLI requests.
+            // Builder hosts never broker learner run CLI requests or completion.
             supports_run_cli_v1: false,
+            supports_run_cli_completion_v1: false,
         },
     })
 }
@@ -874,6 +876,7 @@ mod tests {
         assert!(hello.capabilities.supports_kvm);
         assert!(!hello.capabilities.supports_vsock);
         assert!(!hello.capabilities.supports_run_cli_v1);
+        assert!(!hello.capabilities.supports_run_cli_completion_v1);
     }
 
     #[test]

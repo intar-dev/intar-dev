@@ -15,6 +15,7 @@ import {
   workshopWorkspaces,
 } from "@/db/schema";
 import {
+  RUN_CLI_MAX_COMPLETION_ALIASES,
   RUN_CLI_MAX_FRAME_BYTES,
   RUN_CLI_MAX_HINT_ALIAS_BYTES,
   RUN_CLI_MAX_PROBE_IDS,
@@ -302,15 +303,19 @@ async function handleRunCliSubjectRequest(input: {
         false,
       );
     }
-    const view = await dispatchRunCliAction(input);
-    return runCliOkResponse(input.request.request_id, view);
+    const result = await dispatchRunCliAction(input);
+    return runCliSuccessResponse(
+      input.request.request_id,
+      input.request.action,
+      result,
+    );
   } catch (error) {
     return runCliServiceErrorResponse(input.request.request_id, error);
   }
 
   async function dispatchRunCliAction(params: {
     request: RunCliRequestV1;
-  }): Promise<RunCliViewV1> {
+  }): Promise<RunCliSuccessResultV1> {
     if (input.subject.kind === "scenario") {
       return dispatchScenarioRunCliAction({
         action: params.request.action,
@@ -323,6 +328,16 @@ async function handleRunCliSubjectRequest(input: {
     });
   }
 }
+
+type RunCliOkResultV1 = Extract<RunCliResultV1, { kind: "ok" }>;
+type RunCliCompletionResultV1 = Extract<
+  RunCliResultV1,
+  { kind: "completion" }
+>;
+export type RunCliSuccessResultV1 = Exclude<
+  RunCliResultV1,
+  { kind: "error" }
+>;
 
 async function hasActiveCliAccess(userId: string): Promise<boolean> {
   const row = await env.DB.prepare(
@@ -338,7 +353,7 @@ async function hasActiveCliAccess(userId: string): Promise<boolean> {
 async function dispatchScenarioRunCliAction(input: {
   action: RunCliActionV1;
   subject: Extract<RunCliSubject, { kind: "scenario" }>;
-}): Promise<RunCliViewV1> {
+}): Promise<RunCliSuccessResultV1> {
   let run = await getScenarioRunForUser({
     runId: input.subject.runId,
     userId: input.subject.userId,
@@ -351,6 +366,13 @@ async function dispatchScenarioRunCliAction(input: {
     );
   }
   const vm = requireScenarioVm(run, input.subject.runtimeVmName);
+
+  if (input.action.kind === "completion") {
+    return {
+      kind: "completion",
+      aliases: scenarioCompletionAliases(run, vm),
+    };
+  }
 
   if (input.action.kind === "hint_reveal") {
     const target = scenarioHintForAliasOrdinal(
@@ -385,17 +407,20 @@ async function dispatchScenarioRunCliAction(input: {
     });
   }
 
-  return scenarioRunCliView(
-    run,
-    input.subject.runtimeVmName,
-    input.subject.retryScope,
-  );
+  return {
+    kind: "ok",
+    view: scenarioRunCliView(
+      run,
+      input.subject.runtimeVmName,
+      input.subject.retryScope,
+    ),
+  };
 }
 
 async function dispatchWorkshopRunCliAction(input: {
   action: RunCliActionV1;
   subject: Extract<RunCliSubject, { kind: "workshop" }>;
-}): Promise<RunCliViewV1> {
+}): Promise<RunCliSuccessResultV1> {
   await (
     input.subject.requireWorkshopEnabled?.() ??
     requireWorkshopsEnabledForSession(input.subject.sessionId)
@@ -432,6 +457,13 @@ async function dispatchWorkshopRunCliAction(input: {
       "No workshop module is available yet.",
       true,
     );
+  }
+
+  if (input.action.kind === "completion") {
+    return {
+      kind: "completion",
+      aliases: workshopCompletionAliases(module),
+    };
   }
 
   if (input.action.kind === "hint_reveal") {
@@ -478,16 +510,101 @@ async function dispatchWorkshopRunCliAction(input: {
       true,
     );
   }
-  return workshopRunCliView(
-    projection,
-    await opaqueRetryScope([
-      "workshop",
-      input.subject.mutationFence.executionId,
-      input.subject.mutationFence.workspaceId,
-      String(input.subject.mutationFence.generation),
-      currentModule.id,
-    ]),
+  return {
+    kind: "ok",
+    view: workshopRunCliView(
+      projection,
+      await opaqueRetryScope([
+        "workshop",
+        input.subject.mutationFence.executionId,
+        input.subject.mutationFence.workspaceId,
+        String(input.subject.mutationFence.generation),
+        currentModule.id,
+      ]),
+    ),
+  };
+}
+
+/**
+ * Completion is deliberately a smaller projection than `scenarioRunCliView`.
+ * It never serializes labels, titles, bodies, probe IDs, or solution state.
+ */
+function scenarioCompletionAliases(
+  run: ScenarioRunRecord,
+  vm: ScenarioRunRecord["vms"][number],
+): string[] {
+  if (run.hints.length > RUN_CLI_MAX_HINTS) {
+    throw runCliFailure(
+      "unavailable",
+      "Hints are unavailable for this run.",
+      true,
+    );
+  }
+  if (vm.scenarioProbes.length > RUN_CLI_MAX_PROBE_IDS) {
+    throw runCliFailure(
+      "unavailable",
+      "Checks are unavailable for this run.",
+      true,
+    );
+  }
+
+  const aliases: string[] = [];
+  if (
+    run.hints.some(
+      (hint) => hint.scope === "scenario" && hint.unlocked && !hint.revealed,
+    )
+  ) {
+    aliases.push("general");
+  }
+  const prefix = `probe:${vm.scenarioVmName}:`;
+  for (const [ordinal, probe] of vm.scenarioProbes.entries()) {
+    if (
+      run.hints.some(
+        (hint) =>
+          hint.scope === "probe" &&
+          hint.key.startsWith(prefix) &&
+          hint.probeName === probe.id &&
+          hint.unlocked &&
+          !hint.revealed,
+      )
+    ) {
+      aliases.push(`check-${ordinal + 1}`);
+    }
+  }
+  return boundedCompletionAliases(aliases);
+}
+
+/** Completion aliases are generated from ordinal positions, never content. */
+function workshopCompletionAliases(
+  module: NonNullable<ReturnType<typeof currentWorkshopModule>>,
+): string[] {
+  if (module.hints.length > RUN_CLI_MAX_HINTS) {
+    throw runCliFailure(
+      "unavailable",
+      "Hints are unavailable for this workshop module.",
+      true,
+    );
+  }
+  return boundedCompletionAliases(
+    module.hints.flatMap((hint, ordinal) =>
+      hint.revealed ? [] : [`hint-${ordinal + 1}`],
+    ),
   );
+}
+
+function boundedCompletionAliases(aliases: Iterable<string>): string[] {
+  const sorted = [...new Set(aliases)].sort();
+  // All callers construct aliases from public, fixed prefixes. Keep the
+  // guard here so a future caller cannot accidentally turn completion into a
+  // content transport.
+  if (!sorted.every(validHintAlias)) {
+    throw runCliFailure(
+      "internal",
+      "Intar could not complete that command. Try again.",
+      true,
+    );
+  }
+  return sorted.slice(0, RUN_CLI_MAX_COMPLETION_ALIASES);
 }
 
 function scenarioRunCliView(
@@ -1037,12 +1154,52 @@ function boundedView(view: RunCliViewV1): RunCliViewV1 {
   return view;
 }
 
-function runCliOkResponse(requestId: string, view: RunCliViewV1): Response {
-  const result: RunCliResultV1 = { kind: "ok", view };
+/**
+ * The producer boundary for successful broker results. A completion lookup is
+ * never allowed to serialize a full view, even if a future dispatch branch
+ * accidentally returns one. Conversely, normal commands never serialize an
+ * alias-only completion result.
+ */
+export function runCliSuccessResponse(
+  requestId: string,
+  action: RunCliActionV1,
+  result: RunCliSuccessResultV1,
+): Response {
+  if (action.kind === "completion") {
+    if (result.kind !== "completion") {
+      return runCliUnexpectedSuccessResultResponse(requestId);
+    }
+    const completion: RunCliCompletionResultV1 = {
+      kind: "completion",
+      aliases: boundedCompletionAliases(result.aliases),
+    };
+    return runCliResponse({
+      protocol_version: RUN_CLI_PROTOCOL_VERSION,
+      request_id: requestId,
+      result: completion,
+    });
+  }
+  if (result.kind !== "ok") {
+    return runCliUnexpectedSuccessResultResponse(requestId);
+  }
+  const ok: RunCliOkResultV1 = {
+    kind: "ok",
+    view: boundedView(result.view),
+  };
   return runCliResponse({
     protocol_version: RUN_CLI_PROTOCOL_VERSION,
     request_id: requestId,
-    result,
+    result: ok,
+  });
+}
+
+function runCliUnexpectedSuccessResultResponse(requestId: string): Response {
+  return runCliErrorResponse({
+    requestId,
+    status: 200,
+    code: "internal",
+    message: "Intar could not complete that command. Try again.",
+    retryable: true,
   });
 }
 
@@ -1279,6 +1436,7 @@ function validateRunCliRequest(
 function validateRunCliAction(value: unknown): RunCliActionV1 | null {
   if (!isRecord(value) || typeof value.kind !== "string") return null;
   switch (value.kind) {
+    case "completion":
     case "status":
     case "hints":
     case "solution":

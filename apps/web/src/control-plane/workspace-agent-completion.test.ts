@@ -9,7 +9,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { buildWorkspaceAgentCloudInit } from "@/lib/workshops/workspace-agent-control-plane";
+
+vi.mock("cloudflare:workers", () => ({ env: {} }));
 
 const repositoryRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 const staticCloudInitPath = join(
@@ -18,6 +21,20 @@ const staticCloudInitPath = join(
 );
 
 describe("direct-cloud Intar Bash completion", () => {
+  it("keeps the static cloud-init example aligned with production output", () => {
+    expect(
+      cloudInitFileContent(
+        readFileSync(staticCloudInitPath, "utf8"),
+        "/usr/share/intar/completions/intar.bash",
+      ),
+    ).toBe(
+      cloudInitFileContent(
+        renderedCloudInit(),
+        "/usr/share/intar/completions/intar.bash",
+      ),
+    );
+  });
+
   it("does not offer unrelated aliases for intar hint z Tab", () => {
     const directory = mkdtempSync(
       join(tmpdir(), "intar-direct-cloud-completion-"),
@@ -39,13 +56,7 @@ describe("direct-cloud Intar Bash completion", () => {
       const completionPath = join(directory, "intar.bash");
       writeFileSync(
         completionPath,
-        cloudInitFileContent(
-          readFileSync(staticCloudInitPath, "utf8"),
-          "/usr/share/intar/completions/intar.bash",
-        ).replace(
-          "/usr/bin/timeout 0.25s /usr/local/bin/intar",
-          bashQuote(fakeIntar),
-        ),
+        completionScript({ fakeIntar, timeout: timeoutExecutable() }),
       );
 
       const output = execFileSync(
@@ -63,7 +74,7 @@ describe("direct-cloud Intar Bash completion", () => {
             'if ((${#COMPREPLY[@]})); then printf "%s\\n" "${COMPREPLY[@]}"; fi',
           ].join("\n"),
         ],
-        { encoding: "utf8" },
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
       );
 
       expect(output).toBe("");
@@ -71,7 +82,161 @@ describe("direct-cloud Intar Bash completion", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("loads rendered completion through Bash interactive startup", () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), "intar-direct-cloud-completion-"),
+    );
+    try {
+      const fakeIntar = join(directory, "intar");
+      writeFileSync(
+        fakeIntar,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = __complete ]; then',
+          "  printf '%s\\n' general",
+          "fi",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(fakeIntar, 0o755);
+
+      const completionPath = join(directory, "intar.bash");
+      writeFileSync(
+        completionPath,
+        completionScript({ fakeIntar, timeout: timeoutExecutable() }),
+      );
+      const bashRcPath = join(directory, "bashrc");
+      writeFileSync(bashRcPath, bashRcScript(completionPath));
+
+      const output = execFileSync(
+        "bash",
+        [
+          "--noprofile",
+          "--rcfile",
+          bashRcPath,
+          "-ic",
+          [
+            "complete -p intar",
+            "COMP_WORDS=(intar hint ge)",
+            "COMP_CWORD=2",
+            "COMPREPLY=()",
+            "_intar_complete",
+            'printf "%s\\n" "${COMPREPLY[*]}"',
+          ].join("\n"),
+        ],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+
+      expect(output).toContain("complete -F _intar_complete intar");
+      expect(output).toContain("general");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("hard stops a completion helper that ignores TERM", () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), "intar-direct-cloud-completion-"),
+    );
+    try {
+      const fakeIntar = join(directory, "intar");
+      writeFileSync(
+        fakeIntar,
+        [
+          "#!/bin/sh",
+          "trap '' TERM",
+          "exec sleep 30",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(fakeIntar, 0o755);
+
+      const completionPath = join(directory, "intar.bash");
+      writeFileSync(
+        completionPath,
+        completionScript({ fakeIntar, timeout: timeoutExecutable() }),
+      );
+
+      const startedAt = Date.now();
+      const output = execFileSync(
+        "bash",
+        [
+          "--noprofile",
+          "--norc",
+          "-c",
+          [
+            "source " + bashQuote(completionPath),
+            "COMP_WORDS=(intar hint)",
+            "COMP_CWORD=2",
+            "COMPREPLY=()",
+            "_intar_complete",
+            '(( ${#COMPREPLY[@]} == 0 ))',
+          ].join("\n"),
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(output).toBe("");
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
+
+function completionScript(input: {
+  fakeIntar: string;
+  timeout: string;
+}): string {
+  return cloudInitFileContent(
+    renderedCloudInit(),
+    "/usr/share/intar/completions/intar.bash",
+  )
+    .replace("/usr/bin/timeout", bashQuote(input.timeout))
+    .replace("/usr/local/bin/intar", bashQuote(input.fakeIntar));
+}
+
+function bashRcScript(completionPath: string): string {
+  return cloudInitFileContent(
+    renderedCloudInit(),
+    "/etc/bash.bashrc",
+  ).replaceAll(
+    "/usr/share/intar/completions/intar.bash",
+    bashQuote(completionPath),
+  );
+}
+
+function renderedCloudInit(): string {
+  return buildWorkspaceAgentCloudInit({
+    identity: {
+      executionId: "execution-1",
+      workspaceId: "workspace-1",
+      generation: 1,
+    },
+    endpoint: "https://intar.test/api/runtime/workspace-agent/",
+    bootstrapCapability: "test-bootstrap-capability",
+    sshPublicKey: "ssh-ed25519 AAAATEST intar",
+    agentBinaryUrl: "https://releases.intar.dev/workspace-agent",
+    agentBinarySha256: "b".repeat(64),
+    kinoBinaryUrl: "https://releases.intar.dev/kino",
+    kinoBinarySha256: "c".repeat(64),
+    kinoProbes: [{ moduleId: "00", probeId: "module-00-workspace-ready" }],
+    checkpointSigningKeysJson:
+      '{"test-key":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}',
+    runCliEnabled: true,
+  });
+}
+
+function timeoutExecutable(): string {
+  const timeout = execFileSync(
+    "bash",
+    ["-c", "command -v timeout || command -v gtimeout"],
+    { encoding: "utf8" },
+  ).trim();
+  expect(timeout).not.toBe("");
+  return timeout;
+}
 
 function cloudInitFileContent(document: string, path: string): string {
   const fileStart = document.indexOf("  - path: " + path + "\n");

@@ -10,8 +10,8 @@ use tempfile::tempdir;
 
 use super::{
     FAILED_STEP_LOG_TAIL_BYTES, GeneratedStepScript, INTAR_RUN_CLI_COMPLETION_PATH,
-    RuntimeActivationInput, append_step_scripts, render_runtime_activation_script,
-    render_scenario_provision_script, shell_quote,
+    INTAR_RUN_CLI_PATH, RuntimeActivationInput, append_step_scripts,
+    render_runtime_activation_script, render_scenario_provision_script, shell_quote,
 };
 
 fn render_minimal_provision_script() -> String {
@@ -207,7 +207,10 @@ fn runtime_activation_bash_completion_loads_and_keeps_dynamic_calls_bounded() {
         .split_once("\nEOF_INTAR_BASH_COMPLETION")
         .unwrap();
 
-    assert!(completion.contains("/usr/bin/timeout 0.25s '/usr/local/bin/intar' __complete"));
+    assert!(
+        completion
+            .contains("/usr/bin/timeout --signal=KILL 0.25s '/usr/local/bin/intar' __complete")
+    );
     assert!(completion.contains("\"$COMP_CWORD\" \"${COMP_WORDS[@]}\" 2>/dev/null"));
     assert!(completion.contains("^[a-z0-9][a-z0-9-]*$"));
     assert!(!completion.contains("--yes"));
@@ -243,6 +246,71 @@ fn runtime_activation_bash_completion_loads_and_keeps_dynamic_calls_bounded() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("hints hint"));
     assert!(stdout.contains("complete -F _intar_complete intar"));
+}
+
+#[test]
+fn runtime_activation_bash_completion_kills_term_ignoring_helpers() {
+    let script = render_minimal_runtime_activation();
+    let (_, completion_and_rest) = script.split_once("<<'EOF_INTAR_COMPLETION'\n").unwrap();
+    let (completion, _) = completion_and_rest
+        .split_once("\nEOF_INTAR_COMPLETION")
+        .unwrap();
+    let timeout_command = ["timeout", "gtimeout"]
+        .into_iter()
+        .find(|candidate| {
+            matches!(
+                Command::new(candidate).arg("--version").output(),
+                Ok(output) if output.status.success()
+            )
+        })
+        .expect("completion timeout test requires GNU timeout");
+
+    let temporary = tempdir().unwrap();
+    let fake_intar_path = temporary.path().join("intar");
+    std::fs::write(&fake_intar_path, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n").unwrap();
+    let chmod = Command::new("chmod")
+        .args(["0755", fake_intar_path.to_string_lossy().as_ref()])
+        .output()
+        .unwrap();
+    assert!(
+        chmod.status.success(),
+        "failed to mark fake completion helper executable: {}",
+        String::from_utf8_lossy(&chmod.stderr)
+    );
+
+    let completion_path = temporary.path().join("intar.bash");
+    let completion = completion
+        .replace("/usr/bin/timeout", timeout_command)
+        .replace(
+            &shell_quote(INTAR_RUN_CLI_PATH),
+            &shell_quote(fake_intar_path.to_string_lossy().as_ref()),
+        );
+    std::fs::write(&completion_path, completion).unwrap();
+
+    let started = Instant::now();
+    let output = Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            &format!(
+                "source {}; COMP_WORDS=(intar hint); COMP_CWORD=2; _intar_complete; (( ${{#COMPREPLY[@]}} == 0 ))",
+                shell_quote(completion_path.to_string_lossy().as_ref()),
+            ),
+        ])
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "TERM-ignoring completion helper was not handled: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "completion waited {elapsed:?} for a TERM-ignoring helper"
+    );
 }
 
 #[test]
