@@ -18,6 +18,7 @@ export function serializeAdminScenarioSummary(
     scenarioHintCount: scenario.hints.length,
     probeCount: scenario.probeCount,
     vmCount: scenario.vmCount,
+    requiredResources: scenario.requiredResources,
     enabled: scenario.enabled,
     enabledAt: scenario.enabledAt,
     createdAt: scenario.createdAt,

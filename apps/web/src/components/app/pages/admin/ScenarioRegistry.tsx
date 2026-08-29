@@ -411,7 +411,7 @@ function ScenarioRegistryRow({
         : "No build";
 
   return (
-    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 xl:grid-cols-[minmax(13rem,1fr)_minmax(20rem,1.4fr)_minmax(13rem,0.8fr)_auto] xl:items-center">
+    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 xl:grid-cols-[minmax(13rem,1fr)_minmax(20rem,1.4fr)_minmax(16rem,0.9fr)_auto] xl:items-center">
       <div className="min-w-0 space-y-1">
         <h3>
           <Link
@@ -482,6 +482,12 @@ function ScenarioRegistryRow({
           </dd>
         </div>
         <div className="col-span-2">
+          <dt className="text-label">Resources</dt>
+          <dd className="mt-0.5 tabular-nums">
+            {formatScenarioResources(scenario.requiredResources)}
+          </dd>
+        </div>
+        <div className="col-span-2">
           <dt className="text-label">Updated</dt>
           <dd className="mt-0.5 text-metadata">
             {formatRelativeTime(scenario.updatedAt)}
@@ -523,6 +529,31 @@ function ScenarioRegistryRow({
       </div>
     </div>
   );
+}
+
+export function formatScenarioResources(
+  resources: AdminScenarioSummary["requiredResources"],
+): string {
+  return [
+    `${formatCpu(resources.cpuMillis)} CPU`,
+    `${resources.vcpuCount.toLocaleString()} vCPU`,
+    formatMibResource(resources.memoryMib, "RAM"),
+    formatMibResource(resources.diskMib, "disk"),
+  ].join(" · ");
+}
+
+function formatCpu(cpuMillis: number): string {
+  return (cpuMillis / 1000).toLocaleString(undefined, {
+    maximumFractionDigits: 3,
+  });
+}
+
+function formatMibResource(value: number, label: string): string {
+  const gib = value / 1024;
+  const formatted = gib.toLocaleString(undefined, {
+    maximumFractionDigits: 1,
+  });
+  return `${formatted} GiB ${label}`;
 }
 
 const BUILD_STATUS_LABELS: Record<ScenarioBuildStatus, string> = {

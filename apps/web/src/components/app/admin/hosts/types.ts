@@ -164,6 +164,12 @@ export interface AdminScenarioSummary {
   scenarioHintCount: number;
   probeCount: number;
   vmCount: number;
+  requiredResources: {
+    cpuMillis: number;
+    vcpuCount: number;
+    memoryMib: number;
+    diskMib: number;
+  };
   enabled: boolean;
   enabledAt: number | null;
   createdAt: number;

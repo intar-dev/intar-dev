@@ -41,6 +41,26 @@ export interface ScenarioVmRecord {
   diskMib: number;
 }
 
+export type ScenarioRequiredResources = Pick<
+  ScenarioVmRecord,
+  "cpuMillis" | "vcpuCount" | "memoryMib" | "diskMib"
+>;
+
+/** Total configured VM resources for one scenario. */
+export function aggregateScenarioRequiredResources(
+  vms: readonly ScenarioRequiredResources[],
+): ScenarioRequiredResources {
+  return vms.reduce<ScenarioRequiredResources>(
+    (total, vm) => ({
+      cpuMillis: total.cpuMillis + vm.cpuMillis,
+      vcpuCount: total.vcpuCount + vm.vcpuCount,
+      memoryMib: total.memoryMib + vm.memoryMib,
+      diskMib: total.diskMib + vm.diskMib,
+    }),
+    { cpuMillis: 0, vcpuCount: 0, memoryMib: 0, diskMib: 0 },
+  );
+}
+
 export type ScenarioVmDirectBootMetadata = Pick<
   ScenarioVmRecord,
   | "imageFormat"

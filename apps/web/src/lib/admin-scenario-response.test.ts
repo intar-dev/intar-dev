@@ -14,6 +14,12 @@ describe("admin scenario response serialization", () => {
     expect(serialized).not.toHaveProperty("briefingMarkdown");
     expect(serialized).not.toHaveProperty("hints");
     expect(serialized.scenarioHintCount).toBe(1);
+    expect(serialized.requiredResources).toEqual({
+      cpuMillis: 1_000,
+      vcpuCount: 1,
+      memoryMib: 1_024,
+      diskMib: 2_048,
+    });
   });
 
   it("includes gated content and full probe fields in detail responses", () => {
@@ -53,6 +59,12 @@ const scenario: ScenarioDetailRecord = {
   ],
   probeCount: 1,
   vmCount: 1,
+  requiredResources: {
+    cpuMillis: 1_000,
+    vcpuCount: 1,
+    memoryMib: 1_024,
+    diskMib: 2_048,
+  },
   enabled: true,
   enabledAt: 123,
   createdAt: 100,

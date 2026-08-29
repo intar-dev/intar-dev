@@ -4,6 +4,7 @@ import type {
   ScenarioVmRecord,
 } from "@/lib/scenario-model";
 import {
+  aggregateScenarioRequiredResources,
   buildScenarioLaunchSpecs,
   deriveScenarioBriefing,
   normalizeScenarioVmDirectBootMetadata,
@@ -11,6 +12,30 @@ import {
 } from "@/lib/scenario-model";
 
 describe("scenario model", () => {
+  it("totals the configured resources across every scenario VM", () => {
+    expect(
+      aggregateScenarioRequiredResources([
+        {
+          cpuMillis: 1_000,
+          vcpuCount: 1,
+          memoryMib: 1_024,
+          diskMib: 8_192,
+        },
+        {
+          cpuMillis: 2_500,
+          vcpuCount: 2,
+          memoryMib: 2_048,
+          diskMib: 16_384,
+        },
+      ]),
+    ).toEqual({
+      cpuMillis: 3_500,
+      vcpuCount: 3,
+      memoryMib: 3_072,
+      diskMib: 24_576,
+    });
+  });
+
   it("derives briefing content from stored scenario metadata and scenario probes only", () => {
     const briefing = deriveScenarioBriefing({
       scenarioId: "broken-nginx",

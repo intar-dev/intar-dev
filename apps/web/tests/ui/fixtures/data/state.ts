@@ -160,6 +160,12 @@ function makeAdminScenario(enabled = true) {
     scenarioHintCount: 1,
     probeCount: scenarioProbes.length,
     vmCount: 1,
+    requiredResources: {
+      cpuMillis: 2_000,
+      vcpuCount: 2,
+      memoryMib: scenarioVm.memoryMib,
+      diskMib: scenarioVm.diskMib,
+    },
     enabled,
     enabledAt: enabled ? FIXED_NOW - 45 * day : null,
     createdAt: FIXED_NOW - 60 * day,

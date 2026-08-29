@@ -5,9 +5,11 @@ import { appError } from "@/lib/app-error";
 import type {
   ScenarioDifficulty,
   ScenarioProbeRecord,
+  ScenarioRequiredResources,
   ScenarioVmRecord,
 } from "@/lib/scenario-model";
 import {
+  aggregateScenarioRequiredResources,
   normalizeScenarioVmDirectBootMetadata,
   parseScenarioDifficulty,
 } from "@/lib/scenario-model";
@@ -28,6 +30,7 @@ export interface ScenarioListRecord {
   hints: ScenarioHintManifestV3[];
   probeCount: number;
   vmCount: number;
+  requiredResources: ScenarioRequiredResources;
   enabled: boolean;
   enabledAt: number | null;
   createdAt: number;
@@ -65,6 +68,7 @@ export async function listScenarios(): Promise<ScenarioListRecord[]> {
       hints: detail.hints,
       probeCount: detail.probeCount,
       vmCount: detail.vmCount,
+      requiredResources: detail.requiredResources,
       enabled: detail.enabled,
       enabledAt: detail.enabledAt,
       createdAt: detail.createdAt,
@@ -117,6 +121,35 @@ export async function loadScenario(
     return null;
   }
 
+  const scenarioVms: ScenarioVmRecord[] = vms.map((vm) => {
+    const directBoot = normalizeScenarioVmDirectBootMetadata({
+      imageFormat: vm.imageFormat,
+      imageVirtualSizeBytes: vm.imageVirtualSizeBytes,
+      kernelSha256: vm.kernelSha256,
+      initrdSha256: vm.initrdSha256,
+      bootCmdline: vm.bootCmdline,
+    });
+    if (!directBoot) {
+      invalidDirectBootMetadata(vm);
+    }
+    return {
+      id: vm.id,
+      ordinal: vm.ordinal,
+      name: vm.vmName,
+      image: vm.image,
+      imageKey: vm.imageKeyJson ?? null,
+      imageSha256:
+        typeof vm.imageSha256 === "string" && vm.imageSha256.trim()
+          ? vm.imageSha256.trim()
+          : null,
+      ...directBoot,
+      cpuMillis: vm.cpuMillis,
+      vcpuCount: vm.vcpuCount,
+      memoryMib: vm.memoryMib,
+      diskMib: vm.diskMib,
+    };
+  });
+
   return {
     scenarioId: scenario.scenarioId,
     organizationId: scenario.organizationId,
@@ -130,7 +163,8 @@ export async function loadScenario(
     solutionMarkdown: scenario.solutionMarkdown,
     hints: scenario.hintsJson,
     probeCount: probes.length,
-    vmCount: vms.length,
+    vmCount: scenarioVms.length,
+    requiredResources: aggregateScenarioRequiredResources(scenarioVms),
     enabled: scenario.enabled,
     enabledAt: scenario.enabledAt,
     createdAt: scenario.createdAt,
@@ -150,34 +184,7 @@ export async function loadScenario(
         kind: probe.kind,
       };
     }),
-    vms: vms.map((vm) => {
-      const directBoot = normalizeScenarioVmDirectBootMetadata({
-        imageFormat: vm.imageFormat,
-        imageVirtualSizeBytes: vm.imageVirtualSizeBytes,
-        kernelSha256: vm.kernelSha256,
-        initrdSha256: vm.initrdSha256,
-        bootCmdline: vm.bootCmdline,
-      });
-      if (!directBoot) {
-        invalidDirectBootMetadata(vm);
-      }
-      return {
-        id: vm.id,
-        ordinal: vm.ordinal,
-        name: vm.vmName,
-        image: vm.image,
-        imageKey: vm.imageKeyJson ?? null,
-        imageSha256:
-          typeof vm.imageSha256 === "string" && vm.imageSha256.trim()
-            ? vm.imageSha256.trim()
-            : null,
-        ...directBoot,
-        cpuMillis: vm.cpuMillis,
-        vcpuCount: vm.vcpuCount,
-        memoryMib: vm.memoryMib,
-        diskMib: vm.diskMib,
-      };
-    }),
+    vms: scenarioVms,
   };
 }
 
