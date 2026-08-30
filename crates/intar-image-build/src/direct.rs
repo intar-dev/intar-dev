@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
@@ -10,14 +11,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Error, Result, anyhow, bail, ensure};
-use intar_contracts::catalog::ScenarioManifestV3;
+use intar_contracts::catalog::ScenarioManifestV4;
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
 
-use crate::artifact::{RawZstdArtifact, sha256_file_hex, write_raw_zstd_artifact};
+use crate::artifact::sha256_file_hex;
+use crate::chunked::{
+    ChunkedImageArtifact, EncodedImageChunkArtifact, ReusedEncodedImageChunk, ScannedChunkedImage,
+    scan_raw_image_chunks, write_scanned_chunked_image_artifact,
+};
 use crate::config::QemuBuildConfig;
 use crate::disk::{ScenarioDiskPlan, prepare_scenario_disk, render_scenario_disk_plan};
-use crate::kino::KinoArtifact;
 use crate::manifest::build_direct_manifest_json;
 use crate::provision::render_scenario_provision_script;
 use crate::qemu::{DirectBootQemuInput, render_direct_boot_qemu_command, uses_tcg_accelerator};
@@ -46,13 +50,12 @@ pub struct DirectBuildRequest {
     pub vm_name: String,
     pub config: QemuBuildConfig,
     pub base_image: BaseImageSpec,
-    pub kino: KinoArtifact,
 }
 
 #[derive(Debug, Clone)]
 pub struct DirectBuildPaths {
-    pub output_image_path: PathBuf,
-    pub output_checksum_path: PathBuf,
+    pub output_chunks_dir: PathBuf,
+    pub output_chunk_manifest_path: PathBuf,
     pub output_metadata_path: PathBuf,
     pub work_root: PathBuf,
     pub root_disk_path: PathBuf,
@@ -79,7 +82,6 @@ pub struct RenderedDirectBuild {
     pub base_image: BaseImageSpec,
     pub base_rootfs: RootfsBuildPlan,
     pub disk: ScenarioDiskPlan,
-    pub kino: KinoArtifact,
     pub qemu_args: Vec<String>,
 }
 
@@ -97,13 +99,14 @@ pub struct DirectBuildOutput {
 #[derive(Debug, Clone)]
 pub struct DirectBuildArtifact {
     pub raw_path: PathBuf,
-    pub raw_zstd_path: PathBuf,
-    pub sha256_path: PathBuf,
+    pub chunk_manifest_path: PathBuf,
+    pub chunk_manifest_sha256: String,
+    pub chunks: Vec<EncodedImageChunkArtifact>,
     pub metadata_path: PathBuf,
-    pub image_sha256_hex: String,
+    pub image_id: String,
     pub kernel_sha256_hex: String,
     pub initrd_sha256_hex: String,
-    pub manifest: ScenarioManifestV3,
+    pub manifest: ScenarioManifestV4,
 }
 
 /// Render direct-QEMU build inputs without executing QEMU.
@@ -143,7 +146,7 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
 
     fs::create_dir_all(&paths.work_root)
         .with_context(|| format!("failed to create '{}'", paths.work_root.display()))?;
-    if let Some(parent) = paths.output_image_path.parent() {
+    if let Some(parent) = paths.output_chunk_manifest_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create '{}'", parent.display()))?;
     }
@@ -200,7 +203,6 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         base_image: request.base_image.clone(),
         base_rootfs,
         disk,
-        kino: request.kino.clone(),
         qemu_args,
     })
 }
@@ -228,6 +230,19 @@ pub fn prepare_direct_build_inputs(input: &DirectBuildPrepareInput<'_>) -> Resul
 /// Returns an error if base rootfs generation, QEMU startup, SSH provisioning,
 /// artifact compression, or manifest generation fails.
 pub fn run_direct_build(request: &DirectBuildRequest) -> Result<DirectBuildOutput> {
+    let rendered = run_direct_build_to_raw(request)?;
+    let scan = scan_raw_image_chunks(&rendered.paths.root_disk_path)?;
+    finish_direct_build_from_scan(rendered, &scan, &BTreeMap::new())
+}
+
+/// Provision one final raw disk without spending time compressing chunks.
+/// The caller can scan it, resolve registry reuse, and then finish only the
+/// missing chunks.
+///
+/// # Errors
+/// Returns an error if rendering, rootfs preparation, QEMU, or guest
+/// provisioning fails.
+pub fn run_direct_build_to_raw(request: &DirectBuildRequest) -> Result<RenderedDirectBuild> {
     let rendered = render_direct_build(request).with_context(|| {
         format!(
             "failed to render direct build {}:{}",
@@ -253,19 +268,34 @@ pub fn run_direct_build(request: &DirectBuildRequest) -> Result<DirectBuildOutpu
     }
     wait_for_qemu_shutdown(&mut qemu, &rendered)?;
 
-    let raw_artifact = write_raw_zstd_artifact(
-        &rendered.paths.root_disk_path,
-        &rendered.paths.output_image_path,
-        &rendered.paths.output_checksum_path,
+    Ok(rendered)
+}
+
+/// Finish a provisioned raw image from its stable logical scan, using encoded
+/// metadata for chunks already present in the registry.
+///
+/// # Errors
+/// Returns an error if the raw image changed, chunk encoding fails, or the
+/// scenario manifest cannot be written.
+pub fn finish_direct_build_from_scan(
+    rendered: RenderedDirectBuild,
+    scan: &ScannedChunkedImage,
+    reused: &BTreeMap<String, ReusedEncodedImageChunk>,
+) -> Result<DirectBuildOutput> {
+    let chunked_artifact = write_scanned_chunked_image_artifact(
+        scan,
+        &rendered.paths.output_chunks_dir,
+        &rendered.paths.output_chunk_manifest_path,
+        reused,
     )?;
-    let artifact = direct_artifact_from_raw(&rendered, raw_artifact)?;
+    let artifact = direct_artifact_from_chunked(&rendered, chunked_artifact)?;
     Ok(DirectBuildOutput { rendered, artifact })
 }
 
 fn direct_build_paths(request: &DirectBuildRequest, vm: &VmDefinition) -> DirectBuildPaths {
     let scenario_name = &request.scenario.name;
     let effective_vm_name = effective_vm_name(&vm.name, &request.config.target_arch);
-    let output_file_name = format!("{scenario_name}-{effective_vm_name}.raw.zst");
+    let output_stem = format!("{scenario_name}-{effective_vm_name}");
     let work_root = request
         .config
         .work_root
@@ -274,15 +304,18 @@ fn direct_build_paths(request: &DirectBuildRequest, vm: &VmDefinition) -> Direct
         .join(&vm.name);
 
     DirectBuildPaths {
-        output_image_path: request.config.output_root.join(&output_file_name),
-        output_checksum_path: request
+        output_chunks_dir: request
             .config
             .output_root
-            .join(format!("{output_file_name}.sha256")),
+            .join(format!("{output_stem}.chunks")),
+        output_chunk_manifest_path: request
+            .config
+            .output_root
+            .join(format!("{output_stem}.chunks.json")),
         output_metadata_path: request
             .config
             .output_root
-            .join(format!("{output_file_name}.manifest.json")),
+            .join(format!("{output_stem}.manifest.json")),
         root_disk_path: work_root.join("root.raw"),
         seed_disk_path: work_root.join("intarbuild.img"),
         provision_script_path: work_root.join("provision.sh"),
@@ -372,9 +405,6 @@ fn provision_guest(
     let provision_timeout_seconds = rendered.config.provision_timeout_seconds.max(1);
     let provision_result = runtime.block_on(async {
         tokio::time::timeout(Duration::from_secs(provision_timeout_seconds), async {
-            ssh.upload_file(&rendered.kino.binary_path, "/tmp/kino", 0o755)
-                .await
-                .context("failed to upload kino binary")?;
             ssh.upload_file(
                 &rendered.paths.provision_script_path,
                 "/tmp/intar-provision.sh",
@@ -839,15 +869,16 @@ fn terminate_qemu(qemu: &mut Child) -> Result<ExitStatus> {
         .with_context(|| format!("failed to reap QEMU pid {pid} after killing it"))
 }
 
-fn direct_artifact_from_raw(
+fn direct_artifact_from_chunked(
     rendered: &RenderedDirectBuild,
-    raw_artifact: RawZstdArtifact,
+    chunked_artifact: ChunkedImageArtifact,
 ) -> Result<DirectBuildArtifact> {
     let kernel_sha256_hex = sha256_file_hex(&rendered.base_rootfs.paths.kernel_path)?;
     let initrd_sha256_hex = sha256_file_hex(&rendered.base_rootfs.paths.initrd_path)?;
     let manifest = build_direct_manifest_json(
         rendered,
-        &raw_artifact.sha256_hex,
+        &chunked_artifact.manifest.image_id,
+        &chunked_artifact.manifest_sha256,
         &kernel_sha256_hex,
         &initrd_sha256_hex,
     )?;
@@ -863,11 +894,12 @@ fn direct_artifact_from_raw(
     })?;
 
     Ok(DirectBuildArtifact {
-        raw_path: raw_artifact.raw_path,
-        raw_zstd_path: raw_artifact.compressed_path,
-        sha256_path: raw_artifact.sha256_path,
+        raw_path: chunked_artifact.raw_path,
+        chunk_manifest_path: chunked_artifact.manifest_path,
+        chunk_manifest_sha256: chunked_artifact.manifest_sha256,
+        chunks: chunked_artifact.chunks,
         metadata_path: rendered.paths.output_metadata_path.clone(),
-        image_sha256_hex: raw_artifact.sha256_hex,
+        image_id: chunked_artifact.manifest.image_id,
         kernel_sha256_hex,
         initrd_sha256_hex,
         manifest,

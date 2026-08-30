@@ -14,6 +14,7 @@ pub struct VmRow {
     pub state: String,
     pub image_key: Option<String>,
     pub image_sha256: Option<String>,
+    pub guest_tools_json: Option<String>,
     pub created_at_s: i64,
     pub updated_at_s: i64,
     pub running_at_s: Option<i64>,
@@ -158,12 +159,16 @@ enum Op {
         row: Box<ImageCacheAccessRow>,
         resp: oneshot::Sender<Result<()>>,
     },
+    #[cfg(test)]
+    #[allow(dead_code)]
     LoadImageCacheAccess {
         resp: oneshot::Sender<Result<Vec<ImageCacheAccessRow>>>,
     },
     LoadLocalVmImageShas {
         resp: oneshot::Sender<Result<Vec<String>>>,
     },
+    #[cfg(test)]
+    #[allow(dead_code)]
     DeleteImageCacheAccess {
         image_sha256: String,
         resp: oneshot::Sender<Result<()>>,
@@ -433,6 +438,8 @@ impl Db {
             .context("db thread dropped image cache touch response")?
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub async fn load_image_cache_access(&self) -> Result<Vec<ImageCacheAccessRow>> {
         let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<ImageCacheAccessRow>>>();
         self.tx
@@ -457,6 +464,8 @@ impl Db {
             .context("db thread dropped local vm image sha load response")?
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub async fn delete_image_cache_access(&self, image_sha256: String) -> Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
         self.tx

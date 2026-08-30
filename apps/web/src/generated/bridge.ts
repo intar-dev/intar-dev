@@ -9,7 +9,7 @@ export type SyncRequestReason =
 
 export type HostRoleV1 = "agent" | "builder";
 
-export interface ClientHelloV6 {
+export interface ClientHelloV7 {
   protocol_version: number;
   host_id: string;
   agent_version: string;
@@ -18,50 +18,50 @@ export interface ClientHelloV6 {
   capabilities: HostCapabilitiesV2;
 }
 
-export interface ServerHelloV6 {
+export interface ServerHelloV7 {
   protocol_version: number;
   host_id: string;
   desired_version: number;
 }
 
-export interface DesiredStateV6 {
+export interface DesiredStateV7 {
   protocol_version: number;
   host_id: string;
   desired_state: HostDesiredStateV2;
 }
 
-export interface StateReportV6 {
+export interface StateReportV7 {
   protocol_version: number;
   host_id: string;
   report: HostStateReportV2;
 }
 
-export interface VmReportV6 {
+export interface VmReportV7 {
   protocol_version: number;
   host_id: string;
   report: VmReportV2;
 }
 
-export interface BuildReportV6 {
+export interface BuildReportV7 {
   protocol_version: number;
   host_id: string;
   report: BuildReportV1;
 }
 
-export interface SyncRequestV6 {
+export interface SyncRequestV7 {
   protocol_version: number;
   host_id: string;
   reason: SyncRequestReason;
 }
 
-export type BridgeMessageV6 =
-  | ({ type: "client_hello" } & ClientHelloV6)
-  | ({ type: "server_hello" } & ServerHelloV6)
-  | ({ type: "desired_state" } & DesiredStateV6)
-  | ({ type: "state_report" } & StateReportV6)
-  | ({ type: "vm_report" } & VmReportV6)
-  | ({ type: "build_report" } & BuildReportV6)
-  | ({ type: "sync_request" } & SyncRequestV6);
+export type BridgeMessageV7 =
+  | ({ type: "client_hello" } & ClientHelloV7)
+  | ({ type: "server_hello" } & ServerHelloV7)
+  | ({ type: "desired_state" } & DesiredStateV7)
+  | ({ type: "state_report" } & StateReportV7)
+  | ({ type: "vm_report" } & VmReportV7)
+  | ({ type: "build_report" } & BuildReportV7)
+  | ({ type: "sync_request" } & SyncRequestV7);
 
 export interface HostDesiredStateV2 {
   schema_version: number;
@@ -69,13 +69,14 @@ export interface HostDesiredStateV2 {
   version: number;
   generated_at_unix_ms: number;
   cached_images: DesiredCachedImageV1[];
+  cached_guest_tools?: DesiredGuestToolsV1[];
   vms: DesiredVmV2[];
   builds: DesiredBuildV1[];
 }
 
 export interface DesiredCachedImageV1 {
   image_key: ImageKey;
-  image_sha256: string;
+  image_id: string;
 }
 
 export interface DesiredBuildV1 {
@@ -85,7 +86,6 @@ export interface DesiredBuildV1 {
   rev: string;
   content_hash: string;
   bundle_ref: string;
-  kino_version: string;
 }
 
 export type DesiredVmPhase = "running" | "absent";
@@ -95,10 +95,18 @@ export interface DesiredVmV2 {
   vm_name: string;
   desired_phase: DesiredVmPhase;
   image_key: ImageKey;
-  image_sha256: string;
+  image_id: string;
+  guest_tools: DesiredGuestToolsV1;
   resources: VmResourcesV2;
   ssh_authorized_keys_openssh: string[];
   lease_expires_at_unix_ms: number;
+}
+
+export interface DesiredGuestToolsV1 {
+  tools_disk_sha256: string;
+  tools_disk_size_bytes: number;
+  kino_sha256: string;
+  bootstrap_abi: number;
 }
 
 export interface VmResourcesV2 {
@@ -116,6 +124,7 @@ export interface HostStateReportV2 {
   capacity: HostCapacityV2;
   capabilities: HostCapabilitiesV2;
   cached_images: CachedImageStateV1[];
+  cached_guest_tools?: CachedGuestToolsStateV1[];
   vms: VmActualStateV2[];
   builds: BuildReportV1[];
 }
@@ -153,6 +162,9 @@ export interface HostCapabilitiesV2 {
   supports_hard_cpu_quota: boolean;
   supports_landlock: boolean;
   supports_cgroup_v2: boolean;
+  supports_raw_chunks_v1?: boolean;
+  supports_scenario_guest_tools_v1?: boolean;
+  supports_jailer_v3?: boolean;
   supports_run_cli_v1?: boolean;
   supports_run_cli_completion_v1?: boolean;
 }
@@ -189,7 +201,15 @@ export type ImageCachePhase =
 
 export interface CachedImageStateV1 {
   image_key: ImageKey;
-  image_sha256: string;
+  image_id: string;
+  phase: ImageCachePhase;
+  bytes_on_disk?: number | null;
+  error?: string | null;
+  updated_at_unix_ms: number;
+}
+
+export interface CachedGuestToolsStateV1 {
+  guest_tools: DesiredGuestToolsV1;
   phase: ImageCachePhase;
   bytes_on_disk?: number | null;
   error?: string | null;
@@ -215,7 +235,8 @@ export interface VmActualStateV2 {
   desired_version?: number | null;
   phase: VmPhase;
   image_key?: ImageKey | null;
-  image_sha256?: string | null;
+  image_id?: string | null;
+  guest_tools?: VmGuestToolsStateV1 | null;
   network?: VmNetworkStateV1 | null;
   terminal: VmTerminalStateV1;
   runtime_constraints?: VmRuntimeConstraintsV1 | null;
@@ -226,6 +247,13 @@ export interface VmActualStateV2 {
   archive?: VmArchiveStateV1 | null;
   error?: string | null;
   updated_at_unix_ms: number;
+}
+
+export interface VmGuestToolsStateV1 {
+  tools_disk_sha256: string;
+  kino_sha256: string;
+  bootstrap_abi: number;
+  verified: boolean;
 }
 
 export interface VmNetworkStateV1 {
@@ -296,6 +324,7 @@ export interface VmReportV2 {
   desired_version?: number | null;
   observed_at_unix_ms: number;
   phase: VmPhase;
+  guest_tools?: VmGuestToolsStateV1 | null;
   network?: VmNetworkStateV1 | null;
   terminal: VmTerminalStateV1;
   runtime_constraints?: VmRuntimeConstraintsV1 | null;

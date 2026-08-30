@@ -12,19 +12,16 @@ export const POST: APIRoute = async ({ request }) => {
   const body = (await request.json().catch(() => null)) as {
     scenarioId?: unknown;
     contentHash?: unknown;
-    kinoVersion?: unknown;
     imageArch?: unknown;
   } | null;
   const scenarioId =
     typeof body?.scenarioId === "string" ? body.scenarioId.trim() : "";
   const contentHash =
     typeof body?.contentHash === "string" ? body.contentHash : "";
-  const kinoVersion =
-    typeof body?.kinoVersion === "string" ? body.kinoVersion : "";
   const imageArch = typeof body?.imageArch === "string" ? body.imageArch : "";
-  if (!scenarioId || !contentHash || !kinoVersion || !imageArch) {
+  if (!scenarioId || !contentHash || !imageArch) {
     return jsonResponse(
-      { error: "scenarioId, contentHash, kinoVersion, and imageArch are required" },
+      { error: "scenarioId, contentHash, and imageArch are required" },
       { status: 400 },
     );
   }
@@ -33,7 +30,6 @@ export const POST: APIRoute = async ({ request }) => {
     const result = await queueDraftBuild({
       scenarioId,
       contentHash,
-      kinoVersion,
       imageArch,
     });
     return jsonResponse(result, { status: 202 });

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_DISK_LABEL: [u8; 11] = *b"INTARRUN   ";
 pub const RECORDING_DISK_LABEL: [u8; 11] = *b"INTARREC   ";
+pub const TOOLS_DISK_LABEL: &str = "INTARTOOLS";
 pub const RUNTIME_ENV_FILENAME: &str = "runtime.env";
 pub const RUNTIME_AUTHORIZED_KEYS_FILENAME: &str = "authorized_keys";
 pub const GUEST_USERNAME: &str = "user";
@@ -14,6 +15,8 @@ pub const ENV_SSH_AUTHORIZED_KEYS_B64: &str = "INTAR_SSH_AUTHORIZED_KEYS_B64";
 pub const ENV_KINO_VSOCK_CID: &str = "KINO_VSOCK_CID";
 pub const ENV_KINO_VSOCK_PORT: &str = "KINO_VSOCK_PORT";
 pub const ENV_KINO_HOST_READY_PORT: &str = "KINO_HOST_READY_PORT";
+pub const ENV_KINO_SHA256: &str = "INTAR_KINO_SHA256";
+pub const ENV_GUEST_BOOTSTRAP_ABI: &str = "INTAR_GUEST_BOOTSTRAP_ABI";
 pub const ENV_VM_HOSTNAME: &str = "INTAR_VM_HOSTNAME";
 pub const ENV_GUEST_IP_CIDR: &str = "INTAR_GUEST_IP_CIDR";
 pub const ENV_GATEWAY: &str = "INTAR_GATEWAY";
@@ -30,6 +33,8 @@ pub struct RuntimeEnv {
     pub kino_vsock_cid: u32,
     pub kino_vsock_port: u32,
     pub kino_host_ready_port: u32,
+    pub kino_sha256: String,
+    pub guest_bootstrap_abi: u16,
     pub vm_hostname: String,
     pub guest_ip_cidr: String,
     pub gateway: String,
@@ -62,6 +67,11 @@ impl RuntimeEnv {
             render_line(
                 ENV_KINO_HOST_READY_PORT,
                 &self.kino_host_ready_port.to_string(),
+            ),
+            render_line(ENV_KINO_SHA256, &self.kino_sha256),
+            render_line(
+                ENV_GUEST_BOOTSTRAP_ABI,
+                &self.guest_bootstrap_abi.to_string(),
             ),
             render_line(ENV_VM_HOSTNAME, &self.vm_hostname),
             render_line(ENV_GUEST_IP_CIDR, &self.guest_ip_cidr),
@@ -103,6 +113,8 @@ impl RuntimeEnv {
             kino_vsock_cid: parse_u32(&values, ENV_KINO_VSOCK_CID)?,
             kino_vsock_port: parse_u32(&values, ENV_KINO_VSOCK_PORT)?,
             kino_host_ready_port: parse_u32(&values, ENV_KINO_HOST_READY_PORT)?,
+            kino_sha256: required_sha256(&values, ENV_KINO_SHA256)?,
+            guest_bootstrap_abi: parse_u16(&values, ENV_GUEST_BOOTSTRAP_ABI)?,
             vm_hostname: required(&values, ENV_VM_HOSTNAME)?,
             guest_ip_cidr: required(&values, ENV_GUEST_IP_CIDR)?,
             gateway: required(&values, ENV_GATEWAY)?,
@@ -191,6 +203,31 @@ fn parse_u32(
         .map_err(|_| RuntimeEnvParseError::InvalidNumber(key))
 }
 
+fn parse_u16(
+    values: &BTreeMap<String, String>,
+    key: &'static str,
+) -> Result<u16, RuntimeEnvParseError> {
+    required(values, key)?
+        .parse()
+        .map_err(|_| RuntimeEnvParseError::InvalidNumber(key))
+}
+
+fn required_sha256(
+    values: &BTreeMap<String, String>,
+    key: &'static str,
+) -> Result<String, RuntimeEnvParseError> {
+    let value = required(values, key)?;
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        Ok(value)
+    } else {
+        Err(RuntimeEnvParseError::InvalidLine(key.to_owned()))
+    }
+}
+
 fn parse_authorized_keys(
     values: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, RuntimeEnvParseError> {
@@ -242,6 +279,8 @@ mod tests {
             kino_vsock_cid: 10_001,
             kino_vsock_port: 18_080,
             kino_host_ready_port: 18_081,
+            kino_sha256: "a".repeat(64),
+            guest_bootstrap_abi: 1,
             vm_hostname: "broken-nginx".to_owned(),
             guest_ip_cidr: "10.200.0.2/24".to_owned(),
             gateway: "10.200.0.1".to_owned(),
@@ -280,6 +319,8 @@ mod tests {
             kino_vsock_cid: 10_001,
             kino_vsock_port: 18_080,
             kino_host_ready_port: 18_081,
+            kino_sha256: "b".repeat(64),
+            guest_bootstrap_abi: 1,
             vm_hostname: "pair-ping-db".to_owned(),
             guest_ip_cidr: "10.200.0.2/24".to_owned(),
             gateway: "10.200.0.1".to_owned(),

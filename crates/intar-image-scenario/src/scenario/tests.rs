@@ -131,6 +131,25 @@ fn parses_and_validates_supported_scenario() {
 }
 
 #[test]
+fn file_replace_requires_an_explicit_python3_package() {
+    let mut scenario = Scenario::parse(supported_hcl()).unwrap();
+    scenario.vms[0].steps[0]
+        .actions
+        .push(VmAction::FileReplace {
+            path: "/etc/nginx/nginx.conf".to_string(),
+            pattern: "worker_processes auto".to_string(),
+            replacement: "worker_processes 1".to_string(),
+            regex: false,
+        });
+
+    let error = scenario.validate_for_repo().unwrap_err();
+    assert!(error.to_string().contains("must include python3"));
+
+    scenario.vms[0].packages.push("python3".to_string());
+    scenario.validate_for_repo().unwrap();
+}
+
+#[test]
 fn parses_fractional_cpu_as_exact_millicores() {
     let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 0.125");
 

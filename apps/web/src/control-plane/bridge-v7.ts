@@ -1,5 +1,5 @@
 import type {
-  BridgeMessageV6,
+  BridgeMessageV7,
   BuildPhase,
   DesiredVmPhase,
   HostRoleV1,
@@ -22,7 +22,7 @@ import {
 
 const textDecoder = new TextDecoder();
 
-const MESSAGE_TYPES = new Set<BridgeMessageV6["type"]>([
+const MESSAGE_TYPES = new Set<BridgeMessageV7["type"]>([
   "client_hello",
   "server_hello",
   "desired_state",
@@ -103,9 +103,9 @@ const SYNC_REQUEST_REASONS = new Set<SyncRequestReason>([
 
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/i;
 
-export function parseBridgeMessageV6(
+export function parseBridgeMessageV7(
   input: string | ArrayBuffer,
-): BridgeMessageV6 | null {
+): BridgeMessageV7 | null {
   const value = parseJson(input);
   if (!isRecord(value)) {
     return null;
@@ -116,19 +116,19 @@ export function parseBridgeMessageV6(
     return null;
   }
 
-  if (!hasV6Envelope(value)) {
+  if (!hasV7Envelope(value)) {
     return null;
   }
 
   switch (type) {
     case "client_hello":
-      return isClientHello(value) ? withRunCliCapabilityDefaults(value) : null;
+      return isClientHello(value) ? withCapabilityDefaults(value) : null;
     case "server_hello":
       return isServerHello(value) ? value : null;
     case "desired_state":
       return isDesiredState(value) ? value : null;
     case "state_report":
-      return isStateReport(value) ? withRunCliCapabilityDefaults(value) : null;
+      return isStateReport(value) ? withCapabilityDefaults(value) : null;
     case "vm_report":
       return isVmReport(value) ? value : null;
     case "build_report":
@@ -138,7 +138,7 @@ export function parseBridgeMessageV6(
   }
 }
 
-export function serializeBridgeMessageV6(message: BridgeMessageV6): string {
+export function serializeBridgeMessageV7(message: BridgeMessageV7): string {
   return JSON.stringify(message);
 }
 
@@ -151,7 +151,7 @@ function parseJson(input: string | ArrayBuffer): unknown {
   }
 }
 
-function hasV6Envelope(value: Record<string, unknown>): boolean {
+function hasV7Envelope(value: Record<string, unknown>): boolean {
   return (
     value.protocol_version === BRIDGE_PROTOCOL_VERSION &&
     typeof value.host_id === "string" &&
@@ -161,7 +161,7 @@ function hasV6Envelope(value: Record<string, unknown>): boolean {
 
 function isClientHello(
   value: unknown,
-): value is Extract<BridgeMessageV6, { type: "client_hello" }> {
+): value is Extract<BridgeMessageV7, { type: "client_hello" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -177,7 +177,7 @@ function isClientHello(
 
 function isServerHello(
   value: unknown,
-): value is Extract<BridgeMessageV6, { type: "server_hello" }> {
+): value is Extract<BridgeMessageV7, { type: "server_hello" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -186,7 +186,7 @@ function isServerHello(
 
 function isDesiredState(
   value: unknown,
-): value is Extract<BridgeMessageV6, { type: "desired_state" }> {
+): value is Extract<BridgeMessageV7, { type: "desired_state" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -212,7 +212,7 @@ function isDesiredState(
 
 function isStateReport(
   value: unknown,
-): value is Extract<BridgeMessageV6, { type: "state_report" }> {
+): value is Extract<BridgeMessageV7, { type: "state_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -240,7 +240,7 @@ function isStateReport(
 
 function isVmReport(
   value: unknown,
-): value is Extract<BridgeMessageV6, { type: "vm_report" }> {
+): value is Extract<BridgeMessageV7, { type: "vm_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -251,7 +251,7 @@ function isVmReport(
 
 function isBuildReport(
   value: unknown,
-): value is Extract<BridgeMessageV6, { type: "build_report" }> {
+): value is Extract<BridgeMessageV7, { type: "build_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -265,7 +265,7 @@ function isBuildReport(
 
 function isSyncRequest(
   value: unknown,
-): value is Extract<BridgeMessageV6, { type: "sync_request" }> {
+): value is Extract<BridgeMessageV7, { type: "sync_request" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -275,8 +275,8 @@ function isSyncRequest(
   );
 }
 
-function isBridgeMessageType(value: string): value is BridgeMessageV6["type"] {
-  return MESSAGE_TYPES.has(value as BridgeMessageV6["type"]);
+function isBridgeMessageType(value: string): value is BridgeMessageV7["type"] {
+  return MESSAGE_TYPES.has(value as BridgeMessageV7["type"]);
 }
 
 function isOptionalNumber(value: unknown): boolean {
@@ -361,7 +361,7 @@ function isDesiredCachedImagePayload(value: unknown): boolean {
   return (
     isRecord(value) &&
     isImageKeyPayload(value.image_key) &&
-    isSha256Hex(value.image_sha256)
+    isSha256Hex(value.image_id)
   );
 }
 
@@ -377,8 +377,7 @@ function isDesiredBuildPayload(value: unknown): boolean {
     IMAGE_ARCHITECTURES.has(arch as ImageArchitecture) &&
     readString(value.rev) !== null &&
     isSha256Hex(value.content_hash) &&
-    readString(value.bundle_ref) !== null &&
-    readString(value.kino_version) !== null
+    readString(value.bundle_ref) !== null
   );
 }
 
@@ -393,11 +392,36 @@ function isDesiredVmPayload(value: unknown): boolean {
     desiredPhase !== null &&
     DESIRED_VM_PHASES.has(desiredPhase as DesiredVmPhase) &&
     isImageKeyPayload(value.image_key) &&
-    isSha256Hex(value.image_sha256) &&
+    isSha256Hex(value.image_id) &&
+    isGuestToolsPayload(value.guest_tools) &&
     isVmResourcesPayload(value.resources) &&
     isStringArray(value.ssh_authorized_keys_openssh) &&
     isInteger(value.lease_expires_at_unix_ms)
   );
+}
+
+function isGuestToolsPayload(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isSha256Hex(value.tools_disk_sha256) &&
+    value.tools_disk_size_bytes === 64 * 1024 * 1024 &&
+    isSha256Hex(value.kino_sha256) &&
+    value.bootstrap_abi === 1
+  );
+}
+
+function isVmGuestToolsPayload(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isSha256Hex(value.tools_disk_sha256) &&
+    isSha256Hex(value.kino_sha256) &&
+    value.bootstrap_abi === 1 &&
+    typeof value.verified === "boolean"
+  );
+}
+
+function isOptionalVmGuestToolsPayload(value: unknown): boolean {
+  return value === undefined || value === null || isVmGuestToolsPayload(value);
 }
 
 function isHostCapacityPayload(value: unknown): boolean {
@@ -453,6 +477,12 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
     typeof value.supports_hard_cpu_quota === "boolean" &&
     typeof value.supports_landlock === "boolean" &&
     typeof value.supports_cgroup_v2 === "boolean" &&
+    (value.supports_raw_chunks_v1 === undefined ||
+      typeof value.supports_raw_chunks_v1 === "boolean") &&
+    (value.supports_scenario_guest_tools_v1 === undefined ||
+      typeof value.supports_scenario_guest_tools_v1 === "boolean") &&
+    (value.supports_jailer_v3 === undefined ||
+      typeof value.supports_jailer_v3 === "boolean") &&
     // Old agents did not advertise the learner CLI. Treat an omitted field
     // as an explicit false capability rather than rejecting their inventory
     // report or accidentally scheduling a new CLI-required run there.
@@ -463,13 +493,16 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
   );
 }
 
-function withRunCliCapabilityDefaults(
-  value: Extract<BridgeMessageV6, { type: "client_hello" | "state_report" }>,
-): Extract<BridgeMessageV6, { type: "client_hello" | "state_report" }> {
+function withCapabilityDefaults(
+  value: Extract<BridgeMessageV7, { type: "client_hello" | "state_report" }>,
+): Extract<BridgeMessageV7, { type: "client_hello" | "state_report" }> {
   if (value.type === "client_hello") {
     if (
       value.capabilities.supports_run_cli_v1 !== undefined &&
-      value.capabilities.supports_run_cli_completion_v1 !== undefined
+      value.capabilities.supports_run_cli_completion_v1 !== undefined &&
+      value.capabilities.supports_raw_chunks_v1 !== undefined &&
+      value.capabilities.supports_scenario_guest_tools_v1 !== undefined &&
+      value.capabilities.supports_jailer_v3 !== undefined
     ) {
       return value;
     }
@@ -480,12 +513,20 @@ function withRunCliCapabilityDefaults(
         supports_run_cli_v1: value.capabilities.supports_run_cli_v1 ?? false,
         supports_run_cli_completion_v1:
           value.capabilities.supports_run_cli_completion_v1 ?? false,
+        supports_raw_chunks_v1:
+          value.capabilities.supports_raw_chunks_v1 ?? false,
+        supports_scenario_guest_tools_v1:
+          value.capabilities.supports_scenario_guest_tools_v1 ?? false,
+        supports_jailer_v3: value.capabilities.supports_jailer_v3 ?? false,
       },
     };
   }
   if (
     value.report.capabilities.supports_run_cli_v1 !== undefined &&
-    value.report.capabilities.supports_run_cli_completion_v1 !== undefined
+    value.report.capabilities.supports_run_cli_completion_v1 !== undefined &&
+    value.report.capabilities.supports_raw_chunks_v1 !== undefined &&
+    value.report.capabilities.supports_scenario_guest_tools_v1 !== undefined &&
+    value.report.capabilities.supports_jailer_v3 !== undefined
   ) {
     return value;
   }
@@ -499,6 +540,12 @@ function withRunCliCapabilityDefaults(
           value.report.capabilities.supports_run_cli_v1 ?? false,
         supports_run_cli_completion_v1:
           value.report.capabilities.supports_run_cli_completion_v1 ?? false,
+        supports_raw_chunks_v1:
+          value.report.capabilities.supports_raw_chunks_v1 ?? false,
+        supports_scenario_guest_tools_v1:
+          value.report.capabilities.supports_scenario_guest_tools_v1 ?? false,
+        supports_jailer_v3:
+          value.report.capabilities.supports_jailer_v3 ?? false,
       },
     },
   };
@@ -511,7 +558,7 @@ function isCachedImageStatePayload(value: unknown): boolean {
   const phase = readString(value.phase);
   return (
     isImageKeyPayload(value.image_key) &&
-    isSha256Hex(value.image_sha256) &&
+    isSha256Hex(value.image_id) &&
     phase !== null &&
     IMAGE_CACHE_PHASES.has(phase as ImageCachePhase) &&
     isOptionalNonNegativeInteger(value.bytes_on_disk) &&
@@ -700,7 +747,8 @@ function isVmActualStatePayload(value: unknown): boolean {
     phase !== null &&
     VM_PHASES.has(phase as VmPhase) &&
     isOptionalImageKeyPayload(value.image_key) &&
-    isOptionalSha256Hex(value.image_sha256) &&
+    isOptionalSha256Hex(value.image_id) &&
+    isOptionalVmGuestToolsPayload(value.guest_tools) &&
     isOptionalVmNetworkStatePayload(value.network) &&
     isVmTerminalStatePayload(value.terminal) &&
     hasRequiredRuntimeConstraints(
@@ -732,6 +780,7 @@ function isVmReportPayload(value: unknown, hostId: string): boolean {
     isInteger(value.observed_at_unix_ms) &&
     phase !== null &&
     VM_PHASES.has(phase as VmPhase) &&
+    isOptionalVmGuestToolsPayload(value.guest_tools) &&
     isOptionalVmNetworkStatePayload(value.network) &&
     isVmTerminalStatePayload(value.terminal) &&
     hasRequiredRuntimeConstraints(
@@ -751,7 +800,7 @@ function isVmReportPayload(value: unknown, hostId: string): boolean {
 function isBuildReportPayload(
   value: unknown,
   hostId: string,
-): value is Extract<BridgeMessageV6, { type: "build_report" }>["report"] {
+): value is Extract<BridgeMessageV7, { type: "build_report" }>["report"] {
   if (!isRecord(value)) {
     return false;
   }

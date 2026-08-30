@@ -12,7 +12,10 @@ import type {
   HostDesiredStateV2,
   HostStateReportV2,
 } from "@/generated/bridge";
-import type { ImageArchitecture } from "@/generated/catalog";
+import type {
+  ImageArchitecture,
+  ScenarioManifestV4,
+} from "@/generated/catalog";
 import { organization, user } from "./core";
 import {
   type AgentHostRole,
@@ -76,7 +79,6 @@ export const imageBuildBundles = sqliteTable(
       onDelete: "restrict",
     }),
     r2Key: text("r2_key").notNull(),
-    kinoVersion: text("kino_version").notNull(),
     metaJson: jsonText<ImageBuildBundleMeta>("meta_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
@@ -102,7 +104,10 @@ export const imageBuilds = sqliteTable(
       .notNull()
       .references(() => imageBuildBundles.rev, { onDelete: "cascade" }),
     contentHash: text("content_hash").notNull(),
-    kinoVersion: text("kino_version").notNull(),
+    catalogChannel: text("catalog_channel")
+      .$type<"candidate" | "live">()
+      .default("live")
+      .notNull(),
     hostId: text("host_id").references(() => agentHosts.id, {
       onDelete: "set null",
     }),
@@ -114,6 +119,9 @@ export const imageBuilds = sqliteTable(
     attempt: integer("attempt").default(0).notNull(),
     error: text("error"),
     logR2Key: text("log_r2_key"),
+    publishedManifestJson: jsonText<ScenarioManifestV4>(
+      "published_manifest_json",
+    ),
     timingsJson: jsonText<ImageBuildTimings>("timings_json")
       .default({})
       .notNull(),
@@ -150,6 +158,12 @@ export const imageBuildCoordinationLocks = sqliteTable(
     index("image_build_coordination_locks_expiry_idx").on(table.expiresAt),
   ],
 );
+
+export const runtimeOperationGates = sqliteTable("runtime_operation_gates", {
+  key: text("key").primaryKey(),
+  state: text("state").$type<"open" | "drained">().notNull(),
+  updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+});
 
 export const hostDesiredState = sqliteTable(
   "host_desired_state",

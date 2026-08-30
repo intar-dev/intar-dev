@@ -38,7 +38,6 @@ interface ImageBuildRecord {
   arch: "x86_64" | "aarch64";
   rev: string;
   contentHash: string;
-  kinoVersion: string;
   hostId: string | null;
   hostName: string | null;
   status: "queued" | "assigned" | "building" | "succeeded" | "failed" | "stale";
@@ -68,7 +67,6 @@ interface ImageBuildDetailRecord extends ImageBuildRecord {
   bundle: {
     rev: string;
     r2Key: string | null;
-    kinoVersion: string | null;
     meta: unknown;
   };
 }
@@ -251,9 +249,6 @@ function BuildRow(props: {
           <span className="font-mono text-xs text-muted-foreground">
             {build.arch}
           </span>
-          <span className="font-mono text-xs text-muted-foreground">
-            kino {build.kinoVersion}
-          </span>
         </div>
 
         <div className="min-w-0">
@@ -428,10 +423,6 @@ function BuildDetails(props: {
     <div id={props.id} className="border-t pt-3">
       <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
         <BuildMeta label="Bundle" value={detail.bundle.r2Key ?? detail.rev} />
-        <BuildMeta
-          label="Bundle kino"
-          value={detail.bundle.kinoVersion ?? "Unknown"}
-        />
         <BuildMeta
           label="Host status"
           value={detail.host ? hostStatus(detail.host) : "Unassigned"}

@@ -1,21 +1,21 @@
 use super::*;
 
 #[test]
-fn direct_render_uses_raw_zstd_outputs_and_direct_boot_args() {
+fn direct_render_uses_raw_chunk_outputs_and_direct_boot_args() {
     let directory = tempdir().unwrap();
     let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
 
     assert!(
         rendered
             .paths
-            .output_image_path
-            .ends_with("dist/broken-nginx-web-amd64.raw.zst")
+            .output_chunk_manifest_path
+            .ends_with("dist/broken-nginx-web-amd64.chunks.json")
     );
     assert!(
         rendered
             .paths
             .output_metadata_path
-            .ends_with("dist/broken-nginx-web-amd64.raw.zst.manifest.json")
+            .ends_with("dist/broken-nginx-web-amd64.manifest.json")
     );
     assert!(
         rendered
@@ -146,10 +146,6 @@ base_image "trixie" {
             ..QemuBuildConfig::default()
         },
         base_image: catalog.base_image_by_name("trixie").unwrap().clone(),
-        kino: KinoArtifact {
-            binary_path: "/tmp/kino".into(),
-            version: "0.1.24".to_string(),
-        },
     })
     .unwrap();
     std::fs::create_dir_all(rendered.disk.base_ext4_path.parent().unwrap()).unwrap();

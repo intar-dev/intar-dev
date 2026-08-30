@@ -21,7 +21,7 @@ import {
   workshopWorkspaces,
   type WorkshopManifestV2,
 } from "@/db/schema";
-import type { BridgeMessageV6, VmProbeSnapshotV1 } from "@/generated/bridge";
+import type { BridgeMessageV7, VmProbeSnapshotV1 } from "@/generated/bridge";
 import { upsertDesiredVm } from "@/lib/desired-state";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import {
@@ -424,7 +424,13 @@ describe("HostRuntimeDO generic runtime projection", () => {
             vm: "workspace",
             arch: "x86_64",
           },
-          image_sha256: "b".repeat(64),
+          image_id: "b".repeat(64),
+          guest_tools: {
+            tools_disk_sha256: "1".repeat(64),
+            tools_disk_size_bytes: 64 * 1024 * 1024,
+            kino_sha256: "2".repeat(64),
+            bootstrap_abi: 1,
+          },
           resources: {
             cpu_millis: 4_000,
             vcpu_count: 4,
@@ -989,7 +995,7 @@ function workshopVmReport(input: {
   runtimeVmName: string;
   observedAt: number;
   probes: VmProbeSnapshotV1[];
-}): BridgeMessageV6 {
+}): BridgeMessageV7 {
   const message = vmReport(
     input.hostId,
     input.executionId,

@@ -26,7 +26,6 @@ export interface DesiredBuildSource {
   rev: string;
   contentHash: string;
   bundleRef: string;
-  kinoVersion: string;
 }
 
 export function buildStatusFromPhase(phase: BuildPhase): ImageBuildStatus {
@@ -138,7 +137,6 @@ export function desiredBuildFromSource(
     rev: source.rev,
     content_hash: source.contentHash,
     bundle_ref: source.bundleRef,
-    kino_version: source.kinoVersion,
   };
 }
 

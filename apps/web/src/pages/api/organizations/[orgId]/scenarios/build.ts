@@ -19,7 +19,6 @@ export const POST: APIRoute = async ({ request, params }) => {
   const body = (await request.json().catch(() => null)) as {
     scenarioId?: unknown;
     contentHash?: unknown;
-    kinoVersion?: unknown;
     imageArch?: unknown;
   } | null;
 
@@ -34,8 +33,6 @@ export const POST: APIRoute = async ({ request, params }) => {
         typeof body?.scenarioId === "string" ? body.scenarioId.trim() : "",
       contentHash:
         typeof body?.contentHash === "string" ? body.contentHash : "",
-      kinoVersion:
-        typeof body?.kinoVersion === "string" ? body.kinoVersion : "",
       imageArch: typeof body?.imageArch === "string" ? body.imageArch : "",
       organizationId,
     });

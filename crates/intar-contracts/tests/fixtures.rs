@@ -1,9 +1,9 @@
 use intar_contracts::{
     bridge::{
-        BridgeMessageV6, BuildReportV1, DesiredBuildV1, HostDesiredStateV2, HostStateReportV2,
+        BridgeMessageV7, BuildReportV1, DesiredBuildV1, HostDesiredStateV2, HostStateReportV2,
         VmReportV2,
     },
-    catalog::ScenarioManifestV3,
+    catalog::ScenarioManifestV4,
     stargate::{
         IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
         IssueWorkspaceAppSessionResponse,
@@ -40,8 +40,8 @@ fn stargate_workspace_app_response_fixture_round_trips() {
 
 #[test]
 fn catalog_manifest_fixture_round_trips() {
-    assert_round_trip::<ScenarioManifestV3>(include_str!(
-        "../fixtures/catalog/scenario-manifest-v3.json"
+    assert_round_trip::<ScenarioManifestV4>(include_str!(
+        "../fixtures/catalog/scenario-manifest-v4.json"
     ));
 }
 
@@ -90,11 +90,11 @@ fn bridge_build_report_fixture_round_trips() {
 
 #[test]
 fn bridge_message_fixture_round_trips() {
-    assert_round_trip::<BridgeMessageV6>(include_str!("../fixtures/bridge/sync-request-v6.json"));
+    assert_round_trip::<BridgeMessageV7>(include_str!("../fixtures/bridge/sync-request-v7.json"));
 }
 
 #[test]
-fn catalog_v3_rejects_v2_cpu_field() {
+fn catalog_v4_rejects_legacy_whole_image_fields() {
     let value = serde_json::json!({
         "schema_version": 2,
         "scenario_id": "legacy",
@@ -122,7 +122,7 @@ fn catalog_v3_rejects_v2_cpu_field() {
         }]
     });
 
-    assert!(serde_json::from_value::<ScenarioManifestV3>(value).is_err());
+    assert!(serde_json::from_value::<ScenarioManifestV4>(value).is_err());
 }
 
 #[test]

@@ -85,7 +85,6 @@ export const POST: APIRoute = async ({ request, params }) => {
     const meta = {
       ...parsed.value.bundleMeta,
       rev,
-      kino_version: parsed.value.kinoVersion,
     };
     const archiveError = await validateBundleArchivePayload(payload, meta);
     if (archiveError) return archiveError;
@@ -119,7 +118,6 @@ export const POST: APIRoute = async ({ request, params }) => {
       httpMetadata: { contentType: "application/gzip" },
       customMetadata: {
         rev,
-        kino_version: parsed.value.kinoVersion,
         organization_id: organization.id,
       },
     });
@@ -127,7 +125,6 @@ export const POST: APIRoute = async ({ request, params }) => {
     const queued = await queueImageBuildsFromBundle(db, {
       rev,
       r2Key: objectKey,
-      kinoVersion: parsed.value.kinoVersion,
       meta,
       organizationId: organization.id,
       nowUnixMs: now,

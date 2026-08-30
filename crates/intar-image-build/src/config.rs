@@ -69,6 +69,8 @@ pub struct QemuBuildConfig {
     pub output_root: PathBuf,
     #[serde(default = "default_work_root")]
     pub work_root: PathBuf,
+    #[serde(default)]
+    pub base_cache_root: Option<PathBuf>,
 }
 
 impl Default for QemuBuildConfig {
@@ -89,6 +91,7 @@ impl Default for QemuBuildConfig {
             build_memory_mb: default_build_memory_mb(),
             output_root: default_output_root(),
             work_root: default_work_root(),
+            base_cache_root: None,
         }
     }
 }

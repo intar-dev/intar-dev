@@ -28,7 +28,6 @@ pub struct BuildJobRow {
     pub rev: String,
     pub content_hash: String,
     pub bundle_ref: String,
-    pub kino_version: String,
     pub phase: String,
     pub current_vm: Option<String>,
     pub attempt: u32,
@@ -49,7 +48,6 @@ impl BuildJobRow {
             rev: self.rev.clone(),
             content_hash: self.content_hash.clone(),
             bundle_ref: self.bundle_ref.clone(),
-            kino_version: self.kino_version.clone(),
         }
     }
 }
@@ -122,17 +120,16 @@ ON CONFLICT(id) DO UPDATE SET
             .execute(
                 r#"
 INSERT INTO build_jobs (
-  build_id, scenario_id, arch, rev, content_hash, bundle_ref, kino_version,
+  build_id, scenario_id, arch, rev, content_hash, bundle_ref,
   phase, attempt, error, next_attempt_at_ms, updated_at_ms
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)
 ON CONFLICT(build_id) DO UPDATE SET
   scenario_id = excluded.scenario_id,
   arch = excluded.arch,
   rev = excluded.rev,
   content_hash = excluded.content_hash,
   bundle_ref = excluded.bundle_ref,
-  kino_version = excluded.kino_version,
   phase = excluded.phase,
   attempt = excluded.attempt,
   error = excluded.error,
@@ -146,7 +143,6 @@ ON CONFLICT(build_id) DO UPDATE SET
                     build.rev,
                     build.content_hash,
                     build.bundle_ref,
-                    build.kino_version,
                     phase,
                     attempt as i64,
                     error,
@@ -162,7 +158,7 @@ ON CONFLICT(build_id) DO UPDATE SET
             .conn
             .prepare(
                 r#"
-SELECT build_id, scenario_id, arch, rev, content_hash, bundle_ref, kino_version,
+SELECT build_id, scenario_id, arch, rev, content_hash, bundle_ref,
        phase, current_vm, attempt, error, started_at_ms, finished_at_ms,
        next_attempt_at_ms, updated_at_ms
 FROM build_jobs
@@ -179,15 +175,14 @@ ORDER BY COALESCE(next_attempt_at_ms, updated_at_ms), updated_at_ms, build_id
                     rev: row.get(3)?,
                     content_hash: row.get(4)?,
                     bundle_ref: row.get(5)?,
-                    kino_version: row.get(6)?,
-                    phase: row.get(7)?,
-                    current_vm: row.get(8)?,
-                    attempt: row.get::<_, i64>(9)? as u32,
-                    error: row.get(10)?,
-                    started_at_ms: row.get(11)?,
-                    finished_at_ms: row.get(12)?,
-                    next_attempt_at_ms: row.get(13)?,
-                    updated_at_ms: row.get(14)?,
+                    phase: row.get(6)?,
+                    current_vm: row.get(7)?,
+                    attempt: row.get::<_, i64>(8)? as u32,
+                    error: row.get(9)?,
+                    started_at_ms: row.get(10)?,
+                    finished_at_ms: row.get(11)?,
+                    next_attempt_at_ms: row.get(12)?,
+                    updated_at_ms: row.get(13)?,
                 })
             })
             .context("failed to query build jobs")?;
@@ -200,7 +195,7 @@ ORDER BY COALESCE(next_attempt_at_ms, updated_at_ms), updated_at_ms, build_id
         self.conn
             .query_row(
                 r#"
-SELECT build_id, scenario_id, arch, rev, content_hash, bundle_ref, kino_version,
+SELECT build_id, scenario_id, arch, rev, content_hash, bundle_ref,
        phase, current_vm, attempt, error, started_at_ms, finished_at_ms,
        next_attempt_at_ms, updated_at_ms
 FROM build_jobs
@@ -215,15 +210,14 @@ WHERE build_id = ?1
                         rev: row.get(3)?,
                         content_hash: row.get(4)?,
                         bundle_ref: row.get(5)?,
-                        kino_version: row.get(6)?,
-                        phase: row.get(7)?,
-                        current_vm: row.get(8)?,
-                        attempt: row.get::<_, i64>(9)? as u32,
-                        error: row.get(10)?,
-                        started_at_ms: row.get(11)?,
-                        finished_at_ms: row.get(12)?,
-                        next_attempt_at_ms: row.get(13)?,
-                        updated_at_ms: row.get(14)?,
+                        phase: row.get(6)?,
+                        current_vm: row.get(7)?,
+                        attempt: row.get::<_, i64>(8)? as u32,
+                        error: row.get(9)?,
+                        started_at_ms: row.get(10)?,
+                        finished_at_ms: row.get(11)?,
+                        next_attempt_at_ms: row.get(12)?,
+                        updated_at_ms: row.get(13)?,
                     })
                 },
             )
@@ -409,7 +403,6 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   rev TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   bundle_ref TEXT NOT NULL,
-  kino_version TEXT NOT NULL,
   phase TEXT NOT NULL,
   current_vm TEXT,
   attempt INTEGER NOT NULL,
@@ -419,19 +412,60 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   next_attempt_at_ms INTEGER,
   updated_at_ms INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_build_jobs_phase_updated
-  ON build_jobs(phase, updated_at_ms);
 "#,
     )
     .context("failed to migrate builder db")?;
+    migrate_legacy_kino_column(conn)?;
     ensure_column(conn, "build_jobs", "current_vm", "TEXT")?;
     ensure_column(conn, "build_jobs", "started_at_ms", "INTEGER")?;
     ensure_column(conn, "build_jobs", "finished_at_ms", "INTEGER")?;
     ensure_column(conn, "build_jobs", "next_attempt_at_ms", "INTEGER")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_build_jobs_phase_updated ON build_jobs(phase, updated_at_ms);",
+    )
+    .context("failed to create builder job index")?;
     Ok(())
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str) -> Result<()> {
+fn migrate_legacy_kino_column(conn: &Connection) -> Result<()> {
+    if !table_has_column(conn, "build_jobs", "kino_version")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+DROP INDEX IF EXISTS idx_build_jobs_phase_updated;
+ALTER TABLE build_jobs RENAME TO build_jobs_v9;
+CREATE TABLE build_jobs (
+  build_id TEXT PRIMARY KEY,
+  scenario_id TEXT NOT NULL,
+  arch TEXT NOT NULL,
+  rev TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  bundle_ref TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  current_vm TEXT,
+  attempt INTEGER NOT NULL,
+  error TEXT,
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  next_attempt_at_ms INTEGER,
+  updated_at_ms INTEGER NOT NULL
+);
+INSERT INTO build_jobs (
+  build_id, scenario_id, arch, rev, content_hash, bundle_ref, phase, current_vm,
+  attempt, error, started_at_ms, finished_at_ms, next_attempt_at_ms, updated_at_ms
+)
+SELECT build_id, scenario_id, arch, rev, content_hash, bundle_ref, phase, current_vm,
+       attempt, error, started_at_ms, finished_at_ms, next_attempt_at_ms, updated_at_ms
+FROM build_jobs_v9;
+DROP TABLE build_jobs_v9;
+"#,
+    )
+    .context("failed to migrate builder jobs from v9")?;
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut statement = conn
         .prepare(&format!("PRAGMA table_info({table})"))
         .context("failed to prepare table_info query")?;
@@ -440,7 +474,11 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str
         .context("failed to query table_info")?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("failed to collect table_info rows")?;
-    if columns.iter().any(|existing| existing == column) {
+    Ok(columns.iter().any(|existing| existing == column))
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str) -> Result<()> {
+    if table_has_column(conn, table, column)? {
         return Ok(());
     }
     conn.execute(
@@ -501,7 +539,6 @@ mod tests {
             rev: "abc123".to_string(),
             content_hash: "f".repeat(64),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-            kino_version: "0.1.24".to_string(),
         };
 
         db.upsert_build_job(&build, "queued", 0, None, 1000)
@@ -528,7 +565,6 @@ mod tests {
             rev: "abc123".to_string(),
             content_hash: "f".repeat(64),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-            kino_version: "0.1.24".to_string(),
         };
         db.upsert_build_job(&build, "queued", 0, None, 1000)
             .unwrap();
@@ -579,7 +615,6 @@ mod tests {
             rev: "abc123".to_string(),
             content_hash: "f".repeat(64),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-            kino_version: "0.1.24".to_string(),
         }
     }
 }

@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "scenario_id": "broken-nginx",
   "name": "broken-nginx",
   "title": "Broken Nginx",
@@ -7,11 +7,7 @@
   "description": "Repair the nginx service.",
   "difficulty": "easy",
   "estimated_minutes": 15,
-  "tags": [
-    "nginx",
-    "systemd",
-    "linux"
-  ],
+  "tags": ["nginx", "systemd", "linux"],
   "briefing_markdown": "The web server should serve the default site, but nginx was disabled during cleanup.",
   "solution_markdown": "Enable nginx and restore the default site symlink.",
   "hints": [
@@ -29,9 +25,11 @@
         "vm": "web",
         "arch": "x86_64"
       },
-      "image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "image_format": "raw_zstd",
+      "image_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "image_format": "raw_chunks_v1",
       "image_virtual_size_bytes": 8589934592,
+      "chunk_manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "guest_bootstrap_abi": 1,
       "boot": {
         "kernel_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "initrd_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

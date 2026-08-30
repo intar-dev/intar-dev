@@ -170,21 +170,22 @@ describe("image registry uploads", () => {
     });
   });
 
-  it("publishes manifests that reference pre-uploaded images", async () => {
+  it("publishes manifests that reference pre-uploaded chunk manifests", async () => {
     const imageSha256 = "e".repeat(64);
     const artifactSha256 = "f".repeat(64);
     const manifest = publishManifest({ imageSha256, artifactSha256 });
     const form = new FormData();
     form.set("manifest", JSON.stringify(manifest));
 
-    const imageObjectKey = `images/broken-nginx-web-x86_64/${imageSha256}.raw.zst`;
+    const imageObjectKey = `image-manifests/v1/${"d".repeat(64)}.json`;
     const bucketHead = vi.fn().mockImplementation((key: string) => {
       if (key === imageObjectKey) {
         return Promise.resolve({
           size: 777,
           customMetadata: {
-            image_key: "broken-nginx-web-x86_64",
-            image_sha256: imageSha256,
+            manifest_sha256: "d".repeat(64),
+            image_id: imageSha256,
+            virtual_size_bytes: "8589934592",
           },
         });
       }
@@ -219,20 +220,14 @@ describe("image registry uploads", () => {
       images: [
         {
           image_key: "broken-nginx-web-x86_64",
-          image_sha256: imageSha256,
+          image_id: imageSha256,
           object_key: imageObjectKey,
-          bytes: 777,
+          bytes: 8589934592,
           reused: true,
         },
       ],
     });
-    // Only the sha256 sidecar is written; the image object itself is reused.
-    expect(bucketPut).toHaveBeenCalledTimes(1);
-    expect(bucketPut).toHaveBeenCalledWith(
-      `${imageObjectKey}.sha256`,
-      expect.anything(),
-      expect.anything(),
-    );
+    expect(bucketPut).not.toHaveBeenCalled();
     expect(catalogManifestMock.seedScenarioManifest).toHaveBeenCalledOnce();
   });
 });

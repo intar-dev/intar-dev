@@ -15,9 +15,6 @@
     "content_hash": {
       "type": "string"
     },
-    "kino_version": {
-      "type": "string"
-    },
     "rev": {
       "type": "string"
     },
@@ -31,8 +28,7 @@
     "arch",
     "rev",
     "content_hash",
-    "bundle_ref",
-    "kino_version"
+    "bundle_ref"
   ],
   "$defs": {
     "ImageArchitecture": {

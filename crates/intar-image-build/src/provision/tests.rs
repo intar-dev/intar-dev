@@ -144,7 +144,8 @@ fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
 
     assert!(script.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"));
     assert!(script.contains("install -m 0755 /tmp/kino /usr/local/bin/kino"));
-    assert!(script.contains("ln -sfn kino '/usr/local/bin/intar'"));
+    assert!(!script.contains("wait_for_labeled_device INTARTOOLS"));
+    assert!(script.contains("/usr/local/bin/intar"));
     assert!(script.contains("'/usr/local/bin/intar' help >/dev/null 2>&1"));
     assert!(!script.contains("'/usr/local/bin/intar' --"));
     assert!(script.contains("/usr/share/intar/completions/intar.bash"));
@@ -938,7 +939,8 @@ packages = ["nginx"]
             );
             assert!(script.contains("grep -qxF '/usr/local/bin/kino-shell' /etc/shells"));
             assert!(script.contains("usermod -s '/usr/local/bin/kino-shell' 'ubuntu'"));
-            assert!(script.contains("install -m 0755 /tmp/kino /usr/local/bin/kino"));
+            assert!(script.contains("wait_for_labeled_device INTARTOOLS"));
+            assert!(script.contains("Kino guest tool SHA-256 mismatch"));
             assert!(!script.contains("curl -fsSL"));
             assert!(
                 script.contains(
@@ -955,16 +957,15 @@ packages = ["nginx"]
             assert!(!script.contains("INTAR_SSH_AUTHORIZED_KEYS_B64 is required"));
             assert!(script.contains("KINO_HOST_READY_PORT is required"));
             assert!(script.contains("root_device=\"/dev/vda\""));
-            assert!(script.contains("runtime_device=\"/dev/vdb\""));
-            assert!(script.contains("recording_device=\"/dev/vdc\""));
-            assert!(script.contains("actual_label=\"$(blkid -s LABEL -o value"));
+            assert!(script.contains("wait_for_labeled_device INTARRUN"));
+            assert!(script.contains("wait_for_labeled_device INTARREC"));
+            assert!(script.contains("device=\"$(blkid -L \"$label\""));
             assert!(script.contains("grow_root_filesystem() {"));
             assert!(script.contains("resize2fs \"$root_device\""));
             assert!(script.contains("${INTAR_ROOT_RESIZE_REQUIRED:-1}"));
             assert!(script.contains("0|false)"));
             assert!(script.contains("log_phase root_resize skipped"));
-            assert!(script.contains("wait_for_block_device \"$runtime_device\" INTARRUN"));
-            assert!(script.contains("wait_for_block_device \"$recording_device\" INTARREC"));
+            assert!(script.contains("missing block device with label $label"));
             assert!(script.contains("compgen -v INTAR_PEER_"));
             assert!(script.contains("> /etc/profile.d/intar-peers.sh"));
             assert!(script.contains("rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub"));
@@ -1002,7 +1003,7 @@ packages = ["nginx"]
             assert!(script.contains("ensure_package_lists_updated"));
             assert!(script.contains("apt-get update"));
             assert!(script.contains("apt-get clean"));
-            assert!(!script.contains("/var/lib/apt/lists/*"));
+            assert!(script.contains("/var/lib/apt/lists/*"));
             assert!(!script.contains("dd if=/dev/zero of=/EMPTY"));
             assert!(!script.contains("/etc/intar/runtime.env"));
             assert!(!script.contains("INTAR_VM_MAC"));

@@ -275,18 +275,17 @@ solution; a sealed solution is an expected unavailable result.
 
 The harness fails unless all of these are true:
 
-- In direct publish mode, `/registry/v1/publish` accepts the manifest and uploads
-  images into R2 after the harness verifies each local `.raw.zst` file's
-  compressed SHA-256 against the manifest and logs its byte size.
+- In direct publish mode, the registry accepts all immutable chunks before it
+  accepts the image manifest and scenario publication.
 - In builder mode, `/api/admin/builds` reports the requested bundle revision as
   `succeeded` before the run starts.
-- Published manifests and admin scenario metadata use `raw_zstd`, include
-  kernel/initrd hashes, advertise a positive virtual size, and direct-boot
-  `root=/dev/vda`. The manifest contract is V3 and carries `cpu_millis` plus
-  `vcpu_count`.
+- Published manifests and admin scenario metadata use `raw_chunks_v1`, include
+  the image ID, chunk manifest, bootstrap ABI, kernel/initrd hashes, and a
+  positive virtual size. The manifest contract is V4.
 - The host reports the published image as cache `ready`.
-- The V6 bridge reports KVM, nftables, reflink, jailer-v2, hard-quota, Landlock,
-  and cgroup-v2 support, with an architecture matching the required images.
+- The V7 bridge reports KVM, nftables, reflink, jailer-v3, raw-chunk,
+  guest-tools, hard-quota, Landlock, and cgroup-v2 support, with an architecture
+  matching the required images.
 - The VM report shows the requested quota/topology, `cpu.stat` usage and
   throttling counters, and healthy sandbox state; the complete process tree is
   in the VM unit/cgroup.

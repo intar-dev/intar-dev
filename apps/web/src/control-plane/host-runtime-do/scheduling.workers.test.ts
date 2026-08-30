@@ -46,7 +46,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
         cachedImages: [
           {
             image_key: testImageKey,
-            image_sha256: "2".repeat(64),
+            image_id: "2".repeat(64),
             phase: "ready",
             updated_at_unix_ms: now,
           },
@@ -92,7 +92,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
         cachedImages: [
           {
             image_key: testImageKey,
-            image_sha256: "2".repeat(64),
+            image_id: "2".repeat(64),
             phase: "ready",
             updated_at_unix_ms: now,
           },
@@ -143,7 +143,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
         cachedImages: [
           {
             image_key: testImageKey,
-            image_sha256: "2".repeat(64),
+            image_id: "2".repeat(64),
             phase: "ready",
             updated_at_unix_ms: now,
           },
@@ -208,7 +208,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
         cachedImages: [
           {
             image_key: testImageKey,
-            image_sha256: "2".repeat(64),
+            image_id: "2".repeat(64),
             phase: "ready",
             updated_at_unix_ms: now,
           },
@@ -224,7 +224,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
         cachedImages: [
           {
             image_key: testImageKey,
-            image_sha256: "2".repeat(64),
+            image_id: "2".repeat(64),
             phase: "ready",
             updated_at_unix_ms: now,
           },
@@ -311,13 +311,13 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "4".repeat(64),
+        image_id: "4".repeat(64),
       });
     });
 
     sendBridge(ws, {
       type: "sync_request",
-      protocol_version: 6,
+      protocol_version: 7,
       host_id: hostId,
       reason: "operator_requested",
     });

@@ -41,6 +41,7 @@ export interface ScenarioCourseCatalogSnapshotV1 {
 
 export interface ImageBuildBundleMeta {
   buildFormatVersion: string;
+  catalogChannel?: "candidate" | "live";
   scenarios: Array<{
     scenarioId: string;
     arch: ImageArchitecture;

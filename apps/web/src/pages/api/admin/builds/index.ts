@@ -25,7 +25,6 @@ export const GET: APIRoute = async ({ request }) => {
       arch: imageBuilds.arch,
       rev: imageBuilds.rev,
       contentHash: imageBuilds.contentHash,
-      kinoVersion: imageBuilds.kinoVersion,
       hostId: imageBuilds.hostId,
       hostName: agentHosts.name,
       status: imageBuilds.status,

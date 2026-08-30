@@ -4,9 +4,9 @@ use std::path::Path;
 
 use super::{
     bridge, classify_publish_error, config, db, ensure_preflight_report_ready, local_bundle_rev,
-    log_upload_warning, non_retryable_build_error, preflight, should_retry_build_error,
-    validate_job_config, validate_run_once_publish_target, validate_run_once_publish_token,
-    verify_bundle_or_drop_cached_archive,
+    log_upload_warning, non_retryable_build_error, preflight, qemu_build_config_for_job,
+    should_retry_build_error, validate_job_config, validate_run_once_publish_target,
+    validate_run_once_publish_token, verify_bundle_or_drop_cached_archive,
 };
 
 #[test]
@@ -32,13 +32,34 @@ fn rejects_unsafe_local_bundle_rev() {
 }
 
 #[test]
-fn rejects_parallel_builder_workers_until_build_paths_are_isolated() {
+fn accepts_two_isolated_builder_workers_and_rejects_more() {
     let mut cfg = config::BuilderConfig::default();
     cfg.jobs.max_concurrent_builds = 2;
+    validate_job_config(&cfg).expect("two isolated workers are supported");
 
+    cfg.jobs.max_concurrent_builds = 3;
     let error = validate_job_config(&cfg).unwrap_err();
 
-    assert!(format!("{error:#}").contains("not supported yet"));
+    assert!(format!("{error:#}").contains("must not exceed 2"));
+}
+
+#[test]
+fn concurrent_build_ids_and_hashes_get_disjoint_paths() {
+    let cfg = config::BuilderConfig::default();
+    let build = |build_id: &str, content_hash: &str| intar_contracts::bridge::DesiredBuildV1 {
+        build_id: build_id.to_string(),
+        scenario_id: "broken-nginx".to_string(),
+        arch: intar_contracts::catalog::ImageArchitecture::X86_64,
+        rev: "revision-1".to_string(),
+        content_hash: content_hash.to_string(),
+        bundle_ref: "builds/bundles/revision-1.tar.gz".to_string(),
+    };
+    let first = qemu_build_config_for_job(&cfg, &build("build-a", &"a".repeat(64)));
+    let second = qemu_build_config_for_job(&cfg, &build("build-b", &"b".repeat(64)));
+
+    assert_ne!(first.work_root, second.work_root);
+    assert_ne!(first.output_root, second.output_root);
+    assert_eq!(first.base_cache_root, second.base_cache_root);
 }
 
 #[test]
@@ -145,7 +166,6 @@ async fn drops_cached_bundle_after_verification_failure() {
         rev: "abc123".to_string(),
         content_hash: "f".repeat(64),
         bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-        kino_version: "0.1.24".to_string(),
     };
 
     let error = verify_bundle_or_drop_cached_archive(&archive, &bundle_root, &build)
@@ -176,7 +196,6 @@ fn successful_build_report_can_include_log_upload_warning() {
         rev: "abc123".to_string(),
         content_hash: "f".repeat(64),
         bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-        kino_version: "0.1.24".to_string(),
     };
     db.upsert_build_job(&build, "uploading_logs", 1, None, 1000)
         .unwrap();

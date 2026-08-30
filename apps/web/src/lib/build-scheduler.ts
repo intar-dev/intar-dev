@@ -35,7 +35,6 @@ export async function queueImageBuildsFromBundle(
   input: {
     rev: string;
     r2Key: string;
-    kinoVersion: string;
     meta: ImageBuildBundleMeta;
     organizationId?: string | null;
     nowUnixMs: number;
@@ -48,7 +47,6 @@ export async function queueImageBuildsFromBundle(
       rev: input.rev,
       organizationId,
       r2Key: input.r2Key,
-      kinoVersion: input.kinoVersion,
       metaJson: input.meta,
       createdAt: input.nowUnixMs,
       updatedAt: input.nowUnixMs,
@@ -58,7 +56,6 @@ export async function queueImageBuildsFromBundle(
       set: {
         r2Key: input.r2Key,
         organizationId,
-        kinoVersion: input.kinoVersion,
         metaJson: input.meta,
         updatedAt: input.nowUnixMs,
       },
@@ -75,8 +72,8 @@ export async function queueImageBuildsFromBundle(
           arch: scenario.arch,
           contentHash: scenario.contentHash,
           rev: input.rev,
-          kinoVersion: input.kinoVersion,
           organizationId,
+          catalogChannel: input.meta.catalogChannel ?? "live",
           nowUnixMs: input.nowUnixMs,
         }),
     );
@@ -96,8 +93,8 @@ async function queueImageBuildScenario(
     arch: ImageBuildBundleMeta["scenarios"][number]["arch"];
     contentHash: string;
     rev: string;
-    kinoVersion: string;
     organizationId: string | null;
+    catalogChannel: "candidate" | "live";
     nowUnixMs: number;
   },
 ): Promise<{ queued: number; cleanedHostIds: string[] }> {
@@ -172,7 +169,7 @@ async function queueImageBuildScenario(
         arch: input.arch,
         rev: input.rev,
         contentHash: input.contentHash,
-        kinoVersion: input.kinoVersion,
+        catalogChannel: input.catalogChannel,
         hostId: null,
         status: "queued",
         phase: "queued",
@@ -191,8 +188,8 @@ async function queueImageBuildScenario(
         ],
         set: {
           rev: input.rev,
-          kinoVersion: input.kinoVersion,
           organizationId: input.organizationId,
+          catalogChannel: input.catalogChannel,
           hostId: null,
           status: "queued",
           phase: "queued",
@@ -309,7 +306,6 @@ export async function assignQueuedImageBuilds(
             rev: build.rev,
             contentHash: build.contentHash,
             bundleRef: build.bundleRef,
-            kinoVersion: build.kinoVersion,
           }),
         );
       },
@@ -475,7 +471,6 @@ async function loadQueuedBuildRows(db: DrizzleD1Database) {
       arch: imageBuilds.arch,
       rev: imageBuilds.rev,
       contentHash: imageBuilds.contentHash,
-      kinoVersion: imageBuilds.kinoVersion,
       bundleRef: imageBuildBundles.r2Key,
     })
     .from(imageBuilds)

@@ -70,13 +70,12 @@ export interface PreparedBuild {
   errors: string[];
   scenario_id?: string;
   content_hash?: string;
-  kino_version?: string;
   target_arch: string;
   image_arch: string;
 }
 
-// Validate + compute the source-bundle inputs (content hash, kino version,
-// arch) for the in-app build trigger. Runs the exact build-pipeline Rust.
+// Validate + compute the source-bundle inputs (content hash and architecture)
+// for the in-app build trigger. Runs the exact build-pipeline Rust.
 export async function prepareScenarioBuild(
   scenarioHcl: string,
 ): Promise<PreparedBuild> {
@@ -87,7 +86,6 @@ export async function prepareScenarioBuild(
 export async function computeScenarioContentHash(params: {
   scenarioId: string;
   baseDefinition: string;
-  kinoVersion: string;
   targetArch?: string;
   entries: Array<{ path: string; content: string }>;
 }): Promise<string> {
@@ -96,7 +94,6 @@ export async function computeScenarioContentHash(params: {
     JSON.stringify({
       scenario_id: params.scenarioId,
       base_definition: params.baseDefinition,
-      kino_version: params.kinoVersion,
       target_arch: params.targetArch,
       entries: params.entries,
     }),

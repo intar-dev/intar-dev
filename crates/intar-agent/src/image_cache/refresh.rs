@@ -23,7 +23,7 @@ pub(super) async fn run_cache_refresh_cycle(
     if images.is_empty() {
         warn!(
             registry = %redact_url_userinfo(&registry.url),
-            "image registry did not advertise any raw_zstd images"
+            "image registry did not advertise any raw_chunks_v1 images"
         );
         return;
     }
@@ -51,55 +51,88 @@ pub(super) async fn run_cache_refresh_cycle(
                 image = %image.image_key,
                 registry = %redact_url_userinfo(&registry.url),
             );
-            let _guard = span.enter();
+            async move {
+                let _permit = match sem.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                };
 
-            let _permit = match sem.acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => return,
-            };
-
-            match ensure_cached_image_entry(
-                &image,
-                &registry,
-                bridge.as_ref(),
-                &cache_root,
-                &client,
-            )
-            .await
-            {
-                Ok(cached_image) => {
-                    let template_prepared = match vm
-                        .ensure_cached_image_template(&cached_image)
-                        .await
-                    {
-                        Ok(_) => true,
-                        Err(error) => {
-                            error!(
-                                error = %error,
-                                image = %image.image_key,
-                                "failed to prepare root-owned jail image template"
-                            );
-                            return;
+                match ensure_cached_chunked_image_entry(
+                    &image,
+                    &registry,
+                    bridge.as_ref(),
+                    &cache_root,
+                    &client,
+                )
+                .await
+                {
+                    Ok(cached_image) => {
+                        let template_prepared = match vm
+                            .ensure_cached_image_template(&cached_image)
+                            .await
+                        {
+                            Ok(_) => true,
+                            Err(error) => {
+                                error!(
+                                    error = %error,
+                                    image = %image.image_key,
+                                    "failed to prepare root-owned jail image template"
+                                );
+                                return;
+                            }
+                        };
+                        if let Some(db) = db.as_ref()
+                            && let Err(error) = touch_cached_image(db, &cached_image).await
+                        {
+                            warn!(error = %error, image = %image.image_key, "failed to update image cache access metadata");
                         }
-                    };
-                    if let Some(db) = db.as_ref()
-                        && let Err(error) = touch_cached_image(db, &cached_image).await
-                    {
-                        warn!(error = %error, image = %image.image_key, "failed to update image cache access metadata");
+                        info!(
+                        path = %cached_image.chunk_manifest_path.display(),
+                            template_prepared,
+                            "image boot bundle cache ready"
+                        );
                     }
-                    info!(
-                        path = %cached_image.raw_path.display(),
-                        template_prepared,
-                        "image boot bundle cache ready"
-                    );
+                    Err(e) => error!("failed to cache image: {e}"),
                 }
-                Err(e) => error!("failed to cache image: {e}"),
             }
+            .instrument(span)
+            .await;
         }));
     }
 
     for handle in handles {
         let _ = handle.await;
+    }
+
+    if let Some(db) = db
+        && let Ok(Some(row)) = db.load_desired_state().await
+        && let Ok(desired) =
+            serde_json::from_str::<intar_contracts::bridge::HostDesiredStateV2>(&row.doc_json)
+    {
+        let mut pins = desired.cached_guest_tools;
+        pins.extend(
+            desired
+                .vms
+                .into_iter()
+                .filter(|vm| vm.desired_phase == intar_contracts::bridge::DesiredVmPhase::Running)
+                .map(|vm| vm.guest_tools),
+        );
+        pins.sort_by(|left, right| left.tools_disk_sha256.cmp(&right.tools_disk_sha256));
+        pins.dedup_by(|left, right| left.tools_disk_sha256 == right.tools_disk_sha256);
+        for pin in pins {
+            if let Err(error) = ensure_cached_tools_disk(
+                &pin.tools_disk_sha256,
+                pin.tools_disk_size_bytes,
+                registry,
+                bridge,
+                cache_root,
+                client,
+            )
+            .await
+            {
+                warn!(error = %error, tools_disk_sha256 = %pin.tools_disk_sha256, "failed to warm guest tools disk");
+            }
+        }
     }
 
     info!("image cache refresh finished");

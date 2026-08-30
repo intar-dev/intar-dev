@@ -100,12 +100,14 @@ pub(super) fn db_thread_main(
             Op::TouchImageCacheEntry { row, resp } => {
                 let _ = resp.send(touch_image_cache_entry(&conn, &row));
             }
+            #[cfg(test)]
             Op::LoadImageCacheAccess { resp } => {
                 let _ = resp.send(load_image_cache_access(&conn));
             }
             Op::LoadLocalVmImageShas { resp } => {
                 let _ = resp.send(load_local_vm_image_shas(&conn));
             }
+            #[cfg(test)]
             Op::DeleteImageCacheAccess { image_sha256, resp } => {
                 let _ = resp.send(delete_image_cache_access(&conn, &image_sha256));
             }
@@ -142,6 +144,11 @@ pub(super) fn ensure_baseline_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(BASELINE_SCHEMA_SQL)
         .context("failed to apply baseline sqlite schema")?;
 
+    if !table_has_column(conn, "vms", "guest_tools_json")? {
+        conn.execute("ALTER TABLE vms ADD COLUMN guest_tools_json TEXT;", [])
+            .context("migrate persisted VM guest-tools pins")?;
+    }
+
     let has_any_tables: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%');",
@@ -161,6 +168,7 @@ pub(super) fn schema_is_compatible(conn: &Connection) -> Result<bool> {
         ("vms", "name"),
         ("vms", "image_key"),
         ("vms", "image_sha256"),
+        ("vms", "guest_tools_json"),
         ("vms", "spool_dir"),
         ("vms", "ssh_public_port"),
         ("vms", "ssh_host_keys_openssh_json"),
@@ -219,6 +227,7 @@ SELECT
   state,
   image_key,
   image_sha256,
+  guest_tools_json,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -268,42 +277,43 @@ ORDER BY created_at_s ASC;
                 state: row.get(1)?,
                 image_key: row.get(2)?,
                 image_sha256: row.get(3)?,
-                created_at_s: row.get(4)?,
-                updated_at_s: row.get(5)?,
-                running_at_s: row.get(6)?,
-                error: row.get(7)?,
-                root_disk_path: row.get(8)?,
-                seed_disk_path: row.get(9)?,
-                mac: row.get(10)?,
-                lease_duration_seconds: row.get(11)?,
-                guest_ip: row.get(12)?,
-                guest_ip_cidr: row.get(13)?,
-                gateway: row.get(14)?,
-                bridge_name: row.get(15)?,
-                ssh_public_port: row.get(16)?,
-                tap_name: row.get(17)?,
-                ch_socket_path: row.get(18)?,
-                ch_pid: row.get(19)?,
-                ch_start_time_ticks: row.get(20)?,
-                host_boot_id: row.get(21)?,
-                jail_generation: row.get(22)?,
-                jail_unit_name: row.get(23)?,
-                jail_cgroup_path: row.get(24)?,
-                jail_root_path: row.get(25)?,
-                jail_root_inode: row.get(26)?,
-                jail_uid: row.get(27)?,
-                jail_gid: row.get(28)?,
-                jail_netns_name: row.get(29)?,
-                kino_vsock_cid: row.get(30)?,
-                kino_vsock_port: row.get(31)?,
-                kino_vsock_path: row.get(32)?,
-                ssh_host_keys_openssh_json: row.get(33)?,
-                run_id: row.get(34)?,
-                recording_disk_path: row.get(35)?,
-                spool_dir: row.get(36)?,
-                cpu_millis: row.get(37)?,
-                vcpu_count: row.get(38)?,
-                ch_executable_sha256: row.get(39)?,
+                guest_tools_json: row.get(4)?,
+                created_at_s: row.get(5)?,
+                updated_at_s: row.get(6)?,
+                running_at_s: row.get(7)?,
+                error: row.get(8)?,
+                root_disk_path: row.get(9)?,
+                seed_disk_path: row.get(10)?,
+                mac: row.get(11)?,
+                lease_duration_seconds: row.get(12)?,
+                guest_ip: row.get(13)?,
+                guest_ip_cidr: row.get(14)?,
+                gateway: row.get(15)?,
+                bridge_name: row.get(16)?,
+                ssh_public_port: row.get(17)?,
+                tap_name: row.get(18)?,
+                ch_socket_path: row.get(19)?,
+                ch_pid: row.get(20)?,
+                ch_start_time_ticks: row.get(21)?,
+                host_boot_id: row.get(22)?,
+                jail_generation: row.get(23)?,
+                jail_unit_name: row.get(24)?,
+                jail_cgroup_path: row.get(25)?,
+                jail_root_path: row.get(26)?,
+                jail_root_inode: row.get(27)?,
+                jail_uid: row.get(28)?,
+                jail_gid: row.get(29)?,
+                jail_netns_name: row.get(30)?,
+                kino_vsock_cid: row.get(31)?,
+                kino_vsock_port: row.get(32)?,
+                kino_vsock_path: row.get(33)?,
+                ssh_host_keys_openssh_json: row.get(34)?,
+                run_id: row.get(35)?,
+                recording_disk_path: row.get(36)?,
+                spool_dir: row.get(37)?,
+                cpu_millis: row.get(38)?,
+                vcpu_count: row.get(39)?,
+                ch_executable_sha256: row.get(40)?,
             })
         })
         .context("query load_all_vms")?;
@@ -320,6 +330,7 @@ INSERT INTO vms (
   state,
   image_key,
   image_sha256,
+  guest_tools_json,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -357,12 +368,13 @@ INSERT INTO vms (
   vcpu_count,
   ch_executable_sha256
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
   image_key = excluded.image_key,
   image_sha256 = excluded.image_sha256,
+  guest_tools_json = excluded.guest_tools_json,
   created_at_s = excluded.created_at_s,
   updated_at_s = excluded.updated_at_s,
   running_at_s = excluded.running_at_s,
@@ -405,6 +417,7 @@ ON CONFLICT(name) DO UPDATE SET
             row.state,
             row.image_key,
             row.image_sha256,
+            row.guest_tools_json,
             row.created_at_s,
             row.updated_at_s,
             row.running_at_s,

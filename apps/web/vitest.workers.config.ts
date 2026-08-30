@@ -25,6 +25,8 @@ export default defineConfig({
           GITHUB_CLIENT_SECRET: "test-client-secret",
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",
           SCENARIO_RUN_KEY_ENCRYPTION_SECRET: "test-run-key-secret",
+          SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON:
+            '{"schema_version":1,"bootstrap_abi":1,"tools_disk_sha256":"1111111111111111111111111111111111111111111111111111111111111111","tools_disk_size_bytes":67108864,"compressed_disk_sha256":"3333333333333333333333333333333333333333333333333333333333333333","compressed_disk_size_bytes":1,"kino_sha256":"2222222222222222222222222222222222222222222222222222222222222222","kino_size_bytes":1}',
           STARGATE_ADMIN_AUTH_AUDIENCE: "stargate-admin",
           STARGATE_ADMIN_AUTH_HEADER: "cf-access-jwt-assertion",
           STARGATE_ADMIN_AUTH_ISSUER: "intar.dev",
@@ -54,5 +56,6 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.workers.test.ts"],
+    setupFiles: ["./src/test/worker-setup.ts"],
   },
 });

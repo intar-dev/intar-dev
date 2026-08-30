@@ -7,7 +7,11 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
-import type { ImageKey, ScenarioHintManifestV3 } from "@/generated/catalog";
+import type {
+  ImageKey,
+  ScenarioHintManifestV3,
+  ScenarioManifestV4,
+} from "@/generated/catalog";
 import { organization } from "./core";
 import {
   type ScenarioCourseCatalogCourse,
@@ -50,6 +54,7 @@ export const vmScenarios = sqliteTable(
     organizationId: text("organization_id").references(() => organization.id, {
       onDelete: "restrict",
     }),
+    sourceRevision: text("source_revision"),
     title: text("title").notNull(),
     category: text("category").default("").notNull(),
     description: text("description").notNull(),
@@ -74,6 +79,37 @@ export const vmScenarios = sqliteTable(
   ],
 );
 
+export const scenarioCatalogCandidates = sqliteTable(
+  "scenario_catalog_candidates",
+  {
+    id: text("id").primaryKey(),
+    revision: text("revision").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
+    scenarioId: text("scenario_id").notNull(),
+    buildId: text("build_id").notNull(),
+    manifestJson: jsonText<ScenarioManifestV4>("manifest_json").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [index("scenario_catalog_candidates_revision_idx").on(table.revision)],
+);
+
+export const scenarioCatalogSnapshots = sqliteTable(
+  "scenario_catalog_snapshots",
+  {
+    id: text("id").primaryKey(),
+    revision: text("revision").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
+    snapshotJson: jsonText<Record<string, unknown>>("snapshot_json").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [index("scenario_catalog_snapshots_created_idx").on(table.createdAt)],
+);
+
 export const vmScenarioVms = sqliteTable(
   "vm_scenario_vms",
   {
@@ -88,6 +124,8 @@ export const vmScenarioVms = sqliteTable(
     imageSha256: text("image_sha256"),
     imageFormat: text("image_format").notNull(),
     imageVirtualSizeBytes: integer("image_virtual_size_bytes").notNull(),
+    chunkManifestSha256: text("chunk_manifest_sha256"),
+    guestBootstrapAbi: integer("guest_bootstrap_abi"),
     kernelSha256: text("kernel_sha256").notNull(),
     initrdSha256: text("initrd_sha256").notNull(),
     bootCmdline: text("boot_cmdline").notNull(),

@@ -10,7 +10,6 @@ export interface AdminBuildResponseRow {
   arch: ImageArchitecture;
   rev: string;
   contentHash: string;
-  kinoVersion: string;
   hostId: string | null;
   hostName: string | null;
   status: ImageBuildStatus;
@@ -28,7 +27,6 @@ export interface AdminBuildDetailResponseRow extends AdminBuildResponseRow {
   hostRole: "agent" | "builder" | null;
   hostConnected: boolean | null;
   hostLastHeartbeatAt: number | null;
-  bundleKinoVersion: string | null;
   bundleMeta: unknown;
 }
 
@@ -43,7 +41,6 @@ export function serializeAdminBuildSummary(row: AdminBuildResponseRow) {
     arch: row.arch,
     rev: row.rev,
     contentHash: row.contentHash,
-    kinoVersion: row.kinoVersion,
     hostId: row.hostId,
     hostName: row.hostName,
     status: row.status,
@@ -74,7 +71,6 @@ export function serializeAdminBuildDetail(row: AdminBuildDetailResponseRow) {
     bundle: {
       rev: row.rev,
       r2Key: row.bundleR2Key,
-      kinoVersion: row.bundleKinoVersion,
       meta: row.bundleMeta,
     },
   };

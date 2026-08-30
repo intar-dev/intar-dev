@@ -138,6 +138,9 @@ mod tests {
                 ..Default::default()
             }],
             ssh_host_keys_openssh: vec!["ssh-ed25519 AAAATEST host".to_owned()],
+            kino_sha256: String::new(),
+            guest_bootstrap_abi: 0,
+            guest_phase_timings: None,
         };
         let mapped = decode_snapshot(&snapshot.encode_to_vec(), &[secret]).expect("decode");
         assert_eq!(mapped.probes.len(), 1);

@@ -180,7 +180,6 @@ function makeBuild(status: string, id: string) {
     arch: "x86_64",
     rev: "rev-20260710-01",
     contentHash: sha,
-    kinoVersion: "0.8.0",
     hostId: status === "queued" ? null : "host-builder-1",
     hostName: status === "queued" ? null : "builder-eu-1",
     status,
@@ -1360,7 +1359,6 @@ export function createMockApiState(input?: {
           bundle: {
             rev: build.rev,
             r2Key: build.bundleR2Key,
-            kinoVersion: build.kinoVersion,
             meta: { fixture: true },
           },
         },

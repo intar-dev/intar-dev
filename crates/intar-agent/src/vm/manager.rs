@@ -17,15 +17,20 @@ use cloud_hypervisor_client::{
 };
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
-use intar_contracts::bridge::{VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1};
+use intar_contracts::bridge::{
+    DesiredGuestToolsV1, VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1,
+};
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, DestroyRunNetworkRequest,
     EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap,
-    JailerCapabilities, LaunchVmV2Request, PREPARED_IMAGE_SOURCE_ROOT, PrepareImageV2Request,
-    PreparedImageV2Result, Request as JailerRequest, Response as JailerResponse, RunNetworkResult,
-    SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase, VmCpuRuntimeState,
-    VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+    JailerCapabilities, LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT,
+    PrepareChunkedImageV3Request, PreparedImageV3Result, Request as JailerRequest,
+    Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
+    TrustedDirectorySource, ValidatedId, VmCpuPhase, VmCpuRuntimeState, VmIdentityRequest,
+    VmInspection, VmLaunchRequest, VmLaunchResult,
 };
+#[cfg(test)]
+use intar_jailer_protocol::{LaunchVmV2Request, PrepareImageV2Request, PreparedImageV2Result};
 use reqwest::Client as HttpClient;
 use russh::{
     Disconnect, Preferred,
@@ -40,10 +45,11 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify, OnceCell, OwnedMutexGuard, RwLock, Semaphore, broadcast, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tracing::{Instrument as _, debug, error, info, warn};
 
 use crate::config::{
-    AgentConfig, BridgeConfig, SshAccessConfig, VmDefaultsConfig, normalize_sha256,
+    AgentConfig, BridgeConfig, ImageRegistryConfig, SshAccessConfig, VmDefaultsConfig,
+    normalize_sha256,
 };
 use crate::db::{ArchiveJobRow, Db, VmProbeStateRow, VmRow};
 use crate::image_cache;
@@ -69,6 +75,7 @@ pub struct CreateScenarioVmRequest {
     pub run_id: String,
     pub image: String,
     pub image_sha256: String,
+    pub guest_tools: DesiredGuestToolsV1,
     pub resources: Option<CreateVmResources>,
     pub hostname: Option<String>,
     pub lease_duration_seconds: Option<u64>,
@@ -139,6 +146,8 @@ pub struct VmDetails {
     pub image_key: Option<String>,
     #[serde(skip_serializing)]
     pub image_sha256: Option<String>,
+    #[serde(skip_serializing)]
+    pub guest_tools: Option<DesiredGuestToolsV1>,
     pub run_id: Option<String>,
     pub root_disk_path: String,
     pub seed_disk_path: String,
@@ -243,6 +252,12 @@ impl VmStatusResponse {
             state: self.state.as_str().to_string(),
             image_key: self.details.as_ref().and_then(|d| d.image_key.clone()),
             image_sha256: self.details.as_ref().and_then(|d| d.image_sha256.clone()),
+            guest_tools_json: self.details.as_ref().and_then(|details| {
+                details
+                    .guest_tools
+                    .as_ref()
+                    .and_then(|pin| serde_json::to_string(pin).ok())
+            }),
             created_at_s: self.created_at_s,
             updated_at_s: self.updated_at_s,
             running_at_s: self.running_at_s,
@@ -363,6 +378,7 @@ struct QueueVmCreateRequest {
     requested_run_id: String,
     requested_image: String,
     requested_image_sha256: String,
+    guest_tools: DesiredGuestToolsV1,
     requested_resources: Option<CreateVmResources>,
     requested_hostname: Option<String>,
     lease_duration_seconds: Option<u64>,
@@ -583,6 +599,7 @@ struct Inner {
     jailer_request_timeout_seconds: u64,
     jailer_launch_capabilities: OnceCell<JailerCapabilities>,
     bridge: BridgeConfig,
+    image_registry: ImageRegistryConfig,
     ssh_access: SshAccessConfig,
     db: Db,
     http: HttpClient,

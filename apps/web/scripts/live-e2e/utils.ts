@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import type { ScenarioManifestV3 } from "../../src/generated/catalog";
+import type { ScenarioManifestV4 } from "../../src/generated/catalog";
 import { HttpError, type RequiredImage } from "./types";
 
 export function sameImageKey(
@@ -14,10 +14,10 @@ export function sameImageKey(
 }
 
 export function imageLabel(vm: RequiredImage): string {
-  return `${vm.image_key.scenario}/${vm.image_key.vm}/${vm.image_key.arch}@${vm.image_sha256.slice(0, 12)}`;
+  return `${vm.image_key.scenario}/${vm.image_key.vm}/${vm.image_key.arch}@${vm.image_id.slice(0, 12)}`;
 }
 
-export function bootArtifactSha256s(manifest: ScenarioManifestV3): string[] {
+export function bootArtifactSha256s(manifest: ScenarioManifestV4): string[] {
   const values = new Set<string>();
   for (const vm of manifest.vms) {
     values.add(vm.boot.kernel_sha256.toLowerCase());

@@ -15,10 +15,13 @@ import { AppError, appError, errorChainMatches } from "@/lib/app-error";
 import {
   markDesiredVmAbsent,
   upsertDesiredCachedImage,
+  upsertDesiredGuestTools,
   upsertDesiredVm,
 } from "@/lib/desired-state";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
 import { createAppId } from "@/lib/id";
+import { assertAgentKvmRunsOpen } from "@/lib/run-admission-gate";
 import { RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS } from "@/lib/runtime-capacity";
 import {
   runtimeCapacityAllocationKey,
@@ -115,6 +118,7 @@ async function provisionAgentWorkshopRequest(
     recoveryMessage?: string;
   } = {},
 ): Promise<RuntimeExecutionHandle> {
+  await assertAgentKvmRunsOpen(env.DB);
   const now = Date.now();
   const session = await validateProvisioningRequest(request, now);
   const leaseExpiresAt =
@@ -255,15 +259,18 @@ async function provisionAgentWorkshopRequest(
         image,
       ]),
     );
+    const guestTools = await loadScenarioGuestToolsPin(env, "stable");
+    await assertAgentKvmRunsOpen(env.DB);
     await mutateStoredHostDesiredState(
       drizzle(env.DB),
       requiredHost(activeExecution),
       now,
       (draft) => {
+        upsertDesiredGuestTools(draft, guestTools);
         for (const image of imageByVmId.values()) {
           upsertDesiredCachedImage(draft, {
             image_key: image.imageKey,
-            image_sha256: image.imageSha256,
+            image_id: image.imageSha256,
           });
         }
         for (const vm of activeExecution.vms) {
@@ -277,7 +284,13 @@ async function provisionAgentWorkshopRequest(
           }
           upsertDesiredVm(
             draft,
-            desiredWorkshopVm(activeExecution, vm, publicKey, leaseExpiresAt),
+            desiredWorkshopVm(
+              activeExecution,
+              vm,
+              publicKey,
+              leaseExpiresAt,
+              guestTools,
+            ),
           );
         }
       },
@@ -1226,6 +1239,7 @@ function desiredWorkshopVm(
   vm: RuntimeExecutionHandle["vms"][number],
   publicKeyOpenssh: string,
   leaseExpiresAt: number,
+  guestTools: DesiredVmV2["guest_tools"],
 ): DesiredVmV2 {
   const imageKey = vm.imageKey as Partial<DesiredVmV2["image_key"]>;
   if (
@@ -1248,7 +1262,8 @@ function desiredWorkshopVm(
       vm: imageKey.vm,
       arch: imageKey.arch,
     },
-    image_sha256: vm.imageSha256,
+    image_id: vm.imageSha256,
+    guest_tools: guestTools,
     resources: {
       cpu_millis: vm.cpuMillis,
       vcpu_count: Math.max(1, Math.ceil(vm.cpuMillis / 1_000)),

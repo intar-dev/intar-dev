@@ -30,7 +30,7 @@ tap = "tap"
 work_dir = "/var/cache/intar-agent"
 
 [vm_defaults.resources]
-# Fallback topology for local requests. Scenario catalog V3 manifests carry
+# Fallback topology for local requests. Scenario catalog V4 manifests carry
 # exact cpu_millis and vcpu_count resources for scheduled VMs.
 vcpus = 1
 memory_mib = 512
@@ -42,8 +42,8 @@ guest_cidr = "10.77.0.0/16"
 dns = ["1.1.1.1", "8.8.8.8"]
 
 [image_registry]
-# The Worker index includes image_key, image_sha256, image_format, image_virtual_size_bytes,
-# boot artifact metadata, and download_url entries.
+# The Worker index includes image_id, raw_chunks_v1 manifest metadata, the
+# pinned guest-tools disk, boot artifacts, and immutable download URLs.
 url = "https://intar.dev/agent/registry/images"
 refresh_interval_minutes = 15
 # Optional HTTP basic auth used for local/dev registries. Production agents use bridge JWT auth.
@@ -51,5 +51,6 @@ refresh_interval_minutes = 15
 # password = ""
 
 [image_cache]
-# Optional maximum bytes for raw image and direct-boot artifact cache. Omit for unbounded.
+# Optional maximum bytes for compressed chunks, manifests, guest tools, and
+# direct-boot artifacts. The agent does not keep a full unprivileged raw image.
 # max_bytes = 53687091200

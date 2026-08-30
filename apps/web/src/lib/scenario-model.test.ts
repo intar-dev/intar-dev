@@ -283,8 +283,10 @@ describe("scenario model", () => {
 
   it("normalizes direct-boot VM metadata from catalog rows", () => {
     expect(normalizeScenarioVmDirectBootMetadata({
-      imageFormat: "raw_zstd",
+      imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
+      chunkManifestSha256: "d".repeat(64),
+      guestBootstrapAbi: 1,
       kernelSha256:
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
       initrdSha256:
@@ -292,8 +294,10 @@ describe("scenario model", () => {
       bootCmdline:
         " root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false ",
     })).toEqual({
-      imageFormat: "raw_zstd",
+      imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
+      chunkManifestSha256: "d".repeat(64),
+      guestBootstrapAbi: 1,
       kernelSha256:
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       initrdSha256:
@@ -305,8 +309,10 @@ describe("scenario model", () => {
 
   it("rejects stale or non-direct-boot VM metadata", () => {
     const valid = {
-      imageFormat: "raw_zstd",
+      imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
+      chunkManifestSha256: "d".repeat(64),
+      guestBootstrapAbi: 1,
       kernelSha256:
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       initrdSha256:
@@ -356,7 +362,7 @@ function vm(overrides: Partial<ScenarioVmRecord> = {}): ScenarioVmRecord {
     id: "vm-web",
     ordinal: 0,
     name: "web",
-    image: "broken-nginx-web-x86_64.raw.zst",
+    image: "broken-nginx-web-x86_64.chunks.json",
     imageKey: {
       scenario: "broken-nginx",
       vm: "web",
@@ -364,8 +370,10 @@ function vm(overrides: Partial<ScenarioVmRecord> = {}): ScenarioVmRecord {
     },
     imageSha256:
       "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
-    imageFormat: "raw_zstd",
+    imageFormat: "raw_chunks_v1",
     imageVirtualSizeBytes: 2_147_483_648,
+    chunkManifestSha256: "d".repeat(64),
+    guestBootstrapAbi: 1,
     kernelSha256:
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     initrdSha256:

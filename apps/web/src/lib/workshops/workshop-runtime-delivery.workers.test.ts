@@ -228,7 +228,7 @@ describe("workshop runtime delivery", () => {
     expect(desired[0]?.docJson.cached_images).toEqual([
       {
         image_key: checkpointImageKey("00"),
-        image_sha256: "a".repeat(64),
+        image_id: "a".repeat(64),
       },
     ]);
     expect(desired[0]?.docJson.vms).toEqual([
@@ -2115,6 +2115,9 @@ function hostReport(now: number, hostId: string): HostStateReportV2 {
       supports_reflink: true,
       supports_nftables: true,
       supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
@@ -2127,13 +2130,13 @@ function hostReport(now: number, hostId: string): HostStateReportV2 {
     cached_images: [
       {
         image_key: checkpointImageKey("00"),
-        image_sha256: "a".repeat(64),
+        image_id: "a".repeat(64),
         phase: "ready",
         updated_at_unix_ms: now,
       },
       {
         image_key: checkpointImageKey("01"),
-        image_sha256: "b".repeat(64),
+        image_id: "b".repeat(64),
         phase: "ready",
         updated_at_unix_ms: now,
       },
@@ -2154,7 +2157,7 @@ function readyVmReport(
     desired_version: 1,
     phase: "ready",
     image_key: checkpointImageKey("00"),
-    image_sha256: "a".repeat(64),
+    image_id: "a".repeat(64),
     terminal: {
       state: "ready",
       target: {

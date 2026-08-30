@@ -69,12 +69,12 @@ describe("host CPU reservations", () => {
     ).resolves.toHaveLength(0);
   });
 
-  it("rejects legacy host reports without the complete v2 fast-launch contract", () => {
+  it("rejects legacy host reports without the complete v3 fast-launch contract", () => {
     const report = strictReport("host-legacy", 4_000, 1, 0);
-    report.capabilities.supports_jailer_v2 = false;
+    report.capabilities.supports_jailer_v3 = false;
     expect(strictCpuCapacity(report)).toBeNull();
 
-    report.capabilities.supports_jailer_v2 = true;
+    report.capabilities.supports_jailer_v3 = true;
     report.capabilities.fast_template_store = false;
     expect(strictCpuCapacity(report)).toBeNull();
   });
@@ -594,6 +594,9 @@ function strictReport(
       supports_reflink: true,
       supports_nftables: true,
       supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,

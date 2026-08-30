@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { ScenarioManifestV3 } from "../../src/generated/catalog";
+import type { ScenarioManifestV4 } from "../../src/generated/catalog";
 import type { LoadedManifest } from "./types";
 import { isImageArchitecture, isSha256Hex } from "./options";
 import { bootArtifactSha256s, isRecord, sha256FileHex } from "./utils";
@@ -20,12 +20,12 @@ export async function loadManifests(
 export function parseManifest(
   value: unknown,
   path: string,
-): ScenarioManifestV3 {
+): ScenarioManifestV4 {
   if (!isRecord(value)) {
     throw new Error(`manifest ${path} is not a JSON object`);
   }
-  if (value.schema_version !== 3) {
-    throw new Error(`manifest ${path} must use schema_version 3`);
+  if (value.schema_version !== 4) {
+    throw new Error(`manifest ${path} must use schema_version 4`);
   }
   if (typeof value.scenario_id !== "string" || !value.scenario_id) {
     throw new Error(`manifest ${path} is missing scenario_id`);
@@ -36,7 +36,7 @@ export function parseManifest(
   value.vms.forEach((vm, index) =>
     assertManifestVmDirectBootMetadata(vm, path, index),
   );
-  return value as unknown as ScenarioManifestV3;
+  return value as unknown as ScenarioManifestV4;
 }
 
 export function assertManifestVmDirectBootMetadata(
@@ -49,9 +49,9 @@ export function assertManifestVmDirectBootMetadata(
   }
   const name =
     typeof value.name === "string" && value.name ? value.name : index;
-  if (value.image_format !== "raw_zstd") {
+  if (value.image_format !== "raw_chunks_v1") {
     throw new Error(
-      `manifest ${path} VM ${name} must use image_format raw_zstd`,
+      `manifest ${path} VM ${name} must use image_format raw_chunks_v1`,
     );
   }
   const virtualSize = value.image_virtual_size_bytes;
@@ -61,10 +61,13 @@ export function assertManifestVmDirectBootMetadata(
     );
   }
   if (
-    typeof value.image_sha256 !== "string" ||
-    !isSha256Hex(value.image_sha256)
+    typeof value.image_id !== "string" ||
+    !isSha256Hex(value.image_id) ||
+    typeof value.chunk_manifest_sha256 !== "string" ||
+    !isSha256Hex(value.chunk_manifest_sha256) ||
+    value.guest_bootstrap_abi !== 1
   ) {
-    throw new Error(`manifest ${path} VM ${name} has invalid image_sha256`);
+    throw new Error(`manifest ${path} VM ${name} has invalid chunked image identity`);
   }
   if (!isRecord(value.image_key)) {
     throw new Error(`manifest ${path} VM ${name} is missing image_key`);
@@ -97,12 +100,12 @@ export function assertManifestVmDirectBootMetadata(
   }
 }
 
-export function combineManifests(loaded: LoadedManifest[]): ScenarioManifestV3 {
+export function combineManifests(loaded: LoadedManifest[]): ScenarioManifestV4 {
   const [first, ...rest] = loaded;
   if (!first) {
     throw new Error("cannot combine zero manifests");
   }
-  const combined: ScenarioManifestV3 = {
+  const combined: ScenarioManifestV4 = {
     ...first.manifest,
     vms: [...first.manifest.vms],
   };
@@ -139,7 +142,7 @@ export function inferImagePaths(loaded: LoadedManifest[]): Map<string, string> {
 
 export async function inferArtifactPaths(
   loaded: LoadedManifest[],
-  manifest: ScenarioManifestV3,
+  manifest: ScenarioManifestV4,
 ): Promise<Map<string, string>> {
   const required = new Set(bootArtifactSha256s(manifest));
   const inferred = new Map<string, string>();
@@ -185,6 +188,6 @@ export async function listCandidateArtifactFiles(
 
 export function stripManifestSuffix(path: string): string {
   return path.endsWith(".manifest.json")
-    ? path.slice(0, -".manifest.json".length)
+    ? `${path.slice(0, -".manifest.json".length)}.chunks.json`
     : path;
 }

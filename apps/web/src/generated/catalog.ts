@@ -2,7 +2,7 @@
 export type ImageArchitecture = "x86_64" | "aarch64";
 export type ProbePhase = "boot" | "scenario";
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
-export type ImageFormat = "raw_zstd";
+export type ImageFormat = "raw_chunks_v1" | "raw_zstd";
 
 export interface ImageKey {
   scenario: string;
@@ -28,19 +28,21 @@ export interface ScenarioProbeManifestV3 {
   hints: ScenarioHintManifestV3[];
 }
 
-export interface ScenarioVmBootManifestV3 {
+export interface ScenarioVmBootManifestV4 {
   kernel_sha256: string;
   initrd_sha256: string;
   cmdline: string;
 }
 
-export interface ScenarioVmManifestV3 {
+export interface ScenarioVmManifestV4 {
   name: string;
   image_key: ImageKey;
-  image_sha256: string;
+  image_id: string;
   image_format: ImageFormat;
   image_virtual_size_bytes: number;
-  boot: ScenarioVmBootManifestV3;
+  chunk_manifest_sha256: string;
+  guest_bootstrap_abi: number;
+  boot: ScenarioVmBootManifestV4;
   cpu_millis: number;
   vcpu_count: number;
   memory_mib: Mib;
@@ -48,7 +50,7 @@ export interface ScenarioVmManifestV3 {
   probes: ScenarioProbeManifestV3[];
 }
 
-export interface ScenarioManifestV3 {
+export interface ScenarioManifestV4 {
   schema_version: number;
   scenario_id: string;
   name: string;
@@ -61,5 +63,22 @@ export interface ScenarioManifestV3 {
   briefing_markdown: string;
   solution_markdown: string;
   hints: ScenarioHintManifestV3[];
-  vms: ScenarioVmManifestV3[];
+  vms: ScenarioVmManifestV4[];
+}
+
+export interface ImageChunkManifestV1 {
+  schema_version: number;
+  image_id: string;
+  virtual_size_bytes: number;
+  chunk_size_bytes: number;
+  encoding: string;
+  chunks: ImageChunkV1[];
+}
+
+export interface ImageChunkV1 {
+  index: number;
+  raw_size_bytes: number;
+  raw_sha256: string;
+  encoded_size_bytes: number;
+  encoded_sha256: string;
 }

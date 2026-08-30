@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg(any(target_os = "linux", test))]
 use std::ffi::OsString;
 use std::ffi::{CStr, CString};
@@ -19,10 +19,11 @@ use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, CpuQuota,
     CpuQuotaAttestation, DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest,
     FinalizeVmBootResult, JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig,
-    LaunchVmV2Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT, PROTOCOL_VERSION,
-    PrepareImageV2Request, PreparedImageV2Result, ProtocolError, Request, Response,
-    RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase,
-    VmCpuRuntimeState, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+    LaunchVmV2Request, LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT,
+    PROTOCOL_VERSION, PrepareChunkedImageV3Request, PrepareImageV2Request, PreparedImageV2Result,
+    PreparedImageV3Result, ProtocolError, Request, Response, RunNetworkResult, SandboxHealth,
+    Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase, VmCpuRuntimeState, VmIdentityRequest,
+    VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use rustix::fs::{Mode, OFlags, open};
 #[cfg(target_os = "linux")]
@@ -297,12 +298,26 @@ pub trait JailPreparer: Send {
     ) -> Result<PreparedImageV2Result> {
         bail!("template-backed image preparation is unavailable")
     }
+    fn prepare_image_v3(
+        &mut self,
+        _config: &JailerdConfig,
+        _request: &PrepareChunkedImageV3Request,
+    ) -> Result<PreparedImageV3Result> {
+        bail!("chunked image preparation is unavailable")
+    }
     fn validate_prepared_launch(
         &mut self,
         _config: &JailerdConfig,
         _request: &LaunchVmV2Request,
     ) -> Result<()> {
         bail!("template-backed VM launch is unavailable")
+    }
+    fn validate_prepared_launch_v3(
+        &mut self,
+        _config: &JailerdConfig,
+        _request: &LaunchVmV3Request,
+    ) -> Result<()> {
+        bail!("chunked template-backed VM launch is unavailable")
     }
     fn prepare(
         &mut self,
@@ -323,6 +338,17 @@ pub trait JailPreparer: Send {
         gid: u32,
     ) -> Result<PreparedJail> {
         self.prepare(config, request, run_network, generation, uid, gid)
+    }
+    fn prepare_v3(
+        &mut self,
+        config: &JailerdConfig,
+        request: &VmLaunchRequest,
+        run_network: &RunNetworkResult,
+        generation: &ValidatedId,
+        uid: u32,
+        gid: u32,
+    ) -> Result<PreparedJail> {
+        self.prepare_v2(config, request, run_network, generation, uid, gid)
     }
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool>;
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()>;
@@ -574,7 +600,29 @@ struct DetachedLaunchTask<B, P> {
     backend: B,
     preparer: P,
     reservation: LaunchReservation,
-    prepared_request: LaunchVmV2Request,
+    prepared_request: PreparedLaunchRequest,
+}
+
+#[derive(Clone)]
+enum PreparedLaunchRequest {
+    V2(LaunchVmV2Request),
+    V3(LaunchVmV3Request),
+}
+
+impl PreparedLaunchRequest {
+    fn launch(&self) -> &VmLaunchRequest {
+        match self {
+            Self::V2(request) => &request.launch,
+            Self::V3(request) => &request.launch,
+        }
+    }
+
+    fn validate(&self) -> Result<CpuQuota> {
+        match self {
+            Self::V2(request) => request.validate().map_err(Into::into),
+            Self::V3(request) => request.validate().map_err(Into::into),
+        }
+    }
 }
 
 struct DetachedLaunchSuccess {
@@ -767,6 +815,93 @@ where
     }
 }
 
+/// Execute a V3 chunked-image launch without holding the lifecycle mutex over
+/// template validation, staging, networking, or VMM readiness.
+pub fn launch_vm_v3_response<B, P>(
+    core: &Arc<Mutex<JailerdCore<B, P>>>,
+    request: LaunchVmV3Request,
+) -> Response
+where
+    B: HostBackend + Clone,
+    P: JailPreparer + Clone,
+{
+    if let Err(error) = request.validate() {
+        return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
+    }
+    let admission = {
+        let mut core = match core.lock() {
+            Ok(core) => core,
+            Err(_) => {
+                return Response::Error(ProtocolError::new(
+                    "host_operation_failed",
+                    "jailerd lifecycle state lock poisoned",
+                ));
+            }
+        };
+        if let Err(error) = core
+            .config
+            .validate_ssh_public_port(request.launch.ssh_public_port)
+        {
+            return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
+        }
+        let capabilities = core.capabilities();
+        if !(capabilities.supports_jailer_v3
+            && capabilities.supports_template_backed_launch
+            && capabilities.fast_template_store)
+        {
+            return Response::Error(ProtocolError::new(
+                "host_not_ready",
+                "host readiness attestation does not permit v3 chunked VM launches",
+            ));
+        }
+        match core.begin_detached_launch_vm_v3(request) {
+            Ok(admission) => admission,
+            Err(error) => return protocol_error_response(error),
+        }
+    };
+
+    match admission {
+        DetachedLaunchAdmission::Existing(task) => {
+            let DetachedExistingLaunchTask {
+                config,
+                mut backend,
+                mut preparer,
+                record,
+            } = *task;
+            let outcome = execute_existing_launch(&config, &mut backend, &mut preparer, record);
+            let result = match core.lock() {
+                Ok(mut core) => core.complete_detached_existing_launch(outcome),
+                Err(_) => {
+                    return Response::Error(ProtocolError::new(
+                        "host_operation_failed",
+                        "jailerd lifecycle state lock poisoned during idempotent launch commit",
+                    ));
+                }
+            };
+            match result {
+                Ok(result) => Response::LaunchVmV3(result),
+                Err(error) => protocol_error_response(error),
+            }
+        }
+        DetachedLaunchAdmission::Reserved(task) => {
+            let outcome = task.execute();
+            let result = match core.lock() {
+                Ok(mut core) => core.complete_detached_launch_vm_v3(outcome),
+                Err(_) => {
+                    return Response::Error(ProtocolError::new(
+                        "host_operation_failed",
+                        "jailerd lifecycle state lock poisoned during launch commit",
+                    ));
+                }
+            };
+            match result {
+                Ok(result) => Response::LaunchVmV3(result),
+                Err(error) => protocol_error_response(error),
+            }
+        }
+    }
+}
+
 fn protocol_error_response(error: anyhow::Error) -> Response {
     let message = format!("{error:#}");
     Response::Error(ProtocolError::new(
@@ -820,13 +955,58 @@ pub fn prepare_image_v2_response(
     }
 }
 
+pub fn prepare_chunked_image_v3_response(
+    config: &JailerdConfig,
+    request: PrepareChunkedImageV3Request,
+) -> Response {
+    if let Err(error) = request.validate() {
+        return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
+    }
+    if let Err(error) = probe_fast_template_store(config) {
+        return Response::Error(ProtocolError::new(
+            "host_not_ready",
+            format!("fast image template store is unavailable: {error:#}"),
+        ));
+    }
+    let host_template = match read_optional_host_template_metadata(config) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => {
+            return Response::Error(ProtocolError::new(
+                "host_not_ready",
+                "root-owned host runtime template is unavailable",
+            ));
+        }
+        Err(error) => {
+            return Response::Error(ProtocolError::new(
+                "host_not_ready",
+                format!("host runtime template metadata is unavailable: {error:#}"),
+            ));
+        }
+    };
+    if let Err(error) = validate_host_template(config, &host_template) {
+        return Response::Error(ProtocolError::new(
+            "host_not_ready",
+            format!("host runtime template validation failed: {error:#}"),
+        ));
+    }
+    match prepare_chunked_image_template(config, &request) {
+        Ok(result) => Response::PrepareChunkedImageV3(result),
+        Err(error) => Response::Error(ProtocolError::new(
+            "image_prepare_failed",
+            format!("{error:#}"),
+        )),
+    }
+}
+
 fn validate_protocol_request(request: &Request) -> Result<()> {
     match request {
         Request::PrepareImageV2(request) => request.validate().map_err(Into::into),
+        Request::PrepareChunkedImageV3(request) => request.validate().map_err(Into::into),
         Request::EnsureRunNetwork(request) | Request::RepairRunNetwork(request) => {
             request.validate().map_err(Into::into)
         }
         Request::LaunchVmV2(request) => request.validate().map(|_| ()).map_err(Into::into),
+        Request::LaunchVmV3(request) => request.validate().map(|_| ()).map_err(Into::into),
         Request::FinalizeVmBoot(_) => Ok(()),
         Request::InspectVm(request) | Request::StopVm(request) | Request::DestroyVm(request) => {
             request.validate().map_err(Into::into)
@@ -867,7 +1047,12 @@ pub fn host_cpu_capacity_millis() -> Result<u64> {
 
 mod recovery;
 use recovery::*;
-const IMAGE_TEMPLATE_METADATA_VERSION: u16 = 2;
+mod chunked_templates;
+use chunked_templates::*;
+mod store_gc;
+pub use store_gc::{StoreGcReport, gc_root_stores};
+const IMAGE_TEMPLATE_METADATA_V2: u16 = 2;
+const IMAGE_TEMPLATE_METADATA_V3: u16 = 3;
 const HOST_TEMPLATE_METADATA_VERSION: u16 = 2;
 const HOST_TEMPLATE_POINTER: &str = "host-v2-current.json";
 const HOST_TEMPLATE_DIRECTORY: &str = "host-v2";
@@ -890,6 +1075,10 @@ struct ImageTemplateArtifactV2 {
 struct ImageTemplateMetadataV2 {
     schema_version: u16,
     image_sha256: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chunk_manifest_sha256: Option<Sha256Digest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    chunk_raw_sha256s: Vec<Sha256Digest>,
     virtual_size_bytes: u64,
     root_disk: ImageTemplateArtifactV2,
     kernel: ImageTemplateArtifactV2,

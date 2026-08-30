@@ -177,7 +177,8 @@ impl Default for ImageRegistryConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct ImageCacheConfig {
-    /// Maximum bytes for raw image and direct-boot artifact cache, or unbounded.
+    /// Maximum bytes for compressed chunks, manifests, tools disks, and boot
+    /// artifacts in the unprivileged download cache, or unbounded.
     pub max_bytes: Option<u64>,
 }
 

@@ -17,6 +17,7 @@ const {
   schedulerMock,
   scenarioCourseCatalogMock,
   scenarioImageCacheMock,
+  candidateCatalogMock,
 } = imageRegistryMocks();
 
 describe("image registry source bundles", () => {
@@ -86,8 +87,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -133,7 +133,6 @@ describe("image registry source bundles", () => {
           httpMetadata: { contentType: "application/gzip" },
           customMetadata: {
             rev: "abc123",
-            kino_version: "0.4.0",
           },
         },
       );
@@ -143,12 +142,11 @@ describe("image registry source bundles", () => {
         {
           rev: "abc123",
           r2Key: "builds/bundles/abc123.tar.gz",
-          kinoVersion: "0.4.0",
           meta: {
             rev: "abc123",
-            kino_version: "0.4.0",
-            build_format_version: "intar-image-build-v9",
-            buildFormatVersion: "intar-image-build-v9",
+            build_format_version: "intar-image-build-v10",
+            buildFormatVersion: "intar-image-build-v10",
+            catalogChannel: "candidate",
             scenarios: [
               {
                 scenarioId: "broken-nginx",
@@ -178,8 +176,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -224,8 +221,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -270,8 +266,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -320,8 +315,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -370,8 +364,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -420,8 +413,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -466,8 +458,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -511,8 +502,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -556,8 +546,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "..",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -596,8 +585,7 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v9",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "..",
@@ -630,13 +618,14 @@ describe("image registry source bundles", () => {
     expect(schedulerMock.assignQueuedImageBuilds).not.toHaveBeenCalled();
   });
 
-  it("rejects source bundle metadata with unsafe kino versions", async () => {
+  it("rejects obsolete kino metadata", async () => {
     const form = new FormData();
     form.set(
       "meta",
       JSON.stringify({
         rev: "abc123",
         kino_version: "../0.4.0",
+        build_format_version: "intar-image-build-v10",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -662,7 +651,7 @@ describe("image registry source bundles", () => {
 
     expect(response?.status).toBe(400);
     await expect(response?.json()).resolves.toEqual({
-      error: "invalid kino_version",
+      error: "kino_version is no longer supported",
     });
     expect(bucketPut).not.toHaveBeenCalled();
     expect(schedulerMock.queueImageBuildsFromBundle).not.toHaveBeenCalled();
@@ -675,7 +664,6 @@ describe("image registry source bundles", () => {
       "meta",
       JSON.stringify({
         rev: "abc123",
-        kino_version: "0.4.0",
         build_format_version: "intar-image-build-v7",
         scenarios: [
           {
@@ -951,13 +939,17 @@ describe("course catalog bundle metadata", () => {
       });
       expect(bucketPut).toHaveBeenCalledOnce();
       expect(
-        scenarioImageCacheMock.tryReconcileScenarioImagesForPublicationScope,
+        candidateCatalogMock.stageReusableCandidateManifests,
       ).toHaveBeenCalledWith(dbMock.db, {
-        publicationOrganizationId: null,
+        revision: "abc123",
+        organizationId: null,
+        meta: expect.objectContaining({ catalogChannel: "candidate" }),
         nowUnixMs: now,
-        reason: "public_bundle_accepted_without_full_rebuild",
-        wakeHostRuntime: expect.any(Function),
+        wakeHost: expect.any(Function),
       });
+      expect(
+        scenarioImageCacheMock.tryReconcileScenarioImagesForPublicationScope,
+      ).not.toHaveBeenCalled();
     } finally {
       dateSpy.mockRestore();
     }
@@ -1071,8 +1063,7 @@ describe("course catalog bundle metadata", () => {
 function sourceMeta(extra: Record<string, unknown> = {}) {
   return {
     rev: "abc123",
-    kino_version: "0.4.0",
-    build_format_version: "intar-image-build-v9",
+    build_format_version: "intar-image-build-v10",
     scenarios: [
       {
         scenario_id: "broken-nginx",

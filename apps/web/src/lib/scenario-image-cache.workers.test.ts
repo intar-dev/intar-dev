@@ -84,7 +84,7 @@ describe("scenario image cache reconciliation", () => {
       (draft) => {
         upsertDesiredCachedImage(draft, {
           image_key: image("unrelated-runtime", "vm", "aarch64"),
-          image_sha256: PUBLIC_ARM_SHA,
+          image_id: PUBLIC_ARM_SHA,
         });
       },
     );
@@ -161,7 +161,7 @@ describe("scenario image cache reconciliation", () => {
     ).toEqual([`public-scenario:vm:x86_64:${PUBLIC_SHA}`]);
   });
 
-  it("replaces stale catalog pointers without mutating running VMs or builds", async () => {
+  it("adds new catalog pointers while retaining rollback images and running VMs", async () => {
     const scenarioImage = await seedScenario({
       scenarioId: "rolling-scenario",
       organizationId: null,
@@ -185,11 +185,11 @@ describe("scenario image cache reconciliation", () => {
       (draft) => {
         upsertDesiredCachedImage(draft, {
           image_key: scenarioImage,
-          image_sha256: PUBLIC_SHA,
+          image_id: PUBLIC_SHA,
         });
         upsertDesiredCachedImage(draft, {
           image_key: workshopImage,
-          image_sha256: ORG_A_SHA,
+          image_id: ORG_A_SHA,
         });
         upsertDesiredVm(draft, runningScenarioVm);
         upsertDesiredVm(draft, runningWorkshopVm);
@@ -211,12 +211,13 @@ describe("scenario image cache reconciliation", () => {
     const after = requiredState(result);
 
     expect(imageIdentities(after.cached_images)).toEqual([
+      `rolling-scenario:vm:x86_64:${PUBLIC_SHA}`,
       `rolling-scenario:vm:x86_64:${nextSha}`,
       `workshop-checkpoint:vm:x86_64:${ORG_A_SHA}`,
     ]);
     expect(after.vms).toEqual(before.vms);
     expect(after.builds).toEqual(before.builds);
-    expect(after.vms[0]?.image_sha256).toBe(PUBLIC_SHA);
+    expect(after.vms[0]?.image_id).toBe(PUBLIC_SHA);
   });
 
   it("is idempotent and preserves a concurrent desired-VM mutation", async () => {
@@ -253,7 +254,7 @@ describe("scenario image cache reconciliation", () => {
       mutateStoredHostDesiredState(db, "racing-agent", now + 2, (draft) => {
         upsertDesiredCachedImage(draft, {
           image_key: workshopImage,
-          image_sha256: ORG_A_SHA,
+          image_id: ORG_A_SHA,
         });
         upsertDesiredVm(
           draft,
@@ -409,11 +410,13 @@ async function seedScenario(input: {
       scenarioId: input.scenarioId,
       ordinal: 0,
       vmName: "vm",
-      image: `${input.scenarioId}-vm-${input.arch}.raw.zst`,
+      image: `${input.scenarioId}-vm-${input.arch}.chunks.json`,
       imageKeyJson: imageKey,
       imageSha256: input.sha256,
-      imageFormat: "raw_zstd",
+      imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 1_024,
+      chunkManifestSha256: "d".repeat(64),
+      guestBootstrapAbi: 1,
       kernelSha256: "1".repeat(64),
       initrdSha256: "2".repeat(64),
       bootCmdline: "console=ttyS0 root=/dev/vda rw",
@@ -455,7 +458,7 @@ function image(
 function imageIdentities(images: DesiredCachedImageV1[]): string[] {
   return images.map(
     (entry) =>
-      `${entry.image_key.scenario}:${entry.image_key.vm}:${entry.image_key.arch}:${entry.image_sha256}`,
+      `${entry.image_key.scenario}:${entry.image_key.vm}:${entry.image_key.arch}:${entry.image_id}`,
   );
 }
 
@@ -469,7 +472,13 @@ function desiredVm(
     vm_name: `${runId}-vm`,
     desired_phase: "running",
     image_key: imageKey,
-    image_sha256: imageSha256,
+    image_id: imageSha256,
+    guest_tools: {
+      tools_disk_sha256: "1".repeat(64),
+      tools_disk_size_bytes: 64 * 1024 * 1024,
+      kino_sha256: "2".repeat(64),
+      bootstrap_abi: 1,
+    },
     resources: {
       cpu_millis: 1_000,
       vcpu_count: 1,
@@ -489,7 +498,6 @@ function desiredBuild(): DesiredBuildV1 {
     rev: "revision-1",
     content_hash: "f".repeat(64),
     bundle_ref: "builds/bundles/revision-1.tar.gz",
-    kino_version: "test",
   };
 }
 
@@ -524,6 +532,9 @@ function hostReport(
       supports_reflink: true,
       supports_nftables: true,
       supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,

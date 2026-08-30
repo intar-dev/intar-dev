@@ -19,7 +19,7 @@ import {
 import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import type {
-  BridgeMessageV6,
+  BridgeMessageV7,
   DesiredVmV2,
   HostStateReportV2,
   VmActualStateV2,
@@ -66,7 +66,7 @@ export {
   startScenarioRunForUser,
 };
 export type {
-  BridgeMessageV6,
+  BridgeMessageV7,
   DesiredVmV2,
   HostStateReportV2,
   VmActualStateV2,
@@ -86,6 +86,13 @@ export const testImageKey = {
   arch: "x86_64",
 } satisfies ImageKey;
 
+export const testGuestTools = {
+  tools_disk_sha256: "1".repeat(64),
+  tools_disk_size_bytes: 64 * 1024 * 1024,
+  kino_sha256: "2".repeat(64),
+  bootstrap_abi: 1,
+} as const;
+
 export function desiredRunningVm(
   runId: string,
   vmName: string,
@@ -96,7 +103,8 @@ export function desiredRunningVm(
     vm_name: vmName,
     desired_phase: "running",
     image_key: testImageKey,
-    image_sha256: "2".repeat(64),
+    image_id: "2".repeat(64),
+    guest_tools: testGuestTools,
     resources: {
       cpu_millis: 1_000,
       vcpu_count: 1,
@@ -142,7 +150,7 @@ export async function connectHost(
   hostId: string,
   options?: { lastAppliedDesiredVersion?: number | null },
 ): Promise<{
-  messages: BridgeMessageV6[];
+  messages: BridgeMessageV7[];
   stub: DurableObjectStub;
   ws: WebSocket;
 }> {
@@ -200,11 +208,11 @@ export async function connectHost(
   if (!ws) {
     throw new Error("missing websocket");
   }
-  const messages: BridgeMessageV6[] = [];
+  const messages: BridgeMessageV7[] = [];
   ws.accept();
   ws.addEventListener("message", (event) => {
     if (typeof event.data === "string") {
-      messages.push(JSON.parse(event.data) as BridgeMessageV6);
+      messages.push(JSON.parse(event.data) as BridgeMessageV7);
     }
   });
   ws.send(JSON.stringify(clientHello(hostId, options)));
@@ -249,10 +257,10 @@ export async function betaAdmissionForHostFixture(
 export function clientHello(
   hostId: string,
   options?: { lastAppliedDesiredVersion?: number | null },
-): Extract<BridgeMessageV6, { type: "client_hello" }> {
-  const message: Extract<BridgeMessageV6, { type: "client_hello" }> = {
+): Extract<BridgeMessageV7, { type: "client_hello" }> {
+  const message: Extract<BridgeMessageV7, { type: "client_hello" }> = {
     type: "client_hello",
-    protocol_version: 6,
+    protocol_version: 7,
     host_id: hostId,
     agent_version: "test-agent",
     role: "agent",
@@ -267,6 +275,9 @@ export function clientHello(
       supports_reflink: true,
       supports_nftables: true,
       supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
@@ -284,15 +295,15 @@ export function clientHello(
   return message;
 }
 
-export function sendBridge(ws: WebSocket, message: BridgeMessageV6): void {
+export function sendBridge(ws: WebSocket, message: BridgeMessageV7): void {
   ws.send(JSON.stringify(message));
 }
 
 export async function waitForBridgeMessage(
-  messages: BridgeMessageV6[],
-  predicate: (message: BridgeMessageV6) => boolean,
+  messages: BridgeMessageV7[],
+  predicate: (message: BridgeMessageV7) => boolean,
   timeoutMs = 1_000,
-): Promise<BridgeMessageV6> {
+): Promise<BridgeMessageV7> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
     const match = messages.find(predicate);
@@ -321,8 +332,8 @@ export async function runNextScheduledAlarm(
 }
 
 export async function waitForMessageCount(
-  messages: BridgeMessageV6[],
-  predicate: (message: BridgeMessageV6) => boolean,
+  messages: BridgeMessageV7[],
+  predicate: (message: BridgeMessageV7) => boolean,
   expected: number,
   timeoutMs = 1_000,
 ): Promise<number> {
@@ -531,10 +542,10 @@ export function stateReport(
     vms?: HostStateReportV2["vms"];
     schedulableCpuMillis?: number;
   },
-): BridgeMessageV6 {
+): BridgeMessageV7 {
   return {
     type: "state_report",
-    protocol_version: 6,
+    protocol_version: 7,
     host_id: hostId,
     report: {
       schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
@@ -563,6 +574,9 @@ export function stateReport(
         supports_reflink: true,
         supports_nftables: true,
         supports_jailer_v2: true,
+        supports_jailer_v3: true,
+        supports_raw_chunks_v1: true,
+        supports_scenario_guest_tools_v1: true,
         supports_boot_cpu_lease: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
@@ -613,15 +627,15 @@ export function vmReport(
   observedAt: number,
   sshHostPort: number,
   guestIp: string,
-): BridgeMessageV6 {
+): BridgeMessageV7 {
   const terminalReady = phase === "ready" || phase === "solved";
   const terminalFailed = phase === "failed";
   return {
     type: "vm_report",
-    protocol_version: 6,
+    protocol_version: 7,
     host_id: hostId,
     report: {
-      schema_version: 3,
+      schema_version: 4,
       host_id: hostId,
       run_id: runId,
       vm_name: vmName,

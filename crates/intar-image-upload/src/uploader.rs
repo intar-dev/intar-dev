@@ -1,19 +1,48 @@
 #![allow(clippy::missing_errors_doc)]
 
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use intar_contracts::catalog::{ImageArchitecture, ScenarioManifestV3};
+use intar_contracts::catalog::{
+    ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ScenarioManifestV4,
+};
 use reqwest::blocking::multipart::Form;
+use sha2::{Digest as _, Sha256};
 
 use crate::config::ImageUploadConfig;
 use crate::error::{Error, Result};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PublishImageFile {
+pub struct PublishImageChunkFile {
+    pub raw_sha256: String,
+    pub encoded_sha256: String,
+    pub raw_size_bytes: u32,
+    pub encoded_size_bytes: u64,
+    pub source_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageChunkLookup {
+    pub raw_sha256: String,
+    pub raw_size_bytes: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+pub struct ExistingImageChunk {
+    pub raw_sha256: String,
+    pub raw_size_bytes: u32,
+    pub encoded_sha256: String,
+    pub encoded_size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishChunkedImage {
     pub vm_name: String,
-    pub source_path: PathBuf,
-    pub filename: String,
+    pub image_id: String,
+    pub chunk_manifest_sha256: String,
+    pub chunk_manifest_path: PathBuf,
+    pub chunks: Vec<PublishImageChunkFile>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,7 +94,7 @@ pub struct PublishReceipt {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 pub struct PublishedImage {
     pub image_key: String,
-    pub image_sha256: String,
+    pub image_id: String,
     pub object_key: String,
     pub bytes: u64,
 }
@@ -78,6 +107,7 @@ pub struct PublishedArtifact {
     pub reused: bool,
 }
 
+#[derive(Clone)]
 pub struct ImageUploader {
     config: ImageUploadConfig,
     endpoint: url::Url,
@@ -103,8 +133,8 @@ impl ImageUploader {
 
     pub fn publish_manifest(
         &self,
-        manifest: &ScenarioManifestV3,
-        images: &[PublishImageFile],
+        manifest: &ScenarioManifestV4,
+        images: &[PublishChunkedImage],
     ) -> Result<PublishReceipt> {
         self.publish_manifest_with_artifacts(manifest, images, &[])
     }
@@ -149,8 +179,8 @@ impl ImageUploader {
     /// payloads is rejected with 413.
     pub fn publish_manifest_with_artifacts(
         &self,
-        manifest: &ScenarioManifestV3,
-        images: &[PublishImageFile],
+        manifest: &ScenarioManifestV4,
+        images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
     ) -> Result<PublishReceipt> {
         self.publish_manifest_with_optional_identity(manifest, images, artifacts, None)
@@ -158,8 +188,8 @@ impl ImageUploader {
 
     pub fn publish_build_manifest_with_artifacts(
         &self,
-        manifest: &ScenarioManifestV3,
-        images: &[PublishImageFile],
+        manifest: &ScenarioManifestV4,
+        images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
         identity: &PublishBuildIdentity,
     ) -> Result<PublishReceipt> {
@@ -169,8 +199,8 @@ impl ImageUploader {
 
     fn publish_manifest_with_optional_identity(
         &self,
-        manifest: &ScenarioManifestV3,
-        images: &[PublishImageFile],
+        manifest: &ScenarioManifestV4,
+        images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
         identity: Option<&PublishBuildIdentity>,
     ) -> Result<PublishReceipt> {
@@ -179,8 +209,8 @@ impl ImageUploader {
         }
 
         for image in images {
-            let create_body = image_upload_body(manifest, image)?;
-            self.upload_blob(&create_body, &image.source_path)?;
+            validate_chunked_image(manifest, image)?;
+            self.upload_chunked_image(image)?;
         }
         for artifact in artifacts {
             let sha256 = normalize_sha256(&artifact.sha256)?;
@@ -215,6 +245,146 @@ impl ImageUploader {
         }
 
         Ok(serde_json::from_str(&body)?)
+    }
+
+    fn upload_chunked_image(&self, image: &PublishChunkedImage) -> Result<()> {
+        let lookups = image
+            .chunks
+            .iter()
+            .map(|chunk| ImageChunkLookup {
+                raw_sha256: chunk.raw_sha256.clone(),
+                raw_size_bytes: chunk.raw_size_bytes,
+            })
+            .collect::<Vec<_>>();
+        let existing = self.find_existing_image_chunks(&lookups)?;
+
+        let mut missing_by_hash = BTreeMap::<&str, &PublishImageChunkFile>::new();
+        for chunk in &image.chunks {
+            if existing.contains_key(&chunk.raw_sha256) {
+                continue;
+            }
+            match missing_by_hash.entry(&chunk.raw_sha256) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(chunk);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry)
+                    if entry.get().source_path.is_none() && chunk.source_path.is_some() =>
+                {
+                    entry.insert(chunk);
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+        let missing = missing_by_hash.into_values().collect::<Vec<_>>();
+        for batch in missing.chunks(CHUNK_UPLOAD_CONCURRENCY) {
+            std::thread::scope(|scope| {
+                let handles = batch
+                    .iter()
+                    .map(|chunk| scope.spawn(|| self.upload_image_chunk(chunk)))
+                    .collect::<Vec<_>>();
+                for handle in handles {
+                    handle.join().map_err(|_| {
+                        Error::InvalidConfig("image chunk uploader thread panicked")
+                    })??;
+                }
+                Ok::<(), Error>(())
+            })?;
+        }
+
+        let manifest_bytes = std::fs::read(&image.chunk_manifest_path).map_err(Error::Io)?;
+        let mut url = sibling_endpoint(&self.endpoint, "image-manifests")?;
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidConfig("publish url cannot be a base URL"))?
+            .push(&format!("{}.json", image.chunk_manifest_sha256));
+        let response = self
+            .client
+            .put(url)
+            .bearer_auth(self.config.token.trim())
+            .header("content-type", "application/json")
+            .header("x-intar-manifest-sha256", &image.chunk_manifest_sha256)
+            .body(manifest_bytes)
+            .send()?;
+        require_success(response)?;
+        Ok(())
+    }
+
+    pub fn find_existing_image_chunks(
+        &self,
+        chunks: &[ImageChunkLookup],
+    ) -> Result<BTreeMap<String, ExistingImageChunk>> {
+        let mut expected = BTreeMap::new();
+        for chunk in chunks {
+            let raw_sha256 = normalize_sha256(&chunk.raw_sha256)?;
+            if chunk.raw_size_bytes == 0 || chunk.raw_size_bytes > 4 * 1024 * 1024 {
+                return Err(Error::InvalidConfig("invalid raw image chunk size"));
+            }
+            if let Some(previous) = expected.insert(raw_sha256, chunk.raw_size_bytes)
+                && previous != chunk.raw_size_bytes
+            {
+                return Err(Error::InvalidConfig(
+                    "one raw image chunk hash has conflicting sizes",
+                ));
+            }
+        }
+
+        let hashes = expected.keys().cloned().collect::<Vec<_>>();
+        let mut existing = BTreeMap::new();
+        for batch in hashes.chunks(CHUNK_EXISTS_BATCH_SIZE) {
+            let response: ExistingChunksResponse = self.post_json(
+                sibling_endpoint(&self.endpoint, "image-chunks/exists")?,
+                &serde_json::json!({ "raw_sha256": batch }),
+            )?;
+            for mut chunk in response.existing {
+                chunk.raw_sha256 = normalize_sha256(&chunk.raw_sha256)?;
+                chunk.encoded_sha256 = normalize_sha256(&chunk.encoded_sha256)?;
+                if expected.get(&chunk.raw_sha256) != Some(&chunk.raw_size_bytes)
+                    || chunk.encoded_size_bytes == 0
+                {
+                    return Err(Error::InvalidConfig(
+                        "registry returned inconsistent image chunk metadata",
+                    ));
+                }
+                if let Some(previous) = existing.insert(chunk.raw_sha256.clone(), chunk.clone())
+                    && previous != chunk
+                {
+                    return Err(Error::InvalidConfig(
+                        "registry returned conflicting image chunk metadata",
+                    ));
+                }
+            }
+        }
+        Ok(existing)
+    }
+
+    fn upload_image_chunk(&self, chunk: &PublishImageChunkFile) -> Result<()> {
+        let mut url = sibling_endpoint(&self.endpoint, "image-chunks")?;
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidConfig("publish url cannot be a base URL"))?
+            .push(&chunk.raw_sha256);
+        let source_path = chunk.source_path.as_ref().ok_or(Error::InvalidConfig(
+            "missing image chunk has no local payload",
+        ))?;
+        let body = std::fs::read(source_path).map_err(Error::Io)?;
+        if body.len() as u64 != chunk.encoded_size_bytes {
+            return Err(Error::InvalidPath(format!(
+                "{} has size {}, expected {}",
+                source_path.display(),
+                body.len(),
+                chunk.encoded_size_bytes
+            )));
+        }
+        let response = self
+            .client
+            .put(url)
+            .bearer_auth(self.config.token.trim())
+            .header("content-type", "application/zstd")
+            .header("x-intar-raw-sha256", &chunk.raw_sha256)
+            .header("x-intar-encoded-sha256", &chunk.encoded_sha256)
+            .header("x-intar-raw-size", chunk.raw_size_bytes)
+            .header("x-intar-encoded-size", chunk.encoded_size_bytes)
+            .body(body)
+            .send()?;
+        require_success(response)
     }
 
     fn upload_blob(
@@ -323,6 +493,74 @@ fn validate_upload_image_blob(image: &UploadImageBlob) -> Result<()> {
     Ok(())
 }
 
+fn validate_chunked_image(
+    scenario_manifest: &ScenarioManifestV4,
+    image: &PublishChunkedImage,
+) -> Result<()> {
+    let vm = scenario_manifest
+        .vms
+        .iter()
+        .find(|vm| vm.name == image.vm_name)
+        .ok_or(Error::InvalidConfig("manifest has no vm for chunked image"))?;
+    if normalize_sha256(&vm.image_id)? != normalize_sha256(&image.image_id)? {
+        return Err(Error::InvalidConfig(
+            "chunked image id does not match scenario manifest",
+        ));
+    }
+    if normalize_sha256(&vm.chunk_manifest_sha256)?
+        != normalize_sha256(&image.chunk_manifest_sha256)?
+    {
+        return Err(Error::InvalidConfig(
+            "chunk manifest digest does not match scenario manifest",
+        ));
+    }
+
+    let bytes = std::fs::read(&image.chunk_manifest_path).map_err(Error::Io)?;
+    if sha256_hex(&bytes) != image.chunk_manifest_sha256 {
+        return Err(Error::InvalidConfig("chunk manifest SHA-256 mismatch"));
+    }
+    let manifest: ImageChunkManifestV1 = serde_json::from_slice(&bytes)?;
+    manifest
+        .validate()
+        .map_err(|_| Error::InvalidConfig("chunk manifest validation failed"))?;
+    if manifest.image_id != image.image_id {
+        return Err(Error::InvalidConfig("chunk manifest image id mismatch"));
+    }
+    if manifest.chunks.len() != image.chunks.len() {
+        return Err(Error::InvalidConfig(
+            "chunk file count does not match manifest",
+        ));
+    }
+    for (descriptor, file) in manifest.chunks.iter().zip(&image.chunks) {
+        if descriptor.raw_sha256 != file.raw_sha256
+            || descriptor.encoded_sha256 != file.encoded_sha256
+            || descriptor.raw_size_bytes != file.raw_size_bytes
+            || descriptor.encoded_size_bytes != file.encoded_size_bytes
+        {
+            return Err(Error::InvalidConfig("chunk file does not match manifest"));
+        }
+        validate_chunk_file(file)?;
+    }
+    Ok(())
+}
+
+fn validate_chunk_file(chunk: &PublishImageChunkFile) -> Result<()> {
+    normalize_sha256(&chunk.raw_sha256)?;
+    normalize_sha256(&chunk.encoded_sha256)?;
+    if chunk.raw_size_bytes == 0 || chunk.raw_size_bytes > 4 * 1024 * 1024 {
+        return Err(Error::InvalidConfig("invalid raw image chunk size"));
+    }
+    if chunk.encoded_size_bytes == 0 {
+        return Err(Error::InvalidConfig("invalid encoded image chunk size"));
+    }
+    if let Some(source_path) = &chunk.source_path
+        && !source_path.is_file()
+    {
+        return Err(Error::InvalidPath(source_path.display().to_string()));
+    }
+    Ok(())
+}
+
 impl PublishBuildIdentity {
     pub fn new(
         build_id: impl Into<String>,
@@ -371,6 +609,13 @@ const fn architecture_name(architecture: &ImageArchitecture) -> &'static str {
 /// R2 multipart parts must share one size (only the final part may be
 /// smaller); 64 MiB stays comfortably under Cloudflare request body limits.
 const UPLOAD_PART_BYTES: u64 = 64 * 1024 * 1024;
+const CHUNK_EXISTS_BATCH_SIZE: usize = 512;
+const CHUNK_UPLOAD_CONCURRENCY: usize = 8;
+
+#[derive(Debug, serde::Deserialize)]
+struct ExistingChunksResponse {
+    existing: Vec<ExistingImageChunk>,
+}
 
 #[derive(Debug, serde::Deserialize)]
 struct UploadCreateResponse {
@@ -393,29 +638,6 @@ struct UploadCompleteResponse {
     ok: bool,
 }
 
-fn image_upload_body(
-    manifest: &ScenarioManifestV3,
-    image: &PublishImageFile,
-) -> Result<serde_json::Value> {
-    let vm = manifest
-        .vms
-        .iter()
-        .find(|vm| vm.name.trim() == image.vm_name.trim())
-        .ok_or(Error::InvalidConfig("manifest has no vm for publish image"))?;
-    let sha256 = normalize_sha256(&vm.image_sha256)?;
-    let image_key = image
-        .filename
-        .strip_suffix(".raw.zst")
-        .ok_or(Error::InvalidConfig("publish image filename is invalid"))?;
-    Ok(serde_json::json!({
-        "kind": "image",
-        "sha256": sha256,
-        "image_key": image_key,
-        "scenario_id": manifest.scenario_id.trim(),
-        "vm_name": vm.name.trim(),
-    }))
-}
-
 fn read_chunk(reader: &mut impl std::io::Read, limit: u64) -> Result<Vec<u8>> {
     let mut chunk = Vec::new();
     reader
@@ -436,22 +658,48 @@ fn sibling_endpoint(endpoint: &url::Url, name: &str) -> Result<url::Url> {
     Ok(sibling)
 }
 
-impl PublishImageFile {
+impl PublishImageChunkFile {
+    pub fn new(descriptor: &ImageChunkV1, source_path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_optional_path(descriptor, Some(source_path.as_ref()))
+    }
+
+    pub fn from_optional_path(
+        descriptor: &ImageChunkV1,
+        source_path: Option<&Path>,
+    ) -> Result<Self> {
+        let file = Self {
+            raw_sha256: normalize_sha256(&descriptor.raw_sha256)?,
+            encoded_sha256: normalize_sha256(&descriptor.encoded_sha256)?,
+            raw_size_bytes: descriptor.raw_size_bytes,
+            encoded_size_bytes: descriptor.encoded_size_bytes,
+            source_path: source_path.map(Path::to_path_buf),
+        };
+        validate_chunk_file(&file)?;
+        Ok(file)
+    }
+}
+
+impl PublishChunkedImage {
     pub fn new(
         vm_name: impl Into<String>,
-        source_path: impl AsRef<Path>,
-        filename: impl Into<String>,
+        image_id: impl Into<String>,
+        chunk_manifest_sha256: impl Into<String>,
+        chunk_manifest_path: impl AsRef<Path>,
+        chunks: Vec<PublishImageChunkFile>,
     ) -> Result<Self> {
-        let source_path = source_path.as_ref();
-        if !source_path.is_file() {
-            return Err(Error::InvalidPath(source_path.display().to_string()));
-        }
-
-        Ok(Self {
+        let image = Self {
             vm_name: vm_name.into(),
-            source_path: source_path.to_path_buf(),
-            filename: normalize_filename(&filename.into())?,
-        })
+            image_id: normalize_sha256(&image_id.into())?,
+            chunk_manifest_sha256: normalize_sha256(&chunk_manifest_sha256.into())?,
+            chunk_manifest_path: chunk_manifest_path.as_ref().to_path_buf(),
+            chunks,
+        };
+        if !image.chunk_manifest_path.is_file() {
+            return Err(Error::InvalidPath(
+                image.chunk_manifest_path.display().to_string(),
+            ));
+        }
+        Ok(image)
     }
 }
 
@@ -490,6 +738,21 @@ fn normalize_filename(value: &str) -> Result<String> {
     Ok(filename.to_owned())
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn require_success(response: reqwest::blocking::Response) -> Result<()> {
+    let status = response.status();
+    let body = response.text()?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(Error::HttpStatus { status, body })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -497,19 +760,9 @@ mod tests {
     use intar_contracts::catalog::ImageArchitecture;
 
     use super::{
-        PublishArtifactFile, PublishBuildIdentity, PublishImageFile, UploadImageBlob,
-        architecture_name, normalize_filename, normalize_sha256, validate_upload_image_blob,
+        PublishArtifactFile, PublishBuildIdentity, UploadImageBlob, architecture_name,
+        normalize_filename, normalize_sha256, validate_upload_image_blob,
     };
-
-    #[test]
-    fn accepts_raw_zstd_publish_file() {
-        let temp = tempfile::NamedTempFile::new().unwrap();
-        let file = PublishImageFile::new("web", temp.path(), "broken-nginx-web-x86_64.raw.zst")
-            .expect("file should be valid");
-
-        assert_eq!(file.vm_name, "web");
-        assert_eq!(file.filename, "broken-nginx-web-x86_64.raw.zst");
-    }
 
     #[test]
     fn rejects_nested_publish_filename() {

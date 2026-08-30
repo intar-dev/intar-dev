@@ -5,27 +5,27 @@ mod bundle;
 mod config;
 mod db;
 mod jobs;
-mod kino_release;
 mod preflight;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
-use intar_contracts::catalog::{ImageArchitecture, ImageKey};
 use intar_image_build::{
-    DirectBuildOutput, DirectBuildRequest, combine_scenario_manifests, ensure_base_rootfs,
-    run_direct_build,
+    DirectBuildOutput, DirectBuildRequest, ReusedEncodedImageChunk, combine_scenario_manifests,
+    ensure_base_rootfs, finish_direct_build_from_scan, run_direct_build, run_direct_build_to_raw,
+    scan_raw_image_chunks,
 };
 use intar_image_upload::{
-    Error as ImageUploadError, ImageUploadConfig, ImageUploader, PublishArtifactFile,
-    PublishBuildIdentity, PublishImageFile,
+    Error as ImageUploadError, ImageChunkLookup, ImageUploadConfig, ImageUploader,
+    PublishArtifactFile, PublishBuildIdentity, PublishChunkedImage, PublishImageChunkFile,
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -150,16 +150,19 @@ async fn run(args: RunCommand) -> Result<()> {
         );
     }
     let (report_tx, report_rx) = mpsc::channel(128);
-    let (desired_ready_tx, desired_ready_rx) = watch::channel(false);
+    let (desired_ready_tx, desired_ready_rx) = watch::channel(0_u64);
+    let cpu_gate = Arc::new(Semaphore::new(8));
     for worker_id in 0..cfg.jobs.max_concurrent_builds {
         let worker_cfg = cfg.clone();
         let worker_report_tx = report_tx.clone();
         let worker_desired_ready = desired_ready_rx.clone();
+        let worker_cpu_gate = Arc::clone(&cpu_gate);
         tokio::spawn(async move {
             builder_worker_loop(
                 worker_cfg,
                 worker_report_tx,
                 worker_desired_ready,
+                worker_cpu_gate,
                 worker_id,
             )
             .await;
@@ -187,7 +190,6 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
     // before the build starts, while an absent token keeps run-once local.
     let run_once_publish_token = optional_run_once_publish_token()?;
     validate_run_once_publish_target(&cfg, run_once_publish_token.as_deref())?;
-    let build_config = cfg.qemu_build_config();
     let db = db::BuilderDb::open(&cfg.builder.state_db)?;
     let (bundle_archive, rev) = resolve_bundle_archive(&cfg, &args.bundle).await?;
     let bundle_root = unpacked_bundle_root(&cfg.builder.cache_root, &rev);
@@ -198,13 +200,7 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
     let bundle_input =
         inspect_bundle_build_input(&bundle_root, &args.scenario, host_architecture(), &rev)?;
     let verification = verify_bundle_for_build(&bundle_root, &bundle_input.build)?;
-    let kino = kino_release::resolve_kino_artifact(
-        &cfg.builder,
-        &bundle_input.build_tools.kino.version,
-        &bundle_input.build.arch,
-    )
-    .await?;
-
+    let build_config = qemu_build_config_for_job(&cfg, &bundle_input.build);
     let now = now_unix_ms();
     db.upsert_build_job(&bundle_input.build, "building", 1, None, now)?;
     info!(
@@ -215,7 +211,6 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
         work_root = %cfg.builder.work_root.display(),
         qemu_binary = %build_config.qemu_binary.display(),
         mmdebstrap_binary = %build_config.mmdebstrap_binary.display(),
-        kino_binary = %kino.binary_path.display(),
         "builder run-once starting direct image build"
     );
 
@@ -245,13 +240,12 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
                 vm_name: vm.name.clone(),
                 config: build_config.clone(),
                 base_image: base_image.clone(),
-                kino: kino.clone(),
             })?;
             info!(
                 scenario = %output.rendered.scenario_name,
                 vm = %output.rendered.vm.name,
-                artifact = %output.artifact.raw_zstd_path.display(),
-                sha256 = %output.artifact.image_sha256_hex,
+                artifact = %output.artifact.chunk_manifest_path.display(),
+                image_id = %output.artifact.image_id,
                 "builder run-once built VM image"
             );
             outputs.push(output);
@@ -413,8 +407,8 @@ fn validate_job_config(cfg: &config::BuilderConfig) -> Result<()> {
     if cfg.jobs.max_concurrent_builds == 0 {
         bail!("jobs.max_concurrent_builds must be greater than zero");
     }
-    if cfg.jobs.max_concurrent_builds != 1 {
-        bail!("jobs.max_concurrent_builds greater than 1 is not supported yet");
+    if cfg.jobs.max_concurrent_builds > 2 {
+        bail!("jobs.max_concurrent_builds must not exceed 2");
     }
     Ok(())
 }
@@ -549,6 +543,26 @@ fn now_unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+fn qemu_build_config_for_job(
+    cfg: &config::BuilderConfig,
+    build: &intar_contracts::bridge::DesiredBuildV1,
+) -> intar_image_build::QemuBuildConfig {
+    let mut config = cfg.qemu_build_config();
+    config.work_root = cfg
+        .builder
+        .work_root
+        .join("builds")
+        .join(&build.build_id)
+        .join(&build.content_hash);
+    config.output_root = cfg
+        .builder
+        .cache_root
+        .join("outputs")
+        .join(&build.build_id)
+        .join(&build.content_hash);
+    config
 }
 
 fn init_tracing() {

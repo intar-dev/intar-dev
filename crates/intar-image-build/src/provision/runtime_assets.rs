@@ -6,8 +6,16 @@ pub(super) fn append_runtime_assets(
     scenario_motd: &str,
     cpu_millis: u32,
     requires_kubernetes_modules: bool,
+    guest_tools_delivery: GuestToolsDelivery,
 ) -> Result<()> {
     writeln!(script, "install -d -m 0755 /etc/kino /etc/intar").context("format error")?;
+    if guest_tools_delivery == GuestToolsDelivery::StagedKino {
+        writeln!(script, "install -m 0755 /tmp/kino /usr/local/bin/kino")
+            .context("format error")?;
+        writeln!(script, "ln -sfn kino {}", shell_quote(INTAR_RUN_CLI_PATH))
+            .context("format error")?;
+        writeln!(script, "/usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
+    }
     writeln!(script).context("format error")?;
 
     writeln!(
@@ -247,48 +255,6 @@ pub(super) fn append_runtime_assets(
 
     writeln!(
         script,
-        "cat >{} <<'EOF_BOOTSTRAP'",
-        shell_quote(INTAR_BOOTSTRAP_SCRIPT_PATH)
-    )
-    .context("format error")?;
-    writeln!(script, "#!/usr/bin/env bash").context("format error")?;
-    writeln!(script, "set -euo pipefail").context("format error")?;
-    writeln!(script, "log_phase() {{").context("format error")?;
-    writeln!(
-        script,
-        "  printf '[intar-runtime] ts=%s phase=%s status=%s\\n' \"$(date -Ins)\" \"$1\" \"$2\""
-    )
-    .context("format error")?;
-    writeln!(script, "}}").context("format error")?;
-    writeln!(script).context("format error")?;
-    writeln!(script, "install_kino() {{").context("format error")?;
-    writeln!(script, "  log_phase kino_install start").context("format error")?;
-    writeln!(script, "  install -m 0755 /tmp/kino /usr/local/bin/kino").context("format error")?;
-    writeln!(script, "  /usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
-    writeln!(script, "  ln -sfn kino {}", shell_quote(INTAR_RUN_CLI_PATH))
-        .context("format error")?;
-    writeln!(
-        script,
-        "  {} help >/dev/null 2>&1",
-        shell_quote(INTAR_RUN_CLI_PATH)
-    )
-    .context("format error")?;
-    writeln!(script, "  log_phase kino_install end").context("format error")?;
-    writeln!(script, "}}").context("format error")?;
-    writeln!(script).context("format error")?;
-    writeln!(script, "install_kino").context("format error")?;
-    writeln!(script, "EOF_BOOTSTRAP").context("format error")?;
-    writeln!(
-        script,
-        "chmod 0755 {}",
-        shell_quote(INTAR_BOOTSTRAP_SCRIPT_PATH)
-    )
-    .context("format error")?;
-    writeln!(script, "{}", shell_quote(INTAR_BOOTSTRAP_SCRIPT_PATH)).context("format error")?;
-    writeln!(script).context("format error")?;
-
-    writeln!(
-        script,
         "cat >{} <<'EOF_RUNTIME'",
         shell_quote(INTAR_SCENARIO_SUPERVISOR_PATH)
     )
@@ -296,9 +262,11 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "#!/usr/bin/env bash").context("format error")?;
     writeln!(script, "set -Eeuo pipefail").context("format error")?;
     writeln!(script, "root_device=\"/dev/vda\"").context("format error")?;
-    writeln!(script, "runtime_device=\"/dev/vdb\"").context("format error")?;
-    writeln!(script, "recording_device=\"/dev/vdc\"").context("format error")?;
+    writeln!(script, "runtime_device=\"\"").context("format error")?;
+    writeln!(script, "recording_device=\"\"").context("format error")?;
+    writeln!(script, "tools_device=\"\"").context("format error")?;
     writeln!(script, "runtime_mount_path=\"/run/intar-runtime\"").context("format error")?;
+    writeln!(script, "tools_mount_path=\"/run/intar-tools\"").context("format error")?;
     writeln!(script, "runtime_state_path=\"/run/intar\"").context("format error")?;
     writeln!(
         script,
@@ -319,6 +287,16 @@ pub(super) fn append_runtime_assets(
     )
     .context("format error")?;
     writeln!(script, "kino_log_path=\"$runtime_state_path/kino.log\"").context("format error")?;
+    writeln!(
+        script,
+        "phase_timing_path=\"$runtime_state_path/phase-timings.env\""
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "phase_start_path=\"$runtime_state_path/phase-start\""
+    )
+    .context("format error")?;
     writeln!(script, "recording_mount_path=\"{RECORDING_MOUNT_PATH}\"").context("format error")?;
     writeln!(script, "recording_user=\"{DEFAULT_USERNAME}\"").context("format error")?;
     writeln!(script, "vm_cpu_millis={cpu_millis}").context("format error")?;
@@ -333,10 +311,49 @@ pub(super) fn append_runtime_assets(
     )
     .context("format error")?;
     writeln!(script, "KINO_PID=\"\"").context("format error")?;
+    writeln!(
+        script,
+        "install -d -m 0755 \"$runtime_state_path\" 2>/dev/null || true"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "install -d -m 0700 \"$phase_start_path\" 2>/dev/null || true"
+    )
+    .context("format error")?;
+    writeln!(script, ": >\"$phase_timing_path\" 2>/dev/null || true").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "uptime_millis() {{").context("format error")?;
+    writeln!(
+        script,
+        "  awk '{{ printf \"%.0f\\n\", $1 * 1000 }}' /proc/uptime"
+    )
+    .context("format error")?;
+    writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "log_phase() {{").context("format error")?;
-    writeln!(script, "  local uptime").context("format error")?;
+    writeln!(
+        script,
+        "  local phase=\"$1\" status=\"$2\" uptime now_ms started_ms key"
+    )
+    .context("format error")?;
     writeln!(script, "  read -r uptime _ </proc/uptime").context("format error")?;
+    writeln!(script, "  now_ms=\"$(uptime_millis)\"").context("format error")?;
+    writeln!(script, "  if [ \"$status\" = start ]; then").context("format error")?;
+    writeln!(
+        script,
+        "    printf '%s\\n' \"$now_ms\" >\"$phase_start_path/$phase\" 2>/dev/null || true"
+    )
+    .context("format error")?;
+    writeln!(script, "  elif [ -f \"$phase_start_path/$phase\" ]; then").context("format error")?;
+    writeln!(
+        script,
+        "    read -r started_ms <\"$phase_start_path/$phase\""
+    )
+    .context("format error")?;
+    writeln!(script, "    key=\"${{phase^^}}_MS\"").context("format error")?;
+    writeln!(script, "    printf '%s=%s\\n' \"$key\" \"$((now_ms - started_ms))\" >>\"$phase_timing_path\" 2>/dev/null || true").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
     writeln!(
         script,
         "  printf '[intar-runtime] ts=boot+%ss phase=%s status=%s\\n' \"$uptime\" \"$1\" \"$2\""
@@ -370,31 +387,101 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "  printf '%s\\n' \"${{uptime%%.*}}\"").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
-    writeln!(script, "wait_for_block_device() {{").context("format error")?;
-    writeln!(script, "  local device=\"$1\"").context("format error")?;
-    writeln!(script, "  local label=\"$2\"").context("format error")?;
+    writeln!(script, "wait_for_labeled_device() {{").context("format error")?;
+    writeln!(script, "  local label=\"$1\"").context("format error")?;
+    writeln!(script, "  local device").context("format error")?;
     writeln!(script, "  for _ in {{1..100}}; do").context("format error")?;
-    writeln!(script, "    if [ -e \"$device\" ]; then").context("format error")?;
-    writeln!(script, "      local actual_label").context("format error")?;
     writeln!(
         script,
-        "      actual_label=\"$(blkid -s LABEL -o value \"$device\" 2>/dev/null || true)\""
+        "    device=\"$(blkid -L \"$label\" 2>/dev/null || true)\""
     )
     .context("format error")?;
-    writeln!(script, "      if [ \"$actual_label\" = \"$label\" ]; then")
-        .context("format error")?;
-    writeln!(script, "        return 0").context("format error")?;
-    writeln!(script, "      fi").context("format error")?;
+    writeln!(
+        script,
+        "    if [ -n \"$device\" ] && [ -b \"$device\" ]; then"
+    )
+    .context("format error")?;
+    writeln!(script, "      printf '%s\\n' \"$device\"").context("format error")?;
+    writeln!(script, "      return 0").context("format error")?;
     writeln!(script, "    fi").context("format error")?;
     writeln!(script, "    sleep 0.1").context("format error")?;
     writeln!(script, "  done").context("format error")?;
     writeln!(
         script,
-        "  echo \"missing $label block device at $device or label did not match\" >&2"
+        "  echo \"missing block device with label $label\" >&2"
     )
     .context("format error")?;
     writeln!(script, "  return 1").context("format error")?;
     writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
+    if guest_tools_delivery == GuestToolsDelivery::ReadOnlyDisk {
+        writeln!(script, "install_guest_tools() {{").context("format error")?;
+        writeln!(script, "  log_phase tools_mount start").context("format error")?;
+        writeln!(
+            script,
+            "  tools_device=\"$(wait_for_labeled_device INTARTOOLS)\""
+        )
+        .context("format error")?;
+        writeln!(script, "  install -d -m 0755 \"$tools_mount_path\"").context("format error")?;
+        writeln!(
+            script,
+            "  mount -t ext4 -o ro,nosuid,nodev \"$tools_device\" \"$tools_mount_path\""
+        )
+        .context("format error")?;
+        writeln!(script, "  [ -f \"$tools_mount_path/manifest.json\" ] || {{ echo 'guest tools manifest is missing' >&2; return 1; }}").context("format error")?;
+        writeln!(script, "  [ -x \"$tools_mount_path/bin/kino\" ] || {{ echo 'Kino guest tool is missing or not executable' >&2; return 1; }}").context("format error")?;
+        writeln!(script, "  [ \"$INTAR_GUEST_BOOTSTRAP_ABI\" = 1 ] || {{ echo 'guest tools bootstrap ABI is unsupported' >&2; return 1; }}").context("format error")?;
+        writeln!(script, "  grep -Fq '\"schema_version\":1' \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest schema is invalid' >&2; return 1; }}").context("format error")?;
+        writeln!(script, "  grep -Fq \"\\\"bootstrap_abi\\\":$INTAR_GUEST_BOOTSTRAP_ABI\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest ABI mismatch' >&2; return 1; }}").context("format error")?;
+        writeln!(script, "  grep -Fq \"\\\"kino_sha256\\\":\\\"$INTAR_KINO_SHA256\\\"\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest Kino SHA-256 mismatch' >&2; return 1; }}").context("format error")?;
+        writeln!(
+            script,
+            "  actual_kino_sha256=\"$(sha256sum \"$tools_mount_path/bin/kino\" | cut -d ' ' -f 1)\""
+        )
+        .context("format error")?;
+        writeln!(
+            script,
+            "  actual_kino_size=\"$(stat -c '%s' \"$tools_mount_path/bin/kino\")\""
+        )
+        .context("format error")?;
+        writeln!(script, "  [ \"$actual_kino_sha256\" = \"$INTAR_KINO_SHA256\" ] || {{ echo 'Kino guest tool SHA-256 mismatch' >&2; return 1; }}").context("format error")?;
+        writeln!(script, "  grep -Fq \"\\\"kino_size_bytes\\\":$actual_kino_size\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest Kino size mismatch' >&2; return 1; }}").context("format error")?;
+        writeln!(
+            script,
+            "  ln -sfn \"$tools_mount_path/bin/kino\" /usr/local/bin/kino"
+        )
+        .context("format error")?;
+        writeln!(
+            script,
+            "  ln -sfn \"$tools_mount_path/bin/kino\" {}",
+            shell_quote(INTAR_RUN_CLI_PATH)
+        )
+        .context("format error")?;
+        writeln!(script, "  /usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
+        writeln!(
+            script,
+            "  {} help >/dev/null 2>&1",
+            shell_quote(INTAR_RUN_CLI_PATH)
+        )
+        .context("format error")?;
+        writeln!(script, "  log_phase tools_mount end").context("format error")?;
+        writeln!(script, "}}").context("format error")?;
+    } else {
+        writeln!(script, "install_guest_tools() {{").context("format error")?;
+        writeln!(script, "  log_phase tools_mount start").context("format error")?;
+        writeln!(script, "  [ -x /usr/local/bin/kino ] || {{ echo 'baked Kino guest tool is missing' >&2; return 1; }}").context("format error")?;
+        writeln!(script, "  /usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
+        writeln!(script, "  ln -sfn kino {}", shell_quote(INTAR_RUN_CLI_PATH))
+            .context("format error")?;
+        writeln!(
+            script,
+            "  {} help >/dev/null 2>&1",
+            shell_quote(INTAR_RUN_CLI_PATH)
+        )
+        .context("format error")?;
+        writeln!(script, "  log_phase tools_mount end").context("format error")?;
+        writeln!(script, "}}").context("format error")?;
+    }
     writeln!(script).context("format error")?;
     writeln!(script, "grow_root_filesystem() {{").context("format error")?;
     writeln!(script, "  case \"${{INTAR_ROOT_RESIZE_REQUIRED:-1}}\" in").context("format error")?;
@@ -556,6 +643,7 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "cleanup() {{").context("format error")?;
     writeln!(script, "  local status=$?").context("format error")?;
     writeln!(script, "  if [ -n \"$KINO_PID\" ] && kill -0 \"$KINO_PID\" >/dev/null 2>&1; then kill \"$KINO_PID\" >/dev/null 2>&1 || true; fi").context("format error")?;
+    writeln!(script, "  if mountpoint -q \"$tools_mount_path\"; then umount \"$tools_mount_path\" >/dev/null 2>&1 || true; fi").context("format error")?;
     writeln!(script, "  if mountpoint -q \"$runtime_mount_path\"; then umount \"$runtime_mount_path\" >/dev/null 2>&1 || true; fi").context("format error")?;
     writeln!(script, "  if mountpoint -q \"$recording_mount_path\"; then umount \"$recording_mount_path\" >/dev/null 2>&1 || true; fi").context("format error")?;
     writeln!(script, "  exit \"$status\"").context("format error")?;
@@ -863,8 +951,11 @@ pub(super) fn append_runtime_assets(
     writeln!(script).context("format error")?;
     writeln!(script, "# intar-runtime-main").context("format error")?;
     writeln!(script, "log_phase runtime_disk start").context("format error")?;
-    writeln!(script, "wait_for_block_device \"$runtime_device\" INTARRUN")
-        .context("format error")?;
+    writeln!(
+        script,
+        "runtime_device=\"$(wait_for_labeled_device INTARRUN)\""
+    )
+    .context("format error")?;
     writeln!(script, "install -d -m 0755 \"$runtime_mount_path\"").context("format error")?;
     writeln!(script, "mount -t vfat -o ro,nosuid,nodev,noexec,utf8=1,shortname=mixed \"$runtime_device\" \"$runtime_mount_path\"").context("format error")?;
     writeln!(script, "[ -f \"$runtime_env_path\" ] || {{ echo \"missing runtime env at $runtime_env_path\" >&2; exit 1; }}").context("format error")?;
@@ -929,13 +1020,25 @@ pub(super) fn append_runtime_assets(
         ": \"${{INTAR_DNS_SERVERS:?INTAR_DNS_SERVERS is required}}\""
     )
     .context("format error")?;
+    writeln!(
+        script,
+        ": \"${{INTAR_KINO_SHA256:?INTAR_KINO_SHA256 is required}}\""
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        ": \"${{INTAR_GUEST_BOOTSTRAP_ABI:?INTAR_GUEST_BOOTSTRAP_ABI is required}}\""
+    )
+    .context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "install_guest_tools").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "grow_root_filesystem").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "log_phase recording_mount start").context("format error")?;
     writeln!(
         script,
-        "wait_for_block_device \"$recording_device\" INTARREC"
+        "recording_device=\"$(wait_for_labeled_device INTARREC)\""
     )
     .context("format error")?;
     writeln!(script, "recording_uid=\"$(id -u \"$recording_user\")\"").context("format error")?;
@@ -962,6 +1065,7 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "configure_ssh_access").context("format error")?;
     writeln!(script, "start_sshd").context("format error")?;
     writeln!(script, "start_kino").context("format error")?;
+    writeln!(script, "printf 'READY_UPTIME_MS=%s\\n' \"$(uptime_millis)\" >>\"$phase_timing_path\" 2>/dev/null || true").context("format error")?;
     writeln!(script, "log_phase ready end").context("format error")?;
     writeln!(script, "wait -n \"$KINO_PID\" || true").context("format error")?;
     writeln!(script, "if ! kill -0 \"$KINO_PID\" >/dev/null 2>&1; then cat \"$kino_log_path\" >&2 || true; echo 'kino exited unexpectedly' >&2; exit 1; fi").context("format error")?;

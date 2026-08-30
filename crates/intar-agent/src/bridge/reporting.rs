@@ -2,9 +2,9 @@ use super::*;
 
 pub(super) async fn run_bridge_writer<W>(
     mut write: W,
-    mut urgent: mpsc::Receiver<BridgeMessageV6>,
-    mut inventory: mpsc::Receiver<BridgeMessageV6>,
-    mut normal: mpsc::Receiver<BridgeMessageV6>,
+    mut urgent: mpsc::Receiver<BridgeMessageV7>,
+    mut inventory: mpsc::Receiver<BridgeMessageV7>,
+    mut normal: mpsc::Receiver<BridgeMessageV7>,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
@@ -23,10 +23,10 @@ where
 }
 
 pub(super) async fn next_outbound_message(
-    urgent: &mut mpsc::Receiver<BridgeMessageV6>,
-    inventory: &mut mpsc::Receiver<BridgeMessageV6>,
-    normal: &mut mpsc::Receiver<BridgeMessageV6>,
-) -> Option<BridgeMessageV6> {
+    urgent: &mut mpsc::Receiver<BridgeMessageV7>,
+    inventory: &mut mpsc::Receiver<BridgeMessageV7>,
+    normal: &mut mpsc::Receiver<BridgeMessageV7>,
+) -> Option<BridgeMessageV7> {
     tokio::select! {
         biased;
         message = urgent.recv() => message,
@@ -39,7 +39,7 @@ pub(super) async fn run_inventory_reporter(
     sources: BridgeReportSources,
     mut inventory_updates: watch::Receiver<u64>,
     mut desired_state: watch::Receiver<Option<HostDesiredStateV2>>,
-    outbound: mpsc::Sender<BridgeMessageV6>,
+    outbound: mpsc::Sender<BridgeMessageV7>,
 ) -> Result<()> {
     loop {
         tokio::select! {
@@ -56,8 +56,8 @@ pub(super) async fn run_inventory_reporter(
 }
 
 pub(super) async fn enqueue_bridge_message(
-    outbound: &mpsc::Sender<BridgeMessageV6>,
-    message: BridgeMessageV6,
+    outbound: &mpsc::Sender<BridgeMessageV7>,
+    message: BridgeMessageV7,
 ) -> Result<()> {
     outbound
         .send(message)
@@ -66,7 +66,7 @@ pub(super) async fn enqueue_bridge_message(
 }
 
 pub(super) async fn send_state_report(
-    outbound: &mpsc::Sender<BridgeMessageV6>,
+    outbound: &mpsc::Sender<BridgeMessageV7>,
     sources: &BridgeReportSources,
     desired: Option<&HostDesiredStateV2>,
 ) -> Result<()> {
@@ -82,7 +82,7 @@ pub(super) async fn send_state_report(
     .await;
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV6::StateReport(StateReportV6 {
+        BridgeMessageV7::StateReport(StateReportV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: sources.cfg.host_id.clone(),
             report,
@@ -92,7 +92,7 @@ pub(super) async fn send_state_report(
 }
 
 pub(super) async fn send_inventory_state_report(
-    outbound: &mpsc::Sender<BridgeMessageV6>,
+    outbound: &mpsc::Sender<BridgeMessageV7>,
     sources: &BridgeReportSources,
     desired: Option<&HostDesiredStateV2>,
 ) -> Result<()> {
@@ -112,7 +112,7 @@ pub(super) async fn send_inventory_state_report(
     .await;
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV6::StateReport(StateReportV6 {
+        BridgeMessageV7::StateReport(StateReportV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: sources.cfg.host_id.clone(),
             report,
@@ -122,13 +122,13 @@ pub(super) async fn send_inventory_state_report(
 }
 
 pub(super) async fn send_vm_report(
-    outbound: &mpsc::Sender<BridgeMessageV6>,
+    outbound: &mpsc::Sender<BridgeMessageV7>,
     host_id: &str,
     report: VmReportV2,
 ) -> Result<()> {
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV6::VmReport(VmReportV6 {
+        BridgeMessageV7::VmReport(VmReportV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -148,7 +148,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV6::SyncRequest(SyncRequestV6 {
+        &BridgeMessageV7::SyncRequest(SyncRequestV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             reason,
@@ -275,29 +275,39 @@ pub(super) async fn build_host_state_report(
         (inspection, terminal)
     }))
     .await;
-    let (reported_capabilities, reported_cached_images) = if inspect_runtime {
-        let capabilities = collect_host_capabilities(attested_jailer.as_ref());
-        let cached_images = desired
-            .map(|state| {
-                cached_image_states(
-                    state,
-                    now,
-                    attested_jailer.as_ref().is_some_and(|capabilities| {
-                        capabilities.supports_template_backed_launch
-                            && capabilities.fast_template_store
-                    }),
-                )
-            })
-            .unwrap_or_default();
-        *report_cache.host_capabilities.write().await = capabilities.clone();
-        *report_cache.cached_images.write().await = cached_images.clone();
-        (capabilities, cached_images)
-    } else {
-        (
-            report_cache.host_capabilities.read().await.clone(),
-            report_cache.cached_images.read().await.clone(),
-        )
-    };
+    let (reported_capabilities, reported_cached_images, reported_cached_guest_tools) =
+        if inspect_runtime {
+            let capabilities = collect_host_capabilities(attested_jailer.as_ref());
+            let (cached_images, cached_guest_tools) = desired
+                .map(|state| {
+                    let cache_root = crate::image_cache::default_cache_root().ok();
+                    let images = cached_image_states(
+                        state,
+                        now,
+                        attested_jailer.as_ref().is_some_and(|capabilities| {
+                            capabilities.supports_template_backed_launch
+                                && capabilities.fast_template_store
+                        }),
+                    );
+                    let tools = cached_guest_tools_states_with_cache_root(
+                        state,
+                        now,
+                        cache_root.as_deref(),
+                    );
+                    (images, tools)
+                })
+                .unwrap_or_default();
+            *report_cache.host_capabilities.write().await = capabilities.clone();
+            *report_cache.cached_images.write().await = cached_images.clone();
+            *report_cache.cached_guest_tools.write().await = cached_guest_tools.clone();
+            (capabilities, cached_images, cached_guest_tools)
+        } else {
+            (
+                report_cache.host_capabilities.read().await.clone(),
+                report_cache.cached_images.read().await.clone(),
+                report_cache.cached_guest_tools.read().await.clone(),
+            )
+        };
 
     HostStateReportV2 {
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
@@ -322,6 +332,7 @@ pub(super) async fn build_host_state_report(
         },
         capabilities: reported_capabilities,
         cached_images: reported_cached_images,
+        cached_guest_tools: reported_cached_guest_tools,
         vms: statuses
             .into_iter()
             .zip(observations)
@@ -404,6 +415,7 @@ pub(super) fn build_vm_report_from_status(
         desired_version: actual.desired_version,
         observed_at_unix_ms: actual.updated_at_unix_ms,
         phase: actual.phase,
+        guest_tools: actual.guest_tools,
         network: actual.network,
         terminal: actual.terminal,
         runtime_constraints: actual.runtime_constraints,
@@ -445,13 +457,26 @@ pub(super) fn actual_state_from_status(
         state.observed_at.max(status_updated_at)
     });
 
+    let phase = vm_phase_from_status(&status, &probes);
+    let actual_guest_tools = status
+        .details
+        .as_ref()
+        .and_then(|details| details.guest_tools.as_ref())
+        .or_else(|| desired_vm.map(|vm| &vm.guest_tools));
+    let guest_tools = actual_guest_tools.map(|pin| VmGuestToolsStateV1 {
+        tools_disk_sha256: pin.tools_disk_sha256.clone(),
+        kino_sha256: pin.kino_sha256.clone(),
+        bootstrap_abi: pin.bootstrap_abi,
+        verified: matches!(phase, VmPhase::Ready | VmPhase::Solved),
+    });
     VmActualStateV2 {
         run_id,
         vm_name: status.name.clone(),
         desired_version: desired_vm.and_then(|_| desired.map(|state| state.version)),
-        phase: vm_phase_from_status(&status, &probes),
+        phase,
         image_key: desired_vm.map(|vm| vm.image_key.clone()),
-        image_sha256: desired_vm.map(|vm| vm.image_sha256.clone()),
+        image_id: desired_vm.map(|vm| vm.image_id.clone()),
+        guest_tools,
         network: network_state_from_status(&status, ssh_host),
         terminal: terminal_state,
         runtime_constraints,
@@ -484,6 +509,12 @@ pub(super) fn failed_vm_report(
         desired_version: Some(desired.version),
         observed_at_unix_ms,
         phase: VmPhase::Failed,
+        guest_tools: Some(VmGuestToolsStateV1 {
+            tools_disk_sha256: vm.guest_tools.tools_disk_sha256.clone(),
+            kino_sha256: vm.guest_tools.kino_sha256.clone(),
+            bootstrap_abi: vm.guest_tools.bootstrap_abi,
+            verified: false,
+        }),
         network: None,
         terminal: VmTerminalStateV1 {
             state: VmTerminalStateKindV1::Failed,
@@ -790,13 +821,13 @@ pub(super) fn cached_image_states_with_cache_root(
                 crate::image_cache::verified_cached_image_metadata(
                     root,
                     &key,
-                    &desired_image.image_sha256,
+                    &desired_image.image_id,
                     require_template,
                 )
             });
             CachedImageStateV1 {
                 image_key: desired_image.image_key.clone(),
-                image_sha256: desired_image.image_sha256.clone(),
+                image_id: desired_image.image_id.clone(),
                 phase: if metadata.is_some() {
                     ImageCachePhase::Ready
                 } else {
@@ -810,11 +841,65 @@ pub(super) fn cached_image_states_with_cache_root(
         .collect()
 }
 
+pub(super) fn cached_guest_tools_states_with_cache_root(
+    desired: &HostDesiredStateV2,
+    now: i64,
+    cache_root: Option<&Path>,
+) -> Vec<CachedGuestToolsStateV1> {
+    desired
+        .cached_guest_tools
+        .iter()
+        .map(|pin| {
+            let path = cache_root.map(|root| {
+                root.join("tools")
+                    .join(format!("{}.ext4", pin.tools_disk_sha256))
+            });
+            let metadata = path.as_deref().and_then(|path| {
+                let metadata = fs::metadata(path).ok()?;
+                (metadata.is_file()
+                    && metadata.len() == pin.tools_disk_size_bytes
+                    && sha256_file_for_report(path).as_deref()
+                        == Some(pin.tools_disk_sha256.as_str()))
+                .then_some(metadata)
+            });
+            CachedGuestToolsStateV1 {
+                guest_tools: pin.clone(),
+                phase: if metadata.is_some() {
+                    ImageCachePhase::Ready
+                } else {
+                    ImageCachePhase::Missing
+                },
+                bytes_on_disk: metadata.map(|value| value.len()),
+                error: None,
+                updated_at_unix_ms: now,
+            }
+        })
+        .collect()
+}
+
+fn sha256_file_for_report(path: &Path) -> Option<String> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut hasher = Sha256::new();
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(base16ct::lower::encode_string(&hasher.finalize()))
+}
+
 pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> HostCapabilitiesV2 {
     let supports_cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
         .is_ok_and(|value| value.split_whitespace().any(|item| item == "cpu"));
     let supports_jailer_v2 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v2);
-    let supports_run_cli_v1 = cfg!(target_os = "linux") && supports_jailer_v2;
+    let supports_jailer_v3 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v3);
+    let supports_run_cli_v1 = cfg!(target_os = "linux") && supports_jailer_v3;
     HostCapabilitiesV2 {
         arch: host_architecture(),
         cloud_hypervisor_sha256: jailer
@@ -836,6 +921,9 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
         supports_reflink: supports_reflink_for_image_cache(),
         supports_nftables: command_exists("nft"),
         supports_jailer_v2,
+        supports_jailer_v3,
+        supports_raw_chunks_v1: supports_jailer_v3,
+        supports_scenario_guest_tools_v1: supports_jailer_v3,
         supports_boot_cpu_lease: jailer
             .is_some_and(|capabilities| capabilities.supports_boot_cpu_lease),
         supports_template_backed_launch: jailer

@@ -139,6 +139,9 @@ impl ProbeStore {
             generated_at_unix_ms,
             probes,
             ssh_host_keys_openssh,
+            kino_sha256: String::new(),
+            guest_bootstrap_abi: 0,
+            guest_phase_timings: None,
         }
     }
 

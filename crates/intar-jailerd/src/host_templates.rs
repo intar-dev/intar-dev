@@ -131,8 +131,10 @@ pub(super) fn request_template_identity_matches(
     request: &PrepareImageV2Request,
     metadata: &ImageTemplateMetadataV2,
 ) -> bool {
-    metadata.schema_version == IMAGE_TEMPLATE_METADATA_VERSION
+    metadata.schema_version == IMAGE_TEMPLATE_METADATA_V2
         && metadata.image_sha256 == request.image_sha256
+        && metadata.chunk_manifest_sha256.is_none()
+        && metadata.chunk_raw_sha256s.is_empty()
         && metadata.virtual_size_bytes == request.virtual_size_bytes
         && request.root_disk.sha256.as_ref() == Some(&metadata.root_disk.sha256)
         && request.kernel.sha256.as_ref() == Some(&metadata.kernel.sha256)

@@ -268,8 +268,10 @@ pub(super) fn prepare_image_template(
             .map(|source| copy_template_source(config, source, &temporary.join("initrd"), None))
             .transpose()?;
         let metadata = ImageTemplateMetadataV2 {
-            schema_version: IMAGE_TEMPLATE_METADATA_VERSION,
+            schema_version: IMAGE_TEMPLATE_METADATA_V2,
             image_sha256: request.image_sha256.clone(),
+            chunk_manifest_sha256: None,
+            chunk_raw_sha256s: Vec::new(),
             virtual_size_bytes: request.virtual_size_bytes,
             root_disk,
             kernel,

@@ -9,13 +9,12 @@ use flate2::read::GzDecoder;
 use intar_image_build::{ScenarioContentHashInput, scenario_content_hash};
 
 use super::{
-    BUNDLE_BASE_IMAGES_PATH, BUNDLE_BUILD_TOOLS_PATH, BundleSourceFile, BundleUploadReceipt, Cli,
-    Command, PreparedBundleScenario, TAR_BLOCK_SIZE, bundle_tar_size_bytes,
-    bundle_url_from_publish_url, collect_bundle_source_files, contract_image_arch_slug,
-    course_manifest_is_present, course_manifest_path, discover_course_scenarios,
-    discover_legacy_scenarios, kino_version_from_package_id, load_bundle_course_catalog,
-    parse_bundle_course_catalog, parse_bundle_upload_response, validate_bundle_rev,
-    validate_scenario_arg, write_bundle_archive,
+    BUNDLE_BASE_IMAGES_PATH, BundleSourceFile, BundleUploadReceipt, Cli, Command,
+    PreparedBundleScenario, TAR_BLOCK_SIZE, bundle_tar_size_bytes, bundle_url_from_publish_url,
+    collect_bundle_source_files, contract_image_arch_slug, course_manifest_is_present,
+    course_manifest_path, discover_course_scenarios, discover_legacy_scenarios,
+    load_bundle_course_catalog, parse_bundle_course_catalog, parse_bundle_upload_response,
+    validate_bundle_rev, validate_scenario_arg, write_bundle_archive,
 };
 
 fn write_scenario(scenario_dir: &std::path::Path, scenario_id: &str) {
@@ -94,8 +93,6 @@ fn parses_course_roots_and_explicit_catalog_paths() {
         "/sources/courses",
         "--base-images",
         "/config/base-images.hcl",
-        "--build-tools",
-        "/config/build-tools.hcl",
     ])
     .unwrap();
     let Command::Bundle(bundle) = bundle.command else {
@@ -109,10 +106,6 @@ fn parses_course_roots_and_explicit_catalog_paths() {
     assert_eq!(
         bundle.base_images,
         std::path::PathBuf::from("/config/base-images.hcl")
-    );
-    assert_eq!(
-        bundle.build_tools,
-        std::path::PathBuf::from("/config/build-tools.hcl")
     );
 }
 
@@ -311,17 +304,15 @@ fn rejects_symlinks_at_each_course_source_level() {
 }
 
 #[test]
-fn flattens_nested_course_paths_with_explicit_catalog_and_tool_sources() {
+fn flattens_nested_course_paths_with_explicit_catalog_source() {
     let temp = tempfile::tempdir().unwrap();
     let scenario_dir = temp.path().join("courses/course-a/demo");
     write_scenario(&scenario_dir, "demo");
     fs::create_dir_all(scenario_dir.join("assets")).unwrap();
     fs::write(scenario_dir.join("assets/setup.sh"), "#!/bin/sh\n").unwrap();
     let base_images = temp.path().join("release/base-images-custom.hcl");
-    let build_tools = temp.path().join("release/build-tools-custom.hcl");
     fs::create_dir_all(base_images.parent().unwrap()).unwrap();
     fs::write(&base_images, "base images\n").unwrap();
-    fs::write(&build_tools, "build tools\n").unwrap();
 
     let files = collect_bundle_source_files(
         &[PreparedBundleScenario {
@@ -330,7 +321,6 @@ fn flattens_nested_course_paths_with_explicit_catalog_and_tool_sources() {
             content_hash: "unused".to_owned(),
         }],
         &base_images,
-        &build_tools,
         None,
     )
     .unwrap();
@@ -341,7 +331,6 @@ fn flattens_nested_course_paths_with_explicit_catalog_and_tool_sources() {
             .collect::<Vec<_>>(),
         [
             BUNDLE_BASE_IMAGES_PATH,
-            BUNDLE_BUILD_TOOLS_PATH,
             "scenarios/demo/assets/setup.sh",
             "scenarios/demo/scenario.hcl",
         ]
@@ -420,26 +409,6 @@ fn accepts_only_strict_bundle_upload_receipts() {
             "unexpectedly accepted status {status} with body {body}"
         );
     }
-}
-
-#[test]
-fn parses_path_package_id_version() {
-    assert_eq!(
-        kino_version_from_package_id("path+file:///workspace/intar-dev/crates/kino#0.1.24")
-            .expect("path package id should parse"),
-        "0.1.24"
-    );
-}
-
-#[test]
-fn parses_registry_package_id_version() {
-    assert_eq!(
-        kino_version_from_package_id(
-            "registry+https://github.com/rust-lang/crates.io-index#kino@0.1.24"
-        )
-        .expect("registry package id should parse"),
-        "0.1.24"
-    );
 }
 
 #[test]
@@ -642,13 +611,11 @@ fn distinguishes_missing_and_empty_course_manifests() {
 fn partial_bundle_uses_complete_course_snapshot_and_archives_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let base_images_path = temp.path().join("base-images.hcl");
-    let build_tools_path = temp.path().join("build-tools.hcl");
     let course_path = temp.path().join("courses.hcl");
     let courses_root = temp.path().join("courses");
     let selected_scenario_dir = courses_root.join("linux/broken-nginx");
     let other_scenario_dir = courses_root.join("networking/pair-ping");
     fs::write(&base_images_path, "base images").unwrap();
-    fs::write(&build_tools_path, "build tools").unwrap();
     write_scenario(&selected_scenario_dir, "broken-nginx");
     write_scenario(&other_scenario_dir, "pair-ping");
     fs::write(
@@ -679,13 +646,8 @@ fn partial_bundle_uses_complete_course_snapshot_and_archives_provenance() {
         scenario_dir: selected_scenario_dir,
         content_hash: "hash".to_owned(),
     }];
-    let source_files = collect_bundle_source_files(
-        &selected,
-        &base_images_path,
-        &build_tools_path,
-        Some(&course_path),
-    )
-    .unwrap();
+    let source_files =
+        collect_bundle_source_files(&selected, &base_images_path, Some(&course_path)).unwrap();
     let archive_path = temp.path().join("partial.tar.gz");
     write_bundle_archive(&archive_path, &source_files).unwrap();
 
@@ -741,7 +703,6 @@ fn course_manifest_does_not_change_scenario_content_hash() {
             scenario_id: "broken-nginx",
             scenario_dir: &scenario_dir,
             base_definition: "base definition",
-            kino_version: "0.1.24",
             target_arch: "amd64",
         })
         .unwrap()

@@ -219,9 +219,8 @@ describe("build scheduler", () => {
     const queued = await queueImageBuildsFromBundle(db as never, {
       rev: "abc123",
       r2Key: "builds/bundles/abc123.tar.gz",
-      kinoVersion: "0.4.0",
       meta: {
-        buildFormatVersion: "intar-image-build-v9",
+        buildFormatVersion: "intar-image-build-v10",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -256,9 +255,8 @@ describe("build scheduler", () => {
       queueImageBuildsFromBundle(db as never, {
         rev: "bundle-new",
         r2Key: "builds/bundles/bundle-new.tar.gz",
-        kinoVersion: "0.4.0",
         meta: {
-          buildFormatVersion: "intar-image-build-v9",
+          buildFormatVersion: "intar-image-build-v10",
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -572,7 +570,6 @@ function queuedBuild(
     arch,
     rev: "abc123",
     contentHash: "f".repeat(64),
-    kinoVersion: "0.4.0",
     bundleRef: "builds/bundles/abc123.tar.gz",
   };
 }

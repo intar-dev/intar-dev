@@ -222,6 +222,7 @@ ON CONFLICT(image_sha256) DO UPDATE SET
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn load_image_cache_access(conn: &Connection) -> Result<Vec<ImageCacheAccessRow>> {
     let mut stmt = conn
         .prepare(
@@ -267,6 +268,7 @@ ORDER BY image_sha256 ASC;
         .context("collect local vm image shas")
 }
 
+#[cfg(test)]
 pub(super) fn delete_image_cache_access(conn: &Connection, image_sha256: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM image_cache_access WHERE image_sha256 = ?1;",
@@ -282,6 +284,7 @@ CREATE TABLE IF NOT EXISTS vms (
   state TEXT NOT NULL,
   image_key TEXT,
   image_sha256 TEXT,
+  guest_tools_json TEXT,
   created_at_s INTEGER NOT NULL,
   updated_at_s INTEGER NOT NULL,
   running_at_s INTEGER,

@@ -152,7 +152,7 @@ export function OrganizationScenariosSection({
     mutationFn: async () => {
       const source = await saveSourceRequest();
       const prepared = await prepareScenarioBuild(source.hcl);
-      if (!prepared.ok || !prepared.content_hash || !prepared.kino_version) {
+      if (!prepared.ok || !prepared.content_hash) {
         throw new Error(
           prepared.errors.join("; ") || "Scenario failed build preparation",
         );
@@ -166,7 +166,6 @@ export function OrganizationScenariosSection({
           body: JSON.stringify({
             scenarioId: source.scenarioId,
             contentHash: prepared.content_hash,
-            kinoVersion: prepared.kino_version,
             imageArch: prepared.image_arch,
           }),
         },
@@ -567,7 +566,7 @@ export function OrganizationScenariosSection({
             <Textarea
               value={bundleMeta}
               onChange={(event) => setBundleMeta(event.target.value)}
-              placeholder="Paste bundle metadata JSON, including build_format_version, kino_version, and scenarios."
+              placeholder="Paste bundle metadata JSON, including build_format_version and scenarios."
               className="min-h-32 text-code"
               aria-label="Bundle metadata JSON"
             />

@@ -21,7 +21,7 @@ use thiserror::Error;
 use tokio::io::unix::AsyncFd;
 
 /// Current on-wire protocol version.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 /// Maximum request or response packet, including its JSON envelope.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Reserved source-root selector for artifacts in jailerd's root-owned image
@@ -186,6 +186,29 @@ pub struct ArtifactSource {
     pub access: ArtifactAccess,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedDirectorySource {
+    pub source_root: u16,
+    pub relative_path: PathBuf,
+}
+
+impl TrustedDirectorySource {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        let source = ArtifactSource {
+            source_root: self.source_root,
+            relative_path: self.relative_path.clone(),
+            sha256: None,
+            access: ArtifactAccess::ReadOnly,
+        };
+        source.validate()?;
+        if self.source_root == PREPARED_IMAGE_SOURCE_ROOT {
+            return Err(ValidationError::InvalidChunkCacheRoot);
+        }
+        Ok(())
+    }
+}
+
 impl ArtifactSource {
     pub fn validate(&self) -> Result<(), ValidationError> {
         let mut saw_component = false;
@@ -210,6 +233,8 @@ pub struct SourceArtifacts {
     pub root_disk: ArtifactSource,
     pub runtime_disk: ArtifactSource,
     pub recording_disk: ArtifactSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_disk: Option<ArtifactSource>,
 }
 
 /// Import a verified agent-cache boot bundle into jailerd's root-owned,
@@ -261,6 +286,62 @@ impl PrepareImageV2Request {
 #[serde(deny_unknown_fields)]
 pub struct PreparedImageV2Result {
     pub image_sha256: Sha256Digest,
+    pub virtual_size_bytes: u64,
+    pub root_disk: ArtifactSource,
+    pub kernel: ArtifactSource,
+    pub initrd: Option<ArtifactSource>,
+    pub fast_template_store: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareChunkedImageV3Request {
+    pub image_id: Sha256Digest,
+    pub chunk_manifest_sha256: Sha256Digest,
+    pub virtual_size_bytes: u64,
+    pub manifest: ArtifactSource,
+    pub chunk_cache_root: TrustedDirectorySource,
+    pub kernel: ArtifactSource,
+    pub initrd: Option<ArtifactSource>,
+}
+
+impl PrepareChunkedImageV3Request {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.virtual_size_bytes == 0 {
+            return Err(ValidationError::ZeroImageSize);
+        }
+        self.chunk_cache_root.validate()?;
+        for source in [
+            Some(&self.manifest),
+            Some(&self.kernel),
+            self.initrd.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            source.validate()?;
+            if source.source_root == PREPARED_IMAGE_SOURCE_ROOT {
+                return Err(ValidationError::InvalidTemplateSource);
+            }
+            if source.access != ArtifactAccess::ReadOnly {
+                return Err(ValidationError::InvalidTemplateArtifactAccess);
+            }
+            if source.sha256.is_none() {
+                return Err(ValidationError::MissingTemplateArtifactHash);
+            }
+        }
+        if self.manifest.sha256.as_ref() != Some(&self.chunk_manifest_sha256) {
+            return Err(ValidationError::InvalidChunkManifestSource);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedImageV3Result {
+    pub image_id: Sha256Digest,
+    pub chunk_manifest_sha256: Sha256Digest,
     pub virtual_size_bytes: u64,
     pub root_disk: ArtifactSource,
     pub kernel: ArtifactSource,
@@ -340,6 +421,63 @@ pub struct LaunchVmV2Request {
     pub launch: VmLaunchRequest,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchVmV3Request {
+    pub image_id: Sha256Digest,
+    pub chunk_manifest_sha256: Sha256Digest,
+    pub virtual_size_bytes: u64,
+    pub launch: VmLaunchRequest,
+}
+
+impl LaunchVmV3Request {
+    pub fn validate(&self) -> Result<CpuQuota, ValidationError> {
+        if self.virtual_size_bytes == 0 {
+            return Err(ValidationError::ZeroImageSize);
+        }
+        if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
+            return Err(ValidationError::RootDiskSmallerThanTemplate);
+        }
+        let tools_disk = self
+            .launch
+            .artifacts
+            .tools_disk
+            .as_ref()
+            .ok_or(ValidationError::InvalidToolsDisk)?;
+        tools_disk.validate()?;
+        if tools_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
+            || tools_disk.access != ArtifactAccess::ReadOnly
+            || tools_disk.sha256.is_none()
+        {
+            return Err(ValidationError::InvalidToolsDisk);
+        }
+        let quota = self.launch.validate_inner(true)?;
+        for (source, file_name, expected_access) in [
+            (
+                &self.launch.artifacts.root_disk,
+                "root.raw",
+                ArtifactAccess::ReadWrite,
+            ),
+            (
+                &self.launch.artifacts.kernel,
+                "kernel",
+                ArtifactAccess::ReadOnly,
+            ),
+        ] {
+            validate_prepared_launch_artifact(source, &self.image_id, file_name, expected_access)?;
+        }
+        if let Some(initrd) = &self.launch.artifacts.initrd {
+            validate_prepared_launch_artifact(
+                initrd,
+                &self.image_id,
+                "initrd",
+                ArtifactAccess::ReadOnly,
+            )?;
+        }
+        Ok(quota)
+    }
+}
+
 impl LaunchVmV2Request {
     pub fn validate(&self) -> Result<CpuQuota, ValidationError> {
         if self.virtual_size_bytes == 0 {
@@ -347,6 +485,9 @@ impl LaunchVmV2Request {
         }
         if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
             return Err(ValidationError::RootDiskSmallerThanTemplate);
+        }
+        if self.launch.artifacts.tools_disk.is_some() {
+            return Err(ValidationError::InvalidToolsDisk);
         }
         let quota = self.launch.validate_inner(true)?;
         for (source, file_name, expected_access) in [
@@ -455,9 +596,11 @@ pub struct DestroyRunNetworkRequest {
 pub enum Request {
     Capabilities,
     PrepareImageV2(Box<PrepareImageV2Request>),
+    PrepareChunkedImageV3(Box<PrepareChunkedImageV3Request>),
     EnsureRunNetwork(EnsureRunNetworkRequest),
     RepairRunNetwork(EnsureRunNetworkRequest),
     LaunchVmV2(Box<LaunchVmV2Request>),
+    LaunchVmV3(Box<LaunchVmV3Request>),
     FinalizeVmBoot(FinalizeVmBootRequest),
     InspectVm(VmIdentityRequest),
     StopVm(VmIdentityRequest),
@@ -505,6 +648,7 @@ pub struct JailerCapabilities {
     /// required on the v2 wire; an old daemon cannot decode as performance
     /// ready by omission.
     pub supports_jailer_v2: bool,
+    pub supports_jailer_v3: bool,
     pub supports_template_backed_launch: bool,
     pub fast_template_store: bool,
     pub supports_hard_cpu_quota: bool,
@@ -575,6 +719,8 @@ pub struct JailPathMap {
     pub host_root_disk: PathBuf,
     pub host_runtime_disk: PathBuf,
     pub host_recording_disk: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_tools_disk: Option<PathBuf>,
     pub jailed_api_socket: PathBuf,
     pub jailed_vsock_socket: PathBuf,
     pub jailed_kernel: PathBuf,
@@ -582,6 +728,8 @@ pub struct JailPathMap {
     pub jailed_root_disk: PathBuf,
     pub jailed_runtime_disk: PathBuf,
     pub jailed_recording_disk: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jailed_tools_disk: Option<PathBuf>,
     pub host_serial_log: PathBuf,
     pub host_console_log: PathBuf,
     pub host_stderr_log: PathBuf,
@@ -694,9 +842,11 @@ pub struct OperationResult {
 pub enum Response {
     Capabilities(JailerCapabilities),
     PrepareImageV2(PreparedImageV2Result),
+    PrepareChunkedImageV3(PreparedImageV3Result),
     EnsureRunNetwork(RunNetworkResult),
     RepairRunNetwork(RunNetworkResult),
     LaunchVmV2(VmLaunchResult),
+    LaunchVmV3(VmLaunchResult),
     FinalizeVmBoot(FinalizeVmBootResult),
     InspectVm(VmInspection),
     StopVm(OperationResult),
@@ -774,6 +924,10 @@ pub struct JailerdConfig {
     /// Root-owned range from which the agent may request public SSH DNAT ports.
     pub ssh_public_port_start: u16,
     pub ssh_public_port_end: u16,
+    pub template_budget_bytes: u64,
+    pub minimum_free_space_bytes: u64,
+    pub store_gc_grace_seconds: u64,
+    pub legacy_template_retention_seconds: u64,
 }
 
 impl Default for JailerdConfig {
@@ -798,6 +952,10 @@ impl Default for JailerdConfig {
             guest_network_pool: DEFAULT_GUEST_NETWORK_POOL.to_owned(),
             ssh_public_port_start: DEFAULT_SSH_PUBLIC_PORT_START,
             ssh_public_port_end: DEFAULT_SSH_PUBLIC_PORT_END,
+            template_budget_bytes: 96 * 1024 * 1024 * 1024,
+            minimum_free_space_bytes: 128 * 1024 * 1024 * 1024,
+            store_gc_grace_seconds: 60 * 60,
+            legacy_template_retention_seconds: 7 * 24 * 60 * 60,
         }
     }
 }
@@ -919,6 +1077,12 @@ pub enum ValidationError {
     InvalidTemplateRuntimeSource,
     #[error("launch_vm_v2 boot descriptors must exactly reference one prepared image template")]
     InvalidPreparedLaunchArtifact,
+    #[error("chunk-cache root must be a trusted non-template relative directory")]
+    InvalidChunkCacheRoot,
+    #[error("chunk manifest source must match the requested manifest digest")]
+    InvalidChunkManifestSource,
+    #[error("launch_vm_v3 requires one verified read-only tools disk")]
+    InvalidToolsDisk,
     #[error("VM selector must contain either a generation or a run/VM logical ID")]
     InvalidVmSelector,
     #[error("path must be absolute: {0}")]
@@ -945,6 +1109,8 @@ pub enum ValidationError {
     InvalidFileSizeLimit,
     #[error("boot CPU lease duration must be within 1..=45000 milliseconds")]
     InvalidBootCpuLease,
+    #[error("template/chunk store garbage-collection limits must be positive")]
+    InvalidStoreGcPolicy,
 }
 
 #[derive(Debug, Error)]

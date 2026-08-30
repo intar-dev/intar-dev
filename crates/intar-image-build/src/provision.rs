@@ -21,7 +21,6 @@ const INTAR_RUN_CLI_PATH: &str = "/usr/local/bin/intar";
 const INTAR_RUN_CLI_COMPLETION_PATH: &str = "/usr/share/intar/completions/intar.bash";
 const INTAR_BASHRC_PATH: &str = "/etc/bash.bashrc";
 const INTAR_SCENARIO_SUPERVISOR_PATH: &str = "/usr/local/bin/intar-scenario-supervisor.sh";
-const INTAR_BOOTSTRAP_SCRIPT_PATH: &str = "/usr/local/bin/intar-bootstrap.sh";
 const EPHEMERAL_APT_CONFIG_PATH: &str = "/etc/apt/apt.conf.d/99intar-ephemeral";
 const KINO_RUNTIME_CONFIG_PATH: &str = "/run/intar/kino.hcl";
 const KINO_CONTROL_SOCKET_PATH: &str = "/run/intar/kino-control.sock";
@@ -52,6 +51,12 @@ pub struct RuntimeActivationInput<'a> {
     pub requires_kubernetes_modules: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GuestToolsDelivery {
+    ReadOnlyDisk,
+    StagedKino,
+}
+
 /// Render the root-run activation script shared by scenario and KVM workshop
 /// images. The caller must stage the Kino binary at `/tmp/kino` first.
 pub fn render_runtime_activation_script(input: RuntimeActivationInput<'_>) -> Result<String> {
@@ -66,6 +71,7 @@ pub fn render_runtime_activation_script(input: RuntimeActivationInput<'_>) -> Re
         input.motd,
         input.cpu_millis,
         input.requires_kubernetes_modules,
+        GuestToolsDelivery::StagedKino,
     )?;
     Ok(script)
 }
@@ -256,6 +262,7 @@ fn append_script_body(
         scenario_motd,
         vm.cpu_millis,
         requires_kubernetes_modules,
+        GuestToolsDelivery::ReadOnlyDisk,
     )?;
     append_scenario_image_finalization(script)?;
     append_final_cleanup(script)
@@ -271,6 +278,7 @@ fn append_runtime_activation(
     motd: &str,
     cpu_millis: u32,
     requires_kubernetes_modules: bool,
+    guest_tools_delivery: GuestToolsDelivery,
 ) -> Result<()> {
     append_runtime_assets(
         script,
@@ -278,6 +286,7 @@ fn append_runtime_activation(
         motd,
         cpu_millis,
         requires_kubernetes_modules,
+        guest_tools_delivery,
     )?;
     append_ssh_runtime_gate(script)
 }
@@ -537,9 +546,25 @@ fn append_step_scripts(script: &mut String, step_scripts: &[GeneratedStepScript]
 fn append_apt_cleanup_config(script: &mut String) -> Result<()> {
     // Remove unnecessary packages to reduce image size
     writeln!(script, "log_phase package_cleanup start").context("format error")?;
+    writeln!(script, "package_was_requested() {{").context("format error")?;
+    writeln!(script, "  local wanted=\"$1\" package").context("format error")?;
+    writeln!(script, "  for package in \"${{required_packages[@]}}\"; do")
+        .context("format error")?;
+    writeln!(script, "    [ \"$package\" = \"$wanted\" ] && return 0").context("format error")?;
+    writeln!(script, "  done").context("format error")?;
+    writeln!(script, "  return 1").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script, "slim_base_packages=()").context("format error")?;
+    writeln!(script, "for package in python3 zstd; do").context("format error")?;
     writeln!(
         script,
-        "DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge man-db manpages vim-common vim-tiny popularity-contest installation-report laptop-detect 2>/dev/null || true"
+        "  if ! package_was_requested \"$package\"; then slim_base_packages+=(\"$package\"); fi"
+    )
+    .context("format error")?;
+    writeln!(script, "done").context("format error")?;
+    writeln!(
+        script,
+        "DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge man-db manpages vim-common vim-tiny popularity-contest installation-report laptop-detect \"${{slim_base_packages[@]}}\" 2>/dev/null || true"
     )
     .context("format error")?;
     writeln!(script, "apt-get autoremove -y --purge || true").context("format error")?;
@@ -651,7 +676,7 @@ fn append_final_cleanup(script: &mut String) -> Result<()> {
     writeln!(script, "apt-get clean || true").context("format error")?;
     writeln!(
         script,
-        "rm -rf /usr/share/doc/* /usr/share/man/* /tmp/* /var/tmp/* || true"
+        "rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /tmp/* /var/tmp/* || true"
     )
     .context("format error")?;
     writeln!(script, "journalctl --rotate || true").context("format error")?;

@@ -86,3 +86,22 @@ export function hostSupportsRunCliV1(
     report?.capabilities?.supports_run_cli_completion_v1 === true
   );
 }
+
+export function hostSupportsSpeedRedesign(
+  report:
+    | {
+        capabilities?: {
+          supports_raw_chunks_v1?: unknown;
+          supports_scenario_guest_tools_v1?: unknown;
+          supports_jailer_v3?: unknown;
+        };
+      }
+    | null
+    | undefined,
+): boolean {
+  return (
+    report?.capabilities?.supports_raw_chunks_v1 === true &&
+    report.capabilities.supports_scenario_guest_tools_v1 === true &&
+    report.capabilities.supports_jailer_v3 === true
+  );
+}

@@ -1,19 +1,18 @@
 import {
   type ScenarioHintManifestV3,
-  type ScenarioManifestV3,
+  type ScenarioManifestV4,
   type ScenarioProbeManifestV3,
-  type ScenarioVmManifestV3,
+  type ScenarioVmManifestV4,
 } from "@/generated/catalog";
-import { bootArtifactObjectMatchesSha, imageObjectMatchesSha } from "./agent";
+import { bootArtifactObjectMatchesSha } from "./agent";
+import { imageManifestObjectKey } from "./chunks";
 import {
   bootArtifactSha256s,
   artifactObjectKey,
   jsonResponse,
   sha256Hex,
-  registryImageKey,
   normalizeSha256,
-  imageObjectKey,
-  textEncoder,
+  registryImageKey,
   isRecord,
   isSafeRegistrySlug,
   isImageKey,
@@ -44,16 +43,15 @@ export type PublishedBootArtifact = {
 export type PreparedVmImage = {
   vmName: string;
   imageKey: string;
-  imageSha256: string;
+  imageId: string;
+  chunkManifestSha256: string;
   objectKey: string;
   bytes: number;
-  reused: boolean;
-  payload: ArrayBuffer | null;
 };
 
 export type PublishedVmImage = {
   image_key: string;
-  image_sha256: string;
+  image_id: string;
   object_key: string;
   bytes: number;
   reused: boolean;
@@ -62,7 +60,7 @@ export type PublishedVmImage = {
 export async function prepareBootArtifacts(
   env: Cloudflare.Env,
   form: FormData,
-  manifest: ScenarioManifestV3,
+  manifest: ScenarioManifestV4,
 ): Promise<
   | {
       ok: true;
@@ -140,66 +138,42 @@ export async function prepareBootArtifacts(
 
 export async function prepareVmImages(
   env: Cloudflare.Env,
-  form: FormData,
-  manifest: ScenarioManifestV3,
+  _form: FormData,
+  manifest: ScenarioManifestV4,
 ): Promise<
   { ok: true; prepared: PreparedVmImage[] } | { ok: false; response: Response }
 > {
   const prepared: PreparedVmImage[] = [];
   for (const vm of manifest.vms) {
     const imageKey = registryImageKey(vm.image_key);
-    const expectedSha256 = normalizeSha256(vm.image_sha256);
-    if (!expectedSha256) {
+    const imageId = normalizeSha256(vm.image_id);
+    const chunkManifestSha256 = normalizeSha256(vm.chunk_manifest_sha256);
+    if (!imageId || !chunkManifestSha256) {
       return {
         ok: false,
         response: jsonResponse(
-          { error: `invalid image_sha256 for vm ${vm.name}` },
+          { error: `invalid chunked image identity for vm ${vm.name}` },
           400,
         ),
       };
     }
 
-    const objectKey = imageObjectKey(imageKey, expectedSha256);
-    const file = imageFileForVm(form, vm);
-    if (!file) {
-      // Large images are uploaded ahead of publish via /registry/v1/uploads;
-      // accept the manifest when the content-addressed object already exists.
-      const existing = await env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey);
-      if (imageObjectMatchesSha(existing, imageKey, expectedSha256)) {
-        prepared.push({
-          vmName: vm.name.trim(),
-          imageKey,
-          imageSha256: expectedSha256,
-          objectKey,
-          bytes: existing.size,
-          reused: true,
-          payload: null,
-        });
-        continue;
-      }
+    const objectKey = imageManifestObjectKey(chunkManifestSha256);
+    const existing = await env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey);
+    if (
+      !existing ||
+      existing.customMetadata?.manifest_sha256 !== chunkManifestSha256 ||
+      existing.customMetadata?.image_id !== imageId ||
+      existing.customMetadata?.virtual_size_bytes !==
+        String(vm.image_virtual_size_bytes)
+    ) {
       return {
         ok: false,
         response: jsonResponse(
           {
-            error: `missing image for vm ${vm.name}: attach it to the form or upload it via /registry/v1/uploads first`,
+            error: `missing verified chunk manifest for vm ${vm.name}`,
           },
-          400,
-        ),
-      };
-    }
-
-    const payload = await file.arrayBuffer();
-    const actualSha256 = await sha256Hex(payload);
-    if (actualSha256 !== expectedSha256) {
-      return {
-        ok: false,
-        response: jsonResponse(
-          {
-            error: `sha256 mismatch for vm ${vm.name}`,
-            expected: expectedSha256,
-            actual: actualSha256,
-          },
-          422,
+          409,
         ),
       };
     }
@@ -207,11 +181,10 @@ export async function prepareVmImages(
     prepared.push({
       vmName: vm.name.trim(),
       imageKey,
-      imageSha256: expectedSha256,
+      imageId,
+      chunkManifestSha256,
       objectKey,
-      bytes: payload.byteLength,
-      reused: false,
-      payload,
+      bytes: vm.image_virtual_size_bytes,
     });
   }
   return { ok: true, prepared };
@@ -237,43 +210,25 @@ export async function storePreparedBootArtifacts(
 }
 
 export async function storePreparedVmImages(
-  env: Cloudflare.Env,
+  _env: Cloudflare.Env,
   images: PreparedVmImage[],
-  scenarioId: string,
+  _scenarioId: string,
 ): Promise<PublishedVmImage[]> {
-  const uploaded: PublishedVmImage[] = [];
-  for (const image of images) {
-    if (image.payload) {
-      await env.VM_IMAGE_REGISTRY_BUCKET.put(image.objectKey, image.payload, {
-        httpMetadata: { contentType: "application/octet-stream" },
-        customMetadata: {
-          image_key: image.imageKey,
-          image_sha256: image.imageSha256,
-          scenario_id: scenarioId,
-          vm_name: image.vmName,
-        },
-      });
-    }
-    await env.VM_IMAGE_REGISTRY_BUCKET.put(
-      `${image.objectKey}.sha256`,
-      textEncoder.encode(`${image.imageSha256}  ${image.imageKey}.raw.zst\n`),
-      { httpMetadata: { contentType: "text/plain; charset=utf-8" } },
-    );
-    uploaded.push({
+  return images.map((image) =>
+    ({
       image_key: image.imageKey,
-      image_sha256: image.imageSha256,
+      image_id: image.imageId,
       object_key: image.objectKey,
       bytes: image.bytes,
-      reused: image.reused,
-    });
-  }
-  return uploaded;
+      reused: true,
+    }) satisfies PublishedVmImage,
+  );
 }
 
 export async function readManifest(
   value: FormDataEntryValue | null,
 ): Promise<
-  { ok: true; value: ScenarioManifestV3 } | { ok: false; response: Response }
+  { ok: true; value: ScenarioManifestV4 } | { ok: false; response: Response }
 > {
   if (!value) {
     return {
@@ -298,14 +253,14 @@ export async function readManifest(
       response: jsonResponse({ error: "manifest is not a JSON object" }, 400),
     };
   }
-  return { ok: true, value: parsed as unknown as ScenarioManifestV3 };
+  return { ok: true, value: parsed as unknown as ScenarioManifestV4 };
 }
 
 export function validateManifest(
-  manifest: ScenarioManifestV3,
+  manifest: ScenarioManifestV4,
 ): Response | null {
-  if (manifest.schema_version !== 3) {
-    return jsonResponse({ error: "manifest schema_version must be 3" }, 400);
+  if (manifest.schema_version !== 4) {
+    return jsonResponse({ error: "manifest schema_version must be 4" }, 400);
   }
   const scenarioId = manifest.scenario_id?.trim();
   if (!scenarioId) {
@@ -358,9 +313,12 @@ export function validateManifest(
         400,
       );
     }
-    if (!normalizeSha256(vm.image_sha256)) {
+    if (
+      !normalizeSha256(vm.image_id) ||
+      !normalizeSha256(vm.chunk_manifest_sha256)
+    ) {
       return jsonResponse(
-        { error: "manifest contains invalid image sha256" },
+        { error: "manifest contains invalid chunked image identity" },
         400,
       );
     }
@@ -376,7 +334,8 @@ export function validateManifest(
     const initrdSha256 = normalizeSha256(vm.boot?.initrd_sha256 ?? "");
     const bootCmdline = vm.boot?.cmdline?.trim() ?? "";
     if (
-      vm.image_format !== "raw_zstd" ||
+      vm.image_format !== "raw_chunks_v1" ||
+      vm.guest_bootstrap_abi !== 1 ||
       typeof vm.image_virtual_size_bytes !== "number" ||
       !Number.isSafeInteger(vm.image_virtual_size_bytes) ||
       vm.image_virtual_size_bytes <= 0 ||
@@ -402,8 +361,8 @@ export function isDirectBootCmdline(value: string): boolean {
 }
 
 export function normalizePublishManifest(
-  manifest: ScenarioManifestV3,
-): ScenarioManifestV3 {
+  manifest: ScenarioManifestV4,
+): ScenarioManifestV4 {
   const scenarioId = manifest.scenario_id.trim();
   return {
     ...manifest,
@@ -419,7 +378,10 @@ export function normalizePublishManifest(
           scenario: scenarioId,
           vm: vmName,
         },
-        image_sha256: normalizeSha256(vm.image_sha256) ?? vm.image_sha256,
+        image_id: normalizeSha256(vm.image_id) ?? vm.image_id,
+        chunk_manifest_sha256:
+          normalizeSha256(vm.chunk_manifest_sha256) ??
+          vm.chunk_manifest_sha256,
         boot: {
           ...vm.boot,
           kernel_sha256:
@@ -434,7 +396,7 @@ export function normalizePublishManifest(
 }
 
 export function hasValidScenarioMetadata(
-  manifest: ScenarioManifestV3,
+  manifest: ScenarioManifestV4,
   scenarioId: string,
 ): boolean {
   return (
@@ -450,7 +412,7 @@ export function hasValidScenarioMetadata(
   );
 }
 
-export function hasValidVmResources(vm: ScenarioVmManifestV3): boolean {
+export function hasValidVmResources(vm: ScenarioVmManifestV4): boolean {
   return (
     isPositiveU32(vm.cpu_millis) &&
     isPositiveU16(vm.vcpu_count) &&
@@ -515,7 +477,7 @@ export function hasValidHintList(hints: ScenarioHintManifestV3[]): boolean {
 
 export function imageFileForVm(
   form: FormData,
-  vm: ScenarioVmManifestV3,
+  vm: ScenarioVmManifestV4,
 ): File | null {
   const field = form.get(`image:${vm.name}`);
   if (field instanceof File) return field;

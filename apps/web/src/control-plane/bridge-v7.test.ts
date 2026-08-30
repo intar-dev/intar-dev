@@ -1,26 +1,26 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type {
-  BridgeMessageV6,
+  BridgeMessageV7,
   BuildReportV1,
   HostDesiredStateV2,
   HostStateReportV2,
   VmReportV2,
 } from "@/generated/bridge";
 import {
-  parseBridgeMessageV6,
-  serializeBridgeMessageV6,
-} from "@/control-plane/bridge-v6";
+  parseBridgeMessageV7,
+  serializeBridgeMessageV7,
+} from "@/control-plane/bridge-v7";
 
-describe("bridge v6 protocol", () => {
+describe("bridge v7 protocol", () => {
   it("parses the generated sync request fixture", () => {
-    const fixture = readFixture("sync-request-v6.json");
-    expect(parseBridgeMessageV6(JSON.stringify(fixture))).toEqual(fixture);
+    const fixture = readFixture("sync-request-v7.json");
+    expect(parseBridgeMessageV7(JSON.stringify(fixture))).toEqual(fixture);
   });
 
-  it("serializes bridge messages as snake_case v6 JSON", () => {
-    const fixture = readFixture<BridgeMessageV6>("sync-request-v6.json");
-    expect(JSON.parse(serializeBridgeMessageV6(fixture))).toEqual(fixture);
+  it("serializes bridge messages as snake_case v7 JSON", () => {
+    const fixture = readFixture<BridgeMessageV7>("sync-request-v7.json");
+    expect(JSON.parse(serializeBridgeMessageV7(fixture))).toEqual(fixture);
   });
 
   it("parses desired state, state report, vm report, and build report envelopes", () => {
@@ -34,40 +34,40 @@ describe("bridge v6 protocol", () => {
     const buildReport = readFixture<BuildReportV1>("build-report-v1.json");
 
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "desired_state",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: desiredState.host_id,
           desired_state: desiredState,
         }),
       )?.type,
     ).toBe("desired_state");
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "state_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: hostReport.host_id,
           report: hostReport,
         }),
       )?.type,
     ).toBe("state_report");
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: vmReport,
         }),
       )?.type,
     ).toBe("vm_report");
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "build_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: buildReport.host_id,
           report: buildReport,
         }),
@@ -81,10 +81,10 @@ describe("bridge v6 protocol", () => {
     );
     hostReport.vms[0]!.run_id = "";
 
-    const parsed = parseBridgeMessageV6(
+    const parsed = parseBridgeMessageV7(
       JSON.stringify({
         type: "state_report",
-        protocol_version: 6,
+        protocol_version: 7,
         host_id: hostReport.host_id,
         report: hostReport,
       }),
@@ -99,7 +99,7 @@ describe("bridge v6 protocol", () => {
   it("parses client hello only with valid host capabilities", () => {
     const clientHello = {
       type: "client_hello",
-      protocol_version: 6,
+      protocol_version: 7,
       host_id: "host-alpha",
       agent_version: "0.1.0",
       role: "builder",
@@ -115,6 +115,9 @@ describe("bridge v6 protocol", () => {
         supports_reflink: true,
         supports_nftables: true,
         supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
         supports_boot_cpu_lease: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
@@ -124,10 +127,10 @@ describe("bridge v6 protocol", () => {
       },
     };
 
-    expect(parseBridgeMessageV6(JSON.stringify(clientHello))?.type).toBe(
+    expect(parseBridgeMessageV7(JSON.stringify(clientHello))?.type).toBe(
       "client_hello",
     );
-    const legacy = parseBridgeMessageV6(JSON.stringify(clientHello));
+    const legacy = parseBridgeMessageV7(JSON.stringify(clientHello));
     expect(
       legacy?.type === "client_hello"
         ? legacy.capabilities.supports_run_cli_v1
@@ -138,7 +141,7 @@ describe("bridge v6 protocol", () => {
         ? legacy.capabilities.supports_run_cli_completion_v1
         : null,
     ).toBe(false);
-    const capable = parseBridgeMessageV6(
+    const capable = parseBridgeMessageV7(
       JSON.stringify({
         ...clientHello,
         capabilities: {
@@ -160,7 +163,7 @@ describe("bridge v6 protocol", () => {
         : null,
     ).toBe(true);
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           ...clientHello,
           capabilities: {
@@ -171,7 +174,7 @@ describe("bridge v6 protocol", () => {
       ),
     ).toBeNull();
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           ...clientHello,
           capabilities: {
@@ -182,7 +185,7 @@ describe("bridge v6 protocol", () => {
       ),
     ).toBeNull();
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           ...clientHello,
           capabilities: {
@@ -200,10 +203,10 @@ describe("bridge v6 protocol", () => {
     );
     delete report.capabilities.supports_run_cli_v1;
     delete report.capabilities.supports_run_cli_completion_v1;
-    const parsed = parseBridgeMessageV6(
+    const parsed = parseBridgeMessageV7(
       JSON.stringify({
         type: "state_report",
-        protocol_version: 6,
+        protocol_version: 7,
         host_id: report.host_id,
         report,
       }),
@@ -220,9 +223,9 @@ describe("bridge v6 protocol", () => {
     ).toBe(false);
   });
 
-  it("rejects non-v6 protocol envelopes", () => {
+  it("rejects non-v7 protocol envelopes", () => {
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "sync_request",
           protocol_version: 4,
@@ -233,17 +236,17 @@ describe("bridge v6 protocol", () => {
     ).toBeNull();
   });
 
-  it("rejects desired states missing required v6 arrays", () => {
+  it("rejects desired states missing required v7 arrays", () => {
     const desiredState = readFixture<HostDesiredStateV2>(
       "host-desired-state-v2.json",
     );
     const { builds: _builds, ...missingBuilds } = desiredState;
 
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "desired_state",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: desiredState.host_id,
           desired_state: missingBuilds,
         }),
@@ -256,18 +259,18 @@ describe("bridge v6 protocol", () => {
       "host-desired-state-v2.json",
     );
     const badCachedImage = cloneFixture(desiredState);
-    badCachedImage.cached_images[0]!.image_sha256 = "not-a-sha256";
+    badCachedImage.cached_images[0]!.image_id = "not-a-sha256";
     const badDesiredVm = cloneFixture(desiredState);
-    badDesiredVm.vms[0]!.image_sha256 = "not-a-sha256";
+    badDesiredVm.vms[0]!.image_id = "not-a-sha256";
     const badBuild = cloneFixture(desiredState);
     badBuild.builds[0]!.content_hash = "not-a-sha256";
 
     for (const candidate of [badCachedImage, badDesiredVm, badBuild]) {
       expect(
-        parseBridgeMessageV6(
+        parseBridgeMessageV7(
           JSON.stringify({
             type: "desired_state",
-            protocol_version: 6,
+            protocol_version: 7,
             host_id: desiredState.host_id,
             desired_state: candidate,
           }),
@@ -283,10 +286,10 @@ describe("bridge v6 protocol", () => {
     const zeroCpu = cloneFixture(desiredState);
     zeroCpu.vms[0]!.resources.cpu_millis = 0;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "desired_state",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: desiredState.host_id,
           desired_state: zeroCpu,
         }),
@@ -297,10 +300,10 @@ describe("bridge v6 protocol", () => {
     const badQuota = cloneFixture(vmReport);
     badQuota.resource_state!.cpu_quota_us = 0;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: badQuota,
         }),
@@ -310,10 +313,10 @@ describe("bridge v6 protocol", () => {
     const badSandbox = cloneFixture(vmReport);
     badSandbox.sandbox!.systemd_unit = "";
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: badSandbox,
         }),
@@ -324,10 +327,10 @@ describe("bridge v6 protocol", () => {
   it("rejects report envelopes with a mismatched host id", () => {
     const vmReport = readFixture<VmReportV2>("vm-report-v2.json");
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: "host-bravo",
           report: vmReport,
         }),
@@ -340,10 +343,10 @@ describe("bridge v6 protocol", () => {
     const readyWithoutTarget = cloneFixture(vmReport);
     delete readyWithoutTarget.terminal!.target;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: readyWithoutTarget,
         }),
@@ -353,10 +356,10 @@ describe("bridge v6 protocol", () => {
     const pendingWithTarget = cloneFixture(vmReport);
     pendingWithTarget.terminal!.state = "pending";
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: pendingWithTarget,
         }),
@@ -365,10 +368,10 @@ describe("bridge v6 protocol", () => {
 
     const { terminal: _terminal, ...missingTerminal } = vmReport;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: missingTerminal,
         }),
@@ -378,10 +381,10 @@ describe("bridge v6 protocol", () => {
     const activeWithoutRuntime = cloneFixture(vmReport);
     activeWithoutRuntime.runtime_constraints = null;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: activeWithoutRuntime,
         }),
@@ -397,10 +400,10 @@ describe("bridge v6 protocol", () => {
     };
     pending.runtime_constraints = null;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: pending,
         }),
@@ -413,10 +416,10 @@ describe("bridge v6 protocol", () => {
     const unverifiedSteady = cloneFixture(vmReport);
     delete unverifiedSteady.runtime_constraints!.quota_verified_at_unix_ms;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: unverifiedSteady,
         }),
@@ -426,10 +429,10 @@ describe("bridge v6 protocol", () => {
     const zeroTimestamp = cloneFixture(vmReport);
     zeroTimestamp.runtime_constraints!.quota_verified_at_unix_ms = 0;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: zeroTimestamp,
         }),
@@ -440,10 +443,10 @@ describe("bridge v6 protocol", () => {
     bootBurst.runtime_constraints!.phase = "boot_burst";
     delete bootBurst.runtime_constraints!.quota_verified_at_unix_ms;
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: bootBurst,
         }),
@@ -456,10 +459,10 @@ describe("bridge v6 protocol", () => {
     const { probes: _probes, ...missingProbes } = vmReport;
 
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "vm_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: vmReport.host_id,
           report: missingProbes,
         }),
@@ -470,10 +473,10 @@ describe("bridge v6 protocol", () => {
   it("rejects build reports with unsupported phases", () => {
     const buildReport = readFixture<BuildReportV1>("build-report-v1.json");
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "build_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: buildReport.host_id,
           report: {
             ...buildReport,
@@ -487,10 +490,10 @@ describe("bridge v6 protocol", () => {
   it("rejects build reports with malformed content hashes", () => {
     const buildReport = readFixture<BuildReportV1>("build-report-v1.json");
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "build_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: buildReport.host_id,
           report: {
             ...buildReport,
@@ -508,10 +511,10 @@ describe("bridge v6 protocol", () => {
     const { vms: _vms, ...missingVms } = hostReport;
 
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "state_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: hostReport.host_id,
           report: missingVms,
         }),
@@ -524,10 +527,10 @@ describe("bridge v6 protocol", () => {
       "host-state-report-v2.json",
     );
     expect(
-      parseBridgeMessageV6(
+      parseBridgeMessageV7(
         JSON.stringify({
           type: "state_report",
-          protocol_version: 6,
+          protocol_version: 7,
           host_id: hostReport.host_id,
           report: {
             ...hostReport,

@@ -4,6 +4,5 @@
   "arch": "x86_64",
   "rev": "0123456789abcdef0123456789abcdef01234567",
   "content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-  "bundle_ref": "builds/bundles/0123456789abcdef0123456789abcdef01234567.tar.gz",
-  "kino_version": "0.4.0"
+  "bundle_ref": "builds/bundles/0123456789abcdef0123456789abcdef01234567.tar.gz"
 }

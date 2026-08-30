@@ -25,11 +25,12 @@ describe("desired state", () => {
       hostId: "host-alpha",
       nowUnixMs: 1_762_041_600_000,
     })).toEqual({
-      schema_version: 3,
+      schema_version: 4,
       host_id: "host-alpha",
       version: 0,
       generated_at_unix_ms: 1_762_041_600_000,
       cached_images: [],
+      cached_guest_tools: [],
       vms: [],
       builds: [],
     });
@@ -99,7 +100,10 @@ describe("desired state", () => {
       { nowUnixMs: 1_762_041_660_000 },
     );
 
-    expect(next.cached_images).toEqual([cachedImage("webserver", "sha-b")]);
+    expect(next.cached_images).toEqual([
+      cachedImage("webserver", "sha-a"),
+      cachedImage("webserver", "sha-b"),
+    ]);
     expect(next.vms).toEqual([desiredVm("run-a", "webserver", "sha-b")]);
     expect(next.builds).toEqual([desiredBuild("build-a", "hash-b")]);
   });
@@ -195,6 +199,7 @@ describe("desired state", () => {
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example",
         " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example ",
       ],
+      guestTools: guestTools(),
     })).toEqual({
       run_id: "run-a",
       vm_name: "webserver",
@@ -204,8 +209,9 @@ describe("desired state", () => {
         vm: "webserver",
         arch: "x86_64",
       },
-      image_sha256:
+      image_id:
         "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+      guest_tools: guestTools(),
       resources: {
         cpu_millis: 1_000,
         vcpu_count: 1,
@@ -236,6 +242,7 @@ describe("desired state", () => {
       sshAuthorizedKeysOpenssh: [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example",
       ],
+      guestTools: guestTools(),
     })).toBeNull();
   });
 
@@ -259,6 +266,7 @@ describe("desired state", () => {
       vm,
       nowUnixMs: 1_762_041_600_000,
       sshAuthorizedKeysOpenssh: [],
+      guestTools: guestTools(),
     })).toBeNull();
   });
 });
@@ -270,7 +278,7 @@ function hostDesiredState(input: {
   builds?: DesiredBuildV1[];
 }): HostDesiredStateV2 {
   return {
-    schema_version: 3,
+    schema_version: 4,
     host_id: "host-alpha",
     version: input.version,
     generated_at_unix_ms: 1_762_041_600_000,
@@ -291,7 +299,6 @@ function desiredBuild(
     rev: "0123456789abcdef0123456789abcdef01234567",
     content_hash: contentHash,
     bundle_ref: "builds/bundles/0123456789abcdef0123456789abcdef01234567.tar.gz",
-    kino_version: "0.4.0",
   };
 }
 
@@ -302,7 +309,7 @@ function cachedImage(vmName: string, sha256: string): DesiredCachedImageV1 {
       vm: vmName,
       arch: "x86_64",
     },
-    image_sha256: sha256,
+    image_id: sha256,
   };
 }
 
@@ -320,7 +327,8 @@ function desiredVm(
       vm: vmName,
       arch: "x86_64",
     },
-    image_sha256: sha256,
+    image_id: sha256,
+    guest_tools: guestTools(),
     resources: {
       cpu_millis: 1_000,
       vcpu_count: 1,
@@ -331,6 +339,15 @@ function desiredVm(
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example",
     ],
     lease_expires_at_unix_ms: 1_762_045_200_000,
+  };
+}
+
+function guestTools() {
+  return {
+    tools_disk_sha256: "1".repeat(64),
+    tools_disk_size_bytes: 64 * 1024 * 1024,
+    kino_sha256: "2".repeat(64),
+    bootstrap_abi: 1,
   };
 }
 

@@ -8,79 +8,115 @@ pub(super) async fn evict_cache_if_needed(
     let Some(max_bytes) = cache.max_bytes else {
         return Ok(());
     };
-
-    let access_rows = db.load_image_cache_access().await?;
-    let mut entries = Vec::new();
-    for row in &access_rows {
-        let raw_path = cached_raw_image_path_for_key(cache_root, &row.image_key, &row.image_sha256);
-        match tokio::fs::metadata(&raw_path).await {
-            Ok(metadata) => entries.push(CacheEntry {
-                sha: row.image_sha256.clone(),
-                bytes: file_allocated_bytes(&metadata),
-                last_accessed_at_ms: row.last_accessed_at_ms,
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                db.delete_image_cache_access(row.image_sha256.clone())
-                    .await?;
-            }
-            Err(error) => {
-                warn!(path = %raw_path.display(), error = %error, "failed to stat raw cache entry during eviction");
-            }
-        }
-    }
-
     let protected = protected_image_shas(db).await;
-    let artifact_bytes = artifact_cache_bytes(cache_root).await?;
-    let raw_budget = max_bytes.saturating_sub(artifact_bytes);
-    let evictions = select_evictions(&entries, &protected, raw_budget);
-    let evicted = evictions.iter().cloned().collect::<HashSet<_>>();
-
-    for sha in &evictions {
-        let Some(row) = access_rows.iter().find(|row| row.image_sha256 == *sha) else {
-            continue;
-        };
-        let raw_path = cached_raw_image_path_for_key(cache_root, &row.image_key, sha);
-        let marker_path = raw_cache_marker_path_for_key(cache_root, &row.image_key, sha);
-        let bytes = tokio::fs::metadata(&raw_path)
-            .await
-            .map(|metadata| file_allocated_bytes(&metadata))
-            .unwrap_or(0);
-        remove_raw_cache_entry(&raw_path, &marker_path).await?;
-        remove_launch_descriptor_if_matching(cache_root, &row.image_key, sha).await?;
-        db.delete_image_cache_access(sha.clone()).await?;
-        info!(
-            image = %row.image_key,
-            sha = %sha,
-            bytes,
-            reason = "lru_over_budget",
-            "evicted raw image cache entry"
-        );
-    }
-
-    let retained_artifacts = access_rows
-        .iter()
-        .filter(|row| !evicted.contains(&row.image_sha256))
-        .flat_map(|row| [row.kernel_sha256.clone(), row.initrd_sha256.clone()])
-        .collect::<HashSet<_>>();
-    evict_unreferenced_artifacts(cache_root, &retained_artifacts).await?;
-
-    let remaining_raw = entries
-        .iter()
-        .filter(|entry| !evicted.contains(&entry.sha))
-        .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
-    let remaining_artifacts = artifact_cache_bytes(cache_root).await?;
-    let remaining = remaining_raw.saturating_add(remaining_artifacts);
+    let eviction_root = cache_root.to_path_buf();
+    let protected_for_eviction = protected.clone();
+    let remaining = tokio::task::spawn_blocking(move || {
+        evict_chunk_cache_files(&eviction_root, &protected_for_eviction, max_bytes)
+    })
+    .await
+    .context("chunk cache eviction worker panicked")??;
     if remaining > max_bytes {
         warn!(
             cache_root = %cache_root.display(),
             max_bytes,
             remaining_bytes = remaining,
             protected_count = protected.len(),
-            "image cache remains over budget because no more unprotected entries are evictable"
+            "chunk cache remains over budget because live or recent files are protected"
         );
     }
-
     Ok(())
+}
+
+const CHUNK_CACHE_EVICTION_GRACE: Duration = Duration::from_secs(60 * 60);
+
+fn evict_chunk_cache_files(
+    cache_root: &Path,
+    protected_image_ids: &HashSet<String>,
+    max_bytes: u64,
+) -> Result<u64> {
+    let mut protected_paths = HashSet::new();
+    let mut descriptors = Vec::new();
+    collect_cache_files(&cache_root.join("launch-v3"), &mut descriptors)?;
+    for (descriptor_path, _) in descriptors {
+        if descriptor_path.extension().and_then(|value| value.to_str()) == Some("json") {
+            let Ok(bytes) = std::fs::read(&descriptor_path) else {
+                continue;
+            };
+            let Ok(descriptor) = serde_json::from_slice::<ChunkedLaunchDescriptorV1>(&bytes) else {
+                continue;
+            };
+            if !protected_image_ids.contains(&descriptor.image_id) {
+                continue;
+            }
+            protected_paths.insert(descriptor_path);
+            protected_paths.insert(descriptor.chunk_manifest_path.clone());
+            protected_paths.insert(descriptor.kernel_path.clone());
+            protected_paths.insert(descriptor.initrd_path.clone());
+            if let Ok(manifest) = serde_json::from_slice::<ImageChunkManifestV1>(
+                &std::fs::read(&descriptor.chunk_manifest_path).unwrap_or_default(),
+            ) {
+                for chunk in manifest.chunks {
+                    protected_paths.insert(
+                        descriptor
+                            .chunk_cache_root
+                            .join(format!("{}.raw.zst", chunk.raw_sha256)),
+                    );
+                }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect_cache_files(cache_root, &mut files)?;
+    let mut total = files.iter().fold(0_u64, |sum, (_, metadata)| {
+        sum.saturating_add(file_allocated_bytes(metadata))
+    });
+    files.sort_by_key(|(_, metadata)| metadata.modified().unwrap_or(UNIX_EPOCH));
+    for (path, metadata) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if protected_paths.contains(&path)
+            || file_within_grace(&metadata, CHUNK_CACHE_EVICTION_GRACE)
+        {
+            continue;
+        }
+        let bytes = file_allocated_bytes(&metadata);
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(bytes);
+        }
+    }
+    Ok(total)
+}
+
+fn collect_cache_files(
+    directory: &Path,
+    files: &mut Vec<(PathBuf, std::fs::Metadata)>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            collect_cache_files(&entry.path(), files)?;
+        } else if metadata.is_file() {
+            files.push((entry.path(), metadata));
+        }
+    }
+    Ok(())
+}
+
+fn file_within_grace(metadata: &std::fs::Metadata, grace: Duration) -> bool {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_none_or(|age| age < grace)
 }
 
 pub(super) async fn protected_image_shas(db: &Db) -> HashSet<String> {
@@ -113,16 +149,17 @@ pub(super) async fn protected_image_shas(db: &Db) -> HashSet<String> {
     };
 
     for image in desired.cached_images {
-        protected.insert(image.image_sha256);
+        protected.insert(image.image_id);
     }
     for vm in desired.vms {
         if vm.desired_phase == intar_contracts::bridge::DesiredVmPhase::Running {
-            protected.insert(vm.image_sha256);
+            protected.insert(vm.image_id);
         }
     }
     protected
 }
 
+#[cfg(test)]
 pub(super) async fn artifact_cache_bytes(cache_root: &Path) -> Result<u64> {
     let artifact_dir = cache_root.join("artifacts");
     let mut total = 0_u64;
@@ -155,6 +192,7 @@ pub(super) async fn artifact_cache_bytes(cache_root: &Path) -> Result<u64> {
     Ok(total)
 }
 
+#[cfg(test)]
 pub(super) async fn evict_unreferenced_artifacts(
     cache_root: &Path,
     retained_artifacts: &HashSet<String>,
@@ -211,8 +249,10 @@ pub(super) async fn evict_unreferenced_artifacts(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) const ARTIFACT_EVICTION_GRACE: Duration = Duration::from_secs(15 * 60);
 
+#[cfg(test)]
 pub(super) fn artifact_within_eviction_grace(metadata: &std::fs::Metadata) -> bool {
     let Ok(modified) = metadata.modified() else {
         // Without a modification time we cannot prove the artifact is old;
@@ -249,6 +289,7 @@ pub(super) fn file_allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn ensure_cached_raw_entry(
     image: &RegistryImageRecord,
     registry: &ImageRegistryConfig,
@@ -384,6 +425,7 @@ pub(super) async fn ensure_cached_raw_entry(
     })
 }
 
+#[cfg(test)]
 pub(super) async fn ensure_cached_entry(
     image: &RegistryImageRecord,
     registry: &ImageRegistryConfig,

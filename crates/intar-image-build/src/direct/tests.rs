@@ -23,7 +23,6 @@ use super::{
     prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
 };
 use crate::config::QemuBuildConfig;
-use crate::kino::KinoArtifact;
 
 fn render_test_direct_build(directory: &TempDir, config: QemuBuildConfig) -> RenderedDirectBuild {
     render_test_direct_build_in_work_root(directory, config, directory.path().join(".work"))
@@ -88,10 +87,6 @@ base_image "trixie" {
         vm_name: "web".to_string(),
         config,
         base_image: catalog.base_image_by_name("trixie").unwrap().clone(),
-        kino: KinoArtifact {
-            binary_path: "/tmp/kino".into(),
-            version: "0.1.24".to_string(),
-        },
     })
     .unwrap()
 }

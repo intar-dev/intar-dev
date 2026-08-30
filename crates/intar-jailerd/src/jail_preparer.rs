@@ -51,6 +51,22 @@ impl JailPreparer for FileSystemJailPreparer {
         validate_prepared_launch_template(config, request)
     }
 
+    fn prepare_image_v3(
+        &mut self,
+        config: &JailerdConfig,
+        request: &PrepareChunkedImageV3Request,
+    ) -> Result<PreparedImageV3Result> {
+        prepare_chunked_image_template(config, request)
+    }
+
+    fn validate_prepared_launch_v3(
+        &mut self,
+        config: &JailerdConfig,
+        request: &LaunchVmV3Request,
+    ) -> Result<()> {
+        validate_prepared_chunked_launch(config, request)
+    }
+
     fn prepare(
         &mut self,
         config: &JailerdConfig,
@@ -87,6 +103,18 @@ impl JailPreparer for FileSystemJailPreparer {
             gid,
             Some(metadata),
         )
+    }
+
+    fn prepare_v3(
+        &mut self,
+        config: &JailerdConfig,
+        request: &VmLaunchRequest,
+        run_network: &RunNetworkResult,
+        generation: &ValidatedId,
+        uid: u32,
+        gid: u32,
+    ) -> Result<PreparedJail> {
+        self.prepare_v2(config, request, run_network, generation, uid, gid)
     }
 
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool> {

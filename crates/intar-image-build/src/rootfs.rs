@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, bail};
+use fs2::FileExt as _;
 use intar_image_scenario::BaseImageSpec;
 
 use crate::config::QemuBuildConfig;
@@ -18,6 +20,8 @@ const INITRAMFS_MODULES: &[&str] = &[
     "ext4",
     "crc32c",
 ];
+
+static BASE_ROOTFS_BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const BASE_RUNTIME_MODULES: &[&str] = &["nf_tables"];
 pub(crate) const KUBERNETES_RUNTIME_MODULES: &[&str] = &["overlay", "br_netfilter", "vxlan"];
@@ -38,6 +42,10 @@ const MASKED_UNITS: &[&str] = &[
     "apt-daily-upgrade.timer",
     "man-db.timer",
     "e2scrub_all.timer",
+    "dpkg-db-backup.timer",
+    "e2scrub_reap.service",
+    "systemd-pstore.service",
+    "sshd-keygen.service",
     "fstrim.timer",
     "logrotate.timer",
     "getty@.service",
@@ -89,11 +97,84 @@ pub fn ensure_base_rootfs(
         return Ok(base_rootfs_artifact_from_plan(&plan));
     }
 
-    prepare_rootfs_workspace(&plan)?;
-    run_command(&config.mmdebstrap_binary, &plan.mmdebstrap_args, None)
-        .context("mmdebstrap base rootfs build failed")?;
-    extract_boot_artifacts(&plan)?;
-    create_base_ext4(&plan, config)?;
+    let artifact_dir = plan
+        .paths
+        .base_ext4_path
+        .parent()
+        .context("base rootfs artifact path has no parent")?;
+    let artifact_parent = artifact_dir
+        .parent()
+        .context("base rootfs artifact directory has no parent")?;
+    fs::create_dir_all(artifact_parent).with_context(|| {
+        format!(
+            "failed to create base rootfs cache '{}'",
+            artifact_parent.display()
+        )
+    })?;
+    let artifact_name = artifact_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("base rootfs artifact directory has no UTF-8 name")?;
+    let lock_path = artifact_parent.join(format!(".{artifact_name}.lock"));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open base rootfs lock '{}'", lock_path.display()))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("failed to lock base rootfs '{}'", lock_path.display()))?;
+    if base_rootfs_artifact_exists(&plan) {
+        return Ok(base_rootfs_artifact_from_plan(&plan));
+    }
+    if artifact_dir.exists() {
+        fs::remove_dir_all(artifact_dir).with_context(|| {
+            format!(
+                "failed to remove incomplete base rootfs '{}'",
+                artifact_dir.display()
+            )
+        })?;
+    }
+
+    let sequence = BASE_ROOTFS_BUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging_name = format!(".{artifact_name}.build-{}-{sequence}", std::process::id());
+    let staging_artifact_dir = artifact_parent.join(&staging_name);
+    let staging_work_root = plan
+        .paths
+        .work_root
+        .parent()
+        .context("base rootfs work path has no parent")?
+        .join(staging_name);
+    let mut staging = plan.clone();
+    staging.paths.work_root = staging_work_root.clone();
+    staging.paths.rootfs_dir = staging_work_root.join("rootfs");
+    staging.paths.essential_hook_path = staging_work_root.join("essential-hook.sh");
+    staging.paths.customize_hook_path = staging_work_root.join("customize-hook.sh");
+    staging.paths.base_ext4_path = staging_artifact_dir.join("root.ext4");
+    staging.paths.kernel_path = staging_artifact_dir.join("vmlinuz");
+    staging.paths.initrd_path = staging_artifact_dir.join("initrd.img");
+    staging.mmdebstrap_args = render_mmdebstrap_args(base, &staging.paths);
+
+    let build_result = (|| -> Result<()> {
+        prepare_rootfs_workspace(&staging)?;
+        run_command(&config.mmdebstrap_binary, &staging.mmdebstrap_args, None)
+            .context("mmdebstrap base rootfs build failed")?;
+        extract_boot_artifacts(&staging)?;
+        create_base_ext4(&staging, config)?;
+        if !base_rootfs_artifact_exists(&staging) {
+            bail!("staged base rootfs artifact is incomplete");
+        }
+        fs::rename(&staging_artifact_dir, artifact_dir).with_context(|| {
+            format!("failed to publish base rootfs '{}'", artifact_dir.display())
+        })?;
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&staging_work_root);
+    if build_result.is_err() {
+        let _ = fs::remove_dir_all(&staging_artifact_dir);
+    }
+    build_result?;
     Ok(base_rootfs_artifact_from_plan(&plan))
 }
 
@@ -291,7 +372,7 @@ fn ext4_image_size_bytes(rootfs_dir: &Path) -> Result<u64> {
         .saturating_mul(13)
         .checked_div(10)
         .unwrap_or(apparent_size);
-    let min_size = 512 * 1024 * 1024_u64;
+    let min_size = 384 * 1024 * 1024_u64;
     let rounded = with_headroom.max(min_size).div_ceil(1024 * 1024) * 1024 * 1024;
     Ok(rounded)
 }
@@ -362,17 +443,29 @@ fn rootfs_build_paths(
 ) -> RootfsBuildPaths {
     let cache_key = &definition_hash[..16];
     let name = format!("{}-{}-{cache_key}", base.name, base.arch);
-    let work_root = config.work_root.join("rootfs").join(&name);
-    let output_root = config.output_root.join("base-images").join(&name);
+    let (work_root, output_root) = config.base_cache_root.as_ref().map_or_else(
+        || {
+            (
+                config.work_root.join("rootfs").join(&name),
+                config.output_root.join("base-images").join(&name),
+            )
+        },
+        |cache_root| {
+            (
+                cache_root.join("work").join(&name),
+                cache_root.join("artifacts").join(&name),
+            )
+        },
+    );
 
     RootfsBuildPaths {
         rootfs_dir: work_root.join("rootfs"),
         essential_hook_path: work_root.join("essential-hook.sh"),
         customize_hook_path: work_root.join("customize-hook.sh"),
         work_root,
-        base_ext4_path: output_root.with_extension("ext4"),
-        kernel_path: output_root.with_extension("vmlinuz"),
-        initrd_path: output_root.with_extension("initrd.img"),
+        base_ext4_path: output_root.join("root.ext4"),
+        kernel_path: output_root.join("vmlinuz"),
+        initrd_path: output_root.join("initrd.img"),
     }
 }
 
@@ -679,7 +772,7 @@ base_image "trixie" {
   mirror         = "https://deb.debian.org/debian"
   arch           = "amd64"
   kernel_package = "linux-image-cloud-amd64"
-  packages       = ["acpid", "openssh-server", "ca-certificates", "curl", "python3", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo", "zstd"]
+  packages       = ["acpid", "openssh-server", "ca-certificates", "curl", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo"]
 }
 "#,
         )
@@ -707,7 +800,7 @@ base_image "trixie" {
                 .contains(&"--architectures=amd64".to_string())
         );
         assert!(plan.mmdebstrap_args.iter().any(|arg| {
-            arg == "--include=linux-image-cloud-amd64,acpid,openssh-server,ca-certificates,curl,python3,iproute2,e2fsprogs,kmod,systemd-sysv,udev,sudo,zstd"
+            arg == "--include=linux-image-cloud-amd64,acpid,openssh-server,ca-certificates,curl,iproute2,e2fsprogs,kmod,systemd-sysv,udev,sudo"
         }));
         assert!(
             plan.mmdebstrap_args
@@ -1012,6 +1105,6 @@ base_image "trixie" {
 
         let size = super::ext4_image_size_bytes(temp.path()).unwrap();
 
-        assert_eq!(size, 512 * 1024 * 1024);
+        assert_eq!(size, 384 * 1024 * 1024);
     }
 }

@@ -1,4 +1,5 @@
 use intar_contracts::bridge::DesiredCachedImageV1;
+use sha2::Digest as _;
 
 use crate::vm::VmTerminalTarget;
 
@@ -14,7 +15,13 @@ fn desired_vm() -> DesiredVmV2 {
             vm: "web".to_string(),
             arch: ImageArchitecture::X86_64,
         },
-        image_sha256: "a".repeat(64),
+        image_id: "a".repeat(64),
+        guest_tools: intar_contracts::bridge::DesiredGuestToolsV1 {
+            tools_disk_sha256: "1".repeat(64),
+            tools_disk_size_bytes: 64 * 1024 * 1024,
+            kino_sha256: "2".repeat(64),
+            bootstrap_abi: 1,
+        },
         resources: VmResourcesV2 {
             cpu_millis: 125,
             vcpu_count: 1,
@@ -40,6 +47,7 @@ fn empty_desired_state(version: u64) -> HostDesiredStateV2 {
         version,
         generated_at_unix_ms: 123,
         cached_images: Vec::new(),
+        cached_guest_tools: Vec::new(),
         vms: Vec::new(),
         builds: Vec::new(),
     }
@@ -62,8 +70,8 @@ fn char_device_probe_accepts_openable_char_devices() {
 }
 
 #[test]
-fn parses_only_v6_bridge_messages() {
-    let message = BridgeMessageV6::SyncRequest(SyncRequestV6 {
+fn parses_only_v7_bridge_messages() {
+    let message = BridgeMessageV7::SyncRequest(SyncRequestV7 {
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         host_id: "host-1".to_string(),
         reason: SyncRequestReason::Connect,
@@ -72,9 +80,9 @@ fn parses_only_v6_bridge_messages() {
 
     assert!(parse_bridge_json(&raw).is_ok());
 
-    let raw_v5 = raw.replace("\"protocol_version\":6", "\"protocol_version\":5");
-    let error = parse_bridge_json(&raw_v5).expect_err("v5 should fail");
-    assert!(error.to_string().contains("expected v6"));
+    let raw_v6 = raw.replace("\"protocol_version\":7", "\"protocol_version\":6");
+    let error = parse_bridge_json(&raw_v6).expect_err("v6 should fail");
+    assert!(error.to_string().contains("expected v7"));
 }
 
 #[tokio::test]
@@ -155,7 +163,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
     let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
     let (normal_tx, mut normal_rx) = mpsc::channel(1);
     normal_tx
-        .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "normal".to_string(),
             reason: SyncRequestReason::Connect,
@@ -163,7 +171,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
         .await
         .expect("queue normal message");
     inventory_tx
-        .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "inventory".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -171,7 +179,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
         .await
         .expect("queue inventory message");
     urgent_tx
-        .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "terminal".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -196,7 +204,7 @@ async fn outbound_writer_prioritizes_inventory_reports() {
     let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
     let (normal_tx, mut normal_rx) = mpsc::channel(1);
     normal_tx
-        .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "normal".to_string(),
             reason: SyncRequestReason::Connect,
@@ -204,7 +212,7 @@ async fn outbound_writer_prioritizes_inventory_reports() {
         .await
         .expect("queue normal message");
     inventory_tx
-        .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "inventory".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -344,7 +352,6 @@ fn agent_desired_state_rejects_build_assignments() {
             rev: "abc123".to_string(),
             content_hash: "f".repeat(64),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-            kino_version: "0.1.24".to_string(),
         });
     let error = validate_desired_state("host-1", &desired)
         .expect_err("agents must reject builder assignments");
@@ -412,6 +419,7 @@ fn desired_peer_aliases_map_runtime_names_to_manifest_vm_names() {
         version: 1,
         generated_at_unix_ms: 123,
         cached_images: Vec::new(),
+        cached_guest_tools: Vec::new(),
         vms: vec![web.clone(), db.clone(), absent, other_run],
         builds: Vec::new(),
     };
@@ -425,13 +433,31 @@ fn desired_peer_aliases_map_runtime_names_to_manifest_vm_names() {
 #[tokio::test]
 async fn cached_image_state_requires_verified_launch_descriptor() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let vm = desired_vm();
-    let image_sha256 = vm.image_sha256.clone();
+    let mut vm = desired_vm();
+    let mut manifest = intar_contracts::catalog::ImageChunkManifestV1 {
+        schema_version: 1,
+        image_id: "0".repeat(64),
+        virtual_size_bytes: 1,
+        chunk_size_bytes: intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES,
+        encoding: intar_contracts::catalog::IMAGE_CHUNK_ENCODING.to_string(),
+        chunks: Vec::new(),
+    };
+    manifest.image_id = manifest.compute_image_id().expect("image id");
+    vm.image_id.clone_from(&manifest.image_id);
     let cache_key = image_cache_key(&vm.image_key);
     let image_dir = temp.path().join(&cache_key);
     std::fs::create_dir_all(&image_dir).expect("image cache dir");
-    let raw_path = image_dir.join(format!("{image_sha256}.raw"));
-    std::fs::write(&raw_path, b"raw").expect("raw cache file");
+    let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest JSON");
+    let manifest_sha256 = sha2::Sha256::digest(&manifest_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let manifest_dir = temp.path().join("manifests");
+    let chunk_dir = temp.path().join("chunks");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest cache");
+    std::fs::create_dir_all(&chunk_dir).expect("chunk cache");
+    let manifest_path = manifest_dir.join(format!("{manifest_sha256}.json"));
+    std::fs::write(&manifest_path, &manifest_bytes).expect("cached manifest");
     let desired = HostDesiredStateV2 {
         schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
         host_id: "host-1".to_string(),
@@ -439,8 +465,9 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
         generated_at_unix_ms: 123,
         cached_images: vec![DesiredCachedImageV1 {
             image_key: vm.image_key.clone(),
-            image_sha256: image_sha256.clone(),
+            image_id: manifest.image_id.clone(),
         }],
+        cached_guest_tools: Vec::new(),
         vms: Vec::new(),
         builds: Vec::new(),
     };
@@ -449,29 +476,10 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
     assert_eq!(unverified[0].phase, ImageCachePhase::Missing);
     assert_eq!(unverified[0].bytes_on_disk, None);
 
-    std::fs::write(
-        image_dir.join(format!("{image_sha256}.raw.verified.json")),
-        format!(
-            r#"{{"schema_version":3,"image_key":"{cache_key}","image_sha256":"{image_sha256}","image_virtual_size_bytes":3,"raw_sha256":"{}","kernel_sha256":"{}","initrd_sha256":"{}","cmdline":"root=/dev/vda rw"}}"#,
-            "a".repeat(64),
-            "b".repeat(64),
-            "c".repeat(64),
-        ),
-    )
-    .expect("raw cache marker");
-
-    let verified = cached_image_states_with_cache_root(&desired, 789, Some(temp.path()), false);
-    assert_eq!(verified[0].phase, ImageCachePhase::Ready);
-    assert_eq!(verified[0].bytes_on_disk, Some(3));
-
-    let template_missing =
-        cached_image_states_with_cache_root(&desired, 790, Some(temp.path()), true);
-    assert_eq!(template_missing[0].phase, ImageCachePhase::Missing);
     let artifacts = temp.path().join("artifacts");
     std::fs::create_dir_all(&artifacts).expect("boot artifact cache");
     let kernel_sha256 = "b".repeat(64);
     let initrd_sha256 = "c".repeat(64);
-    let raw_sha256 = "a".repeat(64);
     let kernel_path = artifacts.join(&kernel_sha256);
     let initrd_path = artifacts.join(&initrd_sha256);
     std::fs::write(&kernel_path, b"kernel").expect("cached kernel artifact");
@@ -480,7 +488,7 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
         |name: &str, sha256: &str, access: intar_jailer_protocol::ArtifactAccess| {
             intar_jailer_protocol::ArtifactSource {
                 source_root: intar_jailer_protocol::PREPARED_IMAGE_SOURCE_ROOT,
-                relative_path: PathBuf::from(&image_sha256).join(name),
+                relative_path: PathBuf::from(&manifest.image_id).join(name),
                 sha256: Some(
                     intar_jailer_protocol::Sha256Digest::parse(sha256.to_string())
                         .expect("prepared digest"),
@@ -488,25 +496,29 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
                 access,
             }
         };
-    let cached = crate::image_cache::CachedImage {
+    let cached = crate::image_cache::CachedChunkedImage {
         image_key: cache_key,
-        image_sha256: image_sha256.clone(),
-        raw_path,
-        raw_sha256: raw_sha256.clone(),
+        image_id: manifest.image_id.clone(),
+        chunk_manifest_path: manifest_path,
+        chunk_manifest_sha256: manifest_sha256.clone(),
+        chunk_cache_root: chunk_dir,
         kernel_path,
         initrd_path,
         kernel_sha256: kernel_sha256.clone(),
         initrd_sha256: initrd_sha256.clone(),
         cmdline: "root=/dev/vda rw".to_string(),
-        virtual_size_bytes: 3,
+        virtual_size_bytes: 1,
+        guest_bootstrap_abi: 1,
     };
-    let prepared = intar_jailer_protocol::PreparedImageV2Result {
-        image_sha256: intar_jailer_protocol::Sha256Digest::parse(image_sha256.clone())
+    let prepared = intar_jailer_protocol::PreparedImageV3Result {
+        image_id: intar_jailer_protocol::Sha256Digest::parse(manifest.image_id.clone())
             .expect("image digest"),
-        virtual_size_bytes: 3,
+        chunk_manifest_sha256: intar_jailer_protocol::Sha256Digest::parse(manifest_sha256)
+            .expect("manifest digest"),
+        virtual_size_bytes: 1,
         root_disk: prepared_source(
             "root.raw",
-            &raw_sha256,
+            &manifest.image_id,
             intar_jailer_protocol::ArtifactAccess::ReadWrite,
         ),
         kernel: prepared_source(
@@ -527,6 +539,10 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
     let template_ready =
         cached_image_states_with_cache_root(&desired, 791, Some(temp.path()), true);
     assert_eq!(template_ready[0].phase, ImageCachePhase::Ready);
+    assert_eq!(
+        template_ready[0].bytes_on_disk,
+        Some(manifest_bytes.len() as u64)
+    );
 }
 
 #[test]

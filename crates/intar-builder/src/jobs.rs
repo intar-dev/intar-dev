@@ -191,7 +191,6 @@ mod tests {
             rev: "abc123".to_string(),
             content_hash: "f".repeat(64),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-            kino_version: "0.1.24".to_string(),
         }
     }
 }

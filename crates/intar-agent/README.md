@@ -135,11 +135,12 @@ refresh_interval_minutes = 15
 ```
 
 The image registry is expected to expose a JSON index at `url` with `image_key`,
-compressed `image_sha256`, `image_format = "raw_zstd"`, `image_virtual_size_bytes`,
-boot artifact hashes, boot cmdline, and `download_url` entries. `intar-agent` polls
-the registry every `refresh_interval_minutes`, downloads `.raw.zst` images, verifies
-the compressed SHA-256, decompresses sparse raw disks, downloads kernel/initrd
-artifacts, and passes verified source descriptors to jailerd. The pinned
+`image_id`, `image_format = "raw_chunks_v1"`, the 4 MiB chunk manifest, virtual
+size, exact guest-tools pin, boot artifact hashes, and immutable download URLs.
+Desired-state changes wake the cache immediately; the 15-minute poll is only a
+repair scan. The agent downloads up to 16 chunks concurrently, verifies encoded
+objects, and passes the bounded manifest plus cache roots to jailerd. It does not
+keep a full unprivileged raw-image cache. The pinned
 Cloud Hypervisor v53.0 path and SHA-256 belong only in the root-owned
 `/etc/intar-jailerd/config.toml`.
 
@@ -157,7 +158,7 @@ vcpus = 1
 with at most three fractional digits are accepted. Thus `0.125` becomes 125
 millicores and `2` remains 2000 millicores. Zero, exponent notation, excess
 precision, and values greater than `vcpus * 1000` millicores are rejected.
-Catalog manifests use V3 (`cpu_millis`, `vcpu_count`) and the coordinated bridge
+Catalog manifests use V4 (`cpu_millis`, `vcpu_count`) and the coordinated bridge
 uses V6 with V2 desired-state/resource/report documents. No old-version shim is
 provided. Jailerd capacity-accounts `max(2000m, steady_cpu_millis)` and applies
 that aggregate VMM quota for at most 45 seconds without changing guest vCPU

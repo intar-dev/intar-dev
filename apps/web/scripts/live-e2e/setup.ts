@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
-import type { ScenarioManifestV3 } from "../../src/generated/catalog";
+import { basename, dirname, join } from "node:path";
+import type { ScenarioManifestV4 } from "../../src/generated/catalog";
 import { ApiClient } from "./api-client";
 import { inferArtifactPaths, inferImagePaths } from "./manifest";
 import { HttpError } from "./types";
@@ -32,7 +32,7 @@ import {
 export async function publishManifest(
   options: Options,
   loadedManifests: LoadedManifest[],
-  manifest: ScenarioManifestV3,
+  manifest: ScenarioManifestV4,
 ): Promise<void> {
   if (!options.publishToken) {
     throw new Error(
@@ -45,27 +45,83 @@ export async function publishManifest(
   form.set("manifest", JSON.stringify(manifest));
 
   for (const vm of manifest.vms) {
-    const imagePath =
+    const chunkManifestPath =
       options.imagePathsByVmName.get(vm.name) ?? inferredImages.get(vm.name);
-    if (!imagePath) {
-      throw new Error(`missing image path for manifest VM ${vm.name}`);
+    if (!chunkManifestPath) {
+      throw new Error(`missing chunk manifest path for manifest VM ${vm.name}`);
     }
-    const imageBytes = await readFile(imagePath);
-    const imageSha256 = await sha256BytesHex(imageBytes);
-    if (imageSha256 !== vm.image_sha256.toLowerCase()) {
+    const chunkManifestBytes = await readFile(chunkManifestPath);
+    const chunkManifestSha256 = await sha256BytesHex(chunkManifestBytes);
+    if (chunkManifestSha256 !== vm.chunk_manifest_sha256.toLowerCase()) {
       throw new Error(
-        `image ${imagePath} sha256 mismatch for VM ${vm.name}: expected ${vm.image_sha256.toLowerCase()}, got ${imageSha256}`,
+        `chunk manifest ${chunkManifestPath} sha256 mismatch for VM ${vm.name}`,
       );
     }
-    logStep(
-      `verified image ${vm.name}: ${basename(imagePath)} ${imageBytes.byteLength} bytes sha256=${imageSha256.slice(0, 12)}`,
+    const chunkManifest = JSON.parse(new TextDecoder().decode(chunkManifestBytes)) as {
+      image_id: string;
+      chunks: Array<{
+        index: number;
+        raw_size_bytes: number;
+        raw_sha256: string;
+        encoded_size_bytes: number;
+        encoded_sha256: string;
+      }>;
+    };
+    if (chunkManifest.image_id !== vm.image_id) {
+      throw new Error(`chunk manifest image_id mismatch for VM ${vm.name}`);
+    }
+    const chunksDir = join(
+      dirname(chunkManifestPath),
+      basename(chunkManifestPath, ".chunks.json") + ".chunks",
     );
-    form.append(
-      `image:${vm.name}`,
-      new Blob([copyToArrayBuffer(imageBytes)], {
-        type: "application/octet-stream",
-      }),
-      basename(imagePath),
+    for (const chunk of chunkManifest.chunks) {
+      const chunkPath = join(
+        chunksDir,
+        `${String(chunk.index).padStart(8, "0")}.raw.zst`,
+      );
+      const bytes = await readFile(chunkPath);
+      if (
+        bytes.byteLength !== chunk.encoded_size_bytes ||
+        (await sha256BytesHex(bytes)) !== chunk.encoded_sha256
+      ) {
+        throw new Error(`encoded chunk verification failed at ${chunkPath}`);
+      }
+      const response = await fetch(
+        `${options.baseUrl}/registry/v1/image-chunks/${chunk.raw_sha256}`,
+        {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${options.publishToken}`,
+            "content-type": "application/zstd",
+            "x-intar-raw-sha256": chunk.raw_sha256,
+            "x-intar-encoded-sha256": chunk.encoded_sha256,
+            "x-intar-raw-size": String(chunk.raw_size_bytes),
+            "x-intar-encoded-size": String(chunk.encoded_size_bytes),
+          },
+          body: copyToArrayBuffer(bytes),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`chunk upload failed with HTTP ${response.status}`);
+      }
+    }
+    const manifestUpload = await fetch(
+      `${options.baseUrl}/registry/v1/image-manifests/${chunkManifestSha256}.json`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${options.publishToken}`,
+          "content-type": "application/json",
+          "x-intar-manifest-sha256": chunkManifestSha256,
+        },
+        body: copyToArrayBuffer(chunkManifestBytes),
+      },
+    );
+    if (!manifestUpload.ok) {
+      throw new Error(`chunk manifest upload failed with HTTP ${manifestUpload.status}`);
+    }
+    logStep(
+      `verified chunked image ${vm.name}: ${chunkManifest.chunks.length} non-zero chunks image_id=${vm.image_id.slice(0, 12)}`,
     );
   }
   for (const sha256 of bootArtifactSha256s(manifest)) {
@@ -167,7 +223,7 @@ export async function loadRequiredImagesFromAdminScenario(
     return [
       {
         image_key: vm.imageKey,
-        image_sha256: vm.imageSha256,
+        image_id: vm.imageSha256,
       },
     ];
   });
@@ -238,8 +294,8 @@ export function appendUniqueRequiredImages(
       images.some(
         (candidate) =>
           sameImageKey(candidate.image_key, image.image_key) &&
-          candidate.image_sha256.toLowerCase() ===
-            image.image_sha256.toLowerCase(),
+          candidate.image_id.toLowerCase() ===
+            image.image_id.toLowerCase(),
       )
     ) {
       continue;
@@ -479,7 +535,7 @@ export function hostReadinessProblems(
     const cached = host.actualState.cachedImages.find(
       (image) =>
         sameImageKey(image.image_key, vm.image_key) &&
-        image.image_sha256.toLowerCase() === vm.image_sha256.toLowerCase(),
+        image.image_id.toLowerCase() === vm.image_id.toLowerCase(),
     );
     if (!cached) {
       problems.push(`image ${imageLabel(vm)} is not reported by cache`);

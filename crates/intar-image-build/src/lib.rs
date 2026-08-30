@@ -1,9 +1,10 @@
 mod artifact;
+mod chunked;
 mod config;
 mod content_hash;
 mod direct;
 mod disk;
-mod kino;
+mod guest_tools;
 mod manifest;
 mod provision;
 mod qemu;
@@ -15,6 +16,11 @@ pub use artifact::{
     RawZstdArtifact, expand_raw_zstd_sparse, expand_raw_zstd_sparse_with_cancel, sha256_file_hex,
     write_raw_zstd_artifact, write_raw_zstd_artifact_with_cancel,
 };
+pub use chunked::{
+    ChunkedImageArtifact, EncodedImageChunkArtifact, ReusedEncodedImageChunk, ScannedChunkedImage,
+    ScannedImageChunk, reconstruct_chunked_image, scan_raw_image_chunks,
+    write_chunked_image_artifact, write_scanned_chunked_image_artifact,
+};
 pub use config::{BuildConfig, ConfigError, QemuBuildConfig, RawUploadConfig};
 pub use content_hash::{
     BUILD_FORMAT_VERSION, ScenarioContentHashInput, scenario_content_hash, sha256_bytes_hex,
@@ -22,13 +28,16 @@ pub use content_hash::{
 pub use direct::{
     DirectBuildArtifact, DirectBuildOutput, DirectBuildPaths, DirectBuildPrepareInput,
     DirectBuildRequest, DirectQemuShutdownInput, RenderedDirectBuild, acknowledged_qmp_shutdown,
-    acknowledged_qmp_shutdown_with_cancel, prepare_direct_build_inputs, render_direct_build,
-    run_direct_build,
+    acknowledged_qmp_shutdown_with_cancel, finish_direct_build_from_scan,
+    prepare_direct_build_inputs, render_direct_build, run_direct_build, run_direct_build_to_raw,
 };
 pub use disk::{
     ScenarioDiskCommand, ScenarioDiskPlan, prepare_scenario_disk, render_scenario_disk_plan,
 };
-pub use kino::KinoArtifact;
+pub use guest_tools::{
+    GUEST_TOOLS_DISK_LABEL, GUEST_TOOLS_DISK_SIZE_BYTES, GuestToolsDiskArtifact,
+    GuestToolsDiskManifestV1, write_guest_tools_disk,
+};
 pub use manifest::{build_direct_manifest_json, combine_scenario_manifests};
 pub use provision::{RuntimeActivationInput, render_runtime_activation_script};
 pub use qemu::{

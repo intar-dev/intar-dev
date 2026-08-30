@@ -43,6 +43,7 @@ fn ready_capabilities(source_root: PathBuf) -> JailerCapabilities {
         schedulable_cpu_millis: 7_000,
         committed_cpu_millis: 125,
         supports_jailer_v2: true,
+        supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
         supports_hard_cpu_quota: true,
@@ -320,7 +321,7 @@ fn rejects_legacy_jailerd_protocol_v1() {
     assert!(report.checks.iter().any(|check| {
         check.name == "jailerd protocol"
             && check.status == PreflightStatus::Fail
-            && check.detail.contains("required version 2")
+            && check.detail.contains("required version 3")
     }));
 }
 

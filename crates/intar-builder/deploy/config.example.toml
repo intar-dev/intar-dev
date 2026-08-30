@@ -9,9 +9,6 @@ heartbeat_interval_seconds = 20
 work_root = "/var/lib/intar-builder/work"
 cache_root = "/var/cache/intar-builder"
 state_db = "/var/lib/intar-builder/state.sqlite3"
-kino_release_base_url = "https://github.com/intar-dev/intar-dev/releases/download"
-# For local development or air-gapped builders, use a preinstalled kino binary.
-# kino_binary = "/usr/local/bin/kino"
 
 [qemu]
 qemu_binary = "qemu-system-x86_64"
@@ -28,4 +25,4 @@ build_memory_mb = 4096
 
 [jobs]
 max_attempts = 3
-max_concurrent_builds = 1
+max_concurrent_builds = 2

@@ -335,6 +335,16 @@ mod linux {
         ] {
             push_jail_rule(&mut rules, &root, path, kind, access, uid, gid)?;
         }
+        match open_jail_rule_anchor(&root, "disks/tools.ext4") {
+            Ok(fd) => {
+                validate_rule_anchor(&fd, "disks/tools.ext4", RuleAnchorKind::RootFile, uid, gid)?;
+                rules.push((fd, AccessFs::ReadFile.into()));
+            }
+            Err(error) if error == rustix::io::Errno::NOENT => {}
+            Err(error) => {
+                return Err(error).context("open optional Landlock anchor disks/tools.ext4");
+            }
+        }
         for path in [
             "logs/serial.log",
             "logs/console.log",

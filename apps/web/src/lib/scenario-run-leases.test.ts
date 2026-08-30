@@ -40,7 +40,13 @@ function desiredVm(
     vm_name: vmName,
     desired_phase: desiredPhase,
     image_key: { scenario: "scenario", vm: vmName, arch: "x86_64" },
-    image_sha256: "a".repeat(64),
+    image_id: "a".repeat(64),
+    guest_tools: {
+      tools_disk_sha256: "1".repeat(64),
+      tools_disk_size_bytes: 64 * 1024 * 1024,
+      kino_sha256: "2".repeat(64),
+      bootstrap_abi: 1,
+    },
     resources: {
       cpu_millis: 1_000,
       vcpu_count: 1,

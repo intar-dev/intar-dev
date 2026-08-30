@@ -106,11 +106,28 @@ pub(super) async fn mark_vm_delete_failed(inner: &Inner, name: &str, message: St
 pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
     let state = VmLifecycleState::parse(&row.state)
         .ok_or_else(|| anyhow::anyhow!("unknown vm state \"{}\"", row.state))?;
+    let guest_tools = row
+        .guest_tools_json
+        .as_deref()
+        .map(serde_json::from_str::<DesiredGuestToolsV1>)
+        .transpose()
+        .context("decode persisted VM guest-tools pin")?;
+    if let Some(pin) = &guest_tools {
+        anyhow::ensure!(
+            normalize_sha256(&pin.tools_disk_sha256).as_deref()
+                == Some(pin.tools_disk_sha256.as_str())
+                && pin.tools_disk_size_bytes == 64 * 1024 * 1024
+                && normalize_sha256(&pin.kino_sha256).as_deref() == Some(pin.kino_sha256.as_str())
+                && pin.bootstrap_abi == 1,
+            "persisted VM guest-tools pin is invalid"
+        );
+    }
 
     let details = match (&row.root_disk_path, &row.seed_disk_path, &row.mac) {
         (Some(root_disk_path), Some(seed_disk_path), Some(mac)) => Some(VmDetails {
             image_key: row.image_key.clone(),
             image_sha256: row.image_sha256.clone(),
+            guest_tools,
             run_id: row.run_id.clone(),
             root_disk_path: root_disk_path.clone(),
             seed_disk_path: seed_disk_path.clone(),

@@ -47,7 +47,7 @@ Host orchestration is desired-state based:
 - Desired phases are only `running` and `absent`.
 - Image build assignments are keyed by `build_id` and delivered in the same
   desired-state document under `builds`.
-- The bridge protocol is v6 and full-document based: `client_hello`,
+- The bridge protocol is v7 and full-document based: `client_hello`,
   `server_hello`, `desired_state`, `state_report`, `vm_report`, `build_report`,
   and `sync_request`. Every host declares `role = agent` or `role = builder`.
   Agent capacity reports total, reserved, schedulable, and committed host
@@ -71,19 +71,29 @@ changed scenarios to connected builder hosts. Course snapshots synchronize when
 the authenticated bundle is accepted, independently of asynchronous image
 publication.
 
-Builder hosts publish raw zstd artifacts and `ScenarioManifestV3` manifest JSON.
-The publish endpoint verifies manifests and image hashes, stores immutable images
-in R2, seeds the D1 scenario catalog, and updates each agent desired-state document
-with the referenced cached images. Builder-JWT publishes also carry the exact
+Builder hosts publish fixed 4 MiB raw chunks and `ScenarioManifestV4` manifest JSON.
+Zero chunks are holes. Non-zero chunks are SHA-256 addressed and compressed with
+zstd level 6. The publish endpoint verifies that every referenced chunk exists,
+stores the immutable chunk manifest in R2, stages a candidate D1 catalog, and
+updates each agent desired-state document so both live and candidate image IDs
+stay warm. Source-bundle builds do not change the live catalog.
+Builder-JWT publishes also carry the exact
 build ID, bundle revision, content hash, and architecture. The Worker matches all
 of them to the authenticated host's active assignment while holding the same
 per-scenario/architecture D1 lease used by supersession, so an old build cannot
 seed the catalog after its replacement wins. The static registry token remains
 the explicit privileged path for release tooling and manual `run-once` publishes.
 
+The flag-day workflow closes the D1 run-admission gate and waits for zero
+running desired VMs. It then switches every candidate catalog row in one D1
+batch, promotes the verified candidate tools pin, requires exact host cache
+reports, and reopens starts. The batch also stores the previous catalog as a
+rollback snapshot.
+
 Agents list and download images through the Worker registry endpoint. The agent
-cache validates compressed raw-zstd hashes fail-closed, decompresses sparse raw
-files to `<sha256>.raw`, and reports cache readiness from the raw artifact.
+caches only compressed chunks, manifests, boot artifacts, and the pinned tools
+disk. Jailerd verifies and imports chunks into a root-owned immutable store, then
+uses reflink ranges to assemble templates without a full unprivileged raw image.
 
 ## Builder Daemon
 
@@ -179,7 +189,7 @@ gates `ssh.service` on `/run/intar/ssh-ready` before removing baked host keys. O
 first boot the supervisor configures networking and access, generates and
 validates the keys, creates the root-only gate, and then explicitly starts
 `ssh.service`. Image content hashes use build format
-`intar-image-build-v9`, ensuring images with the boot-path supervisor changes,
+`intar-image-build-v10`, ensuring images with the stable guest bootstrap ABI,
 conditional root resizing, scenario-specific module preload, and faster normal-
 capacity SSH startup are rebuilt rather than reused. When a newer hash is queued
 for the same scenario and architecture, nonterminal older hashes are retired and
@@ -188,10 +198,13 @@ removed from builder desired state before the replacement is assigned.
 ## Guest Runtime
 
 Images are provisioned without baked SSH host keys. On first boot the guest
-generates host keys, starts `sshd`, and starts Kino. The runtime disk carries:
+mounts the read-only `INTARTOOLS` disk, verifies the pinned Kino SHA and
+bootstrap ABI, generates host keys, starts `sshd`, and starts Kino. The runtime
+disk carries:
 
 - per-run authorized SSH public keys,
 - Kino vsock coordinates,
+- the exact Kino SHA-256 and guest bootstrap ABI,
 - host readiness port,
 - hostname,
 - guest network address, gateway, and DNS,

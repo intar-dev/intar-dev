@@ -7,17 +7,13 @@
 use std::collections::BTreeMap;
 
 use intar_image_scenario::{
-    BaseImageCatalog, BuildTools, Scenario, ScenarioContentHashParams,
-    scenario_content_hash_from_entries,
+    BaseImageCatalog, Scenario, ScenarioContentHashParams, scenario_content_hash_from_entries,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 /// The same catalog `intar-image-cli validate` loads from the repo root.
 const BASE_IMAGES_HCL: &str = include_str!("../../../content/scenarios/base-images.hcl");
-/// The same tool pins the CI bundle upload uses (kino version).
-const BUILD_TOOLS_HCL: &str = include_str!("../../../content/scenarios/build-tools.hcl");
-
 /// Matches builder.sample.amd64.hcl / the CI bundle upload.
 const TARGET_ARCH: &str = "amd64";
 /// Contract image-architecture slug for TARGET_ARCH.
@@ -43,7 +39,6 @@ struct HashEntry {
 struct HashInput {
     scenario_id: String,
     base_definition: String,
-    kino_version: String,
     target_arch: Option<String>,
     entries: Vec<HashEntry>,
 }
@@ -108,7 +103,7 @@ pub fn validate(scenario_hcl: &str) -> String {
 }
 
 /// Compute the build content hash for in-memory scenario files. Input is a
-/// JSON string: `{ scenario_id, base_definition, kino_version, target_arch?,
+/// JSON string: `{ scenario_id, base_definition, target_arch?,
 /// entries: [{ path, content }] }`. Returns the hex hash, or throws.
 #[wasm_bindgen]
 pub fn content_hash(input_json: &str) -> Result<String, JsError> {
@@ -123,7 +118,6 @@ pub fn content_hash(input_json: &str) -> Result<String, JsError> {
         &ScenarioContentHashParams {
             scenario_id: &input.scenario_id,
             base_definition: &input.base_definition,
-            kino_version: &input.kino_version,
             target_arch: input.target_arch.as_deref().unwrap_or("x86_64"),
         },
         &entries,
@@ -137,7 +131,6 @@ struct PrepareBuildOutput {
     errors: Vec<String>,
     scenario_id: Option<String>,
     content_hash: Option<String>,
-    kino_version: Option<String>,
     target_arch: &'static str,
     image_arch: &'static str,
 }
@@ -178,7 +171,6 @@ fn prepare_build_impl(scenario_hcl: &str) -> PrepareBuildOutput {
             errors: validation.errors,
             scenario_id: None,
             content_hash: None,
-            kino_version: None,
             target_arch: TARGET_ARCH,
             image_arch: IMAGE_ARCH,
         };
@@ -189,7 +181,6 @@ fn prepare_build_impl(scenario_hcl: &str) -> PrepareBuildOutput {
         errors: vec![message],
         scenario_id: None,
         content_hash: None,
-        kino_version: None,
         target_arch: TARGET_ARCH,
         image_arch: IMAGE_ARCH,
     };
@@ -202,10 +193,6 @@ fn prepare_build_impl(scenario_hcl: &str) -> PrepareBuildOutput {
         Ok(catalog) => catalog,
         Err(error) => return fail(format!("base image catalog: {error}")),
     };
-    let build_tools = match BuildTools::parse(BUILD_TOOLS_HCL) {
-        Ok(tools) => tools,
-        Err(error) => return fail(format!("build tools: {error}")),
-    };
     let base_definition = match base_definition_identity(&scenario, &catalog, TARGET_ARCH) {
         Ok(identity) => identity,
         Err(error) => return fail(error),
@@ -216,7 +203,6 @@ fn prepare_build_impl(scenario_hcl: &str) -> PrepareBuildOutput {
         &ScenarioContentHashParams {
             scenario_id: &scenario.name,
             base_definition: &base_definition,
-            kino_version: &build_tools.kino.version,
             target_arch: TARGET_ARCH,
         },
         &entries,
@@ -230,14 +216,13 @@ fn prepare_build_impl(scenario_hcl: &str) -> PrepareBuildOutput {
         errors: Vec::new(),
         scenario_id: Some(scenario.name),
         content_hash: Some(content_hash),
-        kino_version: Some(build_tools.kino.version),
         target_arch: TARGET_ARCH,
         image_arch: IMAGE_ARCH,
     }
 }
 
 /// Validate a scenario and compute everything a source-bundle upload needs:
-/// `{ ok, errors, scenario_id, content_hash, kino_version, target_arch,
+/// `{ ok, errors, scenario_id, content_hash, target_arch,
 /// image_arch }`. The hash covers exactly one file, `scenario.hcl`, matching
 /// how the in-app build endpoint assembles its bundle.
 #[wasm_bindgen]
@@ -284,7 +269,6 @@ mod tests {
                 output.target_arch,
                 hash
             );
-            assert_eq!(output.kino_version.as_deref(), Some("0.2.6"));
             checked += 1;
         }
         assert!(checked > 0, "expected at least one repo scenario");

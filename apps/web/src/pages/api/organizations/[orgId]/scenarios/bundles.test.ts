@@ -169,8 +169,7 @@ async function upload(meta: Record<string, unknown>): Promise<Response> {
 function sourceMeta(extra: Record<string, unknown> = {}) {
   return {
     rev: "source-revision",
-    kino_version: "0.4.0",
-    build_format_version: "intar-image-build-v9",
+    build_format_version: "intar-image-build-v10",
     scenarios: [
       {
         scenario_id: "org-a-private",

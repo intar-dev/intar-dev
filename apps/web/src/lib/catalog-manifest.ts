@@ -4,7 +4,7 @@ import { vmScenarioProbes, vmScenarioVms, vmScenarios } from "@/db/schema";
 import type {
   ImageFormat,
   ImageKey,
-  ScenarioManifestV3,
+  ScenarioManifestV4,
 } from "@/generated/catalog";
 import { appError } from "@/lib/app-error";
 
@@ -15,11 +15,12 @@ export interface CatalogScenarioRows {
 }
 
 export function catalogRowsFromScenarioManifest(
-  manifest: ScenarioManifestV3,
+  manifest: ScenarioManifestV4,
   options: {
     nowUnixMs: number;
     enabled?: boolean;
     organizationId?: string | null;
+    sourceRevision?: string | null;
   } = { nowUnixMs: Date.now() },
 ): CatalogScenarioRows {
   const enabled = options.enabled ?? true;
@@ -33,9 +34,11 @@ export function catalogRowsFromScenarioManifest(
       vmName: vm.name,
       image: imageName(vm.image_key, vm.image_format),
       imageKeyJson: vm.image_key,
-      imageSha256: vm.image_sha256,
+      imageSha256: vm.image_id,
       imageFormat: vm.image_format,
       imageVirtualSizeBytes: vm.image_virtual_size_bytes,
+      chunkManifestSha256: vm.chunk_manifest_sha256,
+      guestBootstrapAbi: vm.guest_bootstrap_abi,
       kernelSha256: vm.boot.kernel_sha256,
       initrdSha256: vm.boot.initrd_sha256,
       bootCmdline: vm.boot.cmdline,
@@ -50,6 +53,7 @@ export function catalogRowsFromScenarioManifest(
     scenario: {
       scenarioId,
       organizationId: options.organizationId ?? null,
+      sourceRevision: options.sourceRevision ?? null,
       title: manifest.title,
       category: manifest.category,
       description: manifest.description,
@@ -89,20 +93,23 @@ export function catalogRowsFromScenarioManifest(
 
 export async function seedScenarioManifest(
   db: DrizzleD1Database,
-  manifest: ScenarioManifestV3,
+  manifest: ScenarioManifestV4,
   options: {
     nowUnixMs?: number;
     enabled?: boolean;
     organizationId?: string | null;
+    sourceRevision?: string | null;
   } = {},
 ): Promise<CatalogScenarioRows> {
   const rowOptions: {
     nowUnixMs: number;
     enabled?: boolean;
     organizationId?: string | null;
+    sourceRevision?: string | null;
   } = {
     nowUnixMs: options.nowUnixMs ?? Date.now(),
     organizationId: options.organizationId ?? null,
+    sourceRevision: options.sourceRevision ?? null,
   };
   if (options.enabled !== undefined) {
     rowOptions.enabled = options.enabled;
@@ -132,6 +139,7 @@ export async function seedScenarioManifest(
       target: vmScenarios.scenarioId,
       set: {
         title: rows.scenario.title,
+        sourceRevision: rows.scenario.sourceRevision,
         category: rows.scenario.category,
         description: rows.scenario.description,
         difficulty: rows.scenario.difficulty,
@@ -172,11 +180,6 @@ function scenarioProbeRowId(scenarioVmId: string, probeId: string): string {
 }
 
 function imageName(imageKey: ImageKey, format: ImageFormat): string {
-  const extension =
-    format === "raw_zstd" ? "raw.zst" : exhaustiveFormat(format);
+  const extension = format === "raw_chunks_v1" ? "chunks.json" : "raw.zst";
   return `${imageKey.scenario}-${imageKey.vm}-${imageKey.arch}.${extension}`;
-}
-
-function exhaustiveFormat(format: never): never {
-  throw new Error(`unsupported image format '${format}'`);
 }

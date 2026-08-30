@@ -267,6 +267,7 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
         host_root_disk: PathBuf::from("/work/vms/vm-demo/root.raw"),
         host_runtime_disk: PathBuf::from("/work/vms/vm-demo/runtime.vfat"),
         host_recording_disk: PathBuf::from("/work/runs/run-1/vm-demo/recordings.vfat"),
+        host_tools_disk: Some(PathBuf::from("/work/tools/tools.ext4")),
         jailed_api_socket: PathBuf::from("/run/cloud-hypervisor.sock"),
         jailed_vsock_socket: PathBuf::from("/run/kino.vsock"),
         jailed_kernel: PathBuf::from("/boot/kernel"),
@@ -274,6 +275,7 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
         jailed_root_disk: PathBuf::from("/disks/root.raw"),
         jailed_runtime_disk: PathBuf::from("/disks/runtime.vfat"),
         jailed_recording_disk: PathBuf::from("/disks/recordings.vfat"),
+        jailed_tools_disk: Some(PathBuf::from("/disks/tools.ext4")),
         host_serial_log: PathBuf::from("/work/jails/vm-demo/root/logs/serial.log"),
         host_console_log: PathBuf::from("/work/jails/vm-demo/root/logs/console.log"),
         host_stderr_log: PathBuf::from("/work/jails/vm-demo/root/logs/cloud-hypervisor.stderr.log"),
@@ -323,7 +325,7 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
     );
 
     let disks = cfg.disks.as_ref().expect("disks");
-    assert_eq!(disks.len(), 3);
+    assert_eq!(disks.len(), 4);
     assert_eq!(disks[0].path, "/disks/root.raw");
     assert!(!disks[0].readonly);
     assert_eq!(disks[0].id.as_deref(), Some("vm-demo-root"));
@@ -334,6 +336,8 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
     assert_eq!(disks[1].path, "/disks/runtime.vfat");
     assert!(disks[1].readonly);
     assert_eq!(disks[1].id.as_deref(), Some("vm-demo-runtime"));
+    assert_eq!(disks[3].path, "/disks/tools.ext4");
+    assert!(disks[3].readonly);
     assert!(matches!(
         disks[1].image_type.as_ref(),
         Some(DiskImageType::Raw)

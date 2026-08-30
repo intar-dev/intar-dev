@@ -16,7 +16,6 @@ describe("admin build response serialization", () => {
       arch: "x86_64",
       rev: "abc123",
       contentHash: "f".repeat(64),
-      kinoVersion: "0.4.0",
       hostId: "builder-1",
       hostName: "Builder One",
       status: "building",
@@ -42,9 +41,8 @@ describe("admin build response serialization", () => {
     expect(serialized.bundle).toEqual({
       rev: "abc123",
       r2Key: "builds/bundles/abc123.tar.gz",
-      kinoVersion: "0.4.0",
       meta: {
-        buildFormatVersion: "intar-image-build-v9",
+        buildFormatVersion: "intar-image-build-v10",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -95,7 +93,6 @@ const buildRow: AdminBuildDetailResponseRow = {
   arch: "x86_64",
   rev: "abc123",
   contentHash: "f".repeat(64),
-  kinoVersion: "0.4.0",
   hostId: "builder-1",
   hostName: "Builder One",
   hostRole: "builder",
@@ -112,9 +109,8 @@ const buildRow: AdminBuildDetailResponseRow = {
     lastReportAt: 1_762_041_650_000,
   },
   bundleR2Key: "builds/bundles/abc123.tar.gz",
-  bundleKinoVersion: "0.4.0",
   bundleMeta: {
-    buildFormatVersion: "intar-image-build-v9",
+    buildFormatVersion: "intar-image-build-v10",
     scenarios: [
       {
         scenarioId: "broken-nginx",

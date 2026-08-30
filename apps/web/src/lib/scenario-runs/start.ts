@@ -18,6 +18,7 @@ import {
   desiredVmFromRunVm,
   markDesiredVmAbsent,
   upsertDesiredCachedImage,
+  upsertDesiredGuestTools,
   upsertDesiredVm,
 } from "@/lib/desired-state";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
@@ -28,6 +29,7 @@ import {
   rollbackHostCpu,
 } from "@/lib/host-cpu-reservation-client";
 import { createAppId } from "@/lib/id";
+import { assertAgentKvmRunsOpen } from "@/lib/run-admission-gate";
 import {
   availableRuntimeHostResources,
   loadActiveRuntimeResourceSnapshot,
@@ -62,11 +64,13 @@ import {
 } from "@/lib/scenario-host-readiness";
 import {
   hostSupportsRunCliV1,
+  hostSupportsSpeedRedesign,
   isAvailableScenarioLaunchHost,
   isFreshHostHeartbeat,
   isScenarioLaunchHost,
 } from "@/lib/scenario-hosts";
 import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
+import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
 import { deleteStargateRoute, stargateRouteTtlMs } from "@/lib/stargate";
 import {
   generateScenarioRunSshKeyDraft,
@@ -110,6 +114,7 @@ export async function startScenarioRunInternal(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
+  await assertAgentKvmRunsOpen(env.DB);
   const organizationId = params.organizationId ?? null;
   const [[scenario], active] = await Promise.all([
     loadEnabledScenarioRows(params.scenarioId, organizationId),
@@ -906,6 +911,13 @@ export async function assertScenarioLaunchHostForUser(
       "scenario images are not ready on this host",
     );
   }
+  if (!hostSupportsSpeedRedesign(host.actualReport)) {
+    throw appError(
+      409,
+      "scenario_host_unavailable",
+      "host does not support chunked images and pinned guest tools",
+    );
+  }
   if (
     learnerRunCliV1EnforcementEnabled(env) &&
     !hostSupportsRunCliV1(host.actualReport)
@@ -1024,12 +1036,15 @@ export async function upsertRunVmsIntoDesiredState(input: {
   nowUnixMs: number;
   sshAuthorizedKeysByVmId: Map<string, string[]>;
 }): Promise<void> {
+  await assertAgentKvmRunsOpen(env.DB);
+  const guestTools = await loadScenarioGuestToolsPin(env, "stable");
   const desiredVms = input.vms.map((vm) => {
     const desiredVm = desiredVmFromRunVm({
       runId: input.runId,
       vm,
       nowUnixMs: input.nowUnixMs,
       sshAuthorizedKeysOpenssh: input.sshAuthorizedKeysByVmId.get(vm.id) ?? [],
+      guestTools,
     });
     if (!desiredVm) {
       throw appError(
@@ -1046,10 +1061,11 @@ export async function upsertRunVmsIntoDesiredState(input: {
     input.hostId,
     input.nowUnixMs,
     (draft) => {
+      upsertDesiredGuestTools(draft, guestTools);
       for (const desiredVm of desiredVms) {
         upsertDesiredCachedImage(draft, {
           image_key: desiredVm.image_key,
-          image_sha256: desiredVm.image_sha256,
+          image_id: desiredVm.image_id,
         });
         upsertDesiredVm(draft, desiredVm);
       }
@@ -1311,7 +1327,7 @@ export async function selectScenarioHosts(
 
   const candidates = rows
     .map((row) => {
-      // The bridge v6 state report is the live source of per-host VM load
+      // The bridge v7 state report is the live source of per-host VM load
       // and capacity; the legacy inventory upload no longer exists.
       const capacity = row.actualReport?.capacity ?? null;
       const inventoryVmCount = row.actualReport?.vms?.length ?? 0;
@@ -1347,6 +1363,7 @@ export async function selectScenarioHosts(
         ) &&
         hostHealth(row.actualReportedAt ?? null, now) === "healthy" &&
         strictCpuCapacity(row.actualReport) !== null &&
+        hostSupportsSpeedRedesign(row.actualReport) &&
         (!requireRunCli || hostSupportsRunCliV1(row.actualReport)),
     );
 

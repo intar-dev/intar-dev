@@ -12,6 +12,12 @@
     "gateway": {
       "type": "string"
     },
+    "guest_bootstrap_abi": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
     "guest_ip_cidr": {
       "type": "string"
     },
@@ -19,6 +25,9 @@
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "kino_sha256": {
+      "type": "string"
     },
     "kino_vsock_cid": {
       "type": "integer",
@@ -55,6 +64,8 @@
     "kino_vsock_cid",
     "kino_vsock_port",
     "kino_host_ready_port",
+    "kino_sha256",
+    "guest_bootstrap_abi",
     "vm_hostname",
     "guest_ip_cidr",
     "gateway",

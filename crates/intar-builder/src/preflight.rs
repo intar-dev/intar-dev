@@ -106,22 +106,6 @@ pub fn collect_preflight_with_environment(
         &cfg.qemu.resize2fs_binary,
         &env.path_entries,
     );
-    if let Some(kino_binary) = &cfg.builder.kino_binary {
-        push_file_check(&mut checks, "kino binary override", kino_binary);
-    } else if cfg.builder.kino_release_base_url.trim().is_empty() {
-        checks.push(fail(
-            "kino release source",
-            "builder.kino_release_base_url is required when builder.kino_binary is not set",
-        ));
-    } else {
-        checks.push(pass(
-            "kino release source",
-            format!(
-                "will download pinned kino releases from {}",
-                cfg.builder.kino_release_base_url
-            ),
-        ));
-    }
     push_dir_check(&mut checks, "builder work_root", &cfg.builder.work_root);
     push_dir_check(&mut checks, "builder cache_root", &cfg.builder.cache_root);
     match cfg.builder.state_db.parent() {
@@ -179,17 +163,6 @@ fn push_command_check(
             name,
             format!("'{}' was not found or is not executable", command),
         )),
-    }
-}
-
-fn push_file_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &Path) {
-    if is_executable_file(path) {
-        checks.push(pass(name, format!("found {}", path.display())));
-    } else {
-        checks.push(fail(
-            name,
-            format!("'{}' is missing or is not executable", path.display()),
-        ));
     }
 }
 
@@ -282,16 +255,19 @@ fn push_job_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {
         ));
     }
 
-    if cfg.jobs.max_concurrent_builds == 1 {
+    if (1..=2).contains(&cfg.jobs.max_concurrent_builds) {
         checks.push(pass(
             "job concurrency",
-            "max_concurrent_builds = 1 is supported",
+            format!(
+                "max_concurrent_builds = {} is supported",
+                cfg.jobs.max_concurrent_builds
+            ),
         ));
     } else {
         checks.push(fail(
             "job concurrency",
             format!(
-                "jobs.max_concurrent_builds must be 1 in this release; configured {}",
+                "jobs.max_concurrent_builds must be 1 or 2; configured {}",
                 cfg.jobs.max_concurrent_builds
             ),
         ));
@@ -528,7 +504,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut cfg = BuilderConfig::default();
         cfg.bridge.enabled = false;
-        cfg.jobs.max_concurrent_builds = 2;
+        cfg.jobs.max_concurrent_builds = 3;
         cfg.qemu.accelerator = "tcg".to_string();
         cfg.builder.work_root = temp.path().join("missing-work");
         cfg.builder.cache_root = temp.path().join("missing-cache");

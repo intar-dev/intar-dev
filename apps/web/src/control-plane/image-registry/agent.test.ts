@@ -14,7 +14,7 @@ const { authMock, dbMock } = imageRegistryMocks();
 describe("image registry agent routes", () => {
   beforeEach(resetImageRegistryMocks);
 
-  it("advertises only valid raw-zstd direct-boot image index entries", async () => {
+  it("advertises only valid chunked direct-boot image index entries", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
       agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
@@ -69,14 +69,12 @@ describe("image registry agent routes", () => {
       ]),
     );
     const bucketHead = vi.fn(async (key: string) => {
-      if (
-        key === `images/broken-nginx-web-x86_64/${validImageSha256}.raw.zst`
-      ) {
+      if (key === `image-manifests/v1/${"d".repeat(64)}.json`) {
         return {
-          size: 123_456,
+          size: 321,
           customMetadata: {
-            image_key: "broken-nginx-web-x86_64",
-            image_sha256: validImageSha256,
+            manifest_sha256: "d".repeat(64),
+            image_id: validImageSha256,
           },
         };
       }
@@ -132,41 +130,29 @@ describe("image registry agent routes", () => {
       images: [
         {
           image_key: "broken-nginx-web-x86_64",
-          image_sha256: validImageSha256,
-          image_format: "raw_zstd",
+          image_id: validImageSha256,
+          image_format: "raw_chunks_v1",
           image_virtual_size_bytes: 8_589_934_592,
+          chunk_manifest_sha256: "d".repeat(64),
+          guest_bootstrap_abi: 1,
           boot: {
             kernel_sha256: validKernelSha256,
             initrd_sha256: validInitrdSha256,
             cmdline:
               "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false",
           },
-          bytes: 123_456,
-          download_url: `/agent/registry/images/broken-nginx-web-x86_64/${validImageSha256}`,
+          bytes: 8_589_934_592,
+          manifest_download_url: `/agent/registry/image-manifests/${"d".repeat(64)}`,
+          chunk_download_base_url: "/agent/registry/image-chunks",
         },
       ],
     });
     expect(bucketHead).toHaveBeenCalledWith(
-      `images/broken-nginx-web-x86_64/${validImageSha256}.raw.zst`,
+      `image-manifests/v1/${"d".repeat(64)}.json`,
     );
     expect(bucketHead).toHaveBeenCalledWith(`artifacts/${validKernelSha256}`);
     expect(bucketHead).toHaveBeenCalledWith(`artifacts/${validInitrdSha256}`);
-    expect(bucketHead).toHaveBeenCalledWith(
-      `images/broken-nginx-web-x86_64/${missingImageSha256}.raw.zst`,
-    );
-    expect(bucketHead).toHaveBeenCalledWith(
-      `images/broken-nginx-web-x86_64/${missingArtifactImageSha256}.raw.zst`,
-    );
-    expect(bucketHead).toHaveBeenCalledWith(
-      `artifacts/${missingArtifactKernelSha256}`,
-    );
-    expect(bucketHead).toHaveBeenCalledWith(
-      `artifacts/${missingArtifactInitrdSha256}`,
-    );
-    expect(bucketHead).toHaveBeenCalledWith(
-      `images/broken-nginx-web-x86_64/${staleMetadataImageSha256}.raw.zst`,
-    );
-    expect(bucketHead).toHaveBeenCalledTimes(8);
+    expect(bucketHead).toHaveBeenCalledTimes(6);
   });
 
   it("streams raw-zstd images to verified agents", async () => {

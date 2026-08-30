@@ -1439,6 +1439,9 @@ mod tests {
             generated_at_unix_ms: 1,
             probes: Vec::new(),
             ssh_host_keys_openssh: vec!["ssh-ed25519 AAAATEST intar".to_owned()],
+            kino_sha256: String::new(),
+            guest_bootstrap_abi: 0,
+            guest_phase_timings: None,
         }
         .encode_to_vec();
         (

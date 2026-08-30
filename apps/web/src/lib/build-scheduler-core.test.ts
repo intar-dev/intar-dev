@@ -156,7 +156,6 @@ describe("build scheduler core", () => {
         rev: "abc123",
         contentHash: "f".repeat(64),
         bundleRef: "builds/bundles/abc123.tar.gz",
-        kinoVersion: "1.2.3",
       }),
     ).toEqual({
       build_id: "build-1",
@@ -165,7 +164,6 @@ describe("build scheduler core", () => {
       rev: "abc123",
       content_hash: "f".repeat(64),
       bundle_ref: "builds/bundles/abc123.tar.gz",
-      kino_version: "1.2.3",
     });
   });
 

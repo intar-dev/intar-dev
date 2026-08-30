@@ -91,29 +91,22 @@ render-images scenario="" config="builder.sample.amd64.hcl":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    target_dir="$(cargo metadata --format-version=1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
-    kino_binary="${target_dir}/x86_64-unknown-linux-musl/guest/kino"
-
     if [[ -n "{{scenario}}" ]]; then
-      cargo run -p intar-image-cli -- render "{{scenario}}" --config "{{config}}" --kino-binary "${kino_binary}"
+      cargo run -p intar-image-cli -- render "{{scenario}}" --config "{{config}}"
     else
-      cargo run -p intar-image-cli -- render --config "{{config}}" --kino-binary "${kino_binary}"
+      cargo run -p intar-image-cli -- render --config "{{config}}"
     fi
 
 build-images scenario="" config="builder.sample.amd64.hcl" no_upload="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    just build-kino-guest
-    target_dir="$(cargo metadata --format-version=1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
-    kino_binary="${target_dir}/x86_64-unknown-linux-musl/guest/kino"
-
     if [[ -n "{{scenario}}" ]]; then
       args=(build "{{scenario}}")
     else
       args=(build-all)
     fi
-    args+=(--config "{{config}}" --kino-binary "${kino_binary}")
+    args+=(--config "{{config}}")
     if [[ "{{no_upload}}" == "true" ]]; then
       args+=(--no-upload)
     fi

@@ -281,6 +281,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Request::LaunchVmV2(request) => self
                 .config
                 .validate_ssh_public_port(request.launch.ssh_public_port),
+            Request::LaunchVmV3(request) => self
+                .config
+                .validate_ssh_public_port(request.launch.ssh_public_port),
             _ => Ok(()),
         };
         if let Err(error) = policy_validation {
@@ -298,11 +301,31 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 ));
             }
         }
+        if matches!(request, Request::LaunchVmV3(_)) {
+            let capabilities = self.capabilities();
+            if !(capabilities.supports_jailer_v3
+                && capabilities.supports_template_backed_launch
+                && capabilities.fast_template_store)
+            {
+                return Response::Error(ProtocolError::new(
+                    "host_not_ready",
+                    "host readiness attestation does not permit v3 chunked VM launches",
+                ));
+            }
+        }
         if matches!(request, Request::PrepareImageV2(_)) && !self.capabilities().supports_jailer_v2
         {
             return Response::Error(ProtocolError::new(
                 "host_not_ready",
                 "host readiness attestation does not permit template-backed image preparation",
+            ));
+        }
+        if matches!(request, Request::PrepareChunkedImageV3(_))
+            && !self.capabilities().supports_jailer_v3
+        {
+            return Response::Error(ProtocolError::new(
+                "host_not_ready",
+                "host readiness attestation does not permit v3 chunked image preparation",
             ));
         }
         match self.try_handle(request) {
@@ -322,6 +345,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Request::Capabilities => Ok(Response::Capabilities(self.capabilities())),
             Request::PrepareImageV2(request) => Ok(Response::PrepareImageV2(
                 self.preparer.prepare_image_v2(&self.config, &request)?,
+            )),
+            Request::PrepareChunkedImageV3(request) => Ok(Response::PrepareChunkedImageV3(
+                self.preparer.prepare_image_v3(&self.config, &request)?,
             )),
             Request::EnsureRunNetwork(request) => {
                 request.validate().context("validate run network request")?;
@@ -360,6 +386,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 Ok(Response::RepairRunNetwork(result))
             }
             Request::LaunchVmV2(request) => Ok(Response::LaunchVmV2(self.launch_vm_v2(*request)?)),
+            Request::LaunchVmV3(request) => Ok(Response::LaunchVmV3(self.launch_vm_v3(*request)?)),
             Request::FinalizeVmBoot(request) => {
                 Ok(Response::FinalizeVmBoot(self.finalize_vm_boot(request)?))
             }
@@ -416,6 +443,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             schedulable_cpu_millis,
             committed_cpu_millis,
             supports_jailer_v2: ready && fast_template_store,
+            supports_jailer_v3: ready && fast_template_store,
             supports_template_backed_launch: ready && fast_template_store,
             fast_template_store,
             supports_hard_cpu_quota: ready,
@@ -454,8 +482,33 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
     /// delayed by a multi-GiB image.
     pub fn template_prepare_config(&self) -> Option<JailerdConfig> {
         self.capabilities()
-            .supports_jailer_v2
+            .supports_jailer_v3
             .then(|| self.config.clone())
+    }
+
+    pub fn live_template_image_ids(&self) -> HashSet<String> {
+        self.records
+            .values()
+            .filter_map(|record| {
+                (record.request.artifacts.root_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT)
+                    .then(|| {
+                        record
+                            .request
+                            .artifacts
+                            .root_disk
+                            .relative_path
+                            .components()
+                            .next()
+                            .and_then(|component| match component {
+                                std::path::Component::Normal(value) => {
+                                    value.to_str().map(ToOwned::to_owned)
+                                }
+                                _ => None,
+                            })
+                    })
+                    .flatten()
+            })
+            .collect()
     }
 
     pub(super) fn begin_detached_launch_vm_v2(
@@ -466,20 +519,42 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         B: Clone,
         P: Clone,
     {
+        self.begin_detached_launch(PreparedLaunchRequest::V2(request))
+    }
+
+    pub(super) fn begin_detached_launch_vm_v3(
+        &mut self,
+        request: LaunchVmV3Request,
+    ) -> Result<DetachedLaunchAdmission<B, P>>
+    where
+        B: Clone,
+        P: Clone,
+    {
+        self.begin_detached_launch(PreparedLaunchRequest::V3(request))
+    }
+
+    fn begin_detached_launch(
+        &mut self,
+        request: PreparedLaunchRequest,
+    ) -> Result<DetachedLaunchAdmission<B, P>>
+    where
+        B: Clone,
+        P: Clone,
+    {
         let quota = request
             .validate()
             .context("validate template-backed VM launch request")?;
+        let launch = request.launch();
         self.config
-            .validate_ssh_public_port(request.launch.ssh_public_port)
+            .validate_ssh_public_port(launch.ssh_public_port)
             .context("validate root-owned SSH public port policy")?;
         let effective_quota =
-            CpuQuota::from_millis(request.launch.cpu_millis.max(self.config.boot_cpu_millis))
+            CpuQuota::from_millis(launch.cpu_millis.max(self.config.boot_cpu_millis))
                 .context("derive root-owned boot CPU quota")?;
-        let fingerprint = request_fingerprint(&request.launch)?;
+        let fingerprint = request_fingerprint(launch)?;
 
         if let Some(existing) = self.records.values().find(|record| {
-            record.request.run_id == request.launch.run_id
-                && record.request.vm_id == request.launch.vm_id
+            record.request.run_id == launch.run_id && record.request.vm_id == launch.vm_id
         }) {
             if existing.request_fingerprint != fingerprint {
                 bail!("logical VM already exists with a different launch request")
@@ -494,8 +569,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             )));
         }
         if let Some(existing) = self.inflight_launches.values().find(|reservation| {
-            reservation.request.run_id == request.launch.run_id
-                && reservation.request.vm_id == request.launch.vm_id
+            reservation.request.run_id == launch.run_id && reservation.request.vm_id == launch.vm_id
         }) {
             if existing.request_fingerprint != fingerprint {
                 bail!("logical VM launch already exists with a different launch request")
@@ -513,7 +587,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
 
         let run_network = self
             .run_networks
-            .get(&request.launch.run_id)
+            .get(&launch.run_id)
             .context("run network must be ensured before launching a VM")?
             .clone();
         let schedulable = self
@@ -527,7 +601,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             return Err(BootCapacityPendingError {
                 committed,
                 requested: effective_quota.cpu_millis,
-                steady: request.launch.cpu_millis,
+                steady: launch.cpu_millis,
                 schedulable,
             }
             .into());
@@ -553,7 +627,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let identity = self.allocate_identity()?;
         let reservation = LaunchReservation {
             generation: generation.clone(),
-            request: request.launch.clone(),
+            request: launch.clone(),
             request_fingerprint: fingerprint,
             run_network,
             uid: identity,
@@ -656,6 +730,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 }
             }
         }
+    }
+
+    pub(super) fn complete_detached_launch_vm_v3(
+        &mut self,
+        outcome: DetachedLaunchOutcome,
+    ) -> Result<VmLaunchResult> {
+        self.complete_detached_launch_vm_v2(outcome)
     }
 
     pub(super) fn complete_detached_existing_launch(

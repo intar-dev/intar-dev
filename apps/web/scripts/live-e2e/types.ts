@@ -1,6 +1,6 @@
 import type {
-  ScenarioManifestV3,
-  ScenarioVmManifestV3,
+  ScenarioManifestV4,
+  ScenarioVmManifestV4,
 } from "../../src/generated/catalog";
 import type { DashboardArchivedRun } from "../../src/lib/dashboard-host";
 import type { ScenarioRunRecord } from "../../src/lib/scenario-runs";
@@ -31,12 +31,12 @@ export interface Options {
 
 export interface LoadedManifest {
   path: string;
-  manifest: ScenarioManifestV3;
+  manifest: ScenarioManifestV4;
 }
 
 export interface RequiredImage {
-  image_key: ScenarioVmManifestV3["image_key"];
-  image_sha256: string;
+  image_key: ScenarioVmManifestV4["image_key"];
+  image_id: string;
 }
 
 export interface HostSummary {
@@ -56,6 +56,9 @@ export interface HostSummary {
       supports_reflink: boolean;
       supports_nftables: boolean;
       supports_jailer_v2: boolean;
+      supports_jailer_v3: boolean;
+      supports_raw_chunks_v1: boolean;
+      supports_scenario_guest_tools_v1: boolean;
       supports_boot_cpu_lease: boolean;
       supports_template_backed_launch: boolean;
       fast_template_store: boolean;
@@ -68,8 +71,8 @@ export interface HostSummary {
       arch: string;
     };
     cachedImages: Array<{
-      image_key: ScenarioVmManifestV3["image_key"];
-      image_sha256: string;
+      image_key: ScenarioVmManifestV4["image_key"];
+      image_id: string;
       phase: string;
       error?: string | null;
     }>;
@@ -117,7 +120,7 @@ export interface AdminBuildSummary {
 export interface AdminScenarioResponse {
   scenario: {
     vms: Array<{
-      imageKey: ScenarioVmManifestV3["image_key"] | null;
+      imageKey: ScenarioVmManifestV4["image_key"] | null;
       imageSha256: string | null;
       imageFormat: string;
       imageVirtualSizeBytes: number;

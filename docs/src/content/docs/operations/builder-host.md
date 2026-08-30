@@ -48,9 +48,8 @@ scheduling disabled.
 ## Install The Binary
 
 Download the `intar-builder_<version>_linux_amd64.tar.gz` release artifact for
-the target version, then install it. The builder downloads the pinned `kino`
-release from `content/scenarios/build-tools.hcl` into its cache before each build assignment,
-verifying the release checksum before use.
+the target version, then install it. Guest tools are published separately and
+are not downloaded or baked by the image builder.
 
 ```bash
 sudo install -d /usr/local/bin /etc/intar-builder /var/lib/intar-builder/work /var/cache/intar-builder
@@ -70,7 +69,6 @@ heartbeat_interval_seconds = 20
 work_root = "/var/lib/intar-builder/work"
 cache_root = "/var/cache/intar-builder"
 state_db = "/var/lib/intar-builder/state.sqlite3"
-kino_release_base_url = "https://github.com/intar-dev/intar-dev/releases/download"
 
 [qemu]
 qemu_binary = "qemu-system-x86_64"
@@ -87,15 +85,15 @@ build_memory_mb = 4096
 
 [jobs]
 max_attempts = 3
-max_concurrent_builds = 1
+max_concurrent_builds = 2
 ```
 
 The same template is checked into
 `crates/intar-builder/deploy/config.example.toml`.
 
-`max_concurrent_builds` must remain `1` in this release. Multiple builder hosts
-are supported by creating additional hosts; per-host parallel builds need separate
-workspace/cache locking before they are safe.
+Two isolated workers share an eight-slot CPU gate. Each QEMU provision or chunk
+compression stage takes four slots. Upload work takes no CPU slots, so one build
+can upload while the next build provisions.
 
 Protect the config because the bootstrap token remains a credential used to mint
 short-lived builder JWTs until it is rotated, revoked, or expires:
@@ -144,8 +142,8 @@ sudo intar-builder doctor --config /etc/intar-builder/config.toml
 
 The command exits nonzero if required image-build prerequisites are missing:
 `/dev/kvm`, `accelerator = "kvm"`, the configured QEMU/mmdebstrap/e2fsprogs
-binaries, required work/cache/state directories, bridge credentials, or the
-single-worker limit. Builder doctor covers the QEMU/SSH image-build path only;
+binaries, required work/cache/state directories, or bridge credentials. Builder
+doctor covers the QEMU/SSH image-build path only;
 it is not a substitute for agent doctor or the privileged jailerd self-test on
 a scenario host.
 
@@ -173,8 +171,3 @@ df -h /var/lib/intar-builder /var/cache/intar-builder
 
 If the host is connected but builds stay unassigned, confirm the host role is
 `builder`, it is not disabled, and its architecture matches the build row.
-
-For local development or an air-gapped builder, set `builder.kino_binary` to a
-preinstalled binary path. When that override is present, the daemon skips release
-download and uses the configured file with the pinned version recorded in the
-build metadata.

@@ -12,10 +12,7 @@ import { createAppId } from "@/lib/id";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import { getScenarioSource } from "@/lib/scenario-sources";
 import { buildTar, gzipBytes } from "@/lib/tar";
-import {
-  baseImagesHcl,
-  buildToolsHcl,
-} from "@/generated/scenario-authoring-config";
+import { baseImagesHcl } from "@/generated/scenario-authoring-config";
 
 // App-triggered image builds from authoring drafts. The admin's browser runs
 // prepare_build (the Rust validator/hasher compiled to wasm — proven
@@ -28,18 +25,6 @@ import {
 const CONTENT_HASH_PATTERN = /^[a-f0-9]{64}$/;
 const IMAGE_ARCHES = new Set(["x86_64", "aarch64"]);
 
-function embeddedKinoVersion(): string {
-  const match = buildToolsHcl.match(/version\s*=\s*"([^"]+)"/);
-  if (!match?.[1]) {
-    throw appError(
-      500,
-      "build_tools_unreadable",
-      "embedded build-tools.hcl has no kino version",
-    );
-  }
-  return match[1];
-}
-
 export interface DraftBuildResult {
   rev: string;
   contentHash: string;
@@ -50,7 +35,6 @@ export interface DraftBuildResult {
 export async function queueDraftBuild(params: {
   scenarioId: string;
   contentHash: string;
-  kinoVersion: string;
   imageArch: string;
   organizationId?: string | null;
 }): Promise<DraftBuildResult> {
@@ -71,19 +55,9 @@ export async function queueDraftBuild(params: {
   if (!IMAGE_ARCHES.has(params.imageArch)) {
     throw appError(400, "invalid_arch", "unsupported image architecture");
   }
-  const kinoVersion = embeddedKinoVersion();
-  if (params.kinoVersion !== kinoVersion) {
-    throw appError(
-      409,
-      "kino_version_stale",
-      `the validator pins kino ${params.kinoVersion} but the deployed pipeline expects ${kinoVersion} — reload the page`,
-    );
-  }
-
   const encoder = new TextEncoder();
   const tar = buildTar([
     { path: "base-images.hcl", bytes: encoder.encode(baseImagesHcl) },
-    { path: "build-tools.hcl", bytes: encoder.encode(buildToolsHcl) },
     {
       path: `scenarios/${params.scenarioId}/scenario.hcl`,
       bytes: encoder.encode(source.hcl),
@@ -101,7 +75,6 @@ export async function queueDraftBuild(params: {
       httpMetadata: { contentType: "application/gzip" },
       customMetadata: {
         rev,
-        kino_version: kinoVersion,
         ...(organizationId ? { organization_id: organizationId } : {}),
       },
     },
@@ -109,9 +82,10 @@ export async function queueDraftBuild(params: {
 
   const meta: ImageBuildBundleMeta = {
     rev,
-    kino_version: kinoVersion,
     build_format_version: IMAGE_BUILD_FORMAT_VERSION,
     buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+    catalog_channel: "live",
+    catalogChannel: "live",
     scenarios: [
       {
         scenarioId: params.scenarioId,
@@ -125,7 +99,6 @@ export async function queueDraftBuild(params: {
   const queued = await queueImageBuildsFromBundle(db, {
     rev,
     r2Key,
-    kinoVersion,
     meta,
     organizationId,
     nowUnixMs: now,

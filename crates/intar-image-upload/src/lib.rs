@@ -5,6 +5,7 @@ mod uploader;
 pub use config::ImageUploadConfig;
 pub use error::{Error, Result};
 pub use uploader::{
-    ImageUploader, PublishArtifactFile, PublishBuildIdentity, PublishImageFile, PublishReceipt,
-    PublishedArtifact, PublishedImage, UploadBlobReceipt, UploadImageBlob,
+    ExistingImageChunk, ImageChunkLookup, ImageUploader, PublishArtifactFile, PublishBuildIdentity,
+    PublishChunkedImage, PublishImageChunkFile, PublishReceipt, PublishedArtifact, PublishedImage,
+    UploadBlobReceipt, UploadImageBlob,
 };

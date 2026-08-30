@@ -1,6 +1,6 @@
 import { gzipSync } from "node:zlib";
 import { vi } from "vitest";
-import type { ScenarioManifestV3 } from "@/generated/catalog";
+import type { ScenarioManifestV4 } from "@/generated/catalog";
 
 const authMock = vi.hoisted(() => ({
   requireVerifiedAgentRequest: vi.fn(),
@@ -37,6 +37,12 @@ const desiredStateStoreMock = vi.hoisted(() => ({
   mutateStoredHostDesiredState: vi.fn(),
 }));
 
+const candidateCatalogMock = vi.hoisted(() => ({
+  stageCandidateScenarioManifest: vi.fn(),
+  stageReusableCandidateManifests: vi.fn(),
+  warmCandidateScenarioManifest: vi.fn(),
+}));
+
 const hostRuntimeWakeMock = vi.hoisted(() => ({
   tryWakeHostRuntime: vi.fn(),
 }));
@@ -56,6 +62,7 @@ export function imageRegistryMocks() {
     imageBuildLockMock,
     catalogManifestMock,
     desiredStateStoreMock,
+    candidateCatalogMock,
     hostRuntimeWakeMock,
     scenarioImageCacheMock,
   };
@@ -74,6 +81,8 @@ vi.mock("@/lib/image-build-lock", () => imageBuildLockMock);
 vi.mock("@/lib/catalog-manifest", () => catalogManifestMock);
 
 vi.mock("@/lib/desired-state-store", () => desiredStateStoreMock);
+
+vi.mock("@/lib/scenario-catalog-candidates", () => candidateCatalogMock);
 
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeWakeMock);
 
@@ -106,6 +115,12 @@ export function resetImageRegistryMocks(): void {
   );
   catalogManifestMock.seedScenarioManifest.mockReset();
   desiredStateStoreMock.mutateStoredHostDesiredState.mockReset();
+  candidateCatalogMock.stageCandidateScenarioManifest.mockReset();
+  candidateCatalogMock.stageCandidateScenarioManifest.mockResolvedValue(undefined);
+  candidateCatalogMock.stageReusableCandidateManifests.mockReset();
+  candidateCatalogMock.stageReusableCandidateManifests.mockResolvedValue([]);
+  candidateCatalogMock.warmCandidateScenarioManifest.mockReset();
+  candidateCatalogMock.warmCandidateScenarioManifest.mockResolvedValue([]);
   hostRuntimeWakeMock.tryWakeHostRuntime.mockReset();
   scenarioImageCacheMock.isRuntimeImageCacheHost.mockReset();
   scenarioImageCacheMock.isRuntimeImageCacheHost.mockImplementation(
@@ -160,6 +175,7 @@ export type PublishBuildAssignmentFixture = {
   arch: "x86_64" | "aarch64";
   rev: string;
   contentHash: string;
+  catalogChannel?: "candidate" | "live";
 };
 
 export function publishBuildAssignment(
@@ -178,7 +194,7 @@ export function publishBuildAssignment(
   };
 }
 
-export function builderPublishForm(manifest: ScenarioManifestV3): FormData {
+export function builderPublishForm(manifest: ScenarioManifestV4): FormData {
   const form = new FormData();
   form.set("manifest", JSON.stringify(manifest));
   form.set("build_id", "build-1");
@@ -213,10 +229,14 @@ export function publishFenceDb(input: {
     const from = vi.fn(() => ({ where }));
     return { from };
   });
+  const updateWhere = vi.fn().mockResolvedValue(undefined);
+  const updateSet = vi.fn(() => ({ where: updateWhere }));
+  const update = vi.fn(() => ({ set: updateSet }));
 
   return {
     kind: "test-db",
     select,
+    update,
   };
 }
 
@@ -367,7 +387,6 @@ export function bundleFixtureFiles(
 ): Array<[string, string]> {
   return [
     ["base-images.hcl", 'base_image "trixie" {}\n'],
-    ["build-tools.hcl", 'kino { version = "0.4.0" }\n'],
     ...scenarioIds.map((scenarioId): [string, string] => [
       `scenarios/${scenarioId}/scenario.hcl`,
       `scenario "${scenarioId}" {}\n`,
@@ -462,6 +481,8 @@ export interface ImageIndexRow {
   imageSha256: string;
   imageFormat: string;
   imageVirtualSizeBytes: number;
+  chunkManifestSha256: string | null;
+  guestBootstrapAbi: number | null;
   kernelSha256: string;
   initrdSha256: string;
   bootCmdline: string;
@@ -477,8 +498,10 @@ export function imageIndexRow(
       arch: "x86_64",
     },
     imageSha256: "a".repeat(64),
-    imageFormat: "raw_zstd",
+    imageFormat: "raw_chunks_v1",
     imageVirtualSizeBytes: 8_589_934_592,
+    chunkManifestSha256: "d".repeat(64),
+    guestBootstrapAbi: 1,
     kernelSha256: "b".repeat(64),
     initrdSha256: "c".repeat(64),
     bootCmdline:
@@ -490,9 +513,9 @@ export function imageIndexRow(
 export function publishManifest(input: {
   imageSha256: string;
   artifactSha256: string;
-}): ScenarioManifestV3 {
+}): ScenarioManifestV4 {
   return {
-    schema_version: 3,
+    schema_version: 4,
     scenario_id: "broken-nginx",
     name: "broken-nginx",
     title: "Broken Nginx",
@@ -512,9 +535,11 @@ export function publishManifest(input: {
           vm: "web",
           arch: "x86_64",
         },
-        image_sha256: input.imageSha256,
-        image_format: "raw_zstd",
+        image_id: input.imageSha256,
+        image_format: "raw_chunks_v1",
         image_virtual_size_bytes: 8_589_934_592,
+        chunk_manifest_sha256: "d".repeat(64),
+        guest_bootstrap_abi: 1,
         boot: {
           kernel_sha256: input.artifactSha256,
           initrd_sha256: input.artifactSha256,
@@ -528,6 +553,19 @@ export function publishManifest(input: {
         probes: [],
       },
     ],
+  };
+}
+
+export function chunkManifestHead(manifest: ScenarioManifestV4) {
+  const vm = manifest.vms[0];
+  if (!vm) throw new Error("manifest has no VM");
+  return {
+    size: 321,
+    customMetadata: {
+      manifest_sha256: vm.chunk_manifest_sha256.toLowerCase(),
+      image_id: vm.image_id.toLowerCase(),
+      virtual_size_bytes: String(vm.image_virtual_size_bytes),
+    },
   };
 }
 

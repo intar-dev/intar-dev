@@ -11,7 +11,7 @@ use flate2::read::GzDecoder;
 use intar_contracts::bridge::DesiredBuildV1;
 use intar_contracts::catalog::ImageArchitecture;
 use intar_image_build::{ScenarioContentHashInput, scenario_content_hash};
-use intar_image_scenario::{BaseImageCatalog, BuildTools, Scenario};
+use intar_image_scenario::{BaseImageCatalog, Scenario};
 
 const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -19,7 +19,6 @@ const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
 pub struct BundleVerification {
     pub scenario_id: String,
     pub content_hash: String,
-    pub kino_version: String,
     pub target_arch: String,
 }
 
@@ -30,7 +29,6 @@ pub struct BundleBuildInput {
     pub scenario_dir: PathBuf,
     pub scenario: Scenario,
     pub base_catalog: BaseImageCatalog,
-    pub build_tools: BuildTools,
     pub target_arch: String,
 }
 
@@ -262,7 +260,6 @@ pub fn verify_bundle_for_build(
     validate_desired_build_identity(build)?;
     let target_arch = builder_arch(&build.arch);
     let base_catalog_path = bundle_root.join("base-images.hcl");
-    let build_tools_path = bundle_root.join("build-tools.hcl");
     let scenario_path = bundle_root
         .join("scenarios")
         .join(&build.scenario_id)
@@ -277,20 +274,6 @@ pub fn verify_bundle_for_build(
             base_catalog_path.display()
         )
     })?;
-    let build_tools = BuildTools::from_file(&build_tools_path).with_context(|| {
-        format!(
-            "failed to load build tools config from '{}'",
-            build_tools_path.display()
-        )
-    })?;
-    if build_tools.kino.version != build.kino_version {
-        bail!(
-            "desired build kino version mismatch: desired {}, bundle {}",
-            build.kino_version,
-            build_tools.kino.version
-        );
-    }
-
     let scenario = Scenario::from_file(&scenario_path)
         .with_context(|| format!("failed to load scenario '{}'", scenario_path.display()))?;
     if scenario.name != build.scenario_id {
@@ -315,7 +298,6 @@ pub fn verify_bundle_for_build(
         scenario_id: &scenario.name,
         scenario_dir,
         base_definition: &base_definition,
-        kino_version: &build_tools.kino.version,
         target_arch,
     })?;
     if !content_hash.eq_ignore_ascii_case(&build.content_hash) {
@@ -330,7 +312,6 @@ pub fn verify_bundle_for_build(
     Ok(BundleVerification {
         scenario_id: scenario.name,
         content_hash,
-        kino_version: build_tools.kino.version,
         target_arch: target_arch.to_owned(),
     })
 }
@@ -345,7 +326,6 @@ pub fn inspect_bundle_build_input(
     validate_bundle_rev(rev)?;
     let target_arch = builder_arch(&arch);
     let base_catalog_path = bundle_root.join("base-images.hcl");
-    let build_tools_path = bundle_root.join("build-tools.hcl");
     let scenario_path = bundle_root
         .join("scenarios")
         .join(scenario_id)
@@ -359,12 +339,6 @@ pub fn inspect_bundle_build_input(
         format!(
             "failed to load base image catalog from '{}'",
             base_catalog_path.display()
-        )
-    })?;
-    let build_tools = BuildTools::from_file(&build_tools_path).with_context(|| {
-        format!(
-            "failed to load build tools config from '{}'",
-            build_tools_path.display()
         )
     })?;
     let scenario = Scenario::from_file(&scenario_path)
@@ -391,7 +365,6 @@ pub fn inspect_bundle_build_input(
         scenario_id: &scenario.name,
         scenario_dir: &scenario_dir,
         base_definition: &base_definition,
-        kino_version: &build_tools.kino.version,
         target_arch,
     })?;
     let build_id = format!("{}-{target_arch}-{}", scenario.name, &content_hash[..12]);
@@ -402,7 +375,6 @@ pub fn inspect_bundle_build_input(
         rev: rev.to_owned(),
         content_hash,
         bundle_ref: format!("builds/bundles/{rev}.tar.gz"),
-        kino_version: build_tools.kino.version.clone(),
     };
 
     Ok(BundleBuildInput {
@@ -411,7 +383,6 @@ pub fn inspect_bundle_build_input(
         scenario_dir,
         scenario,
         base_catalog,
-        build_tools,
         target_arch: target_arch.to_owned(),
     })
 }
@@ -420,7 +391,6 @@ pub fn validate_desired_build_identity(build: &DesiredBuildV1) -> Result<()> {
     validate_safe_slug(&build.build_id, "build id")?;
     validate_safe_slug(&build.scenario_id, "scenario id")?;
     validate_bundle_rev(&build.rev)?;
-    validate_safe_slug(&build.kino_version, "kino version")?;
     validate_sha256_hex(&build.content_hash, "content hash")?;
     let expected_bundle_ref = bundle_ref_for_rev(&build.rev);
     if build.bundle_ref != expected_bundle_ref {
@@ -591,7 +561,7 @@ mod tests {
             &archive_path,
             &[
                 ("base-images.hcl", b"base".as_slice()),
-                ("build-tools.hcl", b"kino {}".as_slice()),
+                ("scenarios/demo/scenario.hcl", b"scenario {}".as_slice()),
             ],
         );
 
@@ -653,7 +623,6 @@ mod tests {
             scenario_id: "broken-nginx",
             scenario_dir: &scenario_dir,
             base_definition: "trixie\nsuite=trixie\nmirror=https://deb.debian.org/debian\narch=amd64\nkernel_package=linux-image-cloud-amd64\npackages=openssh-server,ca-certificates,sudo,zstd",
-            kino_version: "0.1.24",
             target_arch: "amd64",
         })
         .unwrap();
@@ -663,7 +632,6 @@ mod tests {
 
         assert_eq!(verified.scenario_id, "broken-nginx");
         assert_eq!(verified.content_hash, expected_hash);
-        assert_eq!(verified.kino_version, "0.1.24");
 
         let wrong_hash = desired_build(&"f".repeat(64));
         let error = verify_bundle_for_build(temp.path(), &wrong_hash).unwrap_err();
@@ -698,14 +666,9 @@ mod tests {
         let error = validate_desired_build_identity(&build).unwrap_err();
         assert!(format!("{error:#}").contains("invalid build id"));
 
-        let mut build = desired_build("not-a-sha");
+        let build = desired_build("not-a-sha");
         let error = validate_desired_build_identity(&build).unwrap_err();
         assert!(format!("{error:#}").contains("invalid content hash"));
-
-        build = desired_build(&"f".repeat(64));
-        build.kino_version = "bad/version".to_owned();
-        let error = validate_desired_build_identity(&build).unwrap_err();
-        assert!(format!("{error:#}").contains("invalid kino version"));
     }
 
     #[test]
@@ -725,7 +688,6 @@ mod tests {
         assert_eq!(input.build.scenario_id, "broken-nginx");
         assert_eq!(input.build.rev, "abc123");
         assert_eq!(input.build.bundle_ref, "builds/bundles/abc123.tar.gz");
-        assert_eq!(input.build.kino_version, "0.1.24");
         assert_eq!(input.build.content_hash.len(), 64);
         assert!(input.build.build_id.starts_with("broken-nginx-amd64-"));
         assert_eq!(input.target_arch, "amd64");
@@ -739,7 +701,6 @@ mod tests {
             rev: "abc123".to_owned(),
             content_hash: content_hash.to_owned(),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_owned(),
-            kino_version: "0.1.24".to_owned(),
         }
     }
 
@@ -754,15 +715,6 @@ base_image "trixie" {
   arch = "amd64"
   kernel_package = "linux-image-cloud-amd64"
   packages = ["openssh-server", "ca-certificates", "sudo", "zstd"]
-}
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("build-tools.hcl"),
-            r#"
-kino {
-  version = "0.1.24"
 }
 "#,
         )

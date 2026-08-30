@@ -18,6 +18,7 @@ import {
 } from "@/db/schema";
 import {
   testImageKey,
+  testGuestTools,
   seedHost,
   connectHost,
   sendBridge,
@@ -103,7 +104,8 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         vm_name: runtimeVmName,
         desired_phase: "running",
         image_key: testImageKey,
-        image_sha256: "2".repeat(64),
+        image_id: "2".repeat(64),
+        guest_tools: testGuestTools,
         resources: {
           cpu_millis: 1_000,
           vcpu_count: 1,
@@ -427,7 +429,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "3".repeat(64),
+        image_id: "3".repeat(64),
       });
     });
 
@@ -445,7 +447,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
 
     sendBridge(ws, {
       type: "sync_request",
-      protocol_version: 6,
+      protocol_version: 7,
       host_id: hostId,
       reason: "reconnect",
     });
@@ -467,7 +469,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         cachedImages: [
           {
             image_key: testImageKey,
-            image_sha256: "3".repeat(64),
+            image_id: "3".repeat(64),
             phase: "ready",
             updated_at_unix_ms: Date.now(),
           },
@@ -499,7 +501,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       (message) =>
         message.type === "desired_state" &&
         message.desired_state.cached_images.some(
-          (entry) => entry.image_sha256 === sha256,
+          (entry) => entry.image_id === sha256,
         ),
     );
 
@@ -510,7 +512,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         cached_images: [
           {
             image_key: testImageKey,
-            image_sha256: sha256,
+            image_id: sha256,
           },
         ],
       },
@@ -532,7 +534,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       messages,
       (message) =>
         message.type === "desired_state" &&
-        message.desired_state.cached_images[0]?.image_sha256 === sha256,
+        message.desired_state.cached_images[0]?.image_id === sha256,
     );
 
     const db = drizzle(env.DB);
@@ -558,7 +560,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       (message) =>
         message.type === "desired_state" &&
         message.desired_state.version > cleared.version &&
-        message.desired_state.cached_images[0]?.image_sha256 === sha256,
+        message.desired_state.cached_images[0]?.image_id === sha256,
     );
     expect(repaired).toMatchObject({ type: "desired_state" });
     ws.close();
@@ -591,11 +593,13 @@ async function seedCatalogImage(sha256: string): Promise<void> {
       scenarioId: testImageKey.scenario,
       ordinal: 0,
       vmName: testImageKey.vm,
-      image: "broken-nginx-webserver-x86_64.raw.zst",
+      image: "broken-nginx-webserver-x86_64.chunks.json",
       imageKeyJson: testImageKey,
       imageSha256: sha256,
-      imageFormat: "raw_zstd",
+      imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 1_024,
+      chunkManifestSha256: "d".repeat(64),
+      guestBootstrapAbi: 1,
       kernelSha256: "a".repeat(64),
       initrdSha256: "b".repeat(64),
       bootCmdline: "console=ttyS0 root=/dev/vda rw",

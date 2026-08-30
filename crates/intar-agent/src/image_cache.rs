@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -8,26 +9,34 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
+use intar_contracts::catalog::ImageChunkManifestV1;
+#[cfg(test)]
+use intar_jailer_protocol::PreparedImageV2Result;
 use intar_jailer_protocol::{
-    ArtifactAccess, ArtifactSource, PREPARED_IMAGE_SOURCE_ROOT, PreparedImageV2Result, Sha256Digest,
+    ArtifactAccess, ArtifactSource, PREPARED_IMAGE_SOURCE_ROOT, PreparedImageV3Result, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, error, info, warn};
+use tokio::sync::{Mutex, Notify, Semaphore};
+#[cfg(test)]
+use tracing::debug;
+use tracing::{Instrument as _, error, info, warn};
 
 use crate::config::{
     BridgeConfig, ImageCacheConfig, ImageRegistryConfig, normalize_sha256, redact_url_userinfo,
 };
 use crate::db::{Db, ImageCacheAccessRow};
 
-const MAX_CONCURRENT_IMAGE_WARMS: usize = 2;
-const MAX_CONCURRENT_CACHE_DOWNLOADS: usize = 4;
+const MAX_CONCURRENT_IMAGE_WARMS: usize = 8;
+const MAX_CONCURRENT_CACHE_DOWNLOADS: usize = 16;
 const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
 const RAW_CACHE_MARKER_VERSION: u8 = 3;
+#[cfg(test)]
 const LAUNCH_DESCRIPTOR_VERSION: u8 = 1;
+#[cfg(test)]
 const LAUNCH_DESCRIPTOR_FILENAME: &str = "launch-v2.ready.json";
 
 type CacheEntryLockKey = (PathBuf, String);
@@ -35,6 +44,11 @@ type CacheEntryLocks = Mutex<HashMap<CacheEntryLockKey, Arc<Mutex<()>>>>;
 
 static CACHE_ENTRY_LOCKS: OnceLock<CacheEntryLocks> = OnceLock::new();
 static CACHE_DOWNLOADS: OnceLock<Semaphore> = OnceLock::new();
+static CACHE_REFRESH_WAKE: OnceLock<Notify> = OnceLock::new();
+
+pub(crate) fn wake_cache_refresh() {
+    CACHE_REFRESH_WAKE.get_or_init(Notify::new).notify_one();
+}
 
 fn cache_entry_locks() -> &'static CacheEntryLocks {
     CACHE_ENTRY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -68,11 +82,19 @@ pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
 #[derive(Debug, Clone)]
 struct RegistryImageRecord {
     image_key: String,
+    #[cfg(test)]
     image_filename: String,
+    #[cfg(test)]
     image_sha256: String,
+    image_id: String,
     image_virtual_size_bytes: u64,
+    chunk_manifest_sha256: String,
+    guest_bootstrap_abi: u16,
     boot: RegistryImageBoot,
+    #[cfg(test)]
     download_url: String,
+    manifest_download_url: String,
+    chunk_download_base_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +104,7 @@ struct RegistryImageBoot {
     cmdline: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CachedImage {
     pub image_key: String,
@@ -97,12 +120,30 @@ pub struct CachedImage {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CachedChunkedImage {
+    pub image_key: String,
+    pub image_id: String,
+    pub chunk_manifest_path: PathBuf,
+    pub chunk_manifest_sha256: String,
+    pub chunk_cache_root: PathBuf,
+    pub kernel_path: PathBuf,
+    pub initrd_path: PathBuf,
+    pub kernel_sha256: String,
+    pub initrd_sha256: String,
+    pub cmdline: String,
+    pub virtual_size_bytes: u64,
+    pub guest_bootstrap_abi: u16,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CacheEntry {
     pub sha: String,
     pub bytes: u64,
     pub last_accessed_at_ms: i64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawCacheMarker {
     schema_version: u8,
@@ -115,6 +156,7 @@ struct RawCacheMarker {
     cmdline: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchDescriptorV1 {
@@ -132,18 +174,46 @@ struct LaunchDescriptorV1 {
     prepared_image: PreparedImageV2Result,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ChunkedLaunchDescriptorV1 {
+    schema_version: u8,
+    image_key: String,
+    image_id: String,
+    chunk_manifest_path: PathBuf,
+    chunk_manifest_sha256: String,
+    chunk_cache_root: PathBuf,
+    image_virtual_size_bytes: u64,
+    guest_bootstrap_abi: u16,
+    kernel_path: PathBuf,
+    kernel_sha256: String,
+    initrd_path: PathBuf,
+    initrd_sha256: String,
+    cmdline: String,
+    prepared_image: PreparedImageV3Result,
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct ReadyImageLaunch {
+pub(crate) struct LegacyReadyImageLaunch {
     pub image: CachedImage,
     pub prepared_image: PreparedImageV2Result,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ReadyImageLaunch {
+    pub image: CachedChunkedImage,
+    pub prepared_image: PreparedImageV3Result,
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 struct CachedRawImage {
     path: PathBuf,
     sha256: String,
 }
 
+#[cfg(test)]
 pub fn select_evictions(
     entries: &[CacheEntry],
     protected: &HashSet<String>,
@@ -186,11 +256,19 @@ struct RegistryIndex {
 #[derive(Debug, Deserialize)]
 struct RegistryIndexImage {
     image_key: String,
-    image_sha256: String,
+    #[serde(default)]
+    image_id: Option<String>,
     image_format: String,
     image_virtual_size_bytes: u64,
+    #[serde(default)]
+    chunk_manifest_sha256: Option<String>,
+    #[serde(default)]
+    guest_bootstrap_abi: Option<u16>,
     boot: RegistryIndexImageBoot,
-    download_url: String,
+    #[serde(default)]
+    manifest_download_url: Option<String>,
+    #[serde(default)]
+    chunk_download_base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,7 +325,10 @@ pub fn spawn_warm_cache_with_bridge(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                () = CACHE_REFRESH_WAKE.get_or_init(Notify::new).notified() => {}
+            }
             run_cache_refresh_cycle(
                 &registry,
                 Some(&bridge),
@@ -295,11 +376,14 @@ pub fn spawn_log_cache_state_with_bridge(registry: ImageRegistryConfig, bridge: 
         let mut unknown: usize = 0;
 
         for image in images {
-            let path = cached_raw_image_path(&cache_root, &image);
-            match verified_cached_raw_image_metadata(
+            let path = cache_root
+                .join("manifests")
+                .join(format!("{}.json", image.chunk_manifest_sha256));
+            match verified_cached_image_metadata(
                 &cache_root,
                 &image.image_key,
-                &image.image_sha256,
+                &image.image_id,
+                true,
             ) {
                 Some(meta) => {
                     present = present.saturating_add(1);
@@ -341,6 +425,7 @@ pub fn default_cache_root() -> Result<PathBuf> {
     Ok(base.join("intar-agent").join("images"))
 }
 
+#[cfg(test)]
 pub(crate) fn verified_cached_raw_image_metadata(
     cache_root: &Path,
     image_key: &str,
@@ -365,7 +450,8 @@ pub(crate) fn verified_cached_raw_image_metadata(
     }
 }
 
-pub(crate) fn verified_cached_image_metadata(
+#[cfg(test)]
+pub(crate) fn verified_cached_legacy_image_metadata(
     cache_root: &Path,
     image_key: &str,
     image_sha256: &str,
@@ -387,7 +473,8 @@ pub(crate) fn verified_cached_image_metadata(
 /// Atomically publish the complete, prevalidated foreground launch contract.
 /// The background warmer is the only caller. A launch never updates this file
 /// and never falls back to the registry when it is absent or invalid.
-pub(crate) async fn mark_template_ready(
+#[cfg(test)]
+pub(crate) async fn mark_legacy_template_ready(
     image: &CachedImage,
     prepared: &PreparedImageV2Result,
 ) -> Result<()> {
@@ -437,11 +524,12 @@ pub(crate) async fn mark_template_ready(
 /// Resolve a foreground launch exclusively from the descriptor published by a
 /// completed background prewarm. This intentionally accepts no registry or
 /// HTTP client, so a cache miss cannot enter a download or hashing slow path.
-pub(crate) async fn require_ready_image_launch(
+#[cfg(test)]
+pub(crate) async fn require_ready_legacy_image_launch(
     cache_root: &Path,
     image_key: &str,
     expected_image_sha256: Option<&str>,
-) -> Result<ReadyImageLaunch> {
+) -> Result<LegacyReadyImageLaunch> {
     if !is_safe_component(image_key) {
         anyhow::bail!("invalid image key {image_key:?}");
     }
@@ -472,6 +560,7 @@ pub(crate) async fn require_ready_image_launch(
     .map(|(ready, _)| ready)
 }
 
+#[cfg(test)]
 fn cache_root_from_cached_image(image: &CachedImage) -> Result<&Path> {
     image
         .raw_path
@@ -480,12 +569,13 @@ fn cache_root_from_cached_image(image: &CachedImage) -> Result<&Path> {
         .context("cached raw image is not below an image-key directory")
 }
 
+#[cfg(test)]
 fn validate_launch_descriptor(
     cache_root: &Path,
     image_key: &str,
     expected_image_sha256: Option<&str>,
     descriptor: LaunchDescriptorV1,
-) -> Result<(ReadyImageLaunch, std::fs::Metadata)> {
+) -> Result<(LegacyReadyImageLaunch, std::fs::Metadata)> {
     anyhow::ensure!(
         descriptor.schema_version == LAUNCH_DESCRIPTOR_VERSION,
         "unsupported launch descriptor schema version {}",
@@ -576,7 +666,7 @@ fn validate_launch_descriptor(
         virtual_size_bytes: descriptor.image_virtual_size_bytes,
     };
     Ok((
-        ReadyImageLaunch {
+        LegacyReadyImageLaunch {
             image,
             prepared_image: descriptor.prepared_image,
         },
@@ -594,6 +684,7 @@ fn regular_cached_file(path: &Path, label: &str) -> Result<std::fs::Metadata> {
     Ok(metadata)
 }
 
+#[cfg(test)]
 fn validate_prepared_descriptor(descriptor: &LaunchDescriptorV1) -> Result<()> {
     let prepared = &descriptor.prepared_image;
     anyhow::ensure!(
@@ -646,6 +737,12 @@ fn validate_prepared_source(
     Ok(())
 }
 
+mod chunked;
+use chunked::ensure_cached_chunked_image_entry;
+pub(crate) use chunked::{
+    ensure_cached_tools_disk, mark_template_ready, require_ready_image_launch, touch_cached_image,
+    verified_cached_image_metadata,
+};
 mod refresh;
 use refresh::*;
 #[cfg(test)]
@@ -688,6 +785,7 @@ async fn ensure_cached_image(
     ensure_cached_image_entry(&image, registry, bridge, cache_root, client).await
 }
 
+#[cfg(test)]
 async fn ensure_cached_image_entry(
     image: &RegistryImageRecord,
     registry: &ImageRegistryConfig,
@@ -736,7 +834,8 @@ async fn ensure_cached_image_entry(
     })
 }
 
-pub async fn touch_cached_image(db: &Db, image: &CachedImage) -> Result<()> {
+#[cfg(test)]
+pub async fn touch_cached_legacy_image(db: &Db, image: &CachedImage) -> Result<()> {
     db.touch_image_cache_entry(ImageCacheAccessRow {
         image_key: image.image_key.clone(),
         image_sha256: image.image_sha256.clone(),

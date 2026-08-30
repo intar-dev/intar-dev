@@ -202,7 +202,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
 
     sendBridge(ws, {
       type: "client_hello",
-      protocol_version: 6,
+      protocol_version: 7,
       host_id: hostId,
       agent_version: "test-agent",
       role: "agent",
@@ -217,6 +217,9 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
         supports_reflink: true,
         supports_nftables: true,
         supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
         supports_boot_cpu_lease: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
@@ -451,7 +454,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "1".repeat(64),
+        image_id: "1".repeat(64),
       });
     });
 
@@ -467,7 +470,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
         cached_images: [
           {
             image_key: testImageKey,
-            image_sha256: "1".repeat(64),
+            image_id: "1".repeat(64),
           },
         ],
       },
@@ -495,7 +498,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "1".repeat(64),
+        image_id: "1".repeat(64),
       });
     });
     expect(
@@ -524,7 +527,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
         cached_images: [
           {
             image_key: testImageKey,
-            image_sha256: "1".repeat(64),
+            image_id: "1".repeat(64),
           },
         ],
       },
@@ -551,7 +554,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       (draft) => {
         upsertDesiredCachedImage(draft, {
           image_key: testImageKey,
-          image_sha256: "1".repeat(64),
+          image_id: "1".repeat(64),
         });
       },
     );
@@ -611,7 +614,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "1".repeat(64),
+        image_id: "1".repeat(64),
       });
     });
     expect(
@@ -986,7 +989,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "1".repeat(64),
+        image_id: "1".repeat(64),
       });
     });
 
@@ -1017,7 +1020,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await mutateStoredHostDesiredState(db, hostId, now + 2, (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "3".repeat(64),
+        image_id: "3".repeat(64),
       });
     });
     const missingCommit = await stub.fetch(
@@ -1086,7 +1089,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
-        image_sha256: "1".repeat(64),
+        image_id: "1".repeat(64),
       });
     });
     expect(

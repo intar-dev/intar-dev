@@ -24,6 +24,7 @@ impl VmManager {
             jailer_request_timeout_seconds: cfg.jailer.request_timeout_seconds,
             jailer_launch_capabilities: OnceCell::new(),
             bridge: cfg.bridge.clone(),
+            image_registry: cfg.image_registry.clone(),
             ssh_access: cfg.ssh_access.clone(),
             db,
             http: HttpClient::builder()
@@ -177,8 +178,8 @@ impl VmManager {
     /// incompatibility; this breaking path never downgrades to v1.
     pub async fn ensure_cached_image_template(
         &self,
-        image: &image_cache::CachedImage,
-    ) -> Result<PreparedImageV2Result> {
+        image: &image_cache::CachedChunkedImage,
+    ) -> Result<PreparedImageV3Result> {
         ensure_jailer_image_template(&self.inner, image).await
     }
 
@@ -274,6 +275,7 @@ impl VmManager {
             requested_run_id: req.run_id,
             requested_image: req.image,
             requested_image_sha256: req.image_sha256,
+            guest_tools: req.guest_tools,
             requested_resources: req.resources,
             requested_hostname: req.hostname,
             lease_duration_seconds: req.lease_duration_seconds,
@@ -291,6 +293,7 @@ impl VmManager {
             requested_run_id,
             requested_image,
             requested_image_sha256,
+            guest_tools,
             requested_resources,
             requested_hostname,
             lease_duration_seconds,
@@ -321,6 +324,19 @@ impl VmManager {
         }
         let image_sha256 = normalize_sha256(requested_image_sha256.trim())
             .ok_or_else(|| ApiError::bad_request("image_sha256 must be a SHA-256 digest"))?;
+        let tools_disk_sha256 = normalize_sha256(&guest_tools.tools_disk_sha256)
+            .ok_or_else(|| ApiError::bad_request("guest_tools.tools_disk_sha256 is invalid"))?;
+        let kino_sha256 = normalize_sha256(&guest_tools.kino_sha256)
+            .ok_or_else(|| ApiError::bad_request("guest_tools.kino_sha256 is invalid"))?;
+        if guest_tools.tools_disk_size_bytes != 64 * 1024 * 1024 || guest_tools.bootstrap_abi != 1 {
+            return Err(ApiError::bad_request("guest_tools pin is incompatible"));
+        }
+        let guest_tools = DesiredGuestToolsV1 {
+            tools_disk_sha256: tools_disk_sha256.clone(),
+            tools_disk_size_bytes: guest_tools.tools_disk_size_bytes,
+            kino_sha256: kino_sha256.clone(),
+            bootstrap_abi: guest_tools.bootstrap_abi,
+        };
 
         {
             let states = self.inner.states.read().await;
@@ -498,6 +514,7 @@ impl VmManager {
         let details = VmDetails {
             image_key: Some(image_key.clone()),
             image_sha256: Some(image_sha256.clone()),
+            guest_tools: Some(guest_tools.clone()),
             run_id: Some(run_id.clone()),
             root_disk_path: root_disk_path.display().to_string(),
             seed_disk_path: config_disk_path.display().to_string(),
@@ -614,18 +631,23 @@ impl VmManager {
         let hostname_for_task = hostname.clone();
         let runtime_for_task = runtime.clone();
         let tap_for_task = tap_name.clone();
+        let tools_disk_sha256_for_task = tools_disk_sha256.clone();
+        let kino_sha256_for_task = kino_sha256.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
             let span =
                 tracing::info_span!("vm_create", vm = %name_for_task, image = %image_key_for_task);
-            let _g = span.enter();
 
             let create_input = RunCreateInput {
                 name: &name_for_task,
                 run_id: &run_id,
                 image_key: &image_key_for_task,
                 expected_image_sha256: &image_sha256_for_task,
+                tools_disk_sha256: &tools_disk_sha256_for_task,
+                tools_disk_size_bytes: guest_tools.tools_disk_size_bytes,
+                kino_sha256: &kino_sha256_for_task,
+                guest_bootstrap_abi: guest_tools.bootstrap_abi,
                 runtime: &runtime_for_task,
                 tap: &tap_for_task,
                 ssh_public_port,
@@ -645,7 +667,7 @@ impl VmManager {
                 peer_guest_ips: &peer_guest_ips_for_task,
             };
 
-            let create_result = run_create(&inner, create_input).await;
+            let create_result = run_create(&inner, create_input).instrument(span).await;
             if take_delete_request(&inner, &name_for_task).await {
                 stop_booting_vm(&inner, &name_for_task).await;
                 match cleanup_tracked_vm(&inner, &name_for_task, false).await {

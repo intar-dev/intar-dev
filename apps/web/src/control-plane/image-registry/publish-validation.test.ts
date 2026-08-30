@@ -5,15 +5,21 @@ import {
   publishFenceDb,
   hostSelectDb,
   publishManifest,
+  chunkManifestHead,
   sha256HexForTest,
   resetImageRegistryMocks,
 } from "./test-fixtures";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
-import type { ScenarioManifestV3 } from "@/generated/catalog";
+import type { ScenarioManifestV4 } from "@/generated/catalog";
 
-const { authMock, dbMock, imageBuildLockMock, catalogManifestMock } =
-  imageRegistryMocks();
+const {
+  authMock,
+  dbMock,
+  imageBuildLockMock,
+  catalogManifestMock,
+  candidateCatalogMock,
+} = imageRegistryMocks();
 
 describe("image registry publish validation", () => {
   beforeEach(resetImageRegistryMocks);
@@ -142,32 +148,25 @@ describe("image registry publish validation", () => {
     },
   );
 
-  it("publishes an exactly assigned builder result while holding the build lock", async () => {
+  it("stages an exactly assigned candidate result while holding the build lock", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
       agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
     });
     const imageSha256 = "e".repeat(64);
     const artifactSha256 = "f".repeat(64);
-    const form = builderPublishForm(
-      publishManifest({ imageSha256, artifactSha256 }),
-    );
-    const assignment = publishBuildAssignment();
+    const manifest = publishManifest({ imageSha256, artifactSha256 });
+    const form = builderPublishForm(manifest);
+    const assignment = publishBuildAssignment({ catalogChannel: "candidate" });
     const db = publishFenceDb({
       assignmentRows: [[assignment], [assignment]],
     });
     dbMock.drizzle.mockReturnValueOnce(db);
-    const imageObjectKey = `images/broken-nginx-web-x86_64/${imageSha256}.raw.zst`;
+    const imageObjectKey = `image-manifests/v1/${"d".repeat(64)}.json`;
     const bucketHead = vi.fn().mockImplementation((key: string) =>
       Promise.resolve(
         key === imageObjectKey
-          ? {
-              size: 777,
-              customMetadata: {
-                image_key: "broken-nginx-web-x86_64",
-                image_sha256: imageSha256,
-              },
-            }
+          ? chunkManifestHead(manifest)
           : {
               size: 555,
               customMetadata: { artifact_sha256: artifactSha256 },
@@ -200,12 +199,13 @@ describe("image registry publish validation", () => {
     await expect(response?.json()).resolves.toMatchObject({
       ok: true,
       scenario_id: "broken-nginx",
+      catalog_channel: "candidate",
       images: [
         {
           image_key: "broken-nginx-web-x86_64",
-          image_sha256: imageSha256,
+          image_id: imageSha256,
           object_key: imageObjectKey,
-          bytes: 777,
+          bytes: 8589934592,
           reused: true,
         },
       ],
@@ -218,7 +218,9 @@ describe("image registry publish validation", () => {
       expect.any(Function),
     );
     expect(imageBuildLockMock.assertHeld).toHaveBeenCalledOnce();
-    expect(catalogManifestMock.seedScenarioManifest).toHaveBeenCalledOnce();
+    expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
+    expect(candidateCatalogMock.stageCandidateScenarioManifest).toHaveBeenCalledOnce();
+    expect(candidateCatalogMock.warmCandidateScenarioManifest).toHaveBeenCalledOnce();
   });
 
   it("keeps the stale-build 409 when lease release also fails", async () => {
@@ -228,9 +230,8 @@ describe("image registry publish validation", () => {
     });
     const imageSha256 = "e".repeat(64);
     const artifactSha256 = "f".repeat(64);
-    const form = builderPublishForm(
-      publishManifest({ imageSha256, artifactSha256 }),
-    );
+    const manifest = publishManifest({ imageSha256, artifactSha256 });
+    const form = builderPublishForm(manifest);
     const db = publishFenceDb({
       assignmentRows: [
         [publishBuildAssignment()],
@@ -250,17 +251,11 @@ describe("image registry publish validation", () => {
         throw new Error("lease release failed");
       },
     );
-    const imageObjectKey = `images/broken-nginx-web-x86_64/${imageSha256}.raw.zst`;
+    const imageObjectKey = `image-manifests/v1/${"d".repeat(64)}.json`;
     const bucketHead = vi.fn().mockImplementation((key: string) =>
       Promise.resolve(
         key === imageObjectKey
-          ? {
-              size: 777,
-              customMetadata: {
-                image_key: "broken-nginx-web-x86_64",
-                image_sha256: imageSha256,
-              },
-            }
+          ? chunkManifestHead(manifest)
           : {
               size: 555,
               customMetadata: { artifact_sha256: artifactSha256 },
@@ -288,7 +283,7 @@ describe("image registry publish validation", () => {
     await expect(response?.json()).resolves.toEqual({
       error: "build is not active for this builder",
     });
-    expect(bucketPut).toHaveBeenCalledOnce();
+    expect(bucketPut).not.toHaveBeenCalled();
     expect(imageBuildLockMock.assertHeld).not.toHaveBeenCalled();
     expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
   });
@@ -420,7 +415,7 @@ describe("image registry publish validation", () => {
       vm,
       {
         ...vm,
-        image_sha256: "c".repeat(64),
+        image_id: "c".repeat(64),
       },
     ];
     const form = new FormData();
@@ -471,7 +466,7 @@ describe("image registry publish validation", () => {
           vm: "web-a",
           arch: "x86_64",
         },
-        image_sha256: "c".repeat(64),
+        image_id: "c".repeat(64),
       },
     ];
     const form = new FormData();
@@ -522,7 +517,7 @@ describe("image registry publish validation", () => {
       imageSha256: "a".repeat(64),
       artifactSha256: "b".repeat(64),
     });
-    delete (manifest as Partial<ScenarioManifestV3>).title;
+    delete (manifest as Partial<ScenarioManifestV4>).title;
     const form = new FormData();
     form.set("manifest", JSON.stringify(manifest));
 
@@ -752,7 +747,7 @@ describe("image registry publish validation", () => {
 
     expect(response?.status).toBe(400);
     await expect(response?.json()).resolves.toEqual({
-      error: "manifest contains invalid image sha256",
+      error: "manifest contains invalid chunked image identity",
     });
     expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
   });
@@ -898,10 +893,16 @@ describe("image registry publish validation", () => {
       "image:web",
       new File([imagePayload], "broken-nginx-web-x86_64.raw.zst"),
     );
-    const bucketHead = vi.fn().mockResolvedValue({
-      size: 123_456,
-      customMetadata: { artifact_sha256: artifactSha256 },
-    });
+    const bucketHead = vi.fn().mockImplementation((key: string) =>
+      Promise.resolve(
+        key.startsWith("image-manifests/")
+          ? chunkManifestHead(manifest)
+          : {
+              size: 123_456,
+              customMetadata: { artifact_sha256: artifactSha256 },
+            },
+      ),
+    );
     const bucketPut = vi.fn().mockResolvedValue(undefined);
     const db = hostSelectDb([]);
     dbMock.drizzle.mockReturnValueOnce(db);
@@ -940,7 +941,7 @@ describe("image registry publish validation", () => {
       expect.anything(),
       expect.anything(),
     );
-    expect(bucketPut).toHaveBeenCalledTimes(2);
+    expect(bucketPut).not.toHaveBeenCalled();
     expect(catalogManifestMock.seedScenarioManifest).toHaveBeenCalledOnce();
   });
 });

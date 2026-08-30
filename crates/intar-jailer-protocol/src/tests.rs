@@ -12,6 +12,7 @@ fn boot_cpu_defaults_are_root_owned_and_bounded() {
     let config = JailerdConfig::default();
     assert_eq!(config.boot_cpu_millis, 2_000);
     assert_eq!(config.boot_cpu_lease_ms, 45_000);
+    assert_eq!(config.legacy_template_retention_seconds, 7 * 24 * 60 * 60);
 
     let mut invalid = JailerdConfig {
         agent_uid: 991,
@@ -184,6 +185,7 @@ fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
             root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: agent_owned("runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: agent_owned("recordings.vfat", ArtifactAccess::ReadWrite),
+            tools_disk: None,
         },
     };
     assert_eq!(
@@ -219,6 +221,110 @@ fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
 }
 
 #[test]
+fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
+    let image_id = Sha256Digest::parse("a".repeat(64)).expect("image digest");
+    let manifest_sha256 = Sha256Digest::parse("b".repeat(64)).expect("manifest digest");
+    let artifact_sha256 = Sha256Digest::parse("c".repeat(64)).expect("artifact digest");
+    let readonly = |path: &str, sha256: Sha256Digest| ArtifactSource {
+        source_root: 0,
+        relative_path: PathBuf::from(path),
+        sha256: Some(sha256),
+        access: ArtifactAccess::ReadOnly,
+    };
+    let prepare = PrepareChunkedImageV3Request {
+        image_id: image_id.clone(),
+        chunk_manifest_sha256: manifest_sha256.clone(),
+        virtual_size_bytes: 8 * 1024 * 1024,
+        manifest: readonly("manifests/image.json", manifest_sha256.clone()),
+        chunk_cache_root: TrustedDirectorySource {
+            source_root: 0,
+            relative_path: PathBuf::from("chunks"),
+        },
+        kernel: readonly("artifacts/kernel", artifact_sha256.clone()),
+        initrd: Some(readonly("artifacts/initrd", artifact_sha256.clone())),
+    };
+    prepare.validate().expect("valid chunked prepare");
+    let envelope = RequestEnvelope::new(
+        11,
+        Request::PrepareChunkedImageV3(Box::new(prepare.clone())),
+    );
+    assert_eq!(
+        RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
+        envelope
+    );
+
+    let mut invalid_cache = prepare.clone();
+    invalid_cache.chunk_cache_root.source_root = PREPARED_IMAGE_SOURCE_ROOT;
+    assert_eq!(
+        invalid_cache.validate(),
+        Err(ValidationError::InvalidChunkCacheRoot)
+    );
+    let traversal = serde_json::json!({
+        "source_root": 0,
+        "relative_path": "../chunks"
+    });
+    let traversal: TrustedDirectorySource = serde_json::from_value(traversal).expect("shape");
+    assert_eq!(
+        traversal.validate(),
+        Err(ValidationError::InvalidRelativeArtifactPath)
+    );
+
+    let prepared = |name: &str, access| ArtifactSource {
+        source_root: PREPARED_IMAGE_SOURCE_ROOT,
+        relative_path: PathBuf::from(image_id.as_str()).join(name),
+        sha256: Some(artifact_sha256.clone()),
+        access,
+    };
+    let agent = |name: &str, access, sha256: Option<Sha256Digest>| ArtifactSource {
+        source_root: 0,
+        relative_path: PathBuf::from(name),
+        sha256,
+        access,
+    };
+    let launch = VmLaunchRequest {
+        run_id: ValidatedId::parse("run-v3").expect("run ID"),
+        vm_id: ValidatedId::parse("vm-v3").expect("VM ID"),
+        cpu_millis: 1_000,
+        vcpu_count: 1,
+        memory_mib: 512,
+        root_disk_size_bytes: 8 * 1024 * 1024,
+        tap_name: "tap-v3".to_string(),
+        mac_address: "02:00:00:00:00:03".to_string(),
+        guest_ip_cidr: "10.77.0.2/28".to_string(),
+        ssh_public_port: Some(22_000),
+        vsock_cid: 3,
+        artifacts: SourceArtifacts {
+            kernel: prepared("kernel", ArtifactAccess::ReadOnly),
+            initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
+            root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
+            runtime_disk: agent("runtime.raw", ArtifactAccess::ReadOnly, None),
+            recording_disk: agent("recordings.vfat", ArtifactAccess::ReadWrite, None),
+            tools_disk: Some(agent(
+                "tools/tools.ext4",
+                ArtifactAccess::ReadOnly,
+                Some(Sha256Digest::parse("d".repeat(64)).expect("tools digest")),
+            )),
+        },
+    };
+    let request = LaunchVmV3Request {
+        image_id,
+        chunk_manifest_sha256: manifest_sha256,
+        virtual_size_bytes: 8 * 1024 * 1024,
+        launch,
+    };
+    request.validate().expect("valid v3 launch");
+    let mut writable_tools = request;
+    writable_tools
+        .launch
+        .artifacts
+        .tools_disk
+        .as_mut()
+        .expect("tools disk")
+        .access = ArtifactAccess::ReadWrite;
+    assert!(writable_tools.validate().is_err());
+}
+
+#[test]
 fn identifiers_cannot_escape_paths_or_units() {
     for invalid in ["", ".", "../vm", "vm/name", "vm.name", "vm name"] {
         assert!(ValidatedId::parse(invalid).is_err(), "accepted {invalid:?}");
@@ -237,8 +343,8 @@ fn unknown_envelope_fields_are_rejected() {
 }
 
 #[test]
-fn protocol_v2_rejects_legacy_handshake_authority() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+fn protocol_v3_rejects_legacy_handshake_authority() {
+    assert_eq!(PROTOCOL_VERSION, 3);
     let legacy = RequestEnvelope::decode(
         br#"{"version":1,"request_id":1,"request":{"operation":"capabilities"}}"#,
     )
@@ -257,6 +363,7 @@ fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
         schedulable_cpu_millis: 7_000,
         committed_cpu_millis: 2_000,
         supports_jailer_v2: true,
+        supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
         supports_hard_cpu_quota: true,
@@ -356,6 +463,7 @@ fn launch_validation_enforces_aggregate_topology_limit() {
             root_disk: source("/trusted/root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recordings.vfat", ArtifactAccess::ReadWrite),
+            tools_disk: None,
         },
     };
     assert_eq!(

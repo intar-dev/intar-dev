@@ -321,16 +321,15 @@ async function seedBuilderHistory(
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO image_build_bundles
-         (rev, organization_id, r2_key, kino_version, meta_json)
-       VALUES ('history-rev', 'org-builder-history', 'bundles/history.tar.zst',
-               'kino-history', '{}')`,
+         (rev, organization_id, r2_key, meta_json)
+       VALUES ('history-rev', 'org-builder-history', 'bundles/history.tar.zst', '{}')`,
     ),
     env.DB.prepare(
       `INSERT INTO image_builds
          (id, organization_id, scenario_id, arch, rev, content_hash,
-          kino_version, host_id, status, phase)
+          host_id, status, phase)
        VALUES ('image-build-history', 'org-builder-history', 'history', 'amd64',
-               'history-rev', 'history-image-hash', 'kino-history',
+               'history-rev', 'history-image-hash',
                'builder-history', 'succeeded', 'succeeded')`,
     ),
   ]);

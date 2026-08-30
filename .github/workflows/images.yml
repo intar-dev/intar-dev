@@ -2,6 +2,7 @@ name: Images
 run-name: "${{ github.event_name == 'pull_request' && format('Image validate PR #{0}', github.event.pull_request.number) || format('Image publish main @ {0}', github.sha) }}"
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -11,20 +12,17 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
-      - "crates/kino/**"
-      - "crates/intar-kino-proto/**"
       - "crates/intar-builder/**"
       - "crates/intar-contracts/**"
       - "crates/intar-contracts-typegen/**"
       - "crates/intar-image-*/**"
       - "content/scenarios/base-images.hcl"
-      - "content/scenarios/build-tools.hcl"
       - "builder.*.hcl"
       - "content/courses.hcl"
       - "content/scenarios/**"
       - "apps/web/migrations/**"
       - "apps/web/src/control-plane/auth.ts"
-      - "apps/web/src/control-plane/bridge-v6.ts"
+      - "apps/web/src/control-plane/bridge-v7.ts"
       - "apps/web/src/control-plane/host-runtime-do.ts"
       - "apps/web/src/control-plane/image-registry.ts"
       - "apps/web/src/generated/**"
@@ -41,20 +39,17 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
-      - "crates/kino/**"
-      - "crates/intar-kino-proto/**"
       - "crates/intar-builder/**"
       - "crates/intar-contracts/**"
       - "crates/intar-contracts-typegen/**"
       - "crates/intar-image-*/**"
       - "content/scenarios/base-images.hcl"
-      - "content/scenarios/build-tools.hcl"
       - "builder.*.hcl"
       - "content/courses.hcl"
       - "content/scenarios/**"
       - "apps/web/migrations/**"
       - "apps/web/src/control-plane/auth.ts"
-      - "apps/web/src/control-plane/bridge-v6.ts"
+      - "apps/web/src/control-plane/bridge-v7.ts"
       - "apps/web/src/control-plane/host-runtime-do.ts"
       - "apps/web/src/control-plane/image-registry.ts"
       - "apps/web/src/generated/**"
@@ -114,9 +109,6 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Build kino guest
-        run: just build-kino-guest
-
       - name: Verify public scenario allowlist
         run: |
           test "$(find content/scenarios -mindepth 2 -maxdepth 2 -type f -name scenario.hcl -print | LC_ALL=C sort)" = \
@@ -129,16 +121,48 @@ jobs:
         run: just render-images broken-nginx builder.sample.amd64.hcl
 
       - name: Publish exact scenario source bundle
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_dispatch'
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |
           set -euo pipefail
           test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
           revision="${GITHUB_SHA:0:12}"
+          started_at="$(date +%s)"
           just bundle-images \
             broken-nginx \
             builder.sample.amd64.hcl \
             "${revision}" \
             false \
             "https://intar.dev/registry/v1/bundles"
+
+          warm_started_at=""
+          status_file="${RUNNER_TEMP}/image-build-status.json"
+          for _ in $(seq 1 420); do
+            curl --fail --silent --show-error --retry 2 \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              "https://intar.dev/registry/v1/builds/revisions/${revision}?tools=candidate" \
+              > "${status_file}"
+            state="$(jq -er '.state' "${status_file}")"
+            jq -c '{revision, state, builds: [.builds[] | {scenario_id, status, phase}], hosts: [.hosts[] | {host_id, ready}]}' \
+              "${status_file}"
+            if [ "${state}" = failed ]; then
+              jq -c '.builds[] | select(.status == "failed" or .status == "stale")' \
+                "${status_file}" >&2
+              exit 1
+            fi
+            if [ "${state}" = warming ] && [ -z "${warm_started_at}" ]; then
+              warm_started_at="$(date +%s)"
+            fi
+            if [ "${state}" = ready ]; then
+              completed_at="$(date +%s)"
+              test "$((completed_at - started_at))" -lt 1500
+              if [ -n "${warm_started_at}" ]; then
+                test "$((completed_at - warm_started_at))" -lt 60
+              fi
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Remote image build or exact host cache state did not become ready." >&2
+          exit 1

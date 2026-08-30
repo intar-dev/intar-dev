@@ -33,11 +33,6 @@ pub(super) fn load_base_image_catalog(path: &Path) -> Result<BaseImageCatalog> {
         .with_context(|| format!("failed to load base image catalog from {}", path.display()))
 }
 
-pub(super) fn load_build_tools(path: &Path) -> Result<BuildTools> {
-    BuildTools::from_file(path)
-        .with_context(|| format!("failed to load build tools config from {}", path.display()))
-}
-
 pub(super) fn course_manifest_path(courses_root: Option<&Path>) -> Result<PathBuf> {
     match courses_root {
         Some(courses_root) => courses_root
@@ -351,7 +346,6 @@ pub(super) fn default_bundle_output_path(rev: &str) -> PathBuf {
 pub(super) fn collect_bundle_source_files(
     scenarios: &[PreparedBundleScenario],
     base_images_path: &Path,
-    build_tools_path: &Path,
     course_manifest_path: Option<&Path>,
 ) -> Result<Vec<BundleSourceFile>> {
     if scenarios.is_empty() {
@@ -360,7 +354,6 @@ pub(super) fn collect_bundle_source_files(
 
     let mut files = Vec::new();
     add_bundle_file(base_images_path, BUNDLE_BASE_IMAGES_PATH, &mut files)?;
-    add_bundle_file(build_tools_path, BUNDLE_BUILD_TOOLS_PATH, &mut files)?;
     if let Some(course_manifest_path) = course_manifest_path {
         add_bundle_file(course_manifest_path, COURSES_PATH, &mut files)?;
     }

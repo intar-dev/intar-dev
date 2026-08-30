@@ -1,6 +1,7 @@
 import type {
   DesiredCachedImageV1,
   DesiredBuildV1,
+  DesiredGuestToolsV1,
   DesiredVmV2,
   HostDesiredStateV2,
 } from "@/generated/bridge";
@@ -21,6 +22,7 @@ export function createEmptyHostDesiredState(input: {
     version: 0,
     generated_at_unix_ms: input.nowUnixMs,
     cached_images: [],
+    cached_guest_tools: [],
     vms: [],
     builds: [],
   };
@@ -54,12 +56,28 @@ export function upsertDesiredCachedImage(
 ): void {
   const next = cloneDesiredCachedImage(image);
   const index = draft.cached_images.findIndex(
-    (candidate) => imageKeyIdentity(candidate.image_key) === imageKeyIdentity(next.image_key),
+    (candidate) => cachedImageIdentity(candidate) === cachedImageIdentity(next),
   );
   if (index === -1) {
     draft.cached_images.push(next);
   } else {
     draft.cached_images[index] = next;
+  }
+}
+
+export function upsertDesiredGuestTools(
+  draft: DesiredStateDraft,
+  pin: DesiredGuestToolsV1,
+): void {
+  const next = { ...pin };
+  const entries = draft.cached_guest_tools ?? (draft.cached_guest_tools = []);
+  const index = entries.findIndex(
+    (candidate) => candidate.tools_disk_sha256 === next.tools_disk_sha256,
+  );
+  if (index === -1) {
+    entries.push(next);
+  } else {
+    entries[index] = next;
   }
 }
 
@@ -113,6 +131,14 @@ export function clearDesiredCachedImages(draft: DesiredStateDraft): boolean {
   return true;
 }
 
+export function clearDesiredGuestTools(draft: DesiredStateDraft): boolean {
+  if (!draft.cached_guest_tools?.length) {
+    return false;
+  }
+  draft.cached_guest_tools = [];
+  return true;
+}
+
 export function clearDesiredVms(draft: DesiredStateDraft): boolean {
   if (draft.vms.length === 0) {
     return false;
@@ -152,6 +178,7 @@ export function desiredVmFromRunVm(input: {
   vm: RunVmStateDocument;
   nowUnixMs: number;
   sshAuthorizedKeysOpenssh: string[];
+  guestTools: DesiredGuestToolsV1;
 }): DesiredVmV2 | null {
   const imageKey = input.vm.provisioning.imageKey;
   const imageSha256 = input.vm.provisioning.imageSha256?.trim() ?? "";
@@ -175,7 +202,8 @@ export function desiredVmFromRunVm(input: {
     vm_name: input.vm.runtimeVmName,
     desired_phase: "running",
     image_key: cloneImageKey(imageKey),
-    image_sha256: imageSha256,
+    image_id: imageSha256,
+    guest_tools: { ...input.guestTools },
     resources: {
       cpu_millis: resources.cpuMillis,
       vcpu_count: resources.vcpuCount,
@@ -194,11 +222,15 @@ function normalizeDesiredState(
     ...document,
     cached_images: uniqueLastBy(
       document.cached_images.map(cloneDesiredCachedImage),
-      (image) => imageKeyIdentity(image.image_key),
+      cachedImageIdentity,
     ).sort((left, right) =>
-      imageKeyIdentity(left.image_key).localeCompare(
-        imageKeyIdentity(right.image_key),
-      ),
+      cachedImageIdentity(left).localeCompare(cachedImageIdentity(right)),
+    ),
+    cached_guest_tools: uniqueLastBy(
+      (document.cached_guest_tools ?? []).map((pin) => ({ ...pin })),
+      (pin) => pin.tools_disk_sha256,
+    ).sort((left, right) =>
+      left.tools_disk_sha256.localeCompare(right.tools_disk_sha256),
     ),
     vms: uniqueLastBy(
       document.vms.map(cloneDesiredVm),
@@ -221,6 +253,7 @@ function comparableDesiredStatePayload(document: HostDesiredStateV2): string {
     schema_version: normalized.schema_version,
     host_id: normalized.host_id,
     cached_images: normalized.cached_images,
+    cached_guest_tools: normalized.cached_guest_tools,
     vms: normalized.vms,
     builds: normalized.builds,
   });
@@ -230,6 +263,9 @@ function cloneDesiredState(document: HostDesiredStateV2): HostDesiredStateV2 {
   return {
     ...document,
     cached_images: document.cached_images.map(cloneDesiredCachedImage),
+    cached_guest_tools: (document.cached_guest_tools ?? []).map((pin) => ({
+      ...pin,
+    })),
     vms: document.vms.map(cloneDesiredVm),
     builds: document.builds.map(cloneDesiredBuild),
   };
@@ -244,10 +280,15 @@ function cloneDesiredCachedImage(
   };
 }
 
+function cachedImageIdentity(image: DesiredCachedImageV1): string {
+  return `${imageKeyIdentity(image.image_key)}:${image.image_id}`;
+}
+
 function cloneDesiredVm(vm: DesiredVmV2): DesiredVmV2 {
   return {
     ...vm,
     image_key: cloneImageKey(vm.image_key),
+    guest_tools: { ...vm.guest_tools },
     resources: { ...vm.resources },
     ssh_authorized_keys_openssh: [...vm.ssh_authorized_keys_openssh],
   };

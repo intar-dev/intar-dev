@@ -5,6 +5,10 @@ pub(super) struct RunCreateInput<'a> {
     pub(super) run_id: &'a str,
     pub(super) image_key: &'a str,
     pub(super) expected_image_sha256: &'a str,
+    pub(super) tools_disk_sha256: &'a str,
+    pub(super) tools_disk_size_bytes: u64,
+    pub(super) kino_sha256: &'a str,
+    pub(super) guest_bootstrap_abi: u16,
     pub(super) runtime: &'a CreateScenarioVmRuntime,
     pub(super) tap: &'a str,
     pub(super) ssh_public_port: Option<u16>,
@@ -38,6 +42,34 @@ pub(super) struct CloudHypervisorVmConfigInput<'a> {
 pub(super) fn build_cloud_hypervisor_vm_config(
     input: CloudHypervisorVmConfigInput<'_>,
 ) -> Result<VmConfig> {
+    let mut disks = vec![
+        DiskConfig {
+            path: input.paths.jailed_root_disk.display().to_string(),
+            readonly: false,
+            id: Some(format!("{}-root", input.name)),
+            image_type: Some(DiskImageType::Raw),
+        },
+        DiskConfig {
+            path: input.paths.jailed_runtime_disk.display().to_string(),
+            readonly: true,
+            id: Some(format!("{}-{RUNTIME_DISK_ID_SUFFIX}", input.name)),
+            image_type: Some(DiskImageType::Raw),
+        },
+        DiskConfig {
+            path: input.paths.jailed_recording_disk.display().to_string(),
+            readonly: false,
+            id: Some(format!("{}-recordings", input.name)),
+            image_type: Some(DiskImageType::Raw),
+        },
+    ];
+    if let Some(tools) = &input.paths.jailed_tools_disk {
+        disks.push(DiskConfig {
+            path: tools.display().to_string(),
+            readonly: true,
+            id: Some(format!("{}-tools", input.name)),
+            image_type: Some(DiskImageType::Raw),
+        });
+    }
     Ok(VmConfig {
         cpus: Some(CpusConfig {
             boot_vcpus: input.vcpus,
@@ -68,26 +100,7 @@ pub(super) fn build_cloud_hypervisor_vm_config(
             iommu: false,
             socket: None,
         }),
-        disks: Some(vec![
-            DiskConfig {
-                path: input.paths.jailed_root_disk.display().to_string(),
-                readonly: false,
-                id: Some(format!("{}-root", input.name)),
-                image_type: Some(DiskImageType::Raw),
-            },
-            DiskConfig {
-                path: input.paths.jailed_runtime_disk.display().to_string(),
-                readonly: true,
-                id: Some(format!("{}-{RUNTIME_DISK_ID_SUFFIX}", input.name)),
-                image_type: Some(DiskImageType::Raw),
-            },
-            DiskConfig {
-                path: input.paths.jailed_recording_disk.display().to_string(),
-                readonly: false,
-                id: Some(format!("{}-recordings", input.name)),
-                image_type: Some(DiskImageType::Raw),
-            },
-        ]),
+        disks: Some(disks),
         net: Some(vec![NetConfig {
             tap: input.tap.to_string(),
             mac: Some(input.mac.to_string()),
@@ -124,7 +137,9 @@ pub(super) async fn cached_jailer_launch_capabilities(
         .await
 }
 
-pub(super) async fn ensure_jailer_image_template(
+#[cfg(test)]
+#[allow(dead_code)]
+pub(super) async fn ensure_legacy_jailer_image_template(
     inner: &Inner,
     image: &image_cache::CachedImage,
 ) -> Result<PreparedImageV2Result> {
@@ -177,14 +192,16 @@ pub(super) async fn ensure_jailer_image_template(
             anyhow::bail!("jailerd returned unexpected response to prepare_image_v2: {response:?}")
         }
     };
-    validate_prepared_image_result(&request, &result)?;
-    image_cache::mark_template_ready(image, &result)
+    validate_legacy_prepared_image_result(&request, &result)?;
+    image_cache::mark_legacy_template_ready(image, &result)
         .await
         .context("persist prepared jail template readiness")?;
     Ok(result)
 }
 
-pub(super) fn validate_prepared_image_result(
+#[cfg(test)]
+#[allow(dead_code)]
+pub(super) fn validate_legacy_prepared_image_result(
     request: &PrepareImageV2Request,
     result: &PreparedImageV2Result,
 ) -> Result<()> {
@@ -232,7 +249,150 @@ pub(super) fn validate_prepared_image_result(
     Ok(())
 }
 
-pub(super) fn build_jailer_launch_operation(
+pub(super) async fn ensure_jailer_image_template(
+    inner: &Inner,
+    image: &image_cache::CachedChunkedImage,
+) -> Result<PreparedImageV3Result> {
+    let capabilities = cached_jailer_launch_capabilities(inner).await?;
+    if !(capabilities.supports_jailer_v3
+        && capabilities.supports_template_backed_launch
+        && capabilities.fast_template_store)
+    {
+        anyhow::bail!("jailerd does not attest the mandatory v3 chunked launch contract");
+    }
+    let request = PrepareChunkedImageV3Request {
+        image_id: Sha256Digest::parse(image.image_id.clone())?,
+        chunk_manifest_sha256: Sha256Digest::parse(image.chunk_manifest_sha256.clone())?,
+        virtual_size_bytes: image.virtual_size_bytes,
+        manifest: artifact_source(
+            &image.chunk_manifest_path,
+            &capabilities.allowed_source_roots,
+            Some(&image.chunk_manifest_sha256),
+            ArtifactAccess::ReadOnly,
+        )?,
+        chunk_cache_root: trusted_directory_source(
+            &image.chunk_cache_root,
+            &capabilities.allowed_source_roots,
+        )?,
+        kernel: artifact_source(
+            &image.kernel_path,
+            &capabilities.allowed_source_roots,
+            Some(&image.kernel_sha256),
+            ArtifactAccess::ReadOnly,
+        )?,
+        initrd: Some(artifact_source(
+            &image.initrd_path,
+            &capabilities.allowed_source_roots,
+            Some(&image.initrd_sha256),
+            ArtifactAccess::ReadOnly,
+        )?),
+    };
+    request.validate()?;
+    let result = match request_jailerd_with_timeout(
+        inner,
+        JailerRequest::PrepareChunkedImageV3(Box::new(request.clone())),
+        JAILER_PREPARE_IMAGE_TIMEOUT,
+    )
+    .await?
+    {
+        JailerResponse::PrepareChunkedImageV3(result) => result,
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => anyhow::bail!(
+            "jailerd returned unexpected response to prepare_chunked_image_v3: {response:?}"
+        ),
+    };
+    validate_prepared_image_v3_result(&request, &result)?;
+    image_cache::mark_template_ready(image, &result).await?;
+    Ok(result)
+}
+
+fn validate_prepared_image_v3_result(
+    request: &PrepareChunkedImageV3Request,
+    result: &PreparedImageV3Result,
+) -> Result<()> {
+    anyhow::ensure!(
+        result.image_id == request.image_id
+            && result.chunk_manifest_sha256 == request.chunk_manifest_sha256
+            && result.virtual_size_bytes == request.virtual_size_bytes
+            && result.fast_template_store,
+        "jailerd prepared v3 image identity mismatch"
+    );
+    for (source, name, sha256, access) in [
+        (
+            &result.root_disk,
+            "root.raw",
+            Some(&request.image_id),
+            ArtifactAccess::ReadWrite,
+        ),
+        (
+            &result.kernel,
+            "kernel",
+            request.kernel.sha256.as_ref(),
+            ArtifactAccess::ReadOnly,
+        ),
+    ] {
+        anyhow::ensure!(
+            source.source_root == PREPARED_IMAGE_SOURCE_ROOT
+                && source.relative_path == PathBuf::from(request.image_id.as_str()).join(name)
+                && source.sha256.as_ref() == sha256
+                && source.access == access,
+            "jailerd returned an invalid prepared v3 {name} descriptor"
+        );
+    }
+    match (&request.initrd, &result.initrd) {
+        (Some(expected), Some(actual)) => anyhow::ensure!(
+            actual.relative_path == PathBuf::from(request.image_id.as_str()).join("initrd")
+                && actual.sha256 == expected.sha256
+                && actual.access == ArtifactAccess::ReadOnly,
+            "jailerd returned invalid prepared v3 initrd"
+        ),
+        (None, None) => {}
+        _ => anyhow::bail!("jailerd prepared v3 initrd shape mismatch"),
+    }
+    Ok(())
+}
+
+fn build_jailer_launch_operation(
+    request: VmLaunchRequest,
+    prepared: &PreparedImageV3Result,
+) -> Result<JailerRequest> {
+    let operation = LaunchVmV3Request {
+        image_id: prepared.image_id.clone(),
+        chunk_manifest_sha256: prepared.chunk_manifest_sha256.clone(),
+        virtual_size_bytes: prepared.virtual_size_bytes,
+        launch: request,
+    };
+    operation.validate()?;
+    Ok(JailerRequest::LaunchVmV3(Box::new(operation)))
+}
+
+pub(super) async fn request_v3_launch_with_single_retry<F, Fut>(
+    operation: JailerRequest,
+    mut send: F,
+) -> Result<JailerResponse>
+where
+    F: FnMut(JailerRequest) -> Fut,
+    Fut: Future<Output = Result<JailerResponse>>,
+{
+    anyhow::ensure!(
+        matches!(operation, JailerRequest::LaunchVmV3(_)),
+        "v3 launch retry requires an exact LaunchVmV3 operation"
+    );
+    let retry = operation.clone();
+    match send(operation).await {
+        Ok(response) => Ok(response),
+        Err(first_error) => send(retry).await.with_context(|| {
+            format!(
+                "identical LaunchVmV3 retry failed after the first transport attempt failed: {first_error:#}"
+            )
+        }),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn build_legacy_jailer_launch_operation(
     request: VmLaunchRequest,
     prepared_image: Option<&PreparedImageV2Result>,
 ) -> Result<JailerRequest> {
@@ -249,7 +409,8 @@ pub(super) fn build_jailer_launch_operation(
     Ok(JailerRequest::LaunchVmV2(Box::new(request)))
 }
 
-pub(super) async fn request_v2_launch_with_single_retry<F, Fut>(
+#[cfg(test)]
+pub(super) async fn request_legacy_v2_launch_with_single_retry<F, Fut>(
     operation: JailerRequest,
     mut send: F,
 ) -> Result<JailerResponse>
@@ -275,8 +436,9 @@ where
 pub(super) async fn launch_jailed_cloud_hypervisor(
     inner: &Inner,
     req: &RunCreateInput<'_>,
-    cached_image: &image_cache::CachedImage,
-    prepared: &PreparedImageV2Result,
+    cached_image: &image_cache::CachedChunkedImage,
+    prepared: &PreparedImageV3Result,
+    tools_disk_path: &Path,
 ) -> Result<VmLaunchResult> {
     let run_id = ValidatedId::parse(req.run_id.to_string()).context("validate jailer run ID")?;
     let vm_id = ValidatedId::parse(req.name.to_string()).context("validate jailer VM ID")?;
@@ -303,6 +465,12 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
             None,
             ArtifactAccess::ReadWrite,
         )?,
+        tools_disk: Some(artifact_source(
+            tools_disk_path,
+            &capabilities.allowed_source_roots,
+            Some(req.tools_disk_sha256),
+            ArtifactAccess::ReadOnly,
+        )?),
     };
 
     let request = VmLaunchRequest {
@@ -319,19 +487,19 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
         vsock_cid: req.kino_vsock_cid,
         artifacts,
     };
-    let launch_operation = build_jailer_launch_operation(request, Some(prepared))?;
+    let launch_operation = build_jailer_launch_operation(request, prepared)?;
 
     // A transport timeout can occur after jailerd committed the launch but
     // before the response arrived. Replay the byte-equivalent v2 operation so
     // jailerd's fingerprint and generation fences remain authoritative. Never
     // synthesize success from InspectVm, which cannot attest the request.
-    let launch_response = request_v2_launch_with_single_retry(launch_operation, |operation| {
+    let launch_response = request_v3_launch_with_single_retry(launch_operation, |operation| {
         request_jailerd(inner, operation)
     })
     .await?;
 
     match launch_response {
-        JailerResponse::LaunchVmV2(result) => Ok(result),
+        JailerResponse::LaunchVmV3(result) => Ok(result),
         JailerResponse::Error(error) if error.code == "boot_capacity_pending" => {
             Err(BootCapacityPending {
                 message: error.message,
@@ -342,7 +510,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
             anyhow::bail!("jailerd {}: {}", error.code, error.message)
         }
         response => {
-            anyhow::bail!("jailerd returned unexpected response to v2 launch: {response:?}")
+            anyhow::bail!("jailerd returned unexpected response to v3 launch: {response:?}")
         }
     }
 }
@@ -647,6 +815,28 @@ pub(super) fn artifact_source(
     })
 }
 
+fn trusted_directory_source(
+    path: &Path,
+    allowed_source_roots: &[PathBuf],
+) -> Result<TrustedDirectorySource> {
+    let (source_root, relative_path) = allowed_source_roots
+        .iter()
+        .enumerate()
+        .find_map(|(index, root)| {
+            let relative = path.strip_prefix(root).ok()?;
+            (!relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))))
+            .then(|| (index, relative.to_path_buf()))
+        })
+        .context("jailer directory is outside configured trusted source roots")?;
+    Ok(TrustedDirectorySource {
+        source_root: u16::try_from(source_root).context("too many jailer source roots")?,
+        relative_path,
+    })
+}
+
 pub(super) async fn persist_jail_launch(
     inner: &Inner,
     name: &str,
@@ -747,16 +937,41 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         ensure_jailed_run_network(&network_inner, &network_run_id, &network_config).await
     });
     let _network_abort = AbortTaskOnDrop(network_task.abort_handle());
-    let ready_image = image_cache::require_ready_image_launch(
-        &cache_root,
-        req.image_key,
-        Some(req.expected_image_sha256),
-    )
-    .await
-    .context("image is not eligible for foreground launch")?;
+    image_cache::wake_cache_refresh();
+    let image_prepare_deadline = Instant::now() + Duration::from_secs(60);
+    let ready_image = loop {
+        match image_cache::require_ready_image_launch(
+            &cache_root,
+            req.image_key,
+            Some(req.expected_image_sha256),
+        )
+        .await
+        {
+            Ok(ready) => break ready,
+            Err(error) if Instant::now() < image_prepare_deadline => {
+                debug!(vm = req.name, error = %error, "waiting for event-driven image preparation");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => {
+                return Err(error).context(
+                    "image was not prepared within 60 seconds; foreground registry fallback is disabled",
+                );
+            }
+        }
+    };
     let image_ready_at = Instant::now();
     let cached_image = ready_image.image;
     let prepared_image = ready_image.prepared_image;
+    let tools_disk_path = image_cache::ensure_cached_tools_disk(
+        req.tools_disk_sha256,
+        req.tools_disk_size_bytes,
+        &inner.image_registry,
+        Some(&inner.bridge),
+        &cache_root,
+        &inner.http,
+    )
+    .await
+    .context("pinned guest tools disk is unavailable")?;
     if let Err(error) = image_cache::touch_cached_image(&inner.db, &cached_image).await {
         warn!(
             error = %error,
@@ -773,7 +988,7 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
             };
             if let Some(details) = vm.details.as_mut() {
                 details.image_key = Some(cached_image.image_key.clone());
-                details.image_sha256 = Some(cached_image.image_sha256.clone());
+                details.image_sha256 = Some(cached_image.image_id.clone());
             }
             vm.clone()
         };
@@ -816,6 +1031,8 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
     let kino_vsock_cid = req.kino_vsock_cid;
     let kino_vsock_port = req.kino_vsock_port;
     let kino_host_ready_port = req.kino_host_ready_port;
+    let kino_sha256 = req.kino_sha256.to_string();
+    let guest_bootstrap_abi = req.guest_bootstrap_abi;
     let network = req.network.clone();
     let peer_guest_ips = req.peer_guest_ips.clone();
     let hostname = req.hostname.to_string();
@@ -826,6 +1043,8 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
             kino_vsock_cid,
             kino_vsock_port,
             kino_host_ready_port,
+            kino_sha256: &kino_sha256,
+            guest_bootstrap_abi,
             hostname: &hostname,
             network: &network,
             root_resize_required,
@@ -845,7 +1064,15 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
     let launch_deadline = Instant::now() + Duration::from_secs(SCENARIO_READY_MAX_TIMEOUT_SECONDS);
     let mut capacity_attempt = 0_u32;
     let launch = loop {
-        match launch_jailed_cloud_hypervisor(inner, &req, &cached_image, &prepared_image).await {
+        match launch_jailed_cloud_hypervisor(
+            inner,
+            &req,
+            &cached_image,
+            &prepared_image,
+            &tools_disk_path,
+        )
+        .await
+        {
             Ok(result) => break result,
             Err(error) if error.downcast_ref::<BootCapacityPending>().is_some() => {
                 ensure_create_not_deleted(inner, req.name).await?;
@@ -932,6 +1159,7 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
     let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details, readiness_updates)
         .await
         .context("scenario runtime did not become ready")?;
+    validate_guest_tools_readiness(&ready, req.kino_sha256, req.guest_bootstrap_abi)?;
     ensure_create_not_deleted(inner, req.name).await?;
     let guest_ready_at = Instant::now();
     seal_ready_vm_cpu(
@@ -981,5 +1209,25 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         "vm booted"
     );
 
+    Ok(())
+}
+
+pub(super) fn validate_guest_tools_readiness(
+    ready: &ProbeUpdateEnvelope,
+    kino_sha256: &str,
+    guest_bootstrap_abi: u16,
+) -> Result<()> {
+    anyhow::ensure!(
+        ready.kino_sha256 == kino_sha256,
+        "Kino readiness SHA-256 differs from desired guest tools"
+    );
+    anyhow::ensure!(
+        ready.guest_bootstrap_abi == guest_bootstrap_abi,
+        "Kino readiness bootstrap ABI differs from desired guest tools"
+    );
+    anyhow::ensure!(
+        ready.guest_phase_timings.ready_uptime_ms > 0,
+        "Kino readiness omitted guest phase timings"
+    );
     Ok(())
 }

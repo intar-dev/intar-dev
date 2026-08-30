@@ -1,7 +1,7 @@
 import {
   type ImageArchitecture,
   type ImageKey,
-  type ScenarioManifestV3,
+  type ScenarioManifestV4,
 } from "@/generated/catalog";
 
 export const textEncoder = new TextEncoder();
@@ -69,7 +69,7 @@ export function artifactFilenameMatches(
   return filename === sha256 || filename === `${sha256}.artifact`;
 }
 
-export function bootArtifactSha256s(manifest: ScenarioManifestV3): string[] {
+export function bootArtifactSha256s(manifest: ScenarioManifestV4): string[] {
   const values = new Set<string>();
   for (const vm of manifest.vms) {
     const kernelSha256 = normalizeSha256(vm.boot.kernel_sha256);
@@ -171,15 +171,6 @@ export function isSafeBundleRev(value: string): boolean {
 
 export function isSafeRegistrySlug(value: string): boolean {
   return isSafeBundleRev(value);
-}
-
-export function isSafeKinoVersion(value: string): boolean {
-  return (
-    value !== "." &&
-    value !== ".." &&
-    value.length > 0 &&
-    !/[\s/\\]/.test(value)
-  );
 }
 
 export function jsonResponse(body: unknown, status = 200): Response {

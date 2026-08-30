@@ -30,8 +30,10 @@ export interface ScenarioVmRecord {
   image: string;
   imageKey: ImageKey | null;
   imageSha256: string | null;
-  imageFormat: "raw_zstd";
+  imageFormat: "raw_chunks_v1" | "raw_zstd";
   imageVirtualSizeBytes: number;
+  chunkManifestSha256: string | null;
+  guestBootstrapAbi: 1 | null;
   kernelSha256: string;
   initrdSha256: string;
   bootCmdline: string;
@@ -65,6 +67,8 @@ export type ScenarioVmDirectBootMetadata = Pick<
   ScenarioVmRecord,
   | "imageFormat"
   | "imageVirtualSizeBytes"
+  | "chunkManifestSha256"
+  | "guestBootstrapAbi"
   | "kernelSha256"
   | "initrdSha256"
   | "bootCmdline"
@@ -73,11 +77,13 @@ export type ScenarioVmDirectBootMetadata = Pick<
 export function normalizeScenarioVmDirectBootMetadata(input: {
   imageFormat: string;
   imageVirtualSizeBytes: number;
+  chunkManifestSha256: string | null;
+  guestBootstrapAbi: number | null;
   kernelSha256: string;
   initrdSha256: string;
   bootCmdline: string;
 }): ScenarioVmDirectBootMetadata | null {
-  if (input.imageFormat !== "raw_zstd") {
+  if (input.imageFormat !== "raw_chunks_v1" && input.imageFormat !== "raw_zstd") {
     return null;
   }
   if (
@@ -88,8 +94,13 @@ export function normalizeScenarioVmDirectBootMetadata(input: {
   }
   const kernelSha256 = normalizeSha256Hex(input.kernelSha256);
   const initrdSha256 = normalizeSha256Hex(input.initrdSha256);
+  const chunkManifestSha256 = normalizeSha256Hex(
+    input.chunkManifestSha256 ?? "",
+  );
   const bootCmdline = input.bootCmdline.trim();
   if (
+    (input.imageFormat === "raw_chunks_v1" &&
+      (!chunkManifestSha256 || input.guestBootstrapAbi !== 1)) ||
     !kernelSha256 ||
     !initrdSha256 ||
     !bootCmdline.split(/\s+/).includes("root=/dev/vda")
@@ -98,8 +109,11 @@ export function normalizeScenarioVmDirectBootMetadata(input: {
   }
 
   return {
-    imageFormat: "raw_zstd",
+    imageFormat: input.imageFormat,
     imageVirtualSizeBytes: input.imageVirtualSizeBytes,
+    chunkManifestSha256:
+      input.imageFormat === "raw_chunks_v1" ? chunkManifestSha256 : null,
+    guestBootstrapAbi: input.imageFormat === "raw_chunks_v1" ? 1 : null,
     kernelSha256,
     initrdSha256,
     bootCmdline,

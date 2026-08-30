@@ -34,7 +34,7 @@ describe("admin scenario response serialization", () => {
       "Make nginx respond on localhost.",
     );
     expect(serialized.probes[0]).not.toHaveProperty("hintCount");
-    expect(serialized.vms[0]?.imageFormat).toBe("raw_zstd");
+    expect(serialized.vms[0]?.imageFormat).toBe("raw_chunks_v1");
     expect(serialized.vms[0]?.kernelSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 });
@@ -97,8 +97,10 @@ const scenario: ScenarioDetailRecord = {
       image: "web",
       imageKey: null,
       imageSha256: null,
-      imageFormat: "raw_zstd",
+      imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
+      chunkManifestSha256: "d".repeat(64),
+      guestBootstrapAbi: 1,
       kernelSha256: "b".repeat(64),
       initrdSha256: "c".repeat(64),
       bootCmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4",

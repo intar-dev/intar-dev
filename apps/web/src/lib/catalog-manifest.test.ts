@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ScenarioManifestV3 } from "@/generated/catalog";
+import type { ScenarioManifestV4 } from "@/generated/catalog";
 import { catalogRowsFromScenarioManifest } from "@/lib/catalog-manifest";
 
 describe("catalog manifest", () => {
@@ -36,7 +36,7 @@ describe("catalog manifest", () => {
         scenarioId: "broken-nginx",
         ordinal: 0,
         vmName: "web",
-        image: "broken-nginx-web-x86_64.raw.zst",
+        image: "broken-nginx-web-x86_64.chunks.json",
         imageKeyJson: {
           scenario: "broken-nginx",
           vm: "web",
@@ -44,8 +44,11 @@ describe("catalog manifest", () => {
         },
         imageSha256:
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        imageFormat: "raw_zstd",
+        imageFormat: "raw_chunks_v1",
         imageVirtualSizeBytes: 8589934592,
+        chunkManifestSha256:
+          "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        guestBootstrapAbi: 1,
         kernelSha256:
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         initrdSha256:
@@ -93,11 +96,11 @@ describe("catalog manifest", () => {
   });
 });
 
-function readManifestFixture(): ScenarioManifestV3 {
+function readManifestFixture(): ScenarioManifestV4 {
   return JSON.parse(
     readFileSync(
-      new URL("../generated/fixtures/catalog/scenario-manifest-v3.json", import.meta.url),
+      new URL("../generated/fixtures/catalog/scenario-manifest-v4.json", import.meta.url),
       "utf8",
     ),
-  ) as ScenarioManifestV3;
+  ) as ScenarioManifestV4;
 }

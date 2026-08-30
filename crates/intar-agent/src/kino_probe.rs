@@ -68,7 +68,22 @@ pub struct ProbeUpdateEnvelope {
     pub fingerprint: String,
     pub summary: ProbeSummary,
     pub ssh_host_keys_openssh: Vec<String>,
+    pub kino_sha256: String,
+    pub guest_bootstrap_abi: u16,
+    pub guest_phase_timings: GuestPhaseTimings,
     pub probes: Vec<ProbeView>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestPhaseTimings {
+    pub runtime_disk_ms: u64,
+    pub tools_disk_ms: u64,
+    pub network_ms: u64,
+    pub ssh_keys_ms: u64,
+    pub ssh_service_ms: u64,
+    pub kino_ms: u64,
+    pub ready_uptime_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +92,9 @@ pub struct ProbePollResult {
     pub generated_at_ms: Option<i64>,
     pub summary: ProbeSummary,
     pub ssh_host_keys_openssh: Vec<String>,
+    pub kino_sha256: String,
+    pub guest_bootstrap_abi: u16,
+    pub guest_phase_timings: GuestPhaseTimings,
     pub probes: Vec<ProbeView>,
     pub fingerprint: String,
 }
@@ -118,6 +136,9 @@ impl ProbeUpdateEnvelope {
             fingerprint: result.fingerprint,
             summary: snapshot.summary,
             ssh_host_keys_openssh: result.ssh_host_keys_openssh,
+            kino_sha256: result.kino_sha256,
+            guest_bootstrap_abi: result.guest_bootstrap_abi,
+            guest_phase_timings: result.guest_phase_timings,
             probes: snapshot.probes,
         }
     }
@@ -158,6 +179,18 @@ fn fingerprint_for_state_with_host_keys(
 
 #[cfg(target_os = "linux")]
 fn normalize_snapshot(snapshot: kino_v1::ProbesSnapshotV1) -> ProbePollResult {
+    let kino_sha256 = snapshot.kino_sha256;
+    let guest_bootstrap_abi = u16::try_from(snapshot.guest_bootstrap_abi).unwrap_or_default();
+    let timings = snapshot.guest_phase_timings.unwrap_or_default();
+    let guest_phase_timings = GuestPhaseTimings {
+        runtime_disk_ms: timings.runtime_disk_ms,
+        tools_disk_ms: timings.tools_disk_ms,
+        network_ms: timings.network_ms,
+        ssh_keys_ms: timings.ssh_keys_ms,
+        ssh_service_ms: timings.ssh_service_ms,
+        kino_ms: timings.kino_ms,
+        ready_uptime_ms: timings.ready_uptime_ms,
+    };
     let generated_at_ms = optional_u64_to_i64(snapshot.generated_at_unix_ms);
     let ssh_host_keys_openssh = normalize_ssh_host_keys(snapshot.ssh_host_keys_openssh);
     let probes = snapshot
@@ -171,20 +204,44 @@ fn normalize_snapshot(snapshot: kino_v1::ProbesSnapshotV1) -> ProbePollResult {
         summary: summary.clone(),
         probes: probes.clone(),
     };
-    let fingerprint = fingerprint_for_state_with_host_keys(
+    let base_fingerprint = fingerprint_for_state_with_host_keys(
         ProbeCollectionState::Ok,
         None,
         &snapshot,
         &ssh_host_keys_openssh,
+    );
+    let fingerprint = fingerprint_with_guest_identity(
+        &base_fingerprint,
+        &kino_sha256,
+        guest_bootstrap_abi,
+        &guest_phase_timings,
     );
 
     ProbePollResult {
         generated_at_ms,
         summary,
         ssh_host_keys_openssh,
+        kino_sha256,
+        guest_bootstrap_abi,
+        guest_phase_timings,
         probes,
         fingerprint,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn fingerprint_with_guest_identity(
+    base: &str,
+    kino_sha256: &str,
+    guest_bootstrap_abi: u16,
+    timings: &GuestPhaseTimings,
+) -> String {
+    hash_json(&json!({
+        "base": base,
+        "kinoSha256": kino_sha256,
+        "guestBootstrapAbi": guest_bootstrap_abi,
+        "guestPhaseTimings": timings,
+    }))
 }
 
 #[cfg(target_os = "linux")]

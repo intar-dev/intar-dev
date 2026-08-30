@@ -52,6 +52,10 @@ describe("direct-cloud Intar Bash completion", () => {
         ].join("\n"),
       );
       chmodSync(fakeIntar, 0o755);
+      // macOS can spend more than the production 250 ms completion budget on
+      // the first launch of a new temp executable. The installed Kino binary
+      // is already running in production, so warm this test fixture once.
+      execFileSync(fakeIntar, ["__complete", "2", "intar", "hint", "ge"]);
 
       const completionPath = join(directory, "intar.bash");
       writeFileSync(
@@ -100,6 +104,7 @@ describe("direct-cloud Intar Bash completion", () => {
         ].join("\n"),
       );
       chmodSync(fakeIntar, 0o755);
+      execFileSync(fakeIntar, ["__complete", "2", "intar", "hint", "ge"]);
 
       const completionPath = join(directory, "intar.bash");
       writeFileSync(

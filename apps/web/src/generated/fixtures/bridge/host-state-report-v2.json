@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "host_id": "host-alpha",
   "observed_at_unix_ms": 1762041660000,
   "applied_desired_version": 42,
@@ -35,6 +35,9 @@
     "supports_hard_cpu_quota": true,
     "supports_landlock": true,
     "supports_cgroup_v2": true,
+    "supports_raw_chunks_v1": true,
+    "supports_scenario_guest_tools_v1": true,
+    "supports_jailer_v3": true,
     "supports_run_cli_v1": false,
     "supports_run_cli_completion_v1": false
   },
@@ -45,7 +48,7 @@
         "vm": "webserver",
         "arch": "x86_64"
       },
-      "image_sha256": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+      "image_id": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
       "phase": "ready",
       "bytes_on_disk": 922746880,
       "updated_at_unix_ms": 1762041640000
@@ -62,7 +65,13 @@
         "vm": "webserver",
         "arch": "x86_64"
       },
-      "image_sha256": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+      "image_id": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+      "guest_tools": {
+        "tools_disk_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "kino_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "bootstrap_abi": 1,
+        "verified": true
+      },
       "network": {
         "bridge_name": "intar-run-a",
         "guest_ip": "10.77.0.2",

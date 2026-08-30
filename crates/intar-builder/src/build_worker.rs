@@ -3,11 +3,12 @@ use super::*;
 pub(super) async fn builder_worker_loop(
     cfg: config::BuilderConfig,
     report_tx: mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
-    mut desired_ready: watch::Receiver<bool>,
+    mut desired_revision: watch::Receiver<u64>,
+    cpu_gate: Arc<Semaphore>,
     worker_id: u16,
 ) {
-    while !*desired_ready.borrow() {
-        if desired_ready.changed().await.is_err() {
+    while *desired_revision.borrow() == 0 {
+        if desired_revision.changed().await.is_err() {
             warn!(
                 worker_id,
                 "builder worker stopped before receiving fresh desired state"
@@ -17,16 +18,28 @@ pub(super) async fn builder_worker_loop(
     }
     info!(worker_id, "builder worker received fresh desired state");
 
-    let mut tick = interval(Duration::from_secs(5));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut repair_scan = interval(Duration::from_secs(15 * 60));
+    repair_scan.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    repair_scan.tick().await;
     loop {
-        tick.tick().await;
-        match process_next_queued_build(&cfg, &report_tx).await {
-            Ok(true) => {}
-            Ok(false) => {}
-            Err(error) => {
-                warn!(worker_id, error = %error, "builder worker failed to process queued build");
+        loop {
+            match process_next_queued_build(&cfg, &report_tx, &cpu_gate).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    warn!(worker_id, error = %error, "builder worker failed to process queued build");
+                    break;
+                }
             }
+        }
+        tokio::select! {
+            changed = desired_revision.changed() => {
+                if changed.is_err() {
+                    warn!(worker_id, "builder desired-state notifier closed");
+                    return;
+                }
+            }
+            _ = repair_scan.tick() => {}
         }
     }
 }
@@ -34,6 +47,7 @@ pub(super) async fn builder_worker_loop(
 pub(super) async fn process_next_queued_build(
     cfg: &config::BuilderConfig,
     report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
+    cpu_gate: &Arc<Semaphore>,
 ) -> Result<bool> {
     let Some(job) = ({
         let db = db::BuilderDb::open(&cfg.builder.state_db)?;
@@ -43,7 +57,7 @@ pub(super) async fn process_next_queued_build(
     };
     emit_build_report(cfg, report_tx, &job.build_id).await?;
 
-    let result = run_claimed_build_job(cfg, &job, report_tx).await;
+    let result = run_claimed_build_job(cfg, &job, report_tx, cpu_gate).await;
     if let Err(error) = result {
         let error_message = format!("{error:#}");
         let now = now_unix_ms();
@@ -86,6 +100,7 @@ pub(super) async fn run_claimed_build_job(
     cfg: &config::BuilderConfig,
     job: &db::BuildJobRow,
     report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
+    cpu_gate: &Arc<Semaphore>,
 ) -> Result<()> {
     let desired_build = job.desired_build();
     let download_token = bridge::bootstrap_builder_access_token(&cfg.bridge)
@@ -115,13 +130,7 @@ pub(super) async fn run_claimed_build_job(
         desired_build.arch.clone(),
         &desired_build.rev,
     )?;
-    let kino = kino_release::resolve_kino_artifact(
-        &cfg.builder,
-        &desired_build.kino_version,
-        &desired_build.arch,
-    )
-    .await?;
-    let build_config = cfg.qemu_build_config();
+    let build_config = qemu_build_config_for_job(cfg, &desired_build);
 
     let mut outputs = Vec::new();
     let mut log_files = Vec::new();
@@ -180,11 +189,79 @@ pub(super) async fn run_claimed_build_job(
             vm_name: vm.name.clone(),
             config: build_config.clone(),
             base_image: base_image.clone(),
-            kino: kino.clone(),
         };
-        let output_result = tokio::task::spawn_blocking(move || run_direct_build(&request))
+        let cpu_permit = Arc::clone(cpu_gate)
+            .acquire_many_owned(4)
             .await
-            .context("direct build worker panicked")?;
+            .context("builder CPU gate closed")?;
+        let raw_result = tokio::task::spawn_blocking(move || {
+            let rendered = run_direct_build_to_raw(&request)?;
+            let scan = scan_raw_image_chunks(&rendered.paths.root_disk_path)?;
+            Ok::<_, anyhow::Error>((rendered, scan))
+        })
+        .await
+        .context("direct QEMU build worker panicked")?;
+        drop(cpu_permit);
+        let (rendered, scan) = match raw_result {
+            Ok(output) => output,
+            Err(error) => {
+                upload_build_logs_with_fresh_token_best_effort(
+                    cfg,
+                    &job.build_id,
+                    &log_files,
+                    "direct QEMU build failure",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        ensure_build_still_desired(cfg, &job.build_id)?;
+
+        let lookup_token = bridge::bootstrap_builder_access_token(&cfg.bridge)
+            .await
+            .context("failed to authenticate before image chunk lookup")?;
+        let lookup_cfg = cfg.clone();
+        let lookups = scan
+            .chunks
+            .iter()
+            .map(|chunk| ImageChunkLookup {
+                raw_sha256: chunk.raw_sha256.clone(),
+                raw_size_bytes: chunk.raw_size_bytes,
+            })
+            .collect::<Vec<_>>();
+        let reused = tokio::task::spawn_blocking(move || {
+            let uploader = image_uploader(&lookup_cfg, &lookup_token)?;
+            let reused = uploader
+                .find_existing_image_chunks(&lookups)?
+                .into_iter()
+                .map(|(raw_sha256, chunk)| {
+                    (
+                        raw_sha256,
+                        ReusedEncodedImageChunk {
+                            raw_sha256: chunk.raw_sha256,
+                            raw_size_bytes: chunk.raw_size_bytes,
+                            encoded_sha256: chunk.encoded_sha256,
+                            encoded_size_bytes: chunk.encoded_size_bytes,
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            Ok::<_, anyhow::Error>(reused)
+        })
+        .await
+        .context("image chunk lookup worker panicked")??;
+        ensure_build_still_desired(cfg, &job.build_id)?;
+
+        let cpu_permit = Arc::clone(cpu_gate)
+            .acquire_many_owned(4)
+            .await
+            .context("builder CPU gate closed")?;
+        let output_result = tokio::task::spawn_blocking(move || {
+            finish_direct_build_from_scan(rendered, &scan, &reused)
+        })
+        .await
+        .context("image chunk compression worker panicked")?;
+        drop(cpu_permit);
         let output = match output_result {
             Ok(output) => output,
             Err(error) => {
@@ -192,7 +269,7 @@ pub(super) async fn run_claimed_build_job(
                     cfg,
                     &job.build_id,
                     &log_files,
-                    "direct build failure",
+                    "image chunk compression failure",
                 )
                 .await;
                 return Err(error);
@@ -203,8 +280,8 @@ pub(super) async fn run_claimed_build_job(
             build_id = %job.build_id,
             scenario = %output.rendered.scenario_name,
             vm = %output.rendered.vm.name,
-            artifact = %output.artifact.raw_zstd_path.display(),
-            sha256 = %output.artifact.image_sha256_hex,
+            artifact = %output.artifact.chunk_manifest_path.display(),
+            image_id = %output.artifact.image_id,
             "builder daemon built VM image"
         );
         outputs.push(output);
@@ -336,10 +413,23 @@ pub(super) fn publish_build_outputs(
                 .vms
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("direct build manifest has no vm"))?;
-            PublishImageFile::new(
+            let chunks = output
+                .artifact
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    PublishImageChunkFile::from_optional_path(
+                        &chunk.descriptor,
+                        chunk.path.as_deref(),
+                    )
+                })
+                .collect::<intar_image_upload::Result<Vec<_>>>()?;
+            PublishChunkedImage::new(
                 &vm.name,
-                &output.artifact.raw_zstd_path,
-                image_filename(&vm.image_key),
+                &vm.image_id,
+                &vm.chunk_manifest_sha256,
+                &output.artifact.chunk_manifest_path,
+                chunks,
             )
             .map_err(anyhow::Error::from)
         })
@@ -536,22 +626,6 @@ pub(super) async fn append_build_log_file(log: &mut String, title: &str, path: &
         }
     }
     log.push('\n');
-}
-
-pub(super) fn image_filename(image_key: &ImageKey) -> String {
-    format!(
-        "{}-{}-{}.raw.zst",
-        image_key.scenario,
-        image_key.vm,
-        image_arch_slug(&image_key.arch)
-    )
-}
-
-pub(super) fn image_arch_slug(arch: &ImageArchitecture) -> &'static str {
-    match arch {
-        ImageArchitecture::X86_64 => "x86_64",
-        ImageArchitecture::Aarch64 => "aarch64",
-    }
 }
 
 pub(super) fn retry_delay_ms(attempt: u32) -> i64 {

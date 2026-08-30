@@ -33,8 +33,8 @@ use intar_jailer_protocol::{
 #[cfg(target_os = "linux")]
 use intar_jailerd::{
     BootCpuGuardianRequest, FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
-    host_cpu_capacity_millis, launch_vm_v2_response, prepare_image_v2_response,
-    run_boot_cpu_guardian, self_test,
+    host_cpu_capacity_millis, launch_vm_v2_response, launch_vm_v3_response,
+    prepare_chunked_image_v3_response, prepare_image_v2_response, run_boot_cpu_guardian, self_test,
 };
 #[cfg(target_os = "linux")]
 use rustix::net::{
@@ -53,6 +53,8 @@ const MAX_CLIENT_CONNECTIONS: usize = 32;
 const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "linux")]
 const BOOT_LEASE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(target_os = "linux")]
+const STORE_GC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Parser)]
 #[command(name = "intar-jailerd")]
@@ -269,6 +271,36 @@ fn run_server(config_path: &Path) -> Result<()> {
             }
         })
         .context("spawn boot CPU lease watchdog")?;
+    let gc_core = Arc::clone(&core);
+    let gc_config = config.clone();
+    std::thread::Builder::new()
+        .name("jailerd-store-gc".to_owned())
+        .spawn(move || {
+            loop {
+                let protected = match gc_core.lock() {
+                    Ok(core) => core.live_template_image_ids(),
+                    Err(_) => {
+                        error!("jailerd state lock poisoned; store GC exiting");
+                        return;
+                    }
+                };
+                match intar_jailerd::gc_root_stores(&gc_config, &protected) {
+                    Ok(report) if report.templates_removed > 0 || report.chunks_removed > 0 => {
+                        info!(
+                            templates_removed = report.templates_removed,
+                            chunks_removed = report.chunks_removed,
+                            estimated_bytes = report.estimated_bytes_after,
+                            free_bytes = report.filesystem_free_bytes_after,
+                            "completed root-owned template/chunk garbage collection"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => error!(?error, "root-owned template/chunk GC failed"),
+                }
+                std::thread::park_timeout(STORE_GC_INTERVAL);
+            }
+        })
+        .context("spawn root-owned template/chunk GC")?;
     info!(
         socket = %config.socket_path.display(),
         total_cpu_millis,
@@ -386,7 +418,23 @@ fn serve_connection(
                                 |config| prepare_image_v2_response(&config, *request),
                             )
                         }
+                        Request::PrepareChunkedImageV3(request) => {
+                            let config = core
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("jailerd state lock poisoned"))?
+                                .template_prepare_config();
+                            config.map_or_else(
+                                || {
+                                    Response::Error(ProtocolError::new(
+                                        "host_not_ready",
+                                        "host readiness attestation does not permit v3 chunked image preparation",
+                                    ))
+                                },
+                                |config| prepare_chunked_image_v3_response(&config, *request),
+                            )
+                        }
                         Request::LaunchVmV2(request) => launch_vm_v2_response(core, *request),
+                        Request::LaunchVmV3(request) => launch_vm_v3_response(core, *request),
                         request => core
                             .lock()
                             .map_err(|_| anyhow::anyhow!("jailerd state lock poisoned"))?

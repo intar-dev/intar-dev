@@ -39,9 +39,8 @@ describe("build scheduler bundle supersession", () => {
     await db.insert(imageBuildBundles).values({
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
-      kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v9",
+        buildFormatVersion: "intar-image-build-v10",
         scenarios: [],
       },
       createdAt: now - 1_000,
@@ -78,9 +77,8 @@ describe("build scheduler bundle supersession", () => {
       queueImageBuildsFromBundle(db, {
         rev: "bundle-new",
         r2Key: "builds/bundles/bundle-new.tar.gz",
-        kinoVersion: "0.4.0",
         meta: {
-          buildFormatVersion: "intar-image-build-v9",
+          buildFormatVersion: "intar-image-build-v10",
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -145,9 +143,8 @@ describe("build scheduler bundle supersession", () => {
       queueImageBuildsFromBundle(db, {
         rev: "bundle-same-hash",
         r2Key: "builds/bundles/bundle-same-hash.tar.gz",
-        kinoVersion: "0.4.0",
         meta: {
-          buildFormatVersion: "intar-image-build-v9",
+          buildFormatVersion: "intar-image-build-v10",
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -200,9 +197,8 @@ describe("build scheduler bundle supersession", () => {
     await db.insert(imageBuildBundles).values({
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
-      kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v9",
+        buildFormatVersion: "intar-image-build-v10",
         scenarios: [],
       },
       createdAt: now - 1_000,
@@ -255,9 +251,8 @@ describe("build scheduler bundle supersession", () => {
     await db.insert(imageBuildBundles).values({
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
-      kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v9",
+        buildFormatVersion: "intar-image-build-v10",
         scenarios: [],
       },
       createdAt: now,
@@ -299,9 +294,8 @@ describe("build scheduler bundle supersession", () => {
     await db.insert(imageBuildBundles).values({
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
-      kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v9",
+        buildFormatVersion: "intar-image-build-v10",
         scenarios: [],
       },
       createdAt: now,
@@ -398,9 +392,8 @@ async function queueBundle(
   return queueImageBuildsFromBundle(db, {
     rev,
     r2Key: `builds/bundles/${rev}.tar.gz`,
-    kinoVersion: "0.4.0",
     meta: {
-      buildFormatVersion: "intar-image-build-v9",
+      buildFormatVersion: "intar-image-build-v10",
       scenarios: [
         {
           scenarioId: "broken-nginx",
@@ -428,7 +421,6 @@ function oldBuild(
     arch: "x86_64" as const,
     rev: "bundle-old",
     contentHash: hashChar.repeat(64),
-    kinoVersion: "0.4.0",
     hostId,
     status,
     phase,
@@ -449,7 +441,6 @@ function desiredBuild(id: string, hashChar: string): DesiredBuildV1 {
     rev: "bundle-old",
     content_hash: hashChar.repeat(64),
     bundle_ref: "builds/bundles/bundle-old.tar.gz",
-    kino_version: "0.4.0",
   };
 }
 

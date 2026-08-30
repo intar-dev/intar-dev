@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(target_os = "linux")]
-use crate::kino_probe::{ProbeSummary, ProbeView};
+use crate::kino_probe::{GuestPhaseTimings, ProbeSummary, ProbeView};
 use cloud_hypervisor_client::Error as ChError;
 use intar_jailer_protocol::{CpuQuota, CpuQuotaAttestation};
 use russh::client::Handler as _;
@@ -52,6 +52,7 @@ fn launch_operation_fixture() -> (VmLaunchRequest, PreparedImageV2Result) {
             initrd: prepared.initrd.clone(),
             runtime_disk: agent_source("runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: agent_source("recordings.vfat", ArtifactAccess::ReadWrite),
+            tools_disk: None,
         },
     };
     (request, prepared)
@@ -83,6 +84,7 @@ fn test_vm_status(name: &str, run_id: Option<&str>) -> VmStatusResponse {
         details: Some(VmDetails {
             image_key: None,
             image_sha256: None,
+            guest_tools: None,
             run_id: run_id.map(str::to_string),
             root_disk_path: format!("/tmp/{name}/root.raw"),
             seed_disk_path: format!("/tmp/{name}/runtime.img"),

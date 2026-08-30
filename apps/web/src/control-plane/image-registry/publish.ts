@@ -11,6 +11,10 @@ import {
 import type { ImageArchitecture } from "@/generated/catalog";
 import { seedScenarioManifest } from "@/lib/catalog-manifest";
 import {
+  stageCandidateScenarioManifest,
+  warmCandidateScenarioManifest,
+} from "@/lib/scenario-catalog-candidates";
+import {
   withImageBuildCoordinationLock,
   type ImageBuildCoordinationLease,
 } from "@/lib/image-build-lock";
@@ -34,7 +38,6 @@ import {
   isImageKey,
   normalizeSha256,
   registryImageKey,
-  imageObjectKey,
   hasRegistryPublishToken,
   readString,
   isSafeBuildId,
@@ -105,10 +108,12 @@ export async function handlePublish(
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
         preparedImages: PreparedVmImage[];
+        catalogChannel: "candidate" | "live";
       }
     | { ok: false; response: Response }
   > => {
     let organizationId: string | null = null;
+    let catalogChannel: "candidate" | "live" = "live";
     if (buildFence) {
       const assignment = await loadPublishBuildAssignment(
         db,
@@ -118,6 +123,7 @@ export async function handlePublish(
         return { ok: false, response: inactivePublishBuildResponse() };
       }
       organizationId = assignment?.organizationId ?? null;
+      catalogChannel = assignment?.catalogChannel ?? "live";
     }
 
     const artifacts = await prepareBootArtifacts(env, form, manifest.value);
@@ -142,15 +148,42 @@ export async function handlePublish(
         return { ok: false, response: inactivePublishBuildResponse() };
       }
       organizationId = assignment?.organizationId ?? null;
+      catalogChannel = assignment?.catalogChannel ?? "live";
       await lease?.assertHeld();
     }
 
-    await seedScenarioManifest(db, normalizedManifest, {
-      enabled: true,
-      ...(organizationId ? { organizationId } : {}),
-      nowUnixMs: Date.now(),
-    });
-    if (organizationId) {
+    const now = Date.now();
+    if (buildFence && catalogChannel === "candidate") {
+      await stageCandidateScenarioManifest(db, {
+        revision: buildFence.rev,
+        organizationId,
+        buildId: buildFence.buildId,
+        manifest: normalizedManifest,
+        nowUnixMs: now,
+      });
+    } else {
+      await seedScenarioManifest(db, normalizedManifest, {
+        enabled: true,
+        ...(organizationId ? { organizationId } : {}),
+        sourceRevision: buildFence?.rev ?? null,
+        nowUnixMs: now,
+      });
+    }
+    if (buildFence) {
+      await db
+        .update(imageBuilds)
+        .set({
+          publishedManifestJson: normalizedManifest,
+          updatedAt: Date.now(),
+        })
+        .where(
+          and(
+            eq(imageBuilds.id, buildFence.buildId),
+            eq(imageBuilds.hostId, buildFence.hostId),
+          ),
+        );
+    }
+    if (organizationId && catalogChannel === "live") {
       await db
         .update(scenarioSources)
         .set({ status: "published", updatedAt: Date.now() })
@@ -167,6 +200,7 @@ export async function handlePublish(
       uploaded,
       artifacts: artifacts.uploaded,
       preparedImages: images.prepared,
+      catalogChannel,
     };
   };
 
@@ -177,6 +211,7 @@ export async function handlePublish(
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
         preparedImages: PreparedVmImage[];
+        catalogChannel: "candidate" | "live";
       }
     | { ok: false; response: Response };
   if (buildFence) {
@@ -207,12 +242,21 @@ export async function handlePublish(
   }
   if (!published.ok) return published.response;
 
-  await tryReconcileScenarioImagesForPublicationScope(db, {
-    publicationOrganizationId: published.organizationId,
-    nowUnixMs: Date.now(),
-    reason: "image_published",
-    wakeHostRuntime: tryWakeHostRuntime,
-  });
+  if (published.catalogChannel === "candidate") {
+    await warmCandidateScenarioManifest(db, {
+      organizationId: published.organizationId,
+      manifest: normalizedManifest,
+      nowUnixMs: Date.now(),
+      wakeHost: tryWakeHostRuntime,
+    });
+  } else {
+    await tryReconcileScenarioImagesForPublicationScope(db, {
+      publicationOrganizationId: published.organizationId,
+      nowUnixMs: Date.now(),
+      reason: "image_published",
+      wakeHostRuntime: tryWakeHostRuntime,
+    });
+  }
 
   let pruned: PrunedImages[] = [];
   try {
@@ -228,6 +272,7 @@ export async function handlePublish(
       scenario_id: normalizedManifest.scenario_id,
       images: published.uploaded,
       artifacts: published.artifacts,
+      catalog_channel: published.catalogChannel,
       pruned,
     },
     201,
@@ -312,89 +357,14 @@ export async function listImageKeyObjects(
 }
 
 export async function pruneStaleVmImages(
-  env: Cloudflare.Env,
-  db: DrizzleD1Database,
-  published: PreparedVmImage[],
+  _env: Cloudflare.Env,
+  _db: DrizzleD1Database,
+  _published: PreparedVmImage[],
 ): Promise<PrunedImages[]> {
-  const publishedShasByImageKey = new Map<string, Set<string>>();
-  for (const image of published) {
-    const shas = publishedShasByImageKey.get(image.imageKey) ?? new Set();
-    shas.add(image.imageSha256);
-    publishedShasByImageKey.set(image.imageKey, shas);
-  }
-  if (publishedShasByImageKey.size === 0) return [];
-
-  const referenced = await catalogReferencedImageShas(db);
-  const pruned: PrunedImages[] = [];
-
-  for (const [imageKey, publishedShas] of publishedShasByImageKey) {
-    const prefix = `images/${imageKey}/`;
-    const entries = new Map<
-      string,
-      { uploaded: Date | null; companion: boolean }
-    >();
-    for (const object of await listImageKeyObjects(env, imageKey)) {
-      const basename = object.key.slice(prefix.length);
-      if (basename.endsWith(IMAGE_COMPANION_SUFFIX)) {
-        const sha256 = normalizeSha256(
-          basename.slice(0, -IMAGE_COMPANION_SUFFIX.length),
-        );
-        if (!sha256) continue;
-        const entry = entries.get(sha256) ?? {
-          uploaded: null,
-          companion: false,
-        };
-        entry.companion = true;
-        entries.set(sha256, entry);
-      } else if (basename.endsWith(IMAGE_OBJECT_SUFFIX)) {
-        const sha256 = normalizeSha256(
-          basename.slice(0, -IMAGE_OBJECT_SUFFIX.length),
-        );
-        if (!sha256) continue;
-        const entry = entries.get(sha256) ?? {
-          uploaded: null,
-          companion: false,
-        };
-        entry.uploaded = object.uploaded;
-        entries.set(sha256, entry);
-      }
-    }
-
-    const mostRecent = [...entries.entries()]
-      .filter(([, entry]) => entry.uploaded !== null)
-      .sort(
-        (a, b) =>
-          (b[1].uploaded?.getTime() ?? 0) - (a[1].uploaded?.getTime() ?? 0),
-      )
-      .slice(0, MAX_IMAGES_PER_KEY)
-      .map(([sha256]) => sha256);
-
-    // A reused image keeps its original R2 uploaded timestamp, so recency
-    // alone would evict the image that was just published or is still the
-    // live catalog pointer — both are always kept.
-    const keep = new Set([...publishedShas, ...mostRecent]);
-
-    const deleteKeys: string[] = [];
-    const deletedShas: string[] = [];
-    for (const [sha256, entry] of entries) {
-      if (keep.has(sha256) || referenced.has(`${imageKey}:${sha256}`)) {
-        continue;
-      }
-      if (entry.uploaded !== null) {
-        deleteKeys.push(imageObjectKey(imageKey, sha256));
-      }
-      if (entry.companion) {
-        deleteKeys.push(`${imageObjectKey(imageKey, sha256)}.sha256`);
-      }
-      deletedShas.push(sha256);
-    }
-    if (deleteKeys.length === 0) continue;
-
-    await env.VM_IMAGE_REGISTRY_BUCKET.delete(deleteKeys);
-    pruned.push({ image_key: imageKey, deleted_sha256s: deletedShas.sort() });
-  }
-
-  return pruned;
+  // Chunk and manifest objects are shared by many images. They are retained
+  // for the seven-day rollback window and removed only by reference-aware
+  // registry garbage collection, never by a single scenario publication.
+  return [];
 }
 
 export { isRuntimeImageCacheHost } from "@/lib/scenario-image-cache";
@@ -420,6 +390,7 @@ export type PublishBuildAssignment = {
   arch: ImageArchitecture;
   rev: string;
   contentHash: string;
+  catalogChannel?: "candidate" | "live";
 };
 
 export async function authorizeManifestPublish(
@@ -492,6 +463,7 @@ export async function loadPublishBuildAssignment(
       arch: imageBuilds.arch,
       rev: imageBuilds.rev,
       contentHash: imageBuilds.contentHash,
+      catalogChannel: imageBuilds.catalogChannel,
     })
     .from(imageBuilds)
     .where(eq(imageBuilds.id, buildId))

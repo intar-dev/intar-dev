@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn launch_requires_a_prepared_v2_image_and_never_downgrades() {
     let (prepared_request, prepared) = launch_operation_fixture();
-    let operation =
-        build_jailer_launch_operation(prepared_request, Some(&prepared)).expect("v2 request");
+    let operation = build_legacy_jailer_launch_operation(prepared_request, Some(&prepared))
+        .expect("v2 request");
     assert!(matches!(operation, JailerRequest::LaunchVmV2(_)));
 
     let (mut regular_request, _) = launch_operation_fixture();
@@ -26,7 +26,7 @@ fn launch_requires_a_prepared_v2_image_and_never_downgrades() {
         ArtifactAccess::ReadOnly,
         Some(boot_digest),
     ));
-    let error = build_jailer_launch_operation(regular_request, None)
+    let error = build_legacy_jailer_launch_operation(regular_request, None)
         .expect_err("missing prepared template must fail instead of selecting v1");
     assert!(error.to_string().contains("no v1 fallback"));
 }
@@ -34,12 +34,13 @@ fn launch_requires_a_prepared_v2_image_and_never_downgrades() {
 #[tokio::test]
 async fn v2_launch_transport_retry_replays_the_exact_request_and_preserves_conflict() {
     let (request, prepared) = launch_operation_fixture();
-    let operation = build_jailer_launch_operation(request, Some(&prepared)).expect("v2 operation");
+    let operation =
+        build_legacy_jailer_launch_operation(request, Some(&prepared)).expect("v2 operation");
     let expected = operation.clone();
     let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sent_by_request = Arc::clone(&sent);
 
-    let response = request_v2_launch_with_single_retry(operation, move |operation| {
+    let response = request_legacy_v2_launch_with_single_retry(operation, move |operation| {
         let attempt = {
             let mut sent = sent_by_request.lock().expect("sent requests");
             sent.push(operation);
@@ -76,11 +77,12 @@ async fn v2_launch_transport_retry_replays_the_exact_request_and_preserves_confl
 #[tokio::test]
 async fn v2_launch_transport_retry_fails_closed_after_two_transport_errors() {
     let (request, prepared) = launch_operation_fixture();
-    let operation = build_jailer_launch_operation(request, Some(&prepared)).expect("v2 operation");
+    let operation =
+        build_legacy_jailer_launch_operation(request, Some(&prepared)).expect("v2 operation");
     let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sent_by_request = Arc::clone(&sent);
 
-    let error = request_v2_launch_with_single_retry(operation, move |operation| {
+    let error = request_legacy_v2_launch_with_single_retry(operation, move |operation| {
         let attempt = {
             let mut sent = sent_by_request.lock().expect("sent requests");
             sent.push(operation);

@@ -47,6 +47,12 @@ fn create_scenario_vm_request_accepts_runtime() {
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
         "image_sha256": "a".repeat(64),
+        "guest_tools": {
+            "tools_disk_sha256": "b".repeat(64),
+            "tools_disk_size_bytes": 67108864,
+            "kino_sha256": "c".repeat(64),
+            "bootstrap_abi": 1
+        },
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"],
             "network": {
@@ -95,7 +101,13 @@ fn create_scenario_vm_request_rejects_missing_runtime() {
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64)
+        "image_sha256": "a".repeat(64),
+        "guest_tools": {
+            "tools_disk_sha256": "b".repeat(64),
+            "tools_disk_size_bytes": 67108864,
+            "kino_sha256": "c".repeat(64),
+            "bootstrap_abi": 1
+        }
     }))
     .expect_err("missing runtime field should be rejected");
 

@@ -2265,6 +2265,8 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
 ]
 
 [[package]]
@@ -2285,6 +2287,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fatfs",
+ "fs2",
  "hcl-rs",
  "intar-contracts",
  "intar-image-scenario",
@@ -2351,6 +2354,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "url",
 ]
@@ -2390,6 +2394,8 @@ dependencies = [
  "clap",
  "cloud-hypervisor-client",
  "fatfs",
+ "fs2",
+ "intar-contracts",
  "intar-jailer-protocol",
  "kvm-ioctls",
  "landlock",
@@ -2408,6 +2414,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zbus",
+ "zstd",
 ]
 
 [[package]]

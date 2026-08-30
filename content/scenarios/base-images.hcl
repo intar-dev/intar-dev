@@ -8,13 +8,11 @@ base_image "trixie" {
     "openssh-server",
     "ca-certificates",
     "curl",
-    "python3",
     "iproute2",
     "e2fsprogs",
     "kmod",
     "systemd-sysv",
     "udev",
     "sudo",
-    "zstd",
   ]
 }

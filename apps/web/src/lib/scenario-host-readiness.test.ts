@@ -42,7 +42,7 @@ function report(
   cachedImages: HostStateReportV2["cached_images"] = [
     {
       image_key: { scenario: "pair-ping", vm: "web", arch: "x86_64" },
-      image_sha256: imageSha256,
+      image_id: imageSha256,
       phase,
       bytes_on_disk: 1024,
       error: null,
@@ -76,6 +76,9 @@ function report(
       supports_reflink: true,
       supports_nftables: true,
       supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,

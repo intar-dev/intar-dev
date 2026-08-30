@@ -1,0 +1,142 @@
+name: Image v10 flag-day cutover
+run-name: "Image v10 cutover ${{ inputs.revision }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Verified candidate bundle revision
+        required: true
+        type: string
+      confirmation:
+        description: Type DRAIN AND CUT OVER IMAGE V10
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intar-image-v10-production-cutover
+  cancel-in-progress: false
+
+jobs:
+  cutover:
+    name: Drain, switch, warm, and reopen
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    env:
+      INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+      REVISION: ${{ inputs.revision }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+
+    steps:
+      - name: Validate flag-day authority
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "${CONFIRMATION}" = "DRAIN AND CUT OVER IMAGE V10"
+          [[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
+          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
+
+      - name: Stop new agent-KVM runs
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data '{"state":"drained"}' \
+            "https://intar.dev/registry/v1/cutover/gate" \
+            | jq -e '.ok == true and .state == "drained"' >/dev/null
+
+      - name: Let active VMs finish
+        run: |
+          set -euo pipefail
+          status="${RUNNER_TEMP}/cutover-gate.json"
+          for _ in $(seq 1 720); do
+            curl --fail --silent --show-error --retry 2 \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              "https://intar.dev/registry/v1/cutover/gate" > "${status}"
+            jq -c '{state, active_desired_vms}' "${status}"
+            if jq -e '.state == "drained" and .active_desired_vms == 0' \
+              "${status}" >/dev/null; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Active VMs did not drain within six hours." >&2
+          exit 1
+
+      - name: Require complete candidate builds and exact warm cache
+        run: |
+          set -euo pipefail
+          status="${RUNNER_TEMP}/candidate-status.json"
+          curl --fail --silent --show-error --retry 3 \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=candidate" \
+            > "${status}"
+          jq -e '
+            .ok == true and
+            .state == "ready" and
+            (.builds | length > 0) and
+            (.hosts | length > 0) and
+            all(.builds[]; .status == "succeeded") and
+            all(.hosts[]; .ready == true)
+          ' "${status}" >/dev/null
+
+      - name: Switch candidate catalog
+        run: |
+          set -euo pipefail
+          response="${RUNNER_TEMP}/catalog-promotion.json"
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "x-intar-drained: true" \
+            "https://intar.dev/registry/v1/catalog/promote/${REVISION}" \
+            > "${response}"
+          jq -e '.ok == true and .revision == env.REVISION' "${response}" >/dev/null
+
+      - name: Switch stable guest-tool pin
+        run: |
+          set -euo pipefail
+          response="${RUNNER_TEMP}/guest-tools-promotion.json"
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            "https://intar.dev/registry/v1/guest-tools/promote" \
+            > "${response}"
+          jq -e '.ok == true and .stable.bootstrap_abi == 1' "${response}" >/dev/null
+
+      - name: Require stable exact cache within 60 seconds
+        run: |
+          set -euo pipefail
+          status="${RUNNER_TEMP}/stable-status.json"
+          started_at="$(date +%s)"
+          for _ in $(seq 1 12); do
+            curl --fail --silent --show-error --retry 2 \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
+              > "${status}"
+            if jq -e '.ok == true and .state == "ready" and all(.hosts[]; .ready == true)' \
+              "${status}" >/dev/null; then
+              completed_at="$(date +%s)"
+              test "$((completed_at - started_at))" -lt 60
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Stable image and tools cache did not converge within 60 seconds." >&2
+          exit 1
+
+      - name: Reopen new runs
+        if: always()
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data '{"state":"open"}' \
+            "https://intar.dev/registry/v1/cutover/gate" \
+            | jq -e '.ok == true and .state == "open"' >/dev/null

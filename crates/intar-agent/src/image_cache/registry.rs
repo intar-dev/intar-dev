@@ -38,8 +38,12 @@ pub(super) fn registry_images_from_index(index: RegistryIndex) -> Vec<RegistryIm
             if !is_safe_component(&image.image_key) {
                 return None;
             }
-            let image_sha256 = normalize_sha256(&image.image_sha256)?;
-            if image.image_format != "raw_zstd" || image.image_virtual_size_bytes == 0 {
+            let image_id = normalize_sha256(image.image_id.as_deref()?)?;
+            let chunk_manifest_sha256 = normalize_sha256(image.chunk_manifest_sha256.as_deref()?)?;
+            if image.image_format != "raw_chunks_v1"
+                || image.image_virtual_size_bytes == 0
+                || image.guest_bootstrap_abi != Some(1)
+            {
                 return None;
             }
             let kernel_sha256 = normalize_sha256(&image.boot.kernel_sha256)?;
@@ -47,20 +51,31 @@ pub(super) fn registry_images_from_index(index: RegistryIndex) -> Vec<RegistryIm
             if image.boot.cmdline.trim().is_empty() {
                 return None;
             }
-            if image.download_url.trim().is_empty() {
+            let manifest_download_url = image.manifest_download_url?;
+            let chunk_download_base_url = image.chunk_download_base_url?;
+            if manifest_download_url.trim().is_empty() || chunk_download_base_url.trim().is_empty()
+            {
                 return None;
             }
             Some(RegistryImageRecord {
-                image_filename: format!("{}.raw.zst", image.image_key),
+                #[cfg(test)]
+                image_filename: format!("{}.chunks.json", image.image_key),
                 image_key: image.image_key,
-                image_sha256,
+                #[cfg(test)]
+                image_sha256: image_id.clone(),
+                image_id,
                 image_virtual_size_bytes: image.image_virtual_size_bytes,
+                chunk_manifest_sha256,
+                guest_bootstrap_abi: 1,
                 boot: RegistryImageBoot {
                     kernel_sha256,
                     initrd_sha256,
                     cmdline: image.boot.cmdline,
                 },
-                download_url: image.download_url,
+                #[cfg(test)]
+                download_url: manifest_download_url.clone(),
+                manifest_download_url,
+                chunk_download_base_url,
             })
         })
         .collect()
@@ -89,6 +104,7 @@ pub(super) async fn resolve_registry_image(
         })
 }
 
+#[cfg(test)]
 pub(super) async fn cache_sha_sidecar(body: &str, dir: &Path, filename: &str) -> Result<()> {
     let (tmp_path, mut tmp_file) = create_tmp_file(dir, filename).await?;
     tmp_file
@@ -113,16 +129,19 @@ pub(super) async fn cache_sha_sidecar(body: &str, dir: &Path, filename: &str) ->
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn cached_image_path(cache_root: &Path, image: &RegistryImageRecord) -> PathBuf {
     cache_root
         .join(&image.image_key)
         .join(&image.image_filename)
 }
 
+#[cfg(test)]
 pub(super) fn cached_raw_image_path(cache_root: &Path, image: &RegistryImageRecord) -> PathBuf {
     cached_raw_image_path_for_key(cache_root, &image.image_key, &image.image_sha256)
 }
 
+#[cfg(test)]
 pub(super) fn cached_raw_image_path_for_key(
     cache_root: &Path,
     image_key: &str,
@@ -133,10 +152,12 @@ pub(super) fn cached_raw_image_path_for_key(
         .join(format!("{image_sha256}.raw"))
 }
 
+#[cfg(test)]
 pub(super) fn raw_cache_marker_path(cache_root: &Path, image: &RegistryImageRecord) -> PathBuf {
     raw_cache_marker_path_for_key(cache_root, &image.image_key, &image.image_sha256)
 }
 
+#[cfg(test)]
 pub(super) fn raw_cache_marker_path_for_key(
     cache_root: &Path,
     image_key: &str,
@@ -147,15 +168,18 @@ pub(super) fn raw_cache_marker_path_for_key(
         .join(format!("{image_sha256}.raw.verified.json"))
 }
 
+#[cfg(test)]
 pub(super) fn launch_descriptor_path_for_key(cache_root: &Path, image_key: &str) -> PathBuf {
     cache_root.join(image_key).join(LAUNCH_DESCRIPTOR_FILENAME)
 }
 
+#[cfg(test)]
 pub(super) fn launch_descriptor_path_for_raw(raw_path: &Path) -> Result<PathBuf> {
     let parent = raw_path.parent().context("cached raw image parent")?;
     Ok(parent.join(LAUNCH_DESCRIPTOR_FILENAME))
 }
 
+#[cfg(test)]
 pub(super) fn raw_cache_marker_matches(
     marker: &RawCacheMarker,
     image: &RegistryImageRecord,
@@ -172,18 +196,21 @@ pub(super) fn raw_cache_marker_matches(
         && marker.cmdline == image.boot.cmdline
 }
 
+#[cfg(test)]
 pub(super) async fn read_raw_cache_marker(path: &Path) -> std::io::Result<RawCacheMarker> {
     let bytes = tokio::fs::read(path).await?;
     serde_json::from_slice(&bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+#[cfg(test)]
 pub(super) fn read_raw_cache_marker_sync(path: &Path) -> std::io::Result<RawCacheMarker> {
     let bytes = std::fs::read(path)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+#[cfg(test)]
 pub(super) async fn write_raw_cache_marker(
     cache_root: &Path,
     image: &RegistryImageRecord,
@@ -227,6 +254,7 @@ pub(super) async fn write_raw_cache_marker(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn remove_raw_cache_entry(raw_path: &Path, marker_path: &Path) -> Result<()> {
     match tokio::fs::remove_file(raw_path).await {
         Ok(()) => {}
@@ -246,6 +274,7 @@ pub(super) async fn remove_raw_cache_entry(raw_path: &Path, marker_path: &Path) 
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn remove_launch_descriptor_if_matching(
     cache_root: &Path,
     image_key: &str,
@@ -279,6 +308,7 @@ pub(super) async fn remove_launch_descriptor_if_matching(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn sha_filename(image: &RegistryImageRecord) -> String {
     format!("{}.sha256", image.image_filename)
 }
@@ -510,6 +540,7 @@ pub(super) async fn create_tmp_file(
 pub(super) struct DownloadResult {
     pub(super) bytes: u64,
     pub(super) sha256: String,
+    #[cfg(test)]
     pub(super) source_url: String,
 }
 
@@ -552,6 +583,7 @@ pub(super) async fn download_to_file(
     Ok(DownloadResult {
         bytes,
         sha256: to_hex_lower(&hasher.finalize()),
+        #[cfg(test)]
         source_url: url.to_string(),
     })
 }

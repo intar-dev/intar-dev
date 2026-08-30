@@ -1,14 +1,16 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use flate2::{Compression, GzBuilder};
-use intar_contracts::catalog::{ImageArchitecture, ImageKey};
 use intar_image_build::{
-    BUILD_FORMAT_VERSION, BuildConfig, DirectBuildOutput, DirectBuildRequest, KinoArtifact,
-    RawUploadConfig, ScenarioContentHashInput, combine_scenario_manifests, render_direct_build,
-    run_direct_build, scenario_content_hash,
+    BUILD_FORMAT_VERSION, BuildConfig, DirectBuildOutput, DirectBuildRequest, RawUploadConfig,
+    ScenarioContentHashInput, combine_scenario_manifests, render_direct_build, run_direct_build,
+    scenario_content_hash, write_guest_tools_disk,
 };
-use intar_image_scenario::{BaseImageCatalog, BuildTools, Scenario};
-use intar_image_upload::{ImageUploadConfig, ImageUploader, PublishArtifactFile, PublishImageFile};
+use intar_image_scenario::{BaseImageCatalog, Scenario};
+use intar_image_upload::{
+    ImageUploadConfig, ImageUploader, PublishArtifactFile, PublishChunkedImage,
+    PublishImageChunkFile,
+};
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
@@ -19,9 +21,7 @@ use std::{fs, process::Command as ProcessCommand};
 mod clean_base_command;
 
 const BASE_IMAGES_PATH: &str = "content/scenarios/base-images.hcl";
-const BUILD_TOOLS_PATH: &str = "content/scenarios/build-tools.hcl";
 const BUNDLE_BASE_IMAGES_PATH: &str = "base-images.hcl";
-const BUNDLE_BUILD_TOOLS_PATH: &str = "build-tools.hcl";
 const BUNDLE_SCENARIOS_ROOT: &str = "scenarios";
 const COURSES_PATH: &str = "courses.hcl";
 const DEFAULT_SCENARIOS_ROOT: &str = "content/scenarios";
@@ -84,6 +84,7 @@ enum Command {
     Build(BuildCommand),
     BuildAll(BuildAllCommand),
     BuildBase(clean_base_command::BuildBaseCommand),
+    BuildGuestTools(BuildGuestToolsCommand),
     Hash(HashCommand),
     Bundle(BundleCommand),
 }
@@ -106,8 +107,6 @@ struct RenderCommand {
     vm: Option<String>,
     #[arg(long)]
     config: Option<PathBuf>,
-    #[arg(long)]
-    kino_binary: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -118,8 +117,6 @@ struct BuildCommand {
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
-    kino_binary: PathBuf,
-    #[arg(long)]
     no_upload: bool,
 }
 
@@ -127,8 +124,6 @@ struct BuildCommand {
 struct BuildAllCommand {
     #[arg(long)]
     config: Option<PathBuf>,
-    #[arg(long)]
-    kino_binary: PathBuf,
     #[arg(long)]
     no_upload: bool,
 }
@@ -141,14 +136,22 @@ struct HashCommand {
 }
 
 #[derive(Debug, Args)]
+struct BuildGuestToolsCommand {
+    #[arg(long)]
+    kino_binary: PathBuf,
+    #[arg(long, default_value = "dist/guest-tools")]
+    output_root: PathBuf,
+    #[arg(long, default_value = "mke2fs")]
+    mke2fs_binary: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct BundleCommand {
     scenario: Option<String>,
     #[arg(long)]
     courses_root: Option<PathBuf>,
     #[arg(long, default_value = BASE_IMAGES_PATH)]
     base_images: PathBuf,
-    #[arg(long, default_value = BUILD_TOOLS_PATH)]
-    build_tools: PathBuf,
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
@@ -171,9 +174,30 @@ fn main() -> Result<()> {
         Command::Build(args) => build_command(&args),
         Command::BuildAll(args) => build_all_command(&args),
         Command::BuildBase(args) => clean_base_command::build_base_command(&args),
+        Command::BuildGuestTools(args) => build_guest_tools_command(&args),
         Command::Hash(args) => hash_command(&args),
         Command::Bundle(args) => bundle_command(&args),
     }
+}
+
+fn build_guest_tools_command(args: &BuildGuestToolsCommand) -> Result<()> {
+    let artifact =
+        write_guest_tools_disk(&args.kino_binary, &args.output_root, &args.mke2fs_binary)?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "bootstrap_abi": artifact.manifest.bootstrap_abi,
+            "tools_disk_sha256": artifact.disk_sha256,
+            "tools_disk_size_bytes": artifact.disk_size_bytes,
+            "compressed_disk_sha256": artifact.compressed_disk_sha256,
+            "compressed_disk_size_bytes": artifact.compressed_disk_size_bytes,
+            "compressed_disk_path": artifact.compressed_disk_path,
+            "kino_sha256": artifact.kino_sha256,
+            "kino_size_bytes": artifact.kino_size_bytes,
+        }))?
+    );
+    Ok(())
 }
 
 fn validate_command(args: &ScenarioCommand) -> Result<()> {
@@ -203,7 +227,6 @@ fn validate_command(args: &ScenarioCommand) -> Result<()> {
 
 fn render_command(args: &RenderCommand) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
-    let kino = load_kino_artifact(&args.kino_binary)?;
     let base_catalog = load_base_image_catalog(Path::new(BASE_IMAGES_PATH))?;
     let scenario_paths = selected_scenario_paths(args.scenario.as_deref(), None)?;
 
@@ -222,7 +245,6 @@ fn render_command(args: &RenderCommand) -> Result<()> {
                 &scenario_path,
                 &scenario,
                 &vm_name,
-                &kino,
             )?;
             let rendered = render_direct_build(&request)
                 .with_context(|| format!("failed to render {}:{}", scenario.name, vm_name))?;
@@ -230,7 +252,7 @@ fn render_command(args: &RenderCommand) -> Result<()> {
                 "rendered {}:{} -> {}",
                 scenario.name,
                 vm_name,
-                rendered.paths.output_image_path.display()
+                rendered.paths.output_chunk_manifest_path.display()
             );
         }
     }
@@ -240,7 +262,6 @@ fn render_command(args: &RenderCommand) -> Result<()> {
 
 fn build_command(args: &BuildCommand) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
-    let kino = load_kino_artifact(&args.kino_binary)?;
     let base_catalog = load_base_image_catalog(Path::new(BASE_IMAGES_PATH))?;
     let uploader = build_uploader(config.upload.as_ref(), args.no_upload)?;
     let scenario_paths = selected_scenario_paths(args.scenario.as_deref(), None)?;
@@ -261,14 +282,13 @@ fn build_command(args: &BuildCommand) -> Result<()> {
                 &scenario_path,
                 &scenario,
                 &vm_name,
-                &kino,
             )?;
             let output = build_vm(&request)?;
             println!(
                 "built {}:{} -> {}",
                 scenario.name,
                 vm_name,
-                output.artifact.raw_zstd_path.display()
+                output.artifact.chunk_manifest_path.display()
             );
 
             completed_builds.push(CompletedBuild {
@@ -284,7 +304,6 @@ fn build_command(args: &BuildCommand) -> Result<()> {
 
 fn build_all_command(args: &BuildAllCommand) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
-    let kino = load_kino_artifact(&args.kino_binary)?;
     let base_catalog = load_base_image_catalog(Path::new(BASE_IMAGES_PATH))?;
     let uploader = build_uploader(config.upload.as_ref(), args.no_upload)?;
     let mut completed_builds = Vec::new();
@@ -299,14 +318,13 @@ fn build_all_command(args: &BuildAllCommand) -> Result<()> {
                 &scenario_path,
                 &scenario,
                 &vm_name,
-                &kino,
             )?;
             let output = build_vm(&request)?;
             println!(
                 "built {}:{} -> {}",
                 scenario.name,
                 vm_name,
-                output.artifact.raw_zstd_path.display()
+                output.artifact.chunk_manifest_path.display()
             );
 
             completed_builds.push(CompletedBuild {
@@ -323,7 +341,6 @@ fn build_all_command(args: &BuildAllCommand) -> Result<()> {
 fn hash_command(args: &HashCommand) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
     let base_catalog = load_base_image_catalog(Path::new(BASE_IMAGES_PATH))?;
-    let build_tools = load_build_tools(Path::new(BUILD_TOOLS_PATH))?;
     let scenario_paths = selected_scenario_paths(args.scenario.as_deref(), None)?;
 
     for scenario_path in scenario_paths {
@@ -338,7 +355,6 @@ fn hash_command(args: &HashCommand) -> Result<()> {
             scenario_id: &scenario.name,
             scenario_dir,
             base_definition: &base_definition,
-            kino_version: &build_tools.kino.version,
             target_arch: &config.qemu.target_arch,
         })?;
         println!("{}\t{}\t{}", scenario.name, config.qemu.target_arch, hash);
@@ -350,7 +366,6 @@ fn hash_command(args: &HashCommand) -> Result<()> {
 fn bundle_command(args: &BundleCommand) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
     let base_catalog = load_base_image_catalog(&args.base_images)?;
-    let build_tools = load_build_tools(&args.build_tools)?;
     let contract_arch = contract_image_arch_slug(&config.qemu.target_arch)?;
     let rev = args
         .rev
@@ -390,7 +405,6 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
             scenario_id: &scenario.name,
             scenario_dir,
             base_definition: &base_definition,
-            kino_version: &build_tools.kino.version,
             target_arch: &config.qemu.target_arch,
         })?;
         prepared_scenarios.push(PreparedBundleScenario {
@@ -403,7 +417,6 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
     let source_files = collect_bundle_source_files(
         &prepared_scenarios,
         &args.base_images,
-        &args.build_tools,
         course_catalog
             .as_ref()
             .map(|_| course_manifest_path.as_path()),
@@ -426,8 +439,9 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
         .collect::<Vec<_>>();
     let mut meta = serde_json::json!({
         "rev": rev,
-        "kino_version": build_tools.kino.version,
+        "guest_bootstrap_abi": intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1,
         "build_format_version": BUILD_FORMAT_VERSION,
+        "catalog_channel": "candidate",
         "target_arch": config.qemu.target_arch,
         "scenarios": scenarios_meta,
     });
@@ -460,50 +474,6 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
 
 mod bundle_command;
 use bundle_command::*;
-fn load_kino_artifact(path: &Path) -> Result<KinoArtifact> {
-    let binary_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .context("failed to determine current directory")?
-            .join(path)
-    };
-    if !binary_path.is_file() {
-        bail!("kino binary does not exist at {}", binary_path.display());
-    }
-
-    Ok(KinoArtifact {
-        binary_path,
-        version: kino_package_version()?,
-    })
-}
-
-fn kino_package_version() -> Result<String> {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = ProcessCommand::new(cargo)
-        .args(["pkgid", "-p", "kino"])
-        .output()
-        .context("failed to execute `cargo pkgid -p kino`")?;
-    if !output.status.success() {
-        bail!(
-            "`cargo pkgid -p kino` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let stdout = String::from_utf8(output.stdout).context("cargo pkgid emitted invalid UTF-8")?;
-    let package_id = stdout.trim();
-    let version = kino_version_from_package_id(package_id)?;
-    Ok(version.to_string())
-}
-
-fn kino_version_from_package_id(package_id: &str) -> Result<&str> {
-    package_id
-        .rsplit_once('@')
-        .or_else(|| package_id.rsplit_once('#'))
-        .map(|(_, version)| version)
-        .filter(|version| !version.is_empty())
-        .with_context(|| format!("failed to parse kino package id `{package_id}`"))
-}
 
 fn prepare_direct_render_request(
     config: &BuildConfig,
@@ -511,7 +481,6 @@ fn prepare_direct_render_request(
     scenario_path: &Path,
     scenario: &Scenario,
     vm_name: &str,
-    kino: &KinoArtifact,
 ) -> Result<DirectBuildRequest> {
     let vm = scenario
         .vm_by_name(vm_name)
@@ -532,7 +501,6 @@ fn prepare_direct_render_request(
         vm_name: vm_name.to_string(),
         config: config.qemu.clone(),
         base_image: base_image.clone(),
-        kino: kino.clone(),
     })
 }
 
@@ -913,7 +881,7 @@ fn upload_completed_builds(
             .map(|build| &build.output.artifact.manifest)
             .collect::<Vec<_>>();
         let manifest = combine_scenario_manifests(manifests)?;
-        let mut files = Vec::new();
+        let mut images = Vec::new();
         for build in &builds {
             let vm_manifest = build
                 .output
@@ -922,15 +890,29 @@ fn upload_completed_builds(
                 .vms
                 .first()
                 .ok_or_else(|| anyhow!("build manifest for {} has no VMs", build.vm_name))?;
-            files.push(PublishImageFile::new(
+            let chunks = build
+                .output
+                .artifact
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    PublishImageChunkFile::from_optional_path(
+                        &chunk.descriptor,
+                        chunk.path.as_deref(),
+                    )
+                })
+                .collect::<intar_image_upload::Result<Vec<_>>>()?;
+            images.push(PublishChunkedImage::new(
                 build.vm_name.clone(),
-                &build.output.artifact.raw_zstd_path,
-                registry_image_filename(&vm_manifest.image_key),
+                &vm_manifest.image_id,
+                &vm_manifest.chunk_manifest_sha256,
+                &build.output.artifact.chunk_manifest_path,
+                chunks,
             )?);
         }
         let artifacts = publish_artifacts_from_builds(&builds)?;
         let receipt = uploader
-            .publish_manifest_with_artifacts(&manifest, &files, &artifacts)
+            .publish_manifest_with_artifacts(&manifest, &images, &artifacts)
             .with_context(|| format!("failed to publish scenario {scenario_name}"))?;
         println!(
             "published {} -> {} images, {} artifacts",
@@ -959,22 +941,6 @@ fn publish_artifacts_from_builds(builds: &[&CompletedBuild]) -> Result<Vec<Publi
         .into_iter()
         .map(|(sha256, path)| PublishArtifactFile::new(path, sha256).map_err(anyhow::Error::from))
         .collect()
-}
-
-fn registry_image_filename(image_key: &ImageKey) -> String {
-    format!(
-        "{}-{}-{}.raw.zst",
-        image_key.scenario,
-        image_key.vm,
-        image_arch_slug(&image_key.arch)
-    )
-}
-
-fn image_arch_slug(arch: &ImageArchitecture) -> &'static str {
-    match arch {
-        ImageArchitecture::X86_64 => "x86_64",
-        ImageArchitecture::Aarch64 => "aarch64",
-    }
 }
 
 #[cfg(test)]

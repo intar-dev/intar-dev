@@ -6,13 +6,13 @@ use sha2::{Digest, Sha256};
 
 use crate::ScenarioError;
 
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v9";
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v10";
+pub const GUEST_BOOTSTRAP_ABI: u16 = 1;
 
 #[derive(Debug, Clone)]
 pub struct ScenarioContentHashParams<'a> {
     pub scenario_id: &'a str,
     pub base_definition: &'a str,
-    pub kino_version: &'a str,
     pub target_arch: &'a str,
 }
 
@@ -43,7 +43,11 @@ pub fn scenario_content_hash_from_entries(
         "base_definition",
         params.base_definition.as_bytes(),
     );
-    hash_field(&mut hasher, "kino_version", params.kino_version.as_bytes());
+    hash_field(
+        &mut hasher,
+        "guest_bootstrap_abi",
+        &GUEST_BOOTSTRAP_ABI.to_le_bytes(),
+    );
     hash_field(&mut hasher, "target_arch", params.target_arch.as_bytes());
 
     for (path, bytes) in normalized {
@@ -116,15 +120,14 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        BUILD_FORMAT_VERSION, ScenarioContentHashParams, normalize_relative_path,
-        scenario_content_hash_from_entries,
+        BUILD_FORMAT_VERSION, GUEST_BOOTSTRAP_ABI, ScenarioContentHashParams,
+        normalize_relative_path, scenario_content_hash_from_entries,
     };
 
     fn params() -> ScenarioContentHashParams<'static> {
         ScenarioContentHashParams {
             scenario_id: "demo",
             base_definition: "base-def",
-            kino_version: "1.2.3",
             target_arch: "amd64",
         }
     }
@@ -151,8 +154,9 @@ mod tests {
     }
 
     #[test]
-    fn v9_build_format_matches_the_golden_hash() {
-        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v9");
+    fn v10_build_format_matches_the_golden_hash() {
+        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v10");
+        assert_eq!(GUEST_BOOTSTRAP_ABI, 1);
         let hash = scenario_content_hash_from_entries(
             &params(),
             &[
@@ -163,7 +167,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hash,
-            "625df0497148cf02cb0ea01a9042c76fd8f6ebdd753b3643e40e3769a86b2be7"
+            "97d7a95aafc1d30a54af61f04350772694505c8bec8c3a8ebcd214f18409826e"
         );
     }
 

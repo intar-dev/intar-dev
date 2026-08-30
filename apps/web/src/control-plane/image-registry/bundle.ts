@@ -15,6 +15,7 @@ import {
 } from "@/lib/scenario-course-catalogs";
 import { GENERAL_PRACTICE_COURSE_ID } from "@/lib/course-location";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
+import { stageReusableCandidateManifests } from "@/lib/scenario-catalog-candidates";
 import {
   jsonResponse,
   bundleObjectKey,
@@ -22,7 +23,6 @@ import {
   isRecord,
   readString,
   isSafeBundleRev,
-  isSafeKinoVersion,
   normalizeSha256,
   isImageArchitecture,
 } from "./shared";
@@ -98,7 +98,6 @@ export async function handleBundleUpload(
     httpMetadata: { contentType: "application/gzip" },
     customMetadata: {
       rev: meta.value.rev,
-      kino_version: meta.value.kinoVersion,
     },
   });
 
@@ -106,7 +105,6 @@ export async function handleBundleUpload(
   const queued = await queueImageBuildsFromBundle(db, {
     rev: meta.value.rev,
     r2Key: objectKey,
-    kinoVersion: meta.value.kinoVersion,
     meta: meta.value.bundleMeta,
     nowUnixMs: now,
   });
@@ -119,11 +117,24 @@ export async function handleBundleUpload(
     });
   }
   const assigned = await assignQueuedImageBuilds(db, now);
+  if (queued.queued < meta.value.bundleMeta.scenarios.length) {
+    await stageReusableCandidateManifests(db, {
+      revision: meta.value.rev,
+      organizationId: null,
+      meta: meta.value.bundleMeta,
+      nowUnixMs: now,
+      wakeHost: (hostId) =>
+        tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+    });
+  }
   // Run this after the bundle/course/build pipeline has committed whenever at
   // least one accepted image has no new publication event ahead of it. This is
   // the key path for unchanged bundles (queued=0) and hosts added since the
   // original publication, without duplicating fan-out for all-new builds.
-  if (queued.queued < meta.value.bundleMeta.scenarios.length) {
+  if (
+    queued.queued < meta.value.bundleMeta.scenarios.length &&
+    meta.value.bundleMeta.catalogChannel !== "candidate"
+  ) {
     await tryReconcileScenarioImagesForPublicationScope(db, {
       publicationOrganizationId: null,
       nowUnixMs: now,
@@ -160,7 +171,6 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
       ok: true;
       value: {
         rev: string;
-        kinoVersion: string;
         bundleMeta: ImageBuildBundleMeta;
       };
     }
@@ -190,23 +200,22 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
     };
   }
 
+  if (
+    Object.hasOwn(parsed, "kino_version") ||
+    Object.hasOwn(parsed, "kinoVersion")
+  ) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "kino_version is no longer supported" },
+        400,
+      ),
+    };
+  }
+
   const rev = readString(parsed.rev);
-  const kinoVersion =
-    readString(parsed.kino_version) ?? readString(parsed.kinoVersion);
   if (!rev || !isSafeBundleRev(rev)) {
     return { ok: false, response: jsonResponse({ error: "invalid rev" }, 400) };
-  }
-  if (!kinoVersion) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "kino_version is required" }, 400),
-    };
-  }
-  if (!isSafeKinoVersion(kinoVersion)) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "invalid kino_version" }, 400),
-    };
   }
   const buildFormatVersion =
     readString(parsed.build_format_version) ??
@@ -218,6 +227,16 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
         { error: "unsupported build_format_version" },
         400,
       ),
+    };
+  }
+  const catalogChannel =
+    readString(parsed.catalog_channel) ??
+    readString(parsed.catalogChannel) ??
+    "candidate";
+  if (catalogChannel !== "candidate" && catalogChannel !== "live") {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "invalid catalog_channel" }, 400),
     };
   }
 
@@ -280,6 +299,7 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
   const bundleMeta: ImageBuildBundleMeta = {
     ...parsed,
     buildFormatVersion,
+    catalogChannel,
     scenarios,
   };
   delete bundleMeta.courseCatalog;
@@ -289,7 +309,6 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
     ok: true,
     value: {
       rev,
-      kinoVersion,
       bundleMeta,
     },
   };
@@ -639,7 +658,6 @@ export function isSafeBundleArchivePath(path: string): boolean {
 export function requiredBundlePaths(meta: ImageBuildBundleMeta): string[] {
   return [
     "base-images.hcl",
-    "build-tools.hcl",
     ...(meta.courseCatalog ? ["courses.hcl"] : []),
     ...meta.scenarios.map(
       (scenario) => `scenarios/${scenario.scenarioId}/scenario.hcl`,

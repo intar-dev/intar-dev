@@ -289,6 +289,12 @@ fn probe_replay_preserves_stored_envelope_payload() {
             unknown: 0,
         },
         ssh_host_keys_openssh: vec!["ssh-ed25519 AAAAHOST host".to_string()],
+        kino_sha256: "a".repeat(64),
+        guest_bootstrap_abi: 1,
+        guest_phase_timings: GuestPhaseTimings {
+            ready_uptime_ms: 1_000,
+            ..GuestPhaseTimings::default()
+        },
         probes: vec![ProbeView {
             id: "boot".to_string(),
             kind: "probe".to_string(),
@@ -323,4 +329,39 @@ fn probe_replay_preserves_stored_envelope_payload() {
     assert_eq!(replayed.summary, stored.summary);
     assert_eq!(replayed.ssh_host_keys_openssh, stored.ssh_host_keys_openssh);
     assert_eq!(replayed.probes, stored.probes);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn guest_tools_readiness_fails_closed_on_sha_abi_and_timing_mismatch() {
+    let ready = ProbeUpdateEnvelope {
+        update_id: "update-1".to_string(),
+        vm_name: "vm-1".to_string(),
+        run_id: "run-1".to_string(),
+        jail_generation: "generation-1".to_string(),
+        generated_at_ms: 123,
+        collection_state: ProbeCollectionState::Ok,
+        collection_error: None,
+        fingerprint: "fp-1".to_string(),
+        summary: ProbeSummary {
+            total: 0,
+            pass: 0,
+            fail: 0,
+            unknown: 0,
+        },
+        ssh_host_keys_openssh: vec![],
+        kino_sha256: "a".repeat(64),
+        guest_bootstrap_abi: 1,
+        guest_phase_timings: GuestPhaseTimings {
+            ready_uptime_ms: 1_000,
+            ..GuestPhaseTimings::default()
+        },
+        probes: vec![],
+    };
+    validate_guest_tools_readiness(&ready, &"a".repeat(64), 1).expect("matching pin");
+    assert!(validate_guest_tools_readiness(&ready, &"b".repeat(64), 1).is_err());
+    assert!(validate_guest_tools_readiness(&ready, &"a".repeat(64), 2).is_err());
+    let mut missing_timings = ready;
+    missing_timings.guest_phase_timings.ready_uptime_ms = 0;
+    assert!(validate_guest_tools_readiness(&missing_timings, &"a".repeat(64), 1).is_err());
 }

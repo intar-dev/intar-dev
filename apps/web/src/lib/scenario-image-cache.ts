@@ -381,6 +381,8 @@ export async function listVisibleScenarioImages(
       imageSha256: vmScenarioVms.imageSha256,
       imageFormat: vmScenarioVms.imageFormat,
       imageVirtualSizeBytes: vmScenarioVms.imageVirtualSizeBytes,
+      chunkManifestSha256: vmScenarioVms.chunkManifestSha256,
+      guestBootstrapAbi: vmScenarioVms.guestBootstrapAbi,
       kernelSha256: vmScenarioVms.kernelSha256,
       initrdSha256: vmScenarioVms.initrdSha256,
       bootCmdline: vmScenarioVms.bootCmdline,
@@ -407,8 +409,10 @@ export async function listVisibleScenarioImages(
     const imageSha256 = normalizeSha256(row.imageSha256 ?? "");
     if (
       !imageSha256 ||
-      row.imageFormat !== "raw_zstd" ||
+      row.imageFormat !== "raw_chunks_v1" ||
       row.imageVirtualSizeBytes <= 0 ||
+      !normalizeSha256(row.chunkManifestSha256 ?? "") ||
+      row.guestBootstrapAbi !== 1 ||
       !normalizeSha256(row.kernelSha256) ||
       !normalizeSha256(row.initrdSha256) ||
       !row.bootCmdline.trim()
@@ -418,14 +422,14 @@ export async function listVisibleScenarioImages(
 
     const identity = imageKeyIdentity(row.imageKey);
     const existing = byKey.get(identity);
-    if (existing && existing.image_sha256 !== imageSha256) {
+    if (existing && existing.image_id !== imageSha256) {
       throw new Error(
         `scenario catalog contains conflicting image pointers for ${identity}`,
       );
     }
     byKey.set(identity, {
       image_key: { ...row.imageKey },
-      image_sha256: imageSha256,
+      image_id: imageSha256,
     });
   }
   return [...byKey.values()].sort((left, right) =>

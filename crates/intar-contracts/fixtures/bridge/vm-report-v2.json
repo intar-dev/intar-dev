@@ -1,11 +1,17 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "host_id": "host-alpha",
   "run_id": "run-20260702-a",
   "vm_name": "webserver",
   "desired_version": 42,
   "observed_at_unix_ms": 1762041660000,
   "phase": "ready",
+  "guest_tools": {
+    "tools_disk_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "kino_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "bootstrap_abi": 1,
+    "verified": true
+  },
   "network": {
     "bridge_name": "intar-run-a",
     "guest_ip": "10.77.0.2",

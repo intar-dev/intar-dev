@@ -22,6 +22,19 @@ message ProbesSnapshotV1 {
   uint64 generated_at_unix_ms = 1;
   repeated ProbeSnapshot probes = 2;
   repeated string ssh_host_keys_openssh = 3;
+  string kino_sha256 = 4;
+  uint32 guest_bootstrap_abi = 5;
+  GuestPhaseTimingsV1 guest_phase_timings = 6;
+}
+
+message GuestPhaseTimingsV1 {
+  uint64 runtime_disk_ms = 1;
+  uint64 tools_disk_ms = 2;
+  uint64 network_ms = 3;
+  uint64 ssh_keys_ms = 4;
+  uint64 ssh_service_ms = 5;
+  uint64 kino_ms = 6;
+  uint64 ready_uptime_ms = 7;
 }
 
 message ProbeSnapshot {

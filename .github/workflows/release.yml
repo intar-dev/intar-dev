@@ -484,7 +484,7 @@ jobs:
             find "${guest_tools_dir}" -mindepth 1 -maxdepth 1 -type f \
               -printf '%f\n' | LC_ALL=C sort
           )
-          expected_files=(SHA256SUMS intar-workspace-agent kino manifest.json)
+          expected_files=(SHA256SUMS intar-workspace-agent kino manifest.json scenario-tools.ext4.zst scenario-tools.json)
           if [ "${files[*]}" != "${expected_files[*]}" ]; then
             echo "Unexpected production guest-tool artifact contents: ${files[*]}" >&2
             exit 1
@@ -504,6 +504,10 @@ jobs:
             sha256sum "${guest_tools_dir}/kino" | cut -d ' ' -f 1
           )"
           kino_size_bytes="$(stat --format='%s' "${guest_tools_dir}/kino")"
+          tools_disk_sha256="$(jq -er '.tools_disk_sha256' "${guest_tools_dir}/scenario-tools.json")"
+          tools_disk_size_bytes="$(jq -er '.tools_disk_size_bytes' "${guest_tools_dir}/scenario-tools.json")"
+          compressed_disk_sha256="$(sha256sum "${guest_tools_dir}/scenario-tools.ext4.zst" | cut -d ' ' -f 1)"
+          compressed_disk_size_bytes="$(stat --format='%s' "${guest_tools_dir}/scenario-tools.ext4.zst")"
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg source_sha "${PRODUCTION_SOURCE_SHA}" \
@@ -517,13 +521,18 @@ jobs:
             --arg kino_sha256 "${kino_sha256}" \
             --argjson kino_size_bytes "${kino_size_bytes}" \
             --arg kino_object_key \
-              "workspace-agent/kino/releases/${kino_sha256}/kino" '
+              "workspace-agent/kino/releases/${kino_sha256}/kino" \
+            --arg tools_disk_sha256 "${tools_disk_sha256}" \
+            --argjson tools_disk_size_bytes "${tools_disk_size_bytes}" \
+            --arg compressed_disk_sha256 "${compressed_disk_sha256}" \
+            --argjson compressed_disk_size_bytes "${compressed_disk_size_bytes}" '
               type == "object" and
               (keys == [
                 "architecture",
                 "event",
                 "ref",
                 "repository",
+                "scenario_tools",
                 "schema_version",
                 "source_sha",
                 "target",
@@ -542,6 +551,18 @@ jobs:
               .ref == "refs/heads/main" and
               .architecture == "x86_64" and
               .target == "x86_64-unknown-linux-musl" and
+              (.scenario_tools | keys == [
+                "bootstrap_abi",
+                "compressed_disk_sha256",
+                "compressed_disk_size_bytes",
+                "tools_disk_sha256",
+                "tools_disk_size_bytes"
+              ]) and
+              .scenario_tools.bootstrap_abi == 1 and
+              .scenario_tools.tools_disk_sha256 == $tools_disk_sha256 and
+              .scenario_tools.tools_disk_size_bytes == $tools_disk_size_bytes and
+              .scenario_tools.compressed_disk_sha256 == $compressed_disk_sha256 and
+              .scenario_tools.compressed_disk_size_bytes == $compressed_disk_size_bytes and
               (.tools | keys == ["intar-workspace-agent", "kino"]) and
               (.tools["intar-workspace-agent"] | keys == [
                 "r2_object_key",
@@ -704,7 +725,7 @@ jobs:
             cp "${binary}" "${workdir}/${BINARY}"
             chmod +x "${workdir}/${BINARY}"
             if [ "${PACKAGE}" = "intar-image-cli" ]; then
-              cp content/scenarios/base-images.hcl content/scenarios/build-tools.hcl "${workdir}/"
+              cp content/scenarios/base-images.hcl "${workdir}/"
             fi
             if [ "${PACKAGE}" = "intar-agent" ]; then
               if [ "${arch}" != "amd64" ]; then
@@ -997,7 +1018,7 @@ jobs:
             while IFS= read -r entry; do
               entry="${entry#./}"
               case "${entry}" in
-                ""|intar-image-cli|base-images.hcl|build-tools.hcl) ;;
+                ""|intar-image-cli|base-images.hcl) ;;
                 *)
                   echo "unexpected path in ${archive}: ${entry}" >&2
                   exit 1
@@ -1008,12 +1029,11 @@ jobs:
             tar -xzf "${archive}" -C "${extract_dir}"
             test -x "${extract_dir}/intar-image-cli"
             cmp content/scenarios/base-images.hcl "${extract_dir}/base-images.hcl"
-            cmp content/scenarios/build-tools.hcl "${extract_dir}/build-tools.hcl"
             mapfile -t packaged_files < <(
               find "${extract_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' \
                 | LC_ALL=C sort
             )
-            expected_files=(base-images.hcl build-tools.hcl intar-image-cli)
+            expected_files=(base-images.hcl intar-image-cli)
             if [ "${packaged_files[*]}" != "${expected_files[*]}" ]; then
               echo "unexpected files in ${archive}: ${packaged_files[*]}" >&2
               exit 1
@@ -1034,7 +1054,6 @@ jobs:
           "${smoke_root}/amd64/intar-image-cli" bundle \
             --courses-root "${fixture_root}/courses" \
             --base-images "${smoke_root}/amd64/base-images.hcl" \
-            --build-tools "${smoke_root}/amd64/build-tools.hcl" \
             --rev release-smoke \
             --output "${fixture_root}/bundle.tar.gz" \
             --no-upload
@@ -1044,7 +1063,6 @@ jobs:
           mapfile -t bundled_files < "${bundle_listing}"
           expected_bundle_files=(
             base-images.hcl
-            build-tools.hcl
             scenarios/broken-nginx/scenario.hcl
           )
           if [ "${bundled_files[*]}" != "${expected_bundle_files[*]}" ]; then

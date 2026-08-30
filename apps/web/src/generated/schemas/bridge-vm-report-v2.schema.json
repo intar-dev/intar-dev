@@ -27,6 +27,16 @@
         "null"
       ]
     },
+    "guest_tools": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VmGuestToolsStateV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "host_id": {
       "type": "string"
     },
@@ -89,8 +99,8 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 3,
-      "minimum": 3
+      "maximum": 4,
+      "minimum": 4
     },
     "ssh_host_keys_openssh": {
       "type": "array",
@@ -155,6 +165,33 @@
       "required": [
         "phase",
         "artifact_count"
+      ]
+    },
+    "VmGuestToolsStateV1": {
+      "type": "object",
+      "properties": {
+        "bootstrap_abi": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "kino_sha256": {
+          "type": "string"
+        },
+        "tools_disk_sha256": {
+          "type": "string"
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tools_disk_sha256",
+        "kino_sha256",
+        "bootstrap_abi",
+        "verified"
       ]
     },
     "VmNetworkStateV1": {

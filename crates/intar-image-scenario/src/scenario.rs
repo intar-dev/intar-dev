@@ -675,6 +675,15 @@ fn validate_vm_action(
         }
         VmAction::FileReplace { path, .. } => {
             validate_managed_path(path, &format!("{step_prefix} file_replace path"))?;
+            if !vm.packages.iter().any(|package| package == "python3") {
+                return Err(ScenarioError::InvalidScenarioField {
+                    field: format!("vm.{}.packages", vm.name),
+                    message: format!(
+                        "must include python3 because step '{}' uses file_replace",
+                        step.name
+                    ),
+                });
+            }
         }
         VmAction::Systemctl { unit, .. } => {
             validate_managed_unit(unit, &format!("{step_prefix} systemctl unit"))?;

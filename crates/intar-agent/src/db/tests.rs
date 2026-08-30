@@ -14,6 +14,11 @@ fn test_vm_row() -> VmRow {
         state: "running".to_string(),
         image_key: Some("ubuntu".to_string()),
         image_sha256: Some("1".repeat(64)),
+        guest_tools_json: Some(format!(
+            "{{\"tools_disk_sha256\":\"{}\",\"tools_disk_size_bytes\":67108864,\"kino_sha256\":\"{}\",\"bootstrap_abi\":1}}",
+            "2".repeat(64),
+            "3".repeat(64)
+        )),
         created_at_s: 100,
         updated_at_s: 200,
         running_at_s: Some(150),
@@ -115,6 +120,7 @@ fn upsert_vm_persists_row_with_ssh_public_port() {
     assert_eq!(rows[0].name, "vm-1");
     assert_eq!(rows[0].image_key.as_deref(), Some("ubuntu"));
     assert_eq!(rows[0].image_sha256.as_deref(), Some(image_sha.as_str()));
+    assert_eq!(rows[0].guest_tools_json, row.guest_tools_json);
     assert_eq!(rows[0].ssh_public_port, Some(22001));
     assert_eq!(rows[0].guest_ip_cidr.as_deref(), Some("10.200.0.2/28"));
     assert_eq!(rows[0].gateway.as_deref(), Some("10.200.0.1"));
@@ -128,6 +134,22 @@ fn upsert_vm_persists_row_with_ssh_public_port() {
     assert_eq!(
         load_local_vm_image_shas(&conn).expect("load vm image shas"),
         vec![image_sha]
+    );
+}
+
+#[test]
+fn existing_vm_database_adds_guest_tools_pin_column_in_place() {
+    let path = test_db_path();
+    let conn = Connection::open(&path).expect("open old db");
+    conn.execute_batch(BASELINE_SCHEMA_SQL)
+        .expect("create baseline schema");
+    conn.execute("ALTER TABLE vms DROP COLUMN guest_tools_json", [])
+        .expect("model pre-pin schema");
+    drop(conn);
+
+    let migrated = open_prepared_connection(&path).expect("migrate old db");
+    assert!(
+        table_has_column(&migrated, "vms", "guest_tools_json").expect("inspect migrated schema")
     );
 }
 

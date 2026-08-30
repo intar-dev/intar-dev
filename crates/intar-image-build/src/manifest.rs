@@ -1,8 +1,9 @@
 use anyhow::{Context as _, Result, bail};
 use intar_contracts::catalog::{
-    ImageArchitecture, ImageFormat, ImageKey, Mib, ProbePhase as CatalogProbePhase,
-    ScenarioDifficulty as CatalogScenarioDifficulty, ScenarioHintManifestV3, ScenarioManifestV3,
-    ScenarioProbeManifestV3, ScenarioVmBootManifestV3, ScenarioVmManifestV3,
+    GUEST_BOOTSTRAP_ABI_V1, ImageArchitecture, ImageFormat, ImageKey, Mib,
+    ProbePhase as CatalogProbePhase, ScenarioDifficulty as CatalogScenarioDifficulty,
+    ScenarioHintManifestV3, ScenarioManifestV4, ScenarioProbeManifestV3, ScenarioVmBootManifestV4,
+    ScenarioVmManifestV4,
 };
 use intar_image_scenario::{
     ScenarioDifficulty as SourceScenarioDifficulty, ScenarioHint, VmDefinition,
@@ -11,23 +12,25 @@ use intar_image_scenario::{
 use crate::direct::RenderedDirectBuild;
 use crate::qemu::PUBLISHED_BOOT_CMDLINE;
 
-/// Build the v3 catalog manifest for a direct raw-zstd VM build.
+/// Build the v4 catalog manifest for a direct chunked-raw VM build.
 ///
 /// # Errors
 /// Returns an error if scenario-derived probe metadata or architecture conversion fails.
 pub fn build_direct_manifest_json(
     rendered: &RenderedDirectBuild,
-    image_sha256: &str,
+    image_id: &str,
+    chunk_manifest_sha256: &str,
     kernel_sha256: &str,
     initrd_sha256: &str,
-) -> Result<ScenarioManifestV3> {
+) -> Result<ScenarioManifestV4> {
     build_manifest(ManifestInput {
         scenario: &rendered.scenario,
         scenario_name: &rendered.scenario_name,
         scenario_description: &rendered.scenario_description,
         target_arch: &rendered.target_arch,
         vm: &rendered.vm,
-        image_sha256,
+        image_id,
+        chunk_manifest_sha256,
         image_virtual_size_bytes: rendered.disk.virtual_size_bytes,
         kernel_sha256,
         initrd_sha256,
@@ -41,8 +44,8 @@ pub fn build_direct_manifest_json(
 /// Returns an error when the input set is empty or when any non-VM manifest field
 /// differs between inputs.
 pub fn combine_scenario_manifests<'a>(
-    manifests: impl IntoIterator<Item = &'a ScenarioManifestV3>,
-) -> Result<ScenarioManifestV3> {
+    manifests: impl IntoIterator<Item = &'a ScenarioManifestV4>,
+) -> Result<ScenarioManifestV4> {
     let mut manifests = manifests.into_iter();
     let Some(first) = manifests.next() else {
         bail!("cannot combine an empty manifest set");
@@ -59,8 +62,8 @@ pub fn combine_scenario_manifests<'a>(
 }
 
 fn append_manifest_if_header_matches(
-    combined: &mut ScenarioManifestV3,
-    manifest: &ScenarioManifestV3,
+    combined: &mut ScenarioManifestV4,
+    manifest: &ScenarioManifestV4,
 ) -> Result<()> {
     let mut header = manifest.clone();
     header.vms.clear();
@@ -79,14 +82,15 @@ struct ManifestInput<'a> {
     scenario_description: &'a str,
     target_arch: &'a str,
     vm: &'a VmDefinition,
-    image_sha256: &'a str,
+    image_id: &'a str,
+    chunk_manifest_sha256: &'a str,
     image_virtual_size_bytes: u64,
     kernel_sha256: &'a str,
     initrd_sha256: &'a str,
     boot_cmdline: &'a str,
 }
 
-fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV3> {
+fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV4> {
     let derived = input
         .scenario
         .derive_kino_config_for_vm(&input.vm.name)
@@ -119,8 +123,8 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV3> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(ScenarioManifestV3 {
-        schema_version: 3,
+    Ok(ScenarioManifestV4 {
+        schema_version: 4,
         scenario_id: input.scenario_name.to_string(),
         name: input.scenario_name.to_string(),
         title: input.scenario.title.clone(),
@@ -146,17 +150,19 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV3> {
             .body
             .clone(),
         hints: catalog_hints(&input.scenario.hints),
-        vms: vec![ScenarioVmManifestV3 {
+        vms: vec![ScenarioVmManifestV4 {
             name: input.vm.name.clone(),
             image_key: ImageKey {
                 scenario: input.scenario_name.to_string(),
                 vm: input.vm.name.clone(),
                 arch,
             },
-            image_sha256: input.image_sha256.to_string(),
-            image_format: ImageFormat::RawZstd,
+            image_id: input.image_id.to_string(),
+            image_format: ImageFormat::RawChunksV1,
             image_virtual_size_bytes: input.image_virtual_size_bytes,
-            boot: ScenarioVmBootManifestV3 {
+            chunk_manifest_sha256: input.chunk_manifest_sha256.to_string(),
+            guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V1,
+            boot: ScenarioVmBootManifestV4 {
                 kernel_sha256: input.kernel_sha256.to_string(),
                 initrd_sha256: input.initrd_sha256.to_string(),
                 cmdline: input.boot_cmdline.to_string(),
@@ -213,11 +219,10 @@ mod tests {
     use super::{build_direct_manifest_json, combine_scenario_manifests};
     use crate::config::QemuBuildConfig;
     use crate::direct::{DirectBuildRequest, render_direct_build};
-    use crate::kino::KinoArtifact;
     use crate::qemu::PUBLISHED_BOOT_CMDLINE;
 
     #[test]
-    fn direct_manifest_uses_raw_zstd_and_real_boot_hashes() {
+    fn direct_manifest_uses_raw_chunks_and_real_boot_hashes() {
         let directory = tempdir().unwrap();
         let scenario = intar_image_scenario::Scenario::parse(
             r#"
@@ -275,10 +280,6 @@ base_image "trixie" {
                 ..QemuBuildConfig::default()
             },
             base_image: catalog.base_image_by_name("trixie").unwrap().clone(),
-            kino: KinoArtifact {
-                binary_path: "/tmp/kino".into(),
-                version: "0.1.24".to_string(),
-            },
         })
         .unwrap();
 
@@ -287,20 +288,26 @@ base_image "trixie" {
             &"a".repeat(64),
             &"b".repeat(64),
             &"c".repeat(64),
+            &"d".repeat(64),
         )
         .unwrap();
 
         let vm = &manifest.vms[0];
-        assert_eq!(vm.image_sha256, "a".repeat(64));
+        assert_eq!(vm.image_id, "a".repeat(64));
+        assert_eq!(vm.chunk_manifest_sha256, "b".repeat(64));
         assert_eq!(
             vm.image_format,
-            intar_contracts::catalog::ImageFormat::RawZstd
+            intar_contracts::catalog::ImageFormat::RawChunksV1
         );
         assert_eq!(vm.image_virtual_size_bytes, 6 * 1024 * 1024 * 1024);
-        assert_eq!(vm.boot.kernel_sha256, "b".repeat(64));
-        assert_eq!(vm.boot.initrd_sha256, "c".repeat(64));
+        assert_eq!(vm.boot.kernel_sha256, "c".repeat(64));
+        assert_eq!(vm.boot.initrd_sha256, "d".repeat(64));
         assert_eq!(vm.boot.cmdline, PUBLISHED_BOOT_CMDLINE);
-        assert_eq!(manifest.schema_version, 3);
+        assert_eq!(manifest.schema_version, 4);
+        assert_eq!(
+            vm.guest_bootstrap_abi,
+            intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1
+        );
         assert_eq!(vm.cpu_millis, 1_000);
         assert_eq!(vm.vcpu_count, 1);
     }
@@ -332,9 +339,9 @@ base_image "trixie" {
     fn manifest_fixture(
         vm_name: &str,
         image_sha: &str,
-    ) -> intar_contracts::catalog::ScenarioManifestV3 {
-        intar_contracts::catalog::ScenarioManifestV3 {
-            schema_version: 3,
+    ) -> intar_contracts::catalog::ScenarioManifestV4 {
+        intar_contracts::catalog::ScenarioManifestV4 {
+            schema_version: 4,
             scenario_id: "broken-nginx".to_string(),
             name: "broken-nginx".to_string(),
             title: "Broken Nginx".to_string(),
@@ -346,17 +353,19 @@ base_image "trixie" {
             briefing_markdown: "Restore nginx.".to_string(),
             solution_markdown: "Start nginx.".to_string(),
             hints: Vec::new(),
-            vms: vec![intar_contracts::catalog::ScenarioVmManifestV3 {
+            vms: vec![intar_contracts::catalog::ScenarioVmManifestV4 {
                 name: vm_name.to_string(),
                 image_key: intar_contracts::catalog::ImageKey {
                     scenario: "broken-nginx".to_string(),
                     vm: vm_name.to_string(),
                     arch: intar_contracts::catalog::ImageArchitecture::X86_64,
                 },
-                image_sha256: image_sha.repeat(64),
-                image_format: intar_contracts::catalog::ImageFormat::RawZstd,
+                image_id: image_sha.repeat(64),
+                image_format: intar_contracts::catalog::ImageFormat::RawChunksV1,
                 image_virtual_size_bytes: 1024,
-                boot: intar_contracts::catalog::ScenarioVmBootManifestV3 {
+                chunk_manifest_sha256: "c".repeat(64),
+                guest_bootstrap_abi: intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1,
+                boot: intar_contracts::catalog::ScenarioVmBootManifestV4 {
                     kernel_sha256: "k".repeat(64),
                     initrd_sha256: "i".repeat(64),
                     cmdline: PUBLISHED_BOOT_CMDLINE.to_string(),

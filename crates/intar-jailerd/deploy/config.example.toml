@@ -21,6 +21,10 @@ guest_network_pool = "10.77.0.0/16"
 # DNAT. Jailerd enforces it and rejects duplicate ports across all active VMs.
 ssh_public_port_start = 22000
 ssh_public_port_end = 22999
+template_budget_bytes = 103079215104
+minimum_free_space_bytes = 137438953472
+store_gc_grace_seconds = 3600
+legacy_template_retention_seconds = 604800
 
 # Unschedulable host allowance. A one-CPU host therefore advertises zero by
 # default; lower this only as an explicit operator capacity decision.

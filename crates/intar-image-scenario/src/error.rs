@@ -11,9 +11,6 @@ pub enum ScenarioError {
     #[error("invalid base image catalog: {0}")]
     InvalidBaseImageCatalog(String),
 
-    #[error("invalid build tools config: {0}")]
-    InvalidBuildTools(String),
-
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

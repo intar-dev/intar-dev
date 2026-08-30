@@ -10,6 +10,12 @@ use tokio::task::JoinHandle;
 
 const ENV_KINO_HOST_READY_PORT: &str = "KINO_HOST_READY_PORT";
 #[cfg(target_os = "linux")]
+const ENV_KINO_SHA256: &str = "INTAR_KINO_SHA256";
+#[cfg(target_os = "linux")]
+const ENV_GUEST_BOOTSTRAP_ABI: &str = "INTAR_GUEST_BOOTSTRAP_ABI";
+#[cfg(target_os = "linux")]
+const PHASE_TIMINGS_PATH: &str = "/run/intar/phase-timings.env";
+#[cfg(target_os = "linux")]
 const READY_PUSH_KEEPALIVE: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const READY_PUSH_RECONNECT_DELAY: Duration = Duration::from_millis(250);
@@ -61,6 +67,8 @@ async fn run_ready_push_loop(store: ProbeStore, port: u32) {
                         }
                         Err(error) => {
                             eprintln!("kino readiness snapshot encode failed: {error}");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
                         }
                     }
                     force_send = false;
@@ -96,9 +104,29 @@ async fn run_ready_push_loop(_store: ProbeStore, port: u32) {
 
 #[cfg(target_os = "linux")]
 async fn encode_ready_frame(store: &ProbeStore) -> anyhow::Result<Vec<u8>> {
-    let snapshot = store
+    let mut snapshot = store
         .snapshot_proto_with_host_keys(collect_ssh_host_keys_openssh())
         .await;
+    snapshot.kino_sha256 = env::var(ENV_KINO_SHA256)
+        .ok()
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+        .ok_or_else(|| anyhow::anyhow!("{ENV_KINO_SHA256} is missing or invalid"))?;
+    snapshot.guest_bootstrap_abi = env::var(ENV_GUEST_BOOTSTRAP_ABI)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value == 1)
+        .ok_or_else(|| anyhow::anyhow!("{ENV_GUEST_BOOTSTRAP_ABI} is missing or invalid"))?;
+    let timings = read_guest_phase_timings();
+    anyhow::ensure!(
+        timings.ready_uptime_ms > 0 && timings.kino_ms > 0,
+        "guest phase timings are not ready"
+    );
+    snapshot.guest_phase_timings = Some(timings);
     let len = snapshot.encoded_len();
     anyhow::ensure!(
         len <= MAX_READY_FRAME_BYTES,
@@ -107,6 +135,26 @@ async fn encode_ready_frame(store: &ProbeStore) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(len);
     snapshot.encode(&mut bytes)?;
     Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn read_guest_phase_timings() -> intar_kino_proto::kino_v1::GuestPhaseTimingsV1 {
+    let values = std::fs::read_to_string(PHASE_TIMINGS_PATH)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .filter_map(|(key, value)| value.parse::<u64>().ok().map(|value| (key, value)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let get = |key: &str| values.get(key).copied().unwrap_or_default();
+    intar_kino_proto::kino_v1::GuestPhaseTimingsV1 {
+        runtime_disk_ms: get("RUNTIME_DISK_MS"),
+        tools_disk_ms: get("TOOLS_MOUNT_MS"),
+        network_ms: get("NETWORK_CONFIG_MS"),
+        ssh_keys_ms: get("SSH_HOST_KEYS_MS"),
+        ssh_service_ms: get("SSH_BOOT_MS"),
+        kino_ms: get("KINO_BOOT_MS"),
+        ready_uptime_ms: get("READY_UPTIME_MS"),
+    }
 }
 
 #[cfg(target_os = "linux")]

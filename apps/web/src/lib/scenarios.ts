@@ -125,6 +125,8 @@ export async function loadScenario(
     const directBoot = normalizeScenarioVmDirectBootMetadata({
       imageFormat: vm.imageFormat,
       imageVirtualSizeBytes: vm.imageVirtualSizeBytes,
+      chunkManifestSha256: vm.chunkManifestSha256,
+      guestBootstrapAbi: vm.guestBootstrapAbi,
       kernelSha256: vm.kernelSha256,
       initrdSha256: vm.initrdSha256,
       bootCmdline: vm.bootCmdline,

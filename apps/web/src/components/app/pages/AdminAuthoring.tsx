@@ -125,7 +125,7 @@ export function AdminAuthoring() {
     mutationFn: async () => {
       if (!scenarioId) throw new Error("validate first");
       const prepared = await prepareScenarioBuild(hcl);
-      if (!prepared.ok || !prepared.content_hash || !prepared.kino_version) {
+      if (!prepared.ok || !prepared.content_hash) {
         throw new Error(
           prepared.errors.join("; ") || "scenario failed build preparation",
         );
@@ -139,7 +139,6 @@ export function AdminAuthoring() {
         body: JSON.stringify({
           scenarioId,
           contentHash: prepared.content_hash,
-          kinoVersion: prepared.kino_version,
           imageArch: prepared.image_arch,
         }),
       });

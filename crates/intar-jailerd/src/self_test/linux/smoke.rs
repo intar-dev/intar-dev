@@ -621,6 +621,7 @@ pub(super) fn protocol_artifacts(
             &artifacts.recording_disk,
             ArtifactAccess::ReadWrite,
         )?,
+        tools_disk: None,
     })
 }
 

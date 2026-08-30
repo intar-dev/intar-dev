@@ -1061,7 +1061,7 @@ export function strictCpuCapacity(
     capabilities.supports_vsock !== true ||
     capabilities.supports_reflink !== true ||
     capabilities.supports_nftables !== true ||
-    capabilities.supports_jailer_v2 !== true ||
+    capabilities.supports_jailer_v3 !== true ||
     capabilities.supports_boot_cpu_lease !== true ||
     capabilities.supports_template_backed_launch !== true ||
     capabilities.fast_template_store !== true ||

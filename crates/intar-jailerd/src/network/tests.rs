@@ -387,6 +387,7 @@ fn guest_address_rejects_gateway_network_broadcast_and_prefix_drift() {
                 "recording.raw",
                 intar_jailer_protocol::ArtifactAccess::ReadWrite,
             ),
+            tools_disk: None,
         },
     };
     assert!(validate_guest_address(&run, &request("10.7.0.2/29")).is_ok());

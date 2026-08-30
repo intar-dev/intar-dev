@@ -18,6 +18,7 @@ export {
   imageBuildBundles,
   imageBuildCoordinationLocks,
   imageBuilds,
+  runtimeOperationGates,
 } from "./schema/platform";
 export {
   activeRuntimeSlots,
@@ -40,6 +41,8 @@ export {
   scenarioRunSshKeys,
 } from "./schema/runs";
 export {
+  scenarioCatalogCandidates,
+  scenarioCatalogSnapshots,
   scenarioCourseCatalogs,
   vmScenarioProbes,
   vmScenarios,

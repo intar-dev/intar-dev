@@ -1,7 +1,5 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::MetadataExt as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::tls_provider::ensure_ring_provider;
@@ -54,27 +52,5 @@ fn registry_index_with_boot(
     format!(r#"{{"images":[{images}]}}"#).into_bytes()
 }
 
-fn raw_cache_record(
-    image_key: &str,
-    image_sha256: &str,
-    virtual_size_bytes: u64,
-) -> RegistryImageRecord {
-    RegistryImageRecord {
-        image_key: image_key.to_string(),
-        image_filename: format!("{image_key}.raw.zst"),
-        image_sha256: image_sha256.to_string(),
-        image_virtual_size_bytes: virtual_size_bytes,
-        boot: RegistryImageBoot {
-            kernel_sha256: "b".repeat(64),
-            initrd_sha256: "c".repeat(64),
-            cmdline: "root=/dev/vda rw".to_string(),
-        },
-        download_url: "/agent/registry/images/ubuntu/sha".to_string(),
-    }
-}
-
-mod downloads;
 mod eviction;
-mod raw_cache;
 mod registry;
-mod validation;

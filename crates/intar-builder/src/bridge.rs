@@ -11,10 +11,10 @@ use anyhow::{Context as _, Result};
 use fs2::{available_space, total_space};
 use futures_util::{Sink, SinkExt, StreamExt};
 use intar_contracts::bridge::{
-    BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV6, BuildPhase,
-    BuildReportV1, ClientHelloV6, DesiredStateV6, HOST_DESIRED_STATE_SCHEMA_VERSION,
+    BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV7, BuildPhase,
+    BuildReportV1, ClientHelloV7, DesiredStateV7, HOST_DESIRED_STATE_SCHEMA_VERSION,
     HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
-    HostRoleV1, HostStateReportV2, StateReportV6, SyncRequestReason, SyncRequestV6,
+    HostRoleV1, HostStateReportV2, StateReportV7, SyncRequestReason, SyncRequestV7,
 };
 use intar_contracts::catalog::{ImageArchitecture, Mib};
 use reqwest::Client as HttpClient;
@@ -60,7 +60,7 @@ pub async fn run(
     cfg: BuilderConfig,
     db: BuilderDb,
     mut build_reports: mpsc::Receiver<BuildReportV1>,
-    desired_ready: watch::Sender<bool>,
+    desired_ready: watch::Sender<u64>,
 ) -> Result<()> {
     let http = HttpClient::builder()
         .timeout(Duration::from_secs(30))
@@ -108,7 +108,7 @@ async fn connect_once(
     db: &BuilderDb,
     build_reports: &mut mpsc::Receiver<BuildReportV1>,
     current_desired_state: &mut Option<HostDesiredStateV2>,
-    desired_ready: &watch::Sender<bool>,
+    desired_ready: &watch::Sender<u64>,
     reconnect: bool,
 ) -> Result<()> {
     let bootstrap = bootstrap_builder_access(&cfg.bridge, http).await?;
@@ -147,7 +147,7 @@ async fn connect_once(
             // the first connection attempt fails.
             last_applied_desired_version: advertised_desired_version(
                 current_desired_state.as_ref(),
-                *desired_ready.borrow(),
+                *desired_ready.borrow() > 0,
             ),
         }),
     )
@@ -162,7 +162,7 @@ async fn connect_once(
             if let Some(message) = parse_bridge_message(message)? {
                 validate_bridge_message(&message, &cfg.bridge.host_id)?;
                 match message {
-                    BridgeMessageV6::ServerHello(server_hello) => break Ok(server_hello),
+                    BridgeMessageV7::ServerHello(server_hello) => break Ok(server_hello),
                     other => {
                         anyhow::bail!("expected server_hello, got {}", bridge_message_type(&other))
                     }
@@ -175,7 +175,7 @@ async fn connect_once(
     info!(
         host_id = %server_hello.host_id,
         desired_version = server_hello.desired_version,
-        "builder bridge v6 handshake complete"
+        "builder bridge v7 handshake complete"
     );
 
     send_sync_request(
@@ -237,32 +237,32 @@ async fn handle_server_message<W>(
     cfg: &BuilderConfig,
     db: &BuilderDb,
     current_desired_state: &mut Option<HostDesiredStateV2>,
-    desired_ready: &watch::Sender<bool>,
-    message: BridgeMessageV6,
+    desired_ready: &watch::Sender<u64>,
+    message: BridgeMessageV7,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     match message {
-        BridgeMessageV6::DesiredState(message) => {
+        BridgeMessageV7::DesiredState(message) => {
             let desired_state = message.desired_state.clone();
             apply_desired_state(&cfg.bridge, db, &message)
                 .context("failed to apply builder desired state")?;
             *current_desired_state = Some(desired_state);
-            desired_ready.send_replace(true);
+            desired_ready.send_modify(|revision| *revision = revision.saturating_add(1));
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV6::SyncRequest(_) => {
+        BridgeMessageV7::SyncRequest(_) => {
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV6::ServerHello(_) => {
+        BridgeMessageV7::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
         }
-        BridgeMessageV6::ClientHello(_)
-        | BridgeMessageV6::StateReport(_)
-        | BridgeMessageV6::VmReport(_)
-        | BridgeMessageV6::BuildReport(_) => {
+        BridgeMessageV7::ClientHello(_)
+        | BridgeMessageV7::StateReport(_)
+        | BridgeMessageV7::VmReport(_)
+        | BridgeMessageV7::BuildReport(_) => {
             anyhow::bail!("server sent builder-originated bridge message");
         }
     }
@@ -323,7 +323,7 @@ fn reconcile_cached_desired_state(
     Ok(())
 }
 
-fn apply_desired_state(cfg: &BridgeConfig, db: &BuilderDb, message: &DesiredStateV6) -> Result<()> {
+fn apply_desired_state(cfg: &BridgeConfig, db: &BuilderDb, message: &DesiredStateV7) -> Result<()> {
     validate_desired_state(&cfg.host_id, &message.desired_state)?;
     cache_desired_state(db, &message.desired_state)?;
     let inserted = reconcile_desired_builds(db, &message.desired_state.builds, now_ms())?;
@@ -355,7 +355,7 @@ where
     let report = build_host_state_report(cfg, db, desired)?;
     send_bridge_message(
         write,
-        &BridgeMessageV6::StateReport(StateReportV6 {
+        &BridgeMessageV7::StateReport(StateReportV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.bridge.host_id.clone(),
             report,
@@ -371,7 +371,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV6::BuildReport(intar_contracts::bridge::BuildReportV6 {
+        &BridgeMessageV7::BuildReport(intar_contracts::bridge::BuildReportV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -387,7 +387,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV6::SyncRequest(SyncRequestV6 {
+        &BridgeMessageV7::SyncRequest(SyncRequestV7 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             reason,
@@ -416,6 +416,7 @@ fn build_host_state_report(
         capacity: collect_builder_capacity(cfg),
         capabilities: collect_builder_capabilities(cfg),
         cached_images: Vec::new(),
+        cached_guest_tools: Vec::new(),
         vms: Vec::new(),
         builds,
     })
@@ -467,6 +468,9 @@ fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV2 {
         supports_reflink: false,
         supports_nftables: false,
         supports_jailer_v2: false,
+        supports_jailer_v3: false,
+        supports_raw_chunks_v1: true,
+        supports_scenario_guest_tools_v1: false,
         supports_boot_cpu_lease: false,
         supports_template_backed_launch: false,
         fast_template_store: false,
@@ -599,8 +603,8 @@ fn bytes_to_mib_u32(bytes: u64) -> Option<u32> {
         .filter(|value| *value > 0)
 }
 
-pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessageV6 {
-    BridgeMessageV6::ClientHello(ClientHelloV6 {
+pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessageV7 {
+    BridgeMessageV7::ClientHello(ClientHelloV7 {
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         host_id: input.host_id.to_string(),
         agent_version: input.agent_version.to_string(),
@@ -616,6 +620,9 @@ pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessage
             supports_reflink: false,
             supports_nftables: false,
             supports_jailer_v2: false,
+            supports_jailer_v3: false,
+            supports_raw_chunks_v1: true,
+            supports_scenario_guest_tools_v1: false,
             supports_boot_cpu_lease: false,
             supports_template_backed_launch: false,
             fast_template_store: false,
@@ -694,7 +701,7 @@ fn default_ws_url(base_url: &str, host_id: &str) -> String {
     format!("{ws_base}/agent/connect?hostId={host_id}")
 }
 
-async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV6) -> Result<()>
+async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV7) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
@@ -706,7 +713,7 @@ where
         .context("failed to send builder bridge websocket message")
 }
 
-fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV6>> {
+fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV7>> {
     match message {
         Message::Text(raw) => parse_bridge_json(&raw).map(Some),
         Message::Binary(raw) => {
@@ -720,18 +727,18 @@ fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV6>> {
     }
 }
 
-fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV6> {
+fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV7> {
     let message =
-        serde_json::from_str::<BridgeMessageV6>(raw).context("invalid bridge v6 JSON message")?;
-    if !message_has_v6_protocol(&message) {
-        anyhow::bail!("invalid bridge protocol version; expected v6");
+        serde_json::from_str::<BridgeMessageV7>(raw).context("invalid bridge v7 JSON message")?;
+    if !message_has_v7_protocol(&message) {
+        anyhow::bail!("invalid bridge protocol version; expected v7");
     }
     Ok(message)
 }
 
-fn validate_bridge_message(message: &BridgeMessageV6, host_id: &str) -> Result<()> {
-    if !message_has_v6_protocol(message) {
-        anyhow::bail!("invalid bridge protocol version; expected v6");
+fn validate_bridge_message(message: &BridgeMessageV7, host_id: &str) -> Result<()> {
+    if !message_has_v7_protocol(message) {
+        anyhow::bail!("invalid bridge protocol version; expected v7");
     }
     let message_host_id = bridge_message_host_id(message);
     if message_host_id != host_id {
@@ -760,51 +767,51 @@ fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2) -> Result
     Ok(())
 }
 
-fn message_has_v6_protocol(message: &BridgeMessageV6) -> bool {
+fn message_has_v7_protocol(message: &BridgeMessageV7) -> bool {
     match message {
-        BridgeMessageV6::ClientHello(message) => {
+        BridgeMessageV7::ClientHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV6::ServerHello(message) => {
+        BridgeMessageV7::ServerHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV6::DesiredState(message) => {
+        BridgeMessageV7::DesiredState(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV6::StateReport(message) => {
+        BridgeMessageV7::StateReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV6::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
-        BridgeMessageV6::BuildReport(message) => {
+        BridgeMessageV7::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
+        BridgeMessageV7::BuildReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV6::SyncRequest(message) => {
+        BridgeMessageV7::SyncRequest(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
     }
 }
 
-fn bridge_message_host_id(message: &BridgeMessageV6) -> &str {
+fn bridge_message_host_id(message: &BridgeMessageV7) -> &str {
     match message {
-        BridgeMessageV6::ClientHello(message) => &message.host_id,
-        BridgeMessageV6::ServerHello(message) => &message.host_id,
-        BridgeMessageV6::DesiredState(message) => &message.host_id,
-        BridgeMessageV6::StateReport(message) => &message.host_id,
-        BridgeMessageV6::VmReport(message) => &message.host_id,
-        BridgeMessageV6::BuildReport(message) => &message.host_id,
-        BridgeMessageV6::SyncRequest(message) => &message.host_id,
+        BridgeMessageV7::ClientHello(message) => &message.host_id,
+        BridgeMessageV7::ServerHello(message) => &message.host_id,
+        BridgeMessageV7::DesiredState(message) => &message.host_id,
+        BridgeMessageV7::StateReport(message) => &message.host_id,
+        BridgeMessageV7::VmReport(message) => &message.host_id,
+        BridgeMessageV7::BuildReport(message) => &message.host_id,
+        BridgeMessageV7::SyncRequest(message) => &message.host_id,
     }
 }
 
-fn bridge_message_type(message: &BridgeMessageV6) -> &'static str {
+fn bridge_message_type(message: &BridgeMessageV7) -> &'static str {
     match message {
-        BridgeMessageV6::ClientHello(_) => "client_hello",
-        BridgeMessageV6::ServerHello(_) => "server_hello",
-        BridgeMessageV6::DesiredState(_) => "desired_state",
-        BridgeMessageV6::StateReport(_) => "state_report",
-        BridgeMessageV6::VmReport(_) => "vm_report",
-        BridgeMessageV6::BuildReport(_) => "build_report",
-        BridgeMessageV6::SyncRequest(_) => "sync_request",
+        BridgeMessageV7::ClientHello(_) => "client_hello",
+        BridgeMessageV7::ServerHello(_) => "server_hello",
+        BridgeMessageV7::DesiredState(_) => "desired_state",
+        BridgeMessageV7::StateReport(_) => "state_report",
+        BridgeMessageV7::VmReport(_) => "vm_report",
+        BridgeMessageV7::BuildReport(_) => "build_report",
+        BridgeMessageV7::SyncRequest(_) => "sync_request",
     }
 }
 
@@ -829,7 +836,7 @@ mod tests {
 
     use std::path::Path;
 
-    use intar_contracts::bridge::{BridgeMessageV6, HostRoleV1};
+    use intar_contracts::bridge::{BridgeMessageV7, HostRoleV1};
     use intar_contracts::catalog::ImageArchitecture;
 
     use crate::config::{BridgeConfig, BuilderConfig};
@@ -867,7 +874,7 @@ mod tests {
             last_applied_desired_version: Some(7),
         });
 
-        let BridgeMessageV6::ClientHello(hello) = message else {
+        let BridgeMessageV7::ClientHello(hello) = message else {
             panic!("expected client hello");
         };
         assert_eq!(hello.role, HostRoleV1::Builder);
@@ -887,6 +894,7 @@ mod tests {
             version: 7,
             generated_at_unix_ms: 1000,
             cached_images: Vec::new(),
+            cached_guest_tools: Vec::new(),
             vms: Vec::new(),
             builds: Vec::new(),
         };
@@ -906,7 +914,6 @@ mod tests {
             rev: "abc123".to_string(),
             content_hash: "f".repeat(64),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-            kino_version: "0.1.24".to_string(),
         };
         db.upsert_build_job(&build, "queued", 0, None, 1000)
             .unwrap();
@@ -973,6 +980,7 @@ mod tests {
             version: 1,
             generated_at_unix_ms: 1000,
             cached_images: Vec::new(),
+            cached_guest_tools: Vec::new(),
             vms: Vec::new(),
             builds: vec![intar_contracts::bridge::DesiredBuildV1 {
                 build_id: "build-1".to_string(),
@@ -981,7 +989,6 @@ mod tests {
                 rev: "abc123".to_string(),
                 content_hash: "f".repeat(64),
                 bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-                kino_version: "0.1.24".to_string(),
             }],
         };
         validate_desired_state("builder-1", &desired).unwrap();

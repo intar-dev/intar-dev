@@ -7,9 +7,6 @@ use intar_contracts::catalog::ImageArchitecture;
 use intar_image_build::QemuBuildConfig;
 use serde::Deserialize;
 
-pub const DEFAULT_KINO_RELEASE_BASE_URL: &str =
-    "https://github.com/intar-dev/intar-dev/releases/download";
-
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BuilderConfig {
@@ -37,6 +34,7 @@ impl BuilderConfig {
             build_memory_mb: self.qemu.build_memory_mb,
             work_root: self.builder.work_root.clone(),
             output_root: self.builder.cache_root.join("outputs"),
+            base_cache_root: Some(self.builder.cache_root.join("base-rootfs")),
             ..QemuBuildConfig::default()
         }
     }
@@ -77,8 +75,6 @@ pub struct BuilderRuntimeConfig {
     pub work_root: PathBuf,
     pub cache_root: PathBuf,
     pub state_db: PathBuf,
-    pub kino_binary: Option<PathBuf>,
-    pub kino_release_base_url: String,
 }
 
 impl Default for BuilderRuntimeConfig {
@@ -87,8 +83,6 @@ impl Default for BuilderRuntimeConfig {
             work_root: PathBuf::from("/var/lib/intar-builder/work"),
             cache_root: PathBuf::from("/var/cache/intar-builder"),
             state_db: PathBuf::from("/var/lib/intar-builder/state.sqlite3"),
-            kino_binary: None,
-            kino_release_base_url: DEFAULT_KINO_RELEASE_BASE_URL.to_string(),
         }
     }
 }
@@ -138,7 +132,7 @@ impl Default for JobConfig {
     fn default() -> Self {
         Self {
             max_attempts: 3,
-            max_concurrent_builds: 1,
+            max_concurrent_builds: 2,
         }
     }
 }
@@ -173,8 +167,6 @@ bootstrap_token = "secret"
 [builder]
 work_root = "/tmp/intar-builder/work"
 cache_root = "/tmp/intar-builder/cache"
-kino_binary = "/usr/local/bin/kino"
-kino_release_base_url = "https://example.com/releases/download"
 
 [qemu]
 qemu_binary = "/usr/bin/qemu-system-x86_64"
@@ -194,14 +186,6 @@ build_memory_mb = 6144
 
         assert!(config.bridge.enabled);
         assert_eq!(config.bridge.host_id, "builder-1");
-        assert_eq!(
-            config.builder.kino_binary,
-            Some(PathBuf::from("/usr/local/bin/kino"))
-        );
-        assert_eq!(
-            config.builder.kino_release_base_url,
-            "https://example.com/releases/download"
-        );
         assert_eq!(config.jobs.max_attempts, 3);
         assert_eq!(config.qemu.qemu_binary, "/usr/bin/qemu-system-x86_64");
         assert_eq!(config.qemu.mmdebstrap_binary, "/usr/bin/mmdebstrap");
@@ -259,6 +243,6 @@ unknown = true
             PathBuf::from("/var/lib/intar-builder/state.sqlite3")
         );
         assert_eq!(config.qemu.accelerator, "kvm");
-        assert_eq!(config.jobs.max_concurrent_builds, 1);
+        assert_eq!(config.jobs.max_concurrent_builds, 2);
     }
 }

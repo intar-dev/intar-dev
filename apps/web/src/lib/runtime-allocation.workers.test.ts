@@ -426,6 +426,9 @@ function hostReport(now: number): HostStateReportV2 {
       supports_reflink: true,
       supports_nftables: true,
       supports_jailer_v2: true,
+      supports_jailer_v3: true,
+      supports_raw_chunks_v1: true,
+      supports_scenario_guest_tools_v1: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
@@ -438,13 +441,13 @@ function hostReport(now: number): HostStateReportV2 {
     cached_images: [
       {
         image_key: scenarioImageKey(),
-        image_sha256: "a".repeat(64),
+        image_id: "a".repeat(64),
         phase: "ready",
         updated_at_unix_ms: now,
       },
       {
         image_key: workshopImageKey(),
-        image_sha256: "b".repeat(64),
+        image_id: "b".repeat(64),
         phase: "ready",
         updated_at_unix_ms: now,
       },

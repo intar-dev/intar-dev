@@ -18,7 +18,6 @@ pub struct ScenarioContentHashInput<'a> {
     pub scenario_id: &'a str,
     pub scenario_dir: &'a Path,
     pub base_definition: &'a str,
-    pub kino_version: &'a str,
     pub target_arch: &'a str,
 }
 
@@ -47,7 +46,6 @@ pub fn scenario_content_hash(input: &ScenarioContentHashInput<'_>) -> Result<Str
         &ScenarioContentHashParams {
             scenario_id: input.scenario_id,
             base_definition: input.base_definition,
-            kino_version: input.kino_version,
             target_arch: input.target_arch,
         },
         &entries,
@@ -139,16 +137,6 @@ mod tests {
 
         fs::write(dir.path().join("scenario.hcl"), "scenario changed").unwrap();
         assert_ne!(original, hash_for(dir.path()));
-
-        let kino_changed = scenario_content_hash(&ScenarioContentHashInput {
-            scenario_id: "broken-nginx",
-            scenario_dir: dir.path(),
-            base_definition: "trixie=suite=trixie\narch=amd64",
-            kino_version: "0.1.25",
-            target_arch: "x86_64",
-        })
-        .unwrap();
-        assert_ne!(hash_for(dir.path()), kino_changed);
     }
 
     #[test]
@@ -173,7 +161,6 @@ mod tests {
             &ScenarioContentHashParams {
                 scenario_id: "broken-nginx",
                 base_definition: "trixie=suite=trixie\narch=amd64",
-                kino_version: "0.1.24",
                 target_arch: "x86_64",
             },
             &[
@@ -192,7 +179,6 @@ mod tests {
             scenario_id: "broken-nginx",
             scenario_dir: path,
             base_definition: "trixie=suite=trixie\narch=amd64",
-            kino_version: "0.1.24",
             target_arch: "x86_64",
         })
         .unwrap()

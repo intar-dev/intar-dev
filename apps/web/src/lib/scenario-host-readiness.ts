@@ -21,7 +21,7 @@ export function hostHasImagesReady(
     report.cached_images.some(
       (cached) =>
         cached.phase === "ready" &&
-        cached.image_sha256 === image.imageSha256 &&
+        cached.image_id === image.imageSha256 &&
         imageKeyIdentity(cached.image_key) === imageKeyIdentity(image.imageKey),
     ),
   );

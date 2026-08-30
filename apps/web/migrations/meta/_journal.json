@@ -64,6 +64,13 @@
       "when": 1787849156846,
       "tag": "0008_aromatic_raider",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1788116413323,
+      "tag": "0009_freezing_lord_hawal",
+      "breakpoints": true
     }
   ]
 }

@@ -8,13 +8,24 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         self.preparer
             .validate_prepared_launch(&self.config, &request)
             .context("validate root-owned prepared image template")?;
-        self.launch_vm_validated(request.launch, quota)
+        self.launch_vm_validated(request.launch, quota, false)
+    }
+
+    pub(super) fn launch_vm_v3(&mut self, request: LaunchVmV3Request) -> Result<VmLaunchResult> {
+        let quota = request
+            .validate()
+            .context("validate v3 template-backed VM launch request")?;
+        self.preparer
+            .validate_prepared_launch_v3(&self.config, &request)
+            .context("validate root-owned chunked image template")?;
+        self.launch_vm_validated(request.launch, quota, true)
     }
 
     pub(super) fn launch_vm_validated(
         &mut self,
         request: VmLaunchRequest,
         quota: CpuQuota,
+        use_v3: bool,
     ) -> Result<VmLaunchResult> {
         let effective_quota =
             CpuQuota::from_millis(request.cpu_millis.max(self.config.boot_cpu_millis))
@@ -71,14 +82,26 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let identity = self.allocate_identity()?;
         self.preparer
             .reserve_identity(&self.config, &generation, identity, identity)?;
-        let prepared = match self.preparer.prepare_v2(
-            &self.config,
-            &request,
-            &run_network.result,
-            &generation,
-            identity,
-            identity,
-        ) {
+        let prepare_result = if use_v3 {
+            self.preparer.prepare_v3(
+                &self.config,
+                &request,
+                &run_network.result,
+                &generation,
+                identity,
+                identity,
+            )
+        } else {
+            self.preparer.prepare_v2(
+                &self.config,
+                &request,
+                &run_network.result,
+                &generation,
+                identity,
+                identity,
+            )
+        };
+        let prepared = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
                 return Err(error).context("prepare jail filesystem");
