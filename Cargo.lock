@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "intar-builder"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
