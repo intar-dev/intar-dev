@@ -611,10 +611,13 @@ ${runCliEnabled ? "      Environment=KINO_CONTROL_SOCKET=/run/intar/kino-control
       WantedBy=multi-user.target
 
 bootcmd:
-  - [mkdir, -p, /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent, /var/lib/kino-recordings, /etc/kino${runCliEnabled ? ", /run/intar, /usr/share/intar/completions" : ""}]
-${runCliEnabled ? `  - [chown, intar:intar, /run/intar]
+  # Kino always binds its private control socket under /run/intar. This is a
+  # runtime prerequisite, not a learner CLI asset, so it must exist before
+  # Kino starts even while the learner CLI rollout remains disabled.
+  - [mkdir, -p, /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent, /var/lib/kino-recordings, /etc/kino, /run/intar${runCliEnabled ? ", /usr/share/intar/completions" : ""}]
+  - [chown, intar:intar, /run/intar]
   - [chmod, "0755", /run/intar]
-` : ""}  - [chown, root:intar, /run/intar-workspace-agent]
+  - [chown, root:intar, /run/intar-workspace-agent]
   - [chmod, "0750", /run/intar-workspace-agent]
   - [chmod, "0700", /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent]
 

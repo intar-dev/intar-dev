@@ -874,6 +874,11 @@ describe("workspace agent guest control plane", () => {
 
     expect(cloudInit).not.toContain("run_cli_enabled = true");
     expect(cloudInit).not.toContain("/run/intar/run-cli-broker");
+    // Kino binds its private control socket in this directory even before the
+    // learner CLI rollout is enabled.
+    expect(cloudInit).toContain("/etc/kino, /run/intar]");
+    expect(cloudInit).toContain("[chown, intar:intar, /run/intar]");
+    expect(cloudInit).toContain('[chmod, "0755", /run/intar]');
     expect(cloudInit).not.toContain("/usr/local/bin/intar");
     expect(cloudInit).not.toContain("/usr/share/intar/completions/intar.bash");
     expect(cloudInit).not.toContain("/etc/bash.bashrc");
