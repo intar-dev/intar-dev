@@ -144,8 +144,21 @@ jobs:
             --kino-binary "${guest_tools_dir}/kino" \
             --output-root "${guest_tools_dir}/scenario-tools-rebuild" \
             > "${guest_tools_dir}/scenario-tools-rebuild.json"
-          test "$(jq -er '.tools_disk_sha256' "${guest_tools_dir}/scenario-tools.json")" = \
-            "$(jq -er '.tools_disk_sha256' "${guest_tools_dir}/scenario-tools-rebuild.json")"
+          first_tools_sha="$(jq -er '.tools_disk_sha256' \
+            "${guest_tools_dir}/scenario-tools.json")"
+          second_tools_sha="$(jq -er '.tools_disk_sha256' \
+            "${guest_tools_dir}/scenario-tools-rebuild.json")"
+          if [ "${first_tools_sha}" != "${second_tools_sha}" ]; then
+            echo "Guest-tools ext4 image is not deterministic." >&2
+            sha256sum \
+              "${guest_tools_dir}/scenario-tools-build/${first_tools_sha}.ext4" \
+              "${guest_tools_dir}/scenario-tools-rebuild/${second_tools_sha}.ext4" >&2
+            cmp -l \
+              "${guest_tools_dir}/scenario-tools-build/${first_tools_sha}.ext4" \
+              "${guest_tools_dir}/scenario-tools-rebuild/${second_tools_sha}.ext4" \
+              | head -n 20 >&2 || true
+            exit 1
+          fi
           test "$(jq -er '.compressed_disk_sha256' "${guest_tools_dir}/scenario-tools.json")" = \
             "$(jq -er '.compressed_disk_sha256' "${guest_tools_dir}/scenario-tools-rebuild.json")"
           scenario_tools_path="$(jq -er '.compressed_disk_path' \

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
 use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1;
@@ -84,6 +85,14 @@ pub fn write_guest_tools_disk(
     let manifest_bytes = serde_json::to_vec(&manifest).context("serialize tools manifest")?;
     fs::write(filesystem_root.join("manifest.json"), &manifest_bytes)?;
     set_read_only_file(&filesystem_root.join("manifest.json"))?;
+    for path in [
+        staged_kino.clone(),
+        filesystem_root.join("manifest.json"),
+        filesystem_root.join("bin"),
+        filesystem_root.clone(),
+    ] {
+        set_fixed_times(&path)?;
+    }
 
     let staged_disk = staging.path().join("tools.ext4");
     let disk = fs::OpenOptions::new()
@@ -215,6 +224,18 @@ fn set_read_only_file(path: &Path) -> Result<()> {
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_readonly(true);
     fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+fn set_fixed_times(path: &Path) -> Result<()> {
+    let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    fs::File::open(path)?
+        .set_times(
+            fs::FileTimes::new()
+                .set_accessed(timestamp)
+                .set_modified(timestamp),
+        )
+        .with_context(|| format!("failed to normalize timestamps for '{}'", path.display()))?;
     Ok(())
 }
 
