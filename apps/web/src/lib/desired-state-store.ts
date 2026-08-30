@@ -6,6 +6,7 @@ import {
   createEmptyHostDesiredState,
   mutateDesiredState,
   type DesiredStateMutator,
+  upgradeStoredHostDesiredState,
 } from "@/lib/desired-state";
 
 export async function loadOrCreateHostDesiredState(
@@ -13,34 +14,66 @@ export async function loadOrCreateHostDesiredState(
   hostId: string,
   nowUnixMs: number,
 ): Promise<HostDesiredStateV2> {
-  const rows = await db
-    .select({ docJson: hostDesiredState.docJson })
-    .from(hostDesiredState)
-    .where(eq(hostDesiredState.hostId, hostId))
-    .limit(1);
-  const existing = rows[0]?.docJson;
-  if (existing) {
-    return existing;
+  for (let attempt = 0; attempt < MUTATE_DESIRED_STATE_MAX_ATTEMPTS; attempt++) {
+    const rows = await db
+      .select({
+        version: hostDesiredState.version,
+        docJson: hostDesiredState.docJson,
+      })
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, hostId))
+      .limit(1);
+    const existing = rows[0];
+    if (existing) {
+      const upgraded = upgradeStoredHostDesiredState({
+        document: existing.docJson,
+        hostId,
+        rowVersion: existing.version,
+        nowUnixMs,
+      });
+      if (!upgraded.migrated) {
+        return upgraded.desiredState;
+      }
+      const persisted = await db
+        .update(hostDesiredState)
+        .set({
+          version: upgraded.desiredState.version,
+          docJson: upgraded.desiredState,
+          updatedAt: nowUnixMs,
+        })
+        .where(
+          and(
+            eq(hostDesiredState.hostId, hostId),
+            eq(hostDesiredState.version, existing.version),
+          ),
+        )
+        .returning({ version: hostDesiredState.version });
+      if (persisted.length > 0) {
+        return upgraded.desiredState;
+      }
+      continue;
+    }
+
+    const doc = createEmptyHostDesiredState({ hostId, nowUnixMs });
+    const inserted = await db
+      .insert(hostDesiredState)
+      .values({
+        hostId,
+        version: doc.version,
+        docJson: doc,
+        createdAt: nowUnixMs,
+        updatedAt: nowUnixMs,
+      })
+      .onConflictDoNothing()
+      .returning({ version: hostDesiredState.version });
+    if (inserted.length > 0) {
+      return doc;
+    }
   }
 
-  const doc = createEmptyHostDesiredState({ hostId, nowUnixMs });
-  await db
-    .insert(hostDesiredState)
-    .values({
-      hostId,
-      version: doc.version,
-      docJson: doc,
-      createdAt: nowUnixMs,
-      updatedAt: nowUnixMs,
-    })
-    .onConflictDoNothing();
-
-  const insertedRows = await db
-    .select({ docJson: hostDesiredState.docJson })
-    .from(hostDesiredState)
-    .where(eq(hostDesiredState.hostId, hostId))
-    .limit(1);
-  return insertedRows[0]?.docJson ?? doc;
+  throw new Error(
+    `desired-state load for host ${hostId} lost ${MUTATE_DESIRED_STATE_MAX_ATTEMPTS} version races`,
+  );
 }
 
 const MUTATE_DESIRED_STATE_MAX_ATTEMPTS = 5;

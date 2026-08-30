@@ -13,6 +13,7 @@ import {
   desiredVmFromRunVm,
   markDesiredVmAbsent,
   mutateDesiredState,
+  upgradeStoredHostDesiredState,
   upsertDesiredCachedImage,
   upsertDesiredBuild,
   upsertDesiredVm,
@@ -34,6 +35,64 @@ describe("desired state", () => {
       vms: [],
       builds: [],
     });
+  });
+
+  it("keeps a current stored desired state unchanged", () => {
+    const current = hostDesiredState({ version: 7 });
+    expect(upgradeStoredHostDesiredState({
+      document: current,
+      hostId: "host-alpha",
+      rowVersion: 7,
+      nowUnixMs: 1_762_041_660_000,
+    })).toEqual({ desiredState: current, migrated: false });
+  });
+
+  it("migrates a drained v3 desired state and drops obsolete work", () => {
+    const legacy = {
+      schema_version: 3,
+      host_id: "host-alpha",
+      version: 235,
+      generated_at_unix_ms: 1_762_041_600_000,
+      cached_images: [{ image_sha256: "1".repeat(64) }],
+      vms: [{ desired_phase: "absent", image_sha256: "2".repeat(64) }],
+      builds: [{ build_id: "obsolete-v9-build", kino_version: "0.2.6" }],
+    };
+
+    expect(upgradeStoredHostDesiredState({
+      document: legacy,
+      hostId: "host-alpha",
+      rowVersion: 235,
+      nowUnixMs: 1_762_041_660_000,
+    })).toEqual({
+      migrated: true,
+      desiredState: {
+        schema_version: 4,
+        host_id: "host-alpha",
+        version: 236,
+        generated_at_unix_ms: 1_762_041_660_000,
+        cached_images: [],
+        cached_guest_tools: [],
+        vms: [],
+        builds: [],
+      },
+    });
+  });
+
+  it("refuses to migrate a v3 desired state with a running VM", () => {
+    expect(() => upgradeStoredHostDesiredState({
+      document: {
+        schema_version: 3,
+        host_id: "host-alpha",
+        version: 9,
+        generated_at_unix_ms: 1_762_041_600_000,
+        cached_images: [],
+        vms: [{ desired_phase: "running" }],
+        builds: [],
+      },
+      hostId: "host-alpha",
+      rowVersion: 9,
+      nowUnixMs: 1_762_041_660_000,
+    })).toThrow("still contains a running or malformed VM");
   });
 
   it("bumps the version and timestamp when desired content changes", () => {

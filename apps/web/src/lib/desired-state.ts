@@ -12,6 +12,13 @@ import type { RunVmStateDocument } from "@/lib/run-state";
 export type DesiredStateDraft = HostDesiredStateV2;
 export type DesiredStateMutator = (draft: DesiredStateDraft) => void;
 
+const LEGACY_HOST_DESIRED_STATE_SCHEMA_VERSION = 3;
+
+export interface StoredHostDesiredStateUpgrade {
+  desiredState: HostDesiredStateV2;
+  migrated: boolean;
+}
+
 export function createEmptyHostDesiredState(input: {
   hostId: string;
   nowUnixMs: number;
@@ -25,6 +32,74 @@ export function createEmptyHostDesiredState(input: {
     cached_guest_tools: [],
     vms: [],
     builds: [],
+  };
+}
+
+export function upgradeStoredHostDesiredState(input: {
+  document: unknown;
+  hostId: string;
+  rowVersion: number;
+  nowUnixMs: number;
+}): StoredHostDesiredStateUpgrade {
+  const document = input.document;
+  if (!isUnknownRecord(document)) {
+    throw new Error(`desired state for host ${input.hostId} is not an object`);
+  }
+  if (
+    document.host_id !== input.hostId ||
+    document.version !== input.rowVersion ||
+    !Number.isSafeInteger(input.rowVersion) ||
+    input.rowVersion < 0
+  ) {
+    throw new Error(`desired state identity is invalid for host ${input.hostId}`);
+  }
+
+  if (document.schema_version === HOST_DESIRED_STATE_SCHEMA_VERSION) {
+    if (
+      !Array.isArray(document.cached_images) ||
+      (document.cached_guest_tools !== undefined &&
+        !Array.isArray(document.cached_guest_tools)) ||
+      !Array.isArray(document.vms) ||
+      !Array.isArray(document.builds)
+    ) {
+      throw new Error(`desired state arrays are invalid for host ${input.hostId}`);
+    }
+    return {
+      desiredState: document as unknown as HostDesiredStateV2,
+      migrated: false,
+    };
+  }
+
+  if (document.schema_version !== LEGACY_HOST_DESIRED_STATE_SCHEMA_VERSION) {
+    throw new Error(
+      `desired state schema ${String(document.schema_version)} is unsupported for host ${input.hostId}`,
+    );
+  }
+  if (
+    !Array.isArray(document.cached_images) ||
+    !Array.isArray(document.vms) ||
+    !Array.isArray(document.builds)
+  ) {
+    throw new Error(`legacy desired state arrays are invalid for host ${input.hostId}`);
+  }
+  const runningVm = document.vms.find(
+    (vm) => !isUnknownRecord(vm) || vm.desired_phase !== "absent",
+  );
+  if (runningVm !== undefined) {
+    throw new Error(
+      `legacy desired state for host ${input.hostId} still contains a running or malformed VM`,
+    );
+  }
+
+  return {
+    desiredState: {
+      ...createEmptyHostDesiredState({
+        hostId: input.hostId,
+        nowUnixMs: input.nowUnixMs,
+      }),
+      version: input.rowVersion + 1,
+    },
+    migrated: true,
   };
 }
 
@@ -330,4 +405,8 @@ function desiredBuildIdentity(build: DesiredBuildV1): string {
 
 function imageKeyIdentity(imageKey: ImageKey): string {
   return `${imageKey.scenario}\n${imageKey.vm}\n${imageKey.arch}`;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
