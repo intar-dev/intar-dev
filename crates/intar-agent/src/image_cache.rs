@@ -308,16 +308,16 @@ pub fn spawn_warm_cache_with_bridge(
             "starting image registry cache worker"
         );
 
-        run_cache_refresh_cycle(
-            &registry,
-            Some(&bridge),
-            &cache,
-            Some(&db),
-            &cache_root,
-            &client,
-            &vm,
-        )
-        .await;
+        let refresh_context = refresh::CacheRefreshContext {
+            registry: &registry,
+            bridge: Some(&bridge),
+            cache: &cache,
+            db: Some(&db),
+            cache_root: &cache_root,
+            client: &client,
+            vm: &vm,
+        };
+        run_cache_refresh_cycle(refresh_context, refresh::CacheRefreshScope::FullRepair).await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(
             registry.refresh_interval_minutes.saturating_mul(60),
@@ -325,20 +325,13 @@ pub fn spawn_warm_cache_with_bridge(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
         loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                () = CACHE_REFRESH_WAKE.get_or_init(Notify::new).notified() => {}
-            }
-            run_cache_refresh_cycle(
-                &registry,
-                Some(&bridge),
-                &cache,
-                Some(&db),
-                &cache_root,
-                &client,
-                &vm,
-            )
-            .await;
+            let scope = tokio::select! {
+                _ = interval.tick() => refresh::CacheRefreshScope::FullRepair,
+                () = CACHE_REFRESH_WAKE.get_or_init(Notify::new).notified() => {
+                    refresh::CacheRefreshScope::MissingOnly
+                }
+            };
+            run_cache_refresh_cycle(refresh_context, scope).await;
         }
     });
 }
