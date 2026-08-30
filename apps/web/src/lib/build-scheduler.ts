@@ -296,24 +296,40 @@ export async function assignQueuedImageBuilds(
       continue;
     }
 
-    await mutateStoredHostDesiredState(
-      db,
-      builder.hostId,
-      nowUnixMs,
-      (draft) => {
-        upsertDesiredBuild(
-          draft,
-          desiredBuildFromSource({
-            buildId: build.id,
-            scenarioId: build.scenarioId,
-            arch: build.arch,
-            rev: build.rev,
-            contentHash: build.contentHash,
-            bundleRef: build.bundleRef,
-          }),
-        );
-      },
-    );
+    try {
+      await mutateStoredHostDesiredState(
+        db,
+        builder.hostId,
+        nowUnixMs,
+        (draft) => {
+          upsertDesiredBuild(
+            draft,
+            desiredBuildFromSource({
+              buildId: build.id,
+              scenarioId: build.scenarioId,
+              arch: build.arch,
+              rev: build.rev,
+              contentHash: build.contentHash,
+              bundleRef: build.bundleRef,
+            }),
+          );
+        },
+      );
+    } catch (error) {
+      // The D1 claim above is the durable queue-acceptance boundary. A rapid
+      // batch can exhaust desired-state CAS retries after that claim. Keep the
+      // assigned row, wake the host runtime, and let its report-driven
+      // reconciliation republish the missing desired build. Returning 500
+      // here would falsely tell CI that an already accepted bundle failed.
+      console.warn(
+        JSON.stringify({
+          message: "assigned build delivery deferred to reconciliation",
+          buildId: build.id,
+          hostId: builder.hostId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
     await tryWakeHostRuntime(builder.hostId);
 
     // Supersession can win after the claim but before the desired-state write.
