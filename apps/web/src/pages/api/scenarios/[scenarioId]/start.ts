@@ -95,6 +95,7 @@ export const POST: APIRoute = async ({ request, params }) => {
       betaAdmission: authz.context.betaAdmission,
       ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
+      ...(authz.context.isAdmin ? { allowDrainedAdminProof: true } : {}),
     });
     return jsonResponse(
       {

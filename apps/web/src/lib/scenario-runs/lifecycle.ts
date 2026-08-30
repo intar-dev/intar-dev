@@ -57,6 +57,7 @@ export async function startScenarioRunForUser(params: {
   betaAdmission: BetaAdmissionEpoch;
   organizationId?: string | null;
   hostId?: string;
+  allowDrainedAdminProof?: boolean;
 }): Promise<{
   accepted: true;
   runId: string;

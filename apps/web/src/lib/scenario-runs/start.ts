@@ -107,6 +107,7 @@ export async function startScenarioRunInternal(params: {
   betaAdmission: BetaAdmissionEpoch;
   organizationId?: string | null;
   hostId?: string;
+  allowDrainedAdminProof?: boolean;
 }): Promise<{
   accepted: true;
   runId: string;
@@ -114,7 +115,9 @@ export async function startScenarioRunInternal(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
-  await assertAgentKvmRunsOpen(env.DB);
+  await assertAgentKvmRunsOpen(env.DB, {
+    ...(params.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
+  });
   const organizationId = params.organizationId ?? null;
   const [[scenario], active] = await Promise.all([
     loadEnabledScenarioRows(params.scenarioId, organizationId),
@@ -333,6 +336,7 @@ export async function startScenarioRunInternal(params: {
       vms: provisionedState.vms,
       nowUnixMs: createdAt,
       sshAuthorizedKeysByVmId,
+      ...(params.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
     });
     await updateRuntimeExecutionState({
       executionId: runId,
@@ -1035,8 +1039,11 @@ export async function upsertRunVmsIntoDesiredState(input: {
   vms: RunVmStateDocument[];
   nowUnixMs: number;
   sshAuthorizedKeysByVmId: Map<string, string[]>;
+  allowDrainedAdminProof?: boolean;
 }): Promise<void> {
-  await assertAgentKvmRunsOpen(env.DB);
+  await assertAgentKvmRunsOpen(env.DB, {
+    ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
+  });
   const guestTools = await loadScenarioGuestToolsPin(env, "stable");
   const desiredVms = input.vms.map((vm) => {
     const desiredVm = desiredVmFromRunVm({

@@ -133,7 +133,7 @@ describe("scenario start route", () => {
     });
   });
 
-  it("forwards an explicit host only for an administrator", async () => {
+  it("marks an administrator start as an allowed drained cutover proof", async () => {
     agentBridgeMock.requireUserContext.mockResolvedValue({
       ok: true,
       context: { userId: "admin-1", isAdmin: true, betaAdmission },
@@ -147,6 +147,7 @@ describe("scenario start route", () => {
       userId: "admin-1",
       betaAdmission,
       hostId: "agent-01",
+      allowDrainedAdminProof: true,
     });
   });
 
