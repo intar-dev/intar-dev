@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -182,6 +183,11 @@ async fn cache_entry_lock(cache_root: &Path, key: String) -> Arc<Mutex<()>> {
 pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        // The scenario host is dual-stack, but one Cloudflare IPv6 anycast
+        // route has repeatedly accepted a TLS connection and then stopped
+        // acknowledging registry request bytes. Prefer the host's stable IPv4
+        // path for bulk cache traffic; Bridge control traffic stays dual-stack.
+        .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         .connect_timeout(REGISTRY_CONNECT_TIMEOUT)
         // Bound an idle response without imposing a total deadline on large
         // image downloads. Otherwise one stuck warmer can hold a cache key and
