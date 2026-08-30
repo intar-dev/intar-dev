@@ -54,3 +54,4 @@ fn registry_index_with_boot(
 
 mod eviction;
 mod registry;
+mod tools;

@@ -405,9 +405,11 @@ pub(crate) async fn ensure_cached_tools_disk(
     output.sync_all().await?;
     drop(output);
     tokio::fs::rename(&temporary, &compressed_path).await?;
+    let (raw_temporary, raw_output) = create_tmp_file(&directory, "tools.ext4").await?;
+    drop(raw_output);
     let compressed_for_decode = compressed_path.clone();
-    let raw_for_decode = raw_path.clone();
-    let raw_sha256 = tokio::task::spawn_blocking(move || {
+    let raw_for_decode = raw_temporary.clone();
+    let decode_result = tokio::task::spawn_blocking(move || {
         decompress_raw_zstd_sparse(
             &compressed_for_decode,
             &raw_for_decode,
@@ -415,11 +417,23 @@ pub(crate) async fn ensure_cached_tools_disk(
         )
     })
     .await
-    .context("tools disk decoder panicked")??;
+    .context("tools disk decoder panicked")
+    .and_then(|result| result);
     let _ = tokio::fs::remove_file(&compressed_path).await;
+    let raw_sha256 = match decode_result {
+        Ok(raw_sha256) => raw_sha256,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&raw_temporary).await;
+            return Err(error);
+        }
+    };
     if raw_sha256 != sha256 {
-        let _ = tokio::fs::remove_file(&raw_path).await;
+        let _ = tokio::fs::remove_file(&raw_temporary).await;
         anyhow::bail!("tools disk SHA-256 mismatch");
+    }
+    if let Err(error) = tokio::fs::rename(&raw_temporary, &raw_path).await {
+        let _ = tokio::fs::remove_file(&raw_temporary).await;
+        return Err(error).context("publish verified tools disk");
     }
     Ok(raw_path)
 }
