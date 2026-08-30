@@ -107,12 +107,15 @@ pub(crate) async fn clear_registry_access_token() {
     registry_access_token_cache().lock().await.clear();
 }
 
-async fn registry_access_token(bridge: &BridgeConfig, client: &reqwest::Client) -> Result<String> {
-    if let Some(access_token) = registry_access_token_cache()
+async fn cached_registry_access_token() -> Option<String> {
+    registry_access_token_cache()
         .lock()
         .await
         .get(Instant::now())
-    {
+}
+
+async fn registry_access_token(bridge: &BridgeConfig, client: &reqwest::Client) -> Result<String> {
+    if let Some(access_token) = cached_registry_access_token().await {
         return Ok(access_token);
     }
 
@@ -120,20 +123,30 @@ async fn registry_access_token(bridge: &BridgeConfig, client: &reqwest::Client) 
         .get_or_init(|| Mutex::new(()))
         .lock()
         .await;
-    if let Some(access_token) = registry_access_token_cache()
-        .lock()
-        .await
-        .get(Instant::now())
-    {
+    if let Some(access_token) = cached_registry_access_token().await {
         return Ok(access_token);
     }
 
-    let access_token = tokio::time::timeout(
+    let access_token = match tokio::time::timeout(
         REGISTRY_ACCESS_TOKEN_REFRESH_TIMEOUT,
         bootstrap_agent_access(bridge, client),
     )
     .await
-    .context("agent access refresh for image registry timed out")??;
+    {
+        Ok(Ok(access_token)) => access_token,
+        Ok(Err(error)) => {
+            if let Some(access_token) = cached_registry_access_token().await {
+                return Ok(access_token);
+            }
+            return Err(error).context("agent access refresh for image registry failed");
+        }
+        Err(error) => {
+            if let Some(access_token) = cached_registry_access_token().await {
+                return Ok(access_token);
+            }
+            return Err(error).context("agent access refresh for image registry timed out");
+        }
+    };
     anyhow::ensure!(
         !access_token.is_empty(),
         "agent bootstrap returned an empty registry token"
