@@ -111,6 +111,7 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-intar-kvm.rules >/dev/null
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle --timeout=30
           test -r /dev/kvm
           test -w /dev/kvm
           test -c /dev/net/tun
