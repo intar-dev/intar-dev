@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
@@ -32,6 +32,8 @@ const MAX_CONCURRENT_IMAGE_WARMS: usize = 8;
 const MAX_CONCURRENT_CACHE_DOWNLOADS: usize = 16;
 const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const REGISTRY_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const REGISTRY_ACCESS_TOKEN_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const RAW_CACHE_MARKER_VERSION: u8 = 3;
 #[cfg(test)]
@@ -45,6 +47,103 @@ type CacheEntryLocks = Mutex<HashMap<CacheEntryLockKey, Arc<Mutex<()>>>>;
 static CACHE_ENTRY_LOCKS: OnceLock<CacheEntryLocks> = OnceLock::new();
 static CACHE_DOWNLOADS: OnceLock<Semaphore> = OnceLock::new();
 static CACHE_REFRESH_WAKE: OnceLock<Notify> = OnceLock::new();
+static REGISTRY_ACCESS_TOKEN: OnceLock<Mutex<RegistryAccessTokenCache>> = OnceLock::new();
+static REGISTRY_ACCESS_TOKEN_REFRESH: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Default)]
+struct RegistryAccessTokenCache {
+    current: Option<CachedRegistryAccessToken>,
+}
+
+struct CachedRegistryAccessToken {
+    value: String,
+    valid_until: Instant,
+}
+
+impl std::fmt::Debug for RegistryAccessTokenCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegistryAccessTokenCache")
+            .field("populated", &self.current.is_some())
+            .finish()
+    }
+}
+
+impl RegistryAccessTokenCache {
+    fn get(&self, now: Instant) -> Option<String> {
+        self.current
+            .as_ref()
+            .filter(|cached| now < cached.valid_until)
+            .map(|cached| cached.value.clone())
+    }
+
+    fn replace(&mut self, value: String, now: Instant) {
+        self.current = Some(CachedRegistryAccessToken {
+            value,
+            valid_until: now + REGISTRY_ACCESS_TOKEN_CACHE_TTL,
+        });
+    }
+
+    fn clear(&mut self) {
+        self.current = None;
+    }
+}
+
+fn registry_access_token_cache() -> &'static Mutex<RegistryAccessTokenCache> {
+    REGISTRY_ACCESS_TOKEN.get_or_init(|| Mutex::new(RegistryAccessTokenCache::default()))
+}
+
+pub(crate) async fn cache_registry_access_token(access_token: &str) {
+    if access_token.is_empty() {
+        return;
+    }
+    registry_access_token_cache()
+        .lock()
+        .await
+        .replace(access_token.to_owned(), Instant::now());
+}
+
+pub(crate) async fn clear_registry_access_token() {
+    registry_access_token_cache().lock().await.clear();
+}
+
+async fn registry_access_token(bridge: &BridgeConfig, client: &reqwest::Client) -> Result<String> {
+    if let Some(access_token) = registry_access_token_cache()
+        .lock()
+        .await
+        .get(Instant::now())
+    {
+        return Ok(access_token);
+    }
+
+    let _refresh = REGISTRY_ACCESS_TOKEN_REFRESH
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .await;
+    if let Some(access_token) = registry_access_token_cache()
+        .lock()
+        .await
+        .get(Instant::now())
+    {
+        return Ok(access_token);
+    }
+
+    let access_token = tokio::time::timeout(
+        REGISTRY_ACCESS_TOKEN_REFRESH_TIMEOUT,
+        bootstrap_agent_access(bridge, client),
+    )
+    .await
+    .context("agent access refresh for image registry timed out")??;
+    anyhow::ensure!(
+        !access_token.is_empty(),
+        "agent bootstrap returned an empty registry token"
+    );
+    registry_access_token_cache()
+        .lock()
+        .await
+        .replace(access_token.clone(), Instant::now());
+    Ok(access_token)
+}
 
 pub(crate) fn wake_cache_refresh() {
     CACHE_REFRESH_WAKE.get_or_init(Notify::new).notify_one();

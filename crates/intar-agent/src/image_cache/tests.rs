@@ -12,6 +12,19 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     to_hex_lower(&hasher.finalize())
 }
 
+#[test]
+fn registry_access_token_cache_expires_and_redacts_its_value() {
+    let now = Instant::now();
+    let mut cache = RegistryAccessTokenCache::default();
+    cache.replace("registry-secret".to_owned(), now);
+
+    assert_eq!(cache.get(now).as_deref(), Some("registry-secret"));
+    assert!(cache.get(now + REGISTRY_ACCESS_TOKEN_CACHE_TTL).is_none());
+    assert!(!format!("{cache:?}").contains("registry-secret"));
+    cache.clear();
+    assert!(cache.get(now).is_none());
+}
+
 fn registry_config(addr: std::net::SocketAddr) -> ImageRegistryConfig {
     ImageRegistryConfig {
         url: format!("http://{addr}/images"),

@@ -173,6 +173,7 @@ async fn connect_once(
 ) -> Result<()> {
     let bootstrap = bootstrap_agent_access(cfg, http).await?;
     vm.cache_run_cli_access_token(&bootstrap.access_token).await;
+    crate::image_cache::cache_registry_access_token(&bootstrap.access_token).await;
     let ws_url = bootstrap
         .ws_url
         .unwrap_or_else(|| default_ws_url(&cfg.base_url, &cfg.host_id));
@@ -334,13 +335,16 @@ async fn connect_once(
                     ).await {
                         Ok(Ok(access)) => {
                             vm.cache_run_cli_access_token(&access.access_token).await;
+                            crate::image_cache::cache_registry_access_token(&access.access_token).await;
                         }
                         Ok(Err(error)) => {
                             vm.clear_run_cli_access_token().await;
+                            crate::image_cache::clear_registry_access_token().await;
                             warn!(error = %error, "run CLI access refresh failed; cleared the cached run CLI token");
                         }
                         Err(_) => {
                             vm.clear_run_cli_access_token().await;
+                            crate::image_cache::clear_registry_access_token().await;
                             warn!("run CLI access refresh timed out; cleared the cached run CLI token");
                         }
                     }

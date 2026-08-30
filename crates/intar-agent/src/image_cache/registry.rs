@@ -444,7 +444,7 @@ pub(super) async fn apply_registry_auth(
         return Ok(builder);
     };
 
-    let token = bootstrap_agent_access(bridge, client).await?;
+    let token = registry_access_token(bridge, client).await?;
     Ok(builder.bearer_auth(token))
 }
 
