@@ -25,15 +25,17 @@ pub(super) async fn run_cache_refresh_cycle(
             registry = %redact_url_userinfo(&registry.url),
             "image registry did not advertise any raw_chunks_v1 images"
         );
-        return;
+        // The guest-tools disk is independent of scenario images and must be
+        // warmable before the flag-day catalog switch. Continue through the
+        // empty image phase so desired guest-tool pins are still processed.
+    } else {
+        info!(
+            cache_root = %cache_root.display(),
+            image_count = images.len(),
+            registry = %redact_url_userinfo(&registry.url),
+            "refreshing image cache from registry"
+        );
     }
-
-    info!(
-        cache_root = %cache_root.display(),
-        image_count = images.len(),
-        registry = %redact_url_userinfo(&registry.url),
-        "refreshing image cache from registry"
-    );
 
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_IMAGE_WARMS));
     let mut handles = Vec::with_capacity(images.len());
