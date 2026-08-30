@@ -9,10 +9,11 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 #[test]
-fn cast_writer_persists_header_and_events() {
+fn cast_writer_atomically_publishes_a_finished_recording() {
     let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let start_ts_unix_ms = 1_700_000_000_000;
     let metadata = RecordingMetadata {
@@ -25,13 +26,9 @@ fn cast_writer_persists_header_and_events() {
     let (mut writer, recording_path) =
         RawEventLogWriter::start(temp.path(), start_ts_unix_ms, 120, 40, metadata)
             .unwrap_or_else(|error| panic!("recording writer start failed: {error}"));
+    let partial_path = writer.partial_path.clone();
     assert!(!recording_path.exists());
-    assert!(
-        fs::read_dir(temp.path())
-            .unwrap_or_else(|error| panic!("read_dir failed: {error}"))
-            .filter_map(Result::ok)
-            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "partial"))
-    );
+    assert!(partial_path.exists());
 
     writer
         .write_input_bytes(start_ts_unix_ms, b"echo hello\n")
@@ -49,12 +46,10 @@ fn cast_writer_persists_header_and_events() {
         .finish()
         .unwrap_or_else(|error| panic!("finish failed: {error}"));
     assert!(recording_path.exists());
-    assert!(
-        fs::read_dir(temp.path())
-            .unwrap_or_else(|error| panic!("read_dir failed: {error}"))
-            .filter_map(Result::ok)
-            .all(|entry| entry.path().extension().is_none_or(|ext| ext != "partial"))
-    );
+    assert!(!partial_path.exists());
+    writer
+        .finish()
+        .unwrap_or_else(|error| panic!("second finish failed: {error}"));
 
     let content = fs::read_to_string(recording_path)
         .unwrap_or_else(|error| panic!("failed to read recording file: {error}"));
@@ -105,6 +100,57 @@ fn cast_writer_persists_header_and_events() {
         .unwrap_or_else(|error| panic!("invalid exit event: {error}"));
     assert_eq!(exit["event"], "x");
     assert_eq!(exit["exit_code"], 0);
+}
+
+#[test]
+fn cast_writer_does_not_replace_a_final_path_created_after_start() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let (mut writer, recording_path) = RawEventLogWriter::start(
+        temp.path(),
+        1_700_000_000_000,
+        80,
+        24,
+        RecordingMetadata::default(),
+    )
+    .unwrap_or_else(|error| panic!("recording writer start failed: {error}"));
+
+    fs::write(&recording_path, b"existing recording")
+        .unwrap_or_else(|error| panic!("create final-path collision failed: {error}"));
+
+    let error = writer
+        .finish()
+        .expect_err("finish must reject a final path that appeared after start");
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(
+        fs::read(&recording_path)
+            .unwrap_or_else(|error| panic!("read collision target failed: {error}")),
+        b"existing recording"
+    );
+}
+
+#[test]
+fn cast_writer_preserves_partial_recording_when_publish_collides() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let (mut writer, recording_path) = RawEventLogWriter::start(
+        temp.path(),
+        1_700_000_000_000,
+        80,
+        24,
+        RecordingMetadata::default(),
+    )
+    .unwrap_or_else(|error| panic!("recording writer start failed: {error}"));
+    let partial_path = writer.partial_path.clone();
+    writer
+        .write_output_bytes(1_700_000_000_001, b"still recoverable\n")
+        .unwrap_or_else(|error| panic!("write output failed: {error}"));
+    fs::write(&recording_path, b"existing recording")
+        .unwrap_or_else(|error| panic!("create final-path collision failed: {error}"));
+
+    assert!(writer.finish().is_err());
+    assert!(partial_path.exists());
+    let partial = fs::read_to_string(&partial_path)
+        .unwrap_or_else(|error| panic!("read partial recording failed: {error}"));
+    assert!(partial.contains(&BASE64_STANDARD.encode(b"still recoverable\n")));
 }
 
 #[test]

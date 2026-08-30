@@ -162,10 +162,16 @@ impl RawEventLogWriter {
         }
         self.file.sync_all()?;
         // Publish completion without ever replacing a learner-created path.
-        // The final hard link becomes visible atomically; removing the partial
-        // link leaves one stable regular file for the artifact uploader.
-        fs::hard_link(&self.partial_path, &self.final_path)?;
-        fs::remove_file(&self.partial_path)?;
+        // `RENAME_NOREPLACE` atomically moves the fully synced partial file
+        // into place. A collision leaves both the final file and our partial
+        // recording untouched, so the caller can surface the error safely.
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            &self.partial_path,
+            rustix::fs::CWD,
+            &self.final_path,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )?;
         self.finished = true;
         Ok(())
     }
