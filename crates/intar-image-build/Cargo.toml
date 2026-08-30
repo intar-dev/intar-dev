@@ -14,6 +14,7 @@ hcl-rs.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 intar-image-scenario = { path = "../intar-image-scenario" }
 russh.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

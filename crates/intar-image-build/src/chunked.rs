@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
@@ -93,37 +94,44 @@ pub fn scan_raw_image_chunks(raw_path: &Path) -> Result<ScannedChunkedImage> {
     }
     let mut raw = fs::File::open(raw_path)
         .with_context(|| format!("failed to open raw image '{}'", raw_path.display()))?;
+    let data_extents = discover_data_extents(&raw, metadata.len())?;
     let mut chunks = Vec::new();
-    let mut index = 0_u32;
-    loop {
-        let mut bytes = vec![0_u8; IMAGE_CHUNK_SIZE_BYTES as usize];
-        let mut length = 0_usize;
-        while length < bytes.len() {
-            let read = raw
-                .read(&mut bytes[length..])
-                .with_context(|| format!("failed to read raw image '{}'", raw_path.display()))?;
-            if read == 0 {
-                break;
+    let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
+    let chunk_count = metadata.len().div_ceil(chunk_size);
+    let mut extent_cursor = 0_usize;
+    for raw_index in 0..chunk_count {
+        let chunk_start = raw_index
+            .checked_mul(chunk_size)
+            .context("image chunk offset overflow")?;
+        let chunk_end = chunk_start.saturating_add(chunk_size).min(metadata.len());
+        let length = usize::try_from(chunk_end - chunk_start)
+            .context("image chunk size does not fit memory")?;
+        if let Some(extents) = data_extents.as_ref() {
+            while extents
+                .get(extent_cursor)
+                .is_some_and(|extent| extent.end <= chunk_start)
+            {
+                extent_cursor = extent_cursor.saturating_add(1);
             }
-            length += read;
+            if !extents
+                .get(extent_cursor)
+                .is_some_and(|extent| extent.start < chunk_end)
+            {
+                continue;
+            }
         }
-        if length == 0 {
-            break;
-        }
-        bytes.truncate(length);
+
+        raw.seek(SeekFrom::Start(chunk_start))
+            .with_context(|| format!("failed to seek raw image '{}'", raw_path.display()))?;
+        let mut bytes = vec![0_u8; length];
+        raw.read_exact(&mut bytes)
+            .with_context(|| format!("failed to read raw image '{}'", raw_path.display()))?;
         if bytes.iter().any(|byte| *byte != 0) {
             chunks.push(ScannedImageChunk {
-                index,
+                index: u32::try_from(raw_index).context("image chunk index overflow")?,
                 raw_size_bytes: u32::try_from(length).context("image chunk size overflow")?,
                 raw_sha256: sha256_bytes_hex(&bytes),
             });
-        }
-        index = index
-            .checked_add(1)
-            .context("chunked image has too many logical chunks")?;
-
-        if length < IMAGE_CHUNK_SIZE_BYTES as usize {
-            break;
         }
     }
 
@@ -132,6 +140,47 @@ pub fn scan_raw_image_chunks(raw_path: &Path) -> Result<ScannedChunkedImage> {
         virtual_size_bytes: metadata.len(),
         chunks,
     })
+}
+
+fn discover_data_extents(raw: &fs::File, file_len: u64) -> Result<Option<Vec<Range<u64>>>> {
+    let mut extents = Vec::new();
+    let mut cursor = 0_u64;
+    while cursor < file_len {
+        let data = match rustix::fs::seek(raw, rustix::fs::SeekFrom::Data(cursor)) {
+            Ok(data) => data,
+            Err(rustix::io::Errno::NXIO) => break,
+            Err(error)
+                if error == rustix::io::Errno::INVAL || error == rustix::io::Errno::NOTSUP =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to find sparse data extent at byte {cursor}")
+                });
+            }
+        };
+        if data >= file_len {
+            break;
+        }
+        let hole = match rustix::fs::seek(raw, rustix::fs::SeekFrom::Hole(data)) {
+            Ok(hole) => hole.min(file_len),
+            Err(rustix::io::Errno::NXIO) => file_len,
+            Err(error)
+                if error == rustix::io::Errno::INVAL || error == rustix::io::Errno::NOTSUP =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to find sparse hole extent at byte {data}"));
+            }
+        };
+        ensure!(hole > data, "sparse extent did not advance at byte {data}");
+        extents.push(data..hole);
+        cursor = hole;
+    }
+    Ok(Some(extents))
 }
 
 /// Encode only chunks absent from the registry and publish a complete local

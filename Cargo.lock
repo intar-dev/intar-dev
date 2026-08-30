@@ -2292,6 +2292,7 @@ dependencies = [
  "intar-contracts",
  "intar-image-scenario",
  "russh",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
