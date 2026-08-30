@@ -41,6 +41,10 @@ kino record-command --config /etc/kino/kino.hcl --command 'cat /etc/os-release'
 
 Probe configs support `file_exists`, `file_regex_capture`, `port_open`, `service`, `k8s_pod_state`, and `command_json_path`. Recorder output is written to `recording.output_dir`.
 
+Kino syncs each completed recording and then publishes it with an atomic,
+no-replace rename. This must stay compatible with the KVM runtime's
+sync-mounted VFAT recording disk; VFAT does not support hard links.
+
 Kino is also the guest's multicall learner CLI. Images install
 `/usr/local/bin/intar` as a symlink to Kino. That command provides status,
 fresh checks, layered hints, released solutions, and Bash completion through
