@@ -94,6 +94,9 @@ pub fn write_guest_tools_disk(
     disk.sync_all()?;
     drop(disk);
 
+    let filesystem_uuid = filesystem_uuid(&kino_sha256);
+    let extended_options =
+        format!("lazy_itable_init=0,lazy_journal_init=0,hash_seed={filesystem_uuid}");
     let status = Command::new(mke2fs_binary)
         .args([
             "-F",
@@ -105,14 +108,15 @@ pub fn write_guest_tools_disk(
             "-L",
             GUEST_TOOLS_DISK_LABEL,
             "-U",
-            &filesystem_uuid(&kino_sha256),
+            &filesystem_uuid,
             "-E",
-            "lazy_itable_init=0,lazy_journal_init=0",
+            &extended_options,
             "-d",
         ])
         .arg(&filesystem_root)
         .arg(&staged_disk)
         .env("E2FSPROGS_FAKE_TIME", "1")
+        .env("SOURCE_DATE_EPOCH", "1")
         .env("TZ", "UTC")
         .env("LC_ALL", "C")
         .stdout(Stdio::null())
