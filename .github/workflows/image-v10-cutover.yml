@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   cutover:
-    name: Drain, switch, warm, and reopen
+    name: Drain, switch, and warm
     runs-on: namespace-profile-intar-dev
     environment: production
     env:
@@ -128,15 +128,3 @@ jobs:
           done
           echo "Stable image and tools cache did not converge within 60 seconds." >&2
           exit 1
-
-      - name: Reopen new runs
-        if: always()
-        run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --retry 3 \
-            --request POST \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data '{"state":"open"}' \
-            "https://intar.dev/registry/v1/cutover/gate" \
-            | jq -e '.ok == true and .state == "open"' >/dev/null
