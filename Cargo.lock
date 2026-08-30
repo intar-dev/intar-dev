@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "intar-image-cli"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
