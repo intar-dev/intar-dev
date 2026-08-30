@@ -1,0 +1,86 @@
+name: Image v10 run gate
+run-name: "Image v10 gate ${{ inputs.state }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      state:
+        description: Desired agent-KVM run gate state
+        required: true
+        type: choice
+        options:
+          - drained
+          - open
+      confirmation:
+        description: Type SET IMAGE V10 GATE DRAINED or SET IMAGE V10 GATE OPEN
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intar-image-v10-production-cutover
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Set and verify production run gate
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    env:
+      INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+      STATE: ${{ inputs.state }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+
+    steps:
+      - name: Validate authority
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
+          case "${STATE}" in
+            drained) expected="SET IMAGE V10 GATE DRAINED" ;;
+            open) expected="SET IMAGE V10 GATE OPEN" ;;
+            *) echo "Unsupported run gate state." >&2; exit 1 ;;
+          esac
+          test "${CONFIRMATION}" = "${expected}"
+
+      - name: Set exact gate state
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "{\"state\":\"${STATE}\"}" \
+            "https://intar.dev/registry/v1/cutover/gate" \
+            | jq -e --arg state "${STATE}" '.ok == true and .state == $state' >/dev/null
+
+      - name: Verify drained state has no active desired VMs
+        if: inputs.state == 'drained'
+        run: |
+          set -euo pipefail
+          status="${RUNNER_TEMP}/image-v10-gate.json"
+          for _ in $(seq 1 120); do
+            curl --fail --silent --show-error --retry 2 \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              "https://intar.dev/registry/v1/cutover/gate" > "${status}"
+            if jq -e '.state == "drained" and .active_desired_vms == 0' \
+              "${status}" >/dev/null; then
+              jq -c '{state, active_desired_vms}' "${status}"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Agent-KVM runs did not drain within ten minutes." >&2
+          exit 1
+
+      - name: Verify open state
+        if: inputs.state == 'open'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            "https://intar.dev/registry/v1/cutover/gate" \
+            | jq -e '.state == "open"' >/dev/null
