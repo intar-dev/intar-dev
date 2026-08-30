@@ -198,3 +198,39 @@ fn exact_reflink_attestation_requires_every_configured_source_root() {
     attestation.allowed_source_roots.push(identity);
     assert!(!attestation.covers_allowed_source_roots(&config));
 }
+
+#[test]
+fn chunked_template_metadata_is_bounded_separately_from_protocol_frames() {
+    let digest = Sha256Digest::parse("a".repeat(64)).expect("digest");
+    let artifact = ImageTemplateArtifactV2 {
+        sha256: digest.clone(),
+        bytes: 8 * 1024 * 1024 * 1024,
+        device: 7,
+        inode: 11,
+    };
+    let metadata = ImageTemplateMetadataV2 {
+        schema_version: IMAGE_TEMPLATE_METADATA_V3,
+        image_sha256: digest.clone(),
+        chunk_manifest_sha256: Some(digest.clone()),
+        chunk_raw_sha256s: vec![digest; 1_300],
+        virtual_size_bytes: artifact.bytes,
+        root_disk: artifact.clone(),
+        kernel: artifact.clone(),
+        initrd: Some(artifact),
+    };
+    let bytes = serde_json::to_vec(&metadata).expect("encode template metadata");
+    assert!(bytes.len() > intar_jailer_protocol::MAX_FRAME_BYTES);
+    assert!(bytes.len() <= MAX_IMAGE_TEMPLATE_METADATA_BYTES);
+    assert_eq!(
+        decode_template_metadata(&bytes).expect("decode large template metadata"),
+        metadata
+    );
+
+    let oversized = vec![b' '; MAX_IMAGE_TEMPLATE_METADATA_BYTES + 1];
+    assert!(
+        decode_template_metadata(&oversized)
+            .expect_err("oversized metadata must fail closed")
+            .to_string()
+            .contains("exceeds bounded size")
+    );
+}

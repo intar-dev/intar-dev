@@ -350,15 +350,28 @@ pub(super) fn read_root_metadata_at(
     parent: &impl std::os::fd::AsFd,
     name: &CStr,
 ) -> Result<Vec<u8>> {
+    read_root_metadata_at_bounded(
+        parent,
+        name,
+        intar_jailer_protocol::MAX_FRAME_BYTES,
+        "persisted root metadata exceeds frame limit",
+    )
+}
+
+pub(super) fn read_root_metadata_at_bounded(
+    parent: &impl std::os::fd::AsFd,
+    name: &CStr,
+    max_bytes: usize,
+    limit_error: &str,
+) -> Result<Vec<u8>> {
     let fd = open_lifecycle_entry_at(parent, name, OFlags::RDONLY)
         .context("open root metadata beneath pinned directory")?;
     validate_root_regular_file(&fd, "persisted VM metadata")?;
     let file = File::from(fd);
     let mut bytes = Vec::new();
-    file.take((intar_jailer_protocol::MAX_FRAME_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > intar_jailer_protocol::MAX_FRAME_BYTES {
-        bail!("persisted root metadata exceeds frame limit")
+    file.take((max_bytes + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        bail!(limit_error.to_owned())
     }
     Ok(bytes)
 }

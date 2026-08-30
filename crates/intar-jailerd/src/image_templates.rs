@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const MAX_IMAGE_TEMPLATE_METADATA_BYTES: usize = 4 * 1024 * 1024;
+
 pub(super) fn open_host_template_artifact(
     config: &JailerdConfig,
     metadata: &HostTemplateMetadataV2,
@@ -25,8 +27,21 @@ pub(super) fn open_host_template_artifact(
 pub(super) fn open_template_metadata(
     image_directory: &impl std::os::fd::AsFd,
 ) -> Result<ImageTemplateMetadataV2> {
-    let bytes = read_root_metadata_at(image_directory, c"metadata-v2.json")?;
-    serde_json::from_slice(&bytes).context("decode prepared image metadata")
+    let bytes = read_root_metadata_at_bounded(
+        image_directory,
+        c"metadata-v2.json",
+        MAX_IMAGE_TEMPLATE_METADATA_BYTES,
+        "prepared image metadata exceeds bounded size",
+    )?;
+    decode_template_metadata(&bytes)
+}
+
+pub(super) fn decode_template_metadata(bytes: &[u8]) -> Result<ImageTemplateMetadataV2> {
+    ensure!(
+        bytes.len() <= MAX_IMAGE_TEMPLATE_METADATA_BYTES,
+        "prepared image metadata exceeds bounded size"
+    );
+    serde_json::from_slice(bytes).context("decode prepared image metadata")
 }
 
 pub(super) fn validate_existing_image_template(
