@@ -9,6 +9,7 @@ import {
   isDisconnectedPastDeadline,
   isSilentBuildingBuild,
   isTerminalBuildPhase,
+  shouldAcknowledgeTerminalBuildReport,
   shouldAcceptBuildReport,
   shouldSkipExistingBuildForBundle,
 } from "@/lib/build-scheduler-core";
@@ -93,6 +94,40 @@ describe("build scheduler core", () => {
       shouldAcceptBuildReport({
         ...accepted,
         reportContentHash: "a".repeat(64),
+      }),
+    ).toBe(false);
+  });
+
+  it("acknowledges only an identical replay of a persisted terminal report", () => {
+    const terminal = {
+      assignedHostId: "builder-a",
+      assignedStatus: "succeeded" as const,
+      reportingHostId: "builder-a",
+      reportHostId: "builder-a",
+      assignedScenarioId: "broken-nginx",
+      reportScenarioId: "broken-nginx",
+      assignedContentHash: "f".repeat(64),
+      reportContentHash: "f".repeat(64),
+      reportPhase: "succeeded" as const,
+    };
+
+    expect(shouldAcknowledgeTerminalBuildReport(terminal)).toBe(true);
+    expect(
+      shouldAcknowledgeTerminalBuildReport({
+        ...terminal,
+        assignedStatus: "failed",
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcknowledgeTerminalBuildReport({
+        ...terminal,
+        reportPhase: "failed",
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcknowledgeTerminalBuildReport({
+        ...terminal,
+        reportHostId: "builder-b",
       }),
     ).toBe(false);
   });

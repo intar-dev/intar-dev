@@ -17,6 +17,7 @@ import {
   isDisconnectedPastDeadline,
   isSilentBuildingBuild,
   isTerminalBuildPhase,
+  shouldAcknowledgeTerminalBuildReport,
   shouldAcceptBuildReport,
   type BuilderCandidate,
 } from "@/lib/build-scheduler-core";
@@ -400,19 +401,28 @@ export async function recordImageBuildReport(
       .where(eq(imageBuilds.id, report.build_id))
       .limit(1);
     const existing = rows[0];
+    if (!existing) {
+      return { updated: false, terminal: false };
+    }
+    const reportIdentity = {
+      assignedHostId: existing.hostId,
+      assignedStatus: existing.status,
+      reportingHostId: hostId,
+      reportHostId: report.host_id,
+      assignedScenarioId: existing.scenarioId,
+      reportScenarioId: report.scenario_id,
+      assignedContentHash: existing.contentHash,
+      reportContentHash: report.content_hash,
+    };
     if (
-      !existing ||
-      !shouldAcceptBuildReport({
-        assignedHostId: existing.hostId,
-        assignedStatus: existing.status,
-        reportingHostId: hostId,
-        reportHostId: report.host_id,
-        assignedScenarioId: existing.scenarioId,
-        reportScenarioId: report.scenario_id,
-        assignedContentHash: existing.contentHash,
-        reportContentHash: report.content_hash,
+      shouldAcknowledgeTerminalBuildReport({
+        ...reportIdentity,
+        reportPhase: report.phase,
       })
     ) {
+      return { updated: false, terminal: true };
+    }
+    if (!shouldAcceptBuildReport(reportIdentity)) {
       return { updated: false, terminal: false };
     }
 

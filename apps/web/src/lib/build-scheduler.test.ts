@@ -399,8 +399,38 @@ describe("build scheduler", () => {
     expect(db.updateSet).toHaveBeenCalledTimes(2);
   });
 
-  it("ignores late build reports for non-active build rows", async () => {
-    for (const status of ["queued", "succeeded", "failed", "stale"] as const) {
+  it("acknowledges a matching terminal replay for desired-state cleanup", async () => {
+    const db = buildReportDb({
+      existingRows: [
+        {
+          hostId: "builder-1",
+          status: "succeeded",
+          scenarioId: "broken-nginx",
+          contentHash: "f".repeat(64),
+          timingsJson: {},
+        },
+      ],
+    });
+
+    await expect(
+      recordHostBuildReports(
+        db as never,
+        "builder-1",
+        [
+          buildReport({
+            phase: "succeeded",
+            scenarioId: "broken-nginx",
+            contentHash: "f".repeat(64),
+          }),
+        ],
+        2_000,
+      ),
+    ).resolves.toEqual({ terminalBuildIds: ["build-1"] });
+    expect(db.updateSet).not.toHaveBeenCalled();
+  });
+
+  it("ignores late build reports for non-active, non-matching build rows", async () => {
+    for (const status of ["queued", "failed", "stale"] as const) {
       const db = buildReportDb({
         existingRows: [
           {

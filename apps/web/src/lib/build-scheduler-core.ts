@@ -61,6 +61,39 @@ export function shouldAcceptBuildReport(input: {
 }): boolean {
   return (
     isBuildReportAcceptingStatus(input.assignedStatus) &&
+    buildReportIdentityMatches(input)
+  );
+}
+
+export function shouldAcknowledgeTerminalBuildReport(input: {
+  assignedHostId: string | null;
+  assignedStatus: ImageBuildStatus;
+  reportingHostId: string;
+  reportHostId: string;
+  assignedScenarioId: string;
+  reportScenarioId: string;
+  assignedContentHash: string;
+  reportContentHash: string;
+  reportPhase: BuildPhase;
+}): boolean {
+  return (
+    buildReportIdentityMatches(input) &&
+    ((input.assignedStatus === "succeeded" &&
+      input.reportPhase === "succeeded") ||
+      (input.assignedStatus === "failed" && input.reportPhase === "failed"))
+  );
+}
+
+function buildReportIdentityMatches(input: {
+  assignedHostId: string | null;
+  reportingHostId: string;
+  reportHostId: string;
+  assignedScenarioId: string;
+  reportScenarioId: string;
+  assignedContentHash: string;
+  reportContentHash: string;
+}): boolean {
+  return (
     input.assignedHostId === input.reportingHostId &&
     input.reportHostId === input.reportingHostId &&
     input.assignedScenarioId === input.reportScenarioId &&
