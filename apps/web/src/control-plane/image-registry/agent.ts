@@ -3,8 +3,10 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
+  hostDesiredState,
   imageBuilds,
   imageBuildBundles,
+  scenarioCatalogCandidates,
   workshopPublicationCheckpoints,
   workshopPublications,
   vmScenarios,
@@ -25,6 +27,37 @@ import {
   SHA256_HEX_RE,
 } from "./shared";
 import { imageManifestObjectKey } from "./chunks";
+
+interface AgentChunkedImageIndexSource {
+  imageKey: unknown;
+  imageId: string | null;
+  imageFormat: string;
+  imageVirtualSizeBytes: number;
+  chunkManifestSha256: string | null;
+  guestBootstrapAbi: number | null;
+  kernelSha256: string | null;
+  initrdSha256: string | null;
+  bootCmdline: string | null;
+}
+
+interface AgentImageIndexEntry {
+  image_key: string;
+  image_id?: string;
+  image_sha256?: string;
+  image_format: string;
+  image_virtual_size_bytes: number;
+  chunk_manifest_sha256?: string;
+  guest_bootstrap_abi?: number;
+  boot: {
+    kernel_sha256: string;
+    initrd_sha256: string;
+    cmdline: string;
+  };
+  bytes: number;
+  manifest_download_url?: string;
+  chunk_download_base_url?: string;
+  download_url?: string;
+}
 
 export async function handleAgentBundleDownload(
   request: Request,
@@ -177,77 +210,77 @@ export async function handleAgentImageIndex(
     )
     .where(visibleScenarioScope(verified.agent.organizationId));
 
-  const byKey = new Map<
-    string,
-    {
-      image_key: string;
-      image_id?: string;
-      image_sha256?: string;
-      image_format: string;
-      image_virtual_size_bytes: number;
-      chunk_manifest_sha256?: string;
-      guest_bootstrap_abi?: number;
-      boot: {
-        kernel_sha256: string;
-        initrd_sha256: string;
-        cmdline: string;
-      };
-      bytes: number;
-      manifest_download_url?: string;
-      chunk_download_base_url?: string;
-      download_url?: string;
-    }
-  >();
+  const byKey = new Map<string, AgentImageIndexEntry>();
 
   for (const row of rows) {
-    if (!isImageKey(row.imageKey)) continue;
-    const imageId = normalizeSha256(row.imageSha256 ?? "");
-    const chunkManifestSha256 = normalizeSha256(row.chunkManifestSha256 ?? "");
-    if (!imageId || !chunkManifestSha256) continue;
-    const kernelSha256 = normalizeSha256(row.kernelSha256 ?? "");
-    const initrdSha256 = normalizeSha256(row.initrdSha256 ?? "");
-    const bootCmdline = row.bootCmdline?.trim() ?? "";
-    if (
-      row.imageFormat !== "raw_chunks_v1" ||
-      row.imageVirtualSizeBytes <= 0 ||
-      row.guestBootstrapAbi !== 1 ||
-      !kernelSha256 ||
-      !initrdSha256 ||
-      !bootCmdline
-    ) {
-      continue;
-    }
-
-    const imageKey = registryImageKey(row.imageKey);
-    const objectKey = imageManifestObjectKey(chunkManifestSha256);
-    const object = await env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey);
-    if (
-      !object ||
-      object.customMetadata?.manifest_sha256 !== chunkManifestSha256 ||
-      object.customMetadata?.image_id !== imageId
-    ) {
-      continue;
-    }
-    if (!(await bootArtifactsExist(env, [kernelSha256, initrdSha256]))) {
-      continue;
-    }
-
-    byKey.set(`${imageKey}:${imageId}`, {
-      image_key: imageKey,
-      image_id: imageId,
-      image_format: row.imageFormat,
-      image_virtual_size_bytes: row.imageVirtualSizeBytes,
-      chunk_manifest_sha256: chunkManifestSha256,
-      guest_bootstrap_abi: 1,
-      boot: {
-        kernel_sha256: kernelSha256,
-        initrd_sha256: initrdSha256,
-        cmdline: bootCmdline,
-      },
-      bytes: row.imageVirtualSizeBytes,
-      manifest_download_url: `/agent/registry/image-manifests/${chunkManifestSha256}`,
-      chunk_download_base_url: "/agent/registry/image-chunks",
+    await addChunkedImageIndexEntry(byKey, env, {
+      imageKey: row.imageKey,
+      imageId: row.imageSha256,
+      imageFormat: row.imageFormat,
+      imageVirtualSizeBytes: row.imageVirtualSizeBytes,
+      chunkManifestSha256: row.chunkManifestSha256,
+      guestBootstrapAbi: row.guestBootstrapAbi,
+      kernelSha256: row.kernelSha256,
+      initrdSha256: row.initrdSha256,
+      bootCmdline: row.bootCmdline,
     });
+  }
+
+  const desiredRows = await db
+    .select({ docJson: hostDesiredState.docJson })
+    .from(hostDesiredState)
+    .where(eq(hostDesiredState.hostId, verified.agent.hostId))
+    .limit(1);
+  const desiredImages = new Set(
+    (desiredRows[0]?.docJson.cached_images ?? []).flatMap((image) => {
+      if (!isImageKey(image.image_key)) return [];
+      const imageId = normalizeSha256(image.image_id);
+      return imageId
+        ? [`${registryImageKey(image.image_key)}:${imageId}`]
+        : [];
+    }),
+  );
+  if (desiredImages.size > 0) {
+    const candidateRows = await db
+      .select({ manifest: scenarioCatalogCandidates.manifestJson })
+      .from(scenarioCatalogCandidates)
+      .where(
+        verified.agent.organizationId
+          ? or(
+              isNull(scenarioCatalogCandidates.organizationId),
+              eq(
+                scenarioCatalogCandidates.organizationId,
+                verified.agent.organizationId,
+              ),
+            )
+          : isNull(scenarioCatalogCandidates.organizationId),
+      );
+    for (const candidate of candidateRows) {
+      if (
+        candidate.manifest.schema_version !== 4 ||
+        !Array.isArray(candidate.manifest.vms)
+      ) {
+        continue;
+      }
+      for (const vm of candidate.manifest.vms) {
+        if (!isImageKey(vm.image_key)) continue;
+        const imageId = normalizeSha256(vm.image_id);
+        if (!imageId) continue;
+        const identity = `${registryImageKey(vm.image_key)}:${imageId}`;
+        if (!desiredImages.has(identity)) continue;
+        await addChunkedImageIndexEntry(byKey, env, {
+          imageKey: vm.image_key,
+          imageId: vm.image_id,
+          imageFormat: vm.image_format,
+          imageVirtualSizeBytes: vm.image_virtual_size_bytes,
+          chunkManifestSha256: vm.chunk_manifest_sha256,
+          guestBootstrapAbi: vm.guest_bootstrap_abi,
+          kernelSha256: vm.boot.kernel_sha256,
+          initrdSha256: vm.boot.initrd_sha256,
+          bootCmdline: vm.boot.cmdline,
+        });
+      }
+    }
   }
 
   if (verified.agent.organizationId) {
@@ -331,6 +364,64 @@ export async function handleAgentImageIndex(
     images: [...byKey.values()].sort((a, b) =>
       a.image_key.localeCompare(b.image_key),
     ),
+  });
+}
+
+async function addChunkedImageIndexEntry(
+  byKey: Map<string, AgentImageIndexEntry>,
+  env: Cloudflare.Env,
+  source: AgentChunkedImageIndexSource,
+): Promise<void> {
+  if (!isImageKey(source.imageKey)) return;
+  const imageId = normalizeSha256(source.imageId ?? "");
+  const chunkManifestSha256 = normalizeSha256(
+    source.chunkManifestSha256 ?? "",
+  );
+  const kernelSha256 = normalizeSha256(source.kernelSha256 ?? "");
+  const initrdSha256 = normalizeSha256(source.initrdSha256 ?? "");
+  const bootCmdline = source.bootCmdline?.trim() ?? "";
+  if (
+    !imageId ||
+    !chunkManifestSha256 ||
+    source.imageFormat !== "raw_chunks_v1" ||
+    !Number.isSafeInteger(source.imageVirtualSizeBytes) ||
+    source.imageVirtualSizeBytes <= 0 ||
+    source.guestBootstrapAbi !== 1 ||
+    !kernelSha256 ||
+    !initrdSha256 ||
+    !bootCmdline
+  ) {
+    return;
+  }
+
+  const imageKey = registryImageKey(source.imageKey);
+  const object = await env.VM_IMAGE_REGISTRY_BUCKET.head(
+    imageManifestObjectKey(chunkManifestSha256),
+  );
+  if (
+    !object ||
+    object.customMetadata?.manifest_sha256 !== chunkManifestSha256 ||
+    object.customMetadata?.image_id !== imageId ||
+    !(await bootArtifactsExist(env, [kernelSha256, initrdSha256]))
+  ) {
+    return;
+  }
+
+  byKey.set(`${imageKey}:${imageId}`, {
+    image_key: imageKey,
+    image_id: imageId,
+    image_format: source.imageFormat,
+    image_virtual_size_bytes: source.imageVirtualSizeBytes,
+    chunk_manifest_sha256: chunkManifestSha256,
+    guest_bootstrap_abi: 1,
+    boot: {
+      kernel_sha256: kernelSha256,
+      initrd_sha256: initrdSha256,
+      cmdline: bootCmdline,
+    },
+    bytes: source.imageVirtualSizeBytes,
+    manifest_download_url: `/agent/registry/image-manifests/${chunkManifestSha256}`,
+    chunk_download_base_url: "/agent/registry/image-chunks",
   });
 }
 

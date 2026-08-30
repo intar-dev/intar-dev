@@ -1,5 +1,6 @@
 import { gzipSync } from "node:zlib";
 import { vi } from "vitest";
+import type { HostDesiredStateV2 } from "@/generated/bridge";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
 
 const authMock = vi.hoisted(() => ({
@@ -296,11 +297,30 @@ export function pruneCompanionObject(sha256: string, uploadedMs: number) {
   };
 }
 
-export function imageIndexDb(rows: ImageIndexRow[]) {
-  const selectWhere = vi.fn().mockResolvedValue(rows);
-  const selectInnerJoin = vi.fn(() => ({ where: selectWhere }));
-  const selectFrom = vi.fn(() => ({ innerJoin: selectInnerJoin }));
-  const select = vi.fn(() => ({ from: selectFrom }));
+export function imageIndexDb(
+  rows: ImageIndexRow[],
+  desiredRows: Array<{ docJson: HostDesiredStateV2 }> = [],
+  candidateRows: Array<{ manifest: ScenarioManifestV4 }> = [],
+) {
+  let call = 0;
+  const select = vi.fn(() => {
+    const current = call++;
+    if (current === 0) {
+      const where = vi.fn().mockResolvedValue(rows);
+      const innerJoin = vi.fn(() => ({ where }));
+      const from = vi.fn(() => ({ innerJoin }));
+      return { from };
+    }
+    if (current === 1) {
+      const limit = vi.fn().mockResolvedValue(desiredRows);
+      const where = vi.fn(() => ({ limit }));
+      const from = vi.fn(() => ({ where }));
+      return { from };
+    }
+    const where = vi.fn().mockResolvedValue(candidateRows);
+    const from = vi.fn(() => ({ where }));
+    return { from };
+  });
 
   return {
     kind: "test-db",

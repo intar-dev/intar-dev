@@ -155,6 +155,108 @@ describe("image registry agent routes", () => {
     expect(bucketHead).toHaveBeenCalledTimes(6);
   });
 
+  it("advertises a verified desired candidate before catalog promotion", async () => {
+    authMock.requireVerifiedAgentRequest.mockResolvedValue({
+      ok: true,
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+    });
+    const imageId = "a".repeat(64);
+    const chunkManifestSha256 = "d".repeat(64);
+    const kernelSha256 = "b".repeat(64);
+    const initrdSha256 = "c".repeat(64);
+    const imageKey = {
+      scenario: "broken-nginx",
+      vm: "web",
+      arch: "x86_64" as const,
+    };
+    dbMock.drizzle.mockReturnValueOnce(
+      imageIndexDb(
+        [],
+        [{
+          docJson: {
+            schema_version: 4,
+            host_id: "agent-1",
+            version: 1,
+            generated_at_unix_ms: 1,
+            cached_images: [{ image_key: imageKey, image_id: imageId }],
+            cached_guest_tools: [],
+            vms: [],
+            builds: [],
+          },
+        }],
+        [{
+          manifest: {
+            schema_version: 4,
+            scenario_id: "broken-nginx",
+            name: "broken-nginx",
+            title: "Broken nginx",
+            category: "Linux",
+            description: "candidate",
+            difficulty: "easy",
+            estimated_minutes: 10,
+            tags: [],
+            briefing_markdown: "briefing",
+            solution_markdown: "solution",
+            hints: [],
+            vms: [{
+              name: "web",
+              image_key: imageKey,
+              image_id: imageId,
+              image_format: "raw_chunks_v1",
+              image_virtual_size_bytes: 4_294_967_296,
+              chunk_manifest_sha256: chunkManifestSha256,
+              guest_bootstrap_abi: 1,
+              boot: {
+                kernel_sha256: kernelSha256,
+                initrd_sha256: initrdSha256,
+                cmdline: "root=/dev/vda rw console=ttyS0",
+              },
+              cpu_millis: 1_000,
+              vcpu_count: 1,
+              memory_mib: 512,
+              disk_mib: 4_096,
+              probes: [],
+            }],
+          },
+        }],
+      ),
+    );
+    const bucketHead = vi.fn(async (key: string) => {
+      if (key === `image-manifests/v1/${chunkManifestSha256}.json`) {
+        return {
+          customMetadata: {
+            manifest_sha256: chunkManifestSha256,
+            image_id: imageId,
+          },
+        };
+      }
+      if (key === `artifacts/${kernelSha256}` || key === `artifacts/${initrdSha256}`) {
+        const sha256 = key.slice("artifacts/".length);
+        return { customMetadata: { artifact_sha256: sha256 } };
+      }
+      return null;
+    });
+
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/agent/registry/images", {
+        headers: { authorization: "Bearer agent-jwt" },
+      }),
+      {
+        DB: "db-binding",
+        VM_IMAGE_REGISTRY_BUCKET: { head: bucketHead },
+      } as unknown as Cloudflare.Env,
+    );
+
+    expect(response?.status).toBe(200);
+    await expect(response?.json()).resolves.toMatchObject({
+      images: [{
+        image_key: "broken-nginx-web-x86_64",
+        image_id: imageId,
+        chunk_manifest_sha256: chunkManifestSha256,
+      }],
+    });
+  });
+
   it("streams raw-zstd images to verified agents", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
