@@ -13,6 +13,7 @@ import {
   vmScenarioVms,
 } from "@/db/schema";
 import type { VerifiedAgentHost } from "@/control-plane/auth";
+import type { ScenarioVmManifestV4 } from "@/generated/catalog";
 import {
   jsonResponse,
   isSafeBundleRev,
@@ -226,61 +227,18 @@ export async function handleAgentImageIndex(
     });
   }
 
-  const desiredRows = await db
-    .select({ docJson: hostDesiredState.docJson })
-    .from(hostDesiredState)
-    .where(eq(hostDesiredState.hostId, verified.agent.hostId))
-    .limit(1);
-  const desiredImages = new Set(
-    (desiredRows[0]?.docJson.cached_images ?? []).flatMap((image) => {
-      if (!isImageKey(image.image_key)) return [];
-      const imageId = normalizeSha256(image.image_id);
-      return imageId
-        ? [`${registryImageKey(image.image_key)}:${imageId}`]
-        : [];
-    }),
-  );
-  if (desiredImages.size > 0) {
-    const candidateRows = await db
-      .select({ manifest: scenarioCatalogCandidates.manifestJson })
-      .from(scenarioCatalogCandidates)
-      .where(
-        verified.agent.organizationId
-          ? or(
-              isNull(scenarioCatalogCandidates.organizationId),
-              eq(
-                scenarioCatalogCandidates.organizationId,
-                verified.agent.organizationId,
-              ),
-            )
-          : isNull(scenarioCatalogCandidates.organizationId),
-      );
-    for (const candidate of candidateRows) {
-      if (
-        candidate.manifest.schema_version !== 4 ||
-        !Array.isArray(candidate.manifest.vms)
-      ) {
-        continue;
-      }
-      for (const vm of candidate.manifest.vms) {
-        if (!isImageKey(vm.image_key)) continue;
-        const imageId = normalizeSha256(vm.image_id);
-        if (!imageId) continue;
-        const identity = `${registryImageKey(vm.image_key)}:${imageId}`;
-        if (!desiredImages.has(identity)) continue;
-        await addChunkedImageIndexEntry(byKey, env, {
-          imageKey: vm.image_key,
-          imageId: vm.image_id,
-          imageFormat: vm.image_format,
-          imageVirtualSizeBytes: vm.image_virtual_size_bytes,
-          chunkManifestSha256: vm.chunk_manifest_sha256,
-          guestBootstrapAbi: vm.guest_bootstrap_abi,
-          kernelSha256: vm.boot.kernel_sha256,
-          initrdSha256: vm.boot.initrd_sha256,
-          bootCmdline: vm.boot.cmdline,
-        });
-      }
-    }
+  for (const vm of await loadDesiredCandidateVms(db, verified.agent)) {
+    await addChunkedImageIndexEntry(byKey, env, {
+      imageKey: vm.image_key,
+      imageId: vm.image_id,
+      imageFormat: vm.image_format,
+      imageVirtualSizeBytes: vm.image_virtual_size_bytes,
+      chunkManifestSha256: vm.chunk_manifest_sha256,
+      guestBootstrapAbi: vm.guest_bootstrap_abi,
+      kernelSha256: vm.boot.kernel_sha256,
+      initrdSha256: vm.boot.initrd_sha256,
+      bootCmdline: vm.boot.cmdline,
+    });
   }
 
   if (verified.agent.organizationId) {
@@ -423,6 +381,58 @@ async function addChunkedImageIndexEntry(
     manifest_download_url: `/agent/registry/image-manifests/${chunkManifestSha256}`,
     chunk_download_base_url: "/agent/registry/image-chunks",
   });
+}
+
+async function loadDesiredCandidateVms(
+  db: DrizzleD1Database,
+  agent: VerifiedAgentHost,
+): Promise<ScenarioVmManifestV4[]> {
+  const desiredRows = await db
+    .select({ docJson: hostDesiredState.docJson })
+    .from(hostDesiredState)
+    .where(eq(hostDesiredState.hostId, agent.hostId))
+    .limit(1);
+  const desiredImages = new Set(
+    (desiredRows[0]?.docJson.cached_images ?? []).flatMap((image) => {
+      if (!isImageKey(image.image_key)) return [];
+      const imageId = normalizeSha256(image.image_id);
+      return imageId
+        ? [`${registryImageKey(image.image_key)}:${imageId}`]
+        : [];
+    }),
+  );
+  if (desiredImages.size === 0) return [];
+
+  const candidateRows = await db
+    .select({ manifest: scenarioCatalogCandidates.manifestJson })
+    .from(scenarioCatalogCandidates)
+    .where(
+      agent.organizationId
+        ? or(
+            isNull(scenarioCatalogCandidates.organizationId),
+            eq(scenarioCatalogCandidates.organizationId, agent.organizationId),
+          )
+        : isNull(scenarioCatalogCandidates.organizationId),
+    );
+  const matches = new Map<string, ScenarioVmManifestV4>();
+  for (const candidate of candidateRows) {
+    if (
+      candidate.manifest.schema_version !== 4 ||
+      !Array.isArray(candidate.manifest.vms)
+    ) {
+      continue;
+    }
+    for (const vm of candidate.manifest.vms) {
+      if (!isImageKey(vm.image_key)) continue;
+      const imageId = normalizeSha256(vm.image_id);
+      if (!imageId) continue;
+      const identity = `${registryImageKey(vm.image_key)}:${imageId}`;
+      if (desiredImages.has(identity) && !matches.has(identity)) {
+        matches.set(identity, vm);
+      }
+    }
+  }
+  return [...matches.values()];
 }
 
 export async function bootArtifactsExist(
@@ -666,6 +676,16 @@ async function agentCanAccessArtifact(
     )
     .limit(1);
   if (rows.length > 0) return true;
+  const desiredCandidates = await loadDesiredCandidateVms(db, agent);
+  if (
+    desiredCandidates.some(
+      (vm) =>
+        normalizeSha256(vm.boot.kernel_sha256) === sha256 ||
+        normalizeSha256(vm.boot.initrd_sha256) === sha256,
+    )
+  ) {
+    return true;
+  }
   if (!agent.organizationId) return false;
   const workshopRows = await db
     .select({ vmImages: workshopPublicationCheckpoints.vmImagesJson })

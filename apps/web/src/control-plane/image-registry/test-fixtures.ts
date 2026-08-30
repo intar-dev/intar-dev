@@ -328,6 +328,37 @@ export function imageIndexDb(
   };
 }
 
+export function candidateArtifactDb(
+  desiredRows: Array<{ docJson: HostDesiredStateV2 }>,
+  candidateRows: Array<{ manifest: ScenarioManifestV4 }>,
+) {
+  let call = 0;
+  const select = vi.fn(() => {
+    const current = call++;
+    if (current === 0) {
+      const limit = vi.fn().mockResolvedValue([]);
+      const where = vi.fn(() => ({ limit }));
+      const innerJoin = vi.fn(() => ({ where }));
+      const from = vi.fn(() => ({ innerJoin }));
+      return { from };
+    }
+    if (current === 1) {
+      const limit = vi.fn().mockResolvedValue(desiredRows);
+      const where = vi.fn(() => ({ limit }));
+      const from = vi.fn(() => ({ where }));
+      return { from };
+    }
+    const where = vi.fn().mockResolvedValue(candidateRows);
+    const from = vi.fn(() => ({ where }));
+    return { from };
+  });
+
+  return {
+    kind: "test-db",
+    select,
+  };
+}
+
 export function bundleDownloadDb(rows: Array<{ r2Key: string }>) {
   const selectLimit = vi.fn().mockResolvedValue(rows);
   const selectWhere = vi.fn(() => ({ limit: selectLimit }));
