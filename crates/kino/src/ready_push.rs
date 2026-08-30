@@ -139,8 +139,8 @@ async fn encode_ready_frame(store: &ProbeStore) -> anyhow::Result<Vec<u8>> {
 
 #[cfg(target_os = "linux")]
 fn read_guest_phase_timings() -> intar_kino_proto::kino_v1::GuestPhaseTimingsV1 {
-    let values = std::fs::read_to_string(PHASE_TIMINGS_PATH)
-        .unwrap_or_default()
+    let content = std::fs::read_to_string(PHASE_TIMINGS_PATH).unwrap_or_default();
+    let values = content
         .lines()
         .filter_map(|line| line.split_once('='))
         .filter_map(|(key, value)| value.parse::<u64>().ok().map(|value| (key, value)))
