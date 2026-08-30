@@ -22,7 +22,10 @@ import {
   type BuilderCandidate,
 } from "@/lib/build-scheduler-core";
 import { removeDesiredBuild, upsertDesiredBuild } from "@/lib/desired-state";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import {
+  loadOrCreateHostDesiredState,
+  mutateStoredHostDesiredState,
+} from "@/lib/desired-state-store";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { hostHealth } from "@/lib/host-health";
 import { createAppId } from "@/lib/id";
@@ -356,17 +359,95 @@ export async function maintainHostBuildAssignments(
   requeuedAssignedBuildIds: string[];
   staleBuildIds: string[];
   reassigned: Array<{ buildId: string; hostId: string }>;
+  reconciledDesiredBuildIds: string[];
 }> {
   const [requeuedAssignedBuildIds, staleBuildIds] = await Promise.all([
     requeueAssignedBuildsForDisconnectedHost(db, hostId, nowUnixMs),
     markSilentBuildingBuildsStale(db, hostId, nowUnixMs),
   ]);
   const reassigned = await assignQueuedImageBuilds(db, nowUnixMs);
+  const reconciledDesiredBuildIds = await reconcileAssignedBuildsForHost(
+    db,
+    hostId,
+    nowUnixMs,
+  );
   return {
     requeuedAssignedBuildIds,
     staleBuildIds,
     reassigned,
+    reconciledDesiredBuildIds,
   };
+}
+
+export async function reconcileAssignedBuildsForHost(
+  db: DrizzleD1Database,
+  hostId: string,
+  nowUnixMs: number,
+): Promise<string[]> {
+  const assignments = await db
+    .select({
+      buildId: imageBuilds.id,
+      scenarioId: imageBuilds.scenarioId,
+      arch: imageBuilds.arch,
+      rev: imageBuilds.rev,
+      contentHash: imageBuilds.contentHash,
+      bundleRef: imageBuildBundles.r2Key,
+    })
+    .from(imageBuilds)
+    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
+    .where(
+      and(
+        eq(imageBuilds.hostId, hostId),
+        inArray(imageBuilds.status, ["assigned", "building"]),
+      ),
+    );
+  if (!assignments.length) return [];
+
+  const before = await loadOrCreateHostDesiredState(db, hostId, nowUnixMs);
+  const desiredIds = new Set(before.builds.map((build) => build.build_id));
+  const missingIds = assignments
+    .filter((assignment) => !desiredIds.has(assignment.buildId))
+    .map((assignment) => assignment.buildId);
+  if (!missingIds.length) return [];
+
+  await mutateStoredHostDesiredState(db, hostId, nowUnixMs, (draft) => {
+    for (const assignment of assignments) {
+      upsertDesiredBuild(
+        draft,
+        desiredBuildFromSource({
+          buildId: assignment.buildId,
+          scenarioId: assignment.scenarioId,
+          arch: assignment.arch,
+          rev: assignment.rev,
+          contentHash: assignment.contentHash,
+          bundleRef: assignment.bundleRef,
+        }),
+      );
+    }
+  });
+
+  const stillActive = await db
+    .select({ id: imageBuilds.id })
+    .from(imageBuilds)
+    .where(
+      and(
+        eq(imageBuilds.hostId, hostId),
+        inArray(imageBuilds.status, ["assigned", "building"]),
+        inArray(
+          imageBuilds.id,
+          assignments.map((assignment) => assignment.buildId),
+        ),
+      ),
+    );
+  const activeIds = new Set(stillActive.map((row) => row.id));
+  const supersededIds = assignments
+    .map((assignment) => assignment.buildId)
+    .filter((buildId) => !activeIds.has(buildId));
+  await removeDesiredBuildsFromHost(db, hostId, supersededIds, nowUnixMs, {
+    wake: false,
+  });
+
+  return missingIds.filter((buildId) => activeIds.has(buildId));
 }
 
 export async function recordImageBuildReport(

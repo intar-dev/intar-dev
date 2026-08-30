@@ -17,6 +17,7 @@ import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import {
   maintainHostBuildAssignments,
   queueImageBuildsFromBundle,
+  reconcileAssignedBuildsForHost,
   recordImageBuildReport,
 } from "@/lib/build-scheduler";
 import {
@@ -188,6 +189,53 @@ describe("build scheduler bundle supersession", () => {
     await expect(db.select().from(imageBuildCoordinationLocks)).resolves.toEqual(
       [],
     );
+  });
+
+  it("repairs an assigned build missing from host desired state", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+    await seedBuilder(db, now);
+    await db.insert(imageBuildBundles).values({
+      rev: "bundle-repair",
+      r2Key: "builds/bundles/bundle-repair.tar.gz",
+      metaJson: {
+        buildFormatVersion: "intar-image-build-v10",
+        scenarios: [],
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(imageBuilds).values({
+      ...oldBuild("assigned-repair", "a", "assigned", "builder-1", now),
+      rev: "bundle-repair",
+    });
+    const desired = createEmptyHostDesiredState({
+      hostId: "builder-1",
+      nowUnixMs: now,
+    });
+    await db.insert(hostDesiredState).values({
+      hostId: "builder-1",
+      version: desired.version,
+      docJson: desired,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expect(
+      reconcileAssignedBuildsForHost(db, "builder-1", now + 1),
+    ).resolves.toEqual(["assigned-repair"]);
+
+    const [stored] = await db
+      .select({ docJson: hostDesiredState.docJson })
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, "builder-1"));
+    expect(stored?.docJson.builds).toEqual([
+      expect.objectContaining({
+        build_id: "assigned-repair",
+        scenario_id: "broken-nginx",
+        bundle_ref: "builds/bundles/bundle-repair.tar.gz",
+      }),
+    ]);
   });
 
   it("retries desired cleanup left by an interrupted supersession", async () => {
