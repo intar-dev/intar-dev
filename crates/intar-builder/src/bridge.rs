@@ -189,6 +189,13 @@ async fn connect_once(
     )
     .await?;
     send_state_report(&mut write, cfg, db, current_desired_state.as_ref()).await?;
+    replay_desired_build_reports(
+        &mut write,
+        &cfg.bridge.host_id,
+        db,
+        current_desired_state.as_ref(),
+    )
+    .await?;
 
     let mut state_report_interval = interval(Duration::from_secs(
         cfg.bridge.heartbeat_interval_seconds.max(1),
@@ -252,9 +259,23 @@ where
             *current_desired_state = Some(desired_state);
             desired_ready.send_modify(|revision| *revision = revision.saturating_add(1));
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
+            replay_desired_build_reports(
+                write,
+                &cfg.bridge.host_id,
+                db,
+                current_desired_state.as_ref(),
+            )
+            .await?;
         }
         BridgeMessageV7::SyncRequest(_) => {
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
+            replay_desired_build_reports(
+                write,
+                &cfg.bridge.host_id,
+                db,
+                current_desired_state.as_ref(),
+            )
+            .await?;
         }
         BridgeMessageV7::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
@@ -378,6 +399,41 @@ where
         }),
     )
     .await
+}
+
+async fn replay_desired_build_reports<W>(
+    write: &mut W,
+    host_id: &str,
+    db: &BuilderDb,
+    desired: Option<&HostDesiredStateV2>,
+) -> Result<()>
+where
+    W: Sink<Message> + Unpin,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
+    let Some(desired) = desired else {
+        return Ok(());
+    };
+    for report in build_reports_for_desired_jobs(db, host_id, &desired.builds)? {
+        send_build_report(write, host_id, report).await?;
+    }
+    Ok(())
+}
+
+fn build_reports_for_desired_jobs(
+    db: &BuilderDb,
+    host_id: &str,
+    desired: &[intar_contracts::bridge::DesiredBuildV1],
+) -> Result<Vec<BuildReportV1>> {
+    let reports = desired
+        .iter()
+        .map(|build| db.load_build_job(&build.build_id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .map(|row| build_report_from_job(host_id, row))
+        .collect::<Vec<_>>();
+    Ok(reports)
 }
 
 async fn send_sync_request<W>(write: &mut W, host_id: &str, reason: SyncRequestReason) -> Result<()>
@@ -844,8 +900,47 @@ mod tests {
 
     use super::{
         BuilderClientHelloInput, advertised_desired_version, build_host_state_report,
-        builder_client_hello, can_open_char_device, parse_meminfo_kib, validate_desired_state,
+        build_reports_for_desired_jobs, builder_client_hello, can_open_char_device,
+        parse_meminfo_kib, validate_desired_state,
     };
+
+    #[test]
+    fn reconnect_replays_reports_for_every_still_desired_local_job() {
+        let db = BuilderDb::open_in_memory().unwrap();
+        let succeeded = intar_contracts::bridge::DesiredBuildV1 {
+            build_id: "build-succeeded".to_string(),
+            scenario_id: "scenario-a".to_string(),
+            arch: ImageArchitecture::X86_64,
+            rev: "revision-1".to_string(),
+            content_hash: "a".repeat(64),
+            bundle_ref: "builds/bundles/revision-1.tar.gz".to_string(),
+        };
+        let queued = intar_contracts::bridge::DesiredBuildV1 {
+            build_id: "build-queued".to_string(),
+            scenario_id: "scenario-b".to_string(),
+            arch: ImageArchitecture::X86_64,
+            rev: "revision-1".to_string(),
+            content_hash: "b".repeat(64),
+            bundle_ref: "builds/bundles/revision-1.tar.gz".to_string(),
+        };
+        db.upsert_build_job(&succeeded, "succeeded", 1, None, 1000)
+            .unwrap();
+        db.upsert_build_job(&queued, "queued", 0, None, 1000)
+            .unwrap();
+
+        let reports =
+            build_reports_for_desired_jobs(&db, "builder-1", &[succeeded, queued]).unwrap();
+
+        assert_eq!(reports.len(), 2);
+        assert_eq!(
+            reports[0].phase,
+            intar_contracts::bridge::BuildPhase::Succeeded
+        );
+        assert_eq!(
+            reports[1].phase,
+            intar_contracts::bridge::BuildPhase::Queued
+        );
+    }
 
     #[test]
     fn char_device_probe_rejects_missing_and_regular_files() {
