@@ -40,6 +40,7 @@ import {
   parseRunState,
   scenarioRunDifficulty,
 } from "./storage";
+import { loadScenarioCapacityPressure } from "./start";
 import {
   deriveScenarioRunActivity,
   deriveScenarioRunReplayState,
@@ -339,10 +340,14 @@ export function newScenarioProgress(): ScenarioProgress {
 export async function listScenarioCatalogForUser(
   userId: string,
   organizationId: string | null = null,
+  options: { includeCapacity?: boolean } = {},
 ): Promise<ScenarioCatalogWireResponse> {
-  const [scenarios, progressByScenario] = await Promise.all([
+  const [scenarios, progressByScenario, capacityPressure] = await Promise.all([
     listEnabledScenariosForUser({ organizationId }),
     getScenarioProgressByScenario(userId, organizationId),
+    options.includeCapacity
+      ? loadScenarioCapacityPressure(organizationId)
+      : null,
   ]);
   const wireScenarios: ScenarioCatalogWireEntry[] = scenarios.map(
     (scenario) => ({
@@ -398,7 +403,10 @@ export async function listScenarioCatalogForUser(
     });
   }
 
-  return { courses: projectedCourses };
+  return {
+    courses: projectedCourses,
+    capacityPressure,
+  };
 }
 
 /**

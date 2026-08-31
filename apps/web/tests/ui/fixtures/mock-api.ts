@@ -76,6 +76,7 @@ function nativeSshSessionFixture(input: {
 function nestedCourseCatalog(
   scenarios: Array<Record<string, unknown>>,
   courses: Array<Record<string, unknown>>,
+  capacityPressure: number | null = 68,
 ) {
   const scenarioById = new Map(
     scenarios.flatMap((scenario) =>
@@ -116,6 +117,7 @@ function nestedCourseCatalog(
   );
 
   return {
+    capacityPressure: scenarios.length ? capacityPressure : null,
     courses: [
       ...authored,
       ...(generalScenarios.length
@@ -925,7 +927,11 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       if (pathname === "/api/scenarios" && method === "GET") {
         await json(
           route,
-          nestedCourseCatalog(server.state.scenarios, server.state.courses),
+          nestedCourseCatalog(
+            server.state.scenarios,
+            server.state.courses,
+            server.state.capacityPressure,
+          ),
         );
         return;
       }
@@ -982,8 +988,13 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           ? nestedCourseCatalog(
               server.state.organizationScenarios,
               server.state.organizationCourses,
+              server.state.capacityPressure,
             )
-          : nestedCourseCatalog(server.state.scenarios, server.state.courses);
+          : nestedCourseCatalog(
+              server.state.scenarios,
+              server.state.courses,
+              server.state.capacityPressure,
+            );
         await json(route, {
           scenario: {
             ...server.state.scenarioDetail,
@@ -1342,6 +1353,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           nestedCourseCatalog(
             server.state.organizationScenarios,
             server.state.organizationCourses,
+            server.state.capacityPressure,
           ),
         );
         return;

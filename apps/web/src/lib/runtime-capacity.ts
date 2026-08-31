@@ -39,7 +39,13 @@ export interface ActiveRuntimeResourceSnapshot {
  */
 export async function loadActiveRuntimeResourceSnapshot(
   now: number,
+  hostIds?: readonly string[],
 ): Promise<ActiveRuntimeResourceSnapshot> {
+  const scopedHostIds = hostIds ? [...new Set(hostIds)] : null;
+  if (scopedHostIds?.length === 0) {
+    return { reservations: [], reservedVms: [] };
+  }
+  const hostPlaceholders = scopedHostIds?.map(() => "?").join(", ");
   const [reservationRows, reservedVmRows] = await Promise.all([
     env.DB.prepare(
       `SELECT
@@ -47,9 +53,10 @@ export async function loadActiveRuntimeResourceSnapshot(
          state, expires_at
        FROM host_resource_reservations
        WHERE state IN ('pending', 'committed')
-         AND (state = 'committed' OR expires_at IS NULL OR expires_at > ?)`,
+         AND (state = 'committed' OR expires_at IS NULL OR expires_at > ?)
+         ${hostPlaceholders ? `AND host_id IN (${hostPlaceholders})` : ""}`,
     )
-      .bind(now)
+      .bind(now, ...(scopedHostIds ?? []))
       .all<RuntimeResourceReservationSnapshot>(),
     env.DB.prepare(
       `SELECT
@@ -62,9 +69,14 @@ export async function loadActiveRuntimeResourceSnapshot(
            reservation.state = 'committed'
            OR reservation.expires_at IS NULL
            OR reservation.expires_at > ?
-         )`,
+         )
+         ${
+           hostPlaceholders
+             ? `AND reservation.host_id IN (${hostPlaceholders})`
+             : ""
+         }`,
     )
-      .bind(now)
+      .bind(now, ...(scopedHostIds ?? []))
       .all<RuntimeReservedVmSnapshot>(),
   ]);
   return {

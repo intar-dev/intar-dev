@@ -28,6 +28,7 @@ export interface MockApiState {
   variant: DataVariant;
   runState: RunFixtureState;
   terminalMode: TerminalMode;
+  capacityPressure: number | null;
   scenarios: Array<Record<string, unknown>>;
   courses: Array<Record<string, unknown>>;
   organizationScenarios: Array<Record<string, unknown>>;

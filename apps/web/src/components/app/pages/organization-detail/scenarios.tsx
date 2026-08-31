@@ -45,6 +45,7 @@ import {
   getCourseCurriculumState,
   type CourseCatalogSectionView,
 } from "../learn/course-catalog";
+import { CourseCapacityPressure } from "../learn/CourseCatalogSections";
 import { CourseDescription } from "../learn/CourseDescription";
 import { CourseCatalogLink } from "../learn/course-route-links";
 import {
@@ -308,6 +309,9 @@ export function OrganizationScenariosSection({
 
   return (
     <div className="space-y-8">
+      {catalog.data && entries.length ? (
+        <CourseCapacityPressure pressure={catalog.data.capacityPressure} />
+      ) : null}
       {catalog.isLoading && !catalog.data ? (
         <div role="status" className="space-y-4">
           <span className="sr-only">Loading organization courses…</span>

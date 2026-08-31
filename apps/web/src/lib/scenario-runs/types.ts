@@ -89,6 +89,8 @@ export type ScenarioCatalogCourseWireEntry =
 
 export interface ScenarioCatalogWireResponse {
   courses: ScenarioCatalogCourseWireEntry[];
+  /** Fleet pressure from the most-used CPU, memory, or disk pool. */
+  capacityPressure: number | null;
 }
 
 export interface ScenarioDetail {

@@ -1299,13 +1299,16 @@ async function revokeScenarioRouteTypesForUser(
   await revokeAllRoutes(routeUsernames, deleteStargateRoute);
 }
 
-export async function selectScenarioHosts(
-  requiredImages: RequiredScenarioImage[],
+/**
+ * Loads hosts that can accept a learner scenario before image and resource
+ * checks. Keep this shared with the catalog capacity signal so its policy
+ * cannot say a host is usable when admission would reject it.
+ */
+async function loadEligibleScenarioLaunchHosts(
   organizationId: string | null = null,
-  requiredResources?: RuntimeResourceDemand,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
-): Promise<HostSelectionResult> {
+) {
   const db = drizzle(env.DB);
   const rows = await db
     .select({
@@ -1373,6 +1376,129 @@ export async function selectScenarioHosts(
         hostSupportsSpeedRedesign(row.actualReport) &&
         (!requireRunCli || hostSupportsRunCliV1(row.actualReport)),
     );
+
+  return candidates;
+}
+
+/**
+ * Sums the usable runner fleet, then reports the fullest shared resource pool.
+ * A high disk allowance must not hide exhausted CPU or memory.
+ */
+export async function loadScenarioCapacityPressure(
+  organizationId: string | null = null,
+  now = Date.now(),
+  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
+): Promise<number | null> {
+  const hosts = await loadEligibleScenarioLaunchHosts(
+    organizationId,
+    now,
+    requireRunCli,
+  );
+  if (!hosts.length) return null;
+
+  const snapshot = await loadActiveRuntimeResourceSnapshot(
+    now,
+    hosts.map((host) => host.id),
+  );
+  let validHostCount = 0;
+  let totalCpuMillis = 0;
+  let availableCpuMillis = 0;
+  let totalMemoryMib = 0;
+  let availableMemoryMib = 0;
+  let totalDiskMib = 0;
+  let availableDiskMib = 0;
+
+  for (const host of hosts) {
+    const report = host.actualReport;
+    const cpu = strictCpuCapacity(report);
+    const capacity = report?.capacity;
+    if (
+      !report ||
+      !cpu ||
+      !capacity ||
+      !isPositiveSafeInteger(capacity.memory_total_mib) ||
+      !isPositiveSafeInteger(capacity.disk_total_mib)
+    ) {
+      continue;
+    }
+    const available = availableRuntimeHostResources({
+      hostId: host.id,
+      report,
+      snapshot,
+    });
+    if (!available) continue;
+
+    validHostCount += 1;
+    totalCpuMillis += cpu.schedulableCpuMillis;
+    availableCpuMillis += available.cpuMillis;
+    totalMemoryMib += capacity.memory_total_mib;
+    availableMemoryMib += available.memoryMib;
+    totalDiskMib += capacity.disk_total_mib;
+    availableDiskMib += available.worstCaseDiskMib;
+  }
+
+  if (
+    validHostCount === 0 ||
+    ![
+      totalCpuMillis,
+      availableCpuMillis,
+      totalMemoryMib,
+      availableMemoryMib,
+      totalDiskMib,
+      availableDiskMib,
+    ].every(Number.isSafeInteger)
+  ) {
+    return null;
+  }
+
+  return capacityPressurePercent({
+    totalCpuMillis,
+    availableCpuMillis,
+    totalMemoryMib,
+    availableMemoryMib,
+    totalDiskMib,
+    availableDiskMib,
+  });
+}
+
+function capacityPressurePercent(input: {
+  totalCpuMillis: number;
+  availableCpuMillis: number;
+  totalMemoryMib: number;
+  availableMemoryMib: number;
+  totalDiskMib: number;
+  availableDiskMib: number;
+}): number {
+  const pressure = Math.max(
+    usedFraction(input.totalCpuMillis, input.availableCpuMillis),
+    usedFraction(input.totalMemoryMib, input.availableMemoryMib),
+    usedFraction(input.totalDiskMib, input.availableDiskMib),
+  );
+  return pressure >= 1 ? 100 : Math.min(99, Math.round(pressure * 100));
+}
+
+function usedFraction(total: number, available: number): number {
+  if (total <= 0) return 1;
+  return 1 - Math.min(1, Math.max(0, available) / total);
+}
+
+function isPositiveSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+export async function selectScenarioHosts(
+  requiredImages: RequiredScenarioImage[],
+  organizationId: string | null = null,
+  requiredResources?: RuntimeResourceDemand,
+  now = Date.now(),
+  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
+): Promise<HostSelectionResult> {
+  const db = drizzle(env.DB);
+  const candidates = await loadEligibleScenarioLaunchHosts(
+    organizationId,
+    now,
+    requireRunCli,
+  );
 
   if (!candidates.length) {
     return { ok: false, reason: "unavailable" };

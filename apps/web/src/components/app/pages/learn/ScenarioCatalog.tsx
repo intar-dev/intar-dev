@@ -63,7 +63,10 @@ import type {
   ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
 import { findScenarioCourseLocation } from "@/lib/course-location";
-import { CourseCatalogBrowser } from "./CourseCatalogSections";
+import {
+  CourseCapacityPressure,
+  CourseCatalogBrowser,
+} from "./CourseCatalogSections";
 import {
   buildCourseCatalogSection,
   buildCourseCatalogView,
@@ -513,6 +516,10 @@ function PublicCourseCatalogPage({ courseId }: { courseId: string | null }) {
             </Button>
           </AlertAction>
         </Alert>
+      ) : null}
+
+      {courses.data && allEntries.length ? (
+        <CourseCapacityPressure pressure={courses.data.capacityPressure} />
       ) : null}
 
       {!courseId && activeRuns.length ? (

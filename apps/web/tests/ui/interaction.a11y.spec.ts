@@ -407,7 +407,13 @@ test("course progress tracks keep one measure across responsive layouts", async 
   await page.setViewportSize({ width: 1280, height: 800 });
   await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
 
-  const tracks = page.getByRole("progressbar");
+  const capacity = page.getByRole("progressbar", {
+    name: "Lab capacity used",
+  });
+  await expect(capacity).toHaveAttribute("aria-valuenow", "68");
+  const tracks = page.getByRole("progressbar", {
+    name: /solved progress/,
+  });
   await expect(tracks).toHaveCount(2);
 
   for (const viewport of [
@@ -453,6 +459,31 @@ test("course progress tracks keep one measure across responsive layouts", async 
     }
     await expectNoHorizontalOverflow(page);
   }
+});
+
+test("course capacity reports pool use without promising a launch", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+  const capacity = page.locator("[data-capacity-pressure]");
+  await expect(capacity.getByRole("status")).toHaveText("68% pool use");
+
+  ui.server.state.capacityPressure = 100;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+  await expect(capacity.getByRole("status")).toHaveText(
+    "100% pool use · At capacity",
+  );
+  await expect(
+    capacity.getByRole("progressbar", { name: "Lab capacity used" }),
+  ).toHaveAttribute("aria-valuenow", "100");
+
+  ui.server.state.capacityPressure = null;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+  await expect(capacity.getByRole("status")).toHaveText("Unavailable");
+  await expect(capacity.getByRole("progressbar")).toHaveCount(0);
 });
 
 test("course scenarios return to the selected filtered public course", async ({
@@ -1406,7 +1437,7 @@ test("200% text remains operable without page overflow", async ({
   await page.waitForTimeout(100);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   const progressWidths = await page
-    .getByRole("progressbar")
+    .getByRole("progressbar", { name: /solved progress/ })
     .evaluateAll((elements) =>
       elements.map((element) => element.getBoundingClientRect().width),
     );

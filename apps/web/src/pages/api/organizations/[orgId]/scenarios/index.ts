@@ -25,6 +25,7 @@ export const GET: APIRoute = async ({ request, params }) => {
     const catalog = await listScenarioCatalogForUser(
       authz.context.userId,
       organizationId,
+      { includeCapacity: true },
     );
     return jsonResponse(catalog);
   } catch (error) {

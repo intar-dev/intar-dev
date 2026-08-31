@@ -4,6 +4,7 @@ import {
   ArrowRight,
   BookOpenCheck,
   Clock3,
+  Gauge,
   Search,
 } from "lucide-react";
 import {
@@ -24,6 +25,54 @@ import {
   type CourseCatalogSectionView,
 } from "./course-catalog";
 import { CourseDescription } from "./CourseDescription";
+
+export function CourseCapacityPressure({
+  pressure,
+}: {
+  pressure: number | null;
+}) {
+  const summary =
+    pressure === null
+      ? "Unavailable"
+      : pressure === 100
+        ? "100% pool use · At capacity"
+        : `${pressure}% pool use`;
+  const barClass =
+    pressure === 100 ? "bg-destructive" : "bg-muted-foreground";
+
+  return (
+    <div
+      aria-label="Lab capacity"
+      className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground"
+      data-capacity-pressure
+    >
+      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+        <Gauge className="size-3.5" aria-hidden />
+        Lab capacity
+      </span>
+      <span role="status" aria-atomic="true" className="tabular-nums">
+        {summary}
+      </span>
+      <span
+        role={pressure === null ? undefined : "progressbar"}
+        aria-label={pressure === null ? undefined : "Lab capacity used"}
+        aria-valuemin={pressure === null ? undefined : 0}
+        aria-valuemax={pressure === null ? undefined : 100}
+        aria-valuenow={pressure ?? undefined}
+        className="block h-1 w-24 bg-border/70 sm:w-32"
+      >
+        <span
+          className={`block h-full ${barClass}`}
+          style={{ width: `${pressure ?? 0}%` }}
+        />
+      </span>
+      <span className="sr-only">
+        This is the highest use across pooled CPU, memory, and disk. Large labs
+        still need one runner.
+      </span>
+    </div>
+  );
+}
 
 export interface CourseScenarioRendererContext {
   courseKey: string;

@@ -1016,6 +1016,7 @@ export function createMockApiState(input?: {
         : runState === "failed"
           ? "error"
           : "connected",
+    capacityPressure: empty ? null : 68,
     scenarios: empty ? [] : scenarios,
     courses: empty ? [] : courses,
     organizationScenarios: empty ? [] : organizationScenarios,

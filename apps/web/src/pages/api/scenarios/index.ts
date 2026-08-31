@@ -8,6 +8,10 @@ export const GET: APIRoute = async ({ request }) => {
   const authz = await requireUserContext(request);
   if (!authz.ok) return authz.response;
 
-  const catalog = await listScenarioCatalogForUser(authz.context.userId);
+  const catalog = await listScenarioCatalogForUser(
+    authz.context.userId,
+    null,
+    { includeCapacity: true },
+  );
   return jsonResponse(catalog);
 };

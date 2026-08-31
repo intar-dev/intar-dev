@@ -372,6 +372,7 @@ describe("scenario course catalog reads", () => {
 
   it("preserves public curriculum order while hiding unavailable members", async () => {
     const catalog = await listScenarioCatalogForUser("learner");
+    expect(catalog.capacityPressure).toBeNull();
     expect(catalog.courses).toEqual([
       {
         kind: "authored",

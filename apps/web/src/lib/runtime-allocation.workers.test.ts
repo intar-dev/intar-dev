@@ -24,13 +24,54 @@ import {
   withRuntimeAllocationLock,
 } from "@/lib/runtime-allocation-lock";
 import { createRuntimeExecution } from "@/lib/runtime-executions";
-import { selectScenarioHosts } from "@/lib/scenario-runs/start";
+import {
+  loadScenarioCapacityPressure,
+  selectScenarioHosts,
+} from "@/lib/scenario-runs/start";
 import { calculateWorkshopCapacity } from "@/lib/workshops/capacity";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("shared runtime allocation fence", () => {
   beforeEach(async () => {
     await resetD1Database();
+  });
+
+  it("adds eligible host capacity before it calculates pressure", async () => {
+    const now = Date.now();
+    await seedRuntimePool(now);
+    const secondReport = hostReport(now);
+    secondReport.host_id = "runner-two";
+    secondReport.capacity.memory_available_mib = 16_384;
+    secondReport.capacity.disk_available_mib = 40_960;
+    const db = drizzle(env.DB);
+    await db.batch([
+      db.insert(agentHosts).values({
+        id: "runner-two",
+        userId: "owner",
+        organizationId: "academy",
+        name: "Runner two",
+        role: "agent",
+        scenarioEnabled: true,
+        disabled: false,
+        connected: true,
+        activeSessionId: "runner-two-session",
+        lastHeartbeatAt: now,
+        createdAt: now,
+        updatedAt: now,
+      }),
+      db.insert(hostActualState).values({
+        hostId: "runner-two",
+        appliedDesiredVersion: 0,
+        observedAt: now,
+        reportJson: secondReport,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ]);
+
+    await expect(
+      loadScenarioCapacityPressure("academy", now),
+    ).resolves.toBe(25);
   });
 
   it("serializes simultaneous scenario and workshop admission in one organization", async () => {
