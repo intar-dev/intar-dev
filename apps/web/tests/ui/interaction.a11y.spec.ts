@@ -400,6 +400,49 @@ test("public courses preserve curriculum order and place standalone work in Gene
   expect(postgresUrl.searchParams.get("q")).toBeNull();
 });
 
+test("breadcrumbs keep two course levels and three scenario levels at one size", async ({
+  page,
+  ui,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await ui.open({
+    ...routeCase("scenario-catalog"),
+    path: "/courses/operations",
+    theme: "light",
+  });
+
+  let breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+  await expect(breadcrumb.getByRole("listitem")).toHaveCount(2);
+  await expect(
+    breadcrumb.getByRole("link", { name: "Courses", exact: true }),
+  ).toBeVisible();
+  expect(
+    await breadcrumb.locator("a, h1").evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).fontSize),
+    ),
+  ).toEqual(["14px", "14px"]);
+
+  await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
+
+  breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+  await expect(breadcrumb.getByRole("listitem")).toHaveCount(3);
+  await expect(
+    breadcrumb.getByRole("link", { name: "Courses", exact: true }),
+  ).toBeVisible();
+  await expect(
+    breadcrumb.getByRole("link", { name: "Linux operations" }),
+  ).toBeVisible();
+  expect(
+    await breadcrumb.locator("a, h1").evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).fontSize),
+    ),
+  ).toEqual(["14px", "14px", "14px"]);
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+  });
+  await expectNoHorizontalOverflow(page);
+});
+
 test("course progress tracks keep one measure across responsive layouts", async ({
   page,
   ui,

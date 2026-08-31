@@ -51,21 +51,23 @@ function labelForFinal(
 
 // Page data replaces these labels after load. Until then, never put internal
 // scenario or run identifiers into the visible heading.
-export function safeDynamicPageLabel(pathname: string): string | null {
-  if (/^\/runs\/[^/]+$/.test(pathname)) {
-    return "Lab run";
-  }
-  if (/^\/courses\/[^/]+\/[^/]+$/.test(pathname)) {
-    return "Lab";
-  }
-  if (
+function isScenarioPage(pathname: string): boolean {
+  return (
+    /^\/courses\/[^/]+\/[^/]+$/.test(pathname) ||
     /^\/organizations\/[^/]+\/courses\/(?:public|private)\/[^/]+\/[^/]+$/.test(
       pathname,
     ) ||
     /^\/organizations\/[^/]+\/courses\/general-practice\/[^/]+$/.test(
       pathname,
     )
-  ) {
+  );
+}
+
+export function safeDynamicPageLabel(pathname: string): string | null {
+  if (/^\/runs\/[^/]+$/.test(pathname)) {
+    return "Lab run";
+  }
+  if (isScenarioPage(pathname)) {
     return "Lab";
   }
   return null;
@@ -93,7 +95,7 @@ interface Crumb {
   to?: string | undefined;
 }
 
-function buildCrumbs(
+export function buildCrumbs(
   pathname: string,
   overrides: ReadonlyMap<string, string>,
 ): Crumb[] {
@@ -112,8 +114,9 @@ function buildCrumbs(
           },
     );
   });
-  // The sidebar names the section — two segments of context are the ceiling.
-  return crumbs.slice(-2);
+  // A lab needs its section, course, and current scenario. Other pages keep
+  // the compact section/current-page pair because the sidebar adds context.
+  return crumbs.slice(isScenarioPage(pathname) ? -3 : -2);
 }
 
 // The one bar of app chrome: navigation trigger, breadcrumb-as-title (the
@@ -131,7 +134,7 @@ export function AppBar() {
   const chrome = usePageChromeValue(pathname);
   const crumbs = buildCrumbs(pathname, overrides);
   const final = crumbs[crumbs.length - 1];
-  const ancestor = crumbs.length > 1 ? crumbs[0] : undefined;
+  const ancestors = crumbs.slice(0, -1);
 
   // Every app route's single visible h1, in every data state. Never wrap it
   // in BreadcrumbPage or add aria-current — a role would strip the heading
@@ -139,7 +142,11 @@ export function AppBar() {
   const heading = final ? (
     <h1
       title={final.label}
-      className="min-w-0 truncate text-card-title"
+      className={
+        ancestors.length
+          ? "min-w-0 truncate text-sm font-semibold text-foreground"
+          : "min-w-0 truncate text-card-title"
+      }
     >
       {final.label}
     </h1>
@@ -152,21 +159,28 @@ export function AppBar() {
         orientation="vertical"
         className="data-[orientation=vertical]:h-4"
       />
-      {ancestor?.to ? (
+      {ancestors.length ? (
         <nav aria-label="Breadcrumb" className="flex min-w-0 items-center">
           <ol className="flex min-w-0 items-center gap-1.5">
-            <li className="hidden shrink-0 items-center gap-1.5 sm:flex">
-              <Link
-                to={ancestor.to}
-                className="rounded-sm text-caption transition-colors hover:text-foreground"
-              >
-                {ancestor.label}
-              </Link>
-              <ChevronRight
-                aria-hidden="true"
-                className="size-3.5 text-muted-foreground/60"
-              />
-            </li>
+            {ancestors.map((ancestor) =>
+              ancestor.to ? (
+                <li
+                  key={ancestor.to}
+                  className="hidden shrink-0 items-center gap-1.5 sm:flex"
+                >
+                  <Link
+                    to={ancestor.to}
+                    className="rounded-sm text-sm text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {ancestor.label}
+                  </Link>
+                  <ChevronRight
+                    aria-hidden="true"
+                    className="size-3.5 text-muted-foreground/60"
+                  />
+                </li>
+              ) : null,
+            )}
             <li className="flex min-w-0 items-center">{heading}</li>
           </ol>
         </nav>

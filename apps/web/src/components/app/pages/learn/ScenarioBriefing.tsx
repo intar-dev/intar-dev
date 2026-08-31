@@ -576,11 +576,13 @@ function courseBreadcrumbLabels(
       return { [`/courses/${route.courseId}`]: location.courseTitle };
     case "organization-public":
       return {
+        [`/organizations/${route.organizationId}/courses/public`]: "Courses",
         [`/organizations/${route.organizationId}/courses/public/${route.courseId}`]:
           location.courseTitle,
       };
     case "organization-private":
       return {
+        [`/organizations/${route.organizationId}/courses/private`]: "Courses",
         [`/organizations/${route.organizationId}/courses/private/${route.courseId}`]:
           location.courseTitle,
       };
