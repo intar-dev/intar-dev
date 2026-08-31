@@ -275,16 +275,13 @@ fn validate_chunked_launch_descriptor(
             && manifest.virtual_size_bytes == descriptor.image_virtual_size_bytes,
         "cached chunk manifest identity mismatch"
     );
-    for chunk in &manifest.chunks {
-        let path = descriptor
-            .chunk_cache_root
-            .join(format!("{}.raw.zst", chunk.raw_sha256));
-        let metadata = regular_cached_file(&path, "encoded image chunk")?;
-        anyhow::ensure!(
-            metadata.len() == chunk.encoded_size_bytes,
-            "cached chunk size mismatch"
-        );
-    }
+    // A ready descriptor is bound to the root-owned prepared template. VM
+    // launch does not read the unprivileged compressed-chunk cache again, so
+    // walking every retained chunk here adds no launch integrity. Missing or
+    // corrupt compressed objects are revalidated and repaired by the bounded
+    // event warmer and the 15-minute full repair scan before preparation.
+    // Keeping this path descriptor-only avoids O(revisions * chunks) blocking
+    // filesystem work in Bridge state reports and event wake selection.
     regular_cached_file(&descriptor.kernel_path, "kernel")?;
     regular_cached_file(&descriptor.initrd_path, "initrd")?;
     validate_prepared_v3_descriptor(&descriptor)?;
