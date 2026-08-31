@@ -83,7 +83,7 @@ describe("automatic web deployment workflow", () => {
   });
 
   it("proves the exact Worker, homepage, static asset, and health API", () => {
-    expect(deployScript).toContain("active-runtime-bindings");
+    expect(deployScript).toContain("tools/deploy/worker-version.ts");
     expect(deployScript).toContain("https://intar.dev/");
     expect(deployScript).toContain("https://intar.dev/favicon.svg");
     expect(deployScript).toContain("https://intar.dev/api/health");

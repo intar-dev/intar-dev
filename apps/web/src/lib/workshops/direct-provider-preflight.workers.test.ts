@@ -44,23 +44,11 @@ describe("direct-cloud capacity composition", () => {
       preferredLocation: "europe-west3-a",
       reasons: [],
     }));
-    const unsupported = vi.fn(async () => {
-      throw new Error("not used");
-    });
     const adapter = {
       kind: "gcp_compute",
-      resolveProfile: vi.fn(async ({ profile }) => profile),
       prepareSession,
-      quote: unsupported,
       preflight,
-      advanceAllocation: unsupported,
-      observeAllocation: unsupported,
-      reboot: unsupported,
-      advanceDeletion: unsupported,
-      inspectConnection: unsupported,
-      rotateCredential: unsupported,
-      sweep: vi.fn(async () => []),
-    } as RuntimeProviderAdapter;
+    } satisfies RuntimeProviderAdapter;
     await expect(
       executeWorkshopProviderPreflight({
         adapter,

@@ -259,14 +259,6 @@ pub struct CachedChunkedImage {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct CacheEntry {
-    pub sha: String,
-    pub bytes: u64,
-    pub last_accessed_at_ms: i64,
-}
-
-#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawCacheMarker {
     schema_version: u8,
@@ -334,41 +326,6 @@ pub(crate) struct ReadyImageLaunch {
 struct CachedRawImage {
     path: PathBuf,
     sha256: String,
-}
-
-#[cfg(test)]
-pub fn select_evictions(
-    entries: &[CacheEntry],
-    protected: &HashSet<String>,
-    max_bytes: u64,
-) -> Vec<String> {
-    let total = entries
-        .iter()
-        .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
-    if total <= max_bytes {
-        return Vec::new();
-    }
-
-    let mut candidates = entries
-        .iter()
-        .filter(|entry| !protected.contains(&entry.sha))
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        left.last_accessed_at_ms
-            .cmp(&right.last_accessed_at_ms)
-            .then_with(|| left.sha.cmp(&right.sha))
-    });
-
-    let mut evicted = Vec::new();
-    let mut remaining = total;
-    for entry in candidates {
-        if remaining <= max_bytes {
-            break;
-        }
-        evicted.push(entry.sha.clone());
-        remaining = remaining.saturating_sub(entry.bytes);
-    }
-    evicted
 }
 
 #[derive(Debug, Deserialize)]

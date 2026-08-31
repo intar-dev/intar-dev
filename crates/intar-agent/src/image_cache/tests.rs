@@ -65,6 +65,5 @@ fn registry_index_with_boot(
     format!(r#"{{"images":[{images}]}}"#).into_bytes()
 }
 
-mod eviction;
 mod registry;
 mod tools;

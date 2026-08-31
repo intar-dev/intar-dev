@@ -260,7 +260,6 @@ mod tests {
             id: "safe-check".to_owned(),
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
-            intar: crate::config::IntarProbeMetadata::default(),
             kind: ProbeKindConfig::FileExists { path: present },
         }];
         let probes = build_probes(&configs)
@@ -290,7 +289,6 @@ mod tests {
             id: "known".to_owned(),
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
-            intar: crate::config::IntarProbeMetadata::default(),
             kind: ProbeKindConfig::FileExists {
                 path: "/dev/null".into(),
             },
@@ -328,7 +326,6 @@ mod tests {
                 id: format!("slow-{index}"),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_millis(120),
-                intar: crate::config::IntarProbeMetadata::default(),
                 kind: ProbeKindConfig::CommandJsonPath {
                     argv: vec![
                         "/bin/sh".to_owned(),
@@ -385,7 +382,6 @@ mod tests {
                 id: "slow".to_owned(),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_secs(1),
-                intar: crate::config::IntarProbeMetadata::default(),
                 kind: ProbeKindConfig::CommandJsonPath {
                     argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), slow_command],
                     json_path: "$.passed".to_owned(),
@@ -396,7 +392,6 @@ mod tests {
                 id: "fast".to_owned(),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_secs(1),
-                intar: crate::config::IntarProbeMetadata::default(),
                 kind: ProbeKindConfig::FileExists {
                     path: "/dev/null".into(),
                 },

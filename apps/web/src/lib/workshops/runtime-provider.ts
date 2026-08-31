@@ -11,11 +11,6 @@ import {
   type RuntimeProviderKind,
   type RuntimeProviderSelection,
 } from "@intar/workshop-contracts";
-import {
-  PROVIDER_ADAPTER_OPERATIONS,
-  type ProviderAdapterOperation,
-  type ProviderCapabilities,
-} from "@intar/provider-contracts";
 
 export {
   RUNTIME_PROVIDER_KINDS,
@@ -37,20 +32,21 @@ export interface ResolvedRuntimeProfile {
   configuration: Readonly<Record<string, unknown>>;
 }
 
-export type ProviderOperationName = ProviderAdapterOperation;
-export const PROVIDER_OPERATION_NAMES = PROVIDER_ADAPTER_OPERATIONS;
-export type { ProviderCapabilities };
+export interface ProviderContext {
+  organizationId: string;
+  sessionId: string;
+  now: number;
+}
 
-export type ProviderResourceKind =
-  | "instance"
-  | "boot_disk"
-  | "ipv4"
-  | "ssh_key";
+export interface ProviderConnectionRef {
+  id: string;
+  providerKind: Exclude<RuntimeProviderKind, "agent_kvm">;
+}
 
 export interface ProviderCostLineItem {
   providerKind: RuntimeProviderKind;
   sku: string;
-  resourceKind: ProviderResourceKind;
+  resourceKind: "instance" | "boot_disk" | "ipv4" | "ssh_key";
   location: string;
   currency: string;
   rawPrice: string;
@@ -63,17 +59,6 @@ export interface ProviderCostLineItem {
   taxTreatment: "net" | "gross" | "tax_excluded";
 }
 
-export interface ProviderContext {
-  organizationId: string;
-  sessionId: string;
-  now: number;
-}
-
-export interface ProviderConnectionRef {
-  id: string;
-  providerKind: Exclude<RuntimeProviderKind, "agent_kvm">;
-}
-
 export interface PrepareSessionRequest extends ProviderContext {
   profile: ResolvedRuntimeProfile;
   connection: ProviderConnectionRef | null;
@@ -84,13 +69,6 @@ export interface ProviderSessionPreparation {
   connectionId: string | null;
   permittedLocations: readonly string[];
   catalogObservedAt: number;
-}
-
-export interface ProviderQuoteRequest extends ProviderContext {
-  preparation: ProviderSessionPreparation;
-  participantCount: number;
-  expectedLifetimeSeconds: number;
-  leaseCeilingLifetimeSeconds: number;
 }
 
 export interface ProviderQuote {
@@ -126,80 +104,12 @@ export type ProviderAllocationPhase =
   | "cleanup_pending"
   | "failed";
 
-export interface ProviderAllocationRequest extends ProviderContext {
-  allocationId: string;
-  executionId: string;
-  generation: number;
-  deterministicName: string;
-  preparation: ProviderSessionPreparation;
-}
-
-export interface ProviderAllocationObservation {
-  allocationId: string;
-  phase: ProviderAllocationPhase;
-  location: string | null;
-  externalIpv4: string | null;
-  resources: readonly {
-    kind: ProviderResourceKind;
-    providerResourceId: string;
-    state: string;
-  }[];
-  operationId: string | null;
-  retryableAt: number | null;
-  errorCode: string | null;
-}
-
-export interface ProviderConnectionInspection {
-  externalProjectId: string;
-  projectFingerprint: string;
-  empty: boolean;
-  locations: readonly string[];
-  currency: string;
-  details: Readonly<Record<string, unknown>>;
-}
-
 export interface RuntimeProviderAdapter {
   readonly kind: RuntimeProviderKind;
-  resolveProfile(input: {
-    organizationId: string;
-    profile: ResolvedRuntimeProfile;
-    connection: ProviderConnectionRef | null;
-    now: number;
-  }): Promise<ResolvedRuntimeProfile>;
   prepareSession(
     input: PrepareSessionRequest,
   ): Promise<ProviderSessionPreparation>;
-  quote(input: ProviderQuoteRequest): Promise<ProviderQuote>;
   preflight(input: ProviderPreflightRequest): Promise<ProviderPreflightResult>;
-  advanceAllocation(
-    input: ProviderAllocationRequest,
-  ): Promise<ProviderAllocationObservation>;
-  observeAllocation(
-    input: ProviderAllocationRequest,
-  ): Promise<ProviderAllocationObservation>;
-  reboot(
-    input: ProviderAllocationRequest,
-  ): Promise<ProviderAllocationObservation>;
-  advanceDeletion(
-    input: ProviderAllocationRequest,
-  ): Promise<ProviderAllocationObservation>;
-  inspectConnection(input: {
-    organizationId: string;
-    connectionId: string;
-    credential: unknown;
-    now: number;
-  }): Promise<ProviderConnectionInspection>;
-  rotateCredential(input: {
-    organizationId: string;
-    connectionId: string;
-    credential: unknown;
-    now: number;
-  }): Promise<ProviderConnectionInspection>;
-  sweep(input: {
-    connectionId: string | null;
-    now: number;
-    limit: number;
-  }): Promise<readonly ProviderAllocationObservation[]>;
 }
 
 /** No provider inference or defaulting is allowed at this boundary. */

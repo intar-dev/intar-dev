@@ -39,30 +39,13 @@ function profile(
 }
 
 function adapter(kind: RuntimeProviderKind): RuntimeProviderAdapter {
-  const observation = {
-    allocationId: "allocation-a",
-    phase: "pending" as const,
-    location: null,
-    externalIpv4: null,
-    resources: [],
-    operationId: null,
-    retryableAt: null,
-    errorCode: null,
-  };
   return {
     kind,
-    resolveProfile: vi.fn(async ({ profile }) => profile),
     prepareSession: vi.fn(async ({ profile, connection, now }) => ({
       profile,
       connectionId: connection?.id ?? null,
       permittedLocations: profile.locations,
       catalogObservedAt: now,
-    })),
-    quote: vi.fn(async () => ({
-      currency: "EUR",
-      observedAt: 1,
-      expiresAt: 2,
-      lineItems: [],
     })),
     preflight: vi.fn(async () => ({
       ok: true,
@@ -70,27 +53,6 @@ function adapter(kind: RuntimeProviderKind): RuntimeProviderAdapter {
       preferredLocation: "test-a",
       reasons: [],
     })),
-    advanceAllocation: vi.fn(async () => observation),
-    observeAllocation: vi.fn(async () => observation),
-    reboot: vi.fn(async () => observation),
-    advanceDeletion: vi.fn(async () => observation),
-    inspectConnection: vi.fn(async () => ({
-      externalProjectId: "project-a",
-      projectFingerprint: "fingerprint-a",
-      empty: true,
-      locations: ["test-a"],
-      currency: "EUR",
-      details: {},
-    })),
-    rotateCredential: vi.fn(async () => ({
-      externalProjectId: "project-a",
-      projectFingerprint: "fingerprint-a",
-      empty: true,
-      locations: ["test-a"],
-      currency: "EUR",
-      details: {},
-    })),
-    sweep: vi.fn(async () => []),
   };
 }
 

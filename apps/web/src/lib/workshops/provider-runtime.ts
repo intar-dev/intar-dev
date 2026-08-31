@@ -71,7 +71,6 @@ import {
   nextProviderLocationAttempt,
   orderedProviderLocationAttempts,
   requireRuntimeProviderAdapter,
-  type ProviderAllocationObservation,
   type RuntimeProviderAdapter,
 } from "./runtime-provider";
 import {
@@ -298,7 +297,7 @@ export async function allocateProviderWorkshopRuntime(
       now,
     });
     providerAttempted = true;
-    await directProviderAdapter(context.providerKind).createResources(creation);
+    await directProviderLifecycle(context.providerKind).createResources(creation);
     const bootstrapping = await db
       .update(runtimeProviderAllocations)
       .set({ state: "bootstrapping", updatedAt: now })
@@ -775,7 +774,7 @@ export async function allocateProviderCertificationRuntime(input: {
           now,
         });
         providerAttempted = true;
-        await directProviderAdapter(
+        await directProviderLifecycle(
           row.profile.providerKind as DirectCloudKind,
         ).createResources(creation);
         const bootstrapping = await db
@@ -1600,7 +1599,7 @@ async function advanceCertification(
 
   if (phase === "allocating" || phase === "awaiting_checkpoint_proof") {
     const rebootOperationKind = `certification_reboot_${checkpointOrdinal}`;
-    await directProviderAdapter(context.allocation.providerKind).rebootContext(
+    await directProviderLifecycle(context.allocation.providerKind).rebootContext(
       context,
       now,
       rebootOperationKind,
@@ -1729,7 +1728,7 @@ async function advanceCertification(
         operation.providerOperationId === null &&
         (operation.retryAt === null || operation.retryAt <= now)
       ) {
-        await directProviderAdapter(
+        await directProviderLifecycle(
           context.allocation.providerKind,
         ).rebootContext(context, now, rebootOperationKind);
       }
@@ -1997,7 +1996,7 @@ async function advanceProviderCreation(
   try {
     // Observation is always first. It adopts a resource whose create response
     // was lost and prevents a second paid allocation.
-    await directProviderAdapter(context.allocation.providerKind).observeContext(
+    await directProviderLifecycle(context.allocation.providerKind).observeContext(
       context,
       now,
     );
@@ -2062,7 +2061,7 @@ async function advanceProviderCreation(
         : {}),
       now,
     });
-    await directProviderAdapter(context.allocation.providerKind).createResources(
+    await directProviderLifecycle(context.allocation.providerKind).createResources(
       creation,
     );
     if (
@@ -2403,7 +2402,7 @@ async function rebootProviderAllocation(
   now: number,
   operationKind: string,
 ): Promise<void> {
-  await directProviderAdapter(context.allocation.providerKind).rebootContext(
+  await directProviderLifecycle(context.allocation.providerKind).rebootContext(
     context,
     now,
     operationKind,
@@ -2787,8 +2786,7 @@ async function createGcpResources(input: CreationInput) {
 
 type DirectCloudKind = "hetzner_cloud" | "gcp_compute";
 
-interface ProductionRuntimeProviderAdapter extends RuntimeProviderAdapter {
-  readonly kind: RuntimeProviderKind;
+interface DirectProviderLifecycle {
   createResources(input: CreationInput): Promise<void>;
   observeContext(
     context: ExecutionAllocationContext,
@@ -2805,28 +2803,10 @@ interface ProductionRuntimeProviderAdapter extends RuntimeProviderAdapter {
   ): Promise<void>;
 }
 
-function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter {
-  const loadRequestContext = async (input: {
-    allocationId: string;
-    executionId: string;
-  }) => {
-    const context = await loadExecutionAllocation(input.executionId);
-    if (
-      !context ||
-      context.allocation.id !== input.allocationId ||
-      context.allocation.providerKind !== kind
-    ) {
-      throw appError(
-        409,
-        "runtime_provider_allocation_mismatch",
-        "the provider allocation does not match the registered adapter",
-      );
-    }
-    return context;
-  };
-  const adapter: ProductionRuntimeProviderAdapter = {
+function directSessionAdapter(kind: DirectCloudKind): RuntimeProviderAdapter {
+  return {
     kind,
-    async resolveProfile(input) {
+    async prepareSession(input) {
       if (
         input.profile.providerKind !== kind ||
         input.connection?.providerKind !== kind
@@ -2837,82 +2817,21 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
           "the runtime profile does not match the registered provider adapter",
         );
       }
-      return input.profile;
-    },
-    async prepareSession(input) {
-      const profile = await adapter.resolveProfile({
-        organizationId: input.organizationId,
-        profile: input.profile,
-        connection: input.connection,
-        now: input.now,
-      });
       return {
-        profile,
+        profile: input.profile,
         connectionId: input.connection?.id ?? null,
-        permittedLocations: profile.locations,
+        permittedLocations: input.profile.locations,
         catalogObservedAt: input.now,
       };
     },
-    async quote() {
-      throw appError(
-        409,
-        "runtime_provider_quote_context_required",
-        "provider quotes are persisted through the Workshop cost harness",
-      );
-    },
-    async preflight(input) {
-      return preflightDirectCloudProvider(input);
-    },
-    async advanceAllocation(input) {
-      const context = await loadRequestContext(input);
-      await adapter.observeContext(context, input.now);
-      return allocationObservation(context.allocation.id);
-    },
-    async observeAllocation(input) {
-      const context = await loadRequestContext(input);
-      await adapter.observeContext(context, input.now);
-      return allocationObservation(context.allocation.id);
-    },
-    async reboot(input) {
-      const context = await loadRequestContext(input);
-      await adapter.rebootContext(context, input.now, "adapter_reboot");
-      return allocationObservation(context.allocation.id);
-    },
-    async advanceDeletion(input) {
-      const context = await loadRequestContext(input);
-      await adapter.deleteContext(context, input.now);
-      await confirmProviderDeletion(context, input.now);
-      return allocationObservation(context.allocation.id);
-    },
-    async inspectConnection() {
-      throw appError(
-        409,
-        "runtime_provider_connection_context_required",
-        "provider connection inspection is handled by the credential boundary",
-      );
-    },
-    async rotateCredential() {
-      throw appError(
-        409,
-        "runtime_provider_connection_context_required",
-        "provider credential rotation is handled by the credential boundary",
-      );
-    },
-    async sweep(input) {
-      const rows = await drizzle(env.DB)
-        .select({ id: runtimeProviderAllocations.id })
-        .from(runtimeProviderAllocations)
-        .where(
-          and(
-            eq(runtimeProviderAllocations.providerKind, kind),
-            input.connectionId === null
-              ? undefined
-              : eq(runtimeProviderAllocations.connectionId, input.connectionId),
-          ),
-        )
-        .limit(input.limit);
-      return Promise.all(rows.map((row) => allocationObservation(row.id)));
-    },
+    preflight: preflightDirectCloudProvider,
+  };
+}
+
+function directProviderLifecycle(
+  kind: DirectCloudKind,
+): DirectProviderLifecycle {
+  const lifecycle: DirectProviderLifecycle = {
     createResources:
       kind === "hetzner_cloud" ? createHetznerResources : createGcpResources,
     async observeContext(context, now) {
@@ -2983,7 +2902,7 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
       }
       // Repair a stale local disappearance classification from an
       // ownership-verified provider observation before selecting the server.
-      await adapter.observeContext(context, now);
+      await lifecycle.observeContext(context, now);
       const instances = await drizzle(env.DB)
         .select()
         .from(runtimeProviderResources)
@@ -3048,7 +2967,7 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
       }
       // Observe before filtering active resources. Otherwise cleanup could
       // skip a still-billable server or Primary IP and falsely confirm it gone.
-      await adapter.observeContext(context, now);
+      await lifecycle.observeContext(context, now);
       const resources = await drizzle(env.DB)
         .select()
         .from(runtimeProviderResources)
@@ -3094,29 +3013,11 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
       if (sshKey) await deleteResource(sshKey, "ssh_key");
     },
   };
-  return adapter;
+  return lifecycle;
 }
 
-const unsupportedAgentOperation = async () => {
-  throw appError(
-    409,
-    "runtime_provider_operation_not_applicable",
-    "agent KVM operations use the organization-runner desired-state harness",
-  );
-};
-
-const agentRuntimeProviderAdapter: ProductionRuntimeProviderAdapter = {
+const agentRuntimeProviderAdapter: RuntimeProviderAdapter = {
   kind: "agent_kvm",
-  async resolveProfile({ profile }) {
-    if (profile.providerKind !== "agent_kvm") {
-      throw appError(
-        409,
-        "runtime_provider_profile_mismatch",
-        "the runtime profile does not match the agent KVM adapter",
-      );
-    }
-    return profile;
-  },
   async prepareSession({ profile, now }) {
     return {
       profile,
@@ -3124,9 +3025,6 @@ const agentRuntimeProviderAdapter: ProductionRuntimeProviderAdapter = {
       permittedLocations: [],
       catalogObservedAt: now,
     };
-  },
-  async quote() {
-    return { currency: "", observedAt: 0, expiresAt: 0, lineItems: [] };
   },
   async preflight({ requestedSeats }) {
     return {
@@ -3136,25 +3034,12 @@ const agentRuntimeProviderAdapter: ProductionRuntimeProviderAdapter = {
       reasons: [],
     };
   },
-  advanceAllocation: unsupportedAgentOperation,
-  observeAllocation: unsupportedAgentOperation,
-  reboot: unsupportedAgentOperation,
-  advanceDeletion: unsupportedAgentOperation,
-  inspectConnection: unsupportedAgentOperation,
-  rotateCredential: unsupportedAgentOperation,
-  async sweep() {
-    return [];
-  },
-  createResources: unsupportedAgentOperation,
-  observeContext: unsupportedAgentOperation,
-  rebootContext: unsupportedAgentOperation,
-  deleteContext: unsupportedAgentOperation,
 };
 
 const productionRuntimeProviderRegistry = createRuntimeProviderRegistry([
   agentRuntimeProviderAdapter,
-  directAdapter("hetzner_cloud"),
-  directAdapter("gcp_compute"),
+  directSessionAdapter("hetzner_cloud"),
+  directSessionAdapter("gcp_compute"),
 ]);
 
 export function requireProductionRuntimeProviderAdapter(
@@ -3163,65 +3048,15 @@ export function requireProductionRuntimeProviderAdapter(
   return requireRuntimeProviderAdapter(productionRuntimeProviderRegistry, kind);
 }
 
-function directProviderAdapter(
-  kind: DirectCloudKind,
-): ProductionRuntimeProviderAdapter {
-  return requireRuntimeProviderAdapter(
-    productionRuntimeProviderRegistry,
-    kind,
-  ) as ProductionRuntimeProviderAdapter;
-}
-
-async function allocationObservation(
-  allocationId: string,
-): Promise<ProviderAllocationObservation> {
-  const allocation = await drizzle(env.DB)
-    .select()
-    .from(runtimeProviderAllocations)
-    .where(eq(runtimeProviderAllocations.id, allocationId))
-    .limit(1);
-  const row = allocation[0];
-  if (!row) {
-    throw appError(
-      404,
-      "runtime_provider_allocation_not_found",
-      "provider allocation not found",
-    );
-  }
-  const resources = await drizzle(env.DB)
-    .select()
-    .from(runtimeProviderResources)
-    .where(
-      and(
-        eq(runtimeProviderResources.allocationId, allocationId),
-        eq(runtimeProviderResources.locationAttempt, row.locationAttempt),
-      ),
-    );
-  return {
-    allocationId,
-    phase: row.state,
-    location: row.location,
-    externalIpv4: row.externalIpv4,
-    resources: resources.map((resource) => ({
-      kind: resource.resourceKind,
-      providerResourceId: resource.providerResourceId,
-      state: resource.providerState,
-    })),
-    operationId: null,
-    retryableAt: null,
-    errorCode: row.lastErrorCode,
-  };
-}
-
 async function advanceProviderDeletion(context: ExecutionAllocationContext, now: number) {
-  await directProviderAdapter(context.allocation.providerKind).deleteContext(
+  await directProviderLifecycle(context.allocation.providerKind).deleteContext(
     context,
     now,
   );
 }
 
 async function observeProviderAllocation(context: ExecutionAllocationContext, now: number) {
-  await directProviderAdapter(context.allocation.providerKind).observeContext(
+  await directProviderLifecycle(context.allocation.providerKind).observeContext(
     context,
     now,
   );

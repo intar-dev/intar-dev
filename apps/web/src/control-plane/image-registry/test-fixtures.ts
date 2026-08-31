@@ -259,44 +259,6 @@ export interface HostSelectRow {
   scenarioEnabled: boolean;
 }
 
-// Pruning queries the scenario catalog-reference guard and then the published
-// workshop checkpoint guard. The last query includes an inner join, so the
-// fixture exposes both Drizzle chain shapes.
-export function publishPruneDb(
-  _hostRows: HostSelectRow[],
-  imageRefRows: Array<{ imageKey: unknown; imageSha256: string | null }>,
-  workshopRows: Array<{ images: unknown[] | null }> = [],
-) {
-  const rowSets = [imageRefRows, workshopRows];
-  let queryIndex = 0;
-  const select = vi.fn(() => {
-    const rows = rowSets[queryIndex++] ?? [];
-    const where = vi.fn().mockResolvedValue(rows);
-    const innerJoin = vi.fn(() => ({ where }));
-    const from = vi.fn(() => ({ where, innerJoin }));
-    return { from };
-  });
-
-  return {
-    kind: "test-db",
-    select,
-  };
-}
-
-export function pruneImageObject(sha256: string, uploadedMs: number) {
-  return {
-    key: `images/broken-nginx-web-x86_64/${sha256}.raw.zst`,
-    uploaded: new Date(uploadedMs),
-  };
-}
-
-export function pruneCompanionObject(sha256: string, uploadedMs: number) {
-  return {
-    key: `images/broken-nginx-web-x86_64/${sha256}.raw.zst.sha256`,
-    uploaded: new Date(uploadedMs),
-  };
-}
-
 export function imageIndexDb(
   rows: ImageIndexRow[],
   desiredRows: Array<{ docJson: HostDesiredStateV2 }> = [],

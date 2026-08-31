@@ -4,12 +4,14 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { pruneDrizzleSnapshots } from "./prune-drizzle-snapshots";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const webRoot = join(repositoryRoot, "apps/web");
@@ -37,16 +39,16 @@ describe("Drizzle-generated D1 migrations", () => {
     const snapshotFiles = readdirSync(metadataRoot)
       .filter((name) => name.endsWith("_snapshot.json"))
       .sort();
+    const finalEntry = journal.entries.at(-1);
+    if (!finalEntry) throw new Error("Drizzle journal has no migrations");
 
     expect(journal.dialect).toBe("sqlite");
     expect(journal.entries.map(({ tag }) => `${tag}.sql`)).toEqual(
       migrationFiles,
     );
-    expect(
-      journal.entries.map(
-        ({ idx }) => `${String(idx).padStart(4, "0")}_snapshot.json`,
-      ),
-    ).toEqual(snapshotFiles);
+    expect(snapshotFiles).toEqual([
+      `${String(finalEntry.idx).padStart(4, "0")}_snapshot.json`,
+    ]);
     expect(journal.entries.map(({ idx }) => idx)).toEqual(
       journal.entries.map((_, index) => index),
     );
@@ -63,6 +65,22 @@ describe("Drizzle-generated D1 migrations", () => {
       const sql = readFileSync(join(migrationsRoot, migrationFile), "utf8");
       expect(sql).not.toMatch(/\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b/iu);
       expect(sql).not.toMatch(/\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?VIEW\b/iu);
+    }
+  });
+
+  test("keeps only the latest generated snapshot", () => {
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "intar-drizzle-snapshots-"));
+    try {
+      for (const name of ["0009_snapshot.json", "0010_snapshot.json", "_journal.json"]) {
+        writeFileSync(join(temporaryRoot, name), "{}");
+      }
+      pruneDrizzleSnapshots(temporaryRoot);
+      expect(readdirSync(temporaryRoot).sort()).toEqual([
+        "0010_snapshot.json",
+        "_journal.json",
+      ]);
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
     }
   });
 

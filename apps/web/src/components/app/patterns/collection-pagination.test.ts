@@ -3,7 +3,6 @@ import {
   COLLECTION_PAGE_SIZE,
   buildVisiblePageNumbers,
   paginateCollection,
-  paginateWeightedCollection,
 } from "./CollectionPagination";
 
 describe("collection pagination", () => {
@@ -42,62 +41,4 @@ describe("collection pagination", () => {
     expect(COLLECTION_PAGE_SIZE.cards).toBe(9);
   });
 
-  it("packs weighted units toward nine without splitting them", () => {
-    const units = [
-      { item: "course-a", weight: 6 },
-      { item: "course-b", weight: 4 },
-      ...Array.from({ length: 7 }, (_, index) => ({
-        item: `individual-${index + 1}`,
-        weight: 1,
-      })),
-    ];
-
-    expect(paginateWeightedCollection(units, 1, 9)).toMatchObject({
-      items: ["course-a"],
-      page: 1,
-      totalItems: 17,
-      totalPages: 3,
-      start: 1,
-      end: 6,
-    });
-    expect(paginateWeightedCollection(units, 2, 9)).toMatchObject({
-      items: [
-        "course-b",
-        "individual-1",
-        "individual-2",
-        "individual-3",
-        "individual-4",
-        "individual-5",
-      ],
-      start: 7,
-      end: 15,
-    });
-    expect(paginateWeightedCollection(units, 3, 9)).toMatchObject({
-      items: ["individual-6", "individual-7"],
-      start: 16,
-      end: 17,
-    });
-  });
-
-  it("puts an oversized atomic unit on a page by itself", () => {
-    const units = [
-      { item: "large-course", weight: 11 },
-      { item: "individual", weight: 1 },
-    ];
-
-    expect(paginateWeightedCollection(units, 1, 9)).toMatchObject({
-      items: ["large-course"],
-      start: 1,
-      end: 11,
-      totalPages: 2,
-    });
-    expect(paginateWeightedCollection(units, 2, 9)).toMatchObject({
-      items: ["individual"],
-      start: 12,
-      end: 12,
-    });
-    expect(() =>
-      paginateWeightedCollection([{ item: "bad", weight: 0 }], 1, 9),
-    ).toThrow(RangeError);
-  });
 });

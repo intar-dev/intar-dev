@@ -1,11 +1,8 @@
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   imageBuilds,
   scenarioSources,
-  vmScenarioVms,
-  workshopPublicationCheckpoints,
-  workshopPublications,
   type ImageBuildStatus,
 } from "@/db/schema";
 import type { ImageArchitecture } from "@/generated/catalog";
@@ -26,7 +23,6 @@ import {
   normalizePublishManifest,
   type PublishedVmImage,
   type PublishedBootArtifact,
-  type PreparedVmImage,
   prepareBootArtifacts,
   prepareVmImages,
   storePreparedBootArtifacts,
@@ -35,21 +31,13 @@ import {
 import { requireBuilderAgentRequest } from "./agent";
 import {
   jsonResponse,
-  isImageKey,
   normalizeSha256,
-  registryImageKey,
   hasRegistryPublishToken,
   readString,
   isSafeBuildId,
   isSafeBundleRev,
   isImageArchitecture,
 } from "./shared";
-
-export const MAX_IMAGES_PER_KEY = 2;
-
-export const IMAGE_OBJECT_SUFFIX = ".raw.zst";
-
-export const IMAGE_COMPANION_SUFFIX = ".raw.zst.sha256";
 
 export async function handlePublish(
   request: Request,
@@ -107,7 +95,6 @@ export async function handlePublish(
         organizationId: string | null;
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
-        preparedImages: PreparedVmImage[];
         catalogChannel: "candidate" | "live";
       }
     | { ok: false; response: Response }
@@ -199,7 +186,6 @@ export async function handlePublish(
       organizationId,
       uploaded,
       artifacts: artifacts.uploaded,
-      preparedImages: images.prepared,
       catalogChannel,
     };
   };
@@ -210,7 +196,6 @@ export async function handlePublish(
         organizationId: string | null;
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
-        preparedImages: PreparedVmImage[];
         catalogChannel: "candidate" | "live";
       }
     | { ok: false; response: Response };
@@ -258,14 +243,6 @@ export async function handlePublish(
     });
   }
 
-  let pruned: PrunedImages[] = [];
-  try {
-    pruned = await pruneStaleVmImages(env, db, published.preparedImages);
-  } catch (error) {
-    // Retention is best-effort; a prune failure must never fail the publish.
-    console.error("vm image registry prune failed", error);
-  }
-
   return jsonResponse(
     {
       ok: true,
@@ -273,98 +250,10 @@ export async function handlePublish(
       images: published.uploaded,
       artifacts: published.artifacts,
       catalog_channel: published.catalogChannel,
-      pruned,
+      pruned: [],
     },
     201,
   );
-}
-
-export type PrunedImages = {
-  image_key: string;
-  deleted_sha256s: string[];
-};
-
-export async function catalogReferencedImageShas(
-  db: DrizzleD1Database,
-): Promise<Set<string>> {
-  const scenarioRows = await db
-    .select({
-      imageKey: vmScenarioVms.imageKeyJson,
-      imageSha256: vmScenarioVms.imageSha256,
-    })
-    .from(vmScenarioVms)
-    .where(isNotNull(vmScenarioVms.imageSha256));
-
-  const referenced = new Set<string>();
-  for (const row of scenarioRows) {
-    if (!isImageKey(row.imageKey)) continue;
-    const sha256 = normalizeSha256(row.imageSha256 ?? "");
-    if (!sha256) continue;
-    referenced.add(`${registryImageKey(row.imageKey)}:${sha256}`);
-  }
-
-  // Workshop checkpoint images are immutable revision inputs just like
-  // scenario catalog images. Keep every image referenced by a published
-  // checkpoint so a later scenario publication cannot prune it.
-  const workshopRows = await db
-    .select({ images: workshopPublicationCheckpoints.vmImagesJson })
-    .from(workshopPublicationCheckpoints)
-    .innerJoin(
-      workshopPublications,
-      eq(workshopPublicationCheckpoints.publicationId, workshopPublications.id),
-    )
-    .where(
-      and(
-        eq(workshopPublications.status, "published"),
-        eq(workshopPublicationCheckpoints.status, "verified"),
-        isNotNull(workshopPublicationCheckpoints.vmImagesJson),
-      ),
-    );
-  for (const row of workshopRows) {
-    for (const image of row.images ?? []) {
-      const imageKey = image.image_key ?? image.imageKey;
-      const sha256 = normalizeSha256(
-        typeof image.image_sha256 === "string"
-          ? image.image_sha256
-          : typeof image.imageSha256 === "string"
-            ? image.imageSha256
-            : "",
-      );
-      if (!isImageKey(imageKey) || !sha256) continue;
-      referenced.add(`${registryImageKey(imageKey)}:${sha256}`);
-    }
-  }
-  return referenced;
-}
-
-export async function listImageKeyObjects(
-  env: Cloudflare.Env,
-  imageKey: string,
-): Promise<Array<{ key: string; uploaded: Date }>> {
-  const objects: Array<{ key: string; uploaded: Date }> = [];
-  let cursor: string | undefined;
-  do {
-    const result = await env.VM_IMAGE_REGISTRY_BUCKET.list({
-      prefix: `images/${imageKey}/`,
-      ...(cursor ? { cursor } : {}),
-    });
-    for (const object of result.objects) {
-      objects.push({ key: object.key, uploaded: object.uploaded });
-    }
-    cursor = result.truncated ? result.cursor : undefined;
-  } while (cursor);
-  return objects;
-}
-
-export async function pruneStaleVmImages(
-  _env: Cloudflare.Env,
-  _db: DrizzleD1Database,
-  _published: PreparedVmImage[],
-): Promise<PrunedImages[]> {
-  // Chunk and manifest objects are shared by many images. They are retained
-  // for the seven-day rollback window and removed only by reference-aware
-  // registry garbage collection, never by a single scenario publication.
-  return [];
 }
 
 export { isRuntimeImageCacheHost } from "@/lib/scenario-image-cache";

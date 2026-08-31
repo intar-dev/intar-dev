@@ -17,21 +17,6 @@ interface PaginationSlice<T> {
   totalPages: number;
 }
 
-export interface WeightedCollectionUnit<T> {
-  item: T;
-  weight: number;
-}
-
-interface WeightedPaginationSlice<T> {
-  items: T[];
-  page: number;
-  pageSize: number;
-  totalItems: number;
-  totalPages: number;
-  start: number;
-  end: number;
-}
-
 export function paginateCollection<T>(
   items: readonly T[],
   requestedPage: number,
@@ -55,72 +40,6 @@ export function paginateCollection<T>(
     pageSize,
     totalItems,
     totalPages,
-  };
-}
-
-/**
- * Packs weighted units without splitting them across pages. A unit that is
- * heavier than the target page size gets a page to itself.
- */
-export function paginateWeightedCollection<T>(
-  units: readonly WeightedCollectionUnit<T>[],
-  requestedPage: number,
-  pageSize: number,
-): WeightedPaginationSlice<T> {
-  if (!Number.isInteger(pageSize) || pageSize < 1) {
-    throw new RangeError("pageSize must be a positive integer");
-  }
-  for (const unit of units) {
-    if (!Number.isInteger(unit.weight) || unit.weight < 1) {
-      throw new RangeError("unit weights must be positive integers");
-    }
-  }
-
-  const pages: Array<Array<WeightedCollectionUnit<T>>> = [];
-  let pending: Array<WeightedCollectionUnit<T>> = [];
-  let pendingWeight = 0;
-
-  const finishPage = () => {
-    if (!pending.length) return;
-    pages.push(pending);
-    pending = [];
-    pendingWeight = 0;
-  };
-
-  for (const unit of units) {
-    if (pending.length && pendingWeight + unit.weight > pageSize) {
-      finishPage();
-    }
-    pending.push(unit);
-    pendingWeight += unit.weight;
-    if (pendingWeight >= pageSize) finishPage();
-  }
-  finishPage();
-
-  const totalItems = units.reduce((total, unit) => total + unit.weight, 0);
-  const totalPages = Math.max(1, pages.length);
-  const page = Math.min(
-    Math.max(1, Math.floor(requestedPage) || 1),
-    totalPages,
-  );
-  const visibleUnits = pages[page - 1] ?? [];
-  const precedingItems = pages
-    .slice(0, page - 1)
-    .flat()
-    .reduce((total, unit) => total + unit.weight, 0);
-  const visibleItems = visibleUnits.reduce(
-    (total, unit) => total + unit.weight,
-    0,
-  );
-
-  return {
-    items: visibleUnits.map((unit) => unit.item),
-    page,
-    pageSize,
-    totalItems,
-    totalPages,
-    start: visibleItems ? precedingItems + 1 : 0,
-    end: precedingItems + visibleItems,
   };
 }
 
@@ -188,63 +107,10 @@ export function PaginatedCollection<T>({
   );
 }
 
-export function PaginatedWeightedCollection<T>({
-  units,
-  pageSize,
-  itemLabel,
-  resetKey,
-  paginationClassName,
-  children,
-}: {
-  units: readonly WeightedCollectionUnit<T>[];
-  pageSize: number;
-  itemLabel: string;
-  resetKey?: string | number | boolean | null;
-  paginationClassName?: string | undefined;
-  children: (visibleItems: T[]) => ReactNode;
-}) {
-  const [pageState, setPageState] = useState(() => ({
-    page: 1,
-    resetKey,
-  }));
-  const resetPending = !Object.is(pageState.resetKey, resetKey);
-  const requestedPage = resetPending ? 1 : pageState.page;
-  const pagination = useMemo(
-    () => paginateWeightedCollection(units, requestedPage, pageSize),
-    [pageSize, requestedPage, units],
-  );
-
-  useEffect(() => {
-    if (resetPending || pageState.page !== pagination.page) {
-      setPageState({ page: pagination.page, resetKey });
-    }
-  }, [pageState.page, pagination.page, resetKey, resetPending]);
-
-  return (
-    <>
-      {children(pagination.items)}
-      <CollectionPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        totalItems={pagination.totalItems}
-        totalPages={pagination.totalPages}
-        visibleStart={pagination.start}
-        visibleEnd={pagination.end}
-        itemLabel={itemLabel}
-        onPageChange={(page) => setPageState({ page, resetKey })}
-        className={paginationClassName}
-      />
-    </>
-  );
-}
-
 export function CollectionPagination({
   page,
   pageSize,
   totalItems,
-  totalPages: suppliedTotalPages,
-  visibleStart,
-  visibleEnd,
   itemLabel,
   onPageChange,
   className,
@@ -252,19 +118,15 @@ export function CollectionPagination({
   page: number;
   pageSize: number;
   totalItems: number;
-  totalPages?: number | undefined;
-  visibleStart?: number | undefined;
-  visibleEnd?: number | undefined;
   itemLabel: string;
   onPageChange: (page: number) => void;
   className?: string | undefined;
 }) {
-  const totalPages =
-    suppliedTotalPages ?? Math.max(1, Math.ceil(totalItems / pageSize));
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   if (totalPages <= 1) return null;
 
-  const start = visibleStart ?? (page - 1) * pageSize + 1;
-  const end = visibleEnd ?? Math.min(page * pageSize, totalItems);
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, totalItems);
   const visiblePages = buildVisiblePageNumbers(page, totalPages);
 
   return (

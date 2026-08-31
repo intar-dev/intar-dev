@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 
 type JsonRecord = Record<string, unknown>;
 
-export interface ActiveWorkerVersion {
+interface ActiveWorkerVersion {
   versionId: string;
   databaseId: string;
 }
@@ -13,7 +13,7 @@ export interface ActiveWorkerRuntimeVersion extends ActiveWorkerVersion {
   sessionNamespaceId: string;
 }
 
-export function assertActiveWorkerVersion(
+function assertActiveWorkerVersion(
   deployment: unknown,
   version: unknown,
   expectedDatabaseId: string,
@@ -52,24 +52,6 @@ export function assertActiveWorkerVersion(
   return { versionId, databaseId };
 }
 
-export function assertVersionDatabaseBinding(
-  version: unknown,
-  expectedDatabaseId: string,
-  expectedVersionId?: string,
-): ActiveWorkerVersion {
-  const versionRecord = record(version, "version");
-  const versionId = text(versionRecord.id, "version.id");
-  if (expectedVersionId && versionId !== expectedVersionId) {
-    throw new Error("the inspected Worker version does not match the expected version");
-  }
-  return assertActiveWorkerVersion(
-    { versions: [{ version_id: versionId, percentage: 100 }] },
-    version,
-    expectedDatabaseId,
-    expectedVersionId,
-  );
-}
-
 export function assertActiveWorkerRuntimeVersion(
   deployment: unknown,
   version: unknown,
@@ -79,26 +61,6 @@ export function assertActiveWorkerRuntimeVersion(
 ): ActiveWorkerRuntimeVersion {
   const active = assertActiveWorkerVersion(
     deployment,
-    version,
-    expectedDatabaseId,
-    expectedVersionId,
-  );
-  return {
-    ...active,
-    sessionNamespaceId: assertSessionNamespaceBinding(
-      version,
-      expectedSessionNamespaceId,
-    ),
-  };
-}
-
-export function assertVersionRuntimeBindings(
-  version: unknown,
-  expectedDatabaseId: string,
-  expectedSessionNamespaceId: string,
-  expectedVersionId?: string,
-): ActiveWorkerRuntimeVersion {
-  const active = assertVersionDatabaseBinding(
     version,
     expectedDatabaseId,
     expectedVersionId,
@@ -140,57 +102,17 @@ function assertSessionNamespaceBinding(
 }
 
 async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
-  if (command === "active-binding") {
-    const [deploymentPath, versionPath, databaseId, expectedVersionId] = args;
-    if (!deploymentPath || !versionPath || !databaseId) usage();
-    const result = assertActiveWorkerVersion(
-      JSON.parse(await readFile(deploymentPath, "utf8")),
-      JSON.parse(await readFile(versionPath, "utf8")),
-      databaseId,
-      expectedVersionId || undefined,
-    );
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-    return;
-  }
-  if (command === "version-binding") {
-    const [versionPath, databaseId, expectedVersionId] = args;
-    if (!versionPath || !databaseId) usage();
-    const result = assertVersionDatabaseBinding(
-      JSON.parse(await readFile(versionPath, "utf8")),
-      databaseId,
-      expectedVersionId || undefined,
-    );
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-    return;
-  }
-  if (command === "active-runtime-bindings") {
-    const [deploymentPath, versionPath, databaseId, sessionNamespaceId, expectedVersionId] =
-      args;
-    if (!deploymentPath || !versionPath || !databaseId || !sessionNamespaceId) usage();
-    const result = assertActiveWorkerRuntimeVersion(
-      JSON.parse(await readFile(deploymentPath, "utf8")),
-      JSON.parse(await readFile(versionPath, "utf8")),
-      databaseId,
-      sessionNamespaceId,
-      expectedVersionId || undefined,
-    );
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-    return;
-  }
-  if (command === "version-runtime-bindings") {
-    const [versionPath, databaseId, sessionNamespaceId, expectedVersionId] = args;
-    if (!versionPath || !databaseId || !sessionNamespaceId) usage();
-    const result = assertVersionRuntimeBindings(
-      JSON.parse(await readFile(versionPath, "utf8")),
-      databaseId,
-      sessionNamespaceId,
-      expectedVersionId || undefined,
-    );
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-    return;
-  }
-  usage();
+  const [deploymentPath, versionPath, databaseId, sessionNamespaceId, expectedVersionId] =
+    process.argv.slice(2);
+  if (!deploymentPath || !versionPath || !databaseId || !sessionNamespaceId) usage();
+  const result = assertActiveWorkerRuntimeVersion(
+    JSON.parse(await readFile(deploymentPath, "utf8")),
+    JSON.parse(await readFile(versionPath, "utf8")),
+    databaseId,
+    sessionNamespaceId,
+    expectedVersionId || undefined,
+  );
+  process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 function record(value: unknown, label: string): JsonRecord {
@@ -221,7 +143,7 @@ function number(value: unknown, label: string): number {
 
 function usage(): never {
   throw new Error(
-    "usage: tools/deploy/worker-version.ts active-binding <deployment.json> <version.json> <database-id> [version-id] | version-binding <version.json> <database-id> [version-id] | active-runtime-bindings <deployment.json> <version.json> <database-id> <session-namespace-id> [version-id] | version-runtime-bindings <version.json> <database-id> <session-namespace-id> [version-id]",
+    "usage: tools/deploy/worker-version.ts <deployment.json> <version.json> <database-id> <session-namespace-id> [version-id]",
   );
 }
 

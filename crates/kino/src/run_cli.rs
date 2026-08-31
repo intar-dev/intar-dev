@@ -1420,7 +1420,7 @@ mod tests {
         render_solution, render_status, request_local_checks_at, reveal_hint_at,
         run_fresh_checks_at, sanitize_terminal_text, valid_completion_candidate,
     };
-    use crate::config::{IntarProbeMetadata, ProbeConfig, ProbeKindConfig};
+    use crate::config::{ProbeConfig, ProbeKindConfig};
     use crate::probe::build_probes;
     use crate::run_cli_control::start_at;
     use crate::run_cli_pending::{PendingHintReveal, load_at, persist_at};
@@ -2172,7 +2172,6 @@ mod tests {
             id: "private-probe-id".to_owned(),
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
-            intar: IntarProbeMetadata::default(),
             kind: ProbeKindConfig::FileExists {
                 path: "/dev/null".into(),
             },
@@ -2238,7 +2237,6 @@ mod tests {
             id: "private-probe-id".to_owned(),
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
-            intar: IntarProbeMetadata::default(),
             kind: ProbeKindConfig::FileExists {
                 path: "/dev/null".into(),
             },

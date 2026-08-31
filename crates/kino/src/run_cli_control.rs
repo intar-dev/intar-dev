@@ -283,7 +283,7 @@ fn set_learner_socket_mode(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{remove_socket_if_socket, start_at};
-    use crate::config::{IntarProbeMetadata, ProbeConfig, ProbeKindConfig};
+    use crate::config::{ProbeConfig, ProbeKindConfig};
     use crate::probe::build_probes;
     use crate::run_cli_wire::{read_message, write_message};
     use crate::scheduler::ProbeExecutor;
@@ -304,7 +304,6 @@ mod tests {
             id: "internal-probe".to_owned(),
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
-            intar: IntarProbeMetadata::default(),
             kind: ProbeKindConfig::FileExists {
                 path: "/dev/null".into(),
             },
@@ -375,7 +374,6 @@ mod tests {
                 id: "fast".to_owned(),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_secs(1),
-                intar: IntarProbeMetadata::default(),
                 kind: ProbeKindConfig::FileExists {
                     path: "/dev/null".into(),
                 },
@@ -384,7 +382,6 @@ mod tests {
                 id: "slow".to_owned(),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_secs(2),
-                intar: IntarProbeMetadata::default(),
                 kind: ProbeKindConfig::CommandJsonPath {
                     argv: vec![
                         "/bin/sh".to_owned(),
@@ -463,7 +460,6 @@ mod tests {
                 id: "slow".to_owned(),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_secs(5),
-                intar: IntarProbeMetadata::default(),
                 kind: ProbeKindConfig::CommandJsonPath {
                     argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), slow_command],
                     json_path: "$.passed".to_owned(),
@@ -474,7 +470,6 @@ mod tests {
                 id: "fast".to_owned(),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_secs(1),
-                intar: IntarProbeMetadata::default(),
                 kind: ProbeKindConfig::FileExists {
                     path: "/dev/null".into(),
                 },

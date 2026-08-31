@@ -339,52 +339,25 @@ fn rejects_command_json_path_with_invalid_json_path() {
 }
 
 #[test]
-fn parses_generated_intar_probe_metadata_without_exposing_raw_probe_ids() {
-    let temp = tempfile::tempdir();
-    assert!(temp.is_ok());
-    let dir = match temp {
-        Ok(value) => value,
-        Err(error) => panic!("failed to create tempdir: {error}"),
-    };
+fn ignores_legacy_intar_probe_attributes() {
+    let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("kino.hcl");
     let hcl = r#"
-        server {
-          bind = "tcp://127.0.0.1:9000"
-        }
-
-        probe "internal-private-id" {
+        server { bind = "tcp://127.0.0.1:9000" }
+        probe "legacy" {
           kind = "file_exists"
           path = "/dev/null"
-          intar_alias = "check-1"
-          intar_label = "Start the web server"
-          intar_phase = "scenario"
+          intar_alias = "check_1"
+          intar_label = " "
+          intar_phase = "retired"
+          intar_module = "_retired"
         }
     "#;
     fs::write(&config_path, hcl).expect("write config");
 
     let config = load_from_file(&config_path).expect("parse config");
-    let metadata = &config.probes[0].intar;
-    assert_eq!(metadata.alias.as_deref(), Some("check-1"));
-    assert_eq!(metadata.label.as_deref(), Some("Start the web server"));
-    assert_eq!(metadata.phase, Some(super::IntarProbePhase::Scenario));
-    assert_eq!(metadata.module, None);
-}
-
-#[test]
-fn rejects_intar_alias_that_the_shared_cli_contract_will_not_dispatch() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config_path = temp.path().join("kino.hcl");
-    let hcl = r#"
-        server { bind = "tcp://127.0.0.1:9000" }
-        probe "private" {
-          kind = "file_exists"
-          path = "/dev/null"
-          intar_alias = "check_1"
-        }
-    "#;
-    fs::write(&config_path, hcl).expect("write config");
-    let error = load_from_file(&config_path).expect_err("underscore alias must fail");
-    assert!(error.to_string().contains("intar_alias"));
+    assert_eq!(config.probes.len(), 1);
+    assert_eq!(config.probes[0].id, "legacy");
 }
 
 #[test]

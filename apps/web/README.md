@@ -63,6 +63,9 @@ its `migrations/meta/` provenance. Never edit those generated files, use
 `drizzle-kit generate --custom`, add SQL triggers, or create migrations through
 Wrangler.
 
+`db:generate` keeps only the latest Drizzle snapshot. The SQL stream and journal
+keep the complete migration history.
+
 ```bash
 bun run db:generate
 bun run db:check

@@ -6,14 +6,6 @@ type JsonRecord = Record<string, unknown>;
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
-export interface WranglerVersionUpload {
-  versionId: string;
-}
-
-export interface WranglerVersionDeploy {
-  deploymentId: string;
-}
-
 export interface WranglerDeploy {
   versionId: string;
 }
@@ -28,37 +20,6 @@ export function parseWranglerNdjson(contents: string): unknown[] {
       throw new Error(`Wrangler output line ${index + 1} is not valid JSON`);
     }
   });
-}
-
-export function assertWranglerVersionUpload(
-  events: unknown,
-  expectedWorkerName: string,
-): WranglerVersionUpload {
-  const records = outputRecords(events);
-  rejectCommandFailures(records);
-  const event = oneEvent(records, "version-upload");
-  assertOutputVersion(event);
-  if (text(event.worker_name, "version-upload worker_name") !== expectedWorkerName) {
-    throw new Error("Wrangler uploaded a version for an unexpected Worker");
-  }
-  if (event.worker_name_overridden !== false) {
-    throw new Error("Wrangler unexpectedly overrode the Worker name");
-  }
-  return { versionId: uuid(event.version_id, "version-upload version_id") };
-}
-
-export function assertWranglerVersionDeploy(
-  events: unknown,
-  expectedWorkerName: string,
-): WranglerVersionDeploy {
-  const records = outputRecords(events);
-  rejectCommandFailures(records);
-  const event = oneEvent(records, "version-deploy");
-  assertOutputVersion(event);
-  if (text(event.worker_name, "version-deploy worker_name") !== expectedWorkerName) {
-    throw new Error("Wrangler deployed a version for an unexpected Worker");
-  }
-  return { deploymentId: uuid(event.deployment_id, "version-deploy deployment_id") };
 }
 
 export function assertWranglerDeploy(
@@ -79,24 +40,10 @@ export function assertWranglerDeploy(
 }
 
 async function main(): Promise<void> {
-  const [command, outputPath, workerName] = process.argv.slice(2);
+  const [outputPath, workerName] = process.argv.slice(2);
   if (!outputPath || !workerName) usage();
   const events = parseWranglerNdjson(await readFile(outputPath, "utf8"));
-  if (command === "version-upload") {
-    process.stdout.write(`${JSON.stringify(assertWranglerVersionUpload(events, workerName))}\n`);
-    return;
-  }
-  if (command === "version-deploy") {
-    process.stdout.write(`${JSON.stringify(assertWranglerVersionDeploy(events, workerName))}\n`);
-    return;
-  }
-  if (command === "deploy") {
-    process.stdout.write(
-      `${JSON.stringify(assertWranglerDeploy(events, workerName))}\n`,
-    );
-    return;
-  }
-  usage();
+  process.stdout.write(`${JSON.stringify(assertWranglerDeploy(events, workerName))}\n`);
 }
 
 function outputRecords(value: unknown): JsonRecord[] {
@@ -144,7 +91,7 @@ function uuid(value: unknown, label: string): string {
 
 function usage(): never {
   throw new Error(
-    "usage: tools/deploy/wrangler-output.ts deploy|version-upload|version-deploy <wrangler-output.ndjson> <worker-name>",
+    "usage: tools/deploy/wrangler-output.ts <wrangler-output.ndjson> <worker-name>",
   );
 }
 

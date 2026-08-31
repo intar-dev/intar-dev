@@ -161,7 +161,7 @@ before_version_id="$(jq -er '
 bunx wrangler versions view "${before_version_id}" \
   --name "${worker_name}" --json > "${before_version}"
 bun "${repository_root}/tools/deploy/worker-version.ts" \
-  active-runtime-bindings "${before_deployment}" "${before_version}" \
+  "${before_deployment}" "${before_version}" \
   "${database_id}" "${session_namespace_id}" "${before_version_id}" >/dev/null
 before_maintenance_value="$(jq -r '
   [.resources.bindings[] | select(
@@ -190,7 +190,7 @@ WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
     --strict \
     --experimental-provision=false \
     --autoconfig=false
-bun "${repository_root}/tools/deploy/wrangler-output.ts" deploy \
+bun "${repository_root}/tools/deploy/wrangler-output.ts" \
   "${deploy_output}" "${worker_name}" > "${deploy_result}"
 deployed_version_id="$(jq -er '.versionId' "${deploy_result}")"
 [[ "${deployed_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
@@ -213,7 +213,7 @@ test "${active_version_proven}" = true
 bunx wrangler versions view "${deployed_version_id}" \
   --name "${worker_name}" --json > "${after_version}"
 bun "${repository_root}/tools/deploy/worker-version.ts" \
-  active-runtime-bindings "${after_deployment}" "${after_version}" \
+  "${after_deployment}" "${after_version}" \
   "${database_id}" "${session_namespace_id}" "${deployed_version_id}" >/dev/null
 jq -e '
   ([.resources.bindings[] | select(

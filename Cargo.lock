@@ -2277,7 +2277,6 @@ dependencies = [
  "intar-contracts",
  "intar-workshop-builder",
  "schemars",
- "serde",
  "serde_json",
 ]
 
@@ -2298,7 +2297,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "time",
  "tokio",
  "zstd",
 ]
@@ -2382,7 +2380,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "tempfile",
  "thiserror",
  "tokio",
 ]
@@ -2470,7 +2467,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -2513,7 +2509,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
- "tower",
  "tracing",
  "tracing-subscriber",
  "url",

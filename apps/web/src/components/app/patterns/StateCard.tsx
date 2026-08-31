@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { LoaderCircle, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -63,28 +63,6 @@ function StateShell({
 
 export function EmptyState(props: StateShellProps) {
   return <StateShell {...props} />;
-}
-
-export function LoadingState({
-  title = "Loading…",
-  description,
-  className,
-  headingLevel,
-}: {
-  title?: string;
-  description?: string;
-  className?: string;
-  headingLevel?: 2 | 3 | undefined;
-}) {
-  return (
-    <StateShell
-      className={className}
-      icon={<LoaderCircle className="motion-safe:animate-spin" />}
-      title={title}
-      description={description}
-      headingLevel={headingLevel}
-    />
-  );
 }
 
 export function ErrorState({

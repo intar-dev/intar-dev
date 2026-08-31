@@ -35,7 +35,6 @@ zstd.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
-tower.workspace = true
 
 [lints]
 workspace = true

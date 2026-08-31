@@ -40,27 +40,7 @@ pub(crate) struct ProbeConfig {
     pub(crate) id: String,
     pub(crate) every: Duration,
     pub(crate) timeout: Duration,
-    pub(crate) intar: IntarProbeMetadata,
     pub(crate) kind: ProbeKindConfig,
-}
-
-/// Metadata written by Intar's image generators. It is deliberately optional:
-/// Kino still accepts older images, while newer control-plane clients can use
-/// this data to select learner-visible probes without deriving labels from a
-/// raw probe ID.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct IntarProbeMetadata {
-    pub(crate) alias: Option<String>,
-    pub(crate) label: Option<String>,
-    pub(crate) phase: Option<IntarProbePhase>,
-    pub(crate) module: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IntarProbePhase {
-    Boot,
-    Scenario,
-    Workshop,
 }
 
 #[derive(Debug, Clone)]
@@ -291,20 +271,12 @@ enum RawProbe {
         path: PathBuf,
         every_seconds: Option<u64>,
         timeout_seconds: Option<u64>,
-        intar_alias: Option<String>,
-        intar_label: Option<String>,
-        intar_phase: Option<String>,
-        intar_module: Option<String>,
     },
     FileRegexCapture {
         path: PathBuf,
         pattern: String,
         every_seconds: Option<u64>,
         timeout_seconds: Option<u64>,
-        intar_alias: Option<String>,
-        intar_label: Option<String>,
-        intar_phase: Option<String>,
-        intar_module: Option<String>,
     },
     PortOpen {
         host: String,
@@ -312,20 +284,12 @@ enum RawProbe {
         protocol: PortProtocol,
         every_seconds: Option<u64>,
         timeout_seconds: Option<u64>,
-        intar_alias: Option<String>,
-        intar_label: Option<String>,
-        intar_phase: Option<String>,
-        intar_module: Option<String>,
     },
     Service {
         service: String,
         state: ServiceState,
         every_seconds: Option<u64>,
         timeout_seconds: Option<u64>,
-        intar_alias: Option<String>,
-        intar_label: Option<String>,
-        intar_phase: Option<String>,
-        intar_module: Option<String>,
     },
     K8sPodState {
         namespace: String,
@@ -335,10 +299,6 @@ enum RawProbe {
         kube_context: Option<String>,
         every_seconds: Option<u64>,
         timeout_seconds: Option<u64>,
-        intar_alias: Option<String>,
-        intar_label: Option<String>,
-        intar_phase: Option<String>,
-        intar_module: Option<String>,
     },
     CommandJsonPath {
         argv: Vec<String>,
@@ -346,73 +306,7 @@ enum RawProbe {
         expected: Option<JsonValue>,
         every_seconds: Option<u64>,
         timeout_seconds: Option<u64>,
-        intar_alias: Option<String>,
-        intar_label: Option<String>,
-        intar_phase: Option<String>,
-        intar_module: Option<String>,
     },
-}
-
-#[derive(Clone, Debug, Default)]
-struct RawIntarProbeMetadata {
-    alias: Option<String>,
-    label: Option<String>,
-    phase: Option<String>,
-    module: Option<String>,
-}
-
-impl RawProbe {
-    fn intar_metadata(&self) -> RawIntarProbeMetadata {
-        match self {
-            Self::FileExists {
-                intar_alias,
-                intar_label,
-                intar_phase,
-                intar_module,
-                ..
-            }
-            | Self::FileRegexCapture {
-                intar_alias,
-                intar_label,
-                intar_phase,
-                intar_module,
-                ..
-            }
-            | Self::PortOpen {
-                intar_alias,
-                intar_label,
-                intar_phase,
-                intar_module,
-                ..
-            }
-            | Self::Service {
-                intar_alias,
-                intar_label,
-                intar_phase,
-                intar_module,
-                ..
-            }
-            | Self::K8sPodState {
-                intar_alias,
-                intar_label,
-                intar_phase,
-                intar_module,
-                ..
-            }
-            | Self::CommandJsonPath {
-                intar_alias,
-                intar_label,
-                intar_phase,
-                intar_module,
-                ..
-            } => RawIntarProbeMetadata {
-                alias: intar_alias.clone(),
-                label: intar_label.clone(),
-                phase: intar_phase.clone(),
-                module: intar_module.clone(),
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -603,7 +497,6 @@ fn build_probe_config(
     raw_probe: RawProbe,
     defaults: &EffectiveDefaults,
 ) -> Result<ProbeConfig, ConfigError> {
-    let intar = build_intar_probe_metadata(&id, raw_probe.intar_metadata())?;
     let (every, timeout, kind) = match raw_probe {
         RawProbe::FileExists {
             path,
@@ -703,127 +596,8 @@ fn build_probe_config(
         id,
         every,
         timeout,
-        intar,
         kind,
     })
-}
-
-fn build_intar_probe_metadata(
-    probe_id: &str,
-    raw: RawIntarProbeMetadata,
-) -> Result<IntarProbeMetadata, ConfigError> {
-    let alias = raw
-        .alias
-        .map(|value| validate_intar_alias(probe_id, value))
-        .transpose()?;
-    let label = raw
-        .label
-        .map(|value| validate_intar_label(probe_id, "intar_label", value))
-        .transpose()?;
-    let module = raw
-        .module
-        .map(|value| validate_intar_identifier(probe_id, "intar_module", value))
-        .transpose()?;
-    let phase = raw
-        .phase
-        .map(|value| parse_intar_phase(probe_id, value))
-        .transpose()?;
-
-    if module.is_some() && phase.is_some_and(|phase| phase != IntarProbePhase::Workshop) {
-        return Err(ConfigError::Validation {
-            message: format!(
-                "probe '{probe_id}' has intar_module but intar_phase is not 'workshop'"
-            ),
-        });
-    }
-
-    Ok(IntarProbeMetadata {
-        alias,
-        label,
-        phase,
-        module,
-    })
-}
-
-fn validate_intar_identifier(
-    probe_id: &str,
-    field: &str,
-    value: String,
-) -> Result<String, ConfigError> {
-    let valid = !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        });
-    if valid {
-        Ok(value)
-    } else {
-        Err(ConfigError::Validation {
-            message: format!(
-                "probe '{probe_id}' has invalid {field}; use 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit"
-            ),
-        })
-    }
-}
-
-fn validate_intar_alias(probe_id: &str, value: String) -> Result<String, ConfigError> {
-    let valid = !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-    if valid {
-        Ok(value)
-    } else {
-        Err(ConfigError::Validation {
-            message: format!(
-                "probe '{probe_id}' has invalid intar_alias; use 1-128 lowercase letters, digits or '-', starting with a letter or digit"
-            ),
-        })
-    }
-}
-
-fn validate_intar_label(probe_id: &str, field: &str, value: String) -> Result<String, ConfigError> {
-    let has_terminal_controls = value.chars().any(|character| {
-        character.is_control()
-            || matches!(
-                character,
-                '\u{061c}'
-                    | '\u{200e}'
-                    | '\u{200f}'
-                    | '\u{202a}'..='\u{202e}'
-                    | '\u{2066}'..='\u{2069}'
-            )
-    });
-    if value.trim().is_empty() || value.chars().count() > 160 || has_terminal_controls {
-        return Err(ConfigError::Validation {
-            message: format!(
-                "probe '{probe_id}' has invalid {field}; it must be a visible string of at most 160 characters"
-            ),
-        });
-    }
-    Ok(value)
-}
-
-fn parse_intar_phase(probe_id: &str, value: String) -> Result<IntarProbePhase, ConfigError> {
-    match value.as_str() {
-        "boot" => Ok(IntarProbePhase::Boot),
-        "scenario" => Ok(IntarProbePhase::Scenario),
-        "workshop" => Ok(IntarProbePhase::Workshop),
-        _ => Err(ConfigError::Validation {
-            message: format!(
-                "probe '{probe_id}' has invalid intar_phase '{value}'; supported: boot, scenario, workshop"
-            ),
-        }),
-    }
 }
 
 fn resolve_probe_timing(

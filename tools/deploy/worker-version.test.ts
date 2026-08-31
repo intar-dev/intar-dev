@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  assertActiveWorkerRuntimeVersion,
-  assertActiveWorkerVersion,
-  assertVersionDatabaseBinding,
-  assertVersionRuntimeBindings,
-} from "./worker-version";
+import { assertActiveWorkerRuntimeVersion } from "./worker-version";
 
 const databaseId = "33333333-4444-4555-8666-777777777777";
 const versionId = "11111111-2222-4333-8444-555555555555";
@@ -18,90 +13,76 @@ function version(bindings: unknown[]) {
   };
 }
 
-describe("production Worker binding evidence", () => {
-  it("accepts one 100 percent active version with the exact DB binding", () => {
+describe("production Worker runtime binding evidence", () => {
+  const deployment = { versions: [{ version_id: versionId, percentage: 100 }] };
+  const runtimeVersion = version([
+    { type: "d1", name: "DB", id: databaseId },
+    {
+      type: "kv_namespace",
+      name: "SESSION",
+      namespace_id: sessionNamespaceId,
+    },
+  ]);
+
+  it("accepts one 100 percent active version with the exact runtime bindings", () => {
     expect(
-      assertActiveWorkerVersion(
-        { versions: [{ version_id: versionId, percentage: 100 }] },
-        version([{ type: "d1", name: "DB", id: databaseId }]),
+      assertActiveWorkerRuntimeVersion(
+        deployment,
+        runtimeVersion,
         databaseId,
+        sessionNamespaceId,
+        versionId,
       ),
-    ).toEqual({ versionId, databaseId });
+    ).toEqual({ versionId, databaseId, sessionNamespaceId });
   });
 
-  it("rejects split traffic, extra DB bindings, and suffix-shaped spoofing", () => {
+  it("rejects split traffic, invalid DB bindings, and a different expected version", () => {
     expect(() =>
-      assertActiveWorkerVersion(
+      assertActiveWorkerRuntimeVersion(
         {
           versions: [
             { version_id: versionId, percentage: 90 },
             { version_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", percentage: 10 },
           ],
         },
-        version([{ type: "d1", name: "DB", id: databaseId }]),
+        runtimeVersion,
         databaseId,
+        sessionNamespaceId,
       ),
     ).toThrow(/exactly one/);
     expect(() =>
-      assertVersionDatabaseBinding(
+      assertActiveWorkerRuntimeVersion(
+        deployment,
         version([
           { type: "d1", name: "DB", id: databaseId },
           { type: "d1", name: "DB", id: databaseId },
+          {
+            type: "kv_namespace",
+            name: "SESSION",
+            namespace_id: sessionNamespaceId,
+          },
         ]),
         databaseId,
+        sessionNamespaceId,
       ),
     ).toThrow(/exactly one/);
     expect(() =>
-      assertVersionDatabaseBinding(
-        version([{ type: "plain_text", name: "NOTE", text: databaseId }]),
-        databaseId,
-      ),
-    ).toThrow(/exactly one/);
-  });
-
-  it("rejects a different active version or database", () => {
-    expect(() =>
-      assertActiveWorkerVersion(
-        { versions: [{ version_id: versionId, percentage: 100 }] },
-        version([{ type: "d1", name: "DB", id: databaseId }]),
+      assertActiveWorkerRuntimeVersion(
+        deployment,
+        runtimeVersion,
         "00000000-0000-4000-8000-000000000001",
+        sessionNamespaceId,
       ),
     ).toThrow(/expected database/);
     expect(() =>
-      assertVersionDatabaseBinding(
-        version([{ type: "d1", name: "DB", id: databaseId }]),
+      assertActiveWorkerRuntimeVersion(
+        deployment,
+        runtimeVersion,
         databaseId,
+        sessionNamespaceId,
         "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       ),
     ).toThrow(/expected version/);
-  });
-
-  it("accepts the exact DB and SESSION bindings on an uploaded or active version", () => {
-    const runtimeVersion = version([
-      { type: "d1", name: "DB", id: databaseId },
-      {
-        type: "kv_namespace",
-        name: "SESSION",
-        namespace_id: sessionNamespaceId,
-      },
-    ]);
-    expect(
-      assertVersionRuntimeBindings(
-        runtimeVersion,
-        databaseId,
-        sessionNamespaceId,
-        versionId,
-      ),
-    ).toEqual({ versionId, databaseId, sessionNamespaceId });
-    expect(
-      assertActiveWorkerRuntimeVersion(
-        { versions: [{ version_id: versionId, percentage: 100 }] },
-        runtimeVersion,
-        databaseId,
-        sessionNamespaceId,
-        versionId,
-      ),
-    ).toEqual({ versionId, databaseId, sessionNamespaceId });
   });
 
   it("rejects a missing, duplicate, or wrong SESSION namespace binding", () => {
@@ -112,21 +93,24 @@ describe("production Worker binding evidence", () => {
       namespace_id: sessionNamespaceId,
     };
     expect(() =>
-      assertVersionRuntimeBindings(
+      assertActiveWorkerRuntimeVersion(
+        deployment,
         version([databaseBinding]),
         databaseId,
         sessionNamespaceId,
       ),
     ).toThrow(/exactly one KV binding/);
     expect(() =>
-      assertVersionRuntimeBindings(
+      assertActiveWorkerRuntimeVersion(
+        deployment,
         version([databaseBinding, sessionBinding, sessionBinding]),
         databaseId,
         sessionNamespaceId,
       ),
     ).toThrow(/exactly one KV binding/);
     expect(() =>
-      assertVersionRuntimeBindings(
+      assertActiveWorkerRuntimeVersion(
+        deployment,
         version([
           databaseBinding,
           { ...sessionBinding, namespace_id: `${sessionNamespaceId}spoof` },

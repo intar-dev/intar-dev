@@ -1,6 +1,6 @@
 use crate::config::{
-    DesiredPodState, IntarProbeMetadata, PodCondition, PodPhase, PortProtocol, ProbeConfig,
-    ProbeKindConfig, ServiceState,
+    DesiredPodState, PodCondition, PodPhase, PortProtocol, ProbeConfig, ProbeKindConfig,
+    ServiceState,
 };
 use jsonpath_rust::JsonPath;
 use k8s_openapi::api::core::v1::Pod;
@@ -41,7 +41,6 @@ pub(crate) struct ProbeDefinition {
     kind: ProbeKind,
     every: Duration,
     timeout: Duration,
-    intar: IntarProbeMetadata,
     runner: ProbeRunner,
 }
 
@@ -60,11 +59,6 @@ impl ProbeDefinition {
 
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn intar_metadata(&self) -> &IntarProbeMetadata {
-        &self.intar
     }
 
     pub(crate) fn initial_value(&self) -> ProbeValue {
@@ -817,7 +811,6 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::FileExists,
                 every: config.every,
                 timeout: config.timeout,
-                intar: config.intar.clone(),
                 runner: ProbeRunner::FileExists(FileExistsProbe { path: path.clone() }),
             },
             ProbeKindConfig::FileRegexCapture { path, pattern } => {
@@ -833,7 +826,6 @@ pub(crate) async fn build_probes(
                     kind: ProbeKind::FileRegexCapture,
                     every: config.every,
                     timeout: config.timeout,
-                    intar: config.intar.clone(),
                     runner: ProbeRunner::FileRegexCapture(FileRegexCaptureProbe {
                         path: path.clone(),
                         pattern: pattern.clone(),
@@ -850,7 +842,6 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::PortOpen,
                 every: config.every,
                 timeout: config.timeout,
-                intar: config.intar.clone(),
                 runner: ProbeRunner::PortOpen(PortOpenProbe {
                     host: host.clone(),
                     port: *port,
@@ -871,7 +862,6 @@ pub(crate) async fn build_probes(
                     kind: ProbeKind::K8sPodState,
                     every: config.every,
                     timeout: config.timeout,
-                    intar: config.intar.clone(),
                     runner: ProbeRunner::K8sPodState(K8sPodStateProbe {
                         namespace: namespace.clone(),
                         selector: selector.clone(),
@@ -889,7 +879,6 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::CommandJsonPath,
                 every: config.every,
                 timeout: config.timeout,
-                intar: config.intar.clone(),
                 runner: ProbeRunner::CommandJsonPath(CommandJsonPathProbe {
                     argv: argv.clone(),
                     json_path: json_path.clone(),
@@ -901,7 +890,6 @@ pub(crate) async fn build_probes(
                 kind: ProbeKind::Service,
                 every: config.every,
                 timeout: config.timeout,
-                intar: config.intar.clone(),
                 runner: ProbeRunner::Service(ServiceProbe {
                     service: service.clone(),
                     state: *state,

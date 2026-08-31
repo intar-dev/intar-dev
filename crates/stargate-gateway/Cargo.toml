@@ -38,9 +38,6 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-jsonwebtoken.workspace = true
-reqwest = { workspace = true, features = ["json", "rustls"] }
-time.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 
 [lints]
