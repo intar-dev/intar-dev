@@ -33,6 +33,7 @@ const MAX_CONCURRENT_IMAGE_WARMS: usize = 8;
 const MAX_CONCURRENT_CACHE_DOWNLOADS: usize = 16;
 const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const REGISTRY_INDEX_TIMEOUT: Duration = Duration::from_secs(15);
 const REGISTRY_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const REGISTRY_ACCESS_TOKEN_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -188,6 +189,10 @@ pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
         // acknowledging registry request bytes. Prefer the host's stable IPv4
         // path for bulk cache traffic; Bridge control traffic stays dual-stack.
         .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        // Cloudflare's HTTP/2 edge intermittently stopped acknowledging this
+        // client's small index request after TLS setup. HTTP/1.1 is stable on
+        // both advertised IPv4 edges and chunk objects use independent GETs.
+        .http1_only()
         .connect_timeout(REGISTRY_CONNECT_TIMEOUT)
         // Bound an idle response without imposing a total deadline on large
         // image downloads. Otherwise one stuck warmer can hold a cache key and

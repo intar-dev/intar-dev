@@ -7,26 +7,29 @@ pub(super) async fn list_registry_images(
 ) -> Result<Vec<RegistryImageRecord>> {
     let index_url = registry_base_url(registry)?;
     let display_url = redact_url_userinfo(index_url.as_str());
-    let response = apply_registry_auth(
-        client.get(index_url.clone()),
-        &index_url,
-        registry,
-        bridge,
-        client,
-    )
-    .await?
-    .send()
-    .await
-    .with_context(|| format!("GET {display_url}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        anyhow::bail!("registry listing failed with HTTP {status}");
-    }
-
-    let index = response
-        .json::<RegistryIndex>()
+    let index = tokio::time::timeout(REGISTRY_INDEX_TIMEOUT, async {
+        let response = apply_registry_auth(
+            client.get(index_url.clone()),
+            &index_url,
+            registry,
+            bridge,
+            client,
+        )
+        .await?
+        .send()
         .await
-        .with_context(|| format!("reading registry JSON index from {display_url}"))?;
+        .with_context(|| format!("GET {display_url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("registry listing failed with HTTP {status}");
+        }
+        response
+            .json::<RegistryIndex>()
+            .await
+            .with_context(|| format!("reading registry JSON index from {display_url}"))
+    })
+    .await
+    .with_context(|| format!("registry index exceeded its deadline at {display_url}"))??;
     Ok(registry_images_from_index(index))
 }
 
