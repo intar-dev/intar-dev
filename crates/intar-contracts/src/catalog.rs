@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -8,6 +10,8 @@ pub const IMAGE_CHUNK_SIZE_BYTES: u32 = 4 * 1024 * 1024;
 pub const IMAGE_CHUNK_ENCODING: &str = "zstd-v1-level-6";
 pub const MAX_CHUNKED_IMAGE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const GUEST_BOOTSTRAP_ABI_V1: u16 = 1;
+
+static FULL_ZERO_CHUNK_SHA256: OnceLock<[u8; 32]> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -239,6 +243,14 @@ impl ImageChunkManifestV1 {
 }
 
 fn zero_chunk_sha256(raw_size: u32) -> [u8; 32] {
+    if raw_size == IMAGE_CHUNK_SIZE_BYTES {
+        return *FULL_ZERO_CHUNK_SHA256
+            .get_or_init(|| compute_zero_chunk_sha256(IMAGE_CHUNK_SIZE_BYTES));
+    }
+    compute_zero_chunk_sha256(raw_size)
+}
+
+fn compute_zero_chunk_sha256(raw_size: u32) -> [u8; 32] {
     let mut hasher = Sha256::new();
     let zeros = [0_u8; 64 * 1024];
     let mut remaining = raw_size;
@@ -335,6 +347,16 @@ mod tests {
         assert_eq!(manifest.raw_size_for_index(0), IMAGE_CHUNK_SIZE_BYTES);
         assert_eq!(manifest.raw_size_for_index(1), 3);
         assert_eq!(manifest.validate(), Ok(()));
+    }
+
+    #[test]
+    fn cached_full_zero_chunk_digest_matches_direct_sha256() {
+        let full = vec![0_u8; IMAGE_CHUNK_SIZE_BYTES as usize];
+        let short = [0_u8; 3];
+        let full_digest: [u8; 32] = Sha256::digest(full).into();
+        let short_digest: [u8; 32] = Sha256::digest(short).into();
+        assert_eq!(zero_chunk_sha256(IMAGE_CHUNK_SIZE_BYTES), full_digest);
+        assert_eq!(zero_chunk_sha256(3), short_digest);
     }
 
     #[test]
