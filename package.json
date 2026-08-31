@@ -14,6 +14,7 @@
   "devDependencies": {
     "@intar/provider-contracts": "workspace:*",
     "@intar/provider-testkit": "workspace:*",
+    "@intar/provider-worker-core": "workspace:*",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.125.0"
