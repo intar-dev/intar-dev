@@ -77,9 +77,14 @@ describe("automatic web deployment workflow", () => {
 
   it("retains and gates only the pre-migration D1 evidence", () => {
     for (const required of [
-      "bunx --bun wrangler d1 info",
+      "--request GET",
+      'https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}"',
+      'https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/time_travel/bookmark"',
+      ".success == true",
+      ".result.uuid == $database_id",
+      '.result.name | type == "string"',
       '.result.version == "production"',
-      "bunx --bun wrangler d1 time-travel info",
+      '.result.bookmark | type == "string"',
       "jq -cn --arg sql",
       "{sql: $sql, params: []}",
       "--request POST",
@@ -99,13 +104,14 @@ describe("automatic web deployment workflow", () => {
     ]) {
       expect(deployWorkflow).toContain(required);
     }
+    expect(deployWorkflow).not.toContain("wrangler d1 info");
+    expect(deployWorkflow).not.toContain("wrangler d1 time-travel info");
     expect(deployWorkflow).not.toContain("wrangler d1 execute");
     const artifact = deployWorkflow.slice(
       deployWorkflow.indexOf("Retain deployment evidence"),
     );
     for (const evidence of [
       "production-d1-info.json",
-      "production-d1-backend.json",
       "production-d1-bookmark.json",
       "pre-migration-scenario-course-catalogs.json",
       "pre-migration-draft-build-audit.json",

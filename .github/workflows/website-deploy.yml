@@ -171,7 +171,6 @@ jobs:
         run: |
           set -euo pipefail
           d1_info="${RUNNER_TEMP}/production-d1-info.json"
-          d1_backend="${RUNNER_TEMP}/production-d1-backend.json"
           bookmark="${RUNNER_TEMP}/production-d1-bookmark.json"
           catalogs="${RUNNER_TEMP}/pre-migration-scenario-course-catalogs.json"
           draft_audit="${RUNNER_TEMP}/pre-migration-draft-build-audit.json"
@@ -180,27 +179,28 @@ jobs:
           enabled_scenarios="${RUNNER_TEMP}/pre-migration-enabled-scenarios.json"
           query_request="${RUNNER_TEMP}/pre-migration-d1-query-request.json"
 
-          bunx --bun wrangler d1 info "${DATABASE_ID}" --json > "${d1_info}"
-          jq -e --arg database_id "${DATABASE_ID}" '
-            .uuid == $database_id and
-            (.name | type == "string" and length > 0)
-          ' "${d1_info}" >/dev/null
-
           curl --fail-with-body --silent --show-error \
+            --request GET \
             --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}" \
-            > "${d1_backend}"
+            > "${d1_info}"
           jq -e --arg database_id "${DATABASE_ID}" '
             .success == true and
             .result.uuid == $database_id and
+            (.result.name | type == "string" and length > 0) and
             .result.version == "production"
-          ' "${d1_backend}" >/dev/null
+          ' "${d1_info}" >/dev/null
 
-          bunx --bun wrangler d1 time-travel info "${DATABASE_ID}" --json \
+          curl --fail-with-body --silent --show-error \
+            --request GET \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/time_travel/bookmark" \
             > "${bookmark}"
           jq -e '
-            .bookmark | type == "string" and
+            .success == true and
+            (.result.bookmark | type == "string" and
             test("^[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{32}$")
+            )
           ' "${bookmark}" >/dev/null
 
           d1_readonly_query() {
@@ -412,7 +412,6 @@ jobs:
           path: |
             ${{ runner.temp }}/production-d1-plan.json
             ${{ runner.temp }}/production-d1-info.json
-            ${{ runner.temp }}/production-d1-backend.json
             ${{ runner.temp }}/production-d1-bookmark.json
             ${{ runner.temp }}/pre-migration-scenario-course-catalogs.json
             ${{ runner.temp }}/pre-migration-draft-build-audit.json
