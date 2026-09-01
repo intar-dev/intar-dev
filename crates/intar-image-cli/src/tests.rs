@@ -75,6 +75,36 @@ fn content_only_bundle_archives_the_compiled_curriculum() {
 }
 
 #[test]
+fn long_curriculum_paths_use_ustar_headers_without_extensions() {
+    let temp = tempfile::tempdir().unwrap();
+    let course_id = format!("course-{}", "a".repeat(53));
+    let lecture_id = format!("lecture-{}", "b".repeat(52));
+    write_course(temp.path(), &course_id, &lecture_id, None);
+    let curriculum = load_curriculum(temp.path()).unwrap();
+    let catalog_path = write_compiled_catalog(temp.path(), &curriculum.catalog);
+    let files = collect_bundle_source_files(&[], None, &curriculum, &catalog_path).unwrap();
+    let expected_paths = files
+        .iter()
+        .map(|file| file.archive_path.clone())
+        .collect::<Vec<_>>();
+    let long_lecture_path = format!("curriculum/{course_id}/{lecture_id}/lecture.md");
+    assert!(long_lecture_path.len() > 100);
+
+    let archive = temp.path().join("ustar.tar.gz");
+    write_bundle_archive(&archive, &files).unwrap();
+
+    let mut decoder = GzDecoder::new(fs::File::open(&archive).unwrap());
+    let mut tar_bytes = Vec::new();
+    decoder.read_to_end(&mut tar_bytes).unwrap();
+    assert!(
+        !tar_bytes
+            .windows(b"././@LongLink".len())
+            .any(|window| window == b"././@LongLink")
+    );
+    assert_eq!(archive_paths(&archive), expected_paths);
+}
+
+#[test]
 fn archives_technical_assets_without_lecture_markdown() {
     let temp = tempfile::tempdir().unwrap();
     write_course(temp.path(), "linux", "01-nginx", Some("repair-nginx"));

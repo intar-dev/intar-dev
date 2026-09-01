@@ -294,7 +294,14 @@ pub(super) fn write_bundle_archive(
     for source_file in sorted_files {
         let bytes = fs::read(&source_file.source_path)
             .with_context(|| format!("failed to read {}", source_file.source_path.display()))?;
-        let mut header = tar::Header::new_gnu();
+        let archive_path = Path::new(&source_file.archive_path);
+        let mut header = tar::Header::new_ustar();
+        header.set_path(archive_path).with_context(|| {
+            format!(
+                "bundle archive path cannot be represented as USTAR: {}",
+                source_file.archive_path
+            )
+        })?;
         header.set_size(bytes.len() as u64);
         header.set_mode(0o644);
         header.set_uid(0);
@@ -302,11 +309,7 @@ pub(super) fn write_bundle_archive(
         header.set_mtime(0);
         header.set_cksum();
         builder
-            .append_data(
-                &mut header,
-                Path::new(&source_file.archive_path),
-                Cursor::new(bytes),
-            )
+            .append_data(&mut header, archive_path, Cursor::new(bytes))
             .with_context(|| {
                 format!(
                     "failed to append {} to bundle archive",
