@@ -55,6 +55,11 @@ pub struct Scenario {
     pub images: HashMap<String, ImageSpec>,
     pub kino: KinoDefinition,
     pub vms: Vec<VmDefinition>,
+    /// Presentation fields remain readable for legacy, non-course callers.
+    /// Course sources reject them through `parse_course` and take this data
+    /// from the paired Markdown lecture instead.
+    #[serde(skip)]
+    course_presentation_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,6 +203,17 @@ impl Scenario {
         Self::parse(&content)
     }
 
+    pub fn from_course_file(path: &Path) -> Result<Self, ScenarioError> {
+        let content = std::fs::read_to_string(path)?;
+        Self::parse_course(&content)
+    }
+
+    pub fn parse_course(content: &str) -> Result<Self, ScenarioError> {
+        let scenario = Self::parse(content)?;
+        scenario.validate_course_presentation_fields()?;
+        Ok(scenario)
+    }
+
     pub fn parse(content: &str) -> Result<Self, ScenarioError> {
         let mut vm_cpu_literals: VecDeque<_> = extract_vm_cpu_literals(content)?.into();
         let body: hcl::Body =
@@ -217,6 +233,7 @@ impl Scenario {
         let mut images = HashMap::new();
         let mut kino = KinoDefinition::default();
         let mut vms = Vec::new();
+        let mut course_presentation_fields = Vec::new();
 
         for block in body.blocks() {
             if block.identifier.as_str() != "scenario" {
@@ -232,7 +249,8 @@ impl Scenario {
             scenario_name = required_single_label(block, "scenario", "missing scenario name")?;
 
             for attr in block.body.attributes() {
-                match attr.key.as_str() {
+                let key = attr.key.as_str();
+                match key {
                     "title" => title = extract_string(&attr.expr)?,
                     "category" => category = extract_string(&attr.expr)?,
                     "tags" => tags = extract_string_array(&attr.expr)?,
@@ -246,6 +264,7 @@ impl Scenario {
                         )));
                     }
                 }
+                course_presentation_fields.push(key.to_string());
             }
 
             for inner_block in block.body.blocks() {
@@ -306,12 +325,6 @@ impl Scenario {
             ));
         }
 
-        if category.is_empty() {
-            return Err(ScenarioError::InvalidScenario(
-                "scenario block missing required attribute 'category'".into(),
-            ));
-        }
-
         Ok(Self {
             name: scenario_name,
             title,
@@ -326,6 +339,7 @@ impl Scenario {
             images,
             kino,
             vms,
+            course_presentation_fields,
         })
     }
 
@@ -377,6 +391,15 @@ impl Scenario {
     }
 
     pub fn validate_for_builder_arch(&self, target_arch: &str) -> Result<(), ScenarioError> {
+        self.validate_technical_for_builder_arch(target_arch)?;
+        self.validate_authoring_fields()?;
+        Ok(())
+    }
+
+    pub fn validate_technical_for_builder_arch(
+        &self,
+        target_arch: &str,
+    ) -> Result<(), ScenarioError> {
         assert_supported_builder_arch(target_arch)?;
         self.validate()?;
 
@@ -408,13 +431,24 @@ impl Scenario {
             }
         }
 
-        self.validate_authoring_fields()?;
+        self.validate_required_solution()?;
 
         Ok(())
     }
 
+    fn validate_course_presentation_fields(&self) -> Result<(), ScenarioError> {
+        if self.course_presentation_fields.is_empty() {
+            return Ok(());
+        }
+        Err(ScenarioError::InvalidScenario(format!(
+            "course-mode scenario must not define {}; use lecture.md frontmatter",
+            self.course_presentation_fields.join(", ")
+        )))
+    }
+
     fn validate_authoring_fields(&self) -> Result<(), ScenarioError> {
         validate_required_scenario_text("title", &self.title)?;
+        validate_required_scenario_text("category", &self.category)?;
         validate_required_scenario_text("description", &self.description)?;
         if self.description.lines().count() > 1 {
             return Err(ScenarioError::InvalidScenarioField {
@@ -442,6 +476,10 @@ impl Scenario {
                 });
             }
         }
+        Ok(())
+    }
+
+    fn validate_required_solution(&self) -> Result<(), ScenarioError> {
         match &self.solution {
             Some(solution) if !solution.body.trim().is_empty() => {}
             Some(_) => {

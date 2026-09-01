@@ -33,11 +33,6 @@ import { cn } from "@/lib/utils";
 
 type StateFilter = "enabled" | "disabled" | null;
 
-interface ScenarioSourceSummary {
-  scenarioId: string;
-  status: "draft" | "published";
-}
-
 type ScenarioBuildStatus =
   | "queued"
   | "assigned"
@@ -79,11 +74,6 @@ export function ScenarioRegistry() {
       return (await response.json()) as AdminScenarioListResponse;
     },
     staleTime: 10_000,
-  });
-  const sources = useQuery({
-    queryKey: ["admin", "authoring", "sources"],
-    queryFn: fetchScenarioSources,
-    staleTime: 5_000,
   });
   const builds = useQuery({
     queryKey: ["admin-builds"],
@@ -133,16 +123,6 @@ export function ScenarioRegistry() {
         ),
       ].sort(),
     [scenarioList],
-  );
-  const sourceByScenarioId = useMemo(
-    () =>
-      new Map(
-        (sources.data?.sources ?? []).map((source) => [
-          source.scenarioId,
-          source,
-        ]),
-      ),
-    [sources.data],
   );
   const latestBuildByScenarioId = useMemo(() => {
     const latestBuilds = new Map<string, ScenarioBuildSummary>();
@@ -201,7 +181,7 @@ export function ScenarioRegistry() {
         <EmptyState
           icon={<HardDriveDownload />}
           title="No scenarios uploaded"
-          description="Create and validate a draft in Authoring, or upload one through the external pipeline. Published scenarios appear here with their VM inventory, checks, and learner availability."
+          description="Upload a scenario bundle through the external pipeline. Published scenarios appear here with their VM inventory, checks, and learner availability."
         />
       ) : (
         <div className="space-y-4">
@@ -333,13 +313,6 @@ export function ScenarioRegistry() {
                       <ScenarioRegistryRow
                         key={scenario.scenarioId}
                         scenario={scenario}
-                        source={
-                          sourceByScenarioId.get(scenario.scenarioId) ?? null
-                        }
-                        sourceLoading={sources.isLoading}
-                        sourceUnavailable={Boolean(
-                          sources.error && !sources.data,
-                        )}
                         latestBuild={
                           latestBuildByScenarioId.get(scenario.scenarioId) ??
                           null
@@ -373,9 +346,6 @@ export function ScenarioRegistry() {
 
 function ScenarioRegistryRow({
   scenario,
-  source,
-  sourceLoading,
-  sourceUnavailable,
   latestBuild,
   buildLoading,
   buildUnavailable,
@@ -384,9 +354,6 @@ function ScenarioRegistryRow({
   onToggle,
 }: {
   scenario: AdminScenarioSummary;
-  source: ScenarioSourceSummary | null;
-  sourceLoading: boolean;
-  sourceUnavailable: boolean;
   latestBuild: ScenarioBuildSummary | null;
   buildLoading: boolean;
   buildUnavailable: boolean;
@@ -394,15 +361,6 @@ function ScenarioRegistryRow({
   disabled: boolean;
   onToggle: () => void;
 }) {
-  const sourceValue = sourceLoading
-    ? "Checking source…"
-    : sourceUnavailable
-      ? "Status unavailable"
-      : source?.status === "draft"
-        ? "Draft saved"
-        : source?.status === "published"
-          ? "Published source"
-          : "Published record";
   const buildValue = buildLoading
     ? "Checking builds…"
     : buildUnavailable
@@ -443,17 +401,6 @@ function ScenarioRegistryRow({
             label="Availability"
             value={scenario.enabled ? "Enabled for learners" : "Unavailable"}
             tone={scenario.enabled ? "success" : "muted"}
-          />
-          <RegistryFact
-            label="Source"
-            value={sourceValue}
-            tone={
-              sourceLoading || sourceUnavailable
-                ? "muted"
-                : source?.status === "draft"
-                  ? "warning"
-                  : "default"
-            }
           />
           <RegistryFact
             label="Latest build"
@@ -604,19 +551,6 @@ function buildTone(
   if (status === "failed") return "error";
   if (status === "building" || status === "stale") return "warning";
   return "default";
-}
-
-async function fetchScenarioSources(): Promise<{
-  sources: ScenarioSourceSummary[];
-}> {
-  const response = await fetch("/api/admin/authoring/sources", {
-    method: "GET",
-    credentials: "include",
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to load source status (${response.status})`);
-  }
-  return (await response.json()) as { sources: ScenarioSourceSummary[] };
 }
 
 async function fetchScenarioBuilds(): Promise<{

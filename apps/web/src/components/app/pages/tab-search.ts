@@ -1,9 +1,3 @@
-import {
-  compactCatalogSearch,
-  normalizeCatalogSearch,
-  type CatalogSearch,
-} from "./learn/catalog-search";
-
 export type OrganizationDetailTab =
   | "overview"
   | "people"
@@ -21,8 +15,6 @@ export interface OrganizationDetailSearch {
 export interface AdminPeopleSearch {
   tab?: AdminPeopleTab;
 }
-
-export type ScenarioBriefingSearch = CatalogSearch;
 
 export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
   "overview",
@@ -63,12 +55,6 @@ export function isOrganizationDetailTab(
     typeof value === "string" &&
     ORGANIZATION_DETAIL_TABS.includes(value as OrganizationDetailTab)
   );
-}
-
-export function validateScenarioBriefingSearch(
-  search: Record<string, unknown>,
-): ScenarioBriefingSearch {
-  return compactCatalogSearch(normalizeCatalogSearch(search));
 }
 
 export function isAdminPeopleTab(value: unknown): value is AdminPeopleTab {

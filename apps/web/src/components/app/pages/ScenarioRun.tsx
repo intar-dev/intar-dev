@@ -25,7 +25,13 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { presentScenarioRun } from "@/lib/run-phase";
-import { findNextCourseScenario } from "@/components/app/run/run-course-navigation";
+import {
+  courseRouteForRun,
+  fetchCourseCatalog,
+  findNextCourseLecture,
+  type CourseCatalogResponse,
+  type CourseRouteRef,
+} from "@/components/app/pages/learn/course-wire";
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import {
@@ -52,7 +58,6 @@ import {
 } from "@/components/app/run/run-types";
 import type {
   CourseLocation,
-  ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import { cn } from "@/lib/utils";
@@ -230,19 +235,22 @@ export function ScenarioRun() {
     attempt.data.run.activity === "settled"
       ? (attempt.data.run.courseLocation ?? null)
       : null;
-  const shouldLoadNextCourseScenario =
-    completedCourseLocation?.courseKind === "authored";
+  const completedCourseRoute = useMemo(
+    () => courseRouteForRun(completedCourseLocation),
+    [completedCourseLocation],
+  );
+  const shouldLoadNextCourseLecture = Boolean(completedCourseRoute);
   const currentCourse = useQuery({
     queryKey: [
       "scenario-run",
       runId,
       "current-course",
-      completedCourseLocation?.scope ?? null,
-      completedCourseLocation?.organizationId ?? null,
-      completedCourseLocation?.courseId ?? null,
+      completedCourseRoute?.scope ?? null,
+      completedCourseRoute?.organizationId ?? null,
+      completedCourseRoute?.courseId ?? null,
     ],
-    queryFn: () => fetchCurrentCourseCatalog(completedCourseLocation),
-    enabled: shouldLoadNextCourseScenario,
+    queryFn: () => fetchCurrentCourseCatalog(completedCourseRoute),
+    enabled: shouldLoadNextCourseLecture,
     staleTime: 0,
     retry: false,
   });
@@ -339,7 +347,6 @@ export function ScenarioRun() {
         await navigateToRunCourse(
           navigate,
           attemptData.courseLocation,
-          attemptData.scenarioId,
           attemptData.organizationId,
         );
         return;
@@ -402,16 +409,17 @@ export function ScenarioRun() {
   });
 
   const attemptData = attempt.data?.run ?? null;
-  const nextCourseScenario = useMemo(
+  const nextCourseLecture = useMemo(
     () =>
       attemptData && currentCourse.data
-        ? findNextCourseScenario({
-            location: completedCourseLocation,
+        ? findNextCourseLecture({
+            route: completedCourseRoute,
+            lectureId: attemptData.courseLocation?.lectureId ?? null,
             scenarioId: attemptData.scenarioId,
             courses: currentCourse.data.courses,
           })
         : null,
-    [attemptData, completedCourseLocation, currentCourse.data],
+    [attemptData, completedCourseRoute, currentCourse.data],
   );
   const selectedVm = useMemo(() => {
     if (!attemptData?.vms.length) {
@@ -642,7 +650,7 @@ export function ScenarioRun() {
     [canDeleteRun],
   );
   usePageChrome({
-    title: attemptData?.title ?? "Lab run",
+    title: attemptData?.title ?? "Scenario run",
     status: runIsLive ? undefined : runStatusDisplay,
     action: runIsLive ? undefined : deleteRunAction,
     fullscreen: runIsLive,
@@ -694,6 +702,8 @@ export function ScenarioRun() {
     attemptData?.activity === "foreground"
       ? {
           briefingMarkdown: attemptData.briefingMarkdown,
+          lectureMarkdown: attemptData.lectureBodyMarkdown ?? null,
+          lectureTitle: attemptData.lectureTitle ?? null,
           phase: attemptData.phase,
           probes: selectedProbes,
           vmName: selectedVm?.scenarioVmName ?? null,
@@ -785,7 +795,7 @@ export function ScenarioRun() {
     <>
       {attempt.error ? (
         <Alert variant="destructive">
-          <AlertTitle>Could not load this lab</AlertTitle>
+          <AlertTitle>Could not load this run</AlertTitle>
           <AlertDescription>
             Refresh the page or return to My runs and try again.
           </AlertDescription>
@@ -813,7 +823,7 @@ export function ScenarioRun() {
             className="flex min-h-48 items-center justify-center text-sm text-muted-foreground"
             role="status"
           >
-            Loading your lab…
+            Loading your run…
           </p>
         ) : null}
       </PageShell>
@@ -838,7 +848,7 @@ export function ScenarioRun() {
           <LazyRunRecap
             run={attemptData}
             courseLocation={attemptData.courseLocation}
-            nextScenario={nextCourseScenario}
+            nextLecture={nextCourseLecture}
             headingRef={recapHeadingRef}
           />
         </Suspense>
@@ -1020,32 +1030,21 @@ function RunWorkspaceHeader({
 }
 
 async function fetchCurrentCourseCatalog(
-  location: CourseLocation | null,
-): Promise<ScenarioCatalogWireResponse> {
-  if (!location || location.courseKind !== "authored") {
+  route: CourseRouteRef | null,
+): Promise<CourseCatalogResponse> {
+  if (!route) {
     throw new Error("A current course catalog is not available.");
   }
-
-  const endpoint = location.organizationId
-    ? `/api/organizations/${encodeURIComponent(location.organizationId)}/scenarios`
-    : "/api/scenarios";
-  const response = await fetch(endpoint, {
-    method: "GET",
-    credentials: "include",
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to load current course (${response.status})`);
-  }
-  return (await response.json()) as ScenarioCatalogWireResponse;
+  return fetchCourseCatalog(route.organizationId);
 }
 
 async function navigateToRunCourse(
   navigate: ReturnType<typeof useNavigate>,
   location: CourseLocation | null | undefined,
-  scenarioId: string,
   fallbackOrganizationId: string | null | undefined,
 ) {
-  if (!location) {
+  const route = courseRouteForRun(location);
+  if (!route) {
     if (fallbackOrganizationId) {
       await navigate({
         to: "/organizations/$orgId/courses",
@@ -1057,37 +1056,27 @@ async function navigateToRunCourse(
     return;
   }
 
-  const courseId = location.courseId ?? "general-practice";
-  switch (location.scope) {
+  switch (route.scope) {
     case "public":
       await navigate({
-        to: "/courses/$courseId/$scenarioId",
-        params: { courseId, scenarioId },
+        to: "/courses/$courseId",
+        params: { courseId: route.courseId },
       });
       return;
     case "organization-public":
-      if (location.organizationId) {
+      if (route.organizationId) {
         await navigate({
-          to: "/organizations/$orgId/courses/public/$courseId/$scenarioId",
-          params: { orgId: location.organizationId, courseId, scenarioId },
+          to: "/organizations/$orgId/courses/public/$courseId",
+          params: { orgId: route.organizationId, courseId: route.courseId },
         });
         return;
       }
       break;
     case "organization-private":
-      if (location.organizationId) {
+      if (route.organizationId) {
         await navigate({
-          to: "/organizations/$orgId/courses/private/$courseId/$scenarioId",
-          params: { orgId: location.organizationId, courseId, scenarioId },
-        });
-        return;
-      }
-      break;
-    case "organization-general-practice":
-      if (location.organizationId) {
-        await navigate({
-          to: "/organizations/$orgId/courses/general-practice/$scenarioId",
-          params: { orgId: location.organizationId, scenarioId },
+          to: "/organizations/$orgId/courses/private/$courseId",
+          params: { orgId: route.organizationId, courseId: route.courseId },
         });
         return;
       }

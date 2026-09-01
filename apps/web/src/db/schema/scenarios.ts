@@ -14,35 +14,35 @@ import type {
 } from "@/generated/catalog";
 import { organization } from "./core";
 import {
-  type ScenarioCourseCatalogCourse,
+  type CourseCatalogSnapshotV2,
   jsonText,
   nowMsDefault,
 } from "./shared";
 
 export const scenarioCourseCatalogs = sqliteTable(
-  "scenario_course_catalogs",
+  "course_catalogs",
   {
     scopeKey: text("scope_key").primaryKey(),
     organizationId: text("organization_id").references(() => organization.id, {
       onDelete: "cascade",
     }),
-    coursesJson: jsonText<ScenarioCourseCatalogCourse[]>("courses_json")
+    catalogJson: jsonText<CourseCatalogSnapshotV2>("catalog_json")
       .notNull(),
     sourceRevision: text("source_revision").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
   (table) => [
-    uniqueIndex("scenario_course_catalogs_organization_uidx").on(
+    uniqueIndex("course_catalogs_organization_uidx").on(
       table.organizationId,
     ),
     check(
-      "scenario_course_catalogs_scope_check",
+      "course_catalogs_scope_check",
       sql`(${table.scopeKey} = 'public' AND ${table.organizationId} IS NULL) OR (${table.scopeKey} = 'organization:' || ${table.organizationId} AND ${table.organizationId} IS NOT NULL)`,
     ),
     check(
-      "scenario_course_catalogs_courses_json_check",
-      sql`json_valid(${table.coursesJson})`,
+      "course_catalogs_catalog_json_check",
+      sql`json_valid(${table.catalogJson})`,
     ),
   ],
 );

@@ -65,7 +65,7 @@ export async function requestScenarioStartWithCapacityWait(
       const remainingMs = CAPACITY_WAIT_TIMEOUT_MS - elapsedMs;
       if (remainingMs <= 0) {
         throw new Error(
-          "VM capacity did not become available within 60 seconds. Try again shortly or choose another lab.",
+          "VM capacity did not become available within 60 seconds. Try again shortly or choose another scenario.",
         );
       }
       options.onCapacityWait();
@@ -97,7 +97,7 @@ async function requestScenarioStart(
   } catch (error) {
     if (signal.aborted) throw error;
     throw new ScenarioStartRequestError(
-      "Could not reach the control plane. Check your connection and try starting the lab again.",
+      "Could not reach the control plane. Check your connection and try starting the scenario again.",
       "connectivity_failed",
       DEFAULT_CAPACITY_RETRY_MS,
     );

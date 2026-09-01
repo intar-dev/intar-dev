@@ -3,7 +3,7 @@ use intar_contracts::{
         BridgeMessageV7, BuildReportV1, DesiredBuildV1, HostDesiredStateV2, HostStateReportV2,
         VmReportV2,
     },
-    catalog::ScenarioManifestV4,
+    catalog::{CourseCatalogSnapshotV2, ScenarioManifestV4},
     stargate::{
         IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
         IssueWorkspaceAppSessionResponse,
@@ -42,6 +42,13 @@ fn stargate_workspace_app_response_fixture_round_trips() {
 fn catalog_manifest_fixture_round_trips() {
     assert_round_trip::<ScenarioManifestV4>(include_str!(
         "../fixtures/catalog/scenario-manifest-v4.json"
+    ));
+}
+
+#[test]
+fn course_catalog_v2_fixture_round_trips() {
+    assert_round_trip::<CourseCatalogSnapshotV2>(include_str!(
+        "../fixtures/catalog/course-catalog-v2.json"
     ));
 }
 

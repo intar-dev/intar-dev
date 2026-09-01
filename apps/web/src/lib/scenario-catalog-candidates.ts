@@ -10,6 +10,10 @@ import type { ImageBuildBundleMeta } from "@/db/schema";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import { upsertDesiredCachedImage } from "@/lib/desired-state";
+import {
+  applyLecturePresentation,
+  findCourseLecturePresentation,
+} from "@/lib/scenario-course-catalogs";
 
 export async function stageCandidateScenarioManifest(
   db: DrizzleD1Database,
@@ -141,16 +145,25 @@ export async function stageReusableCandidateManifests(
         candidate.manifest,
     );
     if (!build?.manifest) continue;
+    const presentation = input.meta.courseCatalog
+      ? findCourseLecturePresentation(
+          input.meta.courseCatalog,
+          expected.scenarioId,
+        )
+      : null;
+    const manifest = presentation
+      ? applyLecturePresentation(build.manifest, presentation)
+      : build.manifest;
     await stageCandidateScenarioManifest(db, {
       revision: input.revision,
       organizationId: input.organizationId,
       buildId: build.id,
-      manifest: build.manifest,
+      manifest,
       nowUnixMs: input.nowUnixMs,
     });
     await warmCandidateScenarioManifest(db, {
       organizationId: input.organizationId,
-      manifest: build.manifest,
+      manifest,
       nowUnixMs: input.nowUnixMs,
       wakeHost: input.wakeHost,
     });

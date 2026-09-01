@@ -7,10 +7,6 @@ import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
 } from "../../patterns/CollectionPagination";
-import {
-  MetaDifficulty,
-  type ScenarioDifficulty,
-} from "../../patterns/MetaLine";
 import { Section } from "../../patterns/Section";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -24,9 +20,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { ScenarioCatalogWireResponse } from "@/lib/scenario-runs";
-import { findScenarioCourseLocation } from "@/lib/course-location";
-import { CourseScenarioLink } from "../learn/course-route-links";
+import { LectureLink } from "../learn/course-links";
+import {
+  courseRouteForCatalogCourse,
+  type CourseCatalogCourse,
+  type CourseCatalogResponse,
+  type CourseLectureSummary,
+} from "../learn/course-wire";
 import type { OrganizationDetailTab } from "../tab-search";
 import {
   type AssignmentsResponse,
@@ -250,10 +250,10 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
       ),
   });
   const catalog = useQuery({
-    queryKey: ["organizations", detail.id, "scenarios"],
+    queryKey: ["courses", "organization", detail.id],
     queryFn: () =>
-      fetchJson<ScenarioCatalogWireResponse>(
-        `/api/organizations/${encodeURIComponent(detail.id)}/scenarios`,
+      fetchJson<CourseCatalogResponse>(
+        `/api/organizations/${encodeURIComponent(detail.id)}/courses`,
       ),
   });
   const invalidate = () =>
@@ -291,18 +291,19 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
 
   const entries = assignments.data?.assignments ?? [];
   const assignedIds = new Set(entries.map((entry) => entry.scenarioId));
-  const catalogEntries =
-    catalog.data?.courses.flatMap((course) => course.scenarios) ?? [];
-  const assignable = catalogEntries.filter(
-    (scenario) => !assignedIds.has(scenario.scenarioId),
-  );
-  const scenarioById = new Map(
-    catalogEntries.map((scenario) => [scenario.scenarioId, scenario]),
-  );
-  const courseByScenarioId = new Map(
-    (catalog.data?.courses ?? []).flatMap((course) =>
-      course.scenarios.map((scenario) => [scenario.scenarioId, course] as const),
+  const catalogLectures = (catalog.data?.courses ?? []).flatMap((course) =>
+    course.lectures.flatMap((lecture) =>
+      lecture.scenarioId ? [{ course, lecture }] : [],
     ),
+  );
+  const assignable = catalogLectures.filter(
+    ({ lecture }) => lecture.scenarioId && !assignedIds.has(lecture.scenarioId),
+  );
+  const catalogLectureByScenarioId = new Map(
+    catalogLectures.map(({ course, lecture }) => [
+      lecture.scenarioId!,
+      { course, lecture },
+    ]),
   );
   const actionError = assign.error ?? unassign.error;
 
@@ -320,9 +321,9 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
               aria-label="Scenario to assign"
             >
               <option value="">Choose a scenario…</option>
-              {assignable.map((scenario) => (
-                <option key={scenario.scenarioId} value={scenario.scenarioId}>
-                  {scenario.title}
+              {assignable.map(({ lecture }) => (
+                <option key={lecture.scenarioId} value={lecture.scenarioId!}>
+                  {lecture.title}
                 </option>
               ))}
             </NativeSelect>
@@ -346,7 +347,24 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
           {(visibleAssignments) => (
             <ul className="divide-y overflow-hidden rounded-lg border">
               {visibleAssignments.map((entry) => {
-                const scenario = scenarioById.get(entry.scenarioId);
+                const catalogLecture = catalogLectureByScenarioId.get(
+                  entry.scenarioId,
+                );
+                const lecture = entry.lecture ?? assignmentLecture(
+                  catalogLecture?.course,
+                  catalogLecture?.lecture,
+                  detail.id,
+                );
+                const target =
+                  lecture?.state === "locked" ? lecture.blockedBy : lecture;
+                const route =
+                  lecture && target
+                    ? {
+                        scope: lecture.scope,
+                        courseId: target.courseId,
+                        organizationId: detail.id,
+                      }
+                    : null;
                 return (
                   <li
                     key={entry.id}
@@ -356,29 +374,26 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                       <BookOpen className="size-4" />
                     </span>
                     <div className="min-w-0 flex-1">
-                      <CourseScenarioLink
-                        location={findScenarioCourseLocation(
-                          courseByScenarioId.get(entry.scenarioId)
-                            ? [courseByScenarioId.get(entry.scenarioId)!]
-                            : [],
-                          entry.scenarioId,
-                          detail.id,
-                        )}
-                        scenarioId={entry.scenarioId}
-                        fallbackOrganizationId={detail.id}
-                        className="text-sm font-semibold hover:text-primary"
-                      >
-                        {entry.scenarioTitle ?? entry.scenarioId}
-                      </CourseScenarioLink>
+                      {route && target ? (
+                        <LectureLink
+                          route={route}
+                          lectureId={target.lectureId}
+                          className="text-sm font-semibold hover:text-primary"
+                        >
+                          {target.title}
+                        </LectureLink>
+                      ) : (
+                        <span className="text-sm font-semibold">
+                          {entry.scenarioTitle ?? entry.scenarioId}
+                        </span>
+                      )}
                       <p className="text-caption">
+                        {lecture?.state === "locked" && lecture.blockedBy
+                          ? `Complete “${lecture.blockedBy.title}” first · `
+                          : ""}
                         Assigned {formatRelativeTime(entry.createdAt)}
                       </p>
                     </div>
-                    {scenario ? (
-                      <MetaDifficulty
-                        difficulty={scenario.difficulty as ScenarioDifficulty}
-                      />
-                    ) : null}
                     {admin ? (
                       <Button
                         variant="ghost"
@@ -412,6 +427,24 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
       ) : null}
     </Section>
   );
+}
+
+function assignmentLecture(
+  course: CourseCatalogCourse | undefined,
+  lecture: CourseLectureSummary | undefined,
+  organizationId: string,
+): NonNullable<AssignmentsResponse["assignments"][number]["lecture"]> | null {
+  if (!course || !lecture) return null;
+  const route = courseRouteForCatalogCourse(course, organizationId);
+  if (route.scope === "public") return null;
+  return {
+    courseId: course.courseId,
+    lectureId: lecture.lectureId,
+    title: lecture.title,
+    state: lecture.state,
+    blockedBy: lecture.blockedBy,
+    scope: route.scope,
+  };
 }
 
 export function ProgressSection({ detail }: { detail: Detail }) {

@@ -8,7 +8,6 @@ import {
   member,
   organization,
   scenarioRuns,
-  scenarioSources,
   ssoProvider,
   user,
   vmScenarios,
@@ -764,11 +763,6 @@ async function organizationHasOwnedResources(
       .select({ id: vmScenarios.scenarioId })
       .from(vmScenarios)
       .where(eq(vmScenarios.organizationId, organizationId))
-      .limit(1),
-    db
-      .select({ id: scenarioSources.id })
-      .from(scenarioSources)
-      .where(eq(scenarioSources.organizationId, organizationId))
       .limit(1),
     db
       .select({ id: agentHosts.id })

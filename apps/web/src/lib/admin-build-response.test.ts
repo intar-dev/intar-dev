@@ -42,7 +42,7 @@ describe("admin build response serialization", () => {
       rev: "abc123",
       r2Key: "builds/bundles/abc123.tar.gz",
       meta: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -110,7 +110,7 @@ const buildRow: AdminBuildDetailResponseRow = {
   },
   bundleR2Key: "builds/bundles/abc123.tar.gz",
   bundleMeta: {
-    buildFormatVersion: "intar-image-build-v10",
+    buildFormatVersion: "intar-image-build-v11",
     scenarios: [
       {
         scenarioId: "broken-nginx",

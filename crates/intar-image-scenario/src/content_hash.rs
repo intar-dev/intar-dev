@@ -1,12 +1,12 @@
-//! Pure content-hash core shared by the build pipeline (which walks the
-//! scenario directory on disk) and the wasm authoring validator (which is
-//! handed in-memory file entries). Both must produce byte-identical hashes.
+//! Pure content-hash core shared by the build pipeline and callers that hold
+//! scenario source as in-memory file entries. Both must produce byte-identical
+//! hashes.
 
 use sha2::{Digest, Sha256};
 
 use crate::ScenarioError;
 
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v10";
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v11";
 pub const GUEST_BOOTSTRAP_ABI: u16 = 1;
 
 #[derive(Debug, Clone)]
@@ -29,10 +29,14 @@ pub fn scenario_content_hash_from_entries(
         ));
     }
 
-    let mut normalized: Vec<(String, &[u8])> = entries
-        .iter()
-        .map(|(path, bytes)| Ok((normalize_relative_path(path)?, bytes.as_slice())))
-        .collect::<Result<_, ScenarioError>>()?;
+    let mut normalized = Vec::new();
+    for (path, bytes) in entries {
+        let path = normalize_relative_path(path)?;
+        if path.rsplit('/').next() == Some("lecture.md") {
+            continue;
+        }
+        normalized.push((path, bytes.as_slice()));
+    }
     normalized.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut hasher = Sha256::new();
@@ -154,8 +158,8 @@ mod tests {
     }
 
     #[test]
-    fn v10_build_format_matches_the_golden_hash() {
-        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v10");
+    fn v11_build_format_matches_the_golden_hash() {
+        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v11");
         assert_eq!(GUEST_BOOTSTRAP_ABI, 1);
         let hash = scenario_content_hash_from_entries(
             &params(),
@@ -167,8 +171,26 @@ mod tests {
         .unwrap();
         assert_eq!(
             hash,
-            "97d7a95aafc1d30a54af61f04350772694505c8bec8c3a8ebcd214f18409826e"
+            "c3e4008e1e6c34e31584e590e5436b6d5358d5eaea151556e77e0be245ab9715"
         );
+    }
+
+    #[test]
+    fn lecture_markdown_does_not_change_the_hash() {
+        let before = scenario_content_hash_from_entries(
+            &params(),
+            &[("scenario.hcl".to_string(), b"scenario".to_vec())],
+        )
+        .unwrap();
+        let after = scenario_content_hash_from_entries(
+            &params(),
+            &[
+                ("scenario.hcl".to_string(), b"scenario".to_vec()),
+                ("lecture.md".to_string(), b"new theory".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]

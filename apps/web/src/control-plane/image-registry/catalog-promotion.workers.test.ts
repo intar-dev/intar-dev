@@ -27,7 +27,7 @@ describe("candidate scenario catalog promotion", () => {
       rev: "revision-1",
       r2Key: "builds/bundles/revision-1.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         catalogChannel: "candidate",
         scenarios: [
           {

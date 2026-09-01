@@ -41,7 +41,7 @@ describe("build scheduler bundle supersession", () => {
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [],
       },
       createdAt: now - 1_000,
@@ -79,7 +79,7 @@ describe("build scheduler bundle supersession", () => {
         rev: "bundle-new",
         r2Key: "builds/bundles/bundle-new.tar.gz",
         meta: {
-          buildFormatVersion: "intar-image-build-v10",
+          buildFormatVersion: "intar-image-build-v11",
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -145,7 +145,7 @@ describe("build scheduler bundle supersession", () => {
         rev: "bundle-same-hash",
         r2Key: "builds/bundles/bundle-same-hash.tar.gz",
         meta: {
-          buildFormatVersion: "intar-image-build-v10",
+          buildFormatVersion: "intar-image-build-v11",
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -199,7 +199,7 @@ describe("build scheduler bundle supersession", () => {
       rev: "bundle-repair",
       r2Key: "builds/bundles/bundle-repair.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [],
       },
       createdAt: now,
@@ -246,7 +246,7 @@ describe("build scheduler bundle supersession", () => {
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [],
       },
       createdAt: now - 1_000,
@@ -300,7 +300,7 @@ describe("build scheduler bundle supersession", () => {
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [],
       },
       createdAt: now,
@@ -343,7 +343,7 @@ describe("build scheduler bundle supersession", () => {
       rev: "bundle-old",
       r2Key: "builds/bundles/bundle-old.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [],
       },
       createdAt: now,
@@ -441,7 +441,7 @@ async function queueBundle(
     rev,
     r2Key: `builds/bundles/${rev}.tar.gz`,
     meta: {
-      buildFormatVersion: "intar-image-build-v10",
+      buildFormatVersion: "intar-image-build-v11",
       scenarios: [
         {
           scenarioId: "broken-nginx",

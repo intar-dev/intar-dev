@@ -30,6 +30,16 @@ export const scenarioRuns = sqliteTable(
       .references(() => agentHosts.id, { onDelete: "restrict" }),
     scenarioId: text("scenario_id").notNull(),
     scenarioName: text("scenario_name").notNull(),
+    // Immutable course/lecture context. Old runs remain readable with nulls.
+    courseScopeKey: text("course_scope_key"),
+    courseId: text("course_id"),
+    courseTitle: text("course_title"),
+    lectureId: text("lecture_id"),
+    lectureTitle: text("lecture_title"),
+    lectureSummary: text("lecture_summary"),
+    lectureBodyMarkdown: text("lecture_body_markdown"),
+    lectureOrdinal: integer("lecture_ordinal"),
+    lectureCount: integer("lecture_count"),
     title: text("title").notNull(),
     tagline: text("tagline").notNull(),
     briefingMarkdown: text("briefing_markdown").notNull(),
@@ -74,6 +84,13 @@ export const scenarioRuns = sqliteTable(
       table.organizationId,
       table.createdAt,
     ),
+    index("scenario_runs_course_unit_idx").on(
+      table.userId,
+      table.courseScopeKey,
+      table.courseId,
+      table.lectureId,
+      table.createdAt,
+    ),
     index("scenario_runs_admin_archive_page_idx")
       .on(
         sql`coalesce(${table.archiveEnteredAt}, ${table.createdAt})`,
@@ -84,6 +101,36 @@ export const scenarioRuns = sqliteTable(
       ),
     uniqueIndex("scenario_runs_runtime_execution_uidx").on(
       table.runtimeExecutionId,
+    ),
+  ],
+);
+
+/** Completion is durable even when its source run is later deleted. */
+export const courseUnitCompletions = sqliteTable(
+  "course_unit_completions",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    scopeKey: text("scope_key").notNull(),
+    courseId: text("course_id").notNull(),
+    lectureId: text("lecture_id").notNull(),
+    sourceRunId: text("source_run_id").references(() => scenarioRuns.runId, {
+      onDelete: "set null",
+    }),
+    completedAt: integer("completed_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("course_unit_completions_unit_uidx").on(
+      table.userId,
+      table.scopeKey,
+      table.courseId,
+      table.lectureId,
+    ),
+    index("course_unit_completions_scope_course_idx").on(
+      table.scopeKey,
+      table.courseId,
+      table.lectureId,
     ),
   ],
 );

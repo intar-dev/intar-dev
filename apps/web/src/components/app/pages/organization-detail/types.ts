@@ -25,6 +25,18 @@ export interface AssignmentsResponse {
     scenarioId: string;
     scenarioTitle: string | null;
     createdAt: number;
+    lecture?: {
+      courseId: string;
+      lectureId: string;
+      title: string;
+      state: "locked" | "available" | "waiting_for_scenario" | "in_progress" | "completed";
+      blockedBy: {
+        courseId: string;
+        lectureId: string;
+        title: string;
+      } | null;
+      scope: "organization-public" | "organization-private";
+    } | null;
   }>;
 }
 

@@ -218,7 +218,7 @@ export function ScenarioShellStatusCard(props: {
           </p>
           <p className="text-sm leading-6 text-muted-foreground">
             {props.phase === "failed"
-              ? "This lab stopped before the browser terminal opened. End the run and try again."
+              ? "This scenario stopped before the browser terminal opened. End the run and try again."
               : "The browser terminal will open when your workspace is ready."}
           </p>
         </div>

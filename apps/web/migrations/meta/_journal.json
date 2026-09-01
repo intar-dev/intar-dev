@@ -71,6 +71,13 @@
       "when": 1788116413323,
       "tag": "0009_freezing_lord_hawal",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1788219189780,
+      "tag": "0010_ordinary_crystal",
+      "breakpoints": true
     }
   ]
 }

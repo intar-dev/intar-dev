@@ -9,7 +9,6 @@ import {
   agentHosts,
   member,
   organization,
-  scenarioRuns,
   user,
   vmScenarios,
   vmScenarioVms,
@@ -18,7 +17,6 @@ import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import { errorChainMatches } from "@/lib/app-error";
 import { createOrRotateOrganizationRunner } from "@/lib/organization-runners";
 import { createOrganization } from "@/lib/organizations";
-import { getScenarioProgressByScenario } from "@/lib/scenario-runs";
 import { listEnabledScenarios, loadScenario } from "@/lib/scenarios";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -103,48 +101,6 @@ describe("organization boundaries", () => {
     ).resolves.toMatchObject({
       scenarioId: "org-a-private",
       organizationId: "org-a",
-    });
-  });
-
-  it("keeps public and organization-context progress separate", async () => {
-    const db = drizzle(env.DB);
-    await insertUser("learner");
-    await insertOrganization("org-a");
-    await db.insert(agentHosts).values({
-      id: "progress-host",
-      userId: "learner",
-      organizationId: "org-a",
-      name: "Progress host",
-    });
-    await db.insert(scenarioRuns).values([
-      scenarioRun({
-        runId: "public-run",
-        organizationId: null,
-        solvedAt: 1_500,
-      }),
-      scenarioRun({
-        runId: "organization-run",
-        organizationId: "org-a",
-        solvedAt: 2_000,
-      }),
-    ]);
-
-    const publicProgress = await getScenarioProgressByScenario("learner");
-    const organizationProgress = await getScenarioProgressByScenario(
-      "learner",
-      "org-a",
-    );
-    expect(publicProgress.get("public-scenario")).toMatchObject({
-      attemptCount: 1,
-      completedCount: 1,
-      bestSolveMs: 500,
-      status: "completed",
-    });
-    expect(organizationProgress.get("public-scenario")).toMatchObject({
-      attemptCount: 1,
-      completedCount: 1,
-      bestSolveMs: 1_000,
-      status: "completed",
     });
   });
 
@@ -264,40 +220,4 @@ function scenarioIds(
   scenarios: Awaited<ReturnType<typeof listEnabledScenarios>>,
 ) {
   return scenarios.map((scenario) => scenario.scenarioId).sort();
-}
-
-function scenarioRun(input: {
-  runId: string;
-  organizationId: string | null;
-  solvedAt?: number | null;
-}): typeof scenarioRuns.$inferInsert {
-  const createdAt = 1_000;
-  return {
-    runId: input.runId,
-    userId: "learner",
-    organizationId: input.organizationId,
-    hostId: "progress-host",
-    scenarioId: "public-scenario",
-    scenarioName: "public-scenario",
-    title: "Public scenario",
-    tagline: "Test",
-    briefingMarkdown: "Briefing",
-    objectivesJson: "[]",
-    difficulty: "easy",
-    estimatedMinutes: 10,
-    tagsJson: [],
-    hintsJson: [],
-    solutionMarkdown: "Solution",
-    revealedHintsJson: [],
-    solutionAssisted: false,
-    vmCount: 1,
-    state: "completed",
-    stateRank: 1,
-    activeKey: null,
-    stateJson: "{}",
-    solvedAt: input.solvedAt ?? null,
-    completedAt: 3_000,
-    createdAt,
-    updatedAt: 3_000,
-  };
 }

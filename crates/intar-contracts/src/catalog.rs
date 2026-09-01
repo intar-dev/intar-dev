@@ -47,6 +47,46 @@ pub enum ScenarioDifficulty {
     Hard,
 }
 
+/// The published, Markdown-authored course catalog.
+///
+/// `version` is intentionally a field rather than an enum tag. The bundle
+/// receiver must reject a catalog version that it does not understand.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CourseCatalogSnapshotV2 {
+    #[schemars(range(min = 2, max = 2))]
+    pub version: u16,
+    pub courses: Vec<CourseCatalogCourseV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CourseCatalogCourseV2 {
+    pub course_id: String,
+    pub title: String,
+    pub summary: String,
+    pub body_markdown: String,
+    pub sequential: bool,
+    pub lectures: Vec<CourseCatalogLectureV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CourseCatalogLectureV2 {
+    pub lecture_id: String,
+    pub title: String,
+    pub summary: String,
+    pub body_markdown: String,
+    pub category: String,
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub difficulty: Option<ScenarioDifficulty>,
+    #[schemars(range(min = 1))]
+    pub estimated_minutes: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ScenarioHintManifestV3 {

@@ -18,8 +18,7 @@ on:
       - "crates/intar-image-*/**"
       - "content/scenarios/base-images.hcl"
       - "builder.*.hcl"
-      - "content/courses.hcl"
-      - "content/scenarios/**"
+      - "content/courses/**"
       - "apps/web/migrations/**"
       - "apps/web/src/control-plane/auth.ts"
       - "apps/web/src/control-plane/bridge-v7.ts"
@@ -45,8 +44,7 @@ on:
       - "crates/intar-image-*/**"
       - "content/scenarios/base-images.hcl"
       - "builder.*.hcl"
-      - "content/courses.hcl"
-      - "content/scenarios/**"
+      - "content/courses/**"
       - "apps/web/migrations/**"
       - "apps/web/src/control-plane/auth.ts"
       - "apps/web/src/control-plane/bridge-v7.ts"
@@ -109,16 +107,21 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Verify public scenario allowlist
+      - name: Verify public curriculum source
         run: |
-          test "$(find content/scenarios -mindepth 2 -maxdepth 2 -type f -name scenario.hcl -print | LC_ALL=C sort)" = \
-            "content/scenarios/broken-nginx/scenario.hcl"
+          test -f content/courses/linux-operations/course.md
+          test -f content/courses/linux-operations/00-operating-model/lecture.md
+          test -f content/courses/linux-operations/01-broken-nginx/lecture.md
+          test -f content/courses/linux-operations/01-broken-nginx/scenario.hcl
+          scenario_count="$(find content/courses -type f -name scenario.hcl -print | wc -l | tr -d ' ')"
+          test "${scenario_count}" -gt 0
+          echo "Found ${scenario_count} course scenarios."
 
       - name: Validate scenario definitions
         run: just validate-images
 
       - name: Render public image build input
-        run: just render-images broken-nginx builder.sample.amd64.hcl
+        run: just render-images
 
       - name: Publish exact scenario source bundle
         if: github.event_name == 'workflow_dispatch'
@@ -130,7 +133,7 @@ jobs:
           revision="${GITHUB_SHA:0:12}"
           started_at="$(date +%s)"
           just bundle-images \
-            broken-nginx \
+            "" \
             builder.sample.amd64.hcl \
             "${revision}" \
             false \

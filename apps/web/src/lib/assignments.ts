@@ -3,11 +3,15 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { member, organization, scenarioAssignments } from "@/db/schema";
 import { appError } from "@/lib/app-error";
-import { findScenarioCourseLocation } from "@/lib/course-location";
 import { createAppId } from "@/lib/id";
 import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
-import { listScenarioCatalogForUser } from "@/lib/scenario-runs/catalog";
 import type { CourseLocation } from "@/lib/scenario-runs";
+import {
+  resolveCourseLectureForScenario,
+  type CourseLectureBlocker,
+  type CourseLectureState,
+  type ResolvedCourseLecture,
+} from "@/lib/scenario-course-catalogs";
 import { requireOrganizationRole } from "@/lib/organizations";
 
 export interface OrganizationAssignmentRecord {
@@ -25,6 +29,14 @@ export interface MyAssignment {
   organizationName: string;
   assignedAt: number;
   courseLocation: CourseLocation | null;
+  lecture: {
+    courseId: string;
+    lectureId: string;
+    title: string;
+    state: CourseLectureState;
+    blockedBy: CourseLectureBlocker | null;
+    scope: "organization-public" | "organization-private";
+  } | null;
 }
 
 async function scenarioTitleMap(
@@ -72,6 +84,23 @@ export async function assignScenarioToOrganization(params: {
     throw appError(404, "scenario_not_found", "scenario is not enabled");
   }
 
+  const linkedLecture = await resolveCourseLectureForScenario({
+    db: drizzle(env.DB),
+    userId: params.actorUserId,
+    organizationId: params.organizationId,
+    scenarioId: params.scenarioId,
+    // Assignment validates membership only. It must not unlock this unit for
+    // recipients, who resolve the normal sequence when they open the card.
+    allowSequenceBypass: true,
+  });
+  if (!linkedLecture) {
+    throw appError(
+      404,
+      "scenario_not_in_course_catalog",
+      "scenario is not available in a course",
+    );
+  }
+
   const db = drizzle(env.DB);
   const id = createAppId();
   const inserted = await db
@@ -115,7 +144,7 @@ export async function assignScenarioToOrganization(params: {
   return {
     id: assignment.id,
     scenarioId: params.scenarioId,
-    scenarioTitle,
+    scenarioTitle: linkedLecture.lectureTitle,
     createdAt: assignment.createdAt,
   };
 }
@@ -174,31 +203,67 @@ export async function listMyAssignments(params: {
     )
     .orderBy(desc(scenarioAssignments.createdAt));
 
-  const catalogsByOrganization = new Map(
-    await Promise.all(
-      [...new Set(rows.map((row) => row.organizationId))].map(
-        async (organizationId) => {
-          const catalog = await listScenarioCatalogForUser(
-            params.userId,
-            organizationId,
-          );
-          return [organizationId, catalog.courses] as const;
-        },
-      ),
-    ),
+  const resolved = await Promise.all(
+    rows.map(async (row) => [
+      row.assignmentId,
+      await resolveCourseLectureForScenario({
+        db,
+        userId: params.userId,
+        organizationId: row.organizationId,
+        scenarioId: row.scenarioId,
+      }),
+    ] as const),
   );
-  return rows.map((row) => ({
-    ...row,
-    scenarioTitle:
-      catalogsByOrganization
-        .get(row.organizationId)
-        ?.flatMap((course) => course.scenarios)
-        .find((scenario) => scenario.scenarioId === row.scenarioId)?.title ??
-      null,
-    courseLocation: findScenarioCourseLocation(
-      catalogsByOrganization.get(row.organizationId) ?? [],
-      row.scenarioId,
-      row.organizationId,
-    ),
-  }));
+  const lectureByAssignment = new Map(resolved);
+  return rows.map((row) => {
+    const lecture = lectureByAssignment.get(row.assignmentId) ?? null;
+    return {
+      ...row,
+      scenarioTitle: lecture?.lectureTitle ?? null,
+      courseLocation: lecture
+        ? assignmentCourseLocation(lecture, row.organizationId)
+        : null,
+      lecture: lecture ? assignmentLecture(lecture) : null,
+    };
+  });
+}
+
+function assignmentLecture(
+  lecture: ResolvedCourseLecture,
+): NonNullable<MyAssignment["lecture"]> {
+  return {
+    courseId: lecture.courseId,
+    lectureId: lecture.lectureId,
+    title: lecture.lectureTitle,
+    state: lecture.state,
+    blockedBy: lecture.blockedBy,
+    scope: lecture.organizationId
+      ? "organization-private"
+      : "organization-public",
+  };
+}
+
+function assignmentCourseLocation(
+  lecture: ResolvedCourseLecture,
+  organizationId: string,
+): CourseLocation {
+  const target = lecture.blockedBy ?? {
+    courseId: lecture.courseId,
+    lectureId: lecture.lectureId,
+    title: lecture.lectureTitle,
+  };
+  const targetIndex = lecture.course.lectures.findIndex(
+    (item) => item.lectureId === target.lectureId,
+  );
+  return {
+    scope: lecture.organizationId
+      ? "organization-private"
+      : "organization-public",
+    organizationId,
+    courseId: target.courseId,
+    courseTitle: lecture.courseTitle,
+    lectureId: target.lectureId,
+    step: targetIndex >= 0 ? targetIndex + 1 : lecture.lectureOrdinal,
+    steps: lecture.lectureCount,
+  };
 }

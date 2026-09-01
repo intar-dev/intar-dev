@@ -10,11 +10,19 @@ import { THEME_BOOTSTRAP_SCRIPT } from "../components/app/theme";
 		<script is:inline set:html={THEME_BOOTSTRAP_SCRIPT}></script>
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-		<meta name="description" content="Practice diagnosing and repairing real infrastructure in guided, terminal-first systems labs." />
+		<meta name="description" content="Learn systems theory and repair real infrastructure in guided scenarios." />
 		<meta name="generator" content={Astro.generator} />
 		<title>intar.dev</title>
 	</head>
 	<body class="min-h-screen">
+		<!--
+		THESIS: One ordered reading path teaches the model before the scenario; it refuses a catalog of equal-weight scenario cards.
+		OWN-WORLD: Warm neutral ground, the Intar sidebar frame, quiet borders, direct status text, rust actions, and a narrow Markdown reading rail.
+		STORY: The learner sees the course position, reads the theory, understands the unit state, and then starts or completes one unit.
+		FIRST VIEWPORT: Course context and the lecture title lead. Metadata follows. Theory fills the narrow central rail. The primary action comes only after the body.
+		FORM: Reading rail with a trailing scenario gate; form 1 of 1; seed key course-lecture-reading-first-v2.
+		FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+		-->
 		<App client:only="react" />
 	</body>
 </html>

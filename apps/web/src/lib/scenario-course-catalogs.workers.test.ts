@@ -6,669 +6,693 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
+  courseUnitCompletions,
+  imageBuilds,
   member,
   organization,
   scenarioCourseCatalogs,
   scenarioRuns,
   user,
   vmScenarios,
-  vmScenarioVms,
-  type ScenarioCourseCatalogSnapshotV1,
+  type CourseCatalogCourseV2,
+  type CourseCatalogLectureV2,
+  type CourseCatalogSnapshotV2,
 } from "@/db/schema";
+import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioBriefing } from "@/lib/scenario-model";
 import {
+  applyLectureBriefingPresentation,
+  applyLecturePresentation,
+  assertScenarioCourseStartAllowed,
+  completePureCourseLectureForUser,
+  findCourseLecturePresentation,
+  listCourseCatalogForUser,
+  loadCourseLectureDetailForUser,
+  recordLinkedCourseUnitCompletionForRun,
+  resolveCourseLectureForScenario,
   syncScenarioCourseCatalogSnapshot,
   validateScenarioCourseCatalogReferences,
 } from "@/lib/scenario-course-catalogs";
-import {
-  listScenarioRunsForUser,
-  listScenarioCatalogForUser,
-  resolveScenarioCourseLocationForUser,
-} from "@/lib/scenario-runs";
 import { resetD1Database } from "@/test/d1-migrations";
 
-describe("scenario course catalog storage", () => {
-  beforeEach(async () => {
-    await resetD1Database();
-  });
+const learnerId = "learner";
 
-  it("merges independent snapshots per scope and is idempotent", async () => {
+describe("V2 scenario course catalogs", () => {
+  beforeEach(resetD1Database);
+
+  it("fully replaces a scope snapshot and backfills its first linked unit", async () => {
     const db = drizzle(env.DB);
+    await seedLearnerAndHost();
     await insertOrganization("org-a");
-    await insertOrganization("org-b");
+    await insertScenario(null, "historical");
+    await insertRun({
+      runId: "historical-run",
+      scenarioId: "historical",
+      organizationId: "org-a",
+      state: "completed",
+      solvedAt: 2_000,
+      completedAt: 3_000,
+    });
 
+    const first = snapshot(
+      course("first", [lecture("first-lecture", "historical")]),
+    );
     await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("public-course", ["public-one"])),
-      sourceRevision: "public-rev",
+      snapshot: first,
+      sourceRevision: "first-revision",
       organizationId: null,
       nowUnixMs: 100,
     });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("org-a-course", ["org-a-one"])),
-      sourceRevision: "org-a-rev",
-      organizationId: "org-a",
-      nowUnixMs: 110,
-    });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("org-b-course", ["org-b-one"])),
-      sourceRevision: "org-b-rev",
-      organizationId: "org-b",
-      nowUnixMs: 120,
-    });
 
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("public-course", ["public-one"])),
-      sourceRevision: "public-rev",
-      organizationId: null,
-      nowUnixMs: 200,
-    });
-    const publicAfterIdempotentWrite = await db
+    const [firstRow] = await db
       .select()
       .from(scenarioCourseCatalogs)
       .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
-    expect(publicAfterIdempotentWrite).toEqual([
+    expect(firstRow).toMatchObject({
+      catalogJson: first,
+      sourceRevision: "first-revision",
+      createdAt: 100,
+      updatedAt: 100,
+    });
+    await expect(db.select().from(courseUnitCompletions)).resolves.toEqual([
       expect.objectContaining({
-        sourceRevision: "public-rev",
-        createdAt: 100,
-        updatedAt: 100,
+        userId: learnerId,
+        scopeKey: "public",
+        courseId: "first",
+        lectureId: "first-lecture",
+        sourceRunId: "historical-run",
+        completedAt: 3_000,
       }),
     ]);
 
+    await db.delete(courseUnitCompletions);
     await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(),
-      sourceRevision: "org-a-clear-rev",
-      organizationId: "org-a",
-      nowUnixMs: 210,
+      snapshot: first,
+      sourceRevision: "first-revision",
+      organizationId: null,
+      nowUnixMs: 200,
     });
-    const rows = await db.select().from(scenarioCourseCatalogs);
-    expect(rows).toHaveLength(3);
-    expect(
-      rows.find((row) => row.scopeKey === "organization:org-a"),
-    ).toMatchObject({
-      organizationId: "org-a",
-      coursesJson: [course("org-a-course", ["org-a-one"])],
-      sourceRevision: "org-a-rev",
-      createdAt: 110,
-      updatedAt: 110,
-    });
-    expect(rows.find((row) => row.scopeKey === "public")?.coursesJson).toEqual([
-      course("public-course", ["public-one"]),
-    ]);
-    expect(
-      rows.find((row) => row.scopeKey === "organization:org-b")?.coursesJson,
-    ).toEqual([course("org-b-course", ["org-b-one"])]);
-  });
+    await expect(db.select().from(courseUnitCompletions)).resolves.toHaveLength(
+      1,
+    );
 
-  it("keeps distinct publisher courses, updates matching IDs, and moves memberships", async () => {
-    const db = drizzle(env.DB);
+    const replacement = snapshot(course("second", [lecture("theory")]));
     await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(
-        course("linux", ["linux-one", "shared"]),
-        course("operations", ["operations-one"]),
-      ),
-      sourceRevision: "linux-rev",
+      snapshot: replacement,
+      sourceRevision: "replacement-revision",
       organizationId: null,
-      nowUnixMs: 100,
-    });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("kubernetes", ["shared", "k8s-one"])),
-      sourceRevision: "k8s-rev",
-      organizationId: null,
-      nowUnixMs: 110,
-    });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("linux", ["linux-two", "k8s-one"])),
-      sourceRevision: "linux-update-rev",
-      organizationId: null,
-      nowUnixMs: 120,
+      nowUnixMs: 90,
     });
 
-    const [row] = await db
+    const [replacementRow] = await db
       .select()
       .from(scenarioCourseCatalogs)
       .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
-    expect(row?.coursesJson).toEqual([
-      course("linux", ["linux-two", "k8s-one"]),
-      course("operations", ["operations-one"]),
-      course("kubernetes", ["shared"]),
-    ]);
-    expect(row?.sourceRevision).toBe("linux-update-rev");
-  });
-
-  it("does not rewrite an unchanged merged catalog and keeps update times monotonic", async () => {
-    const db = drizzle(env.DB);
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("linux", ["linux-one"])),
-      sourceRevision: "linux-first",
-      organizationId: null,
-      nowUnixMs: 100,
-    });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("linux", ["linux-one"])),
-      sourceRevision: "linux-replayed-with-new-revision",
-      organizationId: null,
-      nowUnixMs: 500,
-    });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("linux", ["linux-two"])),
-      sourceRevision: "linux-changed",
-      organizationId: null,
-      nowUnixMs: 50,
-    });
-
-    const [row] = await db
-      .select()
-      .from(scenarioCourseCatalogs)
-      .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
-    expect(row).toMatchObject({
-      sourceRevision: "linux-changed",
-      coursesJson: [course("linux", ["linux-two"])],
+    expect(replacementRow).toMatchObject({
+      catalogJson: replacement,
+      sourceRevision: "replacement-revision",
       createdAt: 100,
       updatedAt: 101,
     });
   });
 
-  it("retries concurrent publishers without losing either course", async () => {
+  it("validates only linked V2 scenario references in the upload scope", async () => {
     const db = drizzle(env.DB);
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("base", ["base-one"])),
-      sourceRevision: "base-rev",
-      organizationId: null,
-      nowUnixMs: 100,
-    });
-
-    await Promise.all([
-      syncScenarioCourseCatalogSnapshot(db, {
-        snapshot: snapshot(course("linux", ["linux-one"])),
-        sourceRevision: "linux-rev",
-        organizationId: null,
-        nowUnixMs: 110,
-      }),
-      syncScenarioCourseCatalogSnapshot(db, {
-        snapshot: snapshot(course("kubernetes", ["k8s-one"])),
-        sourceRevision: "k8s-rev",
-        organizationId: null,
-        nowUnixMs: 110,
-      }),
-    ]);
-
-    const [row] = await db
-      .select()
-      .from(scenarioCourseCatalogs)
-      .where(eq(scenarioCourseCatalogs.scopeKey, "public"));
-    expect(row?.coursesJson.map((course) => course.courseId).sort()).toEqual([
-      "base",
-      "kubernetes",
-      "linux",
-    ]);
-  });
-
-  it("cascades organization snapshots and enforces deterministic scope keys", async () => {
-    const db = drizzle(env.DB);
-    await insertOrganization("org-a");
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(),
-      sourceRevision: "org-a-rev",
-      organizationId: "org-a",
-      nowUnixMs: 100,
-    });
-
-    await expect(
-      db.insert(scenarioCourseCatalogs).values({
-        scopeKey: "wrong-scope",
-        organizationId: null,
-        coursesJson: [],
-        sourceRevision: "bad-rev",
-        createdAt: 100,
-        updatedAt: 100,
-      }),
-    ).rejects.toBeDefined();
-
-    await db.delete(organization).where(eq(organization.id, "org-a"));
-    await expect(db.select().from(scenarioCourseCatalogs)).resolves.toEqual([]);
-  });
-});
-
-describe("scenario course catalog reference validation", () => {
-  beforeEach(async () => {
-    await resetD1Database();
     await insertOrganization("org-a");
     await insertOrganization("org-b");
     await insertScenario(null, "public-enabled");
-    await insertScenario(null, "public-disabled", false);
-    await insertScenario("org-a", "org-a-enabled");
     await insertScenario("org-b", "org-b-enabled");
-  });
 
-  it("allows public bundles plus enabled public catalog rows", async () => {
-    const result = await validateScenarioCourseCatalogReferences(
-      drizzle(env.DB),
-      {
+    await expect(
+      validateScenarioCourseCatalogReferences(db, {
         snapshot: snapshot(
-          course("public-course", ["new-public", "public-enabled"]),
+          course("public", [
+            lecture("existing", "public-enabled"),
+            lecture("new", "new-public"),
+            lecture("theory"),
+          ]),
         ),
         bundleScenarioIds: ["new-public"],
         organizationId: null,
-      },
-    );
-    expect(result).toEqual({ ok: true, invalidScenarioIds: [] });
-  });
+      }),
+    ).resolves.toEqual([]);
 
-  it("allows mixed public and same-organization members", async () => {
-    const result = await validateScenarioCourseCatalogReferences(
-      drizzle(env.DB),
-      {
+    await expect(
+      validateScenarioCourseCatalogReferences(db, {
         snapshot: snapshot(
-          course("organization-course", [
-            "public-enabled",
-            "org-a-enabled",
-            "org-a-new",
-          ]),
+          course("invalid", [lecture("other", "org-b-enabled")]),
         ),
-        bundleScenarioIds: ["org-a-new"],
+        bundleScenarioIds: [],
         organizationId: "org-a",
-      },
-    );
-    expect(result).toEqual({ ok: true, invalidScenarioIds: [] });
+      }),
+    ).resolves.toEqual(["org-b-enabled"]);
   });
 
-  it("rejects disabled rows, cross-tenant rows, and bundle-ID collisions", async () => {
+  it("hard-cuts unlinked public scenarios, including a content-only catalog", async () => {
     const db = drizzle(env.DB);
-    await expect(
-      validateScenarioCourseCatalogReferences(db, {
-        snapshot: snapshot(
-          course("public-course", [
-            "public-disabled",
-            "org-a-enabled",
-            "missing",
-          ]),
-        ),
-        bundleScenarioIds: [],
-        organizationId: null,
-      }),
-    ).resolves.toEqual({
-      ok: false,
-      invalidScenarioIds: ["public-disabled", "org-a-enabled", "missing"],
-    });
-
-    await expect(
-      validateScenarioCourseCatalogReferences(db, {
-        snapshot: snapshot(course("org-course", ["org-b-enabled"])),
-        bundleScenarioIds: [],
-        organizationId: "org-a",
-      }),
-    ).resolves.toEqual({
-      ok: false,
-      invalidScenarioIds: ["org-b-enabled"],
-    });
-
-    await expect(
-      validateScenarioCourseCatalogReferences(db, {
-        snapshot: snapshot(course("collision", ["org-a-enabled"])),
-        bundleScenarioIds: ["org-a-enabled"],
-        organizationId: null,
-      }),
-    ).resolves.toEqual({
-      ok: false,
-      invalidScenarioIds: ["org-a-enabled"],
-    });
-    await expect(
-      validateScenarioCourseCatalogReferences(db, {
-        snapshot: snapshot(course("collision", ["public-enabled"])),
-        bundleScenarioIds: ["public-enabled"],
-        organizationId: "org-a",
-      }),
-    ).resolves.toEqual({
-      ok: false,
-      invalidScenarioIds: ["public-enabled"],
-    });
-  });
-});
-
-describe("scenario course catalog reads", () => {
-  beforeEach(async () => {
-    await resetD1Database();
     await insertOrganization("org-a");
-    await insertOrganization("org-b");
-    await insertScenario(null, "public-one");
-    await insertScenario(null, "public-two");
-    await insertScenario(null, "public-three");
-    await insertScenario(null, "public-standalone");
-    await insertScenario(null, "public-hidden", false);
-    await insertScenario("org-a", "org-a-one");
-    await insertScenario("org-a", "org-a-standalone");
-    await insertScenario("org-a", "org-a-hidden", false);
-    await insertScenario("org-b", "org-b-one");
+    await insertScenario(null, "public-kept");
+    await insertScenario(null, "public-removed");
+    await insertScenario("org-a", "organization-kept");
 
-    const db = drizzle(env.DB);
     await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(
-        course("public-curriculum", ["public-two", "public-one"]),
-        course("partial-public", ["public-three", "public-hidden"]),
-        course("empty-public", ["public-hidden"]),
-      ),
-      sourceRevision: "public-rev",
-      organizationId: null,
-      nowUnixMs: 100,
-    });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(
-        course("organization-curriculum", [
-          "public-one",
-          "org-a-one",
-          "org-a-hidden",
-        ]),
-      ),
-      sourceRevision: "org-a-rev",
-      organizationId: "org-a",
-      nowUnixMs: 110,
-    });
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("org-b-course", ["org-b-one"])),
-      sourceRevision: "org-b-rev",
-      organizationId: "org-b",
-      nowUnixMs: 120,
-    });
-  });
-
-  it("preserves public curriculum order while hiding unavailable members", async () => {
-    const catalog = await listScenarioCatalogForUser("learner");
-    expect(catalog.capacityPressure).toBeNull();
-    expect(catalog.courses).toEqual([
-      {
-        kind: "authored",
-        courseId: "public-curriculum",
-        organizationId: null,
-        title: "public-curriculum title",
-        description: "public-curriculum description",
-        scenarios: [
-          expect.objectContaining({ scenarioId: "public-two" }),
-          expect.objectContaining({ scenarioId: "public-one" }),
-        ],
-      },
-      {
-        kind: "authored",
-        courseId: "partial-public",
-        organizationId: null,
-        title: "partial-public title",
-        description: "partial-public description",
-        scenarios: [expect.objectContaining({ scenarioId: "public-three" })],
-      },
-      {
-        kind: "general-practice",
-        courseId: null,
-        organizationId: null,
-        title: "General practice",
-        description:
-          "Standalone systems for focused practice outside a guided curriculum.",
-        scenarios: [
-          expect.objectContaining({ scenarioId: "public-standalone" }),
-        ],
-      },
-    ]);
-    expect(catalog).not.toHaveProperty("scenarios");
-    expect(flattenScenarioIds(catalog)).toEqual([
-      "public-two",
-      "public-one",
-      "public-three",
-      "public-standalone",
-    ]);
-  });
-
-  it("returns public courses first and gives organization membership precedence", async () => {
-    const catalog = await listScenarioCatalogForUser("learner", "org-a");
-    expect(catalog.courses).toEqual([
-      {
-        kind: "authored",
-        courseId: "public-curriculum",
-        organizationId: null,
-        title: "public-curriculum title",
-        description: "public-curriculum description",
-        scenarios: [expect.objectContaining({ scenarioId: "public-two" })],
-      },
-      {
-        kind: "authored",
-        courseId: "partial-public",
-        organizationId: null,
-        title: "partial-public title",
-        description: "partial-public description",
-        scenarios: [expect.objectContaining({ scenarioId: "public-three" })],
-      },
-      {
-        kind: "authored",
-        courseId: "organization-curriculum",
-        organizationId: "org-a",
-        title: "organization-curriculum title",
-        description: "organization-curriculum description",
-        scenarios: [
-          expect.objectContaining({ scenarioId: "public-one" }),
-          expect.objectContaining({ scenarioId: "org-a-one" }),
-        ],
-      },
-      {
-        kind: "general-practice",
-        courseId: null,
-        organizationId: null,
-        title: "General practice",
-        description:
-          "Standalone systems for focused practice outside a guided curriculum.",
-        scenarios: [
-          expect.objectContaining({ scenarioId: "org-a-standalone" }),
-          expect.objectContaining({ scenarioId: "public-standalone" }),
-        ],
-      },
-    ]);
-    expect(flattenScenarioIds(catalog)).toEqual([
-      "public-two",
-      "public-three",
-      "public-one",
-      "org-a-one",
-      "org-a-standalone",
-      "public-standalone",
-    ]);
-    expect(flattenScenarioIds(catalog)).not.toContain("org-b-one");
-    expect(new Set(flattenScenarioIds(catalog)).size).toBe(
-      flattenScenarioIds(catalog).length,
-    );
-  });
-
-  it("does not resolve an organization course for a user without membership", async () => {
-    await expect(
-      resolveScenarioCourseLocationForUser({
-        userId: "learner",
-        scenarioId: "org-a-one",
-        organizationId: "org-a",
-      }),
-    ).resolves.toBeNull();
-
-    const db = drizzle(env.DB);
-    await db.insert(user).values({
-      id: "learner",
-      name: "Learner",
-      email: "learner@example.test",
-      emailVerified: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-    await db.insert(member).values({
-      id: "org-a-learner",
-      organizationId: "org-a",
-      userId: "learner",
-      role: "member",
-      createdAt: new Date(),
-    });
-
-    await expect(
-      resolveScenarioCourseLocationForUser({
-        userId: "learner",
-        scenarioId: "org-a-one",
-        organizationId: "org-a",
-      }),
-    ).resolves.toMatchObject({
-      scope: "organization-private",
-      courseId: "organization-curriculum",
-      step: 2,
-      steps: 2,
-    });
-    await expect(
-      resolveScenarioCourseLocationForUser({
-        userId: "learner",
-        scenarioId: "public-two",
-        organizationId: "org-a",
-      }),
-    ).resolves.toMatchObject({
-      scope: "organization-public",
-      courseId: "public-curriculum",
-      step: 1,
-      steps: 1,
-    });
-  });
-
-  it("omits General practice when authored courses claim every visible scenario", async () => {
-    await syncScenarioCourseCatalogSnapshot(drizzle(env.DB), {
-      snapshot: snapshot(
-        course("complete-curriculum", [
-          "public-three",
-          "public-standalone",
-          "public-two",
-          "public-one",
-        ]),
-      ),
-      sourceRevision: "complete-public-rev",
+      snapshot: snapshot(course("public", [lecture("kept", "public-kept")])),
+      sourceRevision: "public-first",
       organizationId: null,
       nowUnixMs: 200,
     });
 
-    const catalog = await listScenarioCatalogForUser("learner");
-    expect(catalog.courses).toHaveLength(1);
-    expect(
-      catalog.courses.find(
-        (course) => course.courseId === "complete-curriculum",
-      ),
-    ).toMatchObject({
-      kind: "authored",
-      courseId: "complete-curriculum",
+    await expectScenarioEnabled(db, "public-kept", true, 100);
+    await expectScenarioEnabled(db, "public-removed", false, null);
+    await expectScenarioEnabled(db, "organization-kept", true, 100);
+
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("public", [lecture("theory")])),
+      sourceRevision: "public-content-only",
+      organizationId: null,
+      nowUnixMs: 300,
     });
-    expect(flattenScenarioIds(catalog)).toEqual([
-      "public-three",
-      "public-standalone",
-      "public-two",
-      "public-one",
+
+    await expectScenarioEnabled(db, "public-kept", false, null);
+    await expectScenarioEnabled(db, "organization-kept", true, 100);
+  });
+
+  it("hard-cuts only unlinked scenarios in the published organization scope", async () => {
+    const db = drizzle(env.DB);
+    await insertOrganization("org-a");
+    await insertOrganization("org-b");
+    await insertScenario(null, "public-kept");
+    await insertScenario("org-a", "org-a-kept");
+    await insertScenario("org-a", "org-a-removed");
+    await insertScenario("org-b", "org-b-kept");
+
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("organization", [lecture("kept", "org-a-kept")])),
+      sourceRevision: "organization-first",
+      organizationId: "org-a",
+      nowUnixMs: 200,
+    });
+
+    await expectScenarioEnabled(db, "org-a-kept", true, 100);
+    await expectScenarioEnabled(db, "org-a-removed", false, null);
+    await expectScenarioEnabled(db, "public-kept", true, 100);
+    await expectScenarioEnabled(db, "org-b-kept", true, 100);
+  });
+
+  it("updates stored presentation fields for a Markdown-only publish", async () => {
+    const db = drizzle(env.DB);
+    await insertScenario(null, "task");
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("course", [lecture("lesson", "task", { title: "First title" })]),
+      ),
+      sourceRevision: "first",
+      organizationId: null,
+      nowUnixMs: 100,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("course", [
+          lecture("lesson", "task", {
+            title: "Markdown title",
+            summary: "Markdown summary",
+            bodyMarkdown: "Markdown theory",
+            category: "markdown",
+            difficulty: "hard",
+            estimatedMinutes: 42,
+            tags: ["markdown"],
+          }),
+        ]),
+      ),
+      sourceRevision: "markdown-only",
+      organizationId: null,
+      nowUnixMs: 200,
+    });
+
+    const [stored] = await db
+      .select()
+      .from(vmScenarios)
+      .where(eq(vmScenarios.scenarioId, "task"));
+    expect(stored).toMatchObject({
+      sourceRevision: "markdown-only",
+      title: "Markdown title",
+      category: "markdown",
+      description: "Markdown summary",
+      difficulty: "hard",
+      estimatedMinutes: 42,
+      tagsJson: ["markdown"],
+      briefingMarkdown: "Markdown theory",
+    });
+    await expect(db.select().from(imageBuilds)).resolves.toEqual([]);
+  });
+
+  it("shows public and organization courses with linked-scenario override", async () => {
+    const db = drizzle(env.DB);
+    await seedLearnerAndHost();
+    await insertOrganization("org-a");
+    await insertMembership("org-a");
+    await insertScenario(null, "shared");
+    await insertScenario(null, "building", false);
+    await insertScenario(null, "waiting", false);
+
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("public-course", [
+          lecture("public-shared", "shared"),
+          lecture("public-theory"),
+          lecture("public-building", "building"),
+        ]),
+      ),
+      sourceRevision: "public-revision",
+      organizationId: null,
+      nowUnixMs: 100,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course(
+          "organization-course",
+          [
+            lecture("organization-shared", "shared"),
+            lecture("organization-waiting", "waiting"),
+          ],
+          false,
+        ),
+      ),
+      sourceRevision: "organization-revision",
+      organizationId: "org-a",
+      nowUnixMs: 110,
+    });
+    await insertRun({
+      runId: "organization-active",
+      scenarioId: "shared",
+      organizationId: "org-a",
+      active: true,
+      courseScopeKey: "organization:org-a",
+      courseId: "organization-course",
+      lectureId: "organization-shared",
+    });
+
+    const catalog = await listCourseCatalogForUser({
+      db,
+      userId: learnerId,
+      organizationId: "org-a",
+      capacityPressure: null,
+    });
+    expect(catalog.courses).toMatchObject([
+      {
+        courseId: "public-course",
+        organizationId: null,
+        lectures: [
+          {
+            lectureId: "public-theory",
+            scenarioId: null,
+            state: "available",
+          },
+          {
+            lectureId: "public-building",
+            scenarioId: "building",
+            state: "locked",
+            blockedBy: {
+              courseId: "public-course",
+              lectureId: "public-theory",
+            },
+          },
+        ],
+      },
+      {
+        courseId: "organization-course",
+        organizationId: "org-a",
+        lectures: [
+          {
+            lectureId: "organization-shared",
+            scenarioId: "shared",
+            state: "in_progress",
+            activeRunId: "organization-active",
+            scenarioReady: true,
+          },
+          {
+            lectureId: "organization-waiting",
+            scenarioId: "waiting",
+            state: "waiting_for_scenario",
+            scenarioReady: false,
+          },
+        ],
+      },
+    ]);
+    expect(
+      catalog.courses
+        .flatMap((course) => course.lectures)
+        .map((lecture) => lecture.lectureId),
+    ).not.toContain("public-shared");
+
+    const noMembership = await listCourseCatalogForUser({
+      db,
+      userId: "unrelated-user",
+      organizationId: "org-a",
+    });
+    expect(noMembership.courses).toEqual([]);
+  });
+
+  it("enforces sequence order, completes pure lectures, and resolves starts", async () => {
+    const db = drizzle(env.DB);
+    await seedLearnerAndHost();
+    await insertScenario(null, "task");
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("sequence", [
+          lecture("theory"),
+          lecture("task", "task"),
+        ]),
+      ),
+      sourceRevision: "sequence-revision",
+      organizationId: null,
+      nowUnixMs: 100,
+    });
+
+    await expect(
+      loadCourseLectureDetailForUser({
+        db,
+        userId: learnerId,
+        organizationId: null,
+        courseId: "sequence",
+        lectureId: "task",
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      blockedBy: { courseId: "sequence", lectureId: "theory", title: "theory" },
+    });
+    await expect(
+      assertScenarioCourseStartAllowed({
+        db,
+        userId: learnerId,
+        organizationId: null,
+        scenarioId: "task",
+      }),
+    ).rejects.toMatchObject({ code: "course_lecture_locked" });
+    await expect(
+      loadCourseLectureDetailForUser({
+        db,
+        userId: learnerId,
+        organizationId: null,
+        courseId: "sequence",
+        lectureId: "task",
+        allowSequenceBypass: true,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      detail: { lecture: { state: "available" } },
+    });
+
+    const completed = await completePureCourseLectureForUser({
+      db,
+      userId: learnerId,
+      organizationId: null,
+      courseId: "sequence",
+      lectureId: "theory",
+      nowUnixMs: 500,
+    });
+    expect(completed.lecture).toMatchObject({
+      state: "completed",
+      nextLecture: { courseId: "sequence", lectureId: "task", title: "task" },
+    });
+    await completePureCourseLectureForUser({
+      db,
+      userId: learnerId,
+      organizationId: null,
+      courseId: "sequence",
+      lectureId: "theory",
+      nowUnixMs: 600,
+    });
+    await expect(db.select().from(courseUnitCompletions)).resolves.toHaveLength(
+      1,
+    );
+
+    await expect(
+      assertScenarioCourseStartAllowed({
+        db,
+        userId: learnerId,
+        organizationId: null,
+        scenarioId: "task",
+      }),
+    ).resolves.toMatchObject({
+      courseScopeKey: "public",
+      courseId: "sequence",
+      lectureId: "task",
+      lectureOrdinal: 2,
+      lectureCount: 2,
+      scenarioReady: true,
+    });
+    await expect(
+      resolveCourseLectureForScenario({
+        db,
+        userId: learnerId,
+        organizationId: null,
+        scenarioId: "not-linked",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("selects the requested public or private course source on ID collision", async () => {
+    const db = drizzle(env.DB);
+    await seedLearnerAndHost();
+    await insertOrganization("org-a");
+    await insertMembership("org-a");
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("shared-id", [lecture("public-theory")])),
+      sourceRevision: "public-revision",
+      organizationId: null,
+      nowUnixMs: 100,
+    });
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(course("shared-id", [lecture("private-theory")])),
+      sourceRevision: "private-revision",
+      organizationId: "org-a",
+      nowUnixMs: 110,
+    });
+
+    await expect(
+      loadCourseLectureDetailForUser({
+        db,
+        userId: learnerId,
+        organizationId: "org-a",
+        courseId: "shared-id",
+        lectureId: "public-theory",
+        courseScope: "public",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      detail: { course: { organizationId: null } },
+    });
+    await expect(
+      loadCourseLectureDetailForUser({
+        db,
+        userId: learnerId,
+        organizationId: "org-a",
+        courseId: "shared-id",
+        lectureId: "private-theory",
+        courseScope: "private",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      detail: { course: { organizationId: "org-a" } },
+    });
+  });
+
+  it("records only solved successful linked runs, including Finish and save teardown", async () => {
+    const db = drizzle(env.DB);
+    await seedLearnerAndHost();
+    await insertRun({
+      runId: "solved-run",
+      scenarioId: "task",
+      state: "completed",
+      solvedAt: 200,
+      completedAt: 300,
+      deleteRequestedAt: 250,
+      courseScopeKey: "public",
+      courseId: "course",
+      lectureId: "task-lecture",
+    });
+    await insertRun({
+      runId: "unsolved-run",
+      scenarioId: "task",
+      state: "completed",
+      solvedAt: null,
+      courseScopeKey: "public",
+      courseId: "course",
+      lectureId: "unsolved-lecture",
+    });
+    await insertRun({
+      runId: "failed-run",
+      scenarioId: "task",
+      state: "failed",
+      solvedAt: 200,
+      courseScopeKey: "public",
+      courseId: "course",
+      lectureId: "failed-lecture",
+    });
+
+    await recordLinkedCourseUnitCompletionForRun(db, { runId: "solved-run" });
+    await recordLinkedCourseUnitCompletionForRun(db, { runId: "solved-run" });
+    await recordLinkedCourseUnitCompletionForRun(db, { runId: "unsolved-run" });
+    await recordLinkedCourseUnitCompletionForRun(db, { runId: "failed-run" });
+    await expect(db.select().from(courseUnitCompletions)).resolves.toEqual([
+      expect.objectContaining({
+        userId: learnerId,
+        courseId: "course",
+        lectureId: "task-lecture",
+        sourceRunId: "solved-run",
+        completedAt: 300,
+      }),
     ]);
   });
 
-  it("nests progress with its scenario and defensively projects each scenario once", async () => {
-    const db = drizzle(env.DB);
-    await db.insert(user).values({
-      id: "learner",
-      name: "Learner",
-      email: "learner@example.test",
-      emailVerified: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+  it("overlays Markdown presentation without changing technical scenario data", () => {
+    const lesson = lecture("presentation", "task", {
+      title: "Markdown title",
+      summary: "Markdown summary",
+      bodyMarkdown: "Markdown body",
+      category: "markdown-category",
+      tags: ["markdown"],
+      difficulty: "hard",
+      estimatedMinutes: 42,
     });
-    await db.insert(agentHosts).values({
-      id: "progress-host",
-      userId: "learner",
-      name: "Progress host",
-    });
-    await db.insert(scenarioRuns).values(completedScenarioRun("public-two"));
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: snapshot(
-        course("first-course", ["public-two", "public-two"]),
-        course("second-course", ["public-two", "public-one"]),
+    const manifest = {
+      schema_version: 4,
+      scenario_id: "task",
+      name: "task",
+      title: "HCL title",
+      category: "hcl",
+      description: "HCL description",
+      difficulty: "easy",
+      estimated_minutes: 10,
+      tags: ["hcl"],
+      briefing_markdown: "HCL briefing",
+      solution_markdown: "HCL solution",
+      hints: [],
+      vms: [],
+    } satisfies ScenarioManifestV4;
+    const briefing = {
+      title: "HCL title",
+      tagline: "HCL description",
+      category: "hcl",
+      difficulty: "easy",
+      estimatedMinutes: 10,
+      briefingMarkdown: "HCL briefing",
+      tags: ["hcl"],
+      objectives: [],
+    } satisfies ScenarioBriefing;
+
+    expect(
+      findCourseLecturePresentation(
+        snapshot(course("presentation", [lesson])),
+        "task",
       ),
-      sourceRevision: "duplicate-defense-rev",
-      organizationId: null,
-      nowUnixMs: 220,
-    });
-
-    const catalog = await listScenarioCatalogForUser("learner");
+    ).toBe(lesson);
     expect(
-      flattenScenarioIds(catalog).filter((id) => id === "public-two"),
-    ).toEqual(["public-two"]);
-    expect(
-      catalog.courses.find((course) => course.courseId === "first-course"),
-    ).toMatchObject({
-      kind: "authored",
-      courseId: "first-course",
-      scenarios: [
-        {
-          scenarioId: "public-two",
-          progress: {
-            status: "completed",
-            activeRunId: null,
-            attemptCount: 1,
-            completedCount: 1,
-            bestSolveMs: 500,
-            lastPlayedAt: 3_000,
-          },
-        },
-      ],
-    });
-    expect(
-      catalog.courses.find((course) => course.courseId === "second-course"),
-    ).toMatchObject({
-      kind: "authored",
-      courseId: "second-course",
-      scenarios: [expect.objectContaining({ scenarioId: "public-one" })],
-    });
-  });
+      findCourseLecturePresentation(
+        snapshot(course("presentation", [lesson])),
+        "missing",
+      ),
+    ).toBeNull();
 
-  it("deduplicates repeated run course locations in one catalog scope", async () => {
-    const db = drizzle(env.DB);
-    await db.insert(user).values({
-      id: "learner",
-      name: "Learner",
-      email: "learner@example.test",
-      emailVerified: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+    expect(applyLecturePresentation(manifest, lesson)).toMatchObject({
+      title: "Markdown title",
+      category: "markdown-category",
+      description: "Markdown summary",
+      difficulty: "hard",
+      estimated_minutes: 42,
+      tags: ["markdown"],
+      briefing_markdown: "Markdown body",
+      solution_markdown: "HCL solution",
     });
-    await db.insert(agentHosts).values({
-      id: "run-list-host",
-      userId: "learner",
-      name: "Run list host",
+    expect(applyLectureBriefingPresentation(briefing, lesson)).toMatchObject({
+      title: "Markdown title",
+      tagline: "Markdown summary",
+      category: "markdown-category",
+      difficulty: "hard",
+      estimatedMinutes: 42,
+      tags: ["markdown"],
+      briefingMarkdown: "Markdown body",
+      objectives: [],
     });
-    const historicalRuns = Array.from({ length: 100 }, (_, index) => ({
-      ...completedScenarioRun("public-two"),
-      runId: `public-two-run-${index}`,
-      hostId: "run-list-host",
-      createdAt: 10_000 + index,
-      updatedAt: 10_000 + index,
-    }));
-    for (let start = 0; start < historicalRuns.length; start += 3) {
-      await db
-        .insert(scenarioRuns)
-        .values(historicalRuns.slice(start, start + 3));
-    }
-
-    const runs = await listScenarioRunsForUser({ userId: "learner" });
-
-    expect(runs).toHaveLength(100);
-    expect(
-      new Set(runs.map((run) => JSON.stringify(run.courseLocation))),
-    ).toEqual(
-      new Set([
-        JSON.stringify({
-          courseKind: "authored",
-          scope: "public",
-          organizationId: null,
-          courseId: "public-curriculum",
-          courseTitle: "public-curriculum title",
-          step: 1,
-          steps: 2,
-        }),
-      ]),
-    );
   });
 });
+
+function snapshot(
+  ...courses: CourseCatalogCourseV2[]
+): CourseCatalogSnapshotV2 {
+  return { version: 2, courses };
+}
+
+function course(
+  courseId: string,
+  lectures: CourseCatalogLectureV2[],
+  sequential = true,
+): CourseCatalogCourseV2 {
+  return {
+    courseId,
+    title: courseId,
+    summary: `${courseId} summary`,
+    bodyMarkdown: `${courseId} body`,
+    sequential,
+    lectures,
+  };
+}
+
+function lecture(
+  lectureId: string,
+  scenarioId?: string,
+  overrides: Partial<CourseCatalogLectureV2> = {},
+): CourseCatalogLectureV2 {
+  return {
+    lectureId,
+    title: lectureId,
+    summary: `${lectureId} summary`,
+    bodyMarkdown: `${lectureId} body`,
+    category: "test",
+    tags: ["test"],
+    difficulty: "easy",
+    estimatedMinutes: 15,
+    ...(scenarioId ? { scenarioId } : {}),
+    ...overrides,
+  };
+}
+
+async function seedLearnerAndHost(): Promise<void> {
+  const db = drizzle(env.DB);
+  await db.insert(user).values({
+    id: learnerId,
+    name: "Learner",
+    email: "learner@example.test",
+    emailVerified: true,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  });
+  await db.insert(agentHosts).values({
+    id: "host",
+    userId: learnerId,
+    name: "Host",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+}
 
 async function insertOrganization(id: string): Promise<void> {
   await drizzle(env.DB).insert(organization).values({
     id,
     name: id,
     slug: id,
-    createdAt: new Date(),
+    createdAt: new Date(0),
+  });
+}
+
+async function insertMembership(organizationId: string): Promise<void> {
+  await drizzle(env.DB).insert(member).values({
+    id: `${organizationId}:${learnerId}`,
+    organizationId,
+    userId: learnerId,
+    role: "member",
+    createdAt: new Date(0),
   });
 }
 
@@ -677,84 +701,70 @@ async function insertScenario(
   scenarioId: string,
   enabled = true,
 ): Promise<void> {
-  const db = drizzle(env.DB);
-  const now = Date.now();
-  await db.batch([
-    db.insert(vmScenarios).values({
-      scenarioId,
-      organizationId,
-      title: scenarioId,
-      category: "test",
-      description: `${scenarioId} description`,
-      difficulty: "easy",
-      estimatedMinutes: 10,
-      tagsJson: [],
-      briefingMarkdown: `${scenarioId} briefing`,
-      solutionMarkdown: `${scenarioId} solution`,
-      hintsJson: [],
-      enabled,
-      enabledAt: enabled ? now : null,
-      createdAt: now,
-      updatedAt: now,
-    }),
-    db.insert(vmScenarioVms).values({
-      id: `${scenarioId}:vm`,
-      scenarioId,
-      ordinal: 0,
-      vmName: "vm",
-      image: `${scenarioId}-vm-x86_64.raw.zst`,
-      imageKeyJson: { scenario: scenarioId, vm: "vm", arch: "x86_64" },
-      imageSha256: "a".repeat(64),
-      imageFormat: "raw_zstd",
-      imageVirtualSizeBytes: 1024,
-      kernelSha256: "b".repeat(64),
-      initrdSha256: "c".repeat(64),
-      bootCmdline: "console=ttyS0 root=/dev/vda rw",
-      cpuMillis: 1_000,
-      vcpuCount: 1,
-      memoryMib: 512,
-      diskMib: 1_024,
-    }),
-  ]);
-}
-
-function snapshot(
-  ...courses: ScenarioCourseCatalogSnapshotV1["courses"]
-): ScenarioCourseCatalogSnapshotV1 {
-  return { version: 1, mode: "replace", courses };
-}
-
-function course(
-  courseId: string,
-  scenarioIds: string[],
-): ScenarioCourseCatalogSnapshotV1["courses"][number] {
-  return {
-    courseId,
-    title: `${courseId} title`,
-    description: `${courseId} description`,
-    scenarioIds,
-  };
-}
-
-function flattenScenarioIds(
-  catalog: Awaited<ReturnType<typeof listScenarioCatalogForUser>>,
-): string[] {
-  return catalog.courses.flatMap((course) =>
-    course.scenarios.map((scenario) => scenario.scenarioId),
-  );
-}
-
-function completedScenarioRun(
-  scenarioId: string,
-): typeof scenarioRuns.$inferInsert {
-  return {
-    runId: `${scenarioId}-run`,
-    userId: "learner",
-    organizationId: null,
-    hostId: "progress-host",
+  const now = 100;
+  await drizzle(env.DB).insert(vmScenarios).values({
     scenarioId,
-    scenarioName: scenarioId,
+    organizationId,
     title: scenarioId,
+    category: "test",
+    description: `${scenarioId} description`,
+    difficulty: "easy",
+    estimatedMinutes: 10,
+    tagsJson: [],
+    briefingMarkdown: `${scenarioId} briefing`,
+    solutionMarkdown: `${scenarioId} solution`,
+    hintsJson: [],
+    enabled,
+    enabledAt: enabled ? now : null,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+async function expectScenarioEnabled(
+  db: ReturnType<typeof drizzle>,
+  scenarioId: string,
+  enabled: boolean,
+  enabledAt: number | null,
+): Promise<void> {
+  const [scenario] = await db
+    .select({ enabled: vmScenarios.enabled, enabledAt: vmScenarios.enabledAt })
+    .from(vmScenarios)
+    .where(eq(vmScenarios.scenarioId, scenarioId));
+  expect(scenario).toEqual({ enabled, enabledAt });
+}
+
+async function insertRun(input: {
+  runId: string;
+  scenarioId: string;
+  organizationId?: string | null;
+  state?: "completed" | "failed" | "provisioning";
+  active?: boolean;
+  solvedAt?: number | null;
+  completedAt?: number | null;
+  deleteRequestedAt?: number | null;
+  courseScopeKey?: string | null;
+  courseId?: string | null;
+  lectureId?: string | null;
+}): Promise<void> {
+  const state = input.state ?? "provisioning";
+  await drizzle(env.DB).insert(scenarioRuns).values({
+    runId: input.runId,
+    userId: learnerId,
+    organizationId: input.organizationId ?? null,
+    hostId: "host",
+    scenarioId: input.scenarioId,
+    scenarioName: input.scenarioId,
+    courseScopeKey: input.courseScopeKey ?? null,
+    courseId: input.courseId ?? null,
+    courseTitle: input.courseId ?? null,
+    lectureId: input.lectureId ?? null,
+    lectureTitle: input.lectureId ?? null,
+    lectureSummary: input.lectureId ? `${input.lectureId} summary` : null,
+    lectureBodyMarkdown: input.lectureId ? `${input.lectureId} body` : null,
+    lectureOrdinal: input.lectureId ? 1 : null,
+    lectureCount: input.lectureId ? 1 : null,
+    title: input.scenarioId,
     tagline: "Test",
     briefingMarkdown: "Briefing",
     objectivesJson: "[]",
@@ -766,13 +776,17 @@ function completedScenarioRun(
     revealedHintsJson: [],
     solutionAssisted: false,
     vmCount: 1,
-    state: "completed",
+    state,
     stateRank: 1,
-    activeKey: null,
+    activeKey: input.active ? learnerId : null,
     stateJson: "{}",
-    solvedAt: 1_500,
-    completedAt: 3_000,
-    createdAt: 1_000,
-    updatedAt: 3_000,
-  };
+    deleteRequestedAt: input.deleteRequestedAt ?? null,
+    solvedAt: input.solvedAt ?? null,
+    completedAt:
+      input.completedAt ?? (state === "completed" ? 1_000 : null),
+    failedAt: state === "failed" ? 1_000 : null,
+    hiddenAt: null,
+    createdAt: 100,
+    updatedAt: 100,
+  });
 }

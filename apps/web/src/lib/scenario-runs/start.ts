@@ -70,6 +70,10 @@ import {
   isScenarioLaunchHost,
 } from "@/lib/scenario-hosts";
 import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
+import {
+  applyLectureBriefingPresentation,
+  assertScenarioCourseStartAllowed,
+} from "@/lib/scenario-course-catalogs";
 import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
 import { deleteStargateRoute, stargateRouteTtlMs } from "@/lib/stargate";
 import {
@@ -108,6 +112,7 @@ export async function startScenarioRunInternal(params: {
   organizationId?: string | null;
   hostId?: string;
   allowDrainedAdminProof?: boolean;
+  allowSequenceBypass?: boolean;
 }): Promise<{
   accepted: true;
   runId: string;
@@ -119,6 +124,7 @@ export async function startScenarioRunInternal(params: {
     ...(params.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
   });
   const organizationId = params.organizationId ?? null;
+  const db = drizzle(env.DB);
   const [[scenario], active] = await Promise.all([
     loadEnabledScenarioRows(params.scenarioId, organizationId),
     loadActiveRunRow(params.userId),
@@ -126,6 +132,16 @@ export async function startScenarioRunInternal(params: {
   if (!scenario) {
     throw appError(404, "scenario_not_found", "scenario not found");
   }
+  // Resolve the V2 unit before an active-run reuse can return. This keeps an
+  // old direct request from reviving an unlinked scenario around the course
+  // gate.
+  const courseLecture = await assertScenarioCourseStartAllowed({
+    db,
+    userId: params.userId,
+    organizationId,
+    scenarioId: scenario.scenarioId,
+    ...(params.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
+  });
   await assertScenarioStartAdmission(params.userId, params.betaAdmission);
   if (active) {
     if (
@@ -150,6 +166,11 @@ export async function startScenarioRunInternal(params: {
     }
     throw activeRunConflictError(active.title);
   }
+
+  const briefing = applyLectureBriefingPresentation(
+    scenario.briefing,
+    courseLecture.lecture,
+  );
 
   const runId = createAppId();
   const createdAt = Date.now();
@@ -297,13 +318,22 @@ export async function startScenarioRunInternal(params: {
       hostId,
       scenarioId: scenario.scenarioId,
       scenarioName: scenario.scenarioId,
-      title: scenario.briefing.title,
-      tagline: scenario.briefing.tagline,
-      briefingMarkdown: scenario.briefing.briefingMarkdown,
-      objectivesJson: JSON.stringify(scenario.briefing.objectives),
-      difficulty: scenario.briefing.difficulty,
-      estimatedMinutes: scenario.briefing.estimatedMinutes,
-      tagsJson: scenario.content.tags,
+      courseScopeKey: courseLecture.courseScopeKey,
+      courseId: courseLecture.courseId,
+      courseTitle: courseLecture.courseTitle,
+      lectureId: courseLecture.lectureId,
+      lectureTitle: courseLecture.lectureTitle,
+      lectureSummary: courseLecture.lectureSummary,
+      lectureBodyMarkdown: courseLecture.lectureBodyMarkdown,
+      lectureOrdinal: courseLecture.lectureOrdinal,
+      lectureCount: courseLecture.lectureCount,
+      title: briefing.title,
+      tagline: briefing.tagline,
+      briefingMarkdown: briefing.briefingMarkdown,
+      objectivesJson: JSON.stringify(briefing.objectives),
+      difficulty: briefing.difficulty,
+      estimatedMinutes: briefing.estimatedMinutes,
+      tagsJson: briefing.tags,
       hintsJson: scenario.content.hints,
       solutionMarkdown: scenario.content.solutionMarkdown,
       revealedHintsJson: [],
@@ -426,23 +456,26 @@ export async function insertScenarioRunForAdmission(input: {
     env.DB.prepare(
       `INSERT INTO scenario_runs (
          run_id, user_id, organization_id, runtime_execution_id, host_id,
-         scenario_id, scenario_name, title, tagline, briefing_markdown,
-         objectives_json, difficulty, estimated_minutes, tags_json,
-         hints_json, solution_markdown, revealed_hints_json,
-         solution_revealed_at, solution_assisted, vm_count, state, state_rank,
-         active_key, state_json, delete_requested_at, solved_at, completed_at,
-         failed_at, hidden_at, created_at, updated_at
+         scenario_id, scenario_name, course_scope_key, course_id, course_title,
+         lecture_id, lecture_title, lecture_summary, lecture_body_markdown,
+         lecture_ordinal, lecture_count, title, tagline, briefing_markdown,
+         objectives_json, difficulty, estimated_minutes, tags_json, hints_json,
+         solution_markdown, revealed_hints_json, solution_revealed_at,
+         solution_assisted, vm_count, state, state_rank, active_key, state_json,
+         delete_requested_at, solved_at, completed_at, failed_at, hidden_at,
+         created_at, updated_at
        )
        SELECT
          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-         ?27, ?28, ?29, ?30, ?31
+         ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38,
+         ?39, ?40
        FROM access_allowlist access
        WHERE access.user_id = ?2
          AND access.state = 'active'
-         AND access.source_invite_id = ?32
-         AND access.source_lease_id = ?33
-         AND access.granted_at = ?34
+         AND access.source_invite_id = ?41
+         AND access.source_lease_id = ?42
+         AND access.granted_at = ?43
        RETURNING run_id`,
     ).bind(
       row.runId,
@@ -452,6 +485,15 @@ export async function insertScenarioRunForAdmission(input: {
       row.hostId,
       row.scenarioId,
       row.scenarioName,
+      row.courseScopeKey ?? null,
+      row.courseId ?? null,
+      row.courseTitle ?? null,
+      row.lectureId ?? null,
+      row.lectureTitle ?? null,
+      row.lectureSummary ?? null,
+      row.lectureBodyMarkdown ?? null,
+      row.lectureOrdinal ?? null,
+      row.lectureCount ?? null,
       row.title,
       row.tagline,
       row.briefingMarkdown,

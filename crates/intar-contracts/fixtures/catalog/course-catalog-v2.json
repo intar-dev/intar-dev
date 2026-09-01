@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "courses": [
+    {
+      "course_id": "linux-operations",
+      "title": "Linux operations",
+      "summary": "Learn to repair common Linux failures.",
+      "body_markdown": "# Linux operations\n",
+      "sequential": true,
+      "lectures": [
+        {
+          "lecture_id": "01-nginx",
+          "title": "Nginx services",
+          "summary": "Learn how a service reaches a ready state.",
+          "body_markdown": "## Theory\n\nA service is active when systemd runs it.\n",
+          "category": "linux",
+          "tags": ["nginx", "systemd"],
+          "difficulty": "easy",
+          "estimated_minutes": 15,
+          "scenario_id": "broken-nginx"
+        },
+        {
+          "lecture_id": "02-processes",
+          "title": "Process states",
+          "summary": "Read process state before you change it.",
+          "body_markdown": "## Theory\n\nProcesses have observable states.\n",
+          "category": "linux",
+          "tags": ["processes"],
+          "estimated_minutes": 10
+        }
+      ]
+    }
+  ]
+}

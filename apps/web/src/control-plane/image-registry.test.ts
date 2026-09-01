@@ -2,7 +2,7 @@ import { gzipSync } from "node:zlib";
 import {
   imageRegistryMocks,
   sourceBundleFixture,
-  sourceBundleFixtureWithCourses,
+  sourceBundleFixtureWithCurriculum,
   sourceBundleFixtureWithInvalidTarHeader,
   sourceBundleFixtureWithMetadataEntry,
   resetImageRegistryMocks,
@@ -10,6 +10,7 @@ import {
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { readBundleMeta } from "@/control-plane/image-registry/bundle";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 
 const {
   authMock,
@@ -83,25 +84,19 @@ describe("image registry source bundles", () => {
       { buildId: "build-1", hostId: "builder-1" },
     ]);
     const form = new FormData();
-    form.set(
-      "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
-    );
+    form.set("meta", JSON.stringify(sourceMeta()));
     form.set(
       "bundle",
-      new File([sourceBundleFixture(["broken-nginx"])], "abc123.tar.gz", {
-        type: "application/gzip",
-      }),
+      new File(
+        [
+          sourceBundleFixtureWithCurriculum(
+            ["broken-nginx"],
+            [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
+          ),
+        ],
+        "abc123.tar.gz",
+        { type: "application/gzip" },
+      ),
     );
 
     try {
@@ -144,8 +139,8 @@ describe("image registry source bundles", () => {
           r2Key: "builds/bundles/abc123.tar.gz",
           meta: {
             rev: "abc123",
-            build_format_version: "intar-image-build-v10",
-            buildFormatVersion: "intar-image-build-v10",
+            build_format_version: IMAGE_BUILD_FORMAT_VERSION,
+            buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
             catalogChannel: "candidate",
             scenarios: [
               {
@@ -154,6 +149,31 @@ describe("image registry source bundles", () => {
                 contentHash: "d".repeat(64),
               },
             ],
+            courseCatalog: {
+              version: 2,
+              courses: [
+                {
+                  courseId: "linux-operations",
+                  title: "Linux operations",
+                  summary: "Diagnose common Linux failures.",
+                  bodyMarkdown: "# Linux operations\n",
+                  sequential: true,
+                  lectures: [
+                    {
+                      lectureId: "01-broken-nginx",
+                      title: "Repair nginx",
+                      summary: "Learn the nginx recovery loop.",
+                      bodyMarkdown: "# Repair nginx\n",
+                      category: "linux",
+                      tags: ["nginx"],
+                      difficulty: "easy",
+                      estimatedMinutes: 15,
+                      scenarioId: "broken-nginx",
+                    },
+                  ],
+                },
+              ],
+            },
           },
           nowUnixMs: now,
         },
@@ -172,20 +192,7 @@ describe("image registry source bundles", () => {
 
   it("rejects empty source bundle archives before queueing builds", async () => {
     const form = new FormData();
-    form.set(
-      "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
-    );
+    form.set("meta", JSON.stringify(sourceMeta()));
     form.set(
       "bundle",
       new File([], "abc123.tar.gz", {
@@ -217,20 +224,7 @@ describe("image registry source bundles", () => {
 
   it("rejects corrupt source bundle archives before queueing builds", async () => {
     const form = new FormData();
-    form.set(
-      "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
-    );
+    form.set("meta", JSON.stringify(sourceMeta()));
     form.set(
       "bundle",
       new File([new Uint8Array([1, 2, 3])], "abc123.tar.gz", {
@@ -262,20 +256,7 @@ describe("image registry source bundles", () => {
 
   it("rejects oversized inflated source bundles before queueing builds", async () => {
     const form = new FormData();
-    form.set(
-      "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
-    );
+    form.set("meta", JSON.stringify(sourceMeta()));
     form.set(
       "bundle",
       new File(
@@ -311,20 +292,7 @@ describe("image registry source bundles", () => {
 
   it("rejects source bundles with invalid tar headers before queueing builds", async () => {
     const form = new FormData();
-    form.set(
-      "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
-    );
+    form.set("meta", JSON.stringify(sourceMeta()));
     form.set(
       "bundle",
       new File(
@@ -360,20 +328,7 @@ describe("image registry source bundles", () => {
 
   it("rejects source bundles with unsupported tar entry types before queueing builds", async () => {
     const form = new FormData();
-    form.set(
-      "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
-    );
+    form.set("meta", JSON.stringify(sourceMeta()));
     form.set(
       "bundle",
       new File(
@@ -409,25 +364,19 @@ describe("image registry source bundles", () => {
 
   it("rejects source bundles missing declared scenario sources", async () => {
     const form = new FormData();
-    form.set(
-      "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
-    );
+    form.set("meta", JSON.stringify(sourceMeta()));
     form.set(
       "bundle",
-      new File([sourceBundleFixture(["workshop-cluster"])], "abc123.tar.gz", {
-        type: "application/gzip",
-      }),
+      new File(
+        [
+          sourceBundleFixtureWithCurriculum(
+            ["workshop-cluster"],
+            [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
+          ),
+        ],
+        "abc123.tar.gz",
+        { type: "application/gzip" },
+      ),
     );
     const bucketPut = vi.fn();
 
@@ -456,22 +405,22 @@ describe("image registry source bundles", () => {
     const form = new FormData();
     form.set(
       "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "e".repeat(64),
-          },
-        ],
-      }),
+      JSON.stringify(
+        sourceMeta({
+          scenarios: [
+            {
+              scenario_id: "broken-nginx",
+              arch: "x86_64",
+              content_hash: "d".repeat(64),
+            },
+            {
+              scenario_id: "broken-nginx",
+              arch: "x86_64",
+              content_hash: "e".repeat(64),
+            },
+          ],
+        }),
+      ),
     );
     const bucketPut = vi.fn();
 
@@ -500,22 +449,22 @@ describe("image registry source bundles", () => {
     const form = new FormData();
     form.set(
       "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-          {
-            scenario_id: "workshop-cluster",
-            arch: "x86_64",
-            content_hash: "not-a-sha256",
-          },
-        ],
-      }),
+      JSON.stringify(
+        sourceMeta({
+          scenarios: [
+            {
+              scenario_id: "broken-nginx",
+              arch: "x86_64",
+              content_hash: "d".repeat(64),
+            },
+            {
+              scenario_id: "workshop-cluster",
+              arch: "x86_64",
+              content_hash: "not-a-sha256",
+            },
+          ],
+        }),
+      ),
     );
     const bucketPut = vi.fn();
 
@@ -544,17 +493,11 @@ describe("image registry source bundles", () => {
     const form = new FormData();
     form.set(
       "meta",
-      JSON.stringify({
-        rev: "..",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
+      JSON.stringify(
+        sourceMeta({
+          rev: "..",
+        }),
+      ),
     );
     const bucketPut = vi.fn();
 
@@ -583,17 +526,17 @@ describe("image registry source bundles", () => {
     const form = new FormData();
     form.set(
       "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "..",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
+      JSON.stringify(
+        sourceMeta({
+          scenarios: [
+            {
+              scenario_id: "..",
+              arch: "x86_64",
+              content_hash: "d".repeat(64),
+            },
+          ],
+        }),
+      ),
     );
     const bucketPut = vi.fn();
 
@@ -622,18 +565,11 @@ describe("image registry source bundles", () => {
     const form = new FormData();
     form.set(
       "meta",
-      JSON.stringify({
-        rev: "abc123",
-        kino_version: "../0.4.0",
-        build_format_version: "intar-image-build-v10",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
+      JSON.stringify(
+        sourceMeta({
+          kino_version: "../0.4.0",
+        }),
+      ),
     );
     const bucketPut = vi.fn();
 
@@ -662,17 +598,11 @@ describe("image registry source bundles", () => {
     const form = new FormData();
     form.set(
       "meta",
-      JSON.stringify({
-        rev: "abc123",
-        build_format_version: "intar-image-build-v7",
-        scenarios: [
-          {
-            scenario_id: "broken-nginx",
-            arch: "x86_64",
-            content_hash: "d".repeat(64),
-          },
-        ],
-      }),
+      JSON.stringify(
+        sourceMeta({
+          build_format_version: "intar-image-build-v7",
+        }),
+      ),
     );
     const bucketPut = vi.fn();
 
@@ -727,19 +657,41 @@ describe("image registry source bundles", () => {
 describe("course catalog bundle metadata", () => {
   beforeEach(resetImageRegistryMocks);
 
-  it("normalizes ordered version-one replacement snapshots", async () => {
+  it("normalizes ordered version-two snapshots", async () => {
     const result = await readBundleMeta(
       JSON.stringify(
         sourceMeta({
           course_catalog: {
-            version: 1,
-            mode: "replace",
+            version: 2,
             courses: [
               {
                 course_id: "linux-operations",
                 title: " Linux operations ",
-                description: " Diagnose common Linux failures. ",
-                scenario_ids: ["broken-nginx", "pair-ping"],
+                summary: " Diagnose common Linux failures. ",
+                body_markdown: "\n# Linux operations\n",
+                sequential: true,
+                lectures: [
+                  {
+                    lecture_id: "01-broken-nginx",
+                    title: " Repair nginx ",
+                    summary: " Learn the nginx recovery loop. ",
+                    body_markdown: "\n# Repair nginx\n",
+                    category: " linux ",
+                    tags: ["nginx", "service"],
+                    difficulty: "easy",
+                    estimated_minutes: 15,
+                    scenario_id: "broken-nginx",
+                  },
+                  {
+                    lecture_id: "02-theory",
+                    title: " Theory only ",
+                    summary: " Learn the model first. ",
+                    body_markdown: "# Theory\n",
+                    category: "linux",
+                    tags: ["theory"],
+                    estimated_minutes: 5,
+                  },
+                ],
               },
             ],
           },
@@ -750,110 +702,156 @@ describe("course catalog bundle metadata", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.bundleMeta.courseCatalog).toEqual({
-      version: 1,
-      mode: "replace",
+      version: 2,
       courses: [
         {
           courseId: "linux-operations",
           title: "Linux operations",
-          description: "Diagnose common Linux failures.",
-          scenarioIds: ["broken-nginx", "pair-ping"],
+          summary: "Diagnose common Linux failures.",
+          bodyMarkdown: "\n# Linux operations\n",
+          sequential: true,
+          lectures: [
+            {
+              lectureId: "01-broken-nginx",
+              title: "Repair nginx",
+              summary: "Learn the nginx recovery loop.",
+              bodyMarkdown: "\n# Repair nginx\n",
+              category: "linux",
+              tags: ["nginx", "service"],
+              difficulty: "easy",
+              estimatedMinutes: 15,
+              scenarioId: "broken-nginx",
+            },
+            {
+              lectureId: "02-theory",
+              title: "Theory only",
+              summary: "Learn the model first.",
+              bodyMarkdown: "# Theory\n",
+              category: "linux",
+              tags: ["theory"],
+              estimatedMinutes: 5,
+            },
+          ],
         },
       ],
     });
   });
 
-  it("accepts an explicit empty replacement snapshot", async () => {
+  it("accepts zero-scenario content-only catalogs and explicit clears", async () => {
     const result = await readBundleMeta(
       JSON.stringify(
         sourceMeta({
-          course_catalog: { version: 1, mode: "replace", courses: [] },
+          scenarios: [],
+          course_catalog: courseCatalogWire({
+            lectures: [pureLectureMeta()],
+          }),
         }),
       ),
     );
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.bundleMeta.courseCatalog?.courses).toEqual([]);
-  });
+    expect(result.value.bundleMeta.scenarios).toEqual([]);
+    expect(result.value.bundleMeta.courseCatalog?.courses[0]?.lectures).toEqual(
+      [
+        {
+          lectureId: "01-theory",
+          title: "Theory only",
+          summary: "Learn the model first.",
+          bodyMarkdown: "# Theory\n",
+          category: "linux",
+          tags: ["theory"],
+          estimatedMinutes: 5,
+        },
+      ],
+    );
 
-  it("does not treat unvalidated camel-case metadata as a course snapshot", async () => {
-    const result = await readBundleMeta(
+    const clear = await readBundleMeta(
       JSON.stringify(
         sourceMeta({
-          courseCatalog: {
-            version: 99,
-            mode: "merge",
-            courses: "not-an-array",
-          },
+          scenarios: [],
+          course_catalog: { version: 2, courses: [] },
         }),
       ),
     );
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value.bundleMeta.courseCatalog).toBeUndefined();
+    expect(clear.ok).toBe(true);
+    if (clear.ok) {
+      expect(clear.value.bundleMeta.courseCatalog).toEqual({
+        version: 2,
+        courses: [],
+      });
+    }
   });
 
-  it("rejects invalid versions, shapes, IDs, and duplicate membership", async () => {
+  it("rejects V1, unknown fields, bad values, and duplicate IDs", async () => {
     const invalidSnapshots: unknown[] = [
-      { version: 2, mode: "replace", courses: [] },
-      { version: 1, mode: "merge", courses: [] },
-      { version: 1, mode: "replace", courses: [], extra: true },
+      { version: 1, courses: [courseMeta()] },
+      { version: 2, courses: [], extra: true },
       {
-        version: 1,
-        mode: "replace",
+        version: 2,
         courses: [courseMeta({ course_id: "../unsafe" })],
       },
       {
-        version: 1,
-        mode: "replace",
+        version: 2,
         courses: [courseMeta({ course_id: " linux-operations " })],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta({ course_id: "general-practice" })],
+        version: 2,
+        courses: [courseMeta({ body_markdown: " " })],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta({ title: " " })],
+        version: 2,
+        courses: [courseMeta({ sequential: "true" })],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta({ description: " " })],
+        version: 2,
+        courses: [courseMeta({ lectures: [] })],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta({ scenario_ids: [] })],
+        version: 2,
+        courses: [courseMeta({ lectures: [lectureMeta({ tags: [] })] })],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta({ scenario_ids: ["../unsafe"] })],
+        version: 2,
+        courses: [
+          courseMeta({
+            lectures: [lectureMeta({ tags: ["nginx", " nginx "] })],
+          }),
+        ],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta({ scenario_ids: [" broken-nginx "] })],
+        version: 2,
+        courses: [
+          courseMeta({ lectures: [lectureMeta({ estimated_minutes: 0 })] }),
+        ],
       },
       {
-        version: 1,
-        mode: "replace",
+        version: 2,
+        courses: [
+          courseMeta({ lectures: [lectureMeta({ difficulty: undefined })] }),
+        ],
+      },
+      {
+        version: 2,
+        courses: [courseMeta({ lectures: [lectureMeta(), lectureMeta()] })],
+      },
+      {
+        version: 2,
         courses: [courseMeta(), courseMeta()],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta(), courseMeta({ course_id: "second-course" })],
+        version: 2,
+        courses: [
+          courseMeta(),
+          courseMeta({
+            course_id: "second-course",
+            lectures: [lectureMeta({ lecture_id: "01-other" })],
+          }),
+        ],
       },
       {
-        version: 1,
-        mode: "replace",
-        courses: [courseMeta({ extra: true })],
+        version: 2,
+        courses: [courseMeta({ lectures: [lectureMeta({ extra: true })] })],
       },
     ];
 
@@ -869,29 +867,46 @@ describe("course catalog bundle metadata", () => {
     }
   });
 
+  it("requires a catalog and a linked lecture for every bundled scenario", async () => {
+    const missingCatalog = await readBundleMeta(
+      JSON.stringify(sourceMeta({ course_catalog: undefined })),
+    );
+    expect(missingCatalog.ok).toBe(false);
+    if (!missingCatalog.ok) {
+      await expect(missingCatalog.response.json()).resolves.toEqual({
+        error: "meta.course_catalog is required",
+      });
+    }
+
+    const orphanScenario = await readBundleMeta(
+      JSON.stringify(
+        sourceMeta({
+          course_catalog: courseCatalogWire({
+            lectures: [pureLectureMeta()],
+          }),
+        }),
+      ),
+    );
+    expect(orphanScenario.ok).toBe(false);
+    if (!orphanScenario.ok) {
+      await expect(orphanScenario.response.json()).resolves.toEqual({
+        error: "meta.scenarios contains a scenario without a linked lecture",
+      });
+    }
+  });
+
   it("requires provenance and synchronizes a valid public snapshot", async () => {
     const now = 1_762_041_660_000;
     const dateSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     const bucketPut = vi.fn();
     schedulerMock.queueImageBuildsFromBundle.mockResolvedValue({ queued: 0 });
     schedulerMock.assignQueuedImageBuilds.mockResolvedValue([]);
-    const snapshot = {
-      version: 1 as const,
-      mode: "replace" as const,
-      courses: [
-        {
-          course_id: "linux-operations",
-          title: "Linux operations",
-          description: "Diagnose common Linux failures.",
-          scenario_ids: ["broken-nginx"],
-        },
-      ],
-    };
+    const snapshot = courseCatalogWire();
     const form = sourceBundleForm(
       snapshot,
-      sourceBundleFixtureWithCourses(
+      sourceBundleFixtureWithCurriculum(
         ["broken-nginx"],
-        'course "linux-operations" {}\n',
+        [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
       ),
     );
 
@@ -911,14 +926,27 @@ describe("course catalog bundle metadata", () => {
 
       expect(response?.status).toBe(202);
       const normalizedSnapshot = {
-        version: 1,
-        mode: "replace",
+        version: 2,
         courses: [
           {
             courseId: "linux-operations",
             title: "Linux operations",
-            description: "Diagnose common Linux failures.",
-            scenarioIds: ["broken-nginx"],
+            summary: "Diagnose common Linux failures.",
+            bodyMarkdown: "# Linux operations\n",
+            sequential: true,
+            lectures: [
+              {
+                lectureId: "01-broken-nginx",
+                title: "Repair nginx",
+                summary: "Learn the nginx recovery loop.",
+                bodyMarkdown: "# Repair nginx\n",
+                category: "linux",
+                tags: ["nginx"],
+                difficulty: "easy",
+                estimatedMinutes: 15,
+                scenarioId: "broken-nginx",
+              },
+            ],
           },
         ],
       };
@@ -955,7 +983,7 @@ describe("course catalog bundle metadata", () => {
     }
   });
 
-  it("synchronizes an explicit empty snapshot but preserves an omitted one", async () => {
+  it("accepts a content-only archive without base-images.hcl", async () => {
     schedulerMock.queueImageBuildsFromBundle.mockResolvedValue({ queued: 0 });
     schedulerMock.assignQueuedImageBuilds.mockResolvedValue([]);
     const bucketPut = vi.fn();
@@ -965,18 +993,22 @@ describe("course catalog bundle metadata", () => {
       VM_IMAGE_REGISTRY_BUCKET: { put: bucketPut },
     } as unknown as Cloudflare.Env;
 
-    const emptyResponse = await handleImageRegistryRequest(
+    const response = await handleImageRegistryRequest(
       new Request("https://intar.test/registry/v1/bundles", {
         method: "POST",
         headers: { authorization: "Bearer publish-secret" },
         body: sourceBundleForm(
-          { version: 1, mode: "replace", courses: [] },
-          sourceBundleFixtureWithCourses(["broken-nginx"], ""),
+          courseCatalogWire({ lectures: [pureLectureMeta()] }),
+          sourceBundleFixtureWithCurriculum(
+            [],
+            [{ courseId: "linux-operations", lectureIds: ["01-theory"] }],
+          ),
+          { scenarios: [] },
         ),
       }),
       env,
     );
-    expect(emptyResponse?.status).toBe(202);
+    expect(response?.status).toBe(202);
     expect(
       scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
     ).toHaveBeenCalledOnce();
@@ -985,26 +1017,15 @@ describe("course catalog bundle metadata", () => {
     ).toHaveBeenCalledWith(
       dbMock.db,
       expect.objectContaining({
-        snapshot: { version: 1, mode: "replace", courses: [] },
+        snapshot: expect.objectContaining({ version: 2 }),
       }),
     );
-
-    scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot.mockClear();
-    const omittedResponse = await handleImageRegistryRequest(
-      new Request("https://intar.test/registry/v1/bundles", {
-        method: "POST",
-        headers: { authorization: "Bearer publish-secret" },
-        body: sourceBundleForm(
-          undefined,
-          sourceBundleFixture(["broken-nginx"]),
-        ),
+    expect(schedulerMock.queueImageBuildsFromBundle).toHaveBeenCalledWith(
+      dbMock.db,
+      expect.objectContaining({
+        meta: expect.objectContaining({ scenarios: [] }),
       }),
-      env,
     );
-    expect(omittedResponse?.status).toBe(202);
-    expect(
-      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
-    ).not.toHaveBeenCalled();
   });
 
   it("rejects missing provenance and unavailable references before storage", async () => {
@@ -1014,11 +1035,7 @@ describe("course catalog bundle metadata", () => {
       REGISTRY_PUBLISH_TOKEN: "publish-secret",
       VM_IMAGE_REGISTRY_BUCKET: { put: bucketPut },
     } as unknown as Cloudflare.Env;
-    const snapshot = {
-      version: 1 as const,
-      mode: "replace" as const,
-      courses: [courseMeta()],
-    };
+    const snapshot = courseCatalogWire();
 
     const missingProvenance = await handleImageRegistryRequest(
       new Request("https://intar.test/registry/v1/bundles", {
@@ -1030,11 +1047,11 @@ describe("course catalog bundle metadata", () => {
     );
     expect(missingProvenance?.status).toBe(400);
     await expect(missingProvenance?.json()).resolves.toEqual({
-      error: "bundle archive is missing courses.hcl",
+      error: "bundle archive is missing curriculum/catalog.json",
     });
 
     scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValueOnce(
-      { ok: false, invalidScenarioIds: ["broken-nginx"] },
+      ["broken-nginx"],
     );
     const invalidReference = await handleImageRegistryRequest(
       new Request("https://intar.test/registry/v1/bundles", {
@@ -1042,7 +1059,10 @@ describe("course catalog bundle metadata", () => {
         headers: { authorization: "Bearer publish-secret" },
         body: sourceBundleForm(
           snapshot,
-          sourceBundleFixtureWithCourses(["broken-nginx"], "course {}\n"),
+          sourceBundleFixtureWithCurriculum(
+            ["broken-nginx"],
+            [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
+          ),
         ),
       }),
       env,
@@ -1063,7 +1083,7 @@ describe("course catalog bundle metadata", () => {
 function sourceMeta(extra: Record<string, unknown> = {}) {
   return {
     rev: "abc123",
-    build_format_version: "intar-image-build-v10",
+    build_format_version: IMAGE_BUILD_FORMAT_VERSION,
     scenarios: [
       {
         scenario_id: "broken-nginx",
@@ -1071,7 +1091,15 @@ function sourceMeta(extra: Record<string, unknown> = {}) {
         content_hash: "d".repeat(64),
       },
     ],
+    course_catalog: courseCatalogWire(),
     ...extra,
+  };
+}
+
+function courseCatalogWire(extra: Record<string, unknown> = {}) {
+  return {
+    version: 2,
+    courses: [courseMeta(extra)],
   };
 }
 
@@ -1079,8 +1107,38 @@ function courseMeta(extra: Record<string, unknown> = {}) {
   return {
     course_id: "linux-operations",
     title: "Linux operations",
-    description: "Diagnose common Linux failures.",
-    scenario_ids: ["broken-nginx"],
+    summary: "Diagnose common Linux failures.",
+    body_markdown: "# Linux operations\n",
+    sequential: true,
+    lectures: [lectureMeta()],
+    ...extra,
+  };
+}
+
+function lectureMeta(extra: Record<string, unknown> = {}) {
+  return {
+    lecture_id: "01-broken-nginx",
+    title: "Repair nginx",
+    summary: "Learn the nginx recovery loop.",
+    body_markdown: "# Repair nginx\n",
+    category: "linux",
+    tags: ["nginx"],
+    difficulty: "easy",
+    estimated_minutes: 15,
+    scenario_id: "broken-nginx",
+    ...extra,
+  };
+}
+
+function pureLectureMeta(extra: Record<string, unknown> = {}) {
+  return {
+    lecture_id: "01-theory",
+    title: "Theory only",
+    summary: "Learn the model first.",
+    body_markdown: "# Theory\n",
+    category: "linux",
+    tags: ["theory"],
+    estimated_minutes: 5,
     ...extra,
   };
 }
@@ -1088,14 +1146,18 @@ function courseMeta(extra: Record<string, unknown> = {}) {
 function sourceBundleForm(
   courseCatalog: unknown | undefined,
   bundle: ArrayBuffer,
+  extra: Record<string, unknown> = {},
 ): FormData {
   const form = new FormData();
   form.set(
     "meta",
     JSON.stringify(
-      sourceMeta(
-        courseCatalog === undefined ? {} : { course_catalog: courseCatalog },
-      ),
+      sourceMeta({
+        ...extra,
+        ...(courseCatalog === undefined
+          ? {}
+          : { course_catalog: courseCatalog }),
+      }),
     ),
   );
   form.set(

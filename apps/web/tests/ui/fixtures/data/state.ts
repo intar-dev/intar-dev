@@ -3,7 +3,6 @@ import type { DataVariant, MockApiState, RunFixtureState } from "./shared";
 import {
   FIXED_NOW,
   briefing,
-  catalogScenario,
   day,
   hour,
   minute,
@@ -222,86 +221,175 @@ export function createMockApiState(input?: {
   const run = makeRun(runState);
   const runActivity = run.activity as "foreground" | "background" | "settled";
   const runIsForeground = runActivity === "foreground";
-  const scenarios = [
-    catalogScenario({
-      scenarioId: "repair-nginx",
-      title: briefing.title,
-      tagline: long
-        ? `${briefing.tagline} The learner must preserve traffic, explain the failure boundary, and verify every recovery assumption before handing the service back to operations.`
-        : briefing.tagline,
-      difficulty: "medium",
-      category: briefing.category,
-      tags: briefing.tags,
-      status: runIsForeground ? "in_progress" : "attempted",
-      activeRunId: runIsForeground ? "run-active" : null,
-    }),
-    catalogScenario({
-      scenarioId: "repair-dns",
-      title: "Trace an intermittent DNS failure",
-      tagline: "Requests fail only from one resolver path.",
-      difficulty: "hard",
-      category: "Networking",
-      tags: ["dns", "networking", "observability"],
-      status: "new",
-    }),
-    catalogScenario({
-      scenarioId: "recover-postgres",
-      title: "Recover a read-only PostgreSQL node",
-      tagline: "A storage alert left application writes blocked.",
-      difficulty: "easy",
-      category: "Databases",
-      tags: ["postgresql", "storage"],
-      status: "completed",
-    }),
-  ];
-  const courses = [
+  const nginxFinished = ["archived", "replay", "replay-failed"].includes(
+    runState,
+  );
+  const nginxLectureState = nginxFinished
+    ? "completed"
+    : runIsForeground
+      ? "in_progress"
+      : "available";
+  const nginxBlocker = {
+    courseId: "operations",
+    lectureId: "02-repair-nginx",
+    title: "Repair a broken nginx service",
+  };
+  const courseCatalog: MockApiState["courseCatalog"] = [
     {
       courseId: "operations",
       organizationId: null,
       title: long
         ? "Linux operations for distributed service recovery and deliberate production handover"
         : "Linux operations",
-      description: long
-        ? "Practice tracing service failures from the network edge through resolver policy, host networking, process supervision, persistent storage, and the final production handover without skipping verification evidence."
-        : "Practice tracing service failures from the network edge to the process boundary.",
-      scenarioIds: ["repair-nginx", "repair-dns"],
+      summary:
+        "Learn service recovery theory before you repair a live system.",
+      bodyMarkdown:
+        "## How to use this course\n\nRead each lecture first. Then apply the idea in the linked scenario when it is ready.",
+      sequential: true,
+      lectures: [
+        {
+          lectureId: "01-operating-model",
+          title: "Operating model",
+          summary: "Use evidence before you change a live service.",
+          bodyMarkdown:
+            "## Observe first\n\nStart with the symptom, then narrow the fault boundary with evidence.",
+          category: "Linux services",
+          tags: ["linux", "operations"],
+          estimatedMinutes: 10,
+          scenarioId: null,
+          state: "completed",
+          blockedBy: null,
+          activeRunId: null,
+          scenarioReady: null,
+        },
+        {
+          lectureId: "02-repair-nginx",
+          title: briefing.title,
+          summary: briefing.tagline,
+          bodyMarkdown:
+            "## Service recovery\n\nA web service depends on process state, configuration, and network reachability. Check each boundary in order.",
+          category: briefing.category,
+          tags: briefing.tags,
+          difficulty: "medium",
+          estimatedMinutes: briefing.estimatedMinutes,
+          scenarioId: "repair-nginx",
+          state: nginxLectureState,
+          blockedBy: null,
+          activeRunId: runIsForeground ? "run-active" : null,
+          scenarioReady: true,
+        },
+        {
+          lectureId: "03-trace-dns",
+          title: "Trace an intermittent DNS failure",
+          summary: "Separate resolver policy from the service symptom.",
+          bodyMarkdown:
+            "## Resolver paths\n\nCompare working and failing paths before you change resolver configuration.",
+          category: "Networking",
+          tags: ["dns", "networking", "observability"],
+          difficulty: "hard",
+          estimatedMinutes: 60,
+          scenarioId: "repair-dns",
+          state:
+            nginxLectureState === "completed"
+              ? "waiting_for_scenario"
+              : "locked",
+          blockedBy:
+            nginxLectureState === "completed" ? null : nginxBlocker,
+          activeRunId: null,
+          scenarioReady: nginxLectureState === "completed" ? false : true,
+        },
+      ],
+    },
+    {
+      courseId: "systems-concepts",
+      organizationId: null,
+      title: "Systems concepts",
+      summary: "Read compact theory units at your own pace.",
+      bodyMarkdown:
+        "## Concepts before commands\n\nUse these short lectures to build a mental model before practice.",
+      sequential: false,
+      lectures: [
+        {
+          lectureId: "01-storage-alerts",
+          title: "Storage alerts need context",
+          summary: "A full filesystem can be a cause or a symptom.",
+          bodyMarkdown:
+            "## Storage pressure\n\nCheck capacity, inode use, and the process that owns the growth before you delete data.",
+          category: "Databases",
+          tags: ["postgresql", "storage"],
+          difficulty: "easy",
+          estimatedMinutes: 20,
+          scenarioId: "recover-postgres",
+          state: "waiting_for_scenario",
+          blockedBy: null,
+          activeRunId: null,
+          scenarioReady: false,
+        },
+        {
+          lectureId: "02-write-a-handoff",
+          title: "Write a useful handoff",
+          summary: "State what changed and the evidence that proves it.",
+          bodyMarkdown:
+            "## A useful handoff\n\nRecord the fault, the repair, and the checks that now pass.",
+          category: "Operations",
+          tags: ["operations", "communication"],
+          estimatedMinutes: 10,
+          scenarioId: null,
+          state: "available",
+          blockedBy: null,
+          activeRunId: null,
+          scenarioReady: null,
+        },
+      ],
     },
   ];
-  const organizationScenarios = [
-    ...scenarios,
-    catalogScenario({
-      scenarioId: "platform-logrotate",
-      organizationId: "org-platform",
-      title: "Recover the platform log rotation job",
-      tagline: "A private fleet policy filled the service volume overnight.",
-      difficulty: "medium",
-      category: "Platform operations",
-      tags: ["linux", "storage", "organization"],
-      status: "new",
-    }),
-    catalogScenario({
-      scenarioId: "platform-firewall",
-      organizationId: "org-platform",
-      title: "Trace a private firewall regression",
-      tagline: "A fleet-only policy blocks east-west service traffic.",
-      difficulty: "hard",
-      category: "Platform networking",
-      tags: ["networking", "firewall", "organization"],
-      status: "new",
-    }),
-  ];
-  const organizationCourses = [
+  const organizationCourseCatalog: MockApiState["organizationCourseCatalog"] = [
+    ...courseCatalog,
     {
-      ...courses[0],
-      scenarioIds: ["repair-dns"],
-    },
-    {
-      courseId: "operations",
+      courseId: "platform-repair",
       organizationId: "org-platform",
       title: "Platform repair sequence",
-      description:
-        "Work through the public service repair before applying the crew's private fleet policy.",
-      scenarioIds: ["repair-nginx", "platform-logrotate"],
+      summary: "Apply the team operating model to private platform services.",
+      bodyMarkdown:
+        "## Private platform work\n\nUse the same evidence-first method with organization-specific systems.",
+      sequential: true,
+      lectures: [
+        {
+          lectureId: "01-private-context",
+          title: "Private service context",
+          summary: "Identify the organization boundary before you investigate.",
+          bodyMarkdown:
+            "## Scope matters\n\nKnow which team owns the service and which evidence you can safely inspect.",
+          category: "Platform operations",
+          tags: ["organization", "operations"],
+          estimatedMinutes: 10,
+          scenarioId: null,
+          state: "available",
+          blockedBy: null,
+          activeRunId: null,
+          scenarioReady: null,
+        },
+        {
+          lectureId: "02-logrotate",
+          title: "Recover the platform log rotation job",
+          summary: "Find why a private fleet policy filled the service volume.",
+          bodyMarkdown:
+            "## Growth and rotation\n\nConfirm whether the scheduler, policy, or filesystem caused the pressure.",
+          category: "Platform operations",
+          tags: ["linux", "storage", "organization"],
+          difficulty: "medium",
+          estimatedMinutes: 35,
+          scenarioId: "platform-logrotate",
+          state: "locked",
+          blockedBy: {
+            courseId: "platform-repair",
+            lectureId: "01-private-context",
+            title: "Private service context",
+          },
+          activeRunId: null,
+          scenarioReady: true,
+        },
+      ],
     },
   ];
   const runs = [
@@ -1017,59 +1105,8 @@ export function createMockApiState(input?: {
           ? "error"
           : "connected",
     capacityPressure: empty ? null : 68,
-    scenarios: empty ? [] : scenarios,
-    courses: empty ? [] : courses,
-    organizationScenarios: empty ? [] : organizationScenarios,
-    organizationCourses: empty ? [] : organizationCourses,
-    scenarioDetail: {
-      scenarioId: "repair-nginx",
-      organizationId: null,
-      slug: "repair-nginx",
-      enabledAt: FIXED_NOW - 45 * day,
-      scenarioName: "repair-nginx",
-      briefing,
-      vmCount: 1,
-      hasActiveRun: !empty && runIsForeground,
-      activeRunId: !empty && runIsForeground ? "run-active" : null,
-      activeRun:
-        empty || !runIsForeground
-          ? null
-          : {
-              runId: "run-active",
-              phase: "active_full",
-              phaseTitle: "Running",
-              phaseDetail: "Shell ready",
-              canOpenTerminal: true,
-              terminalPhase: "ready",
-              updatedAt: FIXED_NOW - minute,
-            },
-      blockingRun: null,
-      courseLocation: {
-        courseKind: "authored",
-        scope: "public",
-        organizationId: null,
-        courseId: "operations",
-        courseTitle: "Linux operations",
-        step: 1,
-        steps: 2,
-      },
-      finishedRuns: empty
-        ? []
-        : [
-            {
-              runId: "run-replay",
-              phase: "completed",
-              outcome: "succeeded",
-              createdAt: FIXED_NOW - 2 * day,
-              finishedAt: FIXED_NOW - 2 * day + 31 * minute,
-              solvedAt: FIXED_NOW - 2 * day + 26 * minute,
-              solveDurationMs: 26 * minute,
-              solutionAssisted: false,
-              replayState: "ready",
-              hasReplay: true,
-            },
-          ],
-    },
+    courseCatalog: empty ? [] : courseCatalog,
+    organizationCourseCatalog: empty ? [] : organizationCourseCatalog,
     runs: empty ? [] : runs,
     run,
     organizations: empty
@@ -1095,19 +1132,19 @@ export function createMockApiState(input?: {
           {
             id: "assignment-nginx",
             assignmentId: "assignment-nginx",
-            scenarioId: "repair-nginx",
-            scenarioTitle: briefing.title,
+            scenarioId: "platform-logrotate",
+            scenarioTitle: "Recover the platform log rotation job",
             organizationId: "org-platform",
             organizationName: organizationDetail.name,
             assignedAt: FIXED_NOW - 7 * day,
             createdAt: FIXED_NOW - 7 * day,
             courseLocation: {
-              courseKind: "authored",
               scope: "organization-private",
               organizationId: "org-platform",
-              courseId: "operations",
+              courseId: "platform-repair",
               courseTitle: "Platform repair sequence",
-              step: 1,
+              lectureId: "02-logrotate",
+              step: 2,
               steps: 2,
             },
           },
@@ -1365,18 +1402,5 @@ export function createMockApiState(input?: {
         },
       ]),
     ),
-    sources: empty
-      ? []
-      : [
-          {
-            id: "repair-nginx",
-            scenarioId: "repair-nginx",
-            status: "draft",
-            createdBy: "user-admin",
-            createdAt: FIXED_NOW - 4 * day,
-            updatedAt: FIXED_NOW - 30 * minute,
-          },
-        ],
-    sourceHcl: `scenario "repair-nginx" {\n  title = "Repair nginx"\n  category = "Linux services"\n}\n`,
   };
 }

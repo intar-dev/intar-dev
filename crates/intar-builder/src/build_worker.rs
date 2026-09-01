@@ -186,6 +186,7 @@ pub(super) async fn run_claimed_build_job(
         let request = DirectBuildRequest {
             scenario_path: bundle_input.scenario_path.clone(),
             scenario: bundle_input.scenario.clone(),
+            lecture: bundle_input.lecture.clone(),
             vm_name: vm.name.clone(),
             config: build_config.clone(),
             base_image: base_image.clone(),

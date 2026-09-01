@@ -220,7 +220,7 @@ describe("build scheduler", () => {
       rev: "abc123",
       r2Key: "builds/bundles/abc123.tar.gz",
       meta: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -256,7 +256,7 @@ describe("build scheduler", () => {
         rev: "bundle-new",
         r2Key: "builds/bundles/bundle-new.tar.gz",
         meta: {
-          buildFormatVersion: "intar-image-build-v10",
+          buildFormatVersion: "intar-image-build-v11",
           scenarios: [
             {
               scenarioId: "broken-nginx",

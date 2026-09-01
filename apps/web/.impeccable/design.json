@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-01T00:55:51Z",
+  "title": "Design System: Intar Web",
+  "extensions": {
+    "colorMeta": {
+      "background": {
+        "role": "neutral",
+        "displayName": "Warm Ground",
+        "canonical": "oklch(0.975 0.008 77)",
+        "darkCanonical": "oklch(0.17 0.01 52)"
+      },
+      "card": {
+        "role": "neutral",
+        "displayName": "Paper Surface",
+        "canonical": "oklch(0.992 0.004 80)",
+        "darkCanonical": "oklch(0.205 0.012 52)"
+      },
+      "primary": {
+        "role": "primary",
+        "displayName": "Rust Action",
+        "canonical": "oklch(0.52 0.18 36)",
+        "darkCanonical": "oklch(0.73 0.155 43)"
+      },
+      "brand-subtle": {
+        "role": "secondary",
+        "displayName": "Rust Wash",
+        "canonical": "oklch(0.935 0.04 55)",
+        "darkCanonical": "oklch(0.285 0.052 39)"
+      },
+      "brand-border": {
+        "role": "secondary",
+        "displayName": "Rust Rule",
+        "canonical": "oklch(0.72 0.11 44)",
+        "darkCanonical": "oklch(0.49 0.105 39)"
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Quiet Line",
+        "canonical": "oklch(0.855 0.018 70)",
+        "darkCanonical": "oklch(0.35 0.018 56)"
+      },
+      "success": {
+        "role": "secondary",
+        "displayName": "Verified Green",
+        "canonical": "oklch(0.43 0.105 151)",
+        "darkCanonical": "oklch(0.75 0.12 151)"
+      },
+      "warning": {
+        "role": "secondary",
+        "displayName": "Waiting Gold",
+        "canonical": "oklch(0.49 0.115 76)",
+        "darkCanonical": "oklch(0.79 0.115 82)"
+      },
+      "destructive": {
+        "role": "secondary",
+        "displayName": "Repair Red",
+        "canonical": "oklch(0.48 0.19 27)",
+        "darkCanonical": "oklch(0.72 0.16 25)"
+      },
+      "terminal-background": {
+        "role": "neutral",
+        "displayName": "Terminal Surface",
+        "canonical": "#151716"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Recursive Display",
+        "purpose": "Rare large landing statements."
+      },
+      "feature-title": {
+        "displayName": "Recursive Feature Title",
+        "purpose": "Main title in a recap or feature block."
+      },
+      "page-title": {
+        "displayName": "Recursive Page Title",
+        "purpose": "Content headers and course titles."
+      },
+      "body": {
+        "displayName": "Atkinson Reading Text",
+        "purpose": "Instructions and Markdown reading."
+      },
+      "label": {
+        "displayName": "Atkinson System Label",
+        "purpose": "Compact panel labels and secondary system headings."
+      },
+      "mono": {
+        "displayName": "Recursive Mono",
+        "purpose": "Metadata, timestamps, counts, code, and terminal content."
+      }
+    },
+    "shadows": [
+      {
+        "name": "card-rest",
+        "value": "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+        "purpose": "Default card containment."
+      },
+      {
+        "name": "card-hover",
+        "value": "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)",
+        "purpose": "Interactive-card hover state."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-change",
+        "value": "150ms cubic-bezier(0.4, 0, 0.2, 1)",
+        "purpose": "Button, card, and row state changes."
+      },
+      {
+        "name": "sidebar-slide",
+        "value": "200ms linear",
+        "purpose": "Sidebar width and position changes."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0.01ms",
+        "purpose": "Global reduced-motion override."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "page-inset-md",
+        "value": "40rem"
+      },
+      {
+        "name": "page-inset-lg",
+        "value": "64rem"
+      },
+      {
+        "name": "learning-panel",
+        "value": "960px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one main action in a local area.",
+      "html": "<button class='ds-btn-primary' type='button'>Start scenario <span aria-hidden='true'>→</span></button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem; height: var(--control-standard); padding: 0 0.875rem; border: 1px solid transparent; border-radius: var(--radius-lg); background: var(--primary); color: var(--primary-foreground); font-family: 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; font-weight: 600; line-height: 1.25rem; transition: color 150ms cubic-bezier(0.4, 0, 0.2, 1), background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), border-color 150ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1), transform 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-btn-primary:hover { background: var(--brand-text); } .ds-btn-primary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 40%, transparent); } .ds-btn-primary:active { transform: translateY(1px); }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "A secondary action with a quiet boundary.",
+      "html": "<button class='ds-btn-outline' type='button'>Review runs</button>",
+      "css": ".ds-btn-outline { display: inline-flex; align-items: center; justify-content: center; height: var(--control-standard); padding: 0 0.875rem; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--background); color: var(--foreground); font-family: 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; font-weight: 600; line-height: 1.25rem; transition: color 150ms cubic-bezier(0.4, 0, 0.2, 1), background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), border-color 150ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1), transform 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-btn-outline:hover { background: var(--muted); } .ds-btn-outline:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 40%, transparent); } .ds-btn-outline:active { transform: translateY(1px); }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "The standard field for compact app input.",
+      "html": "<input class='ds-input' type='text' value='Search courses' aria-label='Search courses' />",
+      "css": ".ds-input { width: 100%; height: var(--control-standard); padding: 0 0.75rem; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--card); color: var(--foreground); font-family: 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; line-height: 1.25rem; transition: color 150ms cubic-bezier(0.4, 0, 0.2, 1), background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), border-color 150ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-input:focus-visible { border-color: var(--ring); outline: none; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 40%, transparent); } .ds-input:disabled { background: var(--muted); cursor: not-allowed; opacity: 0.6; }"
+    },
+    {
+      "name": "Card Surface",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "A quiet contained surface for grouped content.",
+      "html": "<article class='ds-card'><h3>Course lectures</h3><p>Read the theory, then complete the next unit.</p></article>",
+      "css": ".ds-card { display: flex; flex-direction: column; gap: 1.25rem; padding: 1.25rem; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-xl); background: var(--card); color: var(--card-foreground); font-family: 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); } .ds-card h3 { margin: 0; font-family: 'Recursive Heading', 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 1rem; font-weight: 650; line-height: 1.375; letter-spacing: -0.01em; } .ds-card p { margin: 0; color: var(--muted-foreground); line-height: 1.55; } .ds-card:hover { border-color: var(--brand-border); box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1); }"
+    },
+    {
+      "name": "Sidebar Navigation",
+      "kind": "nav",
+      "refersTo": "sidebar-nav-active",
+      "description": "The persistent app navigation row.",
+      "html": "<nav class='ds-sidebar' aria-label='Main navigation'><a class='ds-sidebar-link ds-sidebar-link-active' href='#courses'>Courses</a><a class='ds-sidebar-link' href='#runs'>My runs</a></nav>",
+      "css": ".ds-sidebar { width: 16rem; padding: 0.5rem; background: var(--sidebar); color: var(--sidebar-foreground); font-family: 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; } .ds-sidebar-link { display: flex; align-items: center; height: var(--control-compact); padding: 0 0.5rem; border-radius: var(--radius-lg); color: inherit; font-size: 0.875rem; text-decoration: none; transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), color 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-sidebar-link:hover { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); } .ds-sidebar-link:focus-visible { outline: 2px solid var(--sidebar-ring); outline-offset: 2px; } .ds-sidebar-link-active { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); font-weight: 600; }"
+    },
+    {
+      "name": "Status Token",
+      "kind": "custom",
+      "refersTo": "status-live",
+      "description": "A direct state label with an optional elapsed value.",
+      "html": "<span class='ds-status'><span class='ds-status-dot' aria-hidden='true'></span><span>In progress</span><span class='ds-status-time' aria-hidden='true'>12:04</span></span>",
+      "css": ".ds-status { display: inline-flex; min-width: 0; align-items: center; gap: 0.375rem; color: var(--foreground); font-family: 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; font-weight: 500; } .ds-status-dot { width: 0.5rem; height: 0.5rem; flex: 0 0 auto; border-radius: 999px; background: var(--primary); } .ds-status-time { color: var(--muted-foreground); font-family: 'Recursive Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.75rem; font-weight: 400; }"
+    },
+    {
+      "name": "Reading Action Gate",
+      "kind": "custom",
+      "refersTo": "reading-action-gate",
+      "description": "The trailing action panel for one reading unit.",
+      "html": "<section class='ds-action-gate'><h2>Continue your scenario</h2><button class='ds-gate-button' type='button'>Resume scenario <span aria-hidden='true'>→</span></button></section>",
+      "css": ".ds-action-gate { display: flex; flex-direction: column; gap: 1rem; padding: 1.25rem 1rem; border-top: 1px solid var(--brand-border); border-bottom: 1px solid var(--brand-border); background: color-mix(in oklch, var(--brand-subtle) 55%, transparent); } .ds-action-gate h2 { margin: 0; font-family: 'Recursive Heading', 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 1.125rem; font-weight: 650; line-height: 1.333; letter-spacing: -0.01em; } .ds-gate-button { display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem; width: 100%; height: var(--control-standard); padding: 0 0.875rem; border: 1px solid transparent; border-radius: var(--radius-lg); background: var(--primary); color: var(--primary-foreground); font-family: 'Atkinson Hyperlegible Next Variable', ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; font-weight: 600; line-height: 1.25rem; } .ds-gate-button:hover { background: var(--brand-text); } .ds-gate-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 40%, transparent); } .ds-gate-button:active { transform: translateY(1px); } @media (min-width: 640px) { .ds-action-gate { padding-right: 1.25rem; padding-left: 1.25rem; } .ds-gate-button { width: auto; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Warm Technical Workbench",
+    "overview": "Intar is a warm technical workbench for learning and repair. The app uses a calm neutral ground, readable type, and one rust action color. It keeps the user in an app frame and makes work state direct.\n\nThe system uses little decoration. A border, a small tonal change, or a small shadow separates work areas. The primary action stays clear. Light and dark themes keep the same role names and action priority.",
+    "keyCharacteristics": [
+      "Warm neutral ground and paper-like content surfaces.",
+      "Rust actions with clear text labels.",
+      "Dense but readable app frame and metadata.",
+      "Quiet borders and small, functional depth.",
+      "Narrow reading rails for Markdown content."
+    ],
+    "rules": [
+      {
+        "name": "The Rust Signal Rule",
+        "body": "Use the rust colors for one main action, active selection, or working state in a local area. Keep the surrounding surface neutral.",
+        "section": "colors"
+      },
+      {
+        "name": "The Status Text Rule",
+        "body": "Use success, warning, and destructive colors with a direct word or icon. Color never carries state alone.",
+        "section": "colors"
+      },
+      {
+        "name": "The Data Line Rule",
+        "body": "Put static facts in one small mono line with middle-dot separators. Use chips only when the user can operate them.",
+        "section": "typography"
+      },
+      {
+        "name": "The One Frame Rule",
+        "body": "Keep app navigation in the sidebar and page identity in the app bar. Do not make a second page header compete with the app bar heading.",
+        "section": "layout"
+      },
+      {
+        "name": "The Reading Rail Rule",
+        "body": "Keep long instructional text on the narrow measure. Put an action panel after the reading unit when the content leads to one next action.",
+        "section": "layout"
+      },
+      {
+        "name": "The Quiet Depth Rule",
+        "body": "Use a border or tonal difference first. Use the small shadow only to show a contained or interactive surface.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use the semantic color properties so light and dark themes keep the same roles.",
+      "Do keep direct status words with dots, icons, and live feedback.",
+      "Do keep long Markdown on the 68ch reading rail.",
+      "Do use the mono metadata line for static counts, durations, and course facts.",
+      "Do use the rust action color for the one main action in a local area."
+    ],
+    "donts": [
+      "Don't use color as the only status signal.",
+      "Don't use chip rows for static metadata.",
+      "Don't add a large shadow when a quiet border or tonal change gives enough separation.",
+      "Don't add an in-flow h1 that competes with the app bar page title."
+    ]
+  }
+}

@@ -9,7 +9,7 @@ use intar_contracts::{
         DesiredBuildV1, HOST_DESIRED_STATE_SCHEMA_VERSION, HOST_STATE_REPORT_SCHEMA_VERSION,
         HostDesiredStateV2, HostStateReportV2, VM_REPORT_SCHEMA_VERSION, VmReportV2,
     },
-    catalog::ScenarioManifestV4,
+    catalog::{CourseCatalogSnapshotV2, ScenarioManifestV4},
     guest::{
         ENV_DNS_SERVERS, ENV_GATEWAY, ENV_GUEST_BOOTSTRAP_ABI, ENV_GUEST_IP_CIDR,
         ENV_KINO_HOST_READY_PORT, ENV_KINO_SHA256, ENV_KINO_VSOCK_CID, ENV_KINO_VSOCK_PORT,
@@ -87,6 +87,10 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("catalog-scenario-manifest-v4.schema.json"),
         &schema_for!(ScenarioManifestV4),
+    )?;
+    write_schema(
+        &schema_dir.join("catalog-course-catalog-v2.schema.json"),
+        &schema_for!(CourseCatalogSnapshotV2),
     )?;
     write_schema(
         &schema_dir.join("workshop-manifest-v2.schema.json"),
@@ -378,6 +382,32 @@ export interface ImageKey {
 }
 
 export type Mib = number;
+
+export interface CourseCatalogSnapshotV2 {
+  version: number;
+  courses: CourseCatalogCourseV2[];
+}
+
+export interface CourseCatalogCourseV2 {
+  course_id: string;
+  title: string;
+  summary: string;
+  body_markdown: string;
+  sequential: boolean;
+  lectures: CourseCatalogLectureV2[];
+}
+
+export interface CourseCatalogLectureV2 {
+  lecture_id: string;
+  title: string;
+  summary: string;
+  body_markdown: string;
+  category: string;
+  tags: string[];
+  difficulty?: ScenarioDifficulty | null;
+  estimated_minutes: number;
+  scenario_id?: string | null;
+}
 
 export interface ScenarioHintManifestV3 {
   id: string;

@@ -46,6 +46,9 @@ describe("automatic web deployment workflow", () => {
 
   it("uses maintenance only when a generated D1 migration is pending", () => {
     const plan = deployWorkflow.indexOf("Plan production D1 migrations");
+    const preMigrationEvidence = deployWorkflow.indexOf(
+      "Capture pre-migration D1 evidence",
+    );
     const maintenance = deployWorkflow.indexOf(
       "Enable maintenance for pending migrations",
     );
@@ -55,7 +58,9 @@ describe("automatic web deployment workflow", () => {
     const deploy = deployWorkflow.indexOf("Deploy production at 100 percent");
 
     expect(plan).toBeGreaterThan(-1);
+    expect(preMigrationEvidence).toBeGreaterThan(plan);
     expect(maintenance).toBeGreaterThan(plan);
+    expect(maintenance).toBeGreaterThan(preMigrationEvidence);
     expect(drain).toBeGreaterThan(maintenance);
     expect(migrate).toBeGreaterThan(drain);
     expect(verify).toBeGreaterThan(migrate);
@@ -68,6 +73,40 @@ describe("automatic web deployment workflow", () => {
     expect(deployWorkflow).toContain("bun run db:migrate:production");
     expect(deployWorkflow).toContain("--expect full");
     expect(deployWorkflow).not.toContain("wrangler d1 migrations");
+  });
+
+  it("retains and gates only the pre-migration D1 evidence", () => {
+    for (const required of [
+      "bunx --bun wrangler d1 info",
+      '.result.version == "production"',
+      "bunx --bun wrangler d1 time-travel info",
+      "scenario_course_catalogs",
+      "rev GLOB 'draft-*'",
+      "host_desired_state",
+      "hidden_at IS NULL AND",
+      "active_key IS NOT NULL OR state NOT IN ('completed', 'failed')",
+      "upload_status <> 'uploaded'",
+      "GROUP BY organization_id, scenario_id",
+      "pre-migration-enabled-scenarios.json",
+    ]) {
+      expect(deployWorkflow).toContain(required);
+    }
+    const artifact = deployWorkflow.slice(
+      deployWorkflow.indexOf("Retain deployment evidence"),
+    );
+    for (const evidence of [
+      "production-d1-info.json",
+      "production-d1-backend.json",
+      "production-d1-bookmark.json",
+      "pre-migration-scenario-course-catalogs.json",
+      "pre-migration-draft-build-audit.json",
+      "pre-migration-run-drain-audit.json",
+      "pre-migration-assignment-counts.json",
+      "pre-migration-enabled-scenarios.json",
+    ]) {
+      expect(artifact).toContain(evidence);
+    }
+    expect(deployWorkflow).not.toContain("scenario_sources");
   });
 
   it("deploys the complete configuration at 100 percent with no rollback", () => {

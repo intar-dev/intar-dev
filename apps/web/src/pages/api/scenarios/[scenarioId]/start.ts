@@ -3,7 +3,7 @@ import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
 import { isSafeScenarioId } from "@/lib/scenario-id";
 import {
-  resolveScenarioCourseLocationForUser,
+  courseLocationFromRunSnapshot,
   startScenarioRunForUser,
 } from "@/lib/scenario-runs";
 import { resolveOrganizationId } from "@/lib/organizations";
@@ -96,17 +96,14 @@ export const POST: APIRoute = async ({ request, params }) => {
       ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
       ...(authz.context.isAdmin ? { allowDrainedAdminProof: true } : {}),
+      ...(authz.context.isAdmin ? { allowSequenceBypass: true } : {}),
     });
     return jsonResponse(
       {
         ...result,
         run: {
           ...result.run,
-          courseLocation: await resolveScenarioCourseLocationForUser({
-            userId: authz.context.userId,
-            scenarioId,
-            organizationId,
-          }),
+          courseLocation: courseLocationFromRunSnapshot(result.run),
         },
       },
       {

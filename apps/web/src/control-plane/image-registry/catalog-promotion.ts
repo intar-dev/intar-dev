@@ -185,15 +185,6 @@ export async function handleCandidateCatalogPromotion(
     );
     for (const vm of rows.vms) statements.push(vmInsert(env.DB, vm));
     for (const probe of rows.probes) statements.push(probeInsert(env.DB, probe));
-    if (bundle.organizationId) {
-      statements.push(
-        env.DB
-          .prepare(
-            "UPDATE scenario_sources SET status = 'published', updated_at = ? WHERE organization_id = ? AND scenario_id = ?",
-          )
-          .bind(now, bundle.organizationId, rows.scenario.scenarioId),
-      );
-    }
   }
   await env.DB.batch(statements);
 

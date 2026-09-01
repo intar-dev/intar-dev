@@ -58,6 +58,7 @@ export async function startScenarioRunForUser(params: {
   organizationId?: string | null;
   hostId?: string;
   allowDrainedAdminProof?: boolean;
+  allowSequenceBypass?: boolean;
 }): Promise<{
   accepted: true;
   runId: string;

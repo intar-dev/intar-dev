@@ -100,7 +100,7 @@ export function resetImageRegistryMocks(): void {
   scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot.mockReset();
   scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockReset();
   scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValue(
-    { ok: true, invalidScenarioIds: [] },
+    [],
   );
   imageBuildLockMock.assertHeld.mockReset();
   imageBuildLockMock.assertHeld.mockResolvedValue(undefined);
@@ -117,7 +117,9 @@ export function resetImageRegistryMocks(): void {
   catalogManifestMock.seedScenarioManifest.mockReset();
   desiredStateStoreMock.mutateStoredHostDesiredState.mockReset();
   candidateCatalogMock.stageCandidateScenarioManifest.mockReset();
-  candidateCatalogMock.stageCandidateScenarioManifest.mockResolvedValue(undefined);
+  candidateCatalogMock.stageCandidateScenarioManifest.mockResolvedValue(
+    undefined,
+  );
   candidateCatalogMock.stageReusableCandidateManifests.mockReset();
   candidateCatalogMock.stageReusableCandidateManifests.mockResolvedValue([]);
   candidateCatalogMock.warmCandidateScenarioManifest.mockReset();
@@ -360,15 +362,28 @@ export function sourceBundleFixture(scenarioIds: string[]): ArrayBuffer {
   );
 }
 
-export function sourceBundleFixtureWithCourses(
+export function sourceBundleFixtureWithCurriculum(
   scenarioIds: string[],
-  coursesHcl: string,
+  courses: Array<{ courseId: string; lectureIds: string[] }>,
 ): ArrayBuffer {
   return toArrayBuffer(
     gzipSync(
       tarArchiveFixture([
-        ...bundleFixtureFiles(scenarioIds),
-        ["courses.hcl", coursesHcl],
+        ...(scenarioIds.length ? bundleFixtureFiles(scenarioIds) : []),
+        ["curriculum/catalog.json", "{}\n"],
+        ...courses.flatMap((course) => [
+          [`curriculum/${course.courseId}/course.md`, "# Course\n"] as [
+            string,
+            string,
+          ],
+          ...course.lectureIds.map(
+            (lectureId) =>
+              [
+                `curriculum/${course.courseId}/${lectureId}/lecture.md`,
+                "# Lecture\n",
+              ] as [string, string],
+          ),
+        ]),
       ]),
     ),
   );

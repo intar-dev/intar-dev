@@ -22,6 +22,7 @@ import {
 } from "./organization-detail/people";
 import { OrganizationRunnersSection } from "./organization-detail/runners";
 import { OrganizationSettingsSection } from "./organization-detail/settings";
+import { OrganizationBundleUpload } from "./organization-detail/BundleUpload";
 import {
   type OrganizationDetailResponse,
   fetchJson,
@@ -183,16 +184,19 @@ export function OrganizationDetail() {
         </div>
 
         <TabsContent value="overview" className="min-w-0">
-          <OrganizationOverview
-            detail={detail}
-            setTab={setTab}
-            onOpenCourses={() =>
-              void navigate({
-                to: "/organizations/$orgId/courses",
-                params: { orgId: detail.id },
-              })
-            }
-          />
+          <div className="space-y-5">
+            <OrganizationOverview
+              detail={detail}
+              setTab={setTab}
+              onOpenCourses={() =>
+                void navigate({
+                  to: "/organizations/$orgId/courses",
+                  params: { orgId: detail.id },
+                })
+              }
+            />
+            <OrganizationBundleUpload detail={detail} />
+          </div>
         </TabsContent>
         <TabsContent value="people" className="min-w-0">
           <MembersSection detail={detail} />

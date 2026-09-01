@@ -82,7 +82,7 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
         .derive_kino_config_for_vm(&vm.name)
         .context("failed to derive Kino config")?;
     let kino_template = derived_kino.config_hcl.clone();
-    let scenario_motd = render_scenario_motd(scenario, &derived_kino.probe_descriptors)
+    let scenario_motd = render_scenario_motd(&derived_kino.probe_descriptors)
         .context("failed to render scenario motd")?;
     let requires_kubernetes_modules = derived_kino
         .probe_descriptors

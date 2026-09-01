@@ -1,10 +1,103 @@
 import { env } from "cloudflare:workers";
+import { applyD1Migrations, reset } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resetDatabase } from "@/test/database-migrations";
+import {
+  databaseMigrations,
+  resetDatabase,
+} from "@/test/database-migrations";
 
 beforeEach(resetDatabase);
 
 describe("Drizzle-managed production D1 schema", () => {
+  it("hard-cuts enabled scenarios in every scope before V2 publication", async () => {
+    await reset();
+    const cutoverMigration = databaseMigrations.find(
+      ({ name }) => name === "0010_ordinary_crystal.sql",
+    );
+    if (!cutoverMigration) throw new Error("V2 cutover migration is missing");
+    await applyD1Migrations(
+      env.DB,
+      databaseMigrations.filter(
+        ({ name }) => name < "0010_ordinary_crystal.sql",
+      ),
+    );
+
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          "INSERT INTO organization (id, name, slug, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("org-a", "Organization A", "organization-a", 1),
+      env.DB
+        .prepare(
+          "INSERT INTO organization (id, name, slug, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("org-b", "Organization B", "organization-b", 1),
+      ...[null, "org-a", "org-b"].map((organizationId, index) =>
+        env.DB
+          .prepare(
+            `INSERT INTO vm_scenarios (
+               scenario_id, organization_id, title, category, description,
+               difficulty, estimated_minutes, tags_json, briefing_markdown,
+               solution_markdown, hints_json, enabled, enabled_at, created_at,
+               updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            `scenario-${index}`,
+            organizationId,
+            `Scenario ${index}`,
+            "test",
+            "Test scenario",
+            "easy",
+            10,
+            "[]",
+            "Briefing",
+            "Solution",
+            "[]",
+            index === 1 ? 0 : 1,
+            index === 1 ? 99 : 100,
+            1,
+            1,
+          ),
+      ),
+    ]);
+
+    await applyD1Migrations(env.DB, [cutoverMigration]);
+
+    const scenarios = await env.DB.prepare(
+      `SELECT scenario_id, enabled, enabled_at, updated_at
+       FROM vm_scenarios ORDER BY scenario_id`,
+    ).all<{
+      scenario_id: string;
+      enabled: number;
+      enabled_at: number | null;
+      updated_at: number;
+    }>();
+    expect(scenarios.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scenario_id: "scenario-0",
+          enabled: 0,
+          enabled_at: null,
+        }),
+        expect.objectContaining({
+          scenario_id: "scenario-1",
+          enabled: 0,
+          enabled_at: null,
+        }),
+        expect.objectContaining({
+          scenario_id: "scenario-2",
+          enabled: 0,
+          enabled_at: null,
+        }),
+      ]),
+    );
+    expect(scenarios.results.every((scenario) => scenario.updated_at > 1)).toBe(
+      true,
+    );
+  });
+
   it("initializes the complete current table model", async () => {
     const tables = await env.DB.prepare(
       `SELECT name FROM sqlite_schema
@@ -22,6 +115,7 @@ describe("Drizzle-managed production D1 schema", () => {
         "access_allowlist",
         "access_events",
         "scenario_runs",
+        "course_unit_completions",
         "workshop_templates",
         "workshop_route_issuance_intents",
         "workshop_runtime_profiles",
@@ -40,6 +134,7 @@ describe("Drizzle-managed production D1 schema", () => {
         "access_requests",
         "hetzner_allocations",
         "organization_provider_connections",
+        "scenario_sources",
       ]),
     );
 
@@ -83,6 +178,18 @@ describe("Drizzle-managed production D1 schema", () => {
         (column) => column.name === "archive_stage_rank",
       ),
     ).toMatchObject({ notnull: 0 });
+
+    const runColumns = await env.DB.prepare(
+      "PRAGMA table_info('scenario_runs')",
+    ).all<{ name: string; notnull: number }>();
+    expect(runColumns.results.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "course_scope_key",
+        "course_id",
+        "lecture_id",
+        "lecture_body_markdown",
+      ]),
+    );
 
     const routeIndexes = await env.DB.prepare(
       `SELECT name, "unique" AS is_unique

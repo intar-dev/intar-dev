@@ -48,17 +48,15 @@ vi.mock("@/lib/build-scheduler", () => schedulerMock);
 vi.mock("@/lib/id", () => ({ createAppId: () => "generated-id" }));
 vi.mock("@/lib/organizations", () => organizationMock);
 vi.mock("@/lib/scenario-course-catalogs", () => courseCatalogMock);
-vi.mock(
-  "@/control-plane/image-registry/bundle",
-  async (importOriginal) => ({
-    ...(await importOriginal<
-      typeof import("@/control-plane/image-registry/bundle")
-    >()),
-    validateBundleArchivePayload: bundleMock.validateBundleArchivePayload,
-  }),
-);
+vi.mock("@/control-plane/image-registry/bundle", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/control-plane/image-registry/bundle")
+  >()),
+  validateBundleArchivePayload: bundleMock.validateBundleArchivePayload,
+}));
 
 import { POST } from "./bundles";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 
 describe("organization scenario bundle course catalogs", () => {
   beforeEach(() => {
@@ -76,35 +74,61 @@ describe("organization scenario bundle course catalogs", () => {
     schedulerMock.queueImageBuildsFromBundle.mockResolvedValue({ queued: 0 });
     schedulerMock.assignQueuedImageBuilds.mockResolvedValue([]);
     courseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValue(
-      { ok: true, invalidScenarioIds: [] },
+      [],
     );
     bundleMock.validateBundleArchivePayload.mockResolvedValue(null);
   });
 
   it("validates and synchronizes normalized metadata in organization scope", async () => {
     const snapshot = {
-      version: 1,
-      mode: "replace",
+      version: 2,
       courses: [
         {
           courseId: "linux-operations",
           title: "Linux operations",
-          description: "Diagnose common Linux failures.",
-          scenarioIds: ["public-scenario", "org-a-private"],
+          summary: "Diagnose common Linux failures.",
+          bodyMarkdown: "# Linux operations\n",
+          sequential: true,
+          lectures: [
+            {
+              lectureId: "01-private",
+              title: "Private repair",
+              summary: "Repair a private service.",
+              bodyMarkdown: "# Private repair\n",
+              category: "linux",
+              tags: ["private"],
+              difficulty: "easy",
+              estimatedMinutes: 15,
+              scenarioId: "org-a-private",
+            },
+          ],
         },
       ],
     };
     const response = await upload(
       sourceMeta({
         course_catalog: {
-          version: 1,
-          mode: "replace",
+          version: 2,
           courses: [
             {
               course_id: "linux-operations",
               title: "Linux operations",
-              description: "Diagnose common Linux failures.",
-              scenario_ids: ["public-scenario", "org-a-private"],
+              summary: "Diagnose common Linux failures.",
+              body_markdown: "# Linux operations\n",
+              sequential: true,
+              lectures: [
+                {
+                  lecture_id: "01-private",
+                  title: "Private repair",
+                  summary: "Repair a private service.",
+                  body_markdown: "# Private repair\n",
+                  category: "linux",
+                  tags: ["private"],
+                  difficulty: "easy",
+                  estimated_minutes: 15,
+                  scenario_id: "org-a-private",
+                },
+              ],
             },
           ],
         },
@@ -136,16 +160,74 @@ describe("organization scenario bundle course catalogs", () => {
     );
   });
 
-  it("preserves the organization snapshot when metadata is omitted", async () => {
-    const response = await upload(sourceMeta());
+  it("accepts a content-only organization catalog", async () => {
+    const snapshot = {
+      version: 2,
+      courses: [
+        {
+          courseId: "linux-operations",
+          title: "Linux operations",
+          summary: "Learn the model first.",
+          bodyMarkdown: "# Linux operations\n",
+          sequential: false,
+          lectures: [
+            {
+              lectureId: "01-theory",
+              title: "Theory only",
+              summary: "Understand the model.",
+              bodyMarkdown: "# Theory\n",
+              category: "linux",
+              tags: ["theory"],
+              estimatedMinutes: 5,
+            },
+          ],
+        },
+      ],
+    };
+    const response = await upload({
+      ...sourceMeta(),
+      scenarios: [],
+      course_catalog: {
+        version: 2,
+        courses: [
+          {
+            course_id: "linux-operations",
+            title: "Linux operations",
+            summary: "Learn the model first.",
+            body_markdown: "# Linux operations\n",
+            sequential: false,
+            lectures: [
+              {
+                lecture_id: "01-theory",
+                title: "Theory only",
+                summary: "Understand the model.",
+                body_markdown: "# Theory\n",
+                category: "linux",
+                tags: ["theory"],
+                estimated_minutes: 5,
+              },
+            ],
+          },
+        ],
+      },
+    });
 
     expect(response.status).toBe(202);
     expect(
       courseCatalogMock.validateScenarioCourseCatalogReferences,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledWith(dbMock.db, {
+      snapshot,
+      bundleScenarioIds: [],
+      organizationId: "org-a-id",
+    });
     expect(
       courseCatalogMock.syncScenarioCourseCatalogSnapshot,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledWith(dbMock.db, {
+      snapshot,
+      sourceRevision: "source-revision",
+      organizationId: "org-a-id",
+      nowUnixMs: expect.any(Number),
+    });
   });
 });
 
@@ -157,11 +239,14 @@ async function upload(meta: Record<string, unknown>): Promise<Response> {
     new File(["bundle"], "source.tar.gz", { type: "application/gzip" }),
   );
   return POST({
-    request: new Request("https://intar.test/api/organizations/org-a/scenarios/bundles", {
-      method: "POST",
-      headers: { "content-length": "1024" },
-      body: form,
-    }),
+    request: new Request(
+      "https://intar.test/api/organizations/org-a/scenarios/bundles",
+      {
+        method: "POST",
+        headers: { "content-length": "1024" },
+        body: form,
+      },
+    ),
     params: { orgId: "org-a" },
   } as unknown as Parameters<typeof POST>[0]);
 }
@@ -169,7 +254,7 @@ async function upload(meta: Record<string, unknown>): Promise<Response> {
 function sourceMeta(extra: Record<string, unknown> = {}) {
   return {
     rev: "source-revision",
-    build_format_version: "intar-image-build-v10",
+    build_format_version: IMAGE_BUILD_FORMAT_VERSION,
     scenarios: [
       {
         scenario_id: "org-a-private",

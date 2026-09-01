@@ -312,6 +312,7 @@ describe("RunRecap", () => {
     }
   });
 
+
   it("shows partial objective progress without technical data", () => {
     const markup = renderToStaticMarkup(
       createElement(RunRecap, {

@@ -1,9 +1,5 @@
 export type {
   ScenarioCatalogEntry,
-  ScenarioProgress,
-  ScenarioCatalogWireEntry,
-  ScenarioCatalogWireResponse,
-  ScenarioCatalogCourseWireEntry,
   CourseLocation,
   ScenarioDetail,
   ScenarioRunRecord,
@@ -18,9 +14,8 @@ export {
   loadEnabledScenarioForUser,
   getScenarioRunForUser,
   listScenarioRunsForUser,
-  getScenarioProgressByScenario,
-  listScenarioCatalogForUser,
   resolveScenarioCourseLocationForUser,
+  courseLocationFromRunSnapshot,
 } from "./scenario-runs/catalog";
 export {
   startScenarioRunForUser,

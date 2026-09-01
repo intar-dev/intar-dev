@@ -1,8 +1,5 @@
 import { expect, test } from "./fixtures/test";
-import {
-  makeMultiReplayRun,
-  paginatedScenarioFixtures,
-} from "./fixtures/data";
+import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectRouteScreenshot } from "./support/screenshot";
 
@@ -63,7 +60,7 @@ async function expectDesktopMissionPane(
   const panel = page.locator("[data-run-learning-panel]");
   await expect(panel).toBeVisible();
   await expect(
-    panel.getByText("Mission briefing", { exact: true }),
+    panel.getByRole("heading", { name: /^Lecture theory/ }),
   ).toBeVisible();
   await expect(
     page.locator("[data-run-learning-panel-trigger]"),
@@ -317,7 +314,7 @@ test.describe("focused visual states", () => {
   for (const variant of ["empty", "loading", "error", "long"] as const) {
     test(`catalog · ${variant}`, async ({ page, ui }) => {
       await ui.open({
-        ...routeCase("scenario-catalog"),
+        ...routeCase("course-catalog"),
         theme: "light",
         variant,
       });
@@ -326,20 +323,7 @@ test.describe("focused visual states", () => {
           exact: true,
         });
         await expect(loadError).toBeVisible({ timeout: 15_000 });
-        await page.bringToFront();
-        await expect(loadError).toBeVisible({ timeout: 15_000 });
-        const alert = page.getByRole("alert").filter({
-          hasText: "Could not load courses",
-        });
-        const screenshot = await alert.screenshot({
-          animations: "disabled",
-          caret: "hide",
-          scale: "css",
-        });
-        expect(screenshot).toMatchSnapshot(
-          "catalog-error-alert-light-desktop.png",
-          { maxDiffPixelRatio: 0.001 },
-        );
+        await expectRouteScreenshot(page, "catalog-error-light-desktop");
         return;
       }
       if (variant === "loading") {
@@ -367,25 +351,9 @@ test.describe("focused visual states", () => {
     });
   }
 
-  test("catalog · paginated", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
-    ui.server.state.scenarios = paginatedScenarioFixtures();
-    ui.server.state.courses = [];
-    ui.server.state.assignments = [];
-    ui.server.state.runs = [];
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await ui.settle();
-
-    await page.getByRole("button", { name: "General practice" }).click();
-    await expect(
-      page.getByRole("navigation", { name: "scenarios pagination" }),
-    ).toContainText("1–9 of 19 scenarios");
-    await expectRouteScreenshot(page, "catalog-paginated-light-desktop");
-  });
-
   test("sidebar · Discord support link", async ({ page, ui }) => {
     await ui.open({
-      ...routeCase("scenario-catalog"),
+      ...routeCase("course-catalog"),
       theme: "light",
     });
     await expect(page.getByText("Support", { exact: true })).toBeVisible();
@@ -396,12 +364,10 @@ test.describe("focused visual states", () => {
   });
 
   test("catalog · authored course", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
-    await page.getByRole("button", { name: "Linux operations" }).click();
+    await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+    await page.getByRole("link", { name: /Linux operations/ }).click();
     await expect(
-      page.locator(
-        'section[data-course-id="operations"][data-course-view="detail"]',
-      ),
+      page.getByRole("heading", { name: "Linux operations" }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "catalog-authored-light-desktop");
   });
@@ -423,8 +389,8 @@ test.describe("focused visual states", () => {
     });
     await expect(
       page
-        .getByRole("link", { name: /Resume lab/i })
-        .or(page.getByRole("button", { name: /Resume lab/i }))
+        .getByRole("link", { name: /Resume run/i })
+        .or(page.getByRole("button", { name: /Resume run/i }))
         .first(),
     ).toBeVisible();
     await expectRouteScreenshot(
@@ -513,17 +479,6 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "people-invite-revoked-light-desktop");
   });
 
-  test("authoring validation result", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("admin-authoring"), theme: "dark" });
-    const editor = page.getByLabel("Scenario HCL source");
-    await expect(editor).toBeVisible();
-    await editor.fill('scenario "broken" {');
-    await page.getByRole("button", { name: "Validate" }).click();
-    await expect(page.getByLabel("Validation results")).toContainText(
-      /validation error|validator error|failed/i,
-    );
-    await expectRouteScreenshot(page, "authoring-invalid-dark-desktop");
-  });
 });
 
 test.describe("focused mobile workspace", () => {
@@ -540,7 +495,7 @@ test.describe("focused mobile workspace", () => {
     await expectConnectedTerminal(page);
     const sheet = await openMobileMissionAndHints(page);
     await expect(
-      sheet.getByText("Mission briefing", { exact: true }),
+      sheet.getByRole("heading", { name: /^Lecture theory:/ }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-running-guidance-dark-mobile");
   });
@@ -763,7 +718,7 @@ for (const viewport of [
           .getByRole("button", { name: "Courses", exact: true })
           .click();
         await expect(
-          page.getByRole("heading", { name: "Platform repair sequence" }),
+          page.getByRole("link", { name: /Platform repair sequence/ }),
         ).toBeVisible();
         if (viewport.id === "desktop") {
           await expect(
@@ -778,38 +733,6 @@ for (const viewport of [
         );
       });
 
-      test(`${theme} · combined General practice`, async ({ page, ui }) => {
-        await ui.open({ ...routeCase("organization-detail"), theme });
-        await page
-          .locator("main")
-          .getByRole("button", { name: "Courses", exact: true })
-          .click();
-        await page
-          .locator('section[data-course-scope="generated"]')
-          .getByRole("link", { name: /General practice/ })
-          .click();
-        const generalPractice = page.locator(
-          'section[data-course-scope="generated"][data-course-view="detail"]',
-        );
-        await generalPractice.scrollIntoViewIfNeeded();
-        await expect(
-          generalPractice.locator('a[href*="recover-postgres"]'),
-        ).toHaveCount(1);
-        await expect(
-          generalPractice.locator('a[href*="platform-firewall"]'),
-        ).toHaveCount(1);
-        if (viewport.id === "desktop") {
-          await expect(
-            page.getByRole("link", {
-              name: "Discord (opens in a new tab)",
-            }),
-          ).toBeVisible();
-        }
-        await expectRouteScreenshot(
-          page,
-          `organization-general-practice-${theme}-${viewport.id}`,
-        );
-      });
     }
   });
 }

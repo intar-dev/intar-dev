@@ -18,7 +18,6 @@ import { validateSearch as validateCatalogSearch } from "./pages/learn/catalog-s
 import {
   validateAdminPeopleSearch,
   validateOrganizationDetailSearch,
-  validateScenarioBriefingSearch,
 } from "./pages/tab-search";
 import {
   appBootstrapQueryOptions,
@@ -31,7 +30,7 @@ const rootRoute = createRootRoute({
   pendingComponent: FullPageRoutePending,
   errorComponent: RouteError,
   notFoundComponent: RouteNotFound,
-  head: () => routeHead("Systems repair labs", DEFAULT_DESCRIPTION),
+  head: () => routeHead("Systems repair courses", DEFAULT_DESCRIPTION),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -47,7 +46,7 @@ const marketingLayoutRoute = createRoute({
 const indexRoute = createRoute({
   getParentRoute: () => marketingLayoutRoute,
   path: "/",
-  head: () => routeHead("Systems repair labs", DEFAULT_DESCRIPTION),
+  head: () => routeHead("Systems repair courses", DEFAULT_DESCRIPTION),
   pendingComponent: FullPageRoutePending,
   component: lazyRouteComponent(() => import("./pages/Landing"), "Landing"),
 });
@@ -116,12 +115,12 @@ const courseCatalogRoute = createRoute({
   head: () =>
     routeHead(
       "Courses",
-      "Choose a systems repair course or resume active lab work.",
+      "Learn the theory, then apply it in a systems repair scenario.",
     ),
   validateSearch: validateCatalogSearch,
   component: lazyRouteComponent(
-    () => import("./pages/learn/ScenarioCatalog"),
-    "ScenarioCatalog",
+    () => import("./pages/learn/CourseCatalog"),
+    "PublicCourseCatalog",
   ),
 });
 
@@ -132,26 +131,25 @@ const courseDetailRoute = createRoute({
   head: () =>
     routeHead(
       "Course",
-      "Follow a guided sequence of systems repair labs.",
+      "Follow the theory-first curriculum in its published order.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/learn/ScenarioCatalog"),
-    "CourseCatalogDetail",
+    () => import("./pages/learn/CourseCatalog"),
+    "PublicCourseDetail",
   ),
 });
 
-const courseScenarioBriefingRoute = createRoute({
+const courseLectureRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "courses/$courseId/$scenarioId",
-  validateSearch: validateScenarioBriefingSearch,
+  path: "courses/$courseId/lectures/$lectureId",
   head: () =>
     routeHead(
-      "Scenario briefing",
-      "Review objectives, constraints, and previous attempts before starting a lab.",
+      "Lecture",
+      "Read the theory before you apply it in a scenario.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/learn/ScenarioBriefing"),
-    "PublicCourseScenarioBriefing",
+    () => import("./pages/learn/Lecture"),
+    "PublicLecture",
   ),
 });
 
@@ -229,7 +227,7 @@ const runsListRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "runs",
   head: () =>
-    routeHead("My runs", "Resume active work or review your lab archive."),
+    routeHead("My runs", "Resume active work or review your run archive."),
   component: lazyRouteComponent(() => import("./pages/RunsList"), "RunsList"),
 });
 
@@ -272,8 +270,8 @@ const organizationCoursesRoute = createRoute({
       "Browse public and private systems repair courses for this organization.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/OrganizationCourses"),
-    "OrganizationCourses",
+    () => import("./pages/learn/CourseCatalog"),
+    "OrganizationCourseCatalog",
   ),
 });
 
@@ -284,10 +282,10 @@ const organizationPublicCourseRoute = createRoute({
   head: () =>
     routeHead(
       "Organization course",
-      "Follow a public course with organization-run lab environments.",
+      "Follow a public course with organization-run scenario environments.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/OrganizationCourses"),
+    () => import("./pages/learn/CourseCatalog"),
     "OrganizationPublicCourseCatalog",
   ),
 });
@@ -302,68 +300,36 @@ const organizationPrivateCourseRoute = createRoute({
       "Follow this organization's private repair curriculum.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/OrganizationCourses"),
+    () => import("./pages/learn/CourseCatalog"),
     "OrganizationPrivateCourseCatalog",
   ),
 });
 
-const organizationGeneralPracticeRoute = createRoute({
+const organizationPublicCourseLectureRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "organizations/$orgId/courses/general-practice",
-  validateSearch: validateCatalogSearch,
+  path: "organizations/$orgId/courses/public/$courseId/lectures/$lectureId",
   head: () =>
     routeHead(
-      "General practice",
-      "Practice standalone systems with organization-run lab environments.",
+      "Lecture",
+      "Read the theory before you apply it in a scenario.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/OrganizationCourses"),
-    "OrganizationGeneralPracticeCatalog",
+    () => import("./pages/learn/Lecture"),
+    "OrganizationPublicLecture",
   ),
 });
 
-const organizationPublicCourseScenarioRoute = createRoute({
+const organizationPrivateCourseLectureRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "organizations/$orgId/courses/public/$courseId/$scenarioId",
-  validateSearch: validateScenarioBriefingSearch,
+  path: "organizations/$orgId/courses/private/$courseId/lectures/$lectureId",
   head: () =>
     routeHead(
-      "Scenario briefing",
-      "Review objectives, constraints, and previous attempts before starting a lab.",
+      "Lecture",
+      "Read the theory before you apply it in a scenario.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/learn/ScenarioBriefing"),
-    "OrganizationPublicCourseScenarioBriefing",
-  ),
-});
-
-const organizationPrivateCourseScenarioRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "organizations/$orgId/courses/private/$courseId/$scenarioId",
-  validateSearch: validateScenarioBriefingSearch,
-  head: () =>
-    routeHead(
-      "Scenario briefing",
-      "Review objectives, constraints, and previous attempts before starting a lab.",
-    ),
-  component: lazyRouteComponent(
-    () => import("./pages/learn/ScenarioBriefing"),
-    "OrganizationPrivateCourseScenarioBriefing",
-  ),
-});
-
-const organizationGeneralPracticeScenarioRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "organizations/$orgId/courses/general-practice/$scenarioId",
-  validateSearch: validateScenarioBriefingSearch,
-  head: () =>
-    routeHead(
-      "Scenario briefing",
-      "Review objectives, constraints, and previous attempts before starting a lab.",
-    ),
-  component: lazyRouteComponent(
-    () => import("./pages/learn/ScenarioBriefing"),
-    "OrganizationGeneralPracticeScenarioBriefing",
+    () => import("./pages/learn/Lecture"),
+    "OrganizationPrivateLecture",
   ),
 });
 
@@ -476,21 +442,6 @@ const adminPeopleRoute = createRoute({
   ),
 });
 
-const adminAuthoringRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "admin/authoring",
-  head: () =>
-    routeHead(
-      "Scenario authoring",
-      "Edit, validate, save, and build scenario source.",
-    ),
-  beforeLoad: requireAdminRoute,
-  component: lazyRouteComponent(
-    () => import("./pages/AdminAuthoring"),
-    "AdminAuthoring",
-  ),
-});
-
 const routeTree = rootRoute.addChildren([
   marketingLayoutRoute.addChildren([
     indexRoute,
@@ -501,7 +452,7 @@ const routeTree = rootRoute.addChildren([
   appLayoutRoute.addChildren([
     courseCatalogRoute,
     courseDetailRoute,
-    courseScenarioBriefingRoute,
+    courseLectureRoute,
     workshopsRoute,
     workshopRoomRoute,
     workshopPresentationRoute,
@@ -513,10 +464,8 @@ const routeTree = rootRoute.addChildren([
     organizationCoursesRoute,
     organizationPublicCourseRoute,
     organizationPrivateCourseRoute,
-    organizationGeneralPracticeRoute,
-    organizationPublicCourseScenarioRoute,
-    organizationPrivateCourseScenarioRoute,
-    organizationGeneralPracticeScenarioRoute,
+    organizationPublicCourseLectureRoute,
+    organizationPrivateCourseLectureRoute,
     organizationWorkshopsRoute,
     profileRoute,
     adminOverviewRoute,
@@ -525,7 +474,6 @@ const routeTree = rootRoute.addChildren([
     adminScenariosRoute,
     adminScenarioDetailsRoute,
     adminPeopleRoute,
-    adminAuthoringRoute,
   ]),
 ]);
 
@@ -538,7 +486,7 @@ export const router = createRouter({
 });
 
 const DEFAULT_DESCRIPTION =
-  "Practice diagnosing and repairing real infrastructure in guided, terminal-first systems labs.";
+  "Learn systems theory and repair real infrastructure in guided scenarios.";
 
 function routeHead(title: string, description: string) {
   return {

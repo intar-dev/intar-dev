@@ -2,8 +2,8 @@ import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
 import {
+  courseLocationFromRunSnapshot,
   destroyScenarioRunForUser,
-  resolveScenarioCourseLocationForUser,
 } from "@/lib/scenario-runs";
 
 export const prerender = false;
@@ -26,11 +26,7 @@ export const POST: APIRoute = async ({ request, params }) => {
       ...result,
       run: {
         ...result.run,
-        courseLocation: await resolveScenarioCourseLocationForUser({
-          userId: authz.context.userId,
-          scenarioId: result.run.scenarioId,
-          organizationId: result.run.organizationId,
-        }),
+        courseLocation: courseLocationFromRunSnapshot(result.run),
       },
     }, {
       status: 202,

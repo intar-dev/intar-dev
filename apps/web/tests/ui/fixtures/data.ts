@@ -1,4 +1,4 @@
-export { FIXED_NOW, paginatedScenarioFixtures } from "./data/shared";
+export { FIXED_NOW } from "./data/shared";
 export type {
   DataVariant,
   MockApiState,

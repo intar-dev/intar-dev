@@ -181,31 +181,31 @@ test("admin can revoke an active invite into history", async ({
 });
 
 test("learner discovery filters the catalog", async ({ page, ui }) => {
-  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
-  const search = page.getByLabel(/Search courses and scenarios/i);
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+  const search = page.getByLabel(/Search courses and lectures/i);
   await search.fill("DNS");
   await expect(
-    page.getByRole("heading", { name: "Linux operations" }),
+    page.getByRole("link", { name: /Linux operations/i }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Linux operations" }).click();
+  await page.getByRole("link", { name: /Linux operations/i }).click();
   await expect(
-    page.getByRole("heading", { name: /Trace an intermittent DNS failure/i }),
+    page.getByText("Trace an intermittent DNS failure", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: /Repair a broken nginx service/i }),
+    page.getByText("Repair a broken nginx service", { exact: true }),
   ).toBeHidden();
 });
 
-test("scenario briefing is nested beneath its catalog course breadcrumb", async ({
+test("lecture is nested beneath its catalog course breadcrumb", async ({
   page,
   ui,
 }) => {
-  await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
+  await ui.open({ ...routeCase("lecture"), theme: "light" });
   const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
   await expect(
     breadcrumb.getByRole("link", { name: "Linux operations" }),
   ).toHaveAttribute("href", "/courses/operations");
-  await expect(page).toHaveURL("/courses/operations/repair-nginx");
+  await expect(page).toHaveURL("/courses/operations/lectures/02-repair-nginx");
 });
 
 test("learner enters the live workshop and can raise a hand", async ({
@@ -696,17 +696,4 @@ test("admin deletes a user instead of banning them", async ({ page, ui }) => {
 
   await expect(page.getByText("Mina Learner", { exact: true })).toHaveCount(0);
   expect(ui.server.requests).toContain("DELETE /api/admin/users/user-learner");
-});
-
-test("authoring editor validates with the browser WASM shell", async ({
-  page,
-  ui,
-}) => {
-  await ui.open({ ...routeCase("admin-authoring"), theme: "dark" });
-  const editor = page.getByLabel("Scenario HCL source");
-  await editor.fill('scenario "broken" {');
-  await page.getByRole("button", { name: "Validate" }).click();
-  await expect(page.getByLabel("Validation results")).toContainText(
-    /validation error|validator error|failed/i,
-  );
 });

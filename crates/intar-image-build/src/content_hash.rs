@@ -2,8 +2,7 @@
 
 //! Filesystem-facing wrapper around the pure content-hash core in
 //! `intar-image-scenario`. Walks the scenario directory into in-memory
-//! entries so the fs pipeline and the wasm authoring validator hash
-//! byte-identically.
+//! entries so filesystem and in-memory callers hash byte-identically.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -37,6 +36,9 @@ pub fn scenario_content_hash(input: &ScenarioContentHashInput<'_>) -> Result<Str
         let relative = path
             .strip_prefix(input.scenario_dir)
             .context("scenario file escaped scenario directory")?;
+        if relative.file_name() == Some(std::ffi::OsStr::new("lecture.md")) {
+            continue;
+        }
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read scenario file '{}'", path.display()))?;
         entries.push((normalize_relative_path(relative)?, bytes));
@@ -172,6 +174,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(from_fs, from_entries);
+    }
+
+    #[test]
+    fn ignores_lecture_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("scenario.hcl"), "scenario body").unwrap();
+        let before = hash_for(dir.path());
+        fs::write(dir.path().join("lecture.md"), "Theory changed.").unwrap();
+        assert_eq!(before, hash_for(dir.path()));
     }
 
     fn hash_for(path: &std::path::Path) -> String {

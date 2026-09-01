@@ -9,7 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
 use intar_contracts::bridge::DesiredBuildV1;
-use intar_contracts::catalog::ImageArchitecture;
+use intar_contracts::catalog::{
+    CourseCatalogLectureV2, CourseCatalogSnapshotV2, ImageArchitecture,
+};
 use intar_image_build::{ScenarioContentHashInput, scenario_content_hash};
 use intar_image_scenario::{BaseImageCatalog, Scenario};
 
@@ -28,6 +30,7 @@ pub struct BundleBuildInput {
     pub scenario_path: PathBuf,
     pub scenario_dir: PathBuf,
     pub scenario: Scenario,
+    pub lecture: CourseCatalogLectureV2,
     pub base_catalog: BaseImageCatalog,
     pub target_arch: String,
 }
@@ -267,6 +270,7 @@ pub fn verify_bundle_for_build(
     let scenario_dir = scenario_path
         .parent()
         .ok_or_else(|| anyhow!("scenario path has no parent"))?;
+    let _lecture = course_lecture_for_scenario(bundle_root, &build.scenario_id)?;
 
     let base_catalog = BaseImageCatalog::from_file(&base_catalog_path).with_context(|| {
         format!(
@@ -274,7 +278,7 @@ pub fn verify_bundle_for_build(
             base_catalog_path.display()
         )
     })?;
-    let scenario = Scenario::from_file(&scenario_path)
+    let scenario = Scenario::from_course_file(&scenario_path)
         .with_context(|| format!("failed to load scenario '{}'", scenario_path.display()))?;
     if scenario.name != build.scenario_id {
         bail!(
@@ -284,7 +288,7 @@ pub fn verify_bundle_for_build(
         );
     }
     scenario
-        .validate_for_builder_arch(target_arch)
+        .validate_technical_for_builder_arch(target_arch)
         .with_context(|| format!("scenario '{}' failed validation", scenario.name))?;
     base_catalog
         .validate_for_builder_arch(target_arch)
@@ -334,6 +338,7 @@ pub fn inspect_bundle_build_input(
         .parent()
         .ok_or_else(|| anyhow!("scenario path has no parent"))?
         .to_path_buf();
+    let lecture = course_lecture_for_scenario(bundle_root, scenario_id)?;
 
     let base_catalog = BaseImageCatalog::from_file(&base_catalog_path).with_context(|| {
         format!(
@@ -341,7 +346,7 @@ pub fn inspect_bundle_build_input(
             base_catalog_path.display()
         )
     })?;
-    let scenario = Scenario::from_file(&scenario_path)
+    let scenario = Scenario::from_course_file(&scenario_path)
         .with_context(|| format!("failed to load scenario '{}'", scenario_path.display()))?;
     if scenario.name != scenario_id {
         bail!(
@@ -351,7 +356,7 @@ pub fn inspect_bundle_build_input(
         );
     }
     scenario
-        .validate_for_builder_arch(target_arch)
+        .validate_technical_for_builder_arch(target_arch)
         .with_context(|| format!("scenario '{}' failed validation", scenario.name))?;
     base_catalog
         .validate_for_builder_arch(target_arch)
@@ -382,9 +387,82 @@ pub fn inspect_bundle_build_input(
         scenario_path,
         scenario_dir,
         scenario,
+        lecture,
         base_catalog,
         target_arch: target_arch.to_owned(),
     })
+}
+
+fn course_lecture_for_scenario(
+    bundle_root: &Path,
+    scenario_id: &str,
+) -> Result<CourseCatalogLectureV2> {
+    let catalog_path = bundle_root.join("curriculum/catalog.json");
+    let catalog_bytes = fs::read(&catalog_path)
+        .with_context(|| format!("failed to read course catalog '{}'", catalog_path.display()))?;
+    let catalog: CourseCatalogSnapshotV2 =
+        serde_json::from_slice(&catalog_bytes).with_context(|| {
+            format!(
+                "failed to parse course catalog '{}'",
+                catalog_path.display()
+            )
+        })?;
+    if catalog.version != 2 {
+        bail!("unsupported course catalog version {}", catalog.version);
+    }
+
+    let mut course_ids = std::collections::HashSet::new();
+    let mut scenario_ids = std::collections::HashSet::new();
+    let mut result = None;
+    for course in &catalog.courses {
+        validate_safe_slug(&course.course_id, "course id")?;
+        if !course_ids.insert(&course.course_id)
+            || course.title.trim().is_empty()
+            || course.summary.trim().is_empty()
+            || course.body_markdown.trim().is_empty()
+            || course.lectures.is_empty()
+        {
+            bail!("course '{}' has invalid catalog metadata", course.course_id);
+        }
+        let mut lecture_ids = std::collections::HashSet::new();
+        for lecture in &course.lectures {
+            validate_safe_slug(&lecture.lecture_id, "lecture id")?;
+            if !lecture_ids.insert(&lecture.lecture_id)
+                || lecture.title.trim().is_empty()
+                || lecture.summary.trim().is_empty()
+                || lecture.body_markdown.trim().is_empty()
+                || lecture.category.trim().is_empty()
+                || lecture.estimated_minutes == 0
+            {
+                bail!(
+                    "course '{}', lecture '{}' has invalid catalog metadata",
+                    course.course_id,
+                    lecture.lecture_id
+                );
+            }
+            let Some(linked_scenario_id) = lecture.scenario_id.as_deref() else {
+                continue;
+            };
+            validate_safe_slug(linked_scenario_id, "scenario id")?;
+            if !scenario_ids.insert(linked_scenario_id) {
+                bail!(
+                    "scenario '{}' belongs to multiple lectures",
+                    linked_scenario_id
+                );
+            }
+            if lecture.difficulty.is_none() {
+                bail!(
+                    "course '{}', lecture '{}' links a scenario but has no difficulty",
+                    course.course_id,
+                    lecture.lecture_id
+                );
+            }
+            if linked_scenario_id == scenario_id {
+                result = Some(lecture.clone());
+            }
+        }
+    }
+    result.with_context(|| format!("scenario '{scenario_id}' has no curriculum lecture"))
 }
 
 pub fn validate_desired_build_identity(build: &DesiredBuildV1) -> Result<()> {
@@ -691,6 +769,11 @@ mod tests {
         assert_eq!(input.build.content_hash.len(), 64);
         assert!(input.build.build_id.starts_with("broken-nginx-amd64-"));
         assert_eq!(input.target_arch, "amd64");
+        assert_eq!(input.lecture.title, "Broken Nginx");
+        assert_eq!(
+            input.lecture.body_markdown,
+            "Nginx should be serving the default site."
+        );
     }
 
     fn desired_build(content_hash: &str) -> intar_contracts::bridge::DesiredBuildV1 {
@@ -706,6 +789,7 @@ mod tests {
 
     fn write_bundle_fixture(root: &Path) {
         std::fs::create_dir_all(root.join("scenarios/broken-nginx")).unwrap();
+        std::fs::create_dir_all(root.join("curriculum")).unwrap();
         std::fs::write(
             root.join("base-images.hcl"),
             r#"
@@ -720,17 +804,34 @@ base_image "trixie" {
         )
         .unwrap();
         std::fs::write(
+            root.join("curriculum/catalog.json"),
+            r#"{
+  "version": 2,
+  "courses": [{
+    "course_id": "linux",
+    "title": "Linux",
+    "summary": "Learn Linux.",
+    "body_markdown": "Course theory.",
+    "sequential": true,
+    "lectures": [{
+      "lecture_id": "01-nginx",
+      "title": "Broken Nginx",
+      "summary": "Fix a misconfigured nginx server.",
+      "body_markdown": "Nginx should be serving the default site.",
+      "category": "web",
+      "tags": ["nginx"],
+      "difficulty": "easy",
+      "estimated_minutes": 15,
+      "scenario_id": "broken-nginx"
+    }]
+  }]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
             root.join("scenarios/broken-nginx/scenario.hcl"),
             r#"
 scenario "broken-nginx" {
-  title = "Broken Nginx"
-  category = "web"
-  tags = ["nginx"]
-  difficulty = "easy"
-  estimated_minutes = 15
-  description = "Fix a misconfigured nginx server"
-  briefing = "Nginx should be serving the default site."
-
   solution {
     body = "Start nginx."
   }

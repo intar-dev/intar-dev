@@ -51,7 +51,6 @@ async function responseBody(
 const BODYLESS_CUSTOM_MUTATIONS = [
   ["POST", "/api/access-invites/cancel"],
   ["POST", "/api/access-invites/confirm"],
-  ["DELETE", "/api/admin/authoring/sources/demo"],
   ["DELETE", "/api/admin/runs/run-1"],
   ["POST", "/api/admin/builds/build-1/retry"],
   ["POST", "/api/admin/scenarios/demo/enabled"],
@@ -63,7 +62,6 @@ const BODYLESS_CUSTOM_MUTATIONS = [
   ["DELETE", "/api/organizations/org/members/member-1"],
   ["DELETE", "/api/organizations/org/runners/runner-1"],
   ["DELETE", "/api/organizations/org/scenarios/demo"],
-  ["DELETE", "/api/organizations/org/scenarios/sources/demo"],
   ["DELETE", "/api/organizations/org/sso"],
   ["POST", "/api/organizations/org/sso/verification"],
   ["POST", "/api/organizations/org/sso/verify"],
@@ -509,11 +507,7 @@ describe("worker API request security", () => {
         customMutation("/api/admin/builds/build-1/retry"),
       ),
     ).toBe("build-retry");
-    for (const path of [
-      "/api/admin/authoring/build",
-      "/api/organizations/org/scenarios/build",
-      "/api/organizations/org/scenarios/bundles",
-    ]) {
+    for (const path of ["/api/organizations/org/scenarios/bundles"]) {
       expect(sensitiveRateLimitActionFor(customMutation(path))).toBe(
         "build-start",
       );

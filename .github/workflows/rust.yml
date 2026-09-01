@@ -16,7 +16,6 @@ on:
       - "content/scenarios/base-images.hcl"
       - "content/workshops/**"
       - "crates/**"
-      - "tools/generate-scenario-authoring-config.ts"
       - "tools/workshops/**"
       - "apps/web/src/generated/**"
   push:
@@ -35,7 +34,6 @@ on:
       - "content/scenarios/base-images.hcl"
       - "content/workshops/**"
       - "crates/**"
-      - "tools/generate-scenario-authoring-config.ts"
       - "tools/workshops/**"
       - "apps/web/src/generated/**"
   workflow_dispatch:
@@ -98,11 +96,8 @@ jobs:
             --output "${bundle_root}/second.tar.gz"
           cmp "${bundle_root}/first.tar.gz" "${bundle_root}/second.tar.gz"
 
-      - name: Check generated contracts and authoring configuration
-        run: |
-          just check-generated-contracts
-          bun tools/generate-scenario-authoring-config.ts
-          git diff --exit-code -- apps/web/src/generated/scenario-authoring-config.ts
+      - name: Check generated contracts
+        run: just check-generated-contracts
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2

@@ -24,7 +24,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   builds: "Builds",
   hosts: "Hosts",
   people: "People",
-  authoring: "Authoring",
+  lectures: "Lectures",
   new: "New",
 };
 
@@ -51,13 +51,10 @@ function labelForFinal(
 
 // Page data replaces these labels after load. Until then, never put internal
 // scenario or run identifiers into the visible heading.
-function isScenarioPage(pathname: string): boolean {
+function isLecturePage(pathname: string): boolean {
   return (
-    /^\/courses\/[^/]+\/[^/]+$/.test(pathname) ||
-    /^\/organizations\/[^/]+\/courses\/(?:public|private)\/[^/]+\/[^/]+$/.test(
-      pathname,
-    ) ||
-    /^\/organizations\/[^/]+\/courses\/general-practice\/[^/]+$/.test(
+    /^\/courses\/[^/]+\/lectures\/[^/]+$/.test(pathname) ||
+    /^\/organizations\/[^/]+\/courses\/(?:public|private)\/[^/]+\/lectures\/[^/]+$/.test(
       pathname,
     )
   );
@@ -65,10 +62,10 @@ function isScenarioPage(pathname: string): boolean {
 
 export function safeDynamicPageLabel(pathname: string): string | null {
   if (/^\/runs\/[^/]+$/.test(pathname)) {
-    return "Lab run";
+    return "Scenario run";
   }
-  if (isScenarioPage(pathname)) {
-    return "Lab";
+  if (isLecturePage(pathname)) {
+    return "Lecture";
   }
   return null;
 }
@@ -104,6 +101,8 @@ export function buildCrumbs(
   let acc = "";
   segments.forEach((segment, index) => {
     acc += `/${segment}`;
+    // This path segment is structural, not learner-facing navigation.
+    if (segment === "lectures") return;
     const isLast = index === segments.length - 1;
     crumbs.push(
       isLast
@@ -114,9 +113,9 @@ export function buildCrumbs(
           },
     );
   });
-  // A lab needs its section, course, and current scenario. Other pages keep
+  // A lecture needs its section, course, and current lecture. Other pages keep
   // the compact section/current-page pair because the sidebar adds context.
-  return crumbs.slice(isScenarioPage(pathname) ? -3 : -2);
+  return crumbs.slice(isLecturePage(pathname) ? -3 : -2);
 }
 
 // The one bar of app chrome: navigation trigger, breadcrumb-as-title (the

@@ -12,9 +12,10 @@ content, and the desired-state runtime that connects those components.
 - `crates/` is the Rust workspace for `intar-agent`, `kino`, `stargate-*`,
   image tooling, Cloud Hypervisor client code, and shared contract crates.
 - `apps/web/` is the Astro and Cloudflare Worker control plane.
-- `content/scenarios/` contains scenario HCL content and base image catalog
-  data; optional `content/courses.hcl` groups catalog entries without changing
-  images.
+- `content/courses/` contains Markdown-first Course source. Each Course has
+  `course.md` and ordered Lecture directories. A Lecture has `lecture.md` and
+  can have a technical `scenario.hcl`. `content/scenarios/base-images.hcl`
+  remains the base image catalog.
 - `.github/workflows/` contains the consolidated Rust, website, image, and release
   workflows.
 
@@ -28,10 +29,10 @@ The platform contracts live in Rust and are generated into TypeScript:
   contract fixtures into `apps/web/src/generated/`.
 - Rust fixture tests and website schema tests validate the same committed fixtures.
 
-The platform contract is intentionally version-strict. Catalog manifests are
-V3. The bridge envelope is V6 and carries V2 desired-state, resource/capacity,
-state-report, and VM-report documents. Unsupported versions are rejected rather
-than translated.
+The platform contract is intentionally version-strict. Course catalog snapshots
+are V2 and Scenario manifests are V4. The bridge envelope is V6 and carries V2
+desired-state, resource/capacity, state-report, and VM-report documents.
+Unsupported versions are rejected rather than translated.
 
 ## Control Plane
 
@@ -64,12 +65,14 @@ boot and steady quota phases so concurrent starts cannot overcommit a host.
 
 ## Image Registry
 
-Scenario pushes upload source bundles instead of building on GitHub Actions. The
-bundle endpoint stores a deterministic tar.gz in R2, records content hashes in D1,
-replaces an optional scope-specific course catalog snapshot in D1, and assigns
-changed scenarios to connected builder hosts. Course snapshots synchronize when
-the authenticated bundle is accepted, independently of asynchronous image
-publication.
+Course bundle uploads replace the complete public or organization-scoped
+`CourseCatalogSnapshotV2`; they do not merge earlier catalog data. The bundle
+endpoint stores deterministic source in R2 and records technical Scenario hashes
+in D1. It accepts Markdown-only Course bundles with no technical Scenarios and
+updates their presentation data without queueing a VM build. When technical HCL
+or runtime files change, it assigns the changed Scenarios to connected builder
+hosts. The Course snapshot synchronizes when the authenticated bundle is
+accepted, independently of asynchronous image publication.
 
 Builder hosts publish fixed 4 MiB raw chunks and `ScenarioManifestV4` manifest JSON.
 Zero chunks are holes. Non-zero chunks are SHA-256 addressed and compressed with
@@ -189,11 +192,13 @@ gates `ssh.service` on `/run/intar/ssh-ready` before removing baked host keys. O
 first boot the supervisor configures networking and access, generates and
 validates the keys, creates the root-only gate, and then explicitly starts
 `ssh.service`. Image content hashes use build format
-`intar-image-build-v10`, ensuring images with the stable guest bootstrap ABI,
+`intar-image-build-v11`, ensuring images with the stable guest bootstrap ABI,
 conditional root resizing, scenario-specific module preload, and faster normal-
-capacity SSH startup are rebuilt rather than reused. When a newer hash is queued
-for the same scenario and architecture, nonterminal older hashes are retired and
-removed from builder desired state before the replacement is assigned.
+capacity SSH startup are rebuilt rather than reused. Lecture Markdown is not a
+technical hash input, so a Markdown-only update does not rebuild an image. When
+a newer hash is queued for the same scenario and architecture, nonterminal older
+hashes are retired and removed from builder desired state before the replacement
+is assigned.
 
 ## Guest Runtime
 

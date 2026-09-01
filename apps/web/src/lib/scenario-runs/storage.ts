@@ -44,6 +44,7 @@ import {
   loadEnabledScenario,
   type ScenarioDetailRecord,
 } from "@/lib/scenarios";
+import { recordLinkedCourseUnitCompletionForRun } from "@/lib/scenario-course-catalogs";
 import { type ScenarioRunRecord } from "./types";
 import {
   deriveScenarioRunActivity,
@@ -214,6 +215,12 @@ export async function updateRunState(
         ? row.deleteRequestedAt
         : input.deleteRequestedAt;
     const now = Math.max(Date.now(), row.updatedAt + 1);
+    const solvedAt = nextSolvedAt({
+      currentPhase: current.phase,
+      nextPhase: nextState.phase,
+      existingSolvedAt: row.solvedAt,
+      now,
+    });
     const mutation = db
       .update(scenarioRuns)
       .set({
@@ -226,12 +233,7 @@ export async function updateRunState(
             ? null
             : row.activeKey,
         deleteRequestedAt,
-        solvedAt: nextSolvedAt({
-          currentPhase: current.phase,
-          nextPhase: nextState.phase,
-          existingSolvedAt: row.solvedAt,
-          now,
-        }),
+        solvedAt,
         completedAt:
           nextState.phase === "completed" ? (row.completedAt ?? now) : null,
         failedAt: nextState.phase === "failed" ? (row.failedAt ?? now) : null,
@@ -257,6 +259,12 @@ export async function updateRunState(
     });
     const updated = updatedResult?.results ?? [];
     if (updated.length) {
+      if (nextState.phase === "completed" && solvedAt !== null) {
+        await recordLinkedCourseUnitCompletionForRun(db, {
+          runId,
+          nowUnixMs: now,
+        });
+      }
       if (
         row.runtimeExecutionId &&
         (input.releaseActiveSlot === true ||
@@ -283,6 +291,15 @@ export function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
     hostId: row.hostId,
     scenarioId: row.scenarioId,
     scenarioName: row.scenarioName,
+    courseScopeKey: row.courseScopeKey,
+    courseId: row.courseId,
+    courseTitle: row.courseTitle,
+    lectureId: row.lectureId,
+    lectureTitle: row.lectureTitle,
+    lectureSummary: row.lectureSummary,
+    lectureBodyMarkdown: row.lectureBodyMarkdown,
+    lectureOrdinal: row.lectureOrdinal,
+    lectureCount: row.lectureCount,
     title: row.title,
     tagline: row.tagline,
     briefingMarkdown: row.briefingMarkdown,
@@ -325,6 +342,15 @@ export function toScenarioRunRecord(
     scenarioId: row.scenarioId,
     organizationId: row.organizationId,
     scenarioName: row.scenarioName,
+    courseScopeKey: row.courseScopeKey,
+    courseId: row.courseId,
+    courseTitle: row.courseTitle,
+    lectureId: row.lectureId,
+    lectureTitle: row.lectureTitle,
+    lectureSummary: row.lectureSummary,
+    lectureBodyMarkdown: row.lectureBodyMarkdown,
+    lectureOrdinal: row.lectureOrdinal,
+    lectureCount: row.lectureCount,
     title: row.title,
     tagline: row.tagline,
     briefingMarkdown: row.briefingMarkdown,

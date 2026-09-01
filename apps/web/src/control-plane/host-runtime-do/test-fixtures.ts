@@ -11,6 +11,7 @@ import {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
+  scenarioCourseCatalogs,
   scenarioRuns,
   user,
   vmScenarioVms,
@@ -52,6 +53,7 @@ export {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
+  scenarioCourseCatalogs,
   scenarioRuns,
   user,
   vmScenarioVms,
@@ -498,6 +500,41 @@ export async function seedEnabledScenario(
   db: ReturnType<typeof drizzle>,
   now: number,
 ): Promise<void> {
+  await db
+    .insert(scenarioCourseCatalogs)
+    .values({
+      scopeKey: "public",
+      organizationId: null,
+      catalogJson: {
+        version: 2,
+        courses: [
+          {
+            courseId: "linux-operations",
+            title: "Linux operations",
+            summary: "Repair common Linux service failures.",
+            bodyMarkdown: "Learn the service model before the repair.",
+            sequential: true,
+            lectures: [
+              {
+                lectureId: "01-broken-nginx",
+                title: "Broken Nginx",
+                summary: "Diagnose and repair the web server.",
+                bodyMarkdown: "Learn how systemd and Nginx sites work.",
+                category: "web",
+                tags: ["nginx"],
+                difficulty: "easy",
+                estimatedMinutes: 1,
+                scenarioId: "broken-nginx",
+              },
+            ],
+          },
+        ],
+      },
+      sourceRevision: "fixture",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing();
   await db.insert(vmScenarios).values({
     scenarioId: "broken-nginx",
     title: "Broken Nginx",

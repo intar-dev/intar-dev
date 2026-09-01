@@ -106,6 +106,11 @@ export interface ScenarioRunRecord {
   phaseDetail: string;
   title: string;
   tagline: string;
+  /** Immutable course lecture snapshot for V2 course runs. */
+  lectureTitle?: string | null;
+  lectureSummary?: string | null;
+  lectureBodyMarkdown?: string | null;
+  /** V1 fallback for historical runs. */
   briefingMarkdown: string;
   objectives: ScenarioObjective[];
   tags: string[];

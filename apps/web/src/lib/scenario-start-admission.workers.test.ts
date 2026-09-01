@@ -66,6 +66,54 @@ describe("scenario start beta-admission fence", () => {
     ).resolves.toEqual({ disabled: 0 });
   });
 
+  it("persists the immutable course and lecture snapshot with the admitted run", async () => {
+    const admission = await seedScenarioStartFixture();
+    const row = {
+      ...scenarioRunRow("curriculum-run"),
+      courseScopeKey: "organization:scenario-organization",
+      courseId: "linux-operations",
+      courseTitle: "Linux operations",
+      lectureId: "01-repair-nginx",
+      lectureTitle: "Repair nginx",
+      lectureSummary: "Learn the nginx service model.",
+      lectureBodyMarkdown: "# Theory\n\nLearn before you repair.",
+      lectureOrdinal: 1,
+      lectureCount: 3,
+    } satisfies typeof scenarioRuns.$inferInsert;
+
+    await insertScenarioRunForAdmission({
+      row,
+      sshKeyRows: [scenarioSshKeyRow("curriculum-run")],
+      betaAdmission: admission,
+    });
+
+    const [stored] = await drizzle(env.DB)
+      .select({
+        courseScopeKey: scenarioRuns.courseScopeKey,
+        courseId: scenarioRuns.courseId,
+        courseTitle: scenarioRuns.courseTitle,
+        lectureId: scenarioRuns.lectureId,
+        lectureTitle: scenarioRuns.lectureTitle,
+        lectureSummary: scenarioRuns.lectureSummary,
+        lectureBodyMarkdown: scenarioRuns.lectureBodyMarkdown,
+        lectureOrdinal: scenarioRuns.lectureOrdinal,
+        lectureCount: scenarioRuns.lectureCount,
+      })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, "curriculum-run"));
+    expect(stored).toEqual({
+      courseScopeKey: "organization:scenario-organization",
+      courseId: "linux-operations",
+      courseTitle: "Linux operations",
+      lectureId: "01-repair-nginx",
+      lectureTitle: "Repair nginx",
+      lectureSummary: "Learn the nginx service model.",
+      lectureBodyMarkdown: "# Theory\n\nLearn before you repair.",
+      lectureOrdinal: 1,
+      lectureCount: 3,
+    });
+  });
+
   it("cannot dispatch desired VM state after the admission is blocked", async () => {
     const admission = await seedScenarioStartFixture();
     await insertScenarioRunForAdmission({

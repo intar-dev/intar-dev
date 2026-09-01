@@ -14,11 +14,7 @@ Scenario control is desired-state based:
 - R2 stores immutable VM images, source bundles, build logs, and run artifacts.
 
 The committed Rust contracts generate the TypeScript bridge types and fixtures in
-`src/generated/`; do not hand-edit those generated files. The browser scenario
-validator under `src/generated/scenario-wasm/` is different: it is an ignored
-build artifact. CI builds it once on Linux and shares it with the website test
-and UI jobs, while the production workflow rebuilds it from the exact deployed
-commit.
+`src/generated/`; do not hand-edit those generated files.
 
 Scenario catalog manifests are V3, the bridge envelope is V6, and its
 desired-state/resource/capacity/report documents are V2. Unsupported contract
@@ -41,16 +37,6 @@ bun run db:generate
 bun run db:check
 bun run dev
 ```
-
-Before the first local website command, build the ignored browser validator
-from the repository root:
-
-```bash
-just generate-scenario-wasm
-```
-
-Local macOS and Linux output may differ byte-for-byte; that no longer affects
-git or CI. Never commit files from `apps/web/src/generated/scenario-wasm/`.
 
 `astro dev` automatically uses `wrangler.local.jsonc`. Its D1, R2, Durable
 Object, and rate-limit bindings are simulated locally and it intentionally has

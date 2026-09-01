@@ -1,31 +1,9 @@
 use super::*;
 
 pub(super) fn render_scenario_motd(
-    scenario: &Scenario,
     probe_descriptors: &[intar_image_scenario::KinoProbeDescriptor],
 ) -> Result<String> {
     let mut output = String::new();
-    let title = scenario.title.trim();
-    let description = scenario.description.trim();
-    let mut wrote_header = false;
-
-    if !title.is_empty() {
-        writeln!(output, "{title}").context("format error")?;
-        wrote_header = true;
-    }
-
-    if !description.is_empty() {
-        if wrote_header {
-            writeln!(output).context("format error")?;
-        }
-        writeln!(output, "{description}").context("format error")?;
-        wrote_header = true;
-    }
-
-    if wrote_header {
-        writeln!(output).context("format error")?;
-    }
-
     for probe in probe_descriptors {
         writeln!(output, "- {}", probe.label.trim()).context("format error")?;
     }

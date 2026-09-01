@@ -6,28 +6,23 @@ import {
 } from "./AppBar";
 
 describe("safe dynamic app-bar labels", () => {
-  it("never exposes run or scenario route identifiers while data loads", () => {
+  it("never exposes run or lecture route identifiers while data loads", () => {
     expect(safeDynamicPageLabel("/runs/run_technical_identifier")).toBe(
-      "Lab run",
+      "Scenario run",
     );
     expect(
-      safeDynamicPageLabel("/courses/linux-operations/broken-nginx"),
-    ).toBe("Lab");
+      safeDynamicPageLabel("/courses/linux-operations/lectures/broken-nginx"),
+    ).toBe("Lecture");
     expect(
       safeDynamicPageLabel(
-        "/organizations/acme/courses/public/linux-operations/broken-nginx",
+        "/organizations/acme/courses/public/linux-operations/lectures/broken-nginx",
       ),
-    ).toBe("Lab");
+    ).toBe("Lecture");
     expect(
       safeDynamicPageLabel(
-        "/organizations/acme/courses/private/linux-operations/broken-nginx",
+        "/organizations/acme/courses/private/linux-operations/lectures/broken-nginx",
       ),
-    ).toBe("Lab");
-    expect(
-      safeDynamicPageLabel(
-        "/organizations/acme/courses/general-practice/broken-nginx",
-      ),
-    ).toBe("Lab");
+    ).toBe("Lecture");
   });
 
   it("leaves static pages and course catalogs unchanged", () => {
@@ -56,10 +51,10 @@ describe("breadcrumbTarget", () => {
 });
 
 describe("buildCrumbs", () => {
-  it("keeps two course levels and three scenario levels", () => {
+  it("keeps two course levels and three lecture levels", () => {
     const publicOverrides = new Map([
       ["/courses/linux", "Linux operations"],
-      ["/courses/linux/broken-nginx", "Broken Nginx"],
+      ["/courses/linux/lectures/broken-nginx", "Broken Nginx"],
     ]);
     expect(
       buildCrumbs("/courses/linux", publicOverrides).map(
@@ -67,7 +62,7 @@ describe("buildCrumbs", () => {
       ),
     ).toEqual(["Courses", "Linux operations"]);
     expect(
-      buildCrumbs("/courses/linux/broken-nginx", publicOverrides).map(
+      buildCrumbs("/courses/linux/lectures/broken-nginx", publicOverrides).map(
         (crumb) => crumb.label,
       ),
     ).toEqual(["Courses", "Linux operations", "Broken Nginx"]);
@@ -76,13 +71,13 @@ describe("buildCrumbs", () => {
       ["/organizations/acme/courses/private", "Courses"],
       ["/organizations/acme/courses/private/linux", "Linux operations"],
       [
-        "/organizations/acme/courses/private/linux/broken-nginx",
+        "/organizations/acme/courses/private/linux/lectures/broken-nginx",
         "Broken Nginx",
       ],
     ]);
     expect(
       buildCrumbs(
-        "/organizations/acme/courses/private/linux/broken-nginx",
+        "/organizations/acme/courses/private/linux/lectures/broken-nginx",
         organizationOverrides,
       ).map((crumb) => crumb.label),
     ).toEqual(["Courses", "Linux operations", "Broken Nginx"]);

@@ -61,7 +61,9 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
   await expect(panel).toBeVisible();
   const panelContent = panel.locator("[data-run-learning-panel-content]");
   await expect(
-    panelContent.getByText("Mission briefing", { exact: true }),
+    panelContent.getByText("Lecture theory: Repair a broken nginx service", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(panelContent.getByText("Work order", { exact: true })).toBeVisible();
   await expect(
@@ -108,7 +110,9 @@ test("the permanent desktop guidance pane keeps progressive hints and solution h
   const panelContent = panel.locator("[data-run-learning-panel-content]");
   await expect(panel).toBeVisible();
   await expect(
-    panelContent.getByText("Mission briefing", { exact: true }),
+    panelContent.getByText("Lecture theory: Repair a broken nginx service", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(panelContent.getByText("Checks", { exact: true })).toBeVisible();
   await expect(panelContent.getByText("0/2 verified", { exact: true })).toBeVisible();
@@ -199,7 +203,7 @@ test("small screens keep work open and show mission and hints in a bottom sheet"
   ).length;
   await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
   const trigger = page.getByRole("button", {
-    name: "Open mission and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+    name: "Open lecture theory and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
   });
   await expect(trigger).toBeVisible();
   await trigger.focus();
@@ -215,7 +219,9 @@ test("small screens keep work open and show mission and hints in a bottom sheet"
     ),
   ).toHaveLength(terminalRequestsBefore);
   await expect(
-    sheet.getByText("Mission briefing", { exact: true }),
+    sheet.getByText("Lecture theory: Repair a broken nginx service", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(sheet.getByText("Checks", { exact: true })).toBeVisible();
   await expect(sheet.getByText("Hints", { exact: true })).toBeVisible();
@@ -454,7 +460,7 @@ test("hint and solution failures use generic learner-safe messages", async ({
   await expect(panel).not.toContainText("control-plane task 7c02c91");
 });
 
-test("a solved lab makes finishing the first learner action", async ({ page, ui }) => {
+test("a solved scenario makes finishing the first learner action", async ({ page, ui }) => {
   await ui.open({
     ...routeCase("run-workspace"),
     theme: "dark",
@@ -590,7 +596,7 @@ test("a delayed old terminal connection cannot replace a newer VM connection", a
   ).toHaveCount(0);
 });
 
-test("ending a lab moves from a calm saving state to a learner recap and replay", async ({
+test("ending a scenario moves from a calm saving state to a learner recap and replay", async ({
   page,
   ui,
 }) => {
@@ -969,7 +975,6 @@ test("deleting a private run preserves its organization course context", async (
   ui.server.state.run.scenarioId = "platform-logrotate";
   ui.server.state.run.organizationId = "org-platform";
   ui.server.state.run.courseLocation = {
-    courseKind: "authored",
     scope: "organization-private",
     organizationId: "org-platform",
     courseId: "operations",
@@ -985,7 +990,7 @@ test("deleting a private run preserves its organization course context", async (
   await dialog.getByRole("button", { name: "Delete run" }).click();
 
   await expect(page).toHaveURL(
-    "/organizations/org-platform/courses/private/operations/platform-logrotate",
+    "/organizations/org-platform/courses/private/operations",
   );
 });
 
@@ -1059,9 +1064,12 @@ test("a saved solved run gives one next learner action without audit details", a
   await expect(recap.getByRole("heading", { name: "Solved" })).toBeVisible();
   await expect(
     recap.getByRole("link", {
-      name: "Next lab: Trace an intermittent DNS failure",
+      name: "Next lecture: Trace an intermittent DNS failure",
     }),
-  ).toHaveAttribute("href", "/courses/operations/repair-dns");
+  ).toHaveAttribute(
+    "href",
+    "/courses/operations/lectures/03-trace-dns",
+  );
   await expect(recap.getByText("Run timeline", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);
@@ -1085,7 +1093,9 @@ test("a saved run without course context still has a safe exit", async ({
   await expect(
     recap.getByRole("link", { name: "Back to My runs" }),
   ).toHaveAttribute("href", "/runs");
-  await expect(page.getByRole("link", { name: /^Next lab:/ })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /^Next lecture:/ })).toHaveCount(
+    0,
+  );
 });
 
 for (const recapCase of [
@@ -1151,8 +1161,11 @@ test("a settled cancelled run tells the learner it ended early", async ({
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
   await expect(recap.getByRole("heading", { name: "Ended early" })).toBeVisible();
   await expect(
-    recap.getByRole("link", { name: "Try this lab again" }),
-  ).toHaveAttribute("href", "/courses/operations/repair-nginx");
+    recap.getByRole("link", { name: "Read lecture and try again" }),
+  ).toHaveAttribute(
+    "href",
+    "/courses/operations/lectures/02-repair-nginx",
+  );
 });
 
 test("a replay failure stays inline and never exposes a server message", async ({

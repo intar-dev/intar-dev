@@ -22,7 +22,6 @@ import type {
   ScenarioVmRecord,
 } from "@/lib/scenario-model";
 import type { CourseLocation } from "@/lib/scenario-runs";
-import { courseRouteId } from "@/lib/course-location";
 
 export interface ScenarioRecord extends AdminScenarioSummary {
   briefingMarkdown: string;
@@ -230,7 +229,6 @@ export function ScenarioDetails() {
             actions={
               enabled && learnerCourseLocation ? (
                 <LearnerCourseAction
-                  scenarioId={scenarioRecord.scenarioId}
                   courseLocation={learnerCourseLocation}
                 />
               ) : undefined
@@ -278,15 +276,15 @@ export function ScenarioDetails() {
 }
 
 function LearnerCourseAction({
-  scenarioId,
   courseLocation,
 }: {
-  scenarioId: string;
   courseLocation: NonNullable<ScenarioRecord["courseLocation"]>;
 }) {
   const location = courseLocation;
+  const lectureId = location.lectureId;
+  if (!lectureId) return null;
 
-  const courseId = courseRouteId(location);
+  const courseId = location.courseId;
   if (location.scope === "public") {
     return (
       <Button
@@ -294,8 +292,8 @@ function LearnerCourseAction({
         variant="outline"
         render={
           <Link
-            to="/courses/$courseId/$scenarioId"
-            params={{ courseId, scenarioId }}
+            to="/courses/$courseId/lectures/$lectureId"
+            params={{ courseId, lectureId }}
           />
         }
       >
@@ -312,11 +310,11 @@ function LearnerCourseAction({
         variant="outline"
         render={
           <Link
-            to="/organizations/$orgId/courses/public/$courseId/$scenarioId"
+            to="/organizations/$orgId/courses/public/$courseId/lectures/$lectureId"
             params={{
               orgId: location.organizationId,
               courseId,
-              scenarioId,
+              lectureId,
             }}
           />
         }
@@ -333,11 +331,11 @@ function LearnerCourseAction({
         variant="outline"
         render={
           <Link
-            to="/organizations/$orgId/courses/private/$courseId/$scenarioId"
+            to="/organizations/$orgId/courses/private/$courseId/lectures/$lectureId"
             params={{
               orgId: location.organizationId,
               courseId,
-              scenarioId,
+              lectureId,
             }}
           />
         }
@@ -347,21 +345,7 @@ function LearnerCourseAction({
       </Button>
     );
   }
-  return (
-    <Button
-      size="sm"
-      variant="outline"
-      render={
-        <Link
-          to="/organizations/$orgId/courses/general-practice/$scenarioId"
-          params={{ orgId: location.organizationId, scenarioId }}
-        />
-      }
-    >
-      <ExternalLink className="size-3.5" />
-      View as learner
-    </Button>
-  );
+  return null;
 }
 
 export function scenarioVerificationSummary(

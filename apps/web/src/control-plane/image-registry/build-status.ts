@@ -148,7 +148,8 @@ export async function handleImageBuildRevisionStatus(
     builds.length === expected.length &&
     builds.every((build) => build.status === "succeeded" && build.manifest);
   const hostsReady =
-    cacheReports.length > 0 && cacheReports.every((host) => host.ready);
+    expected.length === 0 ||
+    (cacheReports.length > 0 && cacheReports.every((host) => host.ready));
   const state: BuildState = failedBuild
     ? "failed"
     : buildsReady

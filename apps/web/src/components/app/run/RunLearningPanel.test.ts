@@ -17,7 +17,7 @@ import type {
 } from "./run-types";
 
 describe("run learning panel", () => {
-  it("uses a stable Mission and hints mobile trigger with learner-safe counts", () => {
+  it("uses a stable theory and hints mobile trigger with learner-safe counts", () => {
     expect(
       getRunLearningTriggerCopy({
         passedChecks: 1,
@@ -26,9 +26,9 @@ describe("run learning panel", () => {
         totalHints: 2,
       }),
     ).toEqual({
-      visibleLabel: "Mission and hints",
+      visibleLabel: "Theory and hints",
       accessibleLabel:
-        "Open mission and hints. 1 of 2 hints revealed. 1 of 3 checks verified.",
+        "Open lecture theory and hints. 1 of 2 hints revealed. 1 of 3 checks verified.",
     });
     expect(
       getRunLearningTriggerCopy({
@@ -38,9 +38,9 @@ describe("run learning panel", () => {
         totalHints: 0,
       }),
     ).toEqual({
-      visibleLabel: "Mission and hints",
+      visibleLabel: "Theory and hints",
       accessibleLabel:
-        "Open mission and hints. No hints are available. 3 of 3 checks verified.",
+        "Open lecture theory and hints. No hints are available. 3 of 3 checks verified.",
     });
   });
 
@@ -62,12 +62,14 @@ describe("run learning panel", () => {
 
     expect(desktopMarkup).toContain('data-run-learning-panel="true"');
     expect(desktopMarkup).toContain('data-run-learning-panel-scroll="true"');
-    expect(desktopMarkup).toContain('aria-label="Mission and hints"');
-    expect(desktopMarkup).toContain('aria-label="Mission and hints content"');
+    expect(desktopMarkup).toContain('aria-label="Lecture theory and hints"');
+    expect(desktopMarkup).toContain(
+      'aria-label="Lecture theory and hints content"',
+    );
     expect(desktopMarkup).toContain('tabindex="0"');
     expect(desktopMarkup).toContain("w-[min(24rem,40dvw)]");
     expect(desktopMarkup).toContain("max-w-[40dvw]");
-    expect(desktopMarkup).toContain("Mission briefing");
+    expect(desktopMarkup).toContain("Lecture theory");
     expect(desktopMarkup).toContain("Repair the service safely.");
     expect(desktopMarkup).not.toContain('data-run-learning-panel-trigger="true"');
     expect(desktopMarkup).not.toContain("data-run-guidance-rail");
@@ -76,9 +78,9 @@ describe("run learning panel", () => {
 
     expect(mobileMarkup).toContain('data-run-learning-mobile="true"');
     expect(mobileMarkup).toContain('data-run-learning-panel-trigger="true"');
-    expect(mobileMarkup).toContain("Mission and hints");
+    expect(mobileMarkup).toContain("Theory and hints");
     expect(mobileMarkup).toContain(
-      'aria-label="Open mission and hints. 0 of 2 hints revealed. 0 of 1 checks verified."',
+      'aria-label="Open lecture theory and hints. 0 of 2 hints revealed. 0 of 1 checks verified."',
     );
     expect(mobileMarkup).toContain("h-11");
     expect(mobileMarkup).not.toContain("data-run-guidance-rail");
@@ -139,14 +141,14 @@ describe("run learning panel", () => {
     expect(markup).toContain("Learner check 8");
   });
 
-  it("puts the authored mission briefing before checks, hints, and solution", () => {
+  it("puts lecture theory before checks, hints, and solution", () => {
     const markup = renderContent({
       briefingMarkdown: "Read the **service status** before you change it.",
     });
 
-    expect(markup).toContain("Mission briefing");
+    expect(markup).toContain("Lecture theory");
     expect(markup).toContain("service status");
-    expect(markup.indexOf("Mission briefing")).toBeLessThan(
+    expect(markup.indexOf("Lecture theory")).toBeLessThan(
       markup.indexOf("service status"),
     );
     expect(markup.indexOf("service status")).toBeLessThan(
@@ -327,8 +329,8 @@ describe("run learning panel", () => {
     });
 
     expect(markup).toContain("No checks are available yet.");
-    expect(markup).toContain("No hints are available for this lab.");
-    expect(markup).toContain("No mission briefing is available for this lab.");
+    expect(markup).toContain("No hints are available for this scenario.");
+    expect(markup).toContain("No lecture theory is available for this run.");
     expect(markup).not.toContain("data-run-learning-sticky-summary");
     expect(markup).not.toContain("probe");
     expect(markup).not.toContain("machine itself");

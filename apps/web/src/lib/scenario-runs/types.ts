@@ -31,66 +31,20 @@ export interface ScenarioCatalogEntry {
   vmCount: number;
 }
 
-export interface ScenarioProgress {
-  status: "new" | "in_progress" | "attempted" | "completed";
-  activeRunId: string | null;
-  attemptCount: number;
-  completedCount: number;
-  bestSolveMs: number | null;
-  lastPlayedAt: number | null;
-}
-
 /**
  * The canonical course context for a scenario.  A scenario can be linked from
  * a run, assignment, or admin record without carrying route state in a query
  * string; consumers use this view to build its canonical learner URL.
  */
-export type CourseLocation =
-  | {
-      courseKind: "authored";
-      scope: "public" | "organization-public" | "organization-private";
-      organizationId: string | null;
-      courseId: string;
-      courseTitle: string;
-      step: number;
-      steps: number;
-    }
-  | {
-      courseKind: "general-practice";
-      scope: "public" | "organization-general-practice";
-      organizationId: string | null;
-      courseId: null;
-      courseTitle: "General practice";
-      step: null;
-      steps: null;
-    };
-
-export interface ScenarioCatalogWireEntry extends ScenarioCatalogEntry {
-  progress: ScenarioProgress;
-}
-
-export type ScenarioCatalogCourseWireEntry =
-  | {
-      kind: "authored";
-      courseId: string;
-      organizationId: string | null;
-      title: string;
-      description: string;
-      scenarios: ScenarioCatalogWireEntry[];
-    }
-  | {
-      kind: "general-practice";
-      courseId: null;
-      organizationId: null;
-      title: "General practice";
-      description: string;
-      scenarios: ScenarioCatalogWireEntry[];
-    };
-
-export interface ScenarioCatalogWireResponse {
-  courses: ScenarioCatalogCourseWireEntry[];
-  /** Fleet pressure from the most-used CPU, memory, or disk pool. */
-  capacityPressure: number | null;
+export interface CourseLocation {
+  scope: "public" | "organization-public" | "organization-private";
+  organizationId: string | null;
+  courseId: string;
+  courseTitle: string;
+  /** Null for runs created before the Markdown-first curriculum. */
+  lectureId: string | null;
+  step: number;
+  steps: number;
 }
 
 export interface ScenarioDetail {
@@ -141,6 +95,16 @@ export interface ScenarioRunRecord extends RunStateDocument {
   /** Resolved when a user-facing run view loads; absent on internal snapshots. */
   courseLocation?: CourseLocation | null;
   scenarioName: string;
+  /** Immutable V2 curriculum context; null for pre-migration runs. */
+  courseScopeKey?: string | null;
+  courseId?: string | null;
+  courseTitle?: string | null;
+  lectureId?: string | null;
+  lectureTitle?: string | null;
+  lectureSummary?: string | null;
+  lectureBodyMarkdown?: string | null;
+  lectureOrdinal?: number | null;
+  lectureCount?: number | null;
   title: string;
   tagline: string;
   briefingMarkdown: string;

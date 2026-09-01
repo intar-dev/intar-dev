@@ -33,10 +33,10 @@ export const ROUTE_CASES = [
     path: `/oauth/consent?${oauthQuery}`,
     sessionRole: "learner",
   },
-  { id: "scenario-catalog", path: "/courses", sessionRole: "learner" },
+  { id: "course-catalog", path: "/courses", sessionRole: "learner" },
   {
-    id: "scenario-briefing",
-    path: "/courses/operations/repair-nginx",
+    id: "lecture",
+    path: "/courses/operations/lectures/02-repair-nginx",
     sessionRole: "learner",
   },
   { id: "workshops", path: "/workshops", sessionRole: "learner" },
@@ -104,11 +104,6 @@ export const ROUTE_CASES = [
     path: "/admin/people",
     sessionRole: "global-admin",
   },
-  {
-    id: "admin-authoring",
-    path: "/admin/authoring",
-    sessionRole: "global-admin",
-  },
 ] as const satisfies readonly RouteCase[];
 
 const byId = new Map<string, RouteCase>(
@@ -125,7 +120,6 @@ export const DENSE_ROUTE_CASES = [
   "admin-hosts",
   "admin-builds",
   "admin-people",
-  "admin-authoring",
 ].map((id) => {
   const route = byId.get(id);
   if (!route) throw new Error(`Unknown dense route fixture: ${id}`);

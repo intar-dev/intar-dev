@@ -24,6 +24,20 @@ use super::{
 };
 use crate::config::QemuBuildConfig;
 
+fn test_lecture() -> intar_contracts::catalog::CourseCatalogLectureV2 {
+    intar_contracts::catalog::CourseCatalogLectureV2 {
+        lecture_id: "01-nginx".to_string(),
+        title: "Broken Nginx".to_string(),
+        summary: "Fix nginx".to_string(),
+        body_markdown: "Restore nginx service availability.".to_string(),
+        category: "web".to_string(),
+        tags: vec!["nginx".to_string()],
+        difficulty: Some(intar_contracts::catalog::ScenarioDifficulty::Easy),
+        estimated_minutes: 15,
+        scenario_id: Some("broken-nginx".to_string()),
+    }
+}
+
 fn render_test_direct_build(directory: &TempDir, config: QemuBuildConfig) -> RenderedDirectBuild {
     render_test_direct_build_in_work_root(directory, config, directory.path().join(".work"))
 }
@@ -84,6 +98,7 @@ base_image "trixie" {
     render_direct_build(&DirectBuildRequest {
         scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
         scenario,
+        lecture: test_lecture(),
         vm_name: "web".to_string(),
         config,
         base_image: catalog.base_image_by_name("trixie").unwrap().clone(),

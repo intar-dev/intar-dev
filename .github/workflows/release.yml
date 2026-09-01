@@ -1045,9 +1045,17 @@ jobs:
             "intar-image-cli ${VERSION}"
 
           fixture_root="${smoke_root}/fixture"
-          scenario_dir="${fixture_root}/courses/release-smoke/broken-nginx"
-          mkdir -p "${scenario_dir}"
-          cp content/scenarios/broken-nginx/scenario.hcl "${scenario_dir}/scenario.hcl"
+          course_dir="${fixture_root}/courses/release-smoke"
+          theory_dir="${course_dir}/00-operating-model"
+          lecture_dir="${course_dir}/01-broken-nginx"
+          mkdir -p "${theory_dir}" "${lecture_dir}"
+          cp content/courses/linux-operations/course.md "${course_dir}/course.md"
+          cp content/courses/linux-operations/00-operating-model/lecture.md \
+            "${theory_dir}/lecture.md"
+          cp content/courses/linux-operations/01-broken-nginx/lecture.md \
+            "${lecture_dir}/lecture.md"
+          cp content/courses/linux-operations/01-broken-nginx/scenario.hcl \
+            "${lecture_dir}/scenario.hcl"
 
           "${smoke_root}/amd64/intar-image-cli" validate \
             --courses-root "${fixture_root}/courses" \
@@ -1064,6 +1072,10 @@ jobs:
           mapfile -t bundled_files < "${bundle_listing}"
           expected_bundle_files=(
             base-images.hcl
+            curriculum/catalog.json
+            curriculum/release-smoke/00-operating-model/lecture.md
+            curriculum/release-smoke/01-broken-nginx/lecture.md
+            curriculum/release-smoke/course.md
             scenarios/broken-nginx/scenario.hcl
           )
           if [ "${bundled_files[*]}" != "${expected_bundle_files[*]}" ]; then

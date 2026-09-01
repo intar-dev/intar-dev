@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Error, Result, anyhow, bail, ensure};
-use intar_contracts::catalog::ScenarioManifestV4;
+use intar_contracts::catalog::{CourseCatalogLectureV2, ScenarioManifestV4};
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
 
@@ -47,6 +47,7 @@ const QMP_READ_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub struct DirectBuildRequest {
     pub scenario_path: PathBuf,
     pub scenario: Scenario,
+    pub lecture: CourseCatalogLectureV2,
     pub vm_name: String,
     pub config: QemuBuildConfig,
     pub base_image: BaseImageSpec,
@@ -72,7 +73,7 @@ pub struct DirectBuildPaths {
 pub struct RenderedDirectBuild {
     pub scenario: Scenario,
     pub scenario_name: String,
-    pub scenario_description: String,
+    pub lecture: CourseCatalogLectureV2,
     pub target_arch: String,
     pub config: QemuBuildConfig,
     pub effective_vm_name: String,
@@ -116,7 +117,8 @@ pub struct DirectBuildArtifact {
 pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirectBuild> {
     request
         .scenario
-        .validate_for_builder_arch(&request.config.target_arch)?;
+        .validate_technical_for_builder_arch(&request.config.target_arch)?;
+    validate_lecture_for_scenario(&request.lecture, &request.scenario.name)?;
     request
         .base_image
         .definition_for_arch(&request.config.target_arch)
@@ -193,7 +195,7 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
     Ok(RenderedDirectBuild {
         scenario: request.scenario.clone(),
         scenario_name: request.scenario.name.clone(),
-        scenario_description: request.scenario.description.clone(),
+        lecture: request.lecture.clone(),
         target_arch: request.config.target_arch.clone(),
         config: request.config.clone(),
         effective_vm_name,
@@ -205,6 +207,32 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         disk,
         qemu_args,
     })
+}
+
+fn validate_lecture_for_scenario(
+    lecture: &CourseCatalogLectureV2,
+    scenario_id: &str,
+) -> Result<()> {
+    if lecture.scenario_id.as_deref() != Some(scenario_id) {
+        bail!(
+            "lecture '{}' does not link to scenario '{}'",
+            lecture.lecture_id,
+            scenario_id
+        );
+    }
+    if lecture.title.trim().is_empty()
+        || lecture.summary.trim().is_empty()
+        || lecture.body_markdown.trim().is_empty()
+        || lecture.category.trim().is_empty()
+        || lecture.estimated_minutes == 0
+        || lecture.difficulty.is_none()
+    {
+        bail!(
+            "lecture '{}' has invalid scenario presentation metadata",
+            lecture.lecture_id
+        );
+    }
+    Ok(())
 }
 
 /// Prepare the raw root disk and INTARBUILD seed for a rendered direct build.

@@ -108,7 +108,7 @@ describe("scenario capacity waiting", () => {
         onCapacityWait: vi.fn(),
       }),
     ).rejects.toThrow(
-      "Could not reach the control plane. Check your connection and try starting the lab again.",
+      "Could not reach the control plane. Check your connection and try starting the scenario again.",
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

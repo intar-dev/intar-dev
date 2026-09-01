@@ -1,23 +1,10 @@
-import type {
-  ScenarioCatalogWireEntry,
-  ScenarioProgress,
-} from "@/lib/scenario-runs";
-import type { ScenarioDifficulty } from "@/components/app/patterns/MetaLine";
-import { parseScenarioDifficulty } from "@/lib/scenario-model";
-
-export type CatalogSort =
-  | "recommended"
-  | "newest"
-  | "difficulty"
-  | "time"
-  | "title";
+import type { ScenarioDifficulty } from "@/generated/catalog";
 
 export interface CatalogSearch {
   q?: string;
   difficulty?: ScenarioDifficulty;
   category?: string;
   tags?: string[];
-  sort?: CatalogSort;
 }
 
 export interface NormalizedCatalogSearch {
@@ -25,36 +12,7 @@ export interface NormalizedCatalogSearch {
   difficulty: ScenarioDifficulty | undefined;
   category: string | undefined;
   tags: string[];
-  sort: CatalogSort;
 }
-
-export const CATALOG_SORT_OPTIONS: Array<{
-  value: CatalogSort;
-  label: string;
-}> = [
-  { value: "recommended", label: "Recommended" },
-  { value: "newest", label: "Newest" },
-  { value: "difficulty", label: "Difficulty" },
-  { value: "time", label: "Time" },
-  { value: "title", label: "Title" },
-];
-
-const SORTS = new Set<CatalogSort>(
-  CATALOG_SORT_OPTIONS.map((option) => option.value),
-);
-
-const DIFFICULTY_RANK: Record<ScenarioDifficulty, number> = {
-  easy: 0,
-  medium: 1,
-  hard: 2,
-};
-
-const PROGRESS_RANK: Record<ScenarioProgress["status"], number> = {
-  in_progress: 0,
-  new: 1,
-  attempted: 2,
-  completed: 3,
-};
 
 export function validateSearch(search: Record<string, unknown>): CatalogSearch {
   const normalized = normalizeCatalogSearch(search);
@@ -66,13 +24,8 @@ export function normalizeCatalogSearch(
 ): NormalizedCatalogSearch {
   const difficulty =
     typeof search.difficulty === "string"
-      ? (parseScenarioDifficulty(search.difficulty) ?? undefined)
+      ? parseCatalogDifficulty(search.difficulty)
       : undefined;
-  const sort =
-    typeof search.sort === "string" && SORTS.has(search.sort as CatalogSort)
-      ? (search.sort as CatalogSort)
-      : "recommended";
-
   return {
     q: typeof search.q === "string" ? search.q.trim() : "",
     difficulty,
@@ -81,7 +34,6 @@ export function normalizeCatalogSearch(
         ? search.category.trim()
         : undefined,
     tags: normalizeTags(search.tags),
-    sort,
   };
 }
 
@@ -93,32 +45,8 @@ export function compactCatalogSearch(
   if (search.difficulty) compact.difficulty = search.difficulty;
   if (search.category) compact.category = search.category;
   if (search.tags.length) compact.tags = search.tags;
-  if (search.sort !== "recommended") compact.sort = search.sort;
   return compact;
 }
-
-export const CATALOG_SORT_COMPARATORS: Record<
-  CatalogSort,
-  (left: ScenarioCatalogWireEntry, right: ScenarioCatalogWireEntry) => number
-> = {
-  recommended: (left, right) => {
-    const leftRank = PROGRESS_RANK[left.progress.status];
-    const rightRank = PROGRESS_RANK[right.progress.status];
-    if (leftRank !== rightRank) return leftRank - rightRank;
-    if (left.progress.status === "new" && right.progress.status === "new") {
-      return right.enabledAt - left.enabledAt;
-    }
-    return 0;
-  },
-  newest: (left, right) => right.enabledAt - left.enabledAt,
-  difficulty: (left, right) =>
-    DIFFICULTY_RANK[left.difficulty] - DIFFICULTY_RANK[right.difficulty] ||
-    left.title.localeCompare(right.title),
-  time: (left, right) =>
-    left.estimatedMinutes - right.estimatedMinutes ||
-    left.title.localeCompare(right.title),
-  title: (left, right) => left.title.localeCompare(right.title),
-};
 
 function normalizeTags(value: unknown): string[] {
   const rawTags = Array.isArray(value)
@@ -127,6 +55,12 @@ function normalizeTags(value: unknown): string[] {
       ? [value]
       : [];
   return [...new Set(rawTags.flatMap((tag) => normalizeTag(tag)))].sort();
+}
+
+function parseCatalogDifficulty(value: string): ScenarioDifficulty | undefined {
+  return value === "easy" || value === "medium" || value === "hard"
+    ? value
+    : undefined;
 }
 
 function normalizeTag(value: unknown): string[] {

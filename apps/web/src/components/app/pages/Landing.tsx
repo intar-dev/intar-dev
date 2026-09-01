@@ -103,7 +103,7 @@ export function Landing() {
                   {runs.isLoading
                     ? "Finding your work…"
                     : activeRun
-                      ? "Resume lab"
+                      ? "Resume run"
                       : "Browse courses"}
                   {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
                 </Button>

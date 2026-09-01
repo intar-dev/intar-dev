@@ -69,7 +69,7 @@ export function getRunRecapState(run: ScenarioRunRecord): RunRecapState {
     return {
       kind: "solved",
       title: "Solved",
-      description: "You completed this lab.",
+      description: "You completed this scenario.",
     };
   }
 
@@ -77,14 +77,14 @@ export function getRunRecapState(run: ScenarioRunRecord): RunRecapState {
     return {
       kind: "could_not_finish",
       title: "Could not finish",
-      description: "This lab did not reach its final checks.",
+      description: "This scenario did not reach its final checks.",
     };
   }
 
   return {
     kind: "ended_early",
     title: "Ended early",
-    description: "You can try this lab again when you are ready.",
+    description: "You can try this scenario again when you are ready.",
   };
 }
 

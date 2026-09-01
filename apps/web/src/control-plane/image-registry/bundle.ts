@@ -1,8 +1,9 @@
 import { drizzle } from "drizzle-orm/d1";
 import {
+  type CourseCatalogSnapshotV2,
   type ImageBuildBundleMeta,
-  type ScenarioCourseCatalogSnapshotV1,
 } from "@/db/schema";
+import type { CourseCatalogSnapshotV2 as CourseCatalogSnapshotV2Wire } from "@/generated/catalog";
 import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
@@ -13,7 +14,6 @@ import {
   syncScenarioCourseCatalogSnapshot,
   validateScenarioCourseCatalogReferences,
 } from "@/lib/scenario-course-catalogs";
-import { GENERAL_PRACTICE_COURSE_ID } from "@/lib/course-location";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import { stageReusableCandidateManifests } from "@/lib/scenario-catalog-candidates";
 import {
@@ -25,7 +25,13 @@ import {
   isSafeBundleRev,
   normalizeSha256,
   isImageArchitecture,
+  isPositiveU32,
+  isScenarioDifficulty,
 } from "./shared";
+
+type ParsedBundleMeta = ImageBuildBundleMeta & {
+  courseCatalog: CourseCatalogSnapshotV2;
+};
 
 export const textDecoder = new TextDecoder();
 
@@ -71,26 +77,24 @@ export async function handleBundleUpload(
 
   const db = drizzle(env.DB);
   const courseCatalog = meta.value.bundleMeta.courseCatalog;
-  if (courseCatalog) {
-    const referenceValidation = await validateScenarioCourseCatalogReferences(
-      db,
+  const invalidScenarioIds = await validateScenarioCourseCatalogReferences(
+    db,
+    {
+      snapshot: courseCatalog,
+      bundleScenarioIds: meta.value.bundleMeta.scenarios.map(
+        (scenario) => scenario.scenarioId,
+      ),
+      organizationId: null,
+    },
+  );
+  if (invalidScenarioIds.length) {
+    return jsonResponse(
       {
-        snapshot: courseCatalog,
-        bundleScenarioIds: meta.value.bundleMeta.scenarios.map(
-          (scenario) => scenario.scenarioId,
-        ),
-        organizationId: null,
+        error: "course catalog references unavailable scenarios",
+        scenario_ids: invalidScenarioIds,
       },
+      400,
     );
-    if (!referenceValidation.ok) {
-      return jsonResponse(
-        {
-          error: "course catalog references unavailable scenarios",
-          scenario_ids: referenceValidation.invalidScenarioIds,
-        },
-        400,
-      );
-    }
   }
 
   const objectKey = bundleObjectKey(meta.value.rev);
@@ -108,14 +112,12 @@ export async function handleBundleUpload(
     meta: meta.value.bundleMeta,
     nowUnixMs: now,
   });
-  if (courseCatalog) {
-    await syncScenarioCourseCatalogSnapshot(db, {
-      snapshot: courseCatalog,
-      sourceRevision: meta.value.rev,
-      organizationId: null,
-      nowUnixMs: now,
-    });
-  }
+  await syncScenarioCourseCatalogSnapshot(db, {
+    snapshot: courseCatalog,
+    sourceRevision: meta.value.rev,
+    organizationId: null,
+    nowUnixMs: now,
+  });
   const assigned = await assignQueuedImageBuilds(db, now);
   if (queued.queued < meta.value.bundleMeta.scenarios.length) {
     await stageReusableCandidateManifests(db, {
@@ -171,7 +173,7 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
       ok: true;
       value: {
         rev: string;
-        bundleMeta: ImageBuildBundleMeta;
+        bundleMeta: ParsedBundleMeta;
       };
     }
   | { ok: false; response: Response }
@@ -260,12 +262,6 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
     }
     scenarios.push(scenario);
   }
-  if (!scenarios.length) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "meta.scenarios is required" }, 400),
-    };
-  }
   const scenarioKeys = new Set<string>();
   for (const scenario of scenarios) {
     const key = `${scenario.scenarioId}:${scenario.arch}`;
@@ -281,7 +277,7 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
     scenarioKeys.add(key);
   }
 
-  let courseCatalog: ScenarioCourseCatalogSnapshotV1 | undefined;
+  let courseCatalog: CourseCatalogSnapshotV2 | undefined;
   if (Object.hasOwn(parsed, "course_catalog")) {
     const normalized = normalizeCourseCatalogSnapshot(parsed.course_catalog);
     if (!normalized) {
@@ -295,15 +291,41 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
     }
     courseCatalog = normalized;
   }
+  if (!courseCatalog) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "meta.course_catalog is required" }, 400),
+    };
+  }
+  const linkedScenarioIds = new Set(
+    courseCatalog.courses.flatMap((course) =>
+      course.lectures.flatMap((lecture) =>
+        lecture.scenarioId ? [lecture.scenarioId] : [],
+      ),
+    ),
+  );
+  if (
+    scenarios.some((scenario) => !linkedScenarioIds.has(scenario.scenarioId))
+  ) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        {
+          error: "meta.scenarios contains a scenario without a linked lecture",
+        },
+        400,
+      ),
+    };
+  }
 
-  const bundleMeta: ImageBuildBundleMeta = {
+  const bundleMeta: ParsedBundleMeta = {
     ...parsed,
     buildFormatVersion,
     catalogChannel,
     scenarios,
+    courseCatalog,
   };
-  delete bundleMeta.courseCatalog;
-  if (courseCatalog) bundleMeta.courseCatalog = courseCatalog;
+  delete bundleMeta.course_catalog;
 
   return {
     ok: true,
@@ -316,69 +338,176 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
 
 export function normalizeCourseCatalogSnapshot(
   value: unknown,
-): ScenarioCourseCatalogSnapshotV1 | null {
+): CourseCatalogSnapshotV2 | null {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["version", "mode", "courses"])
+    !hasExactKeys(value, ["version", "courses"]) ||
+    value.version !== 2 ||
+    !Array.isArray(value.courses)
   ) {
     return null;
   }
-  if (value.version !== 1 || value.mode !== "replace") {
-    return null;
-  }
-  if (!Array.isArray(value.courses)) {
-    return null;
-  }
+  const wire = value as unknown as CourseCatalogSnapshotV2Wire;
 
   const courseIds = new Set<string>();
-  const memberIds = new Set<string>();
-  const courses: ScenarioCourseCatalogSnapshotV1["courses"] = [];
-  for (const valueCourse of value.courses) {
+  const scenarioIds = new Set<string>();
+  const courses: CourseCatalogSnapshotV2["courses"] = [];
+  for (const valueCourse of wire.courses) {
     if (
       !isRecord(valueCourse) ||
       !hasExactKeys(valueCourse, [
         "course_id",
         "title",
-        "description",
-        "scenario_ids",
-      ])
+        "summary",
+        "body_markdown",
+        "sequential",
+        "lectures",
+      ]) ||
+      !Array.isArray(valueCourse.lectures) ||
+      valueCourse.lectures.length === 0
     ) {
       return null;
     }
+
     const courseId = readUntrimmedString(valueCourse.course_id);
     const title = readString(valueCourse.title);
-    const description = readString(valueCourse.description);
+    const summary = readString(valueCourse.summary);
+    const bodyMarkdown = readNonEmptyString(valueCourse.body_markdown);
     if (
       !courseId ||
-      courseId === GENERAL_PRACTICE_COURSE_ID ||
       !isSafeBundleRev(courseId) ||
       !title ||
-      !description ||
-      !Array.isArray(valueCourse.scenario_ids) ||
-      valueCourse.scenario_ids.length === 0 ||
+      !summary ||
+      !bodyMarkdown ||
+      typeof valueCourse.sequential !== "boolean" ||
       courseIds.has(courseId)
     ) {
       return null;
     }
 
-    const scenarioIds: string[] = [];
-    for (const valueScenarioId of valueCourse.scenario_ids) {
-      const scenarioId = readUntrimmedString(valueScenarioId);
-      if (
-        !scenarioId ||
-        !isSafeBundleRev(scenarioId) ||
-        memberIds.has(scenarioId)
-      ) {
-        return null;
-      }
-      memberIds.add(scenarioId);
-      scenarioIds.push(scenarioId);
+    const lectureIds = new Set<string>();
+    const lectures: CourseCatalogSnapshotV2["courses"][number]["lectures"] = [];
+    for (const valueLecture of valueCourse.lectures) {
+      const lecture = normalizeCourseCatalogLecture(
+        valueLecture,
+        lectureIds,
+        scenarioIds,
+      );
+      if (!lecture) return null;
+      lectures.push(lecture);
     }
+
     courseIds.add(courseId);
-    courses.push({ courseId, title, description, scenarioIds });
+    courses.push({
+      courseId,
+      title,
+      summary,
+      bodyMarkdown,
+      sequential: valueCourse.sequential,
+      lectures,
+    });
   }
 
-  return { version: 1, mode: "replace", courses };
+  return { version: 2, courses };
+}
+
+function normalizeCourseCatalogLecture(
+  value: CourseCatalogSnapshotV2Wire["courses"][number]["lectures"][number],
+  lectureIds: Set<string>,
+  scenarioIds: Set<string>,
+): CourseCatalogSnapshotV2["courses"][number]["lectures"][number] | null {
+  if (!isRecord(value)) return null;
+
+  const requiredKeys = [
+    "lecture_id",
+    "title",
+    "summary",
+    "body_markdown",
+    "category",
+    "tags",
+    "estimated_minutes",
+  ];
+  if (Object.hasOwn(value, "difficulty")) requiredKeys.push("difficulty");
+  if (Object.hasOwn(value, "scenario_id")) requiredKeys.push("scenario_id");
+  if (!hasExactKeys(value, requiredKeys)) return null;
+
+  const lectureId = readUntrimmedString(value.lecture_id);
+  const title = readString(value.title);
+  const summary = readString(value.summary);
+  const bodyMarkdown = readNonEmptyString(value.body_markdown);
+  const category = readString(value.category);
+  const tags = normalizeCourseCatalogTags(value.tags);
+  const estimatedMinutes = value.estimated_minutes;
+  if (
+    !lectureId ||
+    !isSafeBundleRev(lectureId) ||
+    !title ||
+    !summary ||
+    !bodyMarkdown ||
+    !category ||
+    !tags ||
+    typeof estimatedMinutes !== "number" ||
+    !isPositiveU32(estimatedMinutes) ||
+    lectureIds.has(lectureId)
+  ) {
+    return null;
+  }
+
+  let difficulty:
+    | CourseCatalogSnapshotV2["courses"][number]["lectures"][number]["difficulty"]
+    | undefined;
+  if (Object.hasOwn(value, "difficulty")) {
+    if (!isCourseCatalogDifficulty(value.difficulty)) return null;
+    difficulty = value.difficulty;
+  }
+
+  let scenarioId: string | undefined;
+  if (Object.hasOwn(value, "scenario_id")) {
+    scenarioId = readUntrimmedString(value.scenario_id) ?? undefined;
+    if (
+      !scenarioId ||
+      !isSafeBundleRev(scenarioId) ||
+      scenarioIds.has(scenarioId)
+    ) {
+      return null;
+    }
+    if (!difficulty) return null;
+  }
+
+  lectureIds.add(lectureId);
+  if (scenarioId) scenarioIds.add(scenarioId);
+  return {
+    lectureId,
+    title,
+    summary,
+    bodyMarkdown,
+    category,
+    tags,
+    estimatedMinutes,
+    ...(difficulty ? { difficulty } : {}),
+    ...(scenarioId ? { scenarioId } : {}),
+  };
+}
+
+function normalizeCourseCatalogTags(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  for (const valueTag of value) {
+    const tag = readString(valueTag);
+    if (!tag || seen.has(tag)) return null;
+    seen.add(tag);
+    tags.push(tag);
+  }
+  return tags;
+}
+
+function isCourseCatalogDifficulty(
+  value: unknown,
+): value is NonNullable<
+  CourseCatalogSnapshotV2["courses"][number]["lectures"][number]["difficulty"]
+> {
+  return isScenarioDifficulty(value);
 }
 
 function hasExactKeys(
@@ -394,6 +523,10 @@ function hasExactKeys(
 
 function readUntrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 export function normalizeBundleScenario(
@@ -657,8 +790,19 @@ export function isSafeBundleArchivePath(path: string): boolean {
 
 export function requiredBundlePaths(meta: ImageBuildBundleMeta): string[] {
   return [
-    "base-images.hcl",
-    ...(meta.courseCatalog ? ["courses.hcl"] : []),
+    ...(meta.scenarios.length ? ["base-images.hcl"] : []),
+    ...(meta.courseCatalog
+      ? [
+          "curriculum/catalog.json",
+          ...meta.courseCatalog.courses.flatMap((course) => [
+            `curriculum/${course.courseId}/course.md`,
+            ...course.lectures.map(
+              (lecture) =>
+                `curriculum/${course.courseId}/${lecture.lectureId}/lecture.md`,
+            ),
+          ]),
+        ]
+      : []),
     ...meta.scenarios.map(
       (scenario) => `scenarios/${scenario.scenarioId}/scenario.hcl`,
     ),

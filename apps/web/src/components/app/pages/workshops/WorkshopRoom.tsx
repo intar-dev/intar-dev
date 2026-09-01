@@ -520,7 +520,7 @@ function WorkshopNow({
           </h2>
           <p className="mt-2 max-w-[68ch] text-support text-muted-foreground">
             The facilitator provisions checked-in workspaces before the first
-            lab.
+            scenario.
           </p>
         </div>
         {workshopMemberHasWorkspace(session.viewer) ? (

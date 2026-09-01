@@ -55,8 +55,11 @@ export interface RunLearningPanelProps {
   probes: readonly ScenarioProbeStatus[];
   /** Authored name of the selected VM; scopes duplicate probe names safely. */
   vmName?: string | null;
-  /** Authored learner-facing mission briefing for this run. */
+  /** V1 fallback when a run predates its immutable lecture snapshot. */
   briefingMarkdown: string;
+  /** Immutable theory the learner read before starting this run. */
+  lectureMarkdown?: string | null | undefined;
+  lectureTitle?: string | null | undefined;
   objectives: readonly ScenarioObjective[];
   hints: readonly ScenarioRunHint[];
   solution: ScenarioRunSolution;
@@ -128,8 +131,8 @@ export function getRunLearningTriggerCopy(input: {
     ? `${input.revealedHints} of ${input.totalHints} hints revealed`
     : "No hints are available";
   return {
-    visibleLabel: "Mission and hints",
-    accessibleLabel: `Open mission and hints. ${hints}. ${checks}.`,
+    visibleLabel: "Theory and hints",
+    accessibleLabel: `Open lecture theory and hints. ${hints}. ${checks}.`,
   };
 }
 
@@ -151,7 +154,7 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
 
   return (
     <aside
-      aria-label="Mission and hints"
+      aria-label="Lecture theory and hints"
       data-run-learning-panel
       className={cn(
         "hidden h-full min-h-0 w-[min(24rem,40dvw)] max-w-[40dvw] shrink-0 border-l min-[960px]:flex min-[960px]:flex-col",
@@ -162,7 +165,7 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
         data-run-learning-panel-scroll
         className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4 py-4"
         role="region"
-        aria-label="Mission and hints content"
+        aria-label="Lecture theory and hints content"
         tabIndex={0}
       >
         <RunLearningPanelContent {...contentProps} />
@@ -276,7 +279,7 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
             data-run-learning-mobile-scroll
             className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4"
             role="region"
-            aria-label="Mission and hints content"
+            aria-label="Lecture theory and hints content"
             tabIndex={0}
           >
             <RunLearningPanelContent {...contentProps} />
@@ -312,7 +315,7 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
     () => scopeObjectivesToVm(props.objectives, props.vmName),
     [props.objectives, props.vmName],
   );
-  const missionHeadingId = useId();
+  const theoryHeadingId = useId();
   const workOrderHeadingId = useId();
   const checksHeadingId = useId();
   const hintsHeadingId = useId();
@@ -323,9 +326,11 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
       data-run-learning-panel-content
       className={cn("space-y-6 pb-6", props.className)}
     >
-      <MissionBriefing
-        headingId={missionHeadingId}
+      <LectureTheory
+        headingId={theoryHeadingId}
         briefingMarkdown={props.briefingMarkdown}
+        lectureMarkdown={props.lectureMarkdown}
+        lectureTitle={props.lectureTitle}
       />
 
       {state === "booting" ? (
@@ -367,9 +372,9 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
 function LearningPanelA11yHeader() {
   return (
     <SheetHeader className="sr-only">
-      <SheetTitle>Mission and hints</SheetTitle>
+      <SheetTitle>Lecture theory and hints</SheetTitle>
       <SheetDescription>
-        Your mission briefing, checks, hints, and solution.
+        Your lecture theory, checks, hints, and solution.
       </SheetDescription>
     </SheetHeader>
   );
@@ -383,7 +388,7 @@ function LearningPanelClose() {
           variant="ghost"
           size="icon"
           className="absolute top-3 right-3 z-30"
-          aria-label="Close mission and hints"
+          aria-label="Close lecture theory and hints"
         />
       }
     >
@@ -409,24 +414,31 @@ function CheckStatusIcon({ status }: { status: LearnerCheckStatus }) {
   return <CircleAlert className="size-4 text-destructive" aria-hidden="true" />;
 }
 
-function MissionBriefing(props: {
+function LectureTheory(props: {
   headingId: string;
   briefingMarkdown: string;
+  lectureMarkdown?: string | null | undefined;
+  lectureTitle?: string | null | undefined;
 }) {
-  const briefing = props.briefingMarkdown.trim();
+  const theory = (props.lectureMarkdown ?? props.briefingMarkdown).trim();
 
   return (
     <section aria-labelledby={props.headingId}>
-      <p id={props.headingId} className="text-label">
-        Mission briefing
-      </p>
-      {briefing ? (
-        <Markdown className="mt-3 max-w-[68ch] space-y-3 text-sm leading-6">
-          {briefing}
+      <h2 id={props.headingId} className="text-card-title">
+        {props.lectureTitle
+          ? `Lecture theory: ${props.lectureTitle}`
+          : "Lecture theory"}
+      </h2>
+      {theory ? (
+        <Markdown
+          headingOffset={1}
+          className="mt-3 max-w-[68ch] space-y-3 text-sm leading-6"
+        >
+          {theory}
         </Markdown>
       ) : (
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          No mission briefing is available for this lab.
+          No lecture theory is available for this run.
         </p>
       )}
     </section>
@@ -463,7 +475,7 @@ function WorkOrder(props: {
         </ol>
       ) : (
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Your work order will appear when the lab is ready.
+          Your work order will appear when the scenario is ready.
         </p>
       )}
     </section>
@@ -559,7 +571,7 @@ function Hints(props: {
       </div>
       {!props.hints.length ? (
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          No hints are available for this lab.
+          No hints are available for this scenario.
         </p>
       ) : (
         <div className="mt-4 space-y-6">
@@ -700,7 +712,7 @@ function Solution(props: {
           <p className="text-sm leading-6 text-muted-foreground">
             {props.solution.assisted
               ? "You used the full solution for this run."
-              : "This solution unlocked after you completed the lab."}
+              : "This solution unlocked after you completed the scenario."}
           </p>
           {props.solution.bodyMarkdown ? (
             <Markdown className="space-y-2 text-sm leading-6">

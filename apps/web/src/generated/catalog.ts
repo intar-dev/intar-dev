@@ -12,6 +12,32 @@ export interface ImageKey {
 
 export type Mib = number;
 
+export interface CourseCatalogSnapshotV2 {
+  version: number;
+  courses: CourseCatalogCourseV2[];
+}
+
+export interface CourseCatalogCourseV2 {
+  course_id: string;
+  title: string;
+  summary: string;
+  body_markdown: string;
+  sequential: boolean;
+  lectures: CourseCatalogLectureV2[];
+}
+
+export interface CourseCatalogLectureV2 {
+  lecture_id: string;
+  title: string;
+  summary: string;
+  body_markdown: string;
+  category: string;
+  tags: string[];
+  difficulty?: ScenarioDifficulty | null;
+  estimated_minutes: number;
+  scenario_id?: string | null;
+}
+
 export interface ScenarioHintManifestV3 {
   id: string;
   title?: string | null;

@@ -137,6 +137,7 @@ base_image "trixie" {
     let rendered = render_direct_build(&DirectBuildRequest {
         scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
         scenario,
+        lecture: test_lecture(),
         vm_name: "web".to_string(),
         config: QemuBuildConfig {
             output_root: directory.path().join("dist"),

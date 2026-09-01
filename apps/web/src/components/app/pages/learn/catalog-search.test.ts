@@ -17,7 +17,6 @@ describe("course catalog search", () => {
       difficulty: undefined,
       category: undefined,
       tags: [],
-      sort: "recommended",
     });
   });
 

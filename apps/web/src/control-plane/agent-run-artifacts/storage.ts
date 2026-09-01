@@ -26,6 +26,7 @@ import {
   drizzleQueryToD1Statement,
   executeScenarioRunRuntimeProjection,
 } from "@/lib/runtime-executions";
+import { recordLinkedCourseUnitCompletionForRun } from "@/lib/scenario-course-catalogs";
 
 export interface AgentRunArtifactInput {
   ordinal?: number;
@@ -1638,6 +1639,9 @@ export async function persistStoredRunLifecycle(
     statements: [drizzleQueryToD1Statement(db.$client, mutation)],
     mode: "update",
   });
+  if (nextPhase === "completed" && solvedAt !== null) {
+    await recordLinkedCourseUnitCompletionForRun(db, { runId, nowUnixMs: now });
+  }
 }
 
 export function deriveArchiveRunPhase(

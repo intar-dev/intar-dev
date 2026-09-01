@@ -9,19 +9,19 @@ bundle.
 ## Suites
 
 - `bun run test:ui:visual` runs the Chromium visual suites.
-  - `routes.visual.spec.ts`: 24 routes × 2 themes × desktop/mobile = 96.
-  - `dense.visual.spec.ts`: 10 dense routes × 2 themes × tablet = 20.
-  - `states.visual.spec.ts`: 54 focused run, workshop, organization, build,
-    people, and authoring snapshots.
-  - The visual baseline count is therefore exactly 170.
-- `bun run test:ui:a11y` runs 176 checks: axe on all 24 routes in both themes;
+  - `routes.visual.spec.ts`: 23 routes × 2 themes × desktop/mobile = 92.
+  - `dense.visual.spec.ts`: 9 dense routes × 2 themes × tablet = 18.
+  - `states.visual.spec.ts`: 53 focused run, workshop, organization, build,
+    and people snapshots.
+  - The visual baseline count is therefore exactly 163.
+- `bun run test:ui:a11y` runs 173 checks: axe on all 23 routes in both themes;
   high-risk empty, error, permission, dialog, operational-detail,
   remote-access, validation, and mobile-sheet states; and keyboard, focus,
   reduced-motion, coarse-pointer, overflow, 200%-text, and terminal-cell
   behavior.
-- `bun run test:ui:smoke` runs 26 workflow archetypes in Chromium, Firefox,
-  and WebKit, for 78 checks.
-- `bun run test:ui` runs the complete 463-test release gate, including 28 VM
+- `bun run test:ui:smoke` runs 25 workflow archetypes in Chromium, Firefox,
+  and WebKit, for 75 checks.
+- `bun run test:ui` runs the complete 460-test release gate, including 28 VM
   lifecycle checks and 11 performance checks, with one worker in CI.
 
 Install the browser revisions pinned by `@playwright/test` and `bun.lock` with:

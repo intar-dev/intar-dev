@@ -22,7 +22,6 @@ on:
       - "tools/deploy/**"
       - "tools/flagship/**"
       - "crates/intar-image-scenario/**"
-      - "crates/intar-image-scenario-wasm/**"
       - "apps/web/**"
       - "!apps/web/workers/providers/**"
   pull_request:
@@ -43,7 +42,6 @@ on:
       - "tools/deploy/**"
       - "tools/flagship/**"
       - "crates/intar-image-scenario/**"
-      - "crates/intar-image-scenario-wasm/**"
       - "apps/web/**"
       - "!apps/web/workers/providers/**"
 
@@ -60,61 +58,15 @@ defaults:
     working-directory: apps/web
 
 jobs:
-  scenario-wasm:
-    name: Build browser scenario validator
-    runs-on: namespace-profile-intar-dev
-
-    steps:
-      - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install 1.97.0 --profile minimal
-          rustup target add --toolchain 1.97.0 wasm32-unknown-unknown
-
-      - name: Set up Rust cache
-        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
-        with:
-          cache: rust
-
-      - name: Install pinned Wasm tools
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
-        with:
-          tool: just@1.58.0,wasm-pack@0.15.0
-          fallback: none
-
-      - name: Build browser scenario validator
-        working-directory: ${{ github.workspace }}
-        run: just generate-scenario-wasm
-
-      - name: Upload browser scenario validator
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: scenario-wasm-${{ github.sha }}
-          path: apps/web/src/generated/scenario-wasm
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 1
-
   validate:
     name: Test and build
     runs-on: namespace-profile-intar-dev
-    needs: scenario-wasm
 
     steps:
       - name: Checkout
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
-
-      - name: Download browser scenario validator
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: scenario-wasm-${{ github.sha }}
-          path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -163,7 +115,6 @@ jobs:
   ui:
     name: Chromium smoke
     runs-on: namespace-profile-intar-dev
-    needs: scenario-wasm
     container:
       image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
       options: --ipc=host
@@ -173,12 +124,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
-      - name: Download browser scenario validator
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: scenario-wasm-${{ github.sha }}
-          path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

@@ -40,11 +40,11 @@ function run(overrides: Partial<RunListItemData> = {}): RunListItemData {
     solveDurationMs: 45_000,
     hasReplay: true,
     courseLocation: {
-      courseKind: "authored",
       scope: "public",
       organizationId: null,
       courseId: "kubernetes-devops-fundamentals",
       courseTitle: "Kubernetes DevOps Fundamentals",
+      lectureId: "04-repair-service",
       step: 4,
       steps: 8,
     },

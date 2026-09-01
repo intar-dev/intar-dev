@@ -2,7 +2,6 @@ import { and, eq } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   imageBuilds,
-  scenarioSources,
   type ImageBuildStatus,
 } from "@/db/schema";
 import type { ImageArchitecture } from "@/generated/catalog";
@@ -167,17 +166,6 @@ export async function handlePublish(
           and(
             eq(imageBuilds.id, buildFence.buildId),
             eq(imageBuilds.hostId, buildFence.hostId),
-          ),
-        );
-    }
-    if (organizationId && catalogChannel === "live") {
-      await db
-        .update(scenarioSources)
-        .set({ status: "published", updatedAt: Date.now() })
-        .where(
-          and(
-            eq(scenarioSources.organizationId, organizationId),
-            eq(scenarioSources.scenarioId, normalizedManifest.scenario_id),
           ),
         );
     }

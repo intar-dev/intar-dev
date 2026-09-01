@@ -40,7 +40,7 @@ export function ScenarioCancelDialog(props: {
           </DialogTitle>
           <DialogDescription>
             {props.retry
-              ? "The earlier request did not finish. Try again to close the lab and save your work."
+              ? "The earlier request did not finish. Try again to close the run and save your work."
               : "This closes the terminal and saves your result and replay."}
           </DialogDescription>
         </DialogHeader>

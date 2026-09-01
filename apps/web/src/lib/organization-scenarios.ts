@@ -6,7 +6,6 @@ import {
   imageBuilds,
   scenarioAssignments,
   scenarioRuns,
-  scenarioSources,
   vmScenarios,
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
@@ -85,14 +84,6 @@ export async function deleteOrganizationScenario(params: {
         and(
           eq(scenarioAssignments.organizationId, params.organizationId),
           eq(scenarioAssignments.scenarioId, params.scenarioId),
-        ),
-      ),
-    db
-      .delete(scenarioSources)
-      .where(
-        and(
-          eq(scenarioSources.organizationId, params.organizationId),
-          eq(scenarioSources.scenarioId, params.scenarioId),
         ),
       ),
     db

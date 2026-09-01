@@ -58,9 +58,6 @@ export function runCourseContextLabel(
   location: CourseLocation | null | undefined,
 ): string | null {
   if (!location) return null;
-  if (location.courseKind === "general-practice") {
-    return location.courseTitle;
-  }
   return `${location.courseTitle} · Step ${location.step} of ${location.steps}`;
 }
 

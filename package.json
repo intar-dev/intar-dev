@@ -26,7 +26,6 @@
     "check:database-migrations": "bun run --cwd apps/web db:check && bun test tools/database",
     "clean:generated": "bun tools/cleanup-generated.ts",
     "hydrate": "bun tools/workshops/platform-engineering/hydrate.ts",
-    "generate:scenario-authoring": "bun tools/generate-scenario-authoring-config.ts",
     "check:providers": "bun tools/providers/check-conformance.ts",
     "test:providers": "bun run --cwd apps/web/workers/providers/hetzner test && bun run --cwd apps/web/workers/providers/gcp test",
     "test:web": "bun run --cwd apps/web test",

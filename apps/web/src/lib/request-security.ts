@@ -332,11 +332,7 @@ export function sensitiveRateLimitActionFor(
   if (/^\/api\/workshops\/[^/]+\/terminal$/u.test(pathname)) {
     return "terminal-issuance";
   }
-  if (
-    pathname === "/api/admin/authoring/build" ||
-    /^\/api\/organizations\/[^/]+\/scenarios\/build$/u.test(pathname) ||
-    isOrganizationScenarioBundleUpload(pathname)
-  ) {
+  if (isOrganizationScenarioBundleUpload(pathname)) {
     return "build-start";
   }
   if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {

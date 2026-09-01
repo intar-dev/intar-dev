@@ -35,9 +35,6 @@ function noContent(route: Route, headers?: Record<string, string>) {
   });
 }
 
-const GENERAL_PRACTICE_DESCRIPTION =
-  "Standalone systems for focused practice outside a guided curriculum.";
-
 function nativeSshSessionFixture(input: {
   routeUsername: string;
   clientPublicKeyOpenssh: string | null;
@@ -73,105 +70,155 @@ function nativeSshSessionFixture(input: {
   };
 }
 
-function nestedCourseCatalog(
-  scenarios: Array<Record<string, unknown>>,
-  courses: Array<Record<string, unknown>>,
-  capacityPressure: number | null = 68,
-) {
-  const scenarioById = new Map(
-    scenarios.flatMap((scenario) =>
-      typeof scenario.scenarioId === "string"
-        ? [[scenario.scenarioId, scenario] as const]
-        : [],
-    ),
-  );
-  const claimed = new Set<string>();
-  const authored = courses.flatMap((course) => {
-    const members = Array.isArray(course.scenarioIds)
-      ? course.scenarioIds.flatMap((scenarioId) => {
-          if (typeof scenarioId !== "string" || claimed.has(scenarioId)) {
-            return [];
-          }
-          const scenario = scenarioById.get(scenarioId);
-          if (!scenario) return [];
-          claimed.add(scenarioId);
-          return [scenario];
-        })
-      : [];
-    if (!members.length) return [];
-    return [
-      {
-        kind: "authored" as const,
-        courseId: course.courseId,
-        organizationId: course.organizationId ?? null,
-        title: course.title,
-        description: course.description,
-        scenarios: members,
-      },
-    ];
-  });
-  const generalScenarios = scenarios.filter(
-    (scenario) =>
-      typeof scenario.scenarioId === "string" &&
-      !claimed.has(scenario.scenarioId),
-  );
+type CourseFixture = MockApiState["courseCatalog"][number];
+type CourseLectureFixture = CourseFixture["lectures"][number];
 
+function courseCatalogResponse(
+  courses: readonly CourseFixture[],
+  capacityPressure: number | null,
+) {
   return {
-    capacityPressure: scenarios.length ? capacityPressure : null,
-    courses: [
-      ...authored,
-      ...(generalScenarios.length
-        ? [
-            {
-              kind: "general-practice" as const,
-              courseId: null,
-              organizationId: null,
-              title: "General practice" as const,
-              description: GENERAL_PRACTICE_DESCRIPTION,
-              scenarios: generalScenarios,
-            },
-          ]
-        : []),
-    ],
+    courses: courses.map(({ lectures, ...course }) => ({
+      ...course,
+      lectures: lectures.map(courseLectureSummary),
+    })),
+    capacityPressure: courses.length ? capacityPressure : null,
   };
 }
 
-function courseLocationForScenario(
-  catalog: ReturnType<typeof nestedCourseCatalog>,
-  scenarioId: string,
-  organizationId: string | null,
+function courseLectureSummary({ bodyMarkdown, ...lecture }: CourseLectureFixture) {
+  return lecture;
+}
+
+function findFixtureCourse(
+  courses: readonly CourseFixture[],
+  courseId: string,
 ) {
-  for (const course of catalog.courses) {
-    const step = course.scenarios.findIndex(
-      (scenario) => scenario.scenarioId === scenarioId,
-    );
-    if (step < 0) continue;
-    if (course.kind === "general-practice") {
-      return {
-        courseKind: "general-practice" as const,
-        scope: organizationId ? "organization-general-practice" : "public",
-        organizationId,
-        courseId: null,
-        courseTitle: "General practice" as const,
-        step: null,
-        steps: null,
-      };
+  return courses.find((course) => course.courseId === courseId) ?? null;
+}
+
+function organizationScopedCourses(
+  courses: readonly CourseFixture[],
+  organizationId: string,
+  scope: "public" | "private",
+) {
+  return courses.filter((course) =>
+    scope === "public"
+      ? course.organizationId === null
+      : course.organizationId === organizationId,
+  );
+}
+
+function courseLectureDetail(
+  courses: readonly CourseFixture[],
+  courseId: string,
+  lectureId: string,
+) {
+  const course = findFixtureCourse(courses, courseId);
+  const lectureIndex = course?.lectures.findIndex(
+    (lecture) => lecture.lectureId === lectureId,
+  ) ?? -1;
+  const lecture = lectureIndex >= 0 ? course?.lectures[lectureIndex] : null;
+  if (!course || !lecture) return null;
+  if (lecture.state === "locked") {
+    return { locked: true as const, blockedBy: lecture.blockedBy };
+  }
+  const next = course.lectures[lectureIndex + 1] ?? null;
+  const courseSummary = {
+    courseId: course.courseId,
+    organizationId: course.organizationId,
+    title: course.title,
+    summary: course.summary,
+    sequential: course.sequential,
+  };
+  return {
+    locked: false as const,
+    detail: {
+      course: courseSummary,
+      lecture: {
+        ...courseLectureSummary(lecture),
+        bodyMarkdown: lecture.bodyMarkdown,
+        nextLecture: next
+          ? {
+              courseId: course.courseId,
+              lectureId: next.lectureId,
+              title: next.title,
+            }
+          : null,
+      },
+    },
+  };
+}
+
+function completeFixtureCourseLecture(
+  courses: CourseFixture[],
+  courseId: string,
+  lectureId: string,
+) {
+  const course = findFixtureCourse(courses, courseId);
+  const lecture = course?.lectures.find(
+    (candidate) => candidate.lectureId === lectureId,
+  );
+  if (!course || !lecture) return null;
+  if (lecture.state === "locked") {
+    return { locked: true as const, blockedBy: lecture.blockedBy };
+  }
+  if (lecture.scenarioId) return { linked: true as const };
+
+  lecture.state = "completed";
+  lecture.activeRunId = null;
+  for (const next of course.lectures) {
+    if (next.blockedBy?.lectureId !== lecture.lectureId) continue;
+    next.blockedBy = null;
+    next.state =
+      next.scenarioReady === false ? "waiting_for_scenario" : "available";
+  }
+  return courseLectureDetail(courses, courseId, lectureId);
+}
+
+function updateFixtureLinkedLectureState(
+  courses: readonly CourseFixture[],
+  scenarioId: string,
+  runState: RunFixtureState,
+) {
+  const active = makeRun(runState).activity === "foreground";
+  const completed = ["archived", "replay", "replay-failed"].includes(
+    runState,
+  );
+  for (const course of courses) {
+    for (const lecture of course.lectures) {
+      if (lecture.scenarioId !== scenarioId || lecture.state === "locked") {
+        continue;
+      }
+      lecture.state = active
+        ? "in_progress"
+        : completed
+          ? "completed"
+          : "available";
+      lecture.activeRunId = active ? "run-active" : null;
     }
+  }
+}
+
+function courseLecturePath(
+  pathname: string,
+  pattern: RegExp,
+): { organizationId: string | null; courseId: string; lectureId: string } | null {
+  const match = pathname.match(pattern);
+  if (!match) return null;
+  const [, organizationId, courseId, lectureId] = match;
+  if (lectureId === undefined) {
     return {
-      courseKind: "authored" as const,
-      scope: organizationId
-        ? course.organizationId
-          ? "organization-private"
-          : "organization-public"
-        : "public",
-      organizationId,
-      courseId: course.courseId as string,
-      courseTitle: course.title as string,
-      step: step + 1,
-      steps: course.scenarios.length,
+      organizationId: null,
+      courseId: decodeURIComponent(organizationId ?? ""),
+      lectureId: decodeURIComponent(courseId ?? ""),
     };
   }
-  return null;
+  return {
+    organizationId: decodeURIComponent(organizationId ?? ""),
+    courseId: decodeURIComponent(courseId ?? ""),
+    lectureId: decodeURIComponent(lectureId),
+  };
 }
 
 type FixtureRecord = Record<string, unknown>;
@@ -457,22 +504,16 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         listedRun.finishedAt =
           projected.activity === "settled" ? FIXED_NOW : null;
       }
-      const foreground = server.state.run.activity === "foreground";
-      const catalogEntry = server.state.scenarios.find(
-        (scenario) => scenario.scenarioId === "repair-nginx",
+      updateFixtureLinkedLectureState(
+        server.state.courseCatalog,
+        "repair-nginx",
+        runState,
       );
-      if (catalogEntry?.progress && typeof catalogEntry.progress === "object") {
-        const progress = catalogEntry.progress as Record<string, unknown>;
-        progress.activeRunId = foreground ? "run-active" : null;
-        progress.status = foreground ? "in_progress" : "attempted";
-      }
-      server.state.scenarioDetail.hasActiveRun = foreground;
-      server.state.scenarioDetail.activeRunId = foreground
-        ? "run-active"
-        : null;
-      server.state.scenarioDetail.activeRun = foreground
-        ? server.state.scenarioDetail.activeRun
-        : null;
+      updateFixtureLinkedLectureState(
+        server.state.organizationCourseCatalog,
+        "repair-nginx",
+        runState,
+      );
       server.state.terminalMode =
         runState === "disconnected"
           ? "disconnected"
@@ -924,22 +965,102 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
-      if (pathname === "/api/scenarios" && method === "GET") {
+      if (pathname === "/api/courses" && method === "GET") {
         await json(
           route,
-          nestedCourseCatalog(
-            server.state.scenarios,
-            server.state.courses,
+          courseCatalogResponse(
+            server.state.courseCatalog,
             server.state.capacityPressure,
           ),
         );
+        return;
+      }
+      const publicCourseLectureComplete = courseLecturePath(
+        pathname,
+        /^\/api\/courses\/([^/]+)\/lectures\/([^/]+)\/complete$/,
+      );
+      if (publicCourseLectureComplete && method === "POST") {
+        const result = completeFixtureCourseLecture(
+          server.state.courseCatalog,
+          publicCourseLectureComplete.courseId,
+          publicCourseLectureComplete.lectureId,
+        );
+        if (!result) {
+          await json(route, { error: "lecture not found" }, 404);
+        } else if ("linked" in result) {
+          await json(
+            route,
+            { error: "only theory lectures can be completed directly" },
+            400,
+          );
+        } else if (result.locked) {
+          await json(
+            route,
+            {
+              locked: true,
+              blockedBy: result.blockedBy,
+            },
+          );
+        } else {
+          await json(route, result.detail);
+        }
+        return;
+      }
+      const publicCourseLecture = courseLecturePath(
+        pathname,
+        /^\/api\/courses\/([^/]+)\/lectures\/([^/]+)$/,
+      );
+      if (publicCourseLecture && method === "GET") {
+        const result = courseLectureDetail(
+          server.state.courseCatalog,
+          publicCourseLecture.courseId,
+          publicCourseLecture.lectureId,
+        );
+        if (!result) {
+          await json(route, { error: "lecture not found" }, 404);
+        } else if (result.locked) {
+          await json(
+            route,
+            {
+              locked: true,
+              blockedBy: result.blockedBy,
+            },
+          );
+        } else {
+          await json(route, result.detail);
+        }
         return;
       }
       if (
         pathname === "/api/organizations/my-assignments" &&
         method === "GET"
       ) {
-        await json(route, { assignments: server.state.assignments });
+        await json(route, {
+          assignments: server.state.assignments.map((assignment) => {
+            for (const course of server.state.organizationCourseCatalog) {
+              const lecture = course.lectures.find(
+                (candidate) => candidate.scenarioId === assignment.scenarioId,
+              );
+              if (!lecture) continue;
+              return {
+                ...assignment,
+                scenarioTitle: lecture.title,
+                lecture: {
+                  courseId: course.courseId,
+                  lectureId: lecture.lectureId,
+                  title: lecture.title,
+                  state: lecture.state,
+                  blockedBy: lecture.blockedBy,
+                  scope:
+                    course.organizationId === assignment.organizationId
+                      ? "organization-private"
+                      : "organization-public",
+                },
+              };
+            }
+            return { ...assignment, lecture: null };
+          }),
+        });
         return;
       }
       if (pathname === "/api/scenarios/runs/summary" && method === "GET") {
@@ -978,37 +1099,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         );
         return;
       }
-      const learnerScenarioId = segment(
-        pathname,
-        /^\/api\/scenarios\/([^/]+)$/,
-      );
-      if (learnerScenarioId && method === "GET") {
-        const organizationId = url.searchParams.get("organizationId") || null;
-        const catalog = organizationId
-          ? nestedCourseCatalog(
-              server.state.organizationScenarios,
-              server.state.organizationCourses,
-              server.state.capacityPressure,
-            )
-          : nestedCourseCatalog(
-              server.state.scenarios,
-              server.state.courses,
-              server.state.capacityPressure,
-            );
-        await json(route, {
-          scenario: {
-            ...server.state.scenarioDetail,
-            scenarioId: learnerScenarioId,
-            courseLocation: courseLocationForScenario(
-              catalog,
-              learnerScenarioId,
-              organizationId,
-            ),
-          },
-        });
-        return;
-      }
-
       const runId = segment(pathname, /^\/api\/scenarios\/runs\/([^/]+)$/);
       if (runId && method === "GET") {
         await json(route, { run: server.state.run });
@@ -1345,24 +1435,94 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (
-        /^\/api\/organizations\/[^/]+\/scenarios$/.test(pathname) &&
+        /^\/api\/organizations\/[^/]+\/courses$/.test(pathname) &&
         method === "GET"
       ) {
         await json(
           route,
-          nestedCourseCatalog(
-            server.state.organizationScenarios,
-            server.state.organizationCourses,
+          courseCatalogResponse(
+            server.state.organizationCourseCatalog,
             server.state.capacityPressure,
           ),
         );
         return;
       }
-      if (
-        /^\/api\/organizations\/[^/]+\/scenarios\/sources$/.test(pathname) &&
-        method === "GET"
-      ) {
-        await json(route, { sources: server.state.sources });
+      const organizationCourseLectureComplete = courseLecturePath(
+        pathname,
+        /^\/api\/organizations\/([^/]+)\/courses\/([^/]+)\/lectures\/([^/]+)\/complete$/,
+      );
+      if (organizationCourseLectureComplete && method === "POST") {
+        const scope = url.searchParams.get("scope");
+        if (scope !== "public" && scope !== "private") {
+          await json(route, { error: "scope must be public or private" }, 400);
+          return;
+        }
+        const result = completeFixtureCourseLecture(
+          organizationScopedCourses(
+            server.state.organizationCourseCatalog,
+            organizationCourseLectureComplete.organizationId ?? "",
+            scope,
+          ),
+          organizationCourseLectureComplete.courseId,
+          organizationCourseLectureComplete.lectureId,
+        );
+        if (!result) {
+          await json(route, { error: "lecture not found" }, 404);
+        } else if ("linked" in result) {
+          await json(
+            route,
+            { error: "only theory lectures can be completed directly" },
+            400,
+          );
+        } else if (result.locked) {
+          await json(
+            route,
+            {
+              error: "complete the required lecture first",
+              code: "course_lecture_locked",
+              blockedBy: result.blockedBy,
+            },
+            409,
+          );
+        } else {
+          await json(route, result.detail);
+        }
+        return;
+      }
+      const organizationCourseLecture = courseLecturePath(
+        pathname,
+        /^\/api\/organizations\/([^/]+)\/courses\/([^/]+)\/lectures\/([^/]+)$/,
+      );
+      if (organizationCourseLecture && method === "GET") {
+        const scope = url.searchParams.get("scope");
+        if (scope !== "public" && scope !== "private") {
+          await json(route, { error: "scope must be public or private" }, 400);
+          return;
+        }
+        const result = courseLectureDetail(
+          organizationScopedCourses(
+            server.state.organizationCourseCatalog,
+            organizationCourseLecture.organizationId ?? "",
+            scope,
+          ),
+          organizationCourseLecture.courseId,
+          organizationCourseLecture.lectureId,
+        );
+        if (!result) {
+          await json(route, { error: "lecture not found" }, 404);
+        } else if (result.locked) {
+          await json(
+            route,
+            {
+              error: "complete the required lecture first",
+              code: "course_lecture_locked",
+              blockedBy: result.blockedBy,
+            },
+            409,
+          );
+        } else {
+          await json(route, result.detail);
+        }
         return;
       }
       if (
@@ -1667,41 +1827,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       if (pathname === "/api/admin/organizations" && method === "GET") {
         await json(route, {
           organizations: server.state.adminOrganizations,
-        });
-        return;
-      }
-
-      if (pathname === "/api/admin/authoring/sources" && method === "GET") {
-        await json(route, { sources: server.state.sources });
-        return;
-      }
-      if (pathname === "/api/admin/authoring/sources" && method === "POST") {
-        await json(route, { source: server.state.sources[0] ?? null }, 201);
-        return;
-      }
-      const sourceId = segment(
-        pathname,
-        /^\/api\/admin\/authoring\/sources\/([^/]+)$/,
-      );
-      if (sourceId && method === "GET") {
-        await json(route, {
-          source: {
-            id: sourceId,
-            scenarioId: sourceId,
-            hcl: server.state.sourceHcl,
-          },
-        });
-        return;
-      }
-      if (sourceId && method === "DELETE") {
-        await noContent(route);
-        return;
-      }
-      if (pathname === "/api/admin/authoring/build" && method === "POST") {
-        await json(route, {
-          rev: "rev-test-only",
-          queued: 1,
-          assigned: [{ buildId: "build-test-only", hostId: "host-builder-1" }],
         });
         return;
       }

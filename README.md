@@ -29,9 +29,11 @@ Never hand-edit migration SQL or metadata, create custom migrations, or add SQL
 triggers. Run `bun run --cwd apps/web db:generate` after a typed schema change
 and `bun run check:database-migrations` before committing it.
 
-`content/scenarios/` contains Scenario source. Scenario curriculum can be
-authored independently in an optional
-[`content/courses.hcl`](docs/src/content/docs/authoring/course-catalogs.md) manifest.
+`content/courses/` contains Markdown-first Course source. Each Course contains
+`course.md` and ordered Lecture directories. Each Lecture contains `lecture.md`
+and can contain a technical `scenario.hcl`. The base image catalog remains at
+`content/scenarios/base-images.hcl`. See the
+[Course authoring guide](docs/src/content/docs/authoring/course-catalogs.md).
 
 Scenario-host operators should follow the
 [Cloud Hypervisor jailer operations guide](docs/src/content/docs/operations/scenario-host-jailer.md),

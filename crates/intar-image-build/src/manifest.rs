@@ -1,13 +1,10 @@
 use anyhow::{Context as _, Result, bail};
 use intar_contracts::catalog::{
-    GUEST_BOOTSTRAP_ABI_V1, ImageArchitecture, ImageFormat, ImageKey, Mib,
-    ProbePhase as CatalogProbePhase, ScenarioDifficulty as CatalogScenarioDifficulty,
-    ScenarioHintManifestV3, ScenarioManifestV4, ScenarioProbeManifestV3, ScenarioVmBootManifestV4,
-    ScenarioVmManifestV4,
+    CourseCatalogLectureV2, GUEST_BOOTSTRAP_ABI_V1, ImageArchitecture, ImageFormat, ImageKey, Mib,
+    ProbePhase as CatalogProbePhase, ScenarioHintManifestV3, ScenarioManifestV4,
+    ScenarioProbeManifestV3, ScenarioVmBootManifestV4, ScenarioVmManifestV4,
 };
-use intar_image_scenario::{
-    ScenarioDifficulty as SourceScenarioDifficulty, ScenarioHint, VmDefinition,
-};
+use intar_image_scenario::{ScenarioHint, VmDefinition};
 
 use crate::direct::RenderedDirectBuild;
 use crate::qemu::PUBLISHED_BOOT_CMDLINE;
@@ -26,7 +23,7 @@ pub fn build_direct_manifest_json(
     build_manifest(ManifestInput {
         scenario: &rendered.scenario,
         scenario_name: &rendered.scenario_name,
-        scenario_description: &rendered.scenario_description,
+        lecture: &rendered.lecture,
         target_arch: &rendered.target_arch,
         vm: &rendered.vm,
         image_id,
@@ -79,7 +76,7 @@ fn append_manifest_if_header_matches(
 struct ManifestInput<'a> {
     scenario: &'a intar_image_scenario::Scenario,
     scenario_name: &'a str,
-    scenario_description: &'a str,
+    lecture: &'a CourseCatalogLectureV2,
     target_arch: &'a str,
     vm: &'a VmDefinition,
     image_id: &'a str,
@@ -127,21 +124,17 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV4> {
         schema_version: 4,
         scenario_id: input.scenario_name.to_string(),
         name: input.scenario_name.to_string(),
-        title: input.scenario.title.clone(),
-        category: input.scenario.category.clone(),
-        description: input.scenario_description.to_string(),
-        difficulty: catalog_difficulty(
-            input
-                .scenario
-                .difficulty
-                .context("scenario difficulty must be validated before manifest generation")?,
-        ),
-        estimated_minutes: input
-            .scenario
-            .estimated_minutes
-            .context("scenario estimated_minutes must be validated before manifest generation")?,
-        tags: input.scenario.tags.clone(),
-        briefing_markdown: input.scenario.briefing.clone(),
+        title: input.lecture.title.clone(),
+        category: input.lecture.category.clone(),
+        description: input.lecture.summary.clone(),
+        difficulty: input
+            .lecture
+            .difficulty
+            .clone()
+            .context("lecture difficulty must be validated before manifest generation")?,
+        estimated_minutes: input.lecture.estimated_minutes,
+        tags: input.lecture.tags.clone(),
+        briefing_markdown: input.lecture.body_markdown.clone(),
         solution_markdown: input
             .scenario
             .solution
@@ -188,14 +181,6 @@ fn catalog_probe_phase(phase: intar_image_scenario::ProbePhase) -> CatalogProbeP
     match phase {
         intar_image_scenario::ProbePhase::Boot => CatalogProbePhase::Boot,
         intar_image_scenario::ProbePhase::Scenario => CatalogProbePhase::Scenario,
-    }
-}
-
-fn catalog_difficulty(difficulty: SourceScenarioDifficulty) -> CatalogScenarioDifficulty {
-    match difficulty {
-        SourceScenarioDifficulty::Easy => CatalogScenarioDifficulty::Easy,
-        SourceScenarioDifficulty::Medium => CatalogScenarioDifficulty::Medium,
-        SourceScenarioDifficulty::Hard => CatalogScenarioDifficulty::Hard,
     }
 }
 
@@ -273,6 +258,7 @@ base_image "trixie" {
         let rendered = render_direct_build(&DirectBuildRequest {
             scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
             scenario,
+            lecture: lecture_fixture(),
             vm_name: "web".to_string(),
             config: QemuBuildConfig {
                 output_root: directory.path().join("dist"),
@@ -304,6 +290,11 @@ base_image "trixie" {
         assert_eq!(vm.boot.initrd_sha256, "d".repeat(64));
         assert_eq!(vm.boot.cmdline, PUBLISHED_BOOT_CMDLINE);
         assert_eq!(manifest.schema_version, 4);
+        assert_eq!(manifest.title, "Lecture title");
+        assert_eq!(manifest.description, "Lecture summary");
+        assert_eq!(manifest.category, "lecture-category");
+        assert_eq!(manifest.tags, ["lecture-tag"]);
+        assert_eq!(manifest.briefing_markdown, "Lecture theory.");
         assert_eq!(
             vm.guest_bootstrap_abi,
             intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1
@@ -376,6 +367,20 @@ base_image "trixie" {
                 disk_mib: intar_contracts::catalog::Mib(2048),
                 probes: Vec::new(),
             }],
+        }
+    }
+
+    fn lecture_fixture() -> intar_contracts::catalog::CourseCatalogLectureV2 {
+        intar_contracts::catalog::CourseCatalogLectureV2 {
+            lecture_id: "01-nginx".to_string(),
+            title: "Lecture title".to_string(),
+            summary: "Lecture summary".to_string(),
+            body_markdown: "Lecture theory.".to_string(),
+            category: "lecture-category".to_string(),
+            tags: vec!["lecture-tag".to_string()],
+            difficulty: Some(intar_contracts::catalog::ScenarioDifficulty::Easy),
+            estimated_minutes: 15,
+            scenario_id: Some("broken-nginx".to_string()),
         }
     }
 }

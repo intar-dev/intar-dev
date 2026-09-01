@@ -26,17 +26,35 @@ export type ImageBuildStatus =
   | "failed"
   | "stale";
 
-export interface ScenarioCourseCatalogCourse {
-  courseId: string;
+/**
+ * Normalized Worker/DB form of the generated CourseCatalogSnapshotV2 wire
+ * contract. The generated contract stays snake_case at the bundle boundary;
+ * this form is camelCase for the application and persisted JSON snapshot.
+ */
+export interface CourseCatalogLectureV2 {
+  lectureId: string;
   title: string;
-  description: string;
-  scenarioIds: string[];
+  summary: string;
+  bodyMarkdown: string;
+  category: string;
+  tags: string[];
+  difficulty?: "easy" | "medium" | "hard";
+  estimatedMinutes: number;
+  scenarioId?: string;
 }
 
-export interface ScenarioCourseCatalogSnapshotV1 {
-  version: 1;
-  mode: "replace";
-  courses: ScenarioCourseCatalogCourse[];
+export interface CourseCatalogCourseV2 {
+  courseId: string;
+  title: string;
+  summary: string;
+  bodyMarkdown: string;
+  sequential: boolean;
+  lectures: CourseCatalogLectureV2[];
+}
+
+export interface CourseCatalogSnapshotV2 {
+  version: 2;
+  courses: CourseCatalogCourseV2[];
 }
 
 export interface ImageBuildBundleMeta {
@@ -47,7 +65,7 @@ export interface ImageBuildBundleMeta {
     arch: ImageArchitecture;
     contentHash: string;
   }>;
-  courseCatalog?: ScenarioCourseCatalogSnapshotV1;
+  courseCatalog?: CourseCatalogSnapshotV2;
   [key: string]: unknown;
 }
 

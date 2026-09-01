@@ -307,37 +307,6 @@ export const accessEvents = sqliteTable(
   ],
 );
 
-// Authoring drafts: the HCL system-of-record for scenarios written in the
-// app (repo/CI-authored scenarios don't appear here).
-export const scenarioSources = sqliteTable(
-  "scenario_sources",
-  {
-    id: text("id").primaryKey(),
-    scenarioId: text("scenario_id").notNull(),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "restrict",
-    }),
-    hcl: text("hcl").notNull(),
-    status: text("status", {
-      enum: ["draft", "published"],
-    })
-      .default("draft")
-      .notNull(),
-    createdBy: text("created_by")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("scenario_sources_scenario_uidx").on(table.scenarioId),
-    index("scenario_sources_organization_idx").on(
-      table.organizationId,
-      table.updatedAt,
-    ),
-  ],
-);
-
 export const jwks = sqliteTable("jwks", {
   id: text("id").primaryKey(),
   publicKey: text("public_key").notNull(),

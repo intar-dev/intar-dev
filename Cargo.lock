@@ -1749,6 +1749,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "granit-parser"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65ec0d45986cd51c847c75c5b69a00852c4fc84d0e5e79f041173f73437d0cdf"
+dependencies = [
+ "arraydeque",
+ "smallvec",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2233,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "intar-builder"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2303,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "intar-image-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2315,6 +2325,7 @@ dependencies = [
  "intar-image-upload",
  "reqwest",
  "serde",
+ "serde-saphyr 1.2.0",
  "serde_json",
  "tar",
  "tempfile",
@@ -2333,16 +2344,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
-]
-
-[[package]]
-name = "intar-image-scenario-wasm"
-version = "0.1.0"
-dependencies = [
- "intar-image-scenario",
- "serde",
- "serde_json",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2795,7 +2796,7 @@ dependencies = [
  "rustls",
  "secrecy",
  "serde",
- "serde-saphyr",
+ "serde-saphyr 0.0.27",
  "serde_json",
  "thiserror",
  "tokio",
@@ -4550,12 +4551,26 @@ dependencies = [
  "base64",
  "encoding_rs_io",
  "getrandom 0.3.4",
- "granit-parser",
+ "granit-parser 0.0.3",
  "nohash-hasher",
  "num-traits",
  "serde",
  "smallvec",
  "zmij",
+]
+
+[[package]]
+name = "serde-saphyr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3afb591f9cdb6223c88ba39269aff895620c7f0716dc42b705b5733d5c7c0823"
+dependencies = [
+ "annotate-snippets",
+ "encoding_rs_io",
+ "granit-parser 1.2.0",
+ "num-traits",
+ "serde_core",
+ "smallvec",
 ]
 
 [[package]]
@@ -5268,7 +5283,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

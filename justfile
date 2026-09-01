@@ -38,7 +38,7 @@ test: test-rust test-js
 build-rust:
     cargo build --workspace
 
-build-js: generate-scenario-wasm
+build-js:
     bun run build
 
 build: build-rust build-js
@@ -56,13 +56,7 @@ security:
 generate-contracts:
     cargo run -p intar-contracts-typegen
 
-generate-scenario-wasm:
-    wasm-pack build crates/intar-image-scenario-wasm --target web --release --no-pack --out-dir ../../apps/web/src/generated/scenario-wasm
-
-generate-scenario-authoring-config:
-    bun tools/generate-scenario-authoring-config.ts
-
-generate: generate-contracts generate-scenario-wasm generate-scenario-authoring-config
+generate: generate-contracts
 
 check-generated-contracts:
     cargo run -p intar-contracts-typegen

@@ -57,7 +57,7 @@ describe("image revision completion status", () => {
       rev: "revision-1",
       r2Key: "builds/bundles/revision-1.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v10",
+        buildFormatVersion: "intar-image-build-v11",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -112,6 +112,46 @@ describe("image revision completion status", () => {
       ok: false,
       state: "warming",
       hosts: [{ host_id: "agent-1", actual_guest_tools_ready: false }],
+    });
+  });
+
+  it("marks a content-only bundle ready without an affected host", async () => {
+    const db = drizzle(env.DB);
+    await db
+      .update(imageBuildBundles)
+      .set({
+        metaJson: {
+          buildFormatVersion: "intar-image-build-v11",
+          scenarios: [],
+        },
+      })
+      .where(eq(imageBuildBundles.rev, "revision-1"));
+    await db
+      .update(agentHosts)
+      .set({ disabled: true })
+      .where(eq(agentHosts.id, "agent-1"));
+
+    const ready = await status();
+    await expect(ready.json()).resolves.toMatchObject({
+      ok: true,
+      state: "ready",
+      builds: [],
+      images: [],
+      hosts: [],
+    });
+  });
+
+  it("keeps a scenario bundle warming when no host is affected", async () => {
+    await drizzle(env.DB)
+      .update(agentHosts)
+      .set({ disabled: true })
+      .where(eq(agentHosts.id, "agent-1"));
+
+    const warming = await status();
+    await expect(warming.json()).resolves.toMatchObject({
+      ok: false,
+      state: "warming",
+      hosts: [],
     });
   });
 });

@@ -4,7 +4,6 @@ import {
   ORGANIZATION_DETAIL_TABS,
   validateAdminPeopleSearch,
   validateOrganizationDetailSearch,
-  validateScenarioBriefingSearch,
 } from "./tab-search";
 
 describe("organization detail tab search", () => {
@@ -48,45 +47,5 @@ describe("admin people tab search", () => {
     });
     expect(validateAdminPeopleSearch({ tab: "requests" })).toEqual({});
     expect(ADMIN_PEOPLE_TABS).not.toContain("requests");
-  });
-});
-
-describe("scenario briefing search", () => {
-  it("keeps only normalized catalog filters", () => {
-    expect(
-      validateScenarioBriefingSearch({
-        course: " public:operations ",
-        q: " nginx ",
-        difficulty: "medium",
-        category: " Linux services ",
-        tags: [" networking ", "linux", "linux", " "],
-        sort: "title",
-        organizationId: " org-platform ",
-        step: "2",
-        steps: "5",
-      }),
-    ).toEqual({
-      q: "nginx",
-      difficulty: "medium",
-      category: "Linux services",
-      tags: ["linux", "networking"],
-      sort: "title",
-    });
-  });
-
-  it("drops invalid and legacy navigation values", () => {
-    expect(
-      validateScenarioBriefingSearch({
-        course: " ",
-        q: 42,
-        difficulty: "expert",
-        category: " ",
-        tags: [" ", 42, null],
-        sort: "popular",
-        organizationId: 42,
-        step: 4,
-        steps: 3,
-      }),
-    ).toEqual({});
   });
 });

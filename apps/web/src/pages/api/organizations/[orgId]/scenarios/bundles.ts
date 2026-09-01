@@ -91,26 +91,24 @@ export const POST: APIRoute = async ({ request, params }) => {
 
     const db = drizzle(env.DB);
     const courseCatalog = parsed.value.bundleMeta.courseCatalog;
-    if (courseCatalog) {
-      const referenceValidation = await validateScenarioCourseCatalogReferences(
-        db,
+    const invalidScenarioIds = await validateScenarioCourseCatalogReferences(
+      db,
+      {
+        snapshot: courseCatalog,
+        bundleScenarioIds: parsed.value.bundleMeta.scenarios.map(
+          (scenario) => scenario.scenarioId,
+        ),
+        organizationId: organization.id,
+      },
+    );
+    if (invalidScenarioIds.length) {
+      return jsonResponse(
         {
-          snapshot: courseCatalog,
-          bundleScenarioIds: parsed.value.bundleMeta.scenarios.map(
-            (scenario) => scenario.scenarioId,
-          ),
-          organizationId: organization.id,
+          error: "course catalog references unavailable scenarios",
+          scenario_ids: invalidScenarioIds,
         },
+        { status: 400 },
       );
-      if (!referenceValidation.ok) {
-        return jsonResponse(
-          {
-            error: "course catalog references unavailable scenarios",
-            scenario_ids: referenceValidation.invalidScenarioIds,
-          },
-          { status: 400 },
-        );
-      }
     }
 
     const objectKey = bundleObjectKey(rev);
@@ -129,14 +127,12 @@ export const POST: APIRoute = async ({ request, params }) => {
       organizationId: organization.id,
       nowUnixMs: now,
     });
-    if (courseCatalog) {
-      await syncScenarioCourseCatalogSnapshot(db, {
-        snapshot: courseCatalog,
-        sourceRevision: parsed.value.rev,
-        organizationId: organization.id,
-        nowUnixMs: now,
-      });
-    }
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: courseCatalog,
+      sourceRevision: parsed.value.rev,
+      organizationId: organization.id,
+      nowUnixMs: now,
+    });
     const assigned = await assignQueuedImageBuilds(db, now);
     if (queued.queued < meta.scenarios.length) {
       await tryReconcileScenarioImagesForPublicationScope(db, {

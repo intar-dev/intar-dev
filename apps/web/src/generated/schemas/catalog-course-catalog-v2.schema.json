@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CourseCatalogSnapshotV2",
+  "description": "The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.",
+  "type": "object",
+  "properties": {
+    "courses": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CourseCatalogCourseV2"
+      }
+    },
+    "version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 2,
+      "minimum": 2
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "courses"
+  ],
+  "$defs": {
+    "CourseCatalogCourseV2": {
+      "type": "object",
+      "properties": {
+        "body_markdown": {
+          "type": "string"
+        },
+        "course_id": {
+          "type": "string"
+        },
+        "lectures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CourseCatalogLectureV2"
+          }
+        },
+        "sequential": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "course_id",
+        "title",
+        "summary",
+        "body_markdown",
+        "sequential",
+        "lectures"
+      ]
+    },
+    "CourseCatalogLectureV2": {
+      "type": "object",
+      "properties": {
+        "body_markdown": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "difficulty": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioDifficulty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "estimated_minutes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "lecture_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "lecture_id",
+        "title",
+        "summary",
+        "body_markdown",
+        "category",
+        "tags",
+        "estimated_minutes"
+      ]
+    },
+    "ScenarioDifficulty": {
+      "type": "string",
+      "enum": [
+        "easy",
+        "medium",
+        "hard"
+      ]
+    }
+  }
+}

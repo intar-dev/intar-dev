@@ -16,6 +16,7 @@ import {
   drizzleQueryToD1Statement,
   executeScenarioRunRuntimeProjection,
 } from "@/lib/runtime-executions";
+import { recordLinkedCourseUnitCompletionForRun } from "@/lib/scenario-course-catalogs";
 import {
   loadOrCreateHostDesiredState,
   mutateStoredHostDesiredState,
@@ -160,6 +161,12 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         row.completedAt === completedAt &&
         row.failedAt === failedAt
       ) {
+        if (merged.phase === "completed" && solvedAt !== null) {
+          await recordLinkedCourseUnitCompletionForRun(db, {
+            runId,
+            nowUnixMs: now,
+          });
+        }
         return "unchanged";
       }
 
@@ -222,6 +229,13 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           return "stale_session";
         }
         continue;
+      }
+
+      if (merged.phase === "completed" && solvedAt !== null) {
+        await recordLinkedCourseUnitCompletionForRun(db, {
+          runId,
+          nowUnixMs: now,
+        });
       }
 
       await recordProbeTransitions(db, {

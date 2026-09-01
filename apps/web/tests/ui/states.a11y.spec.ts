@@ -68,7 +68,7 @@ function runSshButton(page: Page): Locator {
 }
 
 function runLearningSheet(page: Page): Locator {
-  return page.getByRole("dialog", { name: "Mission and hints" });
+  return page.getByRole("dialog", { name: "Lecture theory and hints" });
 }
 
 async function openRunSshDialog(page: Page) {
@@ -277,7 +277,7 @@ test.describe("focused state accessibility", () => {
   for (const variant of ["empty", "error", "long"] as const) {
     test(`catalog · ${variant}`, async ({ page, ui }, testInfo) => {
       await ui.open({
-        ...routeCase("scenario-catalog"),
+        ...routeCase("course-catalog"),
         theme: "light",
         variant,
       });
@@ -298,13 +298,14 @@ test.describe("focused state accessibility", () => {
         .click();
 
       await expect(
+        page.getByRole("link", { name: /Platform repair sequence/ }),
+      ).toBeVisible();
+      await page.getByRole("link", { name: /Platform repair sequence/ }).click();
+      await expect(
         page.getByRole("heading", { name: "Platform repair sequence" }),
       ).toBeVisible();
-      await page
-        .getByRole("link", { name: /Platform repair sequence/ })
-        .click();
       await expect(
-        page.getByRole("heading", { name: "Repair a broken nginx service" }),
+        page.getByText("Private service context", { exact: true }),
       ).toBeVisible();
       await expectNoAxeViolations(page, testInfo);
     });
@@ -679,19 +680,6 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("authoring invalid validation", async ({ page, ui }, testInfo) => {
-    await ui.open({ ...routeCase("admin-authoring"), theme: "dark" });
-    const editor = page.getByLabel("Scenario HCL source");
-    await expect(editor).toBeVisible();
-    await editor.fill('scenario "broken" {');
-    await page.getByRole("button", { name: "Validate" }).click();
-
-    await expect(page.getByLabel("Validation results")).toContainText(
-      /validation error|validator error|failed/i,
-    );
-    await expectNoAxeViolations(page, testInfo);
-  });
-
   test("native SSH credentials", async ({ page, ui }, testInfo) => {
     await ui.open({
       ...routeCase("run-workspace"),
@@ -944,9 +932,9 @@ test.describe("focused state accessibility", () => {
 
     try {
       await expect(
-        page.getByText("Loading your lab…", { exact: true }),
+        page.getByText("Loading your run…", { exact: true }),
       ).toBeVisible();
-      await expectStandardRunChrome(page, "Lab run");
+      await expectStandardRunChrome(page, "Scenario run");
       await expectNoAxeViolations(page, testInfo);
     } finally {
       releaseRunResponse?.();
@@ -998,7 +986,7 @@ test.describe("focused state accessibility", () => {
     const content = runLearningContent(panel);
     const checks = content.getByRole("region", { name: "Checks" });
     await expect(
-      content.getByText("Mission briefing", { exact: true }),
+      content.getByRole("heading", { name: /^Lecture theory/ }),
     ).toBeVisible();
     await expect(checks).toBeVisible();
     await expect(checks).toContainText("Start the web server");
@@ -1346,7 +1334,7 @@ test.describe("focused state accessibility", () => {
       page.getByRole("heading", { name: "Ended early", exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: "Try this lab again" }),
+      page.getByRole("link", { name: "Read lecture and try again" }),
     ).toBeVisible();
     const progress = page.getByRole("progressbar", {
       name: "Final checks progress",
@@ -1442,7 +1430,7 @@ test.describe("focused mobile state accessibility", () => {
     const trigger = runLearningTrigger(page);
     await expect(trigger).toBeVisible();
     await expect(trigger).toHaveAccessibleName(
-      "Open mission and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+      "Open lecture theory and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
     );
     await expectCoarsePointerTarget(
       trigger,
@@ -1464,7 +1452,7 @@ test.describe("focused mobile state accessibility", () => {
     await expectNoVisibleBoxShadow(sheet);
     await expect(content.getByRole("region", { name: "Checks" })).toBeVisible();
     await expectCoarsePointerTarget(
-      sheet.getByRole("button", { name: "Close mission and hints" }),
+      sheet.getByRole("button", { name: "Close lecture theory and hints" }),
       "mobile mission and hints close button",
     );
     await expectCoarsePointerTarget(
@@ -2017,7 +2005,7 @@ test.describe("short run workspace", () => {
     });
     expect(scrolledBack).toBeGreaterThanOrEqual(0);
     const close = sheet.getByRole("button", {
-      name: "Close mission and hints",
+      name: "Close lecture theory and hints",
     });
     await expectCoarsePointerTarget(
       close,
@@ -2094,7 +2082,7 @@ test.describe("small-screen access management", () => {
     await expectRunWorkspaceChrome(page);
     const trigger = runLearningTrigger(page);
     await expect(trigger).toHaveAccessibleName(
-      "Open mission and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+      "Open lecture theory and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
     );
     await expectCoarsePointerTarget(
       trigger,
@@ -2180,7 +2168,9 @@ test.describe("small-screen access management", () => {
     await expect(
       page.getByRole("heading", { name: "Ended early", exact: true }),
     ).toBeVisible();
-    const nextAction = page.getByRole("link", { name: "Try this lab again" });
+    const nextAction = page.getByRole("link", {
+      name: "Read lecture and try again",
+    });
     await nextAction.scrollIntoViewIfNeeded();
     await expectCoarsePointerTarget(nextAction, "320px ended-early next action");
     await expectNoHorizontalOverflow(page);

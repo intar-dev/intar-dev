@@ -5,15 +5,36 @@ import { cn } from "@/lib/utils";
 export function Markdown({
   children,
   className,
+  headingOffset = 0,
 }: {
   children: string;
   className?: string;
+  /** Content pages already own an h1 in the app bar. */
+  headingOffset?: 0 | 1;
 }) {
+  const Heading1 = headingOffset ? "h2" : "h1";
+  const Heading2 = headingOffset ? "h3" : "h2";
+  const Heading3 = headingOffset ? "h4" : "h3";
   return (
     <div className={cn("space-y-4", className ?? "text-body")}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          h1: ({ children }) => (
+            <Heading1 className="text-section-title text-balance">
+              {children}
+            </Heading1>
+          ),
+          h2: ({ children }) => (
+            <Heading2 className="text-card-title text-balance">
+              {children}
+            </Heading2>
+          ),
+          h3: ({ children }) => (
+            <Heading3 className="text-base font-semibold text-balance">
+              {children}
+            </Heading3>
+          ),
           p: ({ children }) => <p>{children}</p>,
           a: ({ children, ...props }) => (
             <a

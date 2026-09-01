@@ -916,8 +916,8 @@ packages = ["nginx"]
             ));
             assert!(script.contains("systemctl set-default multi-user.target"));
             assert!(script.contains("cat >/etc/motd <<'EOF_MOTD'"));
-            assert!(script.contains("Broken Nginx"));
-            assert!(script.contains("Fix nginx"));
+            assert!(!script.contains("Broken Nginx"));
+            assert!(!script.contains("Fix nginx"));
             assert!(script.contains("- Nginx should be running"));
             assert!(!script.contains("Briefing should stay on the website only."));
             assert!(!script.contains("Hint should not be baked into the VM."));

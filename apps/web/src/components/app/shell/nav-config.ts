@@ -1,7 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
   BookOpen,
-  FileCode2,
   Hammer,
   LayoutDashboard,
   Library,
@@ -116,13 +115,6 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Scenarios",
         to: "/admin/scenarios",
         icon: Library,
-        requires: "admin",
-      },
-      {
-        id: "admin-authoring",
-        label: "Authoring",
-        to: "/admin/authoring",
-        icon: FileCode2,
         requires: "admin",
       },
       {

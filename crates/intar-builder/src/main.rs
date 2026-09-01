@@ -237,6 +237,7 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
             let output = run_direct_build(&DirectBuildRequest {
                 scenario_path: bundle_input.scenario_path.clone(),
                 scenario: bundle_input.scenario.clone(),
+                lecture: bundle_input.lecture.clone(),
                 vm_name: vm.name.clone(),
                 config: build_config.clone(),
                 base_image: base_image.clone(),

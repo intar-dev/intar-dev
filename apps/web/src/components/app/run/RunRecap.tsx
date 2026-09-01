@@ -23,13 +23,16 @@ import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { ScenarioStepScreen } from "@/components/app/run/StatusScreens";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
-  CourseCatalogLink,
-  CourseScenarioLink,
-} from "@/components/app/pages/learn/course-route-links";
+  CourseLink,
+  LectureLink,
+} from "@/components/app/pages/learn/course-links";
+import {
+  courseRouteForRun,
+  type CourseLectureSummary,
+} from "@/components/app/pages/learn/course-wire";
 import { scenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
 import type {
   CourseLocation,
-  ScenarioCatalogWireEntry,
 } from "@/lib/scenario-runs";
 import { cn } from "@/lib/utils";
 import { formatScenarioDurationMs } from "./run-support";
@@ -54,8 +57,8 @@ export interface RunRecapProps {
   run: ScenarioRunRecord;
   /** The saved course context builds the one learner-safe next step. */
   courseLocation?: CourseLocation | null | undefined;
-  /** The next current-course lab, when the catalog can prove one exists. */
-  nextScenario?: ScenarioCatalogWireEntry | null | undefined;
+  /** The next current-course lecture, when the catalog can prove one exists. */
+  nextLecture?: CourseLectureSummary | null | undefined;
   headingRef?: Ref<HTMLHeadingElement> | undefined;
   /** Optional override for embedding the recap in another learner flow. */
   nextAction?: ReactNode;
@@ -144,7 +147,7 @@ export function getRunSavingAnnouncement(stage: RunSavingStage | string) {
 export function RunRecap({
   run,
   courseLocation = run.courseLocation,
-  nextScenario = null,
+  nextLecture = null,
   headingRef,
   nextAction,
 }: RunRecapProps) {
@@ -281,10 +284,9 @@ export function RunRecap({
         <div className="mt-4">
           {nextAction ?? (
             <DefaultNextAction
-              run={run}
               recapKind={recap.kind}
               courseLocation={courseLocation}
-              nextScenario={nextScenario}
+              nextLecture={nextLecture}
             />
           )}
         </div>
@@ -401,53 +403,59 @@ function RunRecapProgress({
 }
 
 function DefaultNextAction({
-  run,
   recapKind,
   courseLocation,
-  nextScenario,
+  nextLecture,
 }: {
-  run: ScenarioRunRecord;
   recapKind: Exclude<ReturnType<typeof getRunRecapState>["kind"], "saving">;
   courseLocation: CourseLocation | null | undefined;
-  nextScenario: ScenarioCatalogWireEntry | null | undefined;
+  nextLecture: CourseLectureSummary | null | undefined;
 }) {
   const linkClassName = cn(
     buttonVariants({ variant: "default", size: "default" }),
     "min-h-11 w-full max-w-full whitespace-normal sm:min-h-10 sm:w-auto [@media(pointer:coarse)]:min-h-11",
   );
 
-  if (recapKind === "solved" && courseLocation && nextScenario) {
+  const route = courseRouteForRun(courseLocation);
+  const lectureId = courseLocation?.lectureId ?? null;
+
+  if (recapKind === "solved" && route && nextLecture) {
     return (
-      <CourseScenarioLink
-        location={courseLocation}
-        scenarioId={nextScenario.scenarioId}
+      <LectureLink
+        route={route}
+        lectureId={nextLecture.lectureId}
         className={linkClassName}
       >
-        Next lab: {nextScenario.title}
+        Next lecture: {nextLecture.title}
         <ArrowRight className="size-4" aria-hidden="true" />
-      </CourseScenarioLink>
+      </LectureLink>
     );
   }
 
-  if (recapKind === "solved" && courseLocation) {
+  if (recapKind === "solved" && route && courseLocation) {
     return (
-      <CourseCatalogLink location={courseLocation} className={linkClassName}>
+      <CourseLink route={route} className={linkClassName}>
         Back to {courseLocation.courseTitle}
         <ArrowLeft className="size-4" aria-hidden="true" />
-      </CourseCatalogLink>
+      </CourseLink>
     );
   }
 
-  if (recapKind !== "solved" && courseLocation) {
+  if (recapKind !== "solved" && route && lectureId) {
     return (
-      <CourseScenarioLink
-        location={courseLocation}
-        scenarioId={run.scenarioId}
-        className={linkClassName}
-      >
-        Try this lab again
+      <LectureLink route={route} lectureId={lectureId} className={linkClassName}>
+        Read lecture and try again
         <ArrowRight className="size-4" aria-hidden="true" />
-      </CourseScenarioLink>
+      </LectureLink>
+    );
+  }
+
+  if (recapKind !== "solved" && route) {
+    return (
+      <CourseLink route={route} className={linkClassName}>
+        Back to course
+        <ArrowRight className="size-4" aria-hidden="true" />
+      </CourseLink>
     );
   }
 
@@ -456,7 +464,7 @@ function DefaultNextAction({
       to={recapKind === "solved" ? "/runs" : "/courses"}
       className={linkClassName}
     >
-      {recapKind === "solved" ? "Back to My runs" : "Choose a lab"}
+      {recapKind === "solved" ? "Back to My runs" : "Choose a scenario"}
       {recapKind === "solved" ? (
         <ArrowLeft className="size-4" aria-hidden="true" />
       ) : (

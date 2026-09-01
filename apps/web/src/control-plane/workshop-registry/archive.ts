@@ -1280,7 +1280,7 @@ function agendaTitle(kind: string): string {
     case "demo":
       return "Demo";
     default:
-      return "Lab";
+      return "Scenario";
   }
 }
 

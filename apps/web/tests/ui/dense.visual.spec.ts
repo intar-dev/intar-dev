@@ -4,8 +4,8 @@ import { expectRouteScreenshot } from "./support/screenshot";
 
 const themes = ["light", "dark"] as const;
 
-if (DENSE_ROUTE_CASES.length * themes.length !== 20) {
-  throw new Error("Dense tablet visual matrix must contain exactly 20 cases");
+if (DENSE_ROUTE_CASES.length * themes.length !== 18) {
+  throw new Error("Dense tablet visual matrix must contain exactly 18 cases");
 }
 
 test.describe("dense tablet", () => {

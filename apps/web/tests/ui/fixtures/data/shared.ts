@@ -23,17 +23,47 @@ export type TerminalMode =
   | "error"
   | "delayed-first-ready";
 
+export type CourseLectureFixtureState =
+  | "locked"
+  | "available"
+  | "waiting_for_scenario"
+  | "in_progress"
+  | "completed";
+
+export interface CourseLectureFixture {
+  lectureId: string;
+  title: string;
+  summary: string;
+  bodyMarkdown: string;
+  category: string;
+  tags: string[];
+  difficulty?: "easy" | "medium" | "hard";
+  estimatedMinutes: number;
+  scenarioId: string | null;
+  state: CourseLectureFixtureState;
+  blockedBy: { courseId: string; lectureId: string; title: string } | null;
+  activeRunId: string | null;
+  scenarioReady: boolean | null;
+}
+
+export interface CourseFixture {
+  courseId: string;
+  organizationId: string | null;
+  title: string;
+  summary: string;
+  bodyMarkdown: string;
+  sequential: boolean;
+  lectures: CourseLectureFixture[];
+}
+
 export interface MockApiState {
   sessionRole: SessionRole;
   variant: DataVariant;
   runState: RunFixtureState;
   terminalMode: TerminalMode;
   capacityPressure: number | null;
-  scenarios: Array<Record<string, unknown>>;
-  courses: Array<Record<string, unknown>>;
-  organizationScenarios: Array<Record<string, unknown>>;
-  organizationCourses: Array<Record<string, unknown>>;
-  scenarioDetail: Record<string, unknown>;
+  courseCatalog: CourseFixture[];
+  organizationCourseCatalog: CourseFixture[];
   runs: Array<Record<string, unknown>>;
   run: Record<string, unknown>;
   organizations: Array<Record<string, unknown>>;
@@ -59,8 +89,6 @@ export interface MockApiState {
   adminScenarioDetail: Record<string, unknown>;
   builds: Array<Record<string, unknown>>;
   buildDetails: Record<string, Record<string, unknown>>;
-  sources: Array<Record<string, unknown>>;
-  sourceHcl: string;
 }
 
 export const minute = 60_000;
@@ -166,56 +194,6 @@ export const briefing = {
   tags: ["linux", "nginx", "systemd", "networking"],
   objectives,
 };
-
-export function catalogScenario(input: {
-  scenarioId: string;
-  title: string;
-  tagline: string;
-  difficulty: "easy" | "medium" | "hard";
-  category: string;
-  tags: string[];
-  status: "new" | "in_progress" | "attempted" | "completed";
-  activeRunId?: string | null;
-  organizationId?: string | null;
-}) {
-  return {
-    scenarioId: input.scenarioId,
-    organizationId: input.organizationId ?? null,
-    slug: input.scenarioId,
-    title: input.title,
-    tagline: input.tagline,
-    difficulty: input.difficulty,
-    estimatedMinutes: input.difficulty === "hard" ? 60 : 35,
-    tags: input.tags,
-    category: input.category,
-    scenarioName: input.scenarioId,
-    enabledAt: FIXED_NOW - 45 * day,
-    vmCount: input.difficulty === "hard" ? 2 : 1,
-    progress: {
-      status: input.status,
-      activeRunId: input.activeRunId ?? null,
-      attemptCount: input.status === "new" ? 0 : 2,
-      completedCount: input.status === "completed" ? 1 : 0,
-      bestSolveMs: input.status === "completed" ? 27 * minute : null,
-      lastPlayedAt: input.status === "new" ? null : FIXED_NOW - 2 * day,
-    },
-  };
-}
-
-export function paginatedScenarioFixtures(count = 19) {
-  return Array.from({ length: count }, (_, index) => {
-    const number = index + 1;
-    return catalogScenario({
-      scenarioId: `paging-scenario-${number}`,
-      title: `Paging scenario ${String(number).padStart(2, "0")}`,
-      tagline: "A catalog fixture that verifies collection paging behavior.",
-      difficulty: "medium",
-      category: "Pagination lab",
-      tags: ["paging", "catalog"],
-      status: "new",
-    });
-  });
-}
 
 export function runListEntry(input: {
   runId: string;

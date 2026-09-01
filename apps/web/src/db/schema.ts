@@ -33,6 +33,7 @@ export {
   runtimeVms,
 } from "./schema/runtime";
 export {
+  courseUnitCompletions,
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRunProbeSnapshots,
@@ -64,7 +65,6 @@ export {
   accessInviteRemovals,
   jwks,
   scenarioAssignments,
-  scenarioSources,
 } from "./schema/application";
 export type {
   AccessEventType,
@@ -127,8 +127,9 @@ export type {
   ImageBuildBundleMeta,
   ImageBuildStatus,
   ImageBuildTimings,
-  ScenarioCourseCatalogCourse,
-  ScenarioCourseCatalogSnapshotV1,
+  CourseCatalogCourseV2,
+  CourseCatalogLectureV2,
+  CourseCatalogSnapshotV2,
   ScenarioRunHintSnapshot,
 } from "./schema/shared";
 export type {

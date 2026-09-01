@@ -179,7 +179,8 @@ export INTAR_LIVE_ARTIFACTS="<kernel_sha256_hex>=/path/to/vmlinuz,<initrd_sha256
 
 Use environment variables so shell history does not capture the cookie or token.
 
-The checked-in public proof uses `broken-nginx`. Pass `--scenario` and the
+The checked-in public proof uses `broken-nginx` from
+`content/courses/linux-operations/01-broken-nginx/`. Pass `--scenario` and the
 matching manifests explicitly when exercising a separately maintained fixture.
 
 ```sh
