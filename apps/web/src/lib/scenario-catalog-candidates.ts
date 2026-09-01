@@ -8,7 +8,10 @@ import {
 } from "@/db/schema";
 import type { ImageBuildBundleMeta } from "@/db/schema";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import {
+  loadOrCreateHostDesiredState,
+  mutateStoredHostDesiredState,
+} from "@/lib/desired-state-store";
 import { upsertDesiredCachedImage } from "@/lib/desired-state";
 import {
   applyLecturePresentation,
@@ -61,22 +64,7 @@ export async function warmCandidateScenarioManifest(
     wakeHost: (hostId: string) => Promise<void>;
   },
 ): Promise<string[]> {
-  const hosts = await db
-    .select({
-      id: agentHosts.id,
-      arch: sql<unknown>`json_extract(${hostActualState.reportJson}, '$.capabilities.arch')`,
-    })
-    .from(agentHosts)
-    .innerJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
-    .where(
-      and(
-        eq(agentHosts.role, "agent"),
-        eq(agentHosts.disabled, false),
-        input.organizationId
-          ? eq(agentHosts.organizationId, input.organizationId)
-          : undefined,
-      ),
-    );
+  const hosts = await loadCandidateAgentHosts(db, input.organizationId);
   const warmed: string[] = [];
   for (const host of hosts) {
     const images = input.manifest.vms.filter(
@@ -100,6 +88,83 @@ export async function warmCandidateScenarioManifest(
     warmed.push(host.id);
   }
   return warmed.sort();
+}
+
+async function warmReusableCandidateManifests(
+  db: DrizzleD1Database,
+  input: {
+    organizationId: string | null;
+    manifests: ScenarioManifestV4[];
+    nowUnixMs: number;
+    wakeHost: (hostId: string) => Promise<void>;
+  },
+): Promise<void> {
+  if (!input.manifests.length) return;
+
+  const hosts = await loadCandidateAgentHosts(db, input.organizationId);
+  for (const host of hosts) {
+    const images = input.manifests.flatMap((manifest) =>
+      manifest.vms.filter((vm) => vm.image_key.arch === host.arch),
+    );
+    if (!images.length) continue;
+
+    const current = await loadOrCreateHostDesiredState(
+      db,
+      host.id,
+      input.nowUnixMs,
+    );
+    let changed = false;
+    await mutateStoredHostDesiredState(
+      db,
+      host.id,
+      input.nowUnixMs,
+      (draft) => {
+        changed = false;
+        for (const vm of images) {
+          if (
+            !draft.cached_images.some(
+              (candidate) =>
+                candidate.image_id === vm.image_id &&
+                candidate.image_key.scenario === vm.image_key.scenario &&
+                candidate.image_key.vm === vm.image_key.vm &&
+                candidate.image_key.arch === vm.image_key.arch,
+            )
+          ) {
+            changed = true;
+          }
+          upsertDesiredCachedImage(draft, {
+            image_key: vm.image_key,
+            image_id: vm.image_id,
+          });
+        }
+      },
+      current,
+    );
+    if (!changed) continue;
+    await input.wakeHost(host.id);
+  }
+}
+
+async function loadCandidateAgentHosts(
+  db: DrizzleD1Database,
+  organizationId: string | null,
+) {
+  return db
+    .select({
+      id: agentHosts.id,
+      arch: sql<unknown>`json_extract(${hostActualState.reportJson}, '$.capabilities.arch')`,
+    })
+    .from(agentHosts)
+    .innerJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
+    .where(
+      and(
+        eq(agentHosts.role, "agent"),
+        eq(agentHosts.disabled, false),
+        organizationId
+          ? eq(agentHosts.organizationId, organizationId)
+          : undefined,
+      ),
+    );
 }
 
 export function candidateScenarioId(
@@ -135,6 +200,7 @@ export async function stageReusableCandidateManifests(
     .from(imageBuilds)
     .where(inArray(imageBuilds.contentHash, hashes));
   const staged: string[] = [];
+  const manifests: ScenarioManifestV4[] = [];
   for (const expected of input.meta.scenarios) {
     const build = builds.find(
       (candidate) =>
@@ -161,13 +227,14 @@ export async function stageReusableCandidateManifests(
       manifest,
       nowUnixMs: input.nowUnixMs,
     });
-    await warmCandidateScenarioManifest(db, {
-      organizationId: input.organizationId,
-      manifest,
-      nowUnixMs: input.nowUnixMs,
-      wakeHost: input.wakeHost,
-    });
+    manifests.push(manifest);
     staged.push(expected.scenarioId);
   }
+  await warmReusableCandidateManifests(db, {
+    organizationId: input.organizationId,
+    manifests,
+    nowUnixMs: input.nowUnixMs,
+    wakeHost: input.wakeHost,
+  });
   return staged.sort();
 }
