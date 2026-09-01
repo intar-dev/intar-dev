@@ -838,7 +838,7 @@ export function ScenarioRun() {
         <Suspense
           fallback={
             <section
-              className="mx-auto flex w-full max-w-2xl flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
+              className="flex flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
               role="status"
             >
               Loading your recap…

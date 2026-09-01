@@ -153,6 +153,58 @@ test("organization courses use their own path instead of a tab query", async ({
   expect(new URL(page.url()).searchParams.has("tab")).toBe(false);
 });
 
+test("organization course breadcrumbs stay inside the learner frame", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    path: "/organizations/org-platform/courses",
+    sessionRole: "owner",
+    theme: "light",
+  });
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+
+  await page.getByRole("link", { name: /Linux operations/i }).click();
+  await expect(page).toHaveURL(
+    "/organizations/org-platform/courses/public/operations",
+  );
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+
+  await page
+    .getByRole("link", { name: /Repair a broken nginx service.*Resume/i })
+    .click();
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  const publicBreadcrumb = page.getByRole("navigation", {
+    name: "Breadcrumb",
+  });
+  await expect(
+    publicBreadcrumb.getByRole("link", { name: "Courses" }),
+  ).toHaveAttribute("href", "/organizations/org-platform/courses");
+  await expect(
+    publicBreadcrumb.getByRole("link", { name: "Linux operations" }),
+  ).toHaveAttribute(
+    "href",
+    "/organizations/org-platform/courses/public/operations",
+  );
+
+  await publicBreadcrumb.getByRole("link", { name: "Courses" }).click();
+  await page.getByRole("link", { name: /Platform repair sequence/i }).click();
+  await page.getByRole("link", { name: /Private service context.*Read/i }).click();
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  const privateBreadcrumb = page.getByRole("navigation", {
+    name: "Breadcrumb",
+  });
+  await expect(
+    privateBreadcrumb.getByRole("link", { name: "Courses" }),
+  ).toHaveAttribute("href", "/organizations/org-platform/courses");
+  await expect(
+    privateBreadcrumb.getByRole("link", { name: "Platform repair sequence" }),
+  ).toHaveAttribute(
+    "href",
+    "/organizations/org-platform/courses/private/platform-repair",
+  );
+});
+
 test("legacy organization scenario tab falls back to Overview", async ({
   page,
   ui,
@@ -176,7 +228,9 @@ test("course search carries into lecture drill-down", async ({ page, ui }) => {
 
   const search = page.getByLabel("Search courses and lectures");
   await search.fill("DNS");
-  await page.getByRole("link", { name: /Linux operations/i }).click();
+  const course = page.getByRole("link", { name: /Linux operations/i });
+  await expect(course).toContainText("Open course");
+  await course.click();
 
   await expect(page).toHaveURL(/\/courses\/operations\?q=DNS/);
   await expect(
@@ -187,7 +241,31 @@ test("course search carries into lecture drill-down", async ({ page, ui }) => {
   ).toBeHidden();
 });
 
-test("strict courses expose the blocker without linking around it", async ({
+test("course breadcrumbs keep one content frame and authored headings", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+
+  await page.getByRole("link", { name: /Linux operations/i }).click();
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(
+    page.getByRole("heading", { level: 2, name: "How to use this course" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("link", {
+      name: /Repair a broken nginx service.*Resume/i,
+    })
+    .click();
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Service recovery" }),
+  ).toBeVisible();
+});
+
+test("strict courses link only to the required lecture", async ({
   page,
   ui,
 }) => {
@@ -200,7 +278,16 @@ test("strict courses expose the blocker without linking around it", async ({
   await expect(
     page.getByRole("link", { name: /Trace an intermittent DNS failure/i }),
   ).toHaveCount(0);
-  await expect(page.getByText(/Complete “Repair a broken nginx service” first/)).toBeVisible();
+  const locked = page.locator('[data-lecture-state="locked"]');
+  await expect(locked).toContainText(
+    /Complete “Repair a broken nginx service” first/,
+  );
+  await expect(
+    locked.getByRole("link", { name: /Repair a broken nginx service/i }),
+  ).toHaveAttribute(
+    "href",
+    "/courses/operations/lectures/02-repair-nginx",
+  );
 });
 
 test("a direct locked lecture route keeps its body sealed", async ({ page, ui }) => {
@@ -209,6 +296,8 @@ test("a direct locked lecture route keeps its body sealed", async ({ page, ui })
     sessionRole: "learner",
     theme: "light",
   });
+
+  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
 
   await expect(
     page.getByRole("heading", { name: "This lecture is locked" }),
@@ -243,7 +332,9 @@ test("a theory-only lecture completes and exposes the next unit", async ({
     { waitUntil: "domcontentloaded" },
   );
   await ui.settle();
-  await expect(page.getByRole("heading", { name: "Theory" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Observe first" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Complete lecture" }).click();
 
   await expect(
@@ -467,7 +558,7 @@ test.describe("lecture reading flow", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await ui.open({ ...routeCase("lecture"), theme: "light" });
 
-    const theory = page.getByRole("heading", { name: "Theory" });
+    const theory = page.getByRole("heading", { name: "Service recovery" });
     const action = page.getByRole("button", { name: "Resume scenario" });
     await expect(theory).toBeVisible();
     await expect(
@@ -492,6 +583,7 @@ test.describe("lecture reading flow", () => {
       variant: "loading",
     });
 
+    await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Lecture");
   });
 
@@ -502,6 +594,7 @@ test.describe("lecture reading flow", () => {
       variant: "error",
     });
 
+    await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
     await expect(
       page.getByRole("heading", { name: "Could not load this lecture" }),
     ).toBeVisible({ timeout: 12_000 });
@@ -523,7 +616,9 @@ test.describe("lecture reading flow", () => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await ui.open({ ...routeCase("lecture"), theme: "light" });
 
-      await expect(page.getByRole("heading", { name: "Theory" })).toBeVisible();
+      await expect(
+        page.getByRole("heading", { name: "Service recovery" }),
+      ).toBeVisible();
       await expect(
         page.getByRole("button", { name: "Resume scenario" }),
       ).toBeVisible();
@@ -544,7 +639,9 @@ test.describe("lecture reading flow", () => {
     const action = page.getByRole("button", { name: "Resume scenario" });
     await action.scrollIntoViewIfNeeded();
     await expect(action).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Theory" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Service recovery" }),
+    ).toBeVisible();
     await expectNoHorizontalOverflow(page);
   });
 });

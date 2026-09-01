@@ -68,7 +68,6 @@ describe("buildCrumbs", () => {
     ).toEqual(["Courses", "Linux operations", "Broken Nginx"]);
 
     const organizationOverrides = new Map([
-      ["/organizations/acme/courses/private", "Courses"],
       ["/organizations/acme/courses/private/linux", "Linux operations"],
       [
         "/organizations/acme/courses/private/linux/lectures/broken-nginx",
@@ -79,7 +78,29 @@ describe("buildCrumbs", () => {
       buildCrumbs(
         "/organizations/acme/courses/private/linux/lectures/broken-nginx",
         organizationOverrides,
+      ),
+    ).toEqual([
+      { label: "Courses", to: "/organizations/acme/courses" },
+      {
+        label: "Linux operations",
+        to: "/organizations/acme/courses/private/linux",
+      },
+      { label: "Broken Nginx" },
+    ]);
+  });
+
+  it("keeps organization course breadcrumbs inside the learner flow", () => {
+    expect(
+      buildCrumbs(
+        "/organizations/acme/courses",
+        new Map(),
       ).map((crumb) => crumb.label),
-    ).toEqual(["Courses", "Linux operations", "Broken Nginx"]);
+    ).toEqual(["Courses"]);
+    expect(
+      buildCrumbs(
+        "/organizations/acme/courses/public/linux",
+        new Map([["/organizations/acme/courses/public/linux", "Linux Basics"]]),
+      ).map((crumb) => crumb.label),
+    ).toEqual(["Courses", "Linux Basics"]);
   });
 });

@@ -6,15 +6,18 @@ export function Markdown({
   children,
   className,
   headingOffset = 0,
+  pageContent = false,
 }: {
   children: string;
   className?: string;
   /** Content pages already own an h1 in the app bar. */
   headingOffset?: 0 | 1;
+  /** Keep authored h1 and h2 headings below the app bar's route h1. */
+  pageContent?: boolean;
 }) {
-  const Heading1 = headingOffset ? "h2" : "h1";
-  const Heading2 = headingOffset ? "h3" : "h2";
-  const Heading3 = headingOffset ? "h4" : "h3";
+  const Heading1 = pageContent ? "h2" : headingOffset ? "h2" : "h1";
+  const Heading2 = pageContent ? "h2" : headingOffset ? "h3" : "h2";
+  const Heading3 = pageContent ? "h3" : headingOffset ? "h4" : "h3";
   return (
     <div className={cn("space-y-4", className ?? "text-body")}>
       <ReactMarkdown

@@ -143,8 +143,9 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
   if (lockedError) {
     const blocker = lockedError.blockedBy;
     return (
-      <PageShell width="narrow">
+      <PageShell width="content">
         <EmptyState
+          className="prose-measure"
           title="This lecture is locked"
           description={
             blocker
@@ -169,8 +170,9 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
   }
   if (detailQuery.error && !detail) {
     return (
-      <PageShell width="narrow">
+      <PageShell width="content">
         <ErrorState
+          className="prose-measure"
           title="Could not load this lecture"
           description={
             detailQuery.error instanceof Error
@@ -187,56 +189,53 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
   }
 
   return (
-    <PageShell width="narrow">
-      {detailQuery.error ? (
-        <Alert>
-          <AlertTitle>Lecture status may be out of date</AlertTitle>
-          <AlertDescription>
-            The last available theory is shown. Refresh before you start the scenario.
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      <div className="space-y-4">
-        <CourseLink
+    <PageShell width="content">
+      <div className="prose-measure space-y-6">
+        {detailQuery.error ? (
+          <Alert>
+            <AlertTitle>Lecture status may be out of date</AlertTitle>
+            <AlertDescription>
+              The last available theory is shown. Refresh before you start the scenario.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        <div className="space-y-4">
+          <CourseLink
+            route={route}
+            className="-ml-2 inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+          >
+            <ArrowLeft className="size-4" aria-hidden />
+            Back to {detail.course.title}
+          </CourseLink>
+          <ContentHeader
+            title={detail.lecture.title}
+            summary={detail.lecture.summary}
+            meta={<LectureMeta lecture={detail.lecture} />}
+          />
+        </div>
+
+        <section aria-label="Lecture content" className="text-body leading-7">
+          <Markdown pageContent>{detail.lecture.bodyMarkdown}</Markdown>
+        </section>
+
+        <LectureActionPanel
+          lecture={detail.lecture}
           route={route}
-          className="-ml-2 inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-        >
-          <ArrowLeft className="size-4" aria-hidden />
-          Back to {detail.course.title}
-        </CourseLink>
-        <ContentHeader
-          title={detail.lecture.title}
-          summary={detail.lecture.summary}
-          meta={<LectureMeta lecture={detail.lecture} />}
+          completePending={complete.isPending}
+          completeError={complete.error}
+          onComplete={() => complete.mutate()}
+          startPending={startScenario.isPending}
+          startError={startScenario.error}
+          waitingForCapacity={waitingForCapacity}
+          startNotice={startNotice}
+          onStart={() => startScenario.mutate()}
+          onStopWaiting={() => {
+            startAbortRef.current?.abort();
+            setWaitingForCapacity(false);
+            setStartNotice("Stopped waiting. You can try again when you are ready.");
+          }}
         />
       </div>
-
-      <section aria-labelledby="lecture-theory-heading" className="space-y-4">
-        <h2 id="lecture-theory-heading" className="text-section-title">
-          Theory
-        </h2>
-        <div className="prose-measure text-body leading-7">
-          <Markdown headingOffset={1}>{detail.lecture.bodyMarkdown}</Markdown>
-        </div>
-      </section>
-
-      <LectureActionPanel
-        lecture={detail.lecture}
-        route={route}
-        completePending={complete.isPending}
-        completeError={complete.error}
-        onComplete={() => complete.mutate()}
-        startPending={startScenario.isPending}
-        startError={startScenario.error}
-        waitingForCapacity={waitingForCapacity}
-        startNotice={startNotice}
-        onStart={() => startScenario.mutate()}
-        onStopWaiting={() => {
-          startAbortRef.current?.abort();
-          setWaitingForCapacity(false);
-          setStartNotice("Stopped waiting. You can try again when you are ready.");
-        }}
-      />
     </PageShell>
   );
 }
@@ -473,8 +472,8 @@ function lectureBreadcrumbLabels(route: CourseRouteRef, courseTitle: string) {
 
 function LectureLoading() {
   return (
-    <PageShell width="narrow">
-      <div role="status" className="space-y-8">
+    <PageShell width="content">
+      <div role="status" className="prose-measure space-y-8">
         <span className="sr-only">Loading lecture…</span>
         <Skeleton className="h-8 w-72 max-w-full" />
         <Skeleton className="h-5 w-full" />

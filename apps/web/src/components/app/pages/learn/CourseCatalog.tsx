@@ -242,7 +242,7 @@ function CourseCatalogPage({
   ) : null;
 
   if (catalog.isLoading && !catalog.data) {
-    return <CourseCatalogLoading courseId={courseId} />;
+    return <CourseCatalogLoading />;
   }
   if (catalog.error) {
     return (
@@ -319,7 +319,7 @@ function CourseIndex({
   search: ReturnType<typeof compactCatalogSearch>;
 }) {
   return (
-    <PageShell width="default">
+    <PageShell width="content">
       <ContentHeader
         title="Courses"
         summary="Learn the idea first, then apply it in a scenario."
@@ -404,7 +404,9 @@ function CourseIndexItem({
         </span>
       </span>
       <span className="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:justify-self-end">
-        {courseActionLabel(course.lectures)}
+        {course.lectures.length > 0 && completed === course.lectures.length
+          ? "Review course"
+          : "Open course"}
         <ArrowRight
           className="size-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
           aria-hidden
@@ -456,7 +458,7 @@ function CourseDetail({
       {capacityPressure !== null ? <CourseCapacityPressure pressure={capacityPressure} /> : null}
       {course.bodyMarkdown.trim() ? (
         <section className="prose-measure border-y py-6 text-body leading-7">
-          <Markdown headingOffset={1}>{course.bodyMarkdown}</Markdown>
+          <Markdown pageContent>{course.bodyMarkdown}</Markdown>
         </section>
       ) : null}
       <section aria-labelledby="course-lectures-heading" className="space-y-4">
@@ -577,7 +579,15 @@ function LectureListItem({
         />
         {lecture.state === "locked" && lecture.blockedBy ? (
           <span className="block text-caption text-muted-foreground">
-            Complete “{lecture.blockedBy.title}” first.
+            Complete{" "}
+            <LectureLink
+              route={{ ...route, courseId: lecture.blockedBy.courseId }}
+              lectureId={lecture.blockedBy.lectureId}
+              className="rounded-sm font-medium text-primary underline underline-offset-4 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+            >
+              “{lecture.blockedBy.title}”
+            </LectureLink>{" "}
+            first.
           </span>
         ) : null}
       </span>
@@ -598,11 +608,11 @@ function LectureListItem({
   const className = cn(
     "group flex min-h-20 items-start gap-3 px-4 py-4 outline-none sm:items-center sm:gap-4 sm:px-6",
     lecture.state === "locked"
-      ? "cursor-not-allowed bg-muted/35 text-muted-foreground"
+      ? "bg-muted/35 text-muted-foreground"
       : "transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40",
   );
   return lecture.state === "locked" ? (
-    <div className={className} aria-disabled="true" data-lecture-state="locked">
+    <div className={className} data-lecture-state="locked">
       {content}
     </div>
   ) : (
@@ -619,19 +629,6 @@ function LectureListItem({
 function LectureStatus({ lecture }: { lecture: CourseLectureSummary }) {
   const { tone, word } = lectureStatePresentation(lecture.state);
   return <StatusToken tone={tone} word={word} pulse={lecture.state === "in_progress"} />;
-}
-
-function courseActionLabel(lectures: readonly CourseLectureSummary[]) {
-  if (lectures.some((lecture) => lecture.state === "in_progress")) {
-    return "Resume";
-  }
-  if (lectures.some((lecture) => lecture.state === "available")) {
-    return "Continue";
-  }
-  if (lectures.some((lecture) => lecture.state === "waiting_for_scenario")) {
-    return "Read";
-  }
-  return lectures.length ? "Review" : "Open";
 }
 
 function lectureActionLabel(lecture: CourseLectureSummary) {
@@ -917,9 +914,9 @@ function matchesText(query: string, values: readonly string[]): boolean {
   return values.some((value) => value.toLocaleLowerCase().includes(normalized));
 }
 
-function CourseCatalogLoading({ courseId }: { courseId: string | null }) {
+function CourseCatalogLoading() {
   return (
-    <PageShell width={courseId ? "content" : "default"}>
+    <PageShell width="content">
       <div role="status" className="space-y-6">
         <span className="sr-only">Loading courses…</span>
         <Skeleton className="h-8 w-72 max-w-full" />

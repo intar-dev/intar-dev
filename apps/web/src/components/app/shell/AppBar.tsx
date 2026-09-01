@@ -97,10 +97,26 @@ export function buildCrumbs(
   overrides: ReadonlyMap<string, string>,
 ): Crumb[] {
   const segments = pathname.split("/").filter(Boolean);
+  const organizationCourse = pathname.match(
+    /^\/organizations\/([^/]+)\/courses(?:\/|$)/,
+  );
+  const organizationId = organizationCourse?.[1];
+  const organizationRoot = organizationId
+    ? `/organizations/${organizationId}`
+    : null;
   const crumbs: Crumb[] = [];
   let acc = "";
   segments.forEach((segment, index) => {
     acc += `/${segment}`;
+    if (
+      organizationRoot &&
+      (acc === "/organizations" ||
+        acc === organizationRoot ||
+        acc === `${organizationRoot}/courses/public` ||
+        acc === `${organizationRoot}/courses/private`)
+    ) {
+      return;
+    }
     // This path segment is structural, not learner-facing navigation.
     if (segment === "lectures") return;
     const isLast = index === segments.length - 1;
