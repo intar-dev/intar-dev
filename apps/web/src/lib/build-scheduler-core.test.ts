@@ -6,6 +6,7 @@ import {
   canRetryImageBuild,
   chooseLeastLoadedBuilder,
   desiredBuildFromSource,
+  isActiveImageBuild,
   isDisconnectedPastDeadline,
   isSilentBuildingBuild,
   isTerminalBuildPhase,
@@ -31,6 +32,15 @@ describe("build scheduler core", () => {
     expect(isTerminalBuildPhase("building")).toBe(false);
     expect(isTerminalBuildPhase("succeeded")).toBe(true);
     expect(isTerminalBuildPhase("failed")).toBe(true);
+  });
+
+  it("does not count stale build history as active work", () => {
+    expect(isActiveImageBuild("queued")).toBe(true);
+    expect(isActiveImageBuild("assigned")).toBe(true);
+    expect(isActiveImageBuild("building")).toBe(true);
+    expect(isActiveImageBuild("succeeded")).toBe(false);
+    expect(isActiveImageBuild("failed")).toBe(false);
+    expect(isActiveImageBuild("stale")).toBe(false);
   });
 
   it("accepts build reports only from the assigned builder", () => {
@@ -148,6 +158,9 @@ describe("build scheduler core", () => {
     expect(canRetryImageBuild("succeeded")).toBe(false);
     expect(canRetryImageBuild("failed")).toBe(true);
     expect(canRetryImageBuild("stale")).toBe(true);
+    expect(
+      canRetryImageBuild("stale", "superseded by bundle scenarios-new"),
+    ).toBe(false);
   });
 
   it("chooses the least-loaded connected builder with matching architecture", () => {

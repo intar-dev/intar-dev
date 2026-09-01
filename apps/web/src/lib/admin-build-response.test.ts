@@ -63,6 +63,13 @@ describe("admin build response serialization", () => {
       serializeAdminBuildSummary({ ...buildRow, status: "stale" }).canRetry,
     ).toBe(true);
     expect(
+      serializeAdminBuildSummary({
+        ...buildRow,
+        status: "stale",
+        error: "superseded by bundle scenarios-new",
+      }).canRetry,
+    ).toBe(false);
+    expect(
       serializeAdminBuildSummary({ ...buildRow, status: "queued" }).canRetry,
     ).toBe(false);
     expect(

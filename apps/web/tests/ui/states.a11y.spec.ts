@@ -674,6 +674,19 @@ test.describe("focused state accessibility", () => {
 
   test("build details", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-builds"), theme: "dark" });
+    const supersededBuild = page.locator('[data-build-id="build-4"]');
+
+    await expect(
+      supersededBuild.getByText("Superseded", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      supersededBuild.getByRole("button", { name: "Retry" }),
+    ).toBeDisabled();
+    const queuePosture = page
+      .getByRole("heading", { name: "Queue posture" })
+      .locator("../../..");
+    await expect(queuePosture).toContainText(/Active\s*1/);
+    await expect(queuePosture).toContainText(/Needs attention\s*1/);
     await page.getByRole("button", { name: "Details" }).first().click();
 
     await expect(page.getByText("Content hash").first()).toBeVisible();

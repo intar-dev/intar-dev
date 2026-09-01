@@ -190,7 +190,11 @@ function makeBuild(status: string, id: string) {
           : "building",
     attempt: 1,
     error:
-      status === "failed" ? "qemu image conversion exited with code 1" : null,
+      status === "failed"
+        ? "qemu image conversion exited with code 1"
+        : status === "stale"
+          ? "superseded by bundle rev-20260710-02"
+          : null,
     canRetry: status === "failed",
     hasLog: status !== "queued",
     timings: {
@@ -432,6 +436,7 @@ export function createMockApiState(input?: {
   const hostRuns = makeHostRuns();
   const adminScenario = makeAdminScenario(true);
   const builds = [
+    makeBuild("stale", "build-4"),
     makeBuild("building", "build-1"),
     makeBuild("failed", "build-2"),
     makeBuild("succeeded", "build-3"),

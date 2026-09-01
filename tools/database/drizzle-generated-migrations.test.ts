@@ -270,6 +270,154 @@ describe("Drizzle-generated D1 migrations", () => {
     }
   });
 
+  test("marks retryable builds with later replacements as history", () => {
+    const database = new Database(":memory:", { strict: true });
+    try {
+      database.exec("PRAGMA foreign_keys = ON");
+      const journal = readJson<DrizzleJournal>(
+        join(metadataRoot, "_journal.json"),
+      );
+      const supersessionIndex = journal.entries.findIndex(
+        ({ tag }) => tag === "0012_supersede_replaced_build_failures",
+      );
+      expect(supersessionIndex).toBeGreaterThan(0);
+      for (const entry of journal.entries.slice(0, supersessionIndex)) {
+        applyMigration(database, entry.tag);
+      }
+
+      const bundleMeta = JSON.stringify({
+        buildFormatVersion: "intar-image-build-v11",
+        scenarios: [],
+      });
+      const insertBundle = database.query(
+        `INSERT INTO image_build_bundles (
+          rev, r2_key, meta_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)`,
+      );
+      insertBundle.run("bundle-old", "old.tar.gz", bundleMeta, 1_000, 1_000);
+      insertBundle.run("bundle-new", "new.tar.gz", bundleMeta, 2_000, 2_000);
+      const insertBuild = database.query(
+        `INSERT INTO image_builds (
+          id, scenario_id, arch, rev, content_hash, status, phase, attempt,
+          error, log_r2_key, created_at, updated_at
+        ) VALUES (?, ?, 'x86_64', ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+      );
+      insertBuild.run(
+        "failed-old",
+        "repair-routing",
+        "bundle-old",
+        "a".repeat(64),
+        "failed",
+        "failed",
+        "QEMU failed",
+        "builds/logs/failed-old.log",
+        1_000,
+        1_000,
+      );
+      insertBuild.run(
+        "building-new",
+        "repair-routing",
+        "bundle-new",
+        "b".repeat(64),
+        "building",
+        "building",
+        null,
+        "builds/logs/building-new.log",
+        2_000,
+        2_000,
+      );
+      insertBuild.run(
+        "stale-old",
+        "repair-routing",
+        "bundle-old",
+        "d".repeat(64),
+        "stale",
+        "building",
+        "builder stopped reporting build progress",
+        "builds/logs/stale-old.log",
+        1_100,
+        1_100,
+      );
+      insertBuild.run(
+        "stale-uppercase",
+        "repair-routing",
+        "bundle-old",
+        "e".repeat(64),
+        "stale",
+        "building",
+        "SUPERSEDED BY BUNDLE bundle-other",
+        "builds/logs/stale-uppercase.log",
+        1_200,
+        1_200,
+      );
+      insertBuild.run(
+        "failed-current",
+        "repair-storage",
+        "bundle-new",
+        "c".repeat(64),
+        "failed",
+        "failed",
+        "current failure",
+        "builds/logs/failed-current.log",
+        2_000,
+        2_000,
+      );
+
+      applyMigration(database, journal.entries[supersessionIndex]!.tag);
+      applyMigration(database, journal.entries[supersessionIndex]!.tag);
+
+      expect(
+        database
+          .query(
+            `SELECT id, status, error, log_r2_key AS logR2Key,
+                    updated_at AS updatedAt
+             FROM image_builds
+             ORDER BY id`,
+          )
+          .all(),
+      ).toEqual([
+        {
+          id: "building-new",
+          status: "building",
+          error: null,
+          logR2Key: "builds/logs/building-new.log",
+          updatedAt: 2_000,
+        },
+        {
+          id: "failed-current",
+          status: "failed",
+          error: "current failure",
+          logR2Key: "builds/logs/failed-current.log",
+          updatedAt: 2_000,
+        },
+        {
+          id: "failed-old",
+          status: "stale",
+          error: "superseded by bundle bundle-new",
+          logR2Key: "builds/logs/failed-old.log",
+          updatedAt: 1_000,
+        },
+        {
+          id: "stale-old",
+          status: "stale",
+          error: "superseded by bundle bundle-new",
+          logR2Key: "builds/logs/stale-old.log",
+          updatedAt: 1_100,
+        },
+        {
+          id: "stale-uppercase",
+          status: "stale",
+          error: "superseded by bundle bundle-new",
+          logR2Key: "builds/logs/stale-uppercase.log",
+          updatedAt: 1_200,
+        },
+      ]);
+      expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      database.close(false);
+    }
+  });
+
   test("reproduces the committed final schema from the typed schema", () => {
     const journal = readJson<DrizzleJournal>(join(metadataRoot, "_journal.json"));
     expect(journal.entries[0]).toMatchObject({

@@ -12,6 +12,8 @@ import {
 import type { BuildReportV1 } from "@/generated/bridge";
 import {
   buildStatusFromPhase,
+  SUPERSEDED_BUILD_ERROR_PREFIX,
+  canRetryImageBuild,
   chooseLeastLoadedBuilder,
   desiredBuildFromSource,
   isDisconnectedPastDeadline,
@@ -150,7 +152,7 @@ async function queueImageBuildScenario(
       .update(imageBuilds)
       .set({
         status: "stale",
-        error: `superseded by bundle ${input.rev}`,
+        error: `${SUPERSEDED_BUILD_ERROR_PREFIX}${input.rev}`,
         updatedAt: input.nowUnixMs,
       })
       .where(
@@ -161,7 +163,13 @@ async function queueImageBuildScenario(
             : isNull(imageBuilds.organizationId),
           eq(imageBuilds.arch, input.arch),
           ne(imageBuilds.contentHash, input.contentHash),
-          inArray(imageBuilds.status, ["queued", "assigned", "building"]),
+          inArray(imageBuilds.status, [
+            "queued",
+            "assigned",
+            "building",
+            "failed",
+            "stale",
+          ]),
         ),
       ),
     db
@@ -248,6 +256,95 @@ function supersessionCleanupBuildIds(input: {
 
 function dbBuildIds(where: ReturnType<typeof and>) {
   return sql`select ${imageBuilds.id} from ${imageBuilds} where ${where}`;
+}
+
+export async function retryImageBuild(
+  db: DrizzleD1Database,
+  input: { buildId: string; nowUnixMs: number },
+): Promise<
+  | { outcome: "not_found" }
+  | { outcome: "not_retryable"; status: string }
+  | {
+      outcome: "retried";
+      assigned: Array<{ buildId: string; hostId: string }>;
+    }
+> {
+  const [identity] = await db
+    .select({
+      scenarioId: imageBuilds.scenarioId,
+      arch: imageBuilds.arch,
+    })
+    .from(imageBuilds)
+    .where(eq(imageBuilds.id, input.buildId))
+    .limit(1);
+  if (!identity) return { outcome: "not_found" };
+
+  const outcome = await withImageBuildCoordinationLock(
+    db,
+    identity,
+    async (lease) => {
+      const [build] = await db
+        .select({
+          hostId: imageBuilds.hostId,
+          status: imageBuilds.status,
+          error: imageBuilds.error,
+          timings: imageBuilds.timingsJson,
+          updatedAt: imageBuilds.updatedAt,
+        })
+        .from(imageBuilds)
+        .where(eq(imageBuilds.id, input.buildId))
+        .limit(1);
+      if (!build) return { outcome: "not_found" } as const;
+      if (!canRetryImageBuild(build.status, build.error)) {
+        return { outcome: "not_retryable", status: build.status } as const;
+      }
+
+      if (build.hostId) {
+        await removeDesiredBuildsFromHost(
+          db,
+          build.hostId,
+          [input.buildId],
+          input.nowUnixMs,
+        );
+      }
+      await lease.assertHeld();
+      const updated = await db
+        .update(imageBuilds)
+        .set({
+          hostId: null,
+          status: "queued",
+          phase: "queued",
+          attempt: 0,
+          error: null,
+          logR2Key: null,
+          timingsJson: {
+            ...build.timings,
+            queuedAt: input.nowUnixMs,
+            startedAt: null,
+            finishedAt: null,
+            lastReportAt: null,
+          },
+          updatedAt: input.nowUnixMs,
+        })
+        .where(
+          and(
+            eq(imageBuilds.id, input.buildId),
+            eq(imageBuilds.status, build.status),
+            eq(imageBuilds.updatedAt, build.updatedAt),
+          ),
+        )
+        .returning({ id: imageBuilds.id });
+      return updated.length
+        ? ({ outcome: "retried" } as const)
+        : ({ outcome: "not_retryable", status: build.status } as const);
+    },
+  );
+  if (outcome.outcome !== "retried") return outcome;
+
+  return {
+    outcome: "retried",
+    assigned: await assignQueuedImageBuilds(db, input.nowUnixMs),
+  };
 }
 
 export async function assignQueuedImageBuilds(

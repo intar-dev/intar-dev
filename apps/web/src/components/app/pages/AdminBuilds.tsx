@@ -23,6 +23,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { BuildPhase } from "@/generated/bridge";
+import { isActiveImageBuild } from "@/lib/build-scheduler-core";
 import { cn } from "@/lib/utils";
 
 interface ImageBuildTimings {
@@ -83,7 +84,7 @@ export function AdminBuilds() {
     queryFn: fetchBuilds,
     refetchInterval: (query) =>
       query.state.data?.builds.some((build) =>
-        ["queued", "assigned", "building", "stale"].includes(build.status),
+        isActiveImageBuild(build.status),
       )
         ? 2_500
         : false,
@@ -122,11 +123,9 @@ export function AdminBuilds() {
 
   const records = builds.data?.builds ?? [];
   const activeCount = records.filter((build) =>
-    ["queued", "assigned", "building", "stale"].includes(build.status),
+    isActiveImageBuild(build.status),
   ).length;
-  const failedCount = records.filter(
-    (build) => build.status === "failed",
-  ).length;
+  const needsAttentionCount = records.filter((build) => build.canRetry).length;
   const succeededCount = records.filter(
     (build) => build.status === "succeeded",
   ).length;
@@ -143,9 +142,9 @@ export function AdminBuilds() {
         <BuildCount label="Active" value={activeCount} tone="brand" />
         <BuildCount label="Succeeded" value={succeededCount} tone="success" />
         <BuildCount
-          label="Failed"
-          value={failedCount}
-          tone={failedCount ? "error" : "default"}
+          label="Needs attention"
+          value={needsAttentionCount}
+          tone={needsAttentionCount ? "error" : "default"}
         />
       </Section>
 
@@ -239,12 +238,18 @@ function BuildRow(props: {
   const { build } = props;
   const detailId = `build-details-${build.id}`;
   return (
-    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto]">
+    <div
+      data-build-id={build.id}
+      className="grid gap-4 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto]"
+    >
       <div className="min-w-0 space-y-3">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <StatusBadge status={build.status} />
+          <StatusBadge status={build.status} canRetry={build.canRetry} />
           <span className="text-metadata">
-            <span className="text-label">Phase</span> {build.phase}
+            <span className="text-label">
+              {build.status === "stale" ? "Last phase" : "Phase"}
+            </span>{" "}
+            {build.phase}
           </span>
           <span className="font-mono text-xs text-muted-foreground">
             {build.arch}
@@ -277,7 +282,14 @@ function BuildRow(props: {
         </div>
 
         {build.error ? (
-          <p className="rounded-md border border-destructive-border bg-destructive-subtle px-3 py-2 text-sm text-destructive">
+          <p
+            className={cn(
+              "rounded-md border px-3 py-2 text-sm",
+              build.status === "stale" && !build.canRetry
+                ? "border-warning-border bg-warning-subtle text-warning"
+                : "border-destructive-border bg-destructive-subtle text-destructive",
+            )}
+          >
             {build.error}
           </p>
         ) : null}
@@ -483,14 +495,21 @@ function DetailPair(props: { label: string; value: string }) {
   );
 }
 
-function StatusBadge(props: { status: ImageBuildRecord["status"] }) {
+function StatusBadge(props: {
+  status: ImageBuildRecord["status"];
+  canRetry: boolean;
+}) {
   switch (props.status) {
     case "succeeded":
       return <Badge variant="success">Succeeded</Badge>;
     case "failed":
       return <Badge variant="destructive">Failed</Badge>;
     case "stale":
-      return <Badge variant="warning">Stale</Badge>;
+      return (
+        <Badge variant="warning">
+          {props.canRetry ? "Stale" : "Superseded"}
+        </Badge>
+      );
     case "building":
       return (
         <Badge variant="warning" className="gap-1">

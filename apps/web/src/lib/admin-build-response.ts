@@ -47,7 +47,7 @@ export function serializeAdminBuildSummary(row: AdminBuildResponseRow) {
     phase: row.phase,
     attempt: row.attempt,
     error: row.error,
-    canRetry: canRetryImageBuild(row.status),
+    canRetry: canRetryImageBuild(row.status, row.error),
     hasLog: Boolean(row.logR2Key),
     timings: row.timings,
     bundleR2Key: row.bundleR2Key,

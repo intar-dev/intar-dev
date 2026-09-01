@@ -19,6 +19,7 @@ import {
   queueImageBuildsFromBundle,
   reconcileAssignedBuildsForHost,
   recordImageBuildReport,
+  retryImageBuild,
 } from "@/lib/build-scheduler";
 import {
   withImageBuildCoordinationLock,
@@ -54,6 +55,11 @@ describe("build scheduler bundle supersession", () => {
       oldBuild("building-old", "3", "building", "builder-1", now),
       oldBuild("succeeded-old", "4", "succeeded", "builder-1", now),
       oldBuild("failed-old", "5", "failed", "builder-1", now),
+      {
+        ...oldBuild("stale-old", "6", "building", "builder-1", now),
+        status: "stale" as const,
+        error: "builder stopped reporting build progress",
+      },
     ];
     await db.insert(imageBuilds).values(oldRows);
 
@@ -103,7 +109,13 @@ describe("build scheduler bundle supersession", () => {
       .from(imageBuilds)
       .where(eq(imageBuilds.scenarioId, "broken-nginx"));
     const byId = new Map(rows.map((row) => [row.id, row]));
-    for (const id of ["queued-old", "assigned-old", "building-old"]) {
+    for (const id of [
+      "queued-old",
+      "assigned-old",
+      "building-old",
+      "failed-old",
+      "stale-old",
+    ]) {
       expect(byId.get(id)).toMatchObject({
         status: "stale",
         error: "superseded by bundle bundle-new",
@@ -112,11 +124,6 @@ describe("build scheduler bundle supersession", () => {
     }
     expect(byId.get("succeeded-old")).toMatchObject({
       status: "succeeded",
-      error: null,
-      updatedAt: now - 1_000,
-    });
-    expect(byId.get("failed-old")).toMatchObject({
-      status: "failed",
       error: null,
       updatedAt: now - 1_000,
     });
@@ -189,6 +196,97 @@ describe("build scheduler bundle supersession", () => {
     await expect(db.select().from(imageBuildCoordinationLocks)).resolves.toEqual(
       [],
     );
+  });
+
+  it("retries only a failed build that is still current", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+    await db.insert(imageBuildBundles).values({
+      rev: "bundle-old",
+      r2Key: "builds/bundles/bundle-old.tar.gz",
+      metaJson: {
+        buildFormatVersion: "intar-image-build-v11",
+        scenarios: [],
+      },
+      createdAt: now - 1_000,
+      updatedAt: now - 1_000,
+    });
+    await db
+      .insert(imageBuilds)
+      .values(oldBuild("failed-current", "1", "failed", null, now));
+
+    await expect(
+      retryImageBuild(db, {
+        buildId: "failed-current",
+        nowUnixMs: now,
+      }),
+    ).resolves.toEqual({ outcome: "retried", assigned: [] });
+
+    const [build] = await db
+      .select({
+        status: imageBuilds.status,
+        phase: imageBuilds.phase,
+        attempt: imageBuilds.attempt,
+        error: imageBuilds.error,
+      })
+      .from(imageBuilds)
+      .where(eq(imageBuilds.id, "failed-current"));
+    expect(build).toEqual({
+      status: "queued",
+      phase: "queued",
+      attempt: 0,
+      error: null,
+    });
+  });
+
+  it("cannot retry a build superseded while it waits for the publish fence", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+    await db.insert(imageBuildBundles).values({
+      rev: "bundle-old",
+      r2Key: "builds/bundles/bundle-old.tar.gz",
+      metaJson: {
+        buildFormatVersion: "intar-image-build-v11",
+        scenarios: [],
+      },
+      createdAt: now - 1_000,
+      updatedAt: now - 1_000,
+    });
+    await db.insert(imageBuilds).values({
+      ...oldBuild("stale-old", "1", "building", null, now),
+      status: "stale",
+      error: "builder stopped reporting build progress",
+    });
+
+    let retrySettled = false;
+    let retryPromise!: ReturnType<typeof retryImageBuild>;
+    await withImageBuildCoordinationLock(
+      db,
+      { scenarioId: "broken-nginx", arch: "x86_64" },
+      async () => {
+        retryPromise = retryImageBuild(db, {
+          buildId: "stale-old",
+          nowUnixMs: now + 2,
+        }).finally(() => {
+          retrySettled = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(retrySettled).toBe(false);
+        await db
+          .update(imageBuilds)
+          .set({
+            status: "stale",
+            error: "superseded by bundle bundle-new",
+            updatedAt: now + 1,
+          })
+          .where(eq(imageBuilds.id, "stale-old"));
+      },
+    );
+
+    await expect(retryPromise).resolves.toEqual({
+      outcome: "not_retryable",
+      status: "stale",
+    });
   });
 
   it("repairs an assigned build missing from host desired state", async () => {

@@ -8,6 +8,7 @@ import type { ImageBuildStatus, ImageBuildTimings } from "@/db/schema";
 
 export const BUILDER_REASSIGN_AFTER_MS = 10 * 60 * 1000;
 export const BUILD_REPORT_STALE_AFTER_MS = 30 * 60 * 1000;
+export const SUPERSEDED_BUILD_ERROR_PREFIX = "superseded by bundle ";
 
 export interface BuilderCandidate {
   hostId: string;
@@ -47,6 +48,10 @@ export function buildStatusFromPhase(phase: BuildPhase): ImageBuildStatus {
 
 export function isTerminalBuildPhase(phase: BuildPhase): boolean {
   return phase === "succeeded" || phase === "failed";
+}
+
+export function isActiveImageBuild(status: ImageBuildStatus): boolean {
+  return status === "queued" || status === "assigned" || status === "building";
 }
 
 export function shouldAcceptBuildReport(input: {
@@ -116,8 +121,14 @@ export function shouldSkipExistingBuildForBundle(
   );
 }
 
-export function canRetryImageBuild(status: ImageBuildStatus): boolean {
-  return status === "failed" || status === "stale";
+export function canRetryImageBuild(
+  status: ImageBuildStatus,
+  error?: string | null,
+): boolean {
+  return (
+    status === "failed" ||
+    (status === "stale" && !error?.startsWith(SUPERSEDED_BUILD_ERROR_PREFIX))
+  );
 }
 
 export function chooseLeastLoadedBuilder(

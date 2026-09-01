@@ -1,15 +1,9 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { imageBuilds } from "@/db/schema";
 import { jsonResponse, requireAdminUserContext } from "@/lib/agent-bridge";
 import { isSafeAdminBuildId } from "@/lib/admin-build-response";
-import { assignQueuedImageBuilds } from "@/lib/build-scheduler";
-import { canRetryImageBuild } from "@/lib/build-scheduler-core";
-import { removeDesiredBuild } from "@/lib/desired-state";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
-import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { retryImageBuild } from "@/lib/build-scheduler";
 
 export const prerender = false;
 
@@ -27,56 +21,18 @@ export const POST: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "invalid build id" }, { status: 400 });
   }
 
-  const db = drizzle(env.DB);
-  const rows = await db
-    .select({
-      id: imageBuilds.id,
-      hostId: imageBuilds.hostId,
-      status: imageBuilds.status,
-      timings: imageBuilds.timingsJson,
-    })
-    .from(imageBuilds)
-    .where(eq(imageBuilds.id, buildId))
-    .limit(1);
-  const build = rows[0];
-  if (!build) {
+  const result = await retryImageBuild(drizzle(env.DB), {
+    buildId,
+    nowUnixMs: Date.now(),
+  });
+  if (result.outcome === "not_found") {
     return jsonResponse({ error: "build not found" }, { status: 404 });
   }
-  if (!canRetryImageBuild(build.status)) {
+  if (result.outcome === "not_retryable") {
     return jsonResponse(
-      { error: `build status ${build.status} cannot be retried` },
+      { error: `build status ${result.status} cannot be retried` },
       { status: 409 },
     );
   }
-
-  const now = Date.now();
-  if (build.hostId) {
-    await mutateStoredHostDesiredState(db, build.hostId, now, (draft) => {
-      removeDesiredBuild(draft, { buildId });
-    });
-    await tryWakeHostRuntime(build.hostId);
-  }
-
-  await db
-    .update(imageBuilds)
-    .set({
-      hostId: null,
-      status: "queued",
-      phase: "queued",
-      attempt: 0,
-      error: null,
-      logR2Key: null,
-      timingsJson: {
-        ...build.timings,
-        queuedAt: now,
-        startedAt: null,
-        finishedAt: null,
-        lastReportAt: null,
-      },
-      updatedAt: now,
-    })
-    .where(eq(imageBuilds.id, buildId));
-
-  const assigned = await assignQueuedImageBuilds(db, now);
-  return jsonResponse({ ok: true, buildId, assigned });
+  return jsonResponse({ ok: true, buildId, assigned: result.assigned });
 };
