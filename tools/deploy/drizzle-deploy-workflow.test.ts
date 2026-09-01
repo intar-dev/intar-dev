@@ -80,6 +80,14 @@ describe("automatic web deployment workflow", () => {
       "bunx --bun wrangler d1 info",
       '.result.version == "production"',
       "bunx --bun wrangler d1 time-travel info",
+      "jq -cn --arg sql",
+      "{sql: $sql, params: []}",
+      "--request POST",
+      'Content-Type: application/json',
+      '--data-binary "@${query_request}"',
+      '/d1/database/${DATABASE_ID}/query',
+      ".result[0].success == true",
+      '.result[0].results | type == "array"',
       "scenario_course_catalogs",
       "rev GLOB 'draft-*'",
       "host_desired_state",
@@ -91,6 +99,7 @@ describe("automatic web deployment workflow", () => {
     ]) {
       expect(deployWorkflow).toContain(required);
     }
+    expect(deployWorkflow).not.toContain("wrangler d1 execute");
     const artifact = deployWorkflow.slice(
       deployWorkflow.indexOf("Retain deployment evidence"),
     );

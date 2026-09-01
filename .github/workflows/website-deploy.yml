@@ -178,6 +178,7 @@ jobs:
           run_drain_audit="${RUNNER_TEMP}/pre-migration-run-drain-audit.json"
           assignment_counts="${RUNNER_TEMP}/pre-migration-assignment-counts.json"
           enabled_scenarios="${RUNNER_TEMP}/pre-migration-enabled-scenarios.json"
+          query_request="${RUNNER_TEMP}/pre-migration-d1-query-request.json"
 
           bunx --bun wrangler d1 info "${DATABASE_ID}" --json > "${d1_info}"
           jq -e --arg database_id "${DATABASE_ID}" '
@@ -202,16 +203,30 @@ jobs:
             test("^[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{32}$")
           ' "${bookmark}" >/dev/null
 
+          d1_readonly_query() {
+            local sql="$1"
+            local evidence="$2"
+            jq -cn --arg sql "${sql}" '{sql: $sql, params: []}' \
+              > "${query_request}"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              --header "Content-Type: application/json" \
+              --data-binary "@${query_request}" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/query" \
+              > "${evidence}"
+            jq -e '
+              .success == true and
+              (.result | type == "array" and length == 1) and
+              .result[0].success == true and
+              (.result[0].results | type == "array")
+            ' "${evidence}" >/dev/null
+          }
+
           catalog_sql='SELECT scope_key, organization_id, courses_json, source_revision, created_at, updated_at
             FROM scenario_course_catalogs
             ORDER BY scope_key;'
-          bunx --bun wrangler d1 execute "${DATABASE_ID}" \
-            --remote --command "${catalog_sql}" --json > "${catalogs}"
-          jq -e '
-            type == "array" and length == 1 and
-            .[0].success == true and
-            (.[0].results | type == "array")
-          ' "${catalogs}" >/dev/null
+          d1_readonly_query "${catalog_sql}" "${catalogs}"
 
           draft_audit_sql="WITH draft_builds AS (
               SELECT id, rev, scenario_id, arch, status, phase, host_id,
@@ -235,17 +250,13 @@ jobs:
             JOIN draft_builds
               ON draft_builds.id = CAST(json_extract(desired_build.value, '\$.build_id') AS TEXT)
             ORDER BY record_type, revision, build_id, desired_state_host_id;"
-          bunx --bun wrangler d1 execute "${DATABASE_ID}" \
-            --remote --command "${draft_audit_sql}" --json > "${draft_audit}"
+          d1_readonly_query "${draft_audit_sql}" "${draft_audit}"
           jq -e '
-            type == "array" and length == 1 and
-            .[0].success == true and
-            (.[0].results | type == "array") and
-            ([.[0].results[] |
+            ([.result[0].results[] |
               select(.record_type == "draft_build") |
               select(.status != "succeeded" and .status != "failed" and .status != "stale")
             ] | length) == 0 and
-            ([.[0].results[] |
+            ([.result[0].results[] |
               select(.record_type == "host_desired_reference")
             ] | length) == 0
           ' "${draft_audit}" >/dev/null
@@ -258,14 +269,11 @@ jobs:
               (SELECT COUNT(*) FROM scenario_run_artifacts
                 WHERE upload_status <> 'uploaded')
                 AS non_uploaded_run_artifact_count;"
-          bunx --bun wrangler d1 execute "${DATABASE_ID}" \
-            --remote --command "${run_drain_sql}" --json > "${run_drain_audit}"
+          d1_readonly_query "${run_drain_sql}" "${run_drain_audit}"
           jq -e '
-            type == "array" and length == 1 and
-            .[0].success == true and
-            (.[0].results | type == "array" and length == 1) and
-            .[0].results[0].active_scenario_run_count == 0 and
-            .[0].results[0].non_uploaded_run_artifact_count == 0
+            (.result[0].results | length == 1) and
+            .result[0].results[0].active_scenario_run_count == 0 and
+            .result[0].results[0].non_uploaded_run_artifact_count == 0
           ' "${run_drain_audit}" >/dev/null
 
           assignment_counts_sql='SELECT organization_id, scenario_id,
@@ -273,14 +281,7 @@ jobs:
             FROM scenario_assignments
             GROUP BY organization_id, scenario_id
             ORDER BY organization_id, scenario_id;'
-          bunx --bun wrangler d1 execute "${DATABASE_ID}" \
-            --remote --command "${assignment_counts_sql}" --json \
-            > "${assignment_counts}"
-          jq -e '
-            type == "array" and length == 1 and
-            .[0].success == true and
-            (.[0].results | type == "array")
-          ' "${assignment_counts}" >/dev/null
+          d1_readonly_query "${assignment_counts_sql}" "${assignment_counts}"
 
           enabled_scenarios_sql="SELECT scenario_id,
               CASE
@@ -290,14 +291,7 @@ jobs:
             FROM vm_scenarios
             WHERE enabled = 1
             ORDER BY scope_key, scenario_id;"
-          bunx --bun wrangler d1 execute "${DATABASE_ID}" \
-            --remote --command "${enabled_scenarios_sql}" --json \
-            > "${enabled_scenarios}"
-          jq -e '
-            type == "array" and length == 1 and
-            .[0].success == true and
-            (.[0].results | type == "array")
-          ' "${enabled_scenarios}" >/dev/null
+          d1_readonly_query "${enabled_scenarios_sql}" "${enabled_scenarios}"
 
       - name: Prepare maintenance configuration
         if: steps.migrations.outputs.pending == 'true'
