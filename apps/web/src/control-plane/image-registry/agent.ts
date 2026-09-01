@@ -60,6 +60,8 @@ interface AgentImageIndexEntry {
   download_url?: string;
 }
 
+const IMAGE_INDEX_CONCURRENCY = 4;
+
 export async function handleAgentBundleDownload(
   request: Request,
   env: Cloudflare.Env,
@@ -211,10 +213,8 @@ export async function handleAgentImageIndex(
     )
     .where(visibleScenarioScope(verified.agent.organizationId));
 
-  const byKey = new Map<string, AgentImageIndexEntry>();
-
-  for (const row of rows) {
-    await addChunkedImageIndexEntry(byKey, env, {
+  const sources: AgentChunkedImageIndexSource[] = [
+    ...rows.map((row) => ({
       imageKey: row.imageKey,
       imageId: row.imageSha256,
       imageFormat: row.imageFormat,
@@ -224,11 +224,8 @@ export async function handleAgentImageIndex(
       kernelSha256: row.kernelSha256,
       initrdSha256: row.initrdSha256,
       bootCmdline: row.bootCmdline,
-    });
-  }
-
-  for (const vm of await loadDesiredCandidateVms(db, verified.agent)) {
-    await addChunkedImageIndexEntry(byKey, env, {
+    })),
+    ...(await loadDesiredCandidateVms(db, verified.agent)).map((vm) => ({
       imageKey: vm.image_key,
       imageId: vm.image_id,
       imageFormat: vm.image_format,
@@ -238,8 +235,10 @@ export async function handleAgentImageIndex(
       kernelSha256: vm.boot.kernel_sha256,
       initrdSha256: vm.boot.initrd_sha256,
       bootCmdline: vm.boot.cmdline,
-    });
-  }
+    })),
+  ];
+  const byKey = new Map<string, AgentImageIndexEntry>();
+  await addChunkedImageIndexEntries(byKey, env, sources);
 
   if (verified.agent.organizationId) {
     const checkpointRows = await db
@@ -394,6 +393,55 @@ async function addChunkedImageIndexEntry(
     manifest_download_url: `/agent/registry/image-manifests/${chunkManifestSha256}`,
     chunk_download_base_url: "/agent/registry/image-chunks",
   });
+}
+
+async function addChunkedImageIndexEntries(
+  byKey: Map<string, AgentImageIndexEntry>,
+  env: Cloudflare.Env,
+  sources: AgentChunkedImageIndexSource[],
+): Promise<void> {
+  const groups = groupChunkedImageIndexSources(sources);
+  for (
+    let offset = 0;
+    offset < groups.length;
+    offset += IMAGE_INDEX_CONCURRENCY
+  ) {
+    const entries = await Promise.all(
+      groups
+        .slice(offset, offset + IMAGE_INDEX_CONCURRENCY)
+        .map(async (group) => {
+          const groupEntries = new Map<string, AgentImageIndexEntry>();
+          for (const source of group) {
+            await addChunkedImageIndexEntry(groupEntries, env, source);
+          }
+          return groupEntries;
+        }),
+    );
+    for (const groupEntries of entries) {
+      for (const [identity, entry] of groupEntries) byKey.set(identity, entry);
+    }
+  }
+}
+
+function groupChunkedImageIndexSources(
+  sources: AgentChunkedImageIndexSource[],
+): AgentChunkedImageIndexSource[][] {
+  const groups = new Map<string, AgentChunkedImageIndexSource[]>();
+  for (const [index, source] of sources.entries()) {
+    const identity = chunkedImageIndexIdentity(source) ?? `invalid:${index}`;
+    const group = groups.get(identity);
+    if (group) group.push(source);
+    else groups.set(identity, [source]);
+  }
+  return [...groups.values()];
+}
+
+function chunkedImageIndexIdentity(
+  source: AgentChunkedImageIndexSource,
+): string | null {
+  if (!isImageKey(source.imageKey)) return null;
+  const imageId = normalizeSha256(source.imageId ?? "");
+  return imageId ? `${registryImageKey(source.imageKey)}:${imageId}` : null;
 }
 
 async function loadDesiredCandidateVms(

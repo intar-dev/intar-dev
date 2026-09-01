@@ -157,6 +157,87 @@ describe("image registry agent routes", () => {
     expect(bucketHead).toHaveBeenCalledTimes(6);
   });
 
+  it("checks distinct chunked image identities concurrently", async () => {
+    authMock.requireVerifiedAgentRequest.mockResolvedValue({
+      ok: true,
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+    });
+    const first = imageIndexRow({
+      imageKey: { scenario: "alpha", vm: "web", arch: "x86_64" },
+      imageSha256: "a".repeat(64),
+      chunkManifestSha256: "b".repeat(64),
+      kernelSha256: "c".repeat(64),
+      initrdSha256: "d".repeat(64),
+    });
+    const second = imageIndexRow({
+      imageKey: { scenario: "bravo", vm: "web", arch: "x86_64" },
+      imageSha256: "e".repeat(64),
+      chunkManifestSha256: "f".repeat(64),
+      kernelSha256: "0".repeat(64),
+      initrdSha256: "1".repeat(64),
+    });
+    dbMock.drizzle.mockReturnValueOnce(imageIndexDb([first, second]));
+
+    const manifestKeys = new Map([
+      [`image-manifests/v1/${first.chunkManifestSha256}.json`, first],
+      [`image-manifests/v1/${second.chunkManifestSha256}.json`, second],
+    ]);
+    const artifactKeys = new Set([
+      `artifacts/${first.kernelSha256}`,
+      `artifacts/${first.initrdSha256}`,
+      `artifacts/${second.kernelSha256}`,
+      `artifacts/${second.initrdSha256}`,
+    ]);
+    let manifestHeadsStarted = 0;
+    let releaseManifestHeads!: () => void;
+    const manifestHeads = new Promise<void>((resolve) => {
+      releaseManifestHeads = resolve;
+    });
+    const bucketHead = vi.fn(async (key: string) => {
+      const image = manifestKeys.get(key);
+      if (image) {
+        manifestHeadsStarted += 1;
+        await manifestHeads;
+        return {
+          customMetadata: {
+            manifest_sha256: image.chunkManifestSha256,
+            image_id: image.imageSha256,
+          },
+        };
+      }
+      if (artifactKeys.has(key)) {
+        const sha256 = key.slice("artifacts/".length);
+        return { customMetadata: { artifact_sha256: sha256 } };
+      }
+      return null;
+    });
+
+    const responsePromise = handleImageRegistryRequest(
+      new Request("https://intar.test/agent/registry/images", {
+        headers: { authorization: "Bearer agent-jwt" },
+      }),
+      {
+        DB: "db-binding",
+        VM_IMAGE_REGISTRY_BUCKET: { head: bucketHead },
+      } as unknown as Cloudflare.Env,
+    );
+    try {
+      await vi.waitFor(() => expect(manifestHeadsStarted).toBe(2));
+    } finally {
+      releaseManifestHeads();
+    }
+
+    const response = await responsePromise;
+    expect(response?.status).toBe(200);
+    await expect(response?.json()).resolves.toMatchObject({
+      images: [
+        { image_key: "alpha-web-x86_64", image_id: first.imageSha256 },
+        { image_key: "bravo-web-x86_64", image_id: second.imageSha256 },
+      ],
+    });
+    expect(bucketHead).toHaveBeenCalledTimes(6);
+  });
+
   it("advertises a verified desired candidate before catalog promotion", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
