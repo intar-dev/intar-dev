@@ -3,10 +3,11 @@
 use std::path::Path;
 
 use super::{
-    bridge, classify_publish_error, config, db, ensure_preflight_report_ready, local_bundle_rev,
-    log_upload_warning, non_retryable_build_error, preflight, qemu_build_config_for_job,
-    should_retry_build_error, validate_job_config, validate_run_once_publish_target,
-    validate_run_once_publish_token, verify_bundle_or_drop_cached_archive,
+    bridge, classify_publish_error, cleanup_reported_build_attempt_artifacts, config, db,
+    emit_build_report, ensure_preflight_report_ready, local_bundle_rev, log_upload_warning,
+    non_retryable_build_error, preflight, qemu_build_config_for_job, should_retry_build_error,
+    validate_job_config, validate_run_once_publish_target, validate_run_once_publish_token,
+    verify_bundle_or_drop_cached_archive,
 };
 
 #[test]
@@ -60,6 +61,80 @@ fn concurrent_build_ids_and_hashes_get_disjoint_paths() {
     assert_ne!(first.work_root, second.work_root);
     assert_ne!(first.output_root, second.output_root);
     assert_eq!(first.base_cache_root, second.base_cache_root);
+}
+
+#[tokio::test]
+async fn cleans_only_reported_build_attempt_artifacts_idempotently() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut cfg = config::BuilderConfig::default();
+    cfg.builder.work_root = temporary.path().join("work");
+    cfg.builder.cache_root = temporary.path().join("cache");
+
+    let build_id = "build-1";
+    let build_work = cfg
+        .builder
+        .work_root
+        .join("builds")
+        .join(build_id)
+        .join("content-hash");
+    let build_output = cfg
+        .builder
+        .cache_root
+        .join("outputs")
+        .join(build_id)
+        .join("content-hash");
+    let other_work = cfg.builder.work_root.join("builds").join("other-build");
+    let other_output = cfg.builder.cache_root.join("outputs").join("other-build");
+    for path in [&build_work, &build_output, &other_work, &other_output] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("artifact"), "data").unwrap();
+    }
+
+    cleanup_reported_build_attempt_artifacts(&cfg, build_id).await;
+
+    assert!(!build_work.parent().unwrap().exists());
+    assert!(!build_output.parent().unwrap().exists());
+    assert!(other_work.join("artifact").exists());
+    assert!(other_output.join("artifact").exists());
+
+    cleanup_reported_build_attempt_artifacts(&cfg, build_id).await;
+
+    assert!(other_work.join("artifact").exists());
+    assert!(other_output.join("artifact").exists());
+
+    cleanup_reported_build_attempt_artifacts(&cfg, "../other-build").await;
+
+    assert!(other_work.join("artifact").exists());
+    assert!(other_output.join("artifact").exists());
+}
+
+#[tokio::test]
+async fn closed_report_queue_keeps_persisted_build_state_replayable() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut cfg = config::BuilderConfig::default();
+    cfg.builder.state_db = temporary.path().join("builder.sqlite3");
+    let build = intar_contracts::bridge::DesiredBuildV1 {
+        build_id: "build-1".to_string(),
+        scenario_id: "broken-nginx".to_string(),
+        arch: intar_contracts::catalog::ImageArchitecture::X86_64,
+        rev: "abc123".to_string(),
+        content_hash: "f".repeat(64),
+        bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
+    };
+    let db = db::BuilderDb::open(&cfg.builder.state_db).unwrap();
+    db.upsert_build_job(&build, "succeeded", 1, None, 1000)
+        .unwrap();
+    let (report_tx, report_rx) = tokio::sync::mpsc::channel(1);
+    drop(report_rx);
+
+    emit_build_report(&cfg, &report_tx, &build.build_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.load_build_job(&build.build_id).unwrap().unwrap().phase,
+        "succeeded"
+    );
 }
 
 #[test]

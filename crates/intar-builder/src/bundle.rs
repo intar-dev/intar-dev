@@ -466,7 +466,7 @@ fn course_lecture_for_scenario(
 }
 
 pub fn validate_desired_build_identity(build: &DesiredBuildV1) -> Result<()> {
-    validate_safe_slug(&build.build_id, "build id")?;
+    validate_build_id(&build.build_id)?;
     validate_safe_slug(&build.scenario_id, "scenario id")?;
     validate_bundle_rev(&build.rev)?;
     validate_sha256_hex(&build.content_hash, "content hash")?;
@@ -480,6 +480,10 @@ pub fn validate_desired_build_identity(build: &DesiredBuildV1) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn validate_build_id(value: &str) -> Result<()> {
+    validate_safe_slug(value, "build id")
 }
 
 fn bundle_ref_for_rev(rev: &str) -> String {

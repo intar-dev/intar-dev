@@ -31,7 +31,7 @@ use tracing::{info, warn};
 
 use crate::bridge::host_architecture;
 use crate::bundle::{
-    download_bundle_archive, inspect_bundle_build_input, unpack_bundle_archive,
+    download_bundle_archive, inspect_bundle_build_input, unpack_bundle_archive, validate_build_id,
     validate_bundle_rev, verify_bundle_for_build,
 };
 
@@ -564,6 +564,32 @@ fn qemu_build_config_for_job(
         .join(&build.build_id)
         .join(&build.content_hash);
     config
+}
+
+pub(crate) async fn cleanup_reported_build_attempt_artifacts(
+    cfg: &config::BuilderConfig,
+    build_id: &str,
+) {
+    if let Err(error) = validate_build_id(build_id) {
+        warn!(build_id, error = %error, "refused builder build-attempt artifact cleanup");
+        return;
+    }
+
+    let work_path = cfg.builder.work_root.join("builds").join(build_id);
+    let output_path = cfg.builder.cache_root.join("outputs").join(build_id);
+
+    for path in [&work_path, &output_path] {
+        if let Err(error) = tokio::fs::remove_dir_all(path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                build_id,
+                path = %path.display(),
+                error = %error,
+                "failed to remove completed builder build-attempt artifacts"
+            );
+        }
+    }
 }
 
 fn init_tracing() {

@@ -55,45 +55,53 @@ pub(super) async fn process_next_queued_build(
     }) else {
         return Ok(false);
     };
-    emit_build_report(cfg, report_tx, &job.build_id).await?;
-
-    let result = run_claimed_build_job(cfg, &job, report_tx, cpu_gate).await;
-    if let Err(error) = result {
-        let error_message = format!("{error:#}");
-        let now = now_unix_ms();
-        {
-            let db = db::BuilderDb::open(&cfg.builder.state_db)?;
-            if should_retry_build_error(&error, job.attempt, cfg.jobs.max_attempts) {
-                let next_attempt_at_ms = now.saturating_add(retry_delay_ms(job.attempt));
-                db.schedule_build_job_retry(
-                    &job.build_id,
-                    job.attempt,
-                    &error_message,
-                    next_attempt_at_ms,
-                    now,
-                )?;
-                warn!(
-                    build_id = %job.build_id,
-                    attempt = job.attempt,
-                    next_attempt_at_ms,
-                    "scheduled builder job retry"
-                );
-            } else {
-                db.update_build_job_phase(
-                    &job.build_id,
-                    "failed",
-                    None,
-                    job.attempt,
-                    Some(&error_message),
-                    now,
-                )?;
-            }
-        }
+    let result = async {
         emit_build_report(cfg, report_tx, &job.build_id).await?;
-        return Err(error);
-    }
 
-    Ok(true)
+        let result = run_claimed_build_job(cfg, &job, report_tx, cpu_gate).await;
+        if let Err(error) = result {
+            let error_message = format!("{error:#}");
+            let now = now_unix_ms();
+            {
+                let db = db::BuilderDb::open(&cfg.builder.state_db)?;
+                if should_retry_build_error(&error, job.attempt, cfg.jobs.max_attempts) {
+                    let next_attempt_at_ms = now.saturating_add(retry_delay_ms(job.attempt));
+                    db.schedule_build_job_retry(
+                        &job.build_id,
+                        job.attempt,
+                        &error_message,
+                        next_attempt_at_ms,
+                        now,
+                    )?;
+                    warn!(
+                        build_id = %job.build_id,
+                        attempt = job.attempt,
+                        next_attempt_at_ms,
+                        "scheduled builder job retry"
+                    );
+                } else {
+                    db.update_build_job_phase(
+                        &job.build_id,
+                        "failed",
+                        None,
+                        job.attempt,
+                        Some(&error_message),
+                        now,
+                    )?;
+                }
+            }
+            emit_build_report(cfg, report_tx, &job.build_id).await?;
+            return Err(error);
+        }
+
+        Ok(true)
+    }
+    .await;
+
+    // ponytail: a hard crash can leave one build ID's directories; add a
+    // SQLite-derived startup sweep only when it can prove no worker owns the ID.
+    cleanup_reported_build_attempt_artifacts(cfg, &job.build_id).await;
+    result
 }
 
 pub(super) async fn run_claimed_build_job(
@@ -101,6 +109,27 @@ pub(super) async fn run_claimed_build_job(
     job: &db::BuildJobRow,
     report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
     cpu_gate: &Arc<Semaphore>,
+) -> Result<()> {
+    let mut log_files = Vec::new();
+    let result = run_claimed_build_job_inner(cfg, job, report_tx, cpu_gate, &mut log_files).await;
+    if result.is_err() {
+        upload_build_logs_with_fresh_token_best_effort(
+            cfg,
+            &job.build_id,
+            &log_files,
+            "builder job failure",
+        )
+        .await;
+    }
+    result
+}
+
+async fn run_claimed_build_job_inner(
+    cfg: &config::BuilderConfig,
+    job: &db::BuildJobRow,
+    report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
+    cpu_gate: &Arc<Semaphore>,
+    log_files: &mut Vec<BuildLogFile>,
 ) -> Result<()> {
     let desired_build = job.desired_build();
     let download_token = bridge::bootstrap_builder_access_token(&cfg.bridge)
@@ -133,7 +162,6 @@ pub(super) async fn run_claimed_build_job(
     let build_config = qemu_build_config_for_job(cfg, &desired_build);
 
     let mut outputs = Vec::new();
-    let mut log_files = Vec::new();
     for vm in &bundle_input.scenario.vms {
         log_files.extend(direct_build_log_files(
             &build_config,
@@ -205,16 +233,7 @@ pub(super) async fn run_claimed_build_job(
         drop(cpu_permit);
         let (rendered, scan) = match raw_result {
             Ok(output) => output,
-            Err(error) => {
-                upload_build_logs_with_fresh_token_best_effort(
-                    cfg,
-                    &job.build_id,
-                    &log_files,
-                    "direct QEMU build failure",
-                )
-                .await;
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         ensure_build_still_desired(cfg, &job.build_id)?;
 
@@ -265,16 +284,7 @@ pub(super) async fn run_claimed_build_job(
         drop(cpu_permit);
         let output = match output_result {
             Ok(output) => output,
-            Err(error) => {
-                upload_build_logs_with_fresh_token_best_effort(
-                    cfg,
-                    &job.build_id,
-                    &log_files,
-                    "image chunk compression failure",
-                )
-                .await;
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         ensure_build_still_desired(cfg, &job.build_id)?;
         info!(
@@ -317,16 +327,7 @@ pub(super) async fn run_claimed_build_job(
     })
     .await
     .context("publish worker panicked")?;
-    if let Err(error) = publish_result {
-        upload_build_logs_with_fresh_token_best_effort(
-            cfg,
-            &job.build_id,
-            &log_files,
-            "publish failure",
-        )
-        .await;
-        return Err(error);
-    }
+    publish_result?;
 
     {
         let db = db::BuilderDb::open(&cfg.builder.state_db)?;
@@ -342,7 +343,7 @@ pub(super) async fn run_claimed_build_job(
     emit_build_report(cfg, report_tx, &job.build_id).await?;
     let success_warning = match bridge::bootstrap_builder_access_token(&cfg.bridge).await {
         Ok(log_token) => {
-            if let Err(error) = upload_build_log(cfg, &log_token, &job.build_id, &log_files).await {
+            if let Err(error) = upload_build_log(cfg, &log_token, &job.build_id, log_files).await {
                 warn!(
                     build_id = %job.build_id,
                     error = %error,
@@ -388,11 +389,13 @@ pub(super) async fn emit_build_report(
         db.load_build_job(build_id)?
             .map(|row| bridge::build_report_from_job(&cfg.bridge.host_id, row))
     };
-    if let Some(report) = report {
-        report_tx
-            .send(report)
-            .await
-            .context("failed to queue builder build report")?;
+    if let Some(report) = report
+        && report_tx.send(report).await.is_err()
+    {
+        warn!(
+            build_id,
+            "builder report queue closed; persisted state will replay after restart"
+        );
     }
     Ok(())
 }
