@@ -190,6 +190,56 @@ describe("image registry source bundles", () => {
     }
   });
 
+  it("reports the failing bundle stage without exposing its error", async () => {
+    schedulerMock.queueImageBuildsFromBundle.mockRejectedValueOnce(
+      new Error("private database detail"),
+    );
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const form = new FormData();
+    form.set("meta", JSON.stringify(sourceMeta()));
+    form.set(
+      "bundle",
+      new File(
+        [
+          sourceBundleFixtureWithCurriculum(
+            ["broken-nginx"],
+            [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
+          ),
+        ],
+        "abc123.tar.gz",
+        { type: "application/gzip" },
+      ),
+    );
+
+    try {
+      const response = await handleImageRegistryRequest(
+        new Request("https://intar.test/registry/v1/bundles", {
+          method: "POST",
+          headers: { authorization: "Bearer publish-secret" },
+          body: form,
+        }),
+        {
+          DB: "db-binding",
+          REGISTRY_PUBLISH_TOKEN: "publish-secret",
+          VM_IMAGE_REGISTRY_BUCKET: { put: vi.fn() },
+        } as unknown as Cloudflare.Env,
+      );
+
+      expect(response?.status).toBe(500);
+      const body = await response?.json();
+      expect(body).toEqual({
+        error: "bundle processing failed",
+        stage: "queue_builds",
+      });
+      expect(JSON.stringify(body)).not.toContain("private database detail");
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining('"stage":"queue_builds"'),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("rejects empty source bundle archives before queueing builds", async () => {
     const form = new FormData();
     form.set("meta", JSON.stringify(sourceMeta()));

@@ -78,85 +78,104 @@ export async function handleBundleUpload(
 
   const db = drizzle(env.DB);
   const courseCatalog = meta.value.bundleMeta.courseCatalog;
-  const invalidScenarioIds = await validateCourseCatalogReferences(
-    db,
-    {
-      snapshot: courseCatalog,
-      bundleScenarioIds: meta.value.bundleMeta.scenarios.map(
-        (scenario) => scenario.scenarioId,
-      ),
-      organizationId: null,
-    },
-  );
-  if (invalidScenarioIds.length) {
-    return jsonResponse(
+  let stage = "validate_catalog_references";
+  try {
+    const invalidScenarioIds = await validateCourseCatalogReferences(
+      db,
       {
-        error: "course catalog references unavailable scenarios",
-        scenario_ids: invalidScenarioIds,
+        snapshot: courseCatalog,
+        bundleScenarioIds: meta.value.bundleMeta.scenarios.map(
+          (scenario) => scenario.scenarioId,
+        ),
+        organizationId: null,
       },
-      400,
     );
-  }
+    if (invalidScenarioIds.length) {
+      return jsonResponse(
+        {
+          error: "course catalog references unavailable scenarios",
+          scenario_ids: invalidScenarioIds,
+        },
+        400,
+      );
+    }
 
-  const objectKey = bundleObjectKey(meta.value.rev);
-  await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
-    httpMetadata: { contentType: "application/gzip" },
-    customMetadata: {
+    const objectKey = bundleObjectKey(meta.value.rev);
+    stage = "store_bundle";
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
+      httpMetadata: { contentType: "application/gzip" },
+      customMetadata: {
+        rev: meta.value.rev,
+      },
+    });
+
+    const now = Date.now();
+    stage = "queue_builds";
+    const queued = await queueImageBuildsFromBundle(db, {
       rev: meta.value.rev,
-    },
-  });
-
-  const now = Date.now();
-  const queued = await queueImageBuildsFromBundle(db, {
-    rev: meta.value.rev,
-    r2Key: objectKey,
-    meta: meta.value.bundleMeta,
-    nowUnixMs: now,
-  });
-  await syncCourseCatalogSnapshot(db, {
-    snapshot: courseCatalog,
-    sourceRevision: meta.value.rev,
-    organizationId: null,
-    nowUnixMs: now,
-  });
-  const assigned = await assignQueuedImageBuilds(db, now);
-  if (queued.queued < meta.value.bundleMeta.scenarios.length) {
-    await stageReusableCandidateManifests(db, {
-      revision: meta.value.rev,
-      organizationId: null,
+      r2Key: objectKey,
       meta: meta.value.bundleMeta,
       nowUnixMs: now,
-      wakeHost: (hostId) =>
-        tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
     });
-  }
-  // Run this after the bundle/course/build pipeline has committed whenever at
-  // least one accepted image has no new publication event ahead of it. This is
-  // the key path for unchanged bundles (queued=0) and hosts added since the
-  // original publication, without duplicating fan-out for all-new builds.
-  if (
-    queued.queued < meta.value.bundleMeta.scenarios.length &&
-    meta.value.bundleMeta.catalogChannel !== "candidate"
-  ) {
-    await tryReconcileScenarioImagesForPublicationScope(db, {
-      publicationOrganizationId: null,
+    stage = "sync_course_catalog";
+    await syncCourseCatalogSnapshot(db, {
+      snapshot: courseCatalog,
+      sourceRevision: meta.value.rev,
+      organizationId: null,
       nowUnixMs: now,
-      reason: "public_bundle_accepted_without_full_rebuild",
-      wakeHostRuntime: (hostId) =>
-        tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
     });
-  }
+    stage = "assign_builds";
+    const assigned = await assignQueuedImageBuilds(db, now);
+    if (queued.queued < meta.value.bundleMeta.scenarios.length) {
+      stage = "stage_reused_candidates";
+      await stageReusableCandidateManifests(db, {
+        revision: meta.value.rev,
+        organizationId: null,
+        meta: meta.value.bundleMeta,
+        nowUnixMs: now,
+        wakeHost: (hostId) =>
+          tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+      });
+    }
+    // Run this after the bundle/course/build pipeline has committed whenever at
+    // least one accepted image has no new publication event ahead of it. This is
+    // the key path for unchanged bundles (queued=0) and hosts added since the
+    // original publication, without duplicating fan-out for all-new builds.
+    if (
+      queued.queued < meta.value.bundleMeta.scenarios.length &&
+      meta.value.bundleMeta.catalogChannel !== "candidate"
+    ) {
+      stage = "reconcile_live_images";
+      await tryReconcileScenarioImagesForPublicationScope(db, {
+        publicationOrganizationId: null,
+        nowUnixMs: now,
+        reason: "public_bundle_accepted_without_full_rebuild",
+        wakeHostRuntime: (hostId) =>
+          tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+      });
+    }
 
-  return jsonResponse(
-    {
-      ok: true,
-      rev: meta.value.rev,
-      bundle_key: objectKey,
-      queued: queued.queued,
-      assigned,
-    },
-    202,
-  );
+    return jsonResponse(
+      {
+        ok: true,
+        rev: meta.value.rev,
+        bundle_key: objectKey,
+        queued: queued.queued,
+        assigned,
+      },
+      202,
+    );
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        message: "bundle processing failed",
+        revision: meta.value.rev,
+        stage,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return jsonResponse({ error: "bundle processing failed", stage }, 500);
+  }
 }
 
 export async function requireBundleUploadAuth(
