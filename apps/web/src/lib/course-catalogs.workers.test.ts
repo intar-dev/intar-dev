@@ -24,6 +24,7 @@ import {
   applyLectureBriefingPresentation,
   applyLecturePresentation,
   assertCourseScenarioStartAllowed,
+  backfillCourseUnitCompletions,
   completePureCourseLectureForUser,
   findCourseLecturePresentation,
   listCourseCatalogForUser,
@@ -114,6 +115,31 @@ describe("V2 course catalogs", () => {
       createdAt: 100,
       updatedAt: 101,
     });
+  });
+
+  it("backfills more than one D1 parameter batch", async () => {
+    const db = drizzle(env.DB);
+    await seedLearnerAndHost();
+    const lectures: CourseCatalogLectureV2[] = [];
+    for (let index = 1; index <= 101; index += 1) {
+      const scenarioId = `historical-${index}`;
+      await insertScenario(null, scenarioId);
+      await insertRun({
+        runId: `${scenarioId}-run`,
+        scenarioId,
+        state: "completed",
+        solvedAt: 2_000 + index,
+        completedAt: 3_000 + index,
+      });
+      lectures.push(lecture(`lecture-${index}`, scenarioId));
+    }
+
+    await backfillCourseUnitCompletions(db, {
+      snapshot: snapshot(course("batched", lectures)),
+      organizationId: null,
+    });
+
+    await expect(db.select().from(courseUnitCompletions)).resolves.toHaveLength(101);
   });
 
   it("validates only linked V2 scenario references in the upload scope", async () => {

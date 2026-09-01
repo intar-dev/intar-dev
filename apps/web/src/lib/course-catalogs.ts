@@ -29,6 +29,8 @@ export type {
 } from "@/db/schema";
 
 const PUBLIC_COURSE_CATALOG_SCOPE = "public";
+const COURSE_COMPLETION_SCENARIO_READ_BATCH_SIZE = 96;
+const COURSE_COMPLETION_INSERT_BATCH_SIZE = 16;
 
 export type CourseLectureState =
   | "locked"
@@ -638,25 +640,39 @@ export async function backfillCourseUnitCompletions(
   const scenarioIds = linkedScenarioIds(input.snapshot);
   if (!scenarioIds.length) return;
 
-  const successfulRuns = await db
-    .select({
-      runId: scenarioRuns.runId,
-      userId: scenarioRuns.userId,
-      scenarioId: scenarioRuns.scenarioId,
-      solvedAt: scenarioRuns.solvedAt,
-      completedAt: scenarioRuns.completedAt,
-    })
-    .from(scenarioRuns)
-    .where(
-      and(
-        inArray(scenarioRuns.scenarioId, scenarioIds),
-        eq(scenarioRuns.state, "completed"),
-        isNotNull(scenarioRuns.solvedAt),
-        ...(input.organizationId
-          ? [eq(scenarioRuns.organizationId, input.organizationId)]
-          : []),
-      ),
+  const successfulRuns: Array<{
+    runId: string;
+    userId: string;
+    scenarioId: string;
+    solvedAt: number | null;
+    completedAt: number | null;
+  }> = [];
+  for (const scenarioBatch of chunked(
+    scenarioIds,
+    COURSE_COMPLETION_SCENARIO_READ_BATCH_SIZE,
+  )) {
+    successfulRuns.push(
+      ...(await db
+        .select({
+          runId: scenarioRuns.runId,
+          userId: scenarioRuns.userId,
+          scenarioId: scenarioRuns.scenarioId,
+          solvedAt: scenarioRuns.solvedAt,
+          completedAt: scenarioRuns.completedAt,
+        })
+        .from(scenarioRuns)
+        .where(
+          and(
+            inArray(scenarioRuns.scenarioId, scenarioBatch),
+            eq(scenarioRuns.state, "completed"),
+            isNotNull(scenarioRuns.solvedAt),
+            ...(input.organizationId
+              ? [eq(scenarioRuns.organizationId, input.organizationId)]
+              : []),
+          ),
+        )),
     );
+  }
   const earliestRunByUserScenario = new Map<
     string,
     (typeof successfulRuns)[number]
@@ -693,10 +709,19 @@ export async function backfillCourseUnitCompletions(
   }
   if (!completions.length) return;
 
-  await db
-    .insert(courseUnitCompletions)
-    .values(completions)
-    .onConflictDoNothing();
+  await db.batch(
+    chunked(completions, COURSE_COMPLETION_INSERT_BATCH_SIZE).map((batch) =>
+      db.insert(courseUnitCompletions).values(batch).onConflictDoNothing(),
+    ),
+  );
+}
+
+function chunked<T>(values: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let offset = 0; offset < values.length; offset += size) {
+    chunks.push(values.slice(offset, offset + size));
+  }
+  return chunks;
 }
 
 /** Finds the Markdown presentation associated with one technical scenario. */
