@@ -709,11 +709,18 @@ export async function backfillCourseUnitCompletions(
   }
   if (!completions.length) return;
 
-  await db.batch(
-    chunked(completions, COURSE_COMPLETION_INSERT_BATCH_SIZE).map((batch) =>
+  const completionBatches = chunked(
+    completions,
+    COURSE_COMPLETION_INSERT_BATCH_SIZE,
+  );
+  const firstBatch = completionBatches[0];
+  if (!firstBatch) return;
+  await db.batch([
+    db.insert(courseUnitCompletions).values(firstBatch).onConflictDoNothing(),
+    ...completionBatches.slice(1).map((batch) =>
       db.insert(courseUnitCompletions).values(batch).onConflictDoNothing(),
     ),
-  );
+  ]);
 }
 
 function chunked<T>(values: readonly T[], size: number): T[][] {
