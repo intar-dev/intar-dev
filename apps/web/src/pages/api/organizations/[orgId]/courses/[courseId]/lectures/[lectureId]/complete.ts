@@ -7,7 +7,7 @@ import {
   requireOrganizationRole,
   resolveOrganizationId,
 } from "@/lib/organizations";
-import { completePureCourseLectureForUser } from "@/lib/scenario-course-catalogs";
+import { completePureCourseLectureForUser } from "@/lib/course-catalogs";
 
 export const prerender = false;
 

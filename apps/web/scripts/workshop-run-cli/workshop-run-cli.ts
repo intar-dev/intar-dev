@@ -6,12 +6,11 @@ import {
   type NativeSshExecution,
 } from "./native-ssh";
 import type { ApiClient } from "./api-client";
-import { sleep } from "./utils";
 import {
   assertSafeHintCompletionAliases,
   bashCompletionProofScript,
   parseBashCompletionCandidates,
-} from "./run-cli";
+} from "./completion";
 
 export const DISPOSABLE_WORKSHOP_TEARDOWN_CONFIRMATION =
   "END DISPOSABLE WORKSHOP";
@@ -48,14 +47,11 @@ export interface WorkshopRunCliStatus {
 }
 
 /**
- * The scenario live harness cannot create a workshop session or select a
- * provider. This focused action hook is deliberately usable against either an
+ * This focused action hook is deliberately usable against either an
  * already-running KVM workshop workspace or a direct-cloud workspace.
  *
- * It uses the same issued-key and strict-host-verification route as scenarios.
- * It deliberately runs a fresh check and reveals one currently available hint,
- * but never reveals a Workshop solution. Run it once for each provider after
- * creating the participant workspace through the normal workshop workflow.
+ * It uses issued keys and strict host verification. It runs a fresh check and
+ * reveals one available hint, but never reveals a Workshop solution.
  */
 export async function verifyWorkshopRunCliViaNativeSsh(input: {
   client: ApiClient;
@@ -243,7 +239,7 @@ export async function issueWorkshopNativeSshRoute(input: {
     client: input.client,
     path: `/api/workshops/${encodeURIComponent(sessionId)}/terminal`,
     body: { workspaceId },
-    keyComment: `live-e2e-workshop-${sessionId}`,
+    keyComment: `workshop-run-cli-${sessionId}`,
   });
 }
 
@@ -535,7 +531,7 @@ async function waitForWorkshopStatus(input: {
   while (Date.now() <= deadline) {
     const status = await loadWorkshopStatus(input.client, input.sessionId);
     if (input.predicate(status)) return status;
-    await sleep(input.pollMs);
+    await new Promise<void>((resolve) => setTimeout(resolve, input.pollMs));
   }
   throw new Error(
     `${input.providerLabel} workshop timed out waiting for ${input.description}`,

@@ -21,13 +21,6 @@ fn render_minimal_provision_script() -> String {
 fn render_minimal_provision_script_with_cpu(cpu: &str) -> String {
     let source = r#"
 scenario "ssh-readiness" {
-  title = "SSH Readiness"
-  category = "linux"
-  tags = ["ssh"]
-  difficulty = "easy"
-  estimated_minutes = 5
-  description = "Verify SSH readiness"
-  briefing = "Wait for SSH."
   solution { body = "SSH starts automatically." }
 
   image "debian-13-minimal" {
@@ -51,7 +44,7 @@ probes = ["ssh-running"]
 }
 "#
     .replace("__CPU__", cpu);
-    let scenario = Scenario::parse(&source).unwrap();
+    let scenario = Scenario::parse_course(&source).unwrap();
     let vm = scenario.vm_by_name("server").unwrap();
     render_scenario_provision_script(&scenario, vm).unwrap()
 }
@@ -844,17 +837,9 @@ wait_for_guest_network
 
 #[test]
 fn provision_script_contains_runtime_assets() {
-    let scenario = Scenario::parse(
+    let scenario = Scenario::parse_course(
         r#"
 scenario "broken-nginx" {
-  title = "Broken Nginx"
-  category = "web"
-  tags = ["nginx", "systemd"]
-  difficulty = "easy"
-  estimated_minutes = 15
-  description = "Fix nginx"
-  briefing = "Briefing should stay on the website only."
-
   hint "service-state" {
 body = "Hint should not be baked into the VM."
   }
@@ -1021,12 +1006,9 @@ packages = ["nginx"]
 
 #[test]
 fn provision_script_renders_k8s_scale_deployment_action() {
-    let scenario = Scenario::parse(
+    let scenario = Scenario::parse_course(
         r#"
 scenario "workshop-cluster" {
-  category = "kubernetes"
-  description = "Restore the workshop application"
-
   image "debian-12-minimal" {
 base = "trixie"
   }

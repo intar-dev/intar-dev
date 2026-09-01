@@ -7,7 +7,7 @@ import {
   applyLectureBriefingPresentation,
   resolveCourseLectureForScenario,
   type ResolvedCourseLecture,
-} from "@/lib/scenario-course-catalogs";
+} from "@/lib/course-catalogs";
 import { RUN_PHASE_ORDER, type RunPhase } from "@/lib/run-state";
 import {
   deriveScenarioRunOutcome,

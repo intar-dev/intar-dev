@@ -43,31 +43,11 @@ const INTAR_ALWAYS_BLOCKED_KINO_COMMANDS: &[&str] = &["usermod", "chsh"];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scenario {
     pub name: String,
-    pub title: String,
-    pub category: String,
-    pub tags: Vec<String>,
-    pub difficulty: Option<ScenarioDifficulty>,
-    pub estimated_minutes: Option<u32>,
-    pub description: String,
-    pub briefing: String,
     pub hints: Vec<ScenarioHint>,
     pub solution: Option<ScenarioSolution>,
     pub images: HashMap<String, ImageSpec>,
     pub kino: KinoDefinition,
     pub vms: Vec<VmDefinition>,
-    /// Presentation fields remain readable for legacy, non-course callers.
-    /// Course sources reject them through `parse_course` and take this data
-    /// from the paired Markdown lecture instead.
-    #[serde(skip)]
-    course_presentation_fields: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ScenarioDifficulty {
-    Easy,
-    Medium,
-    Hard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,42 +178,23 @@ pub enum SystemctlAction {
 }
 
 impl Scenario {
-    pub fn from_file(path: &Path) -> Result<Self, ScenarioError> {
-        let content = std::fs::read_to_string(path)?;
-        Self::parse(&content)
-    }
-
     pub fn from_course_file(path: &Path) -> Result<Self, ScenarioError> {
         let content = std::fs::read_to_string(path)?;
         Self::parse_course(&content)
     }
 
     pub fn parse_course(content: &str) -> Result<Self, ScenarioError> {
-        let scenario = Self::parse(content)?;
-        scenario.validate_course_presentation_fields()?;
-        Ok(scenario)
-    }
-
-    pub fn parse(content: &str) -> Result<Self, ScenarioError> {
         let mut vm_cpu_literals: VecDeque<_> = extract_vm_cpu_literals(content)?.into();
         let body: hcl::Body =
             hcl::from_str(content).map_err(|error| ScenarioError::HclParse(error.to_string()))?;
 
         let mut scenario_name = String::new();
         let mut saw_scenario_block = false;
-        let mut title = String::new();
-        let mut category = String::new();
-        let mut tags = Vec::new();
-        let mut difficulty = None;
-        let mut estimated_minutes = None;
-        let mut description = String::new();
-        let mut briefing = String::new();
         let mut hints = Vec::new();
         let mut solution = None;
         let mut images = HashMap::new();
         let mut kino = KinoDefinition::default();
         let mut vms = Vec::new();
-        let mut course_presentation_fields = Vec::new();
 
         for block in body.blocks() {
             if block.identifier.as_str() != "scenario" {
@@ -248,23 +209,21 @@ impl Scenario {
 
             scenario_name = required_single_label(block, "scenario", "missing scenario name")?;
 
-            for attr in block.body.attributes() {
+            if let Some(attr) = block.body.attributes().next() {
                 let key = attr.key.as_str();
                 match key {
-                    "title" => title = extract_string(&attr.expr)?,
-                    "category" => category = extract_string(&attr.expr)?,
-                    "tags" => tags = extract_string_array(&attr.expr)?,
-                    "difficulty" => difficulty = Some(parse_difficulty(&attr.expr)?),
-                    "estimated_minutes" => estimated_minutes = Some(extract_u32(&attr.expr)?),
-                    "description" => description = extract_string(&attr.expr)?,
-                    "briefing" => briefing = extract_string(&attr.expr)?,
+                    "title" | "category" | "tags" | "difficulty" | "estimated_minutes"
+                    | "description" | "briefing" => {
+                        return Err(ScenarioError::InvalidScenario(format!(
+                            "course-mode scenario must not define {key}; use lecture.md frontmatter"
+                        )));
+                    }
                     other => {
                         return Err(ScenarioError::InvalidScenario(format!(
                             "scenario '{scenario_name}' does not support attribute '{other}'"
                         )));
                     }
                 }
-                course_presentation_fields.push(key.to_string());
             }
 
             for inner_block in block.body.blocks() {
@@ -327,19 +286,11 @@ impl Scenario {
 
         Ok(Self {
             name: scenario_name,
-            title,
-            category,
-            tags,
-            difficulty,
-            estimated_minutes,
-            description,
-            briefing,
             hints,
             solution,
             images,
             kino,
             vms,
-            course_presentation_fields,
         })
     }
 
@@ -386,16 +337,6 @@ impl Scenario {
         Ok(())
     }
 
-    pub fn validate_for_repo(&self) -> Result<(), ScenarioError> {
-        self.validate_for_builder_arch("amd64")
-    }
-
-    pub fn validate_for_builder_arch(&self, target_arch: &str) -> Result<(), ScenarioError> {
-        self.validate_technical_for_builder_arch(target_arch)?;
-        self.validate_authoring_fields()?;
-        Ok(())
-    }
-
     pub fn validate_technical_for_builder_arch(
         &self,
         target_arch: &str,
@@ -436,49 +377,6 @@ impl Scenario {
         Ok(())
     }
 
-    fn validate_course_presentation_fields(&self) -> Result<(), ScenarioError> {
-        if self.course_presentation_fields.is_empty() {
-            return Ok(());
-        }
-        Err(ScenarioError::InvalidScenario(format!(
-            "course-mode scenario must not define {}; use lecture.md frontmatter",
-            self.course_presentation_fields.join(", ")
-        )))
-    }
-
-    fn validate_authoring_fields(&self) -> Result<(), ScenarioError> {
-        validate_required_scenario_text("title", &self.title)?;
-        validate_required_scenario_text("category", &self.category)?;
-        validate_required_scenario_text("description", &self.description)?;
-        if self.description.lines().count() > 1 {
-            return Err(ScenarioError::InvalidScenarioField {
-                field: "description".to_string(),
-                message: "must be a single line".to_string(),
-            });
-        }
-        validate_required_scenario_text("briefing", &self.briefing)?;
-        if self.difficulty.is_none() {
-            return Err(ScenarioError::MissingScenarioField {
-                field: "difficulty".to_string(),
-            });
-        }
-        match self.estimated_minutes {
-            Some(value) if value > 0 => {}
-            Some(_) => {
-                return Err(ScenarioError::InvalidScenarioField {
-                    field: "estimated_minutes".to_string(),
-                    message: "must be greater than zero".to_string(),
-                });
-            }
-            None => {
-                return Err(ScenarioError::MissingScenarioField {
-                    field: "estimated_minutes".to_string(),
-                });
-            }
-        }
-        Ok(())
-    }
-
     fn validate_required_solution(&self) -> Result<(), ScenarioError> {
         match &self.solution {
             Some(solution) if !solution.body.trim().is_empty() => {}
@@ -495,10 +393,6 @@ impl Scenario {
             }
         }
         Ok(())
-    }
-
-    pub fn validate_for_builder(&self) -> Result<(), ScenarioError> {
-        self.validate_for_builder_arch("amd64")
     }
 
     #[must_use]
@@ -622,15 +516,6 @@ pub fn validate_managed_text(value: &str, context: &str) -> Result<(), ScenarioE
     if text_references_managed_assets(value) {
         return Err(ScenarioError::ManagedText {
             context: context.to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_required_scenario_text(field: &str, value: &str) -> Result<(), ScenarioError> {
-    if value.trim().is_empty() {
-        return Err(ScenarioError::MissingScenarioField {
-            field: field.to_string(),
         });
     }
     Ok(())

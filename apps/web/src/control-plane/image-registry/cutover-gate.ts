@@ -1,6 +1,6 @@
 import { drizzle } from "drizzle-orm/d1";
 import { runtimeOperationGates } from "@/db/schema";
-import { IMAGE_V10_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { hasRegistryPublishToken, isRecord, jsonResponse } from "./shared";
 
 export async function handleImageCutoverGate(
@@ -30,7 +30,7 @@ export async function handleImageCutoverGate(
     await db
       .insert(runtimeOperationGates)
       .values({
-        key: IMAGE_V10_CUTOVER_GATE,
+        key: IMAGE_CUTOVER_GATE,
         state: value.state,
         updatedAt: Date.now(),
       })
@@ -42,7 +42,7 @@ export async function handleImageCutoverGate(
   const gate = await env.DB.prepare(
     "SELECT state, updated_at FROM runtime_operation_gates WHERE key = ?",
   )
-    .bind(IMAGE_V10_CUTOVER_GATE)
+    .bind(IMAGE_CUTOVER_GATE)
     .first<{ state: "open" | "drained"; updated_at: number }>();
   const active = await env.DB.prepare(
     `SELECT COUNT(*) AS count

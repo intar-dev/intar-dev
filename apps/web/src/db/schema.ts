@@ -44,7 +44,7 @@ export {
 export {
   scenarioCatalogCandidates,
   scenarioCatalogSnapshots,
-  scenarioCourseCatalogs,
+  courseCatalogs,
   vmScenarioProbes,
   vmScenarios,
   vmScenarioVms,

@@ -32,14 +32,4 @@ declare module "*.sql?raw" {
   export default content;
 }
 
-declare module "*.hcl?raw" {
-  const content: string;
-  export default content;
-}
-
-declare module "*.wasm?module" {
-  const wasmModule: WebAssembly.Module;
-  export default wasmModule;
-}
-
 export {};

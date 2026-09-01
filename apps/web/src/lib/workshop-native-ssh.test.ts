@@ -8,17 +8,16 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   buildNativeSshArgs,
   intarCliRemoteArgs,
-  issueNativeSshRoute,
   remoteShellCommand,
   runNativeSsh,
   withNativeSshMaterial,
   type IssuedNativeSshRoute,
   type NativeSshConnection,
-} from "../../scripts/live-e2e/native-ssh";
+} from "../../scripts/workshop-run-cli/native-ssh";
 
 const connection: NativeSshConnection = {
   authMode: "issued_key",
@@ -28,7 +27,7 @@ const connection: NativeSshConnection = {
   knownHostsLine: "[ssh.intar.test]:2222 ssh-ed25519 AAAATEST",
 };
 
-describe("live E2E native SSH helper", () => {
+describe("workshop native SSH helper", () => {
   it("uses an issued route with strict host verification and no local SSH config", () => {
     const args = buildNativeSshArgs({
       connection,
@@ -133,34 +132,6 @@ describe("live E2E native SSH helper", () => {
     ).toThrow("invalid known_hosts");
   });
 
-  it("issues a one-run public key rather than relying on a profile key", async () => {
-    const json = vi.fn().mockResolvedValue({
-      routeUsername: "run-web-native",
-      expiresAt: 1_000,
-      native: connection,
-    });
-
-    const issued = await issueNativeSshRoute({
-      client: { json } as never,
-      runId: "run-1",
-      vmId: "vm-1",
-    });
-
-    expect(json).toHaveBeenCalledWith(
-      "/api/scenarios/runs/run-1/ssh",
-      expect.objectContaining({
-        method: "POST",
-        json: expect.objectContaining({
-          vmId: "vm-1",
-          mode: "native",
-          clientPublicKeyOpenssh: expect.stringMatching(/^ssh-ed25519 /),
-        }),
-      }),
-    );
-    expect(issued.route.native.authMode).toBe("issued_key");
-    expect(issued.privateKeyOpenssh).toContain("OPENSSH PRIVATE KEY");
-  });
-
   it("preserves the learner CLI exit and stream contract over native SSH", async () => {
     await expect(runFakeNativeSsh("usage")).resolves.toMatchObject({
       exitCode: 2,
@@ -211,10 +182,10 @@ const issued: IssuedNativeSshRoute = {
 };
 
 async function runFakeNativeSsh(mode: string) {
-  const directory = await mkdtemp(join(tmpdir(), "intar-live-e2e-fake-ssh-"));
+  const directory = await mkdtemp(join(tmpdir(), "intar-workshop-fake-ssh-"));
   const sshPath = join(directory, "ssh");
   const originalPath = process.env.PATH;
-  const originalMode = process.env.INTAR_LIVE_E2E_FAKE_SSH_MODE;
+  const originalMode = process.env.INTAR_WORKSHOP_FAKE_SSH_MODE;
   await writeFile(
     sshPath,
     [
@@ -223,12 +194,12 @@ async function runFakeNativeSsh(mode: string) {
       "  *TERM=dumb*LANG=C*NO_COLOR=1*CI=1*) ;;",
       "  *) exit 98 ;;",
       "esac",
-      'case "${INTAR_LIVE_E2E_FAKE_SSH_MODE:-}" in',
+      'case "${INTAR_WORKSHOP_FAKE_SSH_MODE:-}" in',
       "  usage) printf 'Usage: intar ...\\n' >&2; exit 2 ;;",
       "  unavailable) printf 'Intar is unavailable. Try again.\\n' >&2; exit 4 ;;",
       "  interrupted) printf 'Interrupted.\\n' >&2; exit 130 ;;",
       "  broken-pipe) printf 'failed checks\\n'; exit 1 ;;",
-      "  plain) printf 'INTAR - Broken Nginx\\n[FAIL] Needs repair\\n'; exit 0 ;;",
+      "  plain) printf 'INTAR - Workshop\\n[FAIL] Needs repair\\n'; exit 0 ;;",
       "  *) exit 99 ;;",
       "esac",
     ].join("\n"),
@@ -237,7 +208,7 @@ async function runFakeNativeSsh(mode: string) {
   await chmod(sshPath, 0o700);
   try {
     process.env.PATH = `${directory}${originalPath ? `:${originalPath}` : ""}`;
-    process.env.INTAR_LIVE_E2E_FAKE_SSH_MODE = mode;
+    process.env.INTAR_WORKSHOP_FAKE_SSH_MODE = mode;
     return await runNativeSsh({
       issued,
       remoteArgs: intarCliRemoteArgs(["status"]),
@@ -250,9 +221,9 @@ async function runFakeNativeSsh(mode: string) {
       process.env.PATH = originalPath;
     }
     if (originalMode === undefined) {
-      delete process.env.INTAR_LIVE_E2E_FAKE_SSH_MODE;
+      delete process.env.INTAR_WORKSHOP_FAKE_SSH_MODE;
     } else {
-      process.env.INTAR_LIVE_E2E_FAKE_SSH_MODE = originalMode;
+      process.env.INTAR_WORKSHOP_FAKE_SSH_MODE = originalMode;
     }
     await rm(directory, { recursive: true, force: true });
   }

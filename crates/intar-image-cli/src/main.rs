@@ -61,7 +61,7 @@ struct BundleUploadReceipt {
 
 #[derive(Debug, Parser)]
 #[command(name = "intar-image-cli")]
-#[command(about = "Build prebaked scenario raw-zstd images with direct QEMU")]
+#[command(about = "Build prebaked scenario chunked images with direct QEMU")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]

@@ -11,7 +11,7 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   courseUnitCompletions,
   member,
-  scenarioCourseCatalogs,
+  courseCatalogs,
   scenarioRuns,
   vmScenarios,
   type CourseCatalogCourseV2,
@@ -142,7 +142,7 @@ interface CourseView extends CourseSource {
   lectures: LectureView[];
 }
 
-export function scenarioCourseCatalogScopeKey(
+export function courseCatalogScopeKey(
   organizationId: string | null,
 ): string {
   return organizationId
@@ -150,7 +150,7 @@ export function scenarioCourseCatalogScopeKey(
     : PUBLIC_COURSE_CATALOG_SCOPE;
 }
 
-export async function validateScenarioCourseCatalogReferences(
+export async function validateCourseCatalogReferences(
   db: DrizzleD1Database,
   input: {
     snapshot: CourseCatalogSnapshotV2;
@@ -201,7 +201,7 @@ export async function validateScenarioCourseCatalogReferences(
 }
 
 /** Replaces the complete V2 snapshot for one publication scope. */
-export async function syncScenarioCourseCatalogSnapshot(
+export async function syncCourseCatalogSnapshot(
   db: DrizzleD1Database,
   input: {
     snapshot: CourseCatalogSnapshotV2;
@@ -211,22 +211,22 @@ export async function syncScenarioCourseCatalogSnapshot(
   },
 ): Promise<void> {
   assertV2Snapshot(input.snapshot);
-  const scopeKey = scenarioCourseCatalogScopeKey(input.organizationId);
+  const scopeKey = courseCatalogScopeKey(input.organizationId);
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const [existing] = await db
       .select({
-        catalog: scenarioCourseCatalogs.catalogJson,
-        sourceRevision: scenarioCourseCatalogs.sourceRevision,
-        updatedAt: scenarioCourseCatalogs.updatedAt,
+        catalog: courseCatalogs.catalogJson,
+        sourceRevision: courseCatalogs.sourceRevision,
+        updatedAt: courseCatalogs.updatedAt,
       })
-      .from(scenarioCourseCatalogs)
-      .where(eq(scenarioCourseCatalogs.scopeKey, scopeKey))
+      .from(courseCatalogs)
+      .where(eq(courseCatalogs.scopeKey, scopeKey))
       .limit(1);
 
     if (!existing) {
       const inserted = await db
-        .insert(scenarioCourseCatalogs)
+        .insert(courseCatalogs)
         .values({
           scopeKey,
           organizationId: input.organizationId,
@@ -236,7 +236,7 @@ export async function syncScenarioCourseCatalogSnapshot(
           updatedAt: input.nowUnixMs,
         })
         .onConflictDoNothing()
-        .returning({ scopeKey: scenarioCourseCatalogs.scopeKey });
+        .returning({ scopeKey: courseCatalogs.scopeKey });
       if (inserted.length) {
         await syncScenarioPresentationFromCourseCatalog(db, input);
         await disableUnlinkedScenariosFromCourseCatalog(db, input);
@@ -263,7 +263,7 @@ export async function syncScenarioCourseCatalogSnapshot(
 
     const encodedExistingCatalog = JSON.stringify(existing.catalog);
     const updated = await db
-      .update(scenarioCourseCatalogs)
+      .update(courseCatalogs)
       .set({
         catalogJson: input.snapshot,
         sourceRevision: input.sourceRevision,
@@ -271,13 +271,13 @@ export async function syncScenarioCourseCatalogSnapshot(
       })
       .where(
         and(
-          eq(scenarioCourseCatalogs.scopeKey, scopeKey),
-          eq(scenarioCourseCatalogs.sourceRevision, existing.sourceRevision),
-          eq(scenarioCourseCatalogs.updatedAt, existing.updatedAt),
-          sql`${scenarioCourseCatalogs.catalogJson} = ${encodedExistingCatalog}`,
+          eq(courseCatalogs.scopeKey, scopeKey),
+          eq(courseCatalogs.sourceRevision, existing.sourceRevision),
+          eq(courseCatalogs.updatedAt, existing.updatedAt),
+          sql`${courseCatalogs.catalogJson} = ${encodedExistingCatalog}`,
         ),
       )
-      .returning({ scopeKey: scenarioCourseCatalogs.scopeKey });
+      .returning({ scopeKey: courseCatalogs.scopeKey });
     if (updated.length) {
       await syncScenarioPresentationFromCourseCatalog(db, input);
       await disableUnlinkedScenariosFromCourseCatalog(db, input);
@@ -465,7 +465,7 @@ export async function completePureCourseLectureForUser(input: {
     );
   }
 
-  const scopeKey = scenarioCourseCatalogScopeKey(
+  const scopeKey = courseCatalogScopeKey(
     before.detail.course.organizationId,
   );
   await input.db
@@ -543,7 +543,7 @@ export async function resolveCourseLectureForScenario(input: {
  * Enforces catalog membership, course order, and scenario readiness before
  * scenario admission. Membership and host admission stay in their own guards.
  */
-export async function assertScenarioCourseStartAllowed(input: {
+export async function assertCourseScenarioStartAllowed(input: {
   db: DrizzleD1Database;
   userId: string;
   organizationId: string | null;
@@ -673,7 +673,7 @@ export async function backfillCourseUnitCompletions(
     }
   }
 
-  const scopeKey = scenarioCourseCatalogScopeKey(input.organizationId);
+  const scopeKey = courseCatalogScopeKey(input.organizationId);
   const completions: Array<typeof courseUnitCompletions.$inferInsert> = [];
   for (const course of input.snapshot.courses) {
     for (const lecture of course.lectures) {
@@ -883,22 +883,22 @@ async function loadVisibleCourseSources(
   organizationId: string | null,
 ): Promise<CourseSource[]> {
   const scopeKeys = [
-    scenarioCourseCatalogScopeKey(null),
-    ...(organizationId ? [scenarioCourseCatalogScopeKey(organizationId)] : []),
+    courseCatalogScopeKey(null),
+    ...(organizationId ? [courseCatalogScopeKey(organizationId)] : []),
   ];
   const rows = await db
     .select({
-      scopeKey: scenarioCourseCatalogs.scopeKey,
-      organizationId: scenarioCourseCatalogs.organizationId,
-      catalog: scenarioCourseCatalogs.catalogJson,
+      scopeKey: courseCatalogs.scopeKey,
+      organizationId: courseCatalogs.organizationId,
+      catalog: courseCatalogs.catalogJson,
     })
-    .from(scenarioCourseCatalogs)
-    .where(inArray(scenarioCourseCatalogs.scopeKey, scopeKeys));
+    .from(courseCatalogs)
+    .where(inArray(courseCatalogs.scopeKey, scopeKeys));
   const byScope = new Map(rows.map((row) => [row.scopeKey, row]));
-  const publicSnapshot = byScope.get(scenarioCourseCatalogScopeKey(null))
+  const publicSnapshot = byScope.get(courseCatalogScopeKey(null))
     ?.catalog;
   const organizationSnapshot = organizationId
-    ? byScope.get(scenarioCourseCatalogScopeKey(organizationId))?.catalog
+    ? byScope.get(courseCatalogScopeKey(organizationId))?.catalog
     : undefined;
   if (publicSnapshot) assertV2Snapshot(publicSnapshot);
   if (organizationSnapshot) assertV2Snapshot(organizationSnapshot);
@@ -916,7 +916,7 @@ async function loadVisibleCourseSources(
     return lectures.length
       ? [
           {
-            scopeKey: scenarioCourseCatalogScopeKey(null),
+            scopeKey: courseCatalogScopeKey(null),
             organizationId: null,
             course: { ...course, lectures },
           },
@@ -925,7 +925,7 @@ async function loadVisibleCourseSources(
   });
   const organizationSources = (organizationSnapshot?.courses ?? []).map(
     (course) => ({
-      scopeKey: scenarioCourseCatalogScopeKey(organizationId),
+      scopeKey: courseCatalogScopeKey(organizationId),
       organizationId,
       course,
     }),

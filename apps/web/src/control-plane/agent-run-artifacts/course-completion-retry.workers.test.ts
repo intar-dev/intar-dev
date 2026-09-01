@@ -8,7 +8,7 @@ const courseCatalogMocks = vi.hoisted(() => ({
   recordLinkedCourseUnitCompletionForRun: vi.fn(),
 }));
 
-vi.mock("@/lib/scenario-course-catalogs", () => courseCatalogMocks);
+vi.mock("@/lib/course-catalogs", () => courseCatalogMocks);
 
 import { agentHosts, scenarioRuns, user } from "@/db/schema";
 import {

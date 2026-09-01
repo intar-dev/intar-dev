@@ -11,9 +11,9 @@ import {
   waitForWorkshopHintParity,
   workshopHintAliasesFromCompletionOutput,
   type WorkshopRunCliStatus,
-} from "../../scripts/live-e2e/workshop-run-cli";
+} from "../../scripts/workshop-run-cli/workshop-run-cli";
 
-describe("workshop native SSH run CLI hook", () => {
+describe("workshop run CLI", () => {
   it("issues a temporary participant key through the exact workshop workspace route", async () => {
     const json = vi.fn().mockResolvedValue({
       routeUsername: "workshop-session-a-learner-a-native",

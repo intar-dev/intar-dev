@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "intar-builder"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "intar-image-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",

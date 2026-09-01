@@ -127,6 +127,3 @@ bundle-images scenario="" config="builder.sample.amd64.hcl" rev="" no_upload="fa
     fi
 
     cargo run -p intar-image-cli -- "${args[@]}"
-
-live-e2e args="":
-    cd apps/web && bun run e2e:live -- {{args}}

@@ -16,7 +16,7 @@ import {
   drizzleQueryToD1Statement,
   executeScenarioRunRuntimeProjection,
 } from "@/lib/runtime-executions";
-import { recordLinkedCourseUnitCompletionForRun } from "@/lib/scenario-course-catalogs";
+import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import {
   loadOrCreateHostDesiredState,
   mutateStoredHostDesiredState,

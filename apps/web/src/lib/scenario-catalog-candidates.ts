@@ -13,7 +13,7 @@ import { upsertDesiredCachedImage } from "@/lib/desired-state";
 import {
   applyLecturePresentation,
   findCourseLecturePresentation,
-} from "@/lib/scenario-course-catalogs";
+} from "@/lib/course-catalogs";
 
 export async function stageCandidateScenarioManifest(
   db: DrizzleD1Database,

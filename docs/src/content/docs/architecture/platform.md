@@ -30,9 +30,10 @@ The platform contracts live in Rust and are generated into TypeScript:
 - Rust fixture tests and website schema tests validate the same committed fixtures.
 
 The platform contract is intentionally version-strict. Course catalog snapshots
-are V2 and Scenario manifests are V4. The bridge envelope is V6 and carries V2
-desired-state, resource/capacity, state-report, and VM-report documents.
-Unsupported versions are rejected rather than translated.
+are V2 and Scenario manifests are V4. The bridge envelope is V7; its
+desired-state, host-state-report, and VM-report schemas are V4, V5, and V4.
+Build reports use schema V1. Unsupported versions are rejected rather than
+translated.
 
 ## Control Plane
 

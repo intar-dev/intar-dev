@@ -285,10 +285,9 @@ base_image "../escape" {
     #[test]
     fn errors_on_unknown_base_reference() {
         let catalog = BaseImageCatalog::parse(catalog_hcl()).unwrap();
-        let scenario = Scenario::parse(
+        let scenario = Scenario::parse_course(
             r#"
 scenario "broken-nginx" {
-  category = "web"
   image "debian-13-generic" {
     base = "missing"
   }

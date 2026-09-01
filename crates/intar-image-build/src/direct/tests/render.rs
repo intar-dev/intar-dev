@@ -88,16 +88,9 @@ fn direct_render_keeps_qmp_argument_short_for_long_work_paths() {
 fn direct_prepare_writes_root_disk_and_intarbuild_seed() {
     let directory = tempdir().unwrap();
     let true_binary = std::path::PathBuf::from("/usr/bin/true");
-    let scenario = intar_image_scenario::Scenario::parse(
+    let scenario = intar_image_scenario::Scenario::parse_course(
         r#"
 scenario "broken-nginx" {
-  title = "Broken Nginx"
-  category = "web"
-  tags = ["nginx"]
-  difficulty = "easy"
-  estimated_minutes = 15
-  description = "Fix nginx"
-  briefing = "Restore nginx service availability."
   solution { body = "Start nginx." }
 
   image "debian-13-minimal" {

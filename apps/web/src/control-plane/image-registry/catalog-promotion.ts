@@ -11,6 +11,7 @@ import {
 } from "@/db/schema";
 import { catalogRowsFromScenarioManifest } from "@/lib/catalog-manifest";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { reconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import {
   hasRegistryPublishToken,
@@ -37,8 +38,10 @@ export async function handleCandidateCatalogPromotion(
   }
 
   const gate = await env.DB.prepare(
-    "SELECT state FROM runtime_operation_gates WHERE key = 'image_v10_cutover'",
-  ).first<{ state: string }>();
+    "SELECT state FROM runtime_operation_gates WHERE key = ?",
+  )
+    .bind(IMAGE_CUTOVER_GATE)
+    .first<{ state: string }>();
   if (gate?.state !== "drained") {
     return jsonResponse({ error: "runtime cutover gate is not drained" }, 409);
   }
@@ -231,8 +234,10 @@ export async function handleCatalogRollback(
     return jsonResponse({ error: "catalog rollback requires a drained host fleet" }, 409);
   }
   const gate = await env.DB.prepare(
-    "SELECT state FROM runtime_operation_gates WHERE key = 'image_v10_cutover'",
-  ).first<{ state: string }>();
+    "SELECT state FROM runtime_operation_gates WHERE key = ?",
+  )
+    .bind(IMAGE_CUTOVER_GATE)
+    .first<{ state: string }>();
   if (gate?.state !== "drained") {
     return jsonResponse({ error: "runtime cutover gate is not drained" }, 409);
   }

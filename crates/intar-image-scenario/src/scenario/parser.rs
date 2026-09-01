@@ -188,21 +188,6 @@ pub(super) fn parse_solution(block: &hcl::Block) -> Result<ScenarioSolution, Sce
     Ok(ScenarioSolution { body })
 }
 
-pub(super) fn parse_difficulty(
-    expr: &hcl::Expression,
-) -> Result<ScenarioDifficulty, ScenarioError> {
-    let value = extract_string(expr)?;
-    match value.as_str() {
-        "easy" => Ok(ScenarioDifficulty::Easy),
-        "medium" => Ok(ScenarioDifficulty::Medium),
-        "hard" => Ok(ScenarioDifficulty::Hard),
-        other => Err(ScenarioError::InvalidScenarioField {
-            field: "difficulty".to_string(),
-            message: format!("must be 'easy', 'medium', or 'hard', got '{other}'"),
-        }),
-    }
-}
-
 pub(super) fn parse_probe_phase(
     name: &str,
     expr: &hcl::Expression,

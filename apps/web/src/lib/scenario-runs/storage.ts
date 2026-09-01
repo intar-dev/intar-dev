@@ -44,7 +44,7 @@ import {
   loadEnabledScenario,
   type ScenarioDetailRecord,
 } from "@/lib/scenarios";
-import { recordLinkedCourseUnitCompletionForRun } from "@/lib/scenario-course-catalogs";
+import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import { type ScenarioRunRecord } from "./types";
 import {
   deriveScenarioRunActivity,

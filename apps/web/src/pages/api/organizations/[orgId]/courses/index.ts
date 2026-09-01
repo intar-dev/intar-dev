@@ -7,7 +7,7 @@ import {
   requireOrganizationRole,
   resolveOrganizationId,
 } from "@/lib/organizations";
-import { listCourseCatalogForUser } from "@/lib/scenario-course-catalogs";
+import { listCourseCatalogForUser } from "@/lib/course-catalogs";
 import { loadScenarioCapacityPressure } from "@/lib/scenario-runs/start";
 
 export const prerender = false;

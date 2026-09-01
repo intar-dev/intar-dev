@@ -24,7 +24,6 @@
     "test:ui:smoke": "playwright test tests/ui/smoke.spec.ts",
     "types:cf": "wrangler types worker-configuration.d.ts --env-interface WorkerEnv --include-runtime false --env-file .env.types",
     "types:cf:check": "wrangler types worker-configuration.d.ts --env-interface WorkerEnv --include-runtime false --env-file .env.types --check",
-    "e2e:live": "bun scripts/live-e2e.ts",
     "preview": "astro preview",
     "astro": "astro",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts && bun ../../tools/database/prune-drizzle-snapshots.ts",

@@ -532,7 +532,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
           <DialogHeader>
             <DialogTitle>Delete {detail.name}?</DialogTitle>
             <DialogDescription>
-              First remove every owned provider, scenario source, runner, build,
+              First remove every owned provider, course catalog, runner, build,
               and run. Type the organization name to confirm.
             </DialogDescription>
           </DialogHeader>

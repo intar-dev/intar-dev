@@ -52,27 +52,8 @@ export interface NativeSshMaterial {
 }
 
 /**
- * Issue a disposable native route with a fresh client key. The private half is
- * kept only in this process and is written to a restrictive temporary file for
- * the duration of each SSH command.
- */
-export async function issueNativeSshRoute(input: {
-  client: ApiClient;
-  runId: string;
-  vmId: string;
-}): Promise<IssuedNativeSshRoute> {
-  return issueNativeSshRouteRequest({
-    client: input.client,
-    path: `/api/scenarios/runs/${encodeURIComponent(input.runId)}/ssh`,
-    body: { vmId: input.vmId },
-    keyComment: `live-e2e-${input.runId}-${input.vmId}`,
-  });
-}
-
-/**
- * Shared route issuer for scenario and workshop native-SSH proofs. Callers
- * only supply an authenticated application path and its non-key body fields;
- * this helper always forces native mode and a newly generated issued key.
+ * Issue a disposable workshop native route with a fresh client key. The
+ * private half stays in this process for the duration of each SSH command.
  */
 export async function issueNativeSshRouteRequest(input: {
   client: ApiClient;
@@ -206,7 +187,7 @@ export async function withNativeSshMaterial<T>(
     throw new Error("issued native SSH route did not provide an OpenSSH key");
   }
 
-  const directory = await mkdtemp(join(tmpdir(), "intar-live-e2e-ssh-"));
+  const directory = await mkdtemp(join(tmpdir(), "intar-workshop-ssh-"));
   const privateKeyPath = join(directory, "issued.key");
   const knownHostsPath = join(directory, "known_hosts");
   try {
@@ -356,7 +337,7 @@ async function runSshProcess(
       clearTimeout(timeout);
       if (overflowed) {
         reject(
-          new Error("native SSH output exceeded the live E2E safety limit"),
+          new Error("native SSH output exceeded the workshop proof safety limit"),
         );
         return;
       }

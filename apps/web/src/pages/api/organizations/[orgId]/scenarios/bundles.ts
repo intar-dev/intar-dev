@@ -17,9 +17,9 @@ import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { getOrganizationDetail } from "@/lib/organizations";
 import { requireOrganizationScenarioBundleMultipart } from "@/lib/request-security";
 import {
-  syncScenarioCourseCatalogSnapshot,
-  validateScenarioCourseCatalogReferences,
-} from "@/lib/scenario-course-catalogs";
+  syncCourseCatalogSnapshot,
+  validateCourseCatalogReferences,
+} from "@/lib/course-catalogs";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 
 export const prerender = false;
@@ -91,7 +91,7 @@ export const POST: APIRoute = async ({ request, params }) => {
 
     const db = drizzle(env.DB);
     const courseCatalog = parsed.value.bundleMeta.courseCatalog;
-    const invalidScenarioIds = await validateScenarioCourseCatalogReferences(
+    const invalidScenarioIds = await validateCourseCatalogReferences(
       db,
       {
         snapshot: courseCatalog,
@@ -127,7 +127,7 @@ export const POST: APIRoute = async ({ request, params }) => {
       organizationId: organization.id,
       nowUnixMs: now,
     });
-    await syncScenarioCourseCatalogSnapshot(db, {
+    await syncCourseCatalogSnapshot(db, {
       snapshot: courseCatalog,
       sourceRevision: parsed.value.rev,
       organizationId: organization.id,

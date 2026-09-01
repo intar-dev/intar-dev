@@ -26,8 +26,8 @@ const organizationMock = vi.hoisted(() => ({
 }));
 
 const courseCatalogMock = vi.hoisted(() => ({
-  syncScenarioCourseCatalogSnapshot: vi.fn(),
-  validateScenarioCourseCatalogReferences: vi.fn(),
+  syncCourseCatalogSnapshot: vi.fn(),
+  validateCourseCatalogReferences: vi.fn(),
 }));
 
 const bundleMock = vi.hoisted(() => ({
@@ -47,7 +47,7 @@ vi.mock("@/lib/agent-bridge", () => ({
 vi.mock("@/lib/build-scheduler", () => schedulerMock);
 vi.mock("@/lib/id", () => ({ createAppId: () => "generated-id" }));
 vi.mock("@/lib/organizations", () => organizationMock);
-vi.mock("@/lib/scenario-course-catalogs", () => courseCatalogMock);
+vi.mock("@/lib/course-catalogs", () => courseCatalogMock);
 vi.mock("@/control-plane/image-registry/bundle", async (importOriginal) => ({
   ...(await importOriginal<
     typeof import("@/control-plane/image-registry/bundle")
@@ -73,7 +73,7 @@ describe("organization scenario bundle course catalogs", () => {
     });
     schedulerMock.queueImageBuildsFromBundle.mockResolvedValue({ queued: 0 });
     schedulerMock.assignQueuedImageBuilds.mockResolvedValue([]);
-    courseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValue(
+    courseCatalogMock.validateCourseCatalogReferences.mockResolvedValue(
       [],
     );
     bundleMock.validateBundleArchivePayload.mockResolvedValue(null);
@@ -137,14 +137,14 @@ describe("organization scenario bundle course catalogs", () => {
 
     expect(response.status).toBe(202);
     expect(
-      courseCatalogMock.validateScenarioCourseCatalogReferences,
+      courseCatalogMock.validateCourseCatalogReferences,
     ).toHaveBeenCalledWith(dbMock.db, {
       snapshot,
       bundleScenarioIds: ["org-a-private"],
       organizationId: "org-a-id",
     });
     expect(
-      courseCatalogMock.syncScenarioCourseCatalogSnapshot,
+      courseCatalogMock.syncCourseCatalogSnapshot,
     ).toHaveBeenCalledWith(dbMock.db, {
       snapshot,
       sourceRevision: "source-revision",
@@ -214,14 +214,14 @@ describe("organization scenario bundle course catalogs", () => {
 
     expect(response.status).toBe(202);
     expect(
-      courseCatalogMock.validateScenarioCourseCatalogReferences,
+      courseCatalogMock.validateCourseCatalogReferences,
     ).toHaveBeenCalledWith(dbMock.db, {
       snapshot,
       bundleScenarioIds: [],
       organizationId: "org-a-id",
     });
     expect(
-      courseCatalogMock.syncScenarioCourseCatalogSnapshot,
+      courseCatalogMock.syncCourseCatalogSnapshot,
     ).toHaveBeenCalledWith(dbMock.db, {
       snapshot,
       sourceRevision: "source-revision",

@@ -14,6 +14,7 @@ import {
   vmScenarios,
 } from "@/db/schema";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
 
 const CONTENT_HASH = "a".repeat(64);
@@ -39,7 +40,7 @@ describe("candidate scenario catalog promotion", () => {
       },
     });
     await db.insert(runtimeOperationGates).values({
-      key: "image_v10_cutover",
+      key: IMAGE_CUTOVER_GATE,
       state: "drained",
     });
     await db.insert(imageBuilds).values({

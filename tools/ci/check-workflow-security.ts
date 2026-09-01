@@ -9,7 +9,6 @@ const PINNED_TAIKI_TOOLS = new Map([
   ["cargo-nextest", "0.9.143"],
   ["cargo-zigbuild", "0.23.0"],
   ["cargo-audit", "0.22.2"],
-  ["wasm-pack", "0.15.0"],
 ]);
 const SHA = /^[0-9a-f]{40}$/u;
 const EXACT_VERSION = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;

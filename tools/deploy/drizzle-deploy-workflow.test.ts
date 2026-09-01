@@ -20,7 +20,9 @@ describe("automatic web deployment workflow", () => {
     expect(validationWorkflow).toContain(
       "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
     );
-    expect(validationWorkflow).toContain("needs:\n      - validate\n      - ui");
+    expect(validationWorkflow).toContain(
+      "needs:\n      - validate\n      - ui",
+    );
     expect(validationWorkflow).toContain(
       "uses: ./.github/workflows/website-deploy.yml",
     );
@@ -75,7 +77,7 @@ describe("automatic web deployment workflow", () => {
     expect(deployWorkflow).not.toContain("wrangler d1 migrations");
   });
 
-  it("retains and gates only the pre-migration D1 evidence", () => {
+  it("retains and gates the pre-migration D1 evidence", () => {
     for (const required of [
       "--request GET",
       'https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}"',
@@ -88,14 +90,11 @@ describe("automatic web deployment workflow", () => {
       "jq -cn --arg sql",
       "{sql: $sql, params: []}",
       "--request POST",
-      'Content-Type: application/json',
+      "Content-Type: application/json",
       '--data-binary "@${query_request}"',
-      '/d1/database/${DATABASE_ID}/query',
+      "/d1/database/${DATABASE_ID}/query",
       ".result[0].success == true",
       '.result[0].results | type == "array"',
-      "scenario_course_catalogs",
-      "rev GLOB 'draft-*'",
-      "host_desired_state",
       "hidden_at IS NULL AND",
       "active_key IS NOT NULL OR state NOT IN ('completed', 'failed')",
       "upload_status <> 'uploaded'",
@@ -113,8 +112,6 @@ describe("automatic web deployment workflow", () => {
     for (const evidence of [
       "production-d1-info.json",
       "production-d1-bookmark.json",
-      "pre-migration-scenario-course-catalogs.json",
-      "pre-migration-draft-build-audit.json",
       "pre-migration-run-drain-audit.json",
       "pre-migration-assignment-counts.json",
       "pre-migration-enabled-scenarios.json",
@@ -122,6 +119,9 @@ describe("automatic web deployment workflow", () => {
       expect(artifact).toContain(evidence);
     }
     expect(deployWorkflow).not.toContain("scenario_sources");
+    expect(deployWorkflow).not.toContain("scenario_course_catalogs");
+    expect(deployWorkflow).not.toContain("courses_json");
+    expect(deployWorkflow).not.toContain("draft-*");
   });
 
   it("deploys the complete configuration at 100 percent with no rollback", () => {
@@ -141,7 +141,9 @@ describe("automatic web deployment workflow", () => {
     expect(deployScript).toContain("https://intar.dev/");
     expect(deployScript).toContain("https://intar.dev/favicon.svg");
     expect(deployScript).toContain("https://intar.dev/api/health");
-    expect(deployScript).toContain("propagation_required_consecutive_healthy=5");
+    expect(deployScript).toContain(
+      "propagation_required_consecutive_healthy=5",
+    );
     expect(deployScript).toContain("live_health_proven: true");
   });
 
@@ -165,7 +167,9 @@ describe("automatic web deployment workflow", () => {
 
   it("leaves provider deployment in its provider-only workflow", () => {
     expect(providerRollout).toContain("Multicloud provider rollout");
-    expect(providerRollout).toContain("uses: ./.github/workflows/provider-workers.yml");
+    expect(providerRollout).toContain(
+      "uses: ./.github/workflows/provider-workers.yml",
+    );
     expect(providerRollout).not.toContain("website-deploy.yml");
     expect(providerRollout).not.toContain("web_confirmation");
     expect(providerRollout).not.toContain("oidc_canary");
@@ -188,9 +192,7 @@ describe("automatic web deployment workflow", () => {
     expect(deployWorkflow).toContain(
       '[[ "${ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1}" =~ ^[A-Za-z0-9_-]{43}$ ]]',
     );
-    expect(deployWorkflow).toContain(
-      'decoded.toString("base64url") !== value',
-    );
+    expect(deployWorkflow).toContain('decoded.toString("base64url") !== value');
   });
 });
 

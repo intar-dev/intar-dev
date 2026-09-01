@@ -115,7 +115,7 @@ export async function handlePublish(
     const artifacts = await prepareBootArtifacts(env, form, manifest.value);
     if (!artifacts.ok) return artifacts;
 
-    const images = await prepareVmImages(env, form, manifest.value);
+    const images = await prepareVmImages(env, manifest.value);
     if (!images.ok) return images;
 
     await storePreparedBootArtifacts(env, artifacts.prepared);

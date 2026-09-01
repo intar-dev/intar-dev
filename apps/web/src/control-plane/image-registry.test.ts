@@ -16,7 +16,7 @@ const {
   authMock,
   dbMock,
   schedulerMock,
-  scenarioCourseCatalogMock,
+  courseCatalogMock,
   scenarioImageCacheMock,
   candidateCatalogMock,
 } = imageRegistryMocks();
@@ -951,14 +951,14 @@ describe("course catalog bundle metadata", () => {
         ],
       };
       expect(
-        scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences,
+        courseCatalogMock.validateCourseCatalogReferences,
       ).toHaveBeenCalledWith(dbMock.db, {
         snapshot: normalizedSnapshot,
         bundleScenarioIds: ["broken-nginx"],
         organizationId: null,
       });
       expect(
-        scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+        courseCatalogMock.syncCourseCatalogSnapshot,
       ).toHaveBeenCalledWith(dbMock.db, {
         snapshot: normalizedSnapshot,
         sourceRevision: "abc123",
@@ -1010,10 +1010,10 @@ describe("course catalog bundle metadata", () => {
     );
     expect(response?.status).toBe(202);
     expect(
-      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+      courseCatalogMock.syncCourseCatalogSnapshot,
     ).toHaveBeenCalledOnce();
     expect(
-      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+      courseCatalogMock.syncCourseCatalogSnapshot,
     ).toHaveBeenCalledWith(
       dbMock.db,
       expect.objectContaining({
@@ -1050,7 +1050,7 @@ describe("course catalog bundle metadata", () => {
       error: "bundle archive is missing curriculum/catalog.json",
     });
 
-    scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValueOnce(
+    courseCatalogMock.validateCourseCatalogReferences.mockResolvedValueOnce(
       ["broken-nginx"],
     );
     const invalidReference = await handleImageRegistryRequest(
@@ -1075,7 +1075,7 @@ describe("course catalog bundle metadata", () => {
     expect(bucketPut).not.toHaveBeenCalled();
     expect(schedulerMock.queueImageBuildsFromBundle).not.toHaveBeenCalled();
     expect(
-      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+      courseCatalogMock.syncCourseCatalogSnapshot,
     ).not.toHaveBeenCalled();
   });
 });

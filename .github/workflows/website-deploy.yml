@@ -172,8 +172,6 @@ jobs:
           set -euo pipefail
           d1_info="${RUNNER_TEMP}/production-d1-info.json"
           bookmark="${RUNNER_TEMP}/production-d1-bookmark.json"
-          catalogs="${RUNNER_TEMP}/pre-migration-scenario-course-catalogs.json"
-          draft_audit="${RUNNER_TEMP}/pre-migration-draft-build-audit.json"
           run_drain_audit="${RUNNER_TEMP}/pre-migration-run-drain-audit.json"
           assignment_counts="${RUNNER_TEMP}/pre-migration-assignment-counts.json"
           enabled_scenarios="${RUNNER_TEMP}/pre-migration-enabled-scenarios.json"
@@ -222,44 +220,6 @@ jobs:
               (.result[0].results | type == "array")
             ' "${evidence}" >/dev/null
           }
-
-          catalog_sql='SELECT scope_key, organization_id, courses_json, source_revision, created_at, updated_at
-            FROM scenario_course_catalogs
-            ORDER BY scope_key;'
-          d1_readonly_query "${catalog_sql}" "${catalogs}"
-
-          draft_audit_sql="WITH draft_builds AS (
-              SELECT id, rev, scenario_id, arch, status, phase, host_id,
-                created_at, updated_at
-              FROM image_builds
-              WHERE rev GLOB 'draft-*'
-            )
-            SELECT 'draft_build' AS record_type, id AS build_id, rev AS revision,
-              scenario_id, arch, status, phase, host_id,
-              NULL AS desired_state_host_id, created_at, updated_at
-            FROM draft_builds
-            UNION ALL
-            SELECT 'host_desired_reference' AS record_type,
-              draft_builds.id AS build_id, draft_builds.rev AS revision,
-              draft_builds.scenario_id, draft_builds.arch, draft_builds.status,
-              draft_builds.phase, draft_builds.host_id,
-              host_desired_state.host_id AS desired_state_host_id,
-              host_desired_state.created_at, host_desired_state.updated_at
-            FROM host_desired_state
-            JOIN json_each(host_desired_state.doc_json, '\$.builds') AS desired_build
-            JOIN draft_builds
-              ON draft_builds.id = CAST(json_extract(desired_build.value, '\$.build_id') AS TEXT)
-            ORDER BY record_type, revision, build_id, desired_state_host_id;"
-          d1_readonly_query "${draft_audit_sql}" "${draft_audit}"
-          jq -e '
-            ([.result[0].results[] |
-              select(.record_type == "draft_build") |
-              select(.status != "succeeded" and .status != "failed" and .status != "stale")
-            ] | length) == 0 and
-            ([.result[0].results[] |
-              select(.record_type == "host_desired_reference")
-            ] | length) == 0
-          ' "${draft_audit}" >/dev/null
 
           run_drain_sql="SELECT
               (SELECT COUNT(*) FROM scenario_runs
@@ -413,8 +373,6 @@ jobs:
             ${{ runner.temp }}/production-d1-plan.json
             ${{ runner.temp }}/production-d1-info.json
             ${{ runner.temp }}/production-d1-bookmark.json
-            ${{ runner.temp }}/pre-migration-scenario-course-catalogs.json
-            ${{ runner.temp }}/pre-migration-draft-build-audit.json
             ${{ runner.temp }}/pre-migration-run-drain-audit.json
             ${{ runner.temp }}/pre-migration-assignment-counts.json
             ${{ runner.temp }}/pre-migration-enabled-scenarios.json

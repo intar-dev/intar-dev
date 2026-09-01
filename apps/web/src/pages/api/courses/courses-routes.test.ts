@@ -25,7 +25,7 @@ vi.mock("@/lib/organizations", () => ({
   resolveOrganizationId: mocks.resolveOrganizationId,
   requireOrganizationRole: mocks.requireOrganizationRole,
 }));
-vi.mock("@/lib/scenario-course-catalogs", () => ({
+vi.mock("@/lib/course-catalogs", () => ({
   listCourseCatalogForUser: mocks.listCourseCatalogForUser,
   loadCourseLectureDetailForUser: mocks.loadCourseLectureDetailForUser,
   completePureCourseLectureForUser: mocks.completePureCourseLectureForUser,

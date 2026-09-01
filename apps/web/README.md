@@ -16,9 +16,9 @@ Scenario control is desired-state based:
 The committed Rust contracts generate the TypeScript bridge types and fixtures in
 `src/generated/`; do not hand-edit those generated files.
 
-Scenario catalog manifests are V3, the bridge envelope is V6, and its
-desired-state/resource/capacity/report documents are V2. Unsupported contract
-versions are rejected rather than translated.
+Scenario catalog manifests are V4. The bridge envelope is V7; its desired-state,
+host-state-report, and VM-report schemas are V4, V5, and V4. Build reports use
+schema V1. Unsupported contract versions are rejected rather than translated.
 Host CPU reservations use exact millicores and count pending plus committed
 rows against schedulable capacity.
 

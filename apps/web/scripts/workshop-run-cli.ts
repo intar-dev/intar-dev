@@ -1,8 +1,8 @@
-import { ApiClient } from "./live-e2e/api-client";
 import {
   DISPOSABLE_WORKSHOP_TEARDOWN_CONFIRMATION,
   verifyWorkshopRunCliViaNativeSsh,
-} from "./live-e2e/workshop-run-cli";
+} from "./workshop-run-cli/workshop-run-cli";
+import { ApiClient } from "./workshop-run-cli/api-client";
 
 const baseUrl = process.env.INTAR_LIVE_BASE_URL?.trim() ?? "";
 const cookie = process.env.INTAR_LIVE_COOKIE?.trim() ?? "";
@@ -35,7 +35,7 @@ await verifyWorkshopRunCliViaNativeSsh({
 });
 
 console.log(
-  `[live-e2e] ${provider} workshop native SSH run CLI action proof passed`,
+  `[workshop-run-cli] ${provider} native SSH action proof passed`,
 );
 
 function isProvider(value: string): value is "kvm" | "direct-cloud" {

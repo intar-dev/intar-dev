@@ -20,9 +20,9 @@ const schedulerMock = vi.hoisted(() => ({
   queueImageBuildsFromBundle: vi.fn(),
 }));
 
-const scenarioCourseCatalogMock = vi.hoisted(() => ({
-  syncScenarioCourseCatalogSnapshot: vi.fn(),
-  validateScenarioCourseCatalogReferences: vi.fn(),
+const courseCatalogMock = vi.hoisted(() => ({
+  syncCourseCatalogSnapshot: vi.fn(),
+  validateCourseCatalogReferences: vi.fn(),
 }));
 
 const imageBuildLockMock = vi.hoisted(() => ({
@@ -59,7 +59,7 @@ export function imageRegistryMocks() {
     authMock,
     dbMock,
     schedulerMock,
-    scenarioCourseCatalogMock,
+    courseCatalogMock,
     imageBuildLockMock,
     catalogManifestMock,
     desiredStateStoreMock,
@@ -75,7 +75,7 @@ vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
 
 vi.mock("@/lib/build-scheduler", () => schedulerMock);
 
-vi.mock("@/lib/scenario-course-catalogs", () => scenarioCourseCatalogMock);
+vi.mock("@/lib/course-catalogs", () => courseCatalogMock);
 
 vi.mock("@/lib/image-build-lock", () => imageBuildLockMock);
 
@@ -97,9 +97,9 @@ export function resetImageRegistryMocks(): void {
   dbMock.drizzle.mockImplementation(() => defaultAgentVisibilityDb());
   schedulerMock.assignQueuedImageBuilds.mockReset();
   schedulerMock.queueImageBuildsFromBundle.mockReset();
-  scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot.mockReset();
-  scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockReset();
-  scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValue(
+  courseCatalogMock.syncCourseCatalogSnapshot.mockReset();
+  courseCatalogMock.validateCourseCatalogReferences.mockReset();
+  courseCatalogMock.validateCourseCatalogReferences.mockResolvedValue(
     [],
   );
   imageBuildLockMock.assertHeld.mockReset();

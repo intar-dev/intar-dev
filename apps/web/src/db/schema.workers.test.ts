@@ -98,6 +98,44 @@ describe("Drizzle-managed production D1 schema", () => {
     );
   });
 
+  it("moves the legacy image cutover gate state to the neutral key", async () => {
+    await reset();
+    const gateMigration = databaseMigrations.find(
+      ({ name }) => name === "0011_rename_image_cutover_gate.sql",
+    );
+    if (!gateMigration) {
+      throw new Error("image cutover gate migration is missing");
+    }
+    await applyD1Migrations(
+      env.DB,
+      databaseMigrations.filter(
+        ({ name }) => name < "0011_rename_image_cutover_gate.sql",
+      ),
+    );
+
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          "INSERT INTO runtime_operation_gates (key, state, updated_at) VALUES (?, ?, ?)",
+        )
+        .bind("image_v10_cutover", "drained", 123),
+      env.DB
+        .prepare(
+          "INSERT INTO runtime_operation_gates (key, state, updated_at) VALUES (?, ?, ?)",
+        )
+        .bind("image_cutover", "open", 456),
+    ]);
+
+    await applyD1Migrations(env.DB, [gateMigration]);
+
+    const gates = await env.DB.prepare(
+      "SELECT key, state, updated_at FROM runtime_operation_gates ORDER BY key",
+    ).all<{ key: string; state: string; updated_at: number }>();
+    expect(gates.results).toEqual([
+      { key: "image_cutover", state: "drained", updated_at: 123 },
+    ]);
+  });
+
   it("initializes the complete current table model", async () => {
     const tables = await env.DB.prepare(
       `SELECT name FROM sqlite_schema
@@ -134,6 +172,7 @@ describe("Drizzle-managed production D1 schema", () => {
         "access_requests",
         "hetzner_allocations",
         "organization_provider_connections",
+        "scenario_course_catalogs",
         "scenario_sources",
       ]),
     );

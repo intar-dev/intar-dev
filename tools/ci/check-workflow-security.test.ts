@@ -90,7 +90,7 @@ jobs:
       - uses: ${pinnedCheckout}
       - uses: ${pinnedTaiki}
         with:
-          tool: just@1.58.0,cargo-nextest@0.9.143,cargo-zigbuild@0.23.0,cargo-audit@0.22.2,wasm-pack@0.15.0
+          tool: just@1.58.0,cargo-nextest@0.9.143,cargo-zigbuild@0.23.0,cargo-audit@0.22.2
       - uses: ${pinnedZig}
         with:
           version: 0.16.0

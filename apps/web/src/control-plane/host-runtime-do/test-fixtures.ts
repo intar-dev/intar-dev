@@ -11,7 +11,7 @@ import {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
-  scenarioCourseCatalogs,
+  courseCatalogs,
   scenarioRuns,
   user,
   vmScenarioVms,
@@ -53,7 +53,7 @@ export {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
-  scenarioCourseCatalogs,
+  courseCatalogs,
   scenarioRuns,
   user,
   vmScenarioVms,
@@ -501,7 +501,7 @@ export async function seedEnabledScenario(
   now: number,
 ): Promise<void> {
   await db
-    .insert(scenarioCourseCatalogs)
+    .insert(courseCatalogs)
     .values({
       scopeKey: "public",
       organizationId: null,

@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
-import { listCourseCatalogForUser } from "@/lib/scenario-course-catalogs";
+import { listCourseCatalogForUser } from "@/lib/course-catalogs";
 import { loadScenarioCapacityPressure } from "@/lib/scenario-runs/start";
 
 export const prerender = false;

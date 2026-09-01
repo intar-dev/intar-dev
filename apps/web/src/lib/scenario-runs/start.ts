@@ -72,8 +72,8 @@ import {
 import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import {
   applyLectureBriefingPresentation,
-  assertScenarioCourseStartAllowed,
-} from "@/lib/scenario-course-catalogs";
+  assertCourseScenarioStartAllowed,
+} from "@/lib/course-catalogs";
 import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
 import { deleteStargateRoute, stargateRouteTtlMs } from "@/lib/stargate";
 import {
@@ -135,7 +135,7 @@ export async function startScenarioRunInternal(params: {
   // Resolve the V2 unit before an active-run reuse can return. This keeps an
   // old direct request from reviving an unlinked scenario around the course
   // gate.
-  const courseLecture = await assertScenarioCourseStartAllowed({
+  const courseLecture = await assertCourseScenarioStartAllowed({
     db,
     userId: params.userId,
     organizationId,

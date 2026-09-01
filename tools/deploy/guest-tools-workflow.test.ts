@@ -16,7 +16,9 @@ describe("guest-tool publication workflow", () => {
     expect(guestTools).toContain("push:\n    branches:\n      - main");
     expect(guestTools).toContain('      - "crates/intar-workspace-agent/**"');
     expect(guestTools).toContain('      - "crates/kino/**"');
-    expect(guestTools).toContain("cargo test --locked -p intar-workspace-agent -p kino");
+    expect(guestTools).toContain(
+      "cargo test --locked -p intar-workspace-agent -p kino",
+    );
     expect(guestTools).toContain("Publish content-addressed guest tools");
     expect(guestTools).toContain("Publish current guest-tool manifest");
     expect(guestTools).toContain(
@@ -50,11 +52,14 @@ describe("guest-tool publication workflow", () => {
     );
   });
 
-  it("publishes Scenario source bundles only from the image workflow", () => {
+  it("keeps the main-repository image workflow validation-only", () => {
     expect(images).toContain("push:\n    branches:\n      - main");
-    expect(images).toContain("Publish exact scenario source bundle");
-    expect(images).toContain("just bundle-images");
-    expect(images).toContain("INTAR_IMAGE_PUBLISH_TOKEN");
+    expect(images).toContain("Validate curriculum source");
+    expect(images).toContain("just validate-images");
+    expect(images).toContain("just render-images");
+    expect(images).not.toContain("bundle-images");
+    expect(images).not.toContain("INTAR_IMAGE_PUBLISH_TOKEN");
+    expect(images).not.toContain("Publish exact scenario source bundle");
     expect(`${website}\n${websiteDeploy}`).not.toContain("bundle-images");
   });
 });

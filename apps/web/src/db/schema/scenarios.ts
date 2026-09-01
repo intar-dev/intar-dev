@@ -19,7 +19,7 @@ import {
   nowMsDefault,
 } from "./shared";
 
-export const scenarioCourseCatalogs = sqliteTable(
+export const courseCatalogs = sqliteTable(
   "course_catalogs",
   {
     scopeKey: text("scope_key").primaryKey(),

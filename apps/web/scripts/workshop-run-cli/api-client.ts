@@ -1,6 +1,3 @@
-import { HttpError } from "./types";
-import { parseResponseBody, parseResponseText } from "./utils";
-
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly origin: string;
@@ -24,30 +21,11 @@ export class ApiClient {
     const response = await this.raw(path, init);
     const body = await parseResponseBody(response);
     if (!response.ok) {
-      throw new HttpError(`request failed: ${path}`, response.status, body);
-    }
-    return body as T;
-  }
-
-  async text(
-    path: string,
-    init: {
-      method?: string;
-      headers?: Record<string, string>;
-      json?: unknown;
-      signal?: AbortSignal;
-    } = {},
-  ): Promise<string> {
-    const response = await this.raw(path, init);
-    const text = await response.text();
-    if (!response.ok) {
-      throw new HttpError(
-        `request failed: ${path}`,
-        response.status,
-        parseResponseText(text),
+      throw new Error(
+        `request failed: ${path} (${response.status}): ${JSON.stringify(body)}`,
       );
     }
-    return text;
+    return body as T;
   }
 
   async raw(
@@ -62,8 +40,7 @@ export class ApiClient {
     const headers = new Headers(init.headers);
     headers.set("cookie", this.cookie);
     headers.set("accept", "application/json");
-    // Astro's CSRF protection rejects form-like POSTs without a same-site
-    // Origin; bodyless mutations (e.g. run destroy) need it explicitly.
+    // Astro's CSRF protection requires a same-site Origin for mutations.
     if ((init.method ?? "GET") !== "GET") {
       headers.set("origin", this.origin);
     }
@@ -85,5 +62,15 @@ export class ApiClient {
       throw new Error(`refused cross-origin API request: ${url.origin}`);
     }
     return fetch(url, requestInit);
+  }
+}
+
+async function parseResponseBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
   }
 }

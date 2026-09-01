@@ -209,16 +209,9 @@ mod tests {
     #[test]
     fn direct_manifest_uses_raw_chunks_and_real_boot_hashes() {
         let directory = tempdir().unwrap();
-        let scenario = intar_image_scenario::Scenario::parse(
+        let scenario = intar_image_scenario::Scenario::parse_course(
             r#"
 scenario "broken-nginx" {
-  title = "Broken Nginx"
-  category = "web"
-  tags = ["nginx"]
-  difficulty = "easy"
-  estimated_minutes = 15
-  description = "Fix nginx"
-  briefing = "Restore nginx service availability."
   solution { body = "Start nginx." }
 
   image "debian-13-minimal" {

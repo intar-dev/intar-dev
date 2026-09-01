@@ -138,7 +138,6 @@ export async function prepareBootArtifacts(
 
 export async function prepareVmImages(
   env: Cloudflare.Env,
-  _form: FormData,
   manifest: ScenarioManifestV4,
 ): Promise<
   { ok: true; prepared: PreparedVmImage[] } | { ok: false; response: Response }
@@ -473,23 +472,6 @@ export function hasValidHintList(hints: ScenarioHintManifestV3[]): boolean {
     ids.add(id);
   }
   return true;
-}
-
-export function imageFileForVm(
-  form: FormData,
-  vm: ScenarioVmManifestV4,
-): File | null {
-  const field = form.get(`image:${vm.name}`);
-  if (field instanceof File) return field;
-
-  const imageKey = `${registryImageKey(vm.image_key)}.raw.zst`;
-  for (const entry of form.getAll("image")) {
-    if (entry instanceof File && entry.name === imageKey) {
-      return entry;
-    }
-  }
-
-  return null;
 }
 
 export function artifactFileForSha(

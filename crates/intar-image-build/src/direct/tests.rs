@@ -47,16 +47,9 @@ fn render_test_direct_build_in_work_root(
     mut config: QemuBuildConfig,
     work_root: PathBuf,
 ) -> RenderedDirectBuild {
-    let scenario = intar_image_scenario::Scenario::parse(
+    let scenario = intar_image_scenario::Scenario::parse_course(
         r#"
 scenario "broken-nginx" {
-  title = "Broken Nginx"
-  category = "web"
-  tags = ["nginx"]
-  difficulty = "easy"
-  estimated_minutes = 15
-  description = "Fix nginx"
-  briefing = "Restore nginx service availability."
   solution { body = "Start nginx." }
 
   image "debian-13-minimal" {

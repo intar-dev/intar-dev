@@ -5,9 +5,9 @@ vi.mock("@/lib/build-scheduler", () => ({
   assignQueuedImageBuilds: vi.fn(),
   queueImageBuildsFromBundle: vi.fn(),
 }));
-vi.mock("@/lib/scenario-course-catalogs", () => ({
-  syncScenarioCourseCatalogSnapshot: vi.fn(),
-  validateScenarioCourseCatalogReferences: vi.fn(),
+vi.mock("@/lib/course-catalogs", () => ({
+  syncCourseCatalogSnapshot: vi.fn(),
+  validateCourseCatalogReferences: vi.fn(),
 }));
 import {
   hydrateWorkshopManifest,

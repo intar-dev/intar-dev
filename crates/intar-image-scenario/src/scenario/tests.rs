@@ -6,16 +6,6 @@ use crate::{KinoProbeKind, ScenarioError};
 fn supported_hcl() -> &'static str {
     r#"
 scenario "broken-nginx" {
-  title = "Broken Nginx"
-  category = "web"
-  tags = ["nginx", "systemd", "linux"]
-  difficulty = "easy"
-  estimated_minutes = 15
-  description = "Fix a misconfigured nginx server"
-  briefing = <<-MD
-    Nginx should be serving the default site, but the service was broken during cleanup.
-  MD
-
   hint "check-service" {
     title = "Start with systemd"
     body  = "Check the nginx service state first."
@@ -103,15 +93,12 @@ scenario "broken-nginx" {
 
 #[test]
 fn parses_and_validates_supported_scenario() {
-    let scenario = Scenario::parse(supported_hcl()).unwrap();
-    scenario.validate_for_repo().unwrap();
+    let scenario = Scenario::parse_course(supported_hcl()).unwrap();
+    scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap();
 
     assert_eq!(scenario.name, "broken-nginx");
-    assert_eq!(scenario.title, "Broken Nginx");
-    assert_eq!(scenario.category, "web");
-    assert_eq!(scenario.tags, vec!["nginx", "systemd", "linux"]);
-    assert_eq!(scenario.difficulty, Some(ScenarioDifficulty::Easy));
-    assert_eq!(scenario.estimated_minutes, Some(15));
     assert_eq!(scenario.hints[0].id, "check-service");
     assert!(
         scenario
@@ -132,7 +119,7 @@ fn parses_and_validates_supported_scenario() {
 
 #[test]
 fn file_replace_requires_an_explicit_python3_package() {
-    let mut scenario = Scenario::parse(supported_hcl()).unwrap();
+    let mut scenario = Scenario::parse_course(supported_hcl()).unwrap();
     scenario.vms[0].steps[0]
         .actions
         .push(VmAction::FileReplace {
@@ -142,18 +129,22 @@ fn file_replace_requires_an_explicit_python3_package() {
             regex: false,
         });
 
-    let error = scenario.validate_for_repo().unwrap_err();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(error.to_string().contains("must include python3"));
 
     scenario.vms[0].packages.push("python3".to_string());
-    scenario.validate_for_repo().unwrap();
+    scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap();
 }
 
 #[test]
 fn parses_fractional_cpu_as_exact_millicores() {
     let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 0.125");
 
-    let scenario = Scenario::parse(&hcl).unwrap();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
 
     assert_eq!(scenario.vms[0].cpu_millis, 125);
     assert_eq!(scenario.vms[0].vcpu_count, 1);
@@ -162,12 +153,12 @@ fn parses_fractional_cpu_as_exact_millicores() {
 #[test]
 fn defaults_vcpus_to_the_cpu_ceiling_and_accepts_an_explicit_topology() {
     let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 2.125");
-    let scenario = Scenario::parse(&hcl).unwrap();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
     assert_eq!(scenario.vms[0].cpu_millis, 2_125);
     assert_eq!(scenario.vms[0].vcpu_count, 3);
 
     let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 0.125\n    vcpus  = 4");
-    let scenario = Scenario::parse(&hcl).unwrap();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
     assert_eq!(scenario.vms[0].cpu_millis, 125);
     assert_eq!(scenario.vms[0].vcpu_count, 4);
 }
@@ -182,7 +173,7 @@ fn rejects_inexact_or_non_positive_cpu_literals() {
         ("1e-1", "must not use exponent notation"),
     ] {
         let hcl = supported_hcl().replace("cpu    = 1", &format!("cpu    = {literal}"));
-        let error = Scenario::parse(&hcl).unwrap_err();
+        let error = Scenario::parse_course(&hcl).unwrap_err();
         assert!(
             matches!(error, ScenarioError::InvalidScenario(ref message) if message.contains(expected)),
             "literal {literal} should fail with {expected}: {error:?}"
@@ -194,7 +185,7 @@ fn rejects_inexact_or_non_positive_cpu_literals() {
 fn rejects_cpu_above_explicit_vcpu_capacity() {
     let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 1.001\n    vcpus  = 1");
 
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
 
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("exceeds vcpus capacity"))
@@ -204,11 +195,11 @@ fn rejects_cpu_above_explicit_vcpu_capacity() {
 #[test]
 fn errors_on_unknown_scenario_attribute() {
     let hcl = supported_hcl().replace(
-        r#"  description = "Fix a misconfigured nginx server""#,
-        r#"  typo_description = "This should not be silently ignored"
-  description = "Fix a misconfigured nginx server""#,
+        r#"scenario "broken-nginx" {"#,
+        r#"scenario "broken-nginx" {
+  typo_description = "This should not be silently ignored""#,
     );
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("does not support attribute 'typo_description'"))
     );
@@ -222,7 +213,7 @@ fn errors_on_unknown_vm_attribute() {
     packages = ["nginx"]"#,
     );
 
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
 
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("vm 'webserver' does not support attribute 'package'"))
@@ -237,7 +228,7 @@ fn errors_on_unknown_step_attribute() {
       summary = "This should not be accepted""#,
     );
 
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
 
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("step 'break-nginx' does not support attribute 'summary'"))
@@ -252,7 +243,7 @@ fn errors_on_unknown_vm_action_attribute() {
         path = "/etc/nginx/sites-enabled/default""#,
     );
 
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
 
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("file_delete block does not support attribute 'target'"))
@@ -271,7 +262,7 @@ fn errors_on_nested_vm_action_block() {
       }"#,
     );
 
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
 
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("file_delete block does not support nested block 'nested'"))
@@ -284,7 +275,7 @@ fn errors_on_extra_named_block_label() {
         r#"scenario "broken-nginx" {"#,
         r#"scenario "broken-nginx" "extra" {"#,
     );
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("scenario block expects exactly one label"))
     );
@@ -293,7 +284,7 @@ fn errors_on_extra_named_block_label() {
         r#"    probe "nginx-running" {"#,
         r#"    probe "nginx-running" "extra" {"#,
     );
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("kino probe block expects exactly one label"))
     );
@@ -302,13 +293,13 @@ fn errors_on_extra_named_block_label() {
 #[test]
 fn errors_on_label_free_block_labels() {
     let hcl = supported_hcl().replace(r#"  kino {"#, r#"  kino "checks" {"#);
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("kino block does not support labels"))
     );
 
     let hcl = supported_hcl().replace(r#"      systemctl {"#, r#"      systemctl "stop" {"#);
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("systemctl block does not support labels"))
     );
@@ -324,8 +315,10 @@ fn errors_on_duplicate_hint_ids_per_scope() {
 
   solution {"#,
     );
-    let scenario = Scenario::parse(&hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(
         error,
         ScenarioError::DuplicateHintId { scope, id }
@@ -344,8 +337,10 @@ fn errors_on_duplicate_hint_ids_per_scope() {
         body = "Check the service status again."
       }"#,
     );
-    let scenario = Scenario::parse(&hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(
         error,
         ScenarioError::DuplicateHintId { scope, id }
@@ -356,15 +351,19 @@ fn errors_on_duplicate_hint_ids_per_scope() {
 #[test]
 fn errors_on_unsafe_scenario_identifiers() {
     let hcl = supported_hcl().replace(r#"scenario "broken-nginx" {"#, r#"scenario "../escape" {"#);
-    let scenario = Scenario::parse(&hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("invalid scenario name"))
     );
 
     let hcl = supported_hcl().replace(r#"vm "webserver" {"#, r#"vm "../web" {"#);
-    let scenario = Scenario::parse(&hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("invalid vm name"))
     );
@@ -380,7 +379,7 @@ fn errors_on_duplicate_image_and_vm_labels() {
 
   kino {"#,
     );
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("duplicate image 'debian-12-minimal'"))
     );
@@ -394,53 +393,58 @@ fn errors_on_duplicate_image_and_vm_labels() {
 
   vm "webserver" {"#,
     );
-    let error = Scenario::parse(&hcl).unwrap_err();
+    let error = Scenario::parse_course(&hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("duplicate vm 'webserver'"))
     );
 }
 
 #[test]
-fn errors_on_multiline_description() {
-    let hcl = supported_hcl().replace(
-        r#"description = "Fix a misconfigured nginx server""#,
-        r#"description = <<-MD
-    Fix a misconfigured nginx server.
-    Keep the tagline on one line.
-  MD"#,
-    );
-    let scenario = Scenario::parse(&hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
-    assert!(matches!(
-        error,
-        ScenarioError::InvalidScenarioField { field, message }
-            if field == "description" && message.contains("single line")
-    ));
+fn rejects_lecture_presentation_attributes() {
+    for (field, attribute) in [
+        ("title", r#"title = "Broken Nginx""#),
+        ("category", r#"category = "web""#),
+        ("tags", r#"tags = ["nginx"]"#),
+        ("difficulty", r#"difficulty = "easy""#),
+        ("estimated_minutes", "estimated_minutes = 15"),
+        ("description", r#"description = "Fix nginx""#),
+        ("briefing", r#"briefing = "Restore nginx""#),
+    ] {
+        let hcl = supported_hcl().replace(
+            r#"scenario "broken-nginx" {"#,
+            &format!("scenario \"broken-nginx\" {{\n  {attribute}"),
+        );
+        let error = Scenario::parse_course(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(ref message) if message.contains(&format!("course-mode scenario must not define {field}"))),
+            "{field} should be rejected: {error}"
+        );
+    }
 }
 
 #[test]
-fn authoring_prose_may_reference_managed_commands() {
+fn hint_and_solution_prose_may_reference_managed_commands() {
     let hcl = supported_hcl()
-            .replace(
-                "Nginx should be serving the default site, but the service was broken during cleanup.",
-                "As prose, mention `systemctl status intar-scenario.service` without making it executable.",
-            )
-            .replace(
-                "Check the nginx service state first.",
-                "The hint can mention `systemctl restart sshd.service` as text.",
-            )
-            .replace(
-                "Start nginx and restore the default site symlink.",
-                "The solution may discuss why `chsh ubuntu` would be wrong without running it.",
-            );
-    let scenario = Scenario::parse(&hcl).unwrap();
-    scenario.validate_for_repo().unwrap();
+        .replace(
+            "Check the nginx service state first.",
+            "The hint can mention `systemctl restart sshd.service` as text.",
+        )
+        .replace(
+            "Start nginx and restore the default site symlink.",
+            "The solution may discuss why `chsh ubuntu` would be wrong without running it.",
+        );
+    let scenario = Scenario::parse_course(&hcl).unwrap();
+    scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap();
 }
 
 #[test]
 fn derives_kino_config_from_vm_probes() {
-    let scenario = Scenario::parse(supported_hcl()).unwrap();
-    scenario.validate_for_repo().unwrap();
+    let scenario = Scenario::parse_course(supported_hcl()).unwrap();
+    scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap();
 
     let kino = scenario.derive_kino_config_for_vm("webserver").unwrap();
     assert!(
@@ -526,8 +530,10 @@ SCRIPT
       ]"#,
     );
 
-    let scenario = Scenario::parse(&hcl).unwrap();
-    scenario.validate_for_repo().unwrap();
+    let scenario = Scenario::parse_course(&hcl).unwrap();
+    scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap();
 
     let kino = scenario.derive_kino_config_for_vm("webserver").unwrap();
     assert!(!kino.config_hcl.contains("TemplateExpr"));
@@ -581,7 +587,6 @@ SCRIPT
 fn errors_on_missing_probe_description() {
     let hcl = r#"
 scenario "missing-description" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -601,8 +606,10 @@ scenario "missing-description" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(
         error,
         ScenarioError::MissingProbeDescription { probe } if probe == "nginx-running"
@@ -612,10 +619,13 @@ scenario "missing-description" {
 #[test]
 fn rejects_probe_descriptions_that_cannot_be_safe_cli_labels() {
     for description in ["x".repeat(161), "\u{202e}spoofed label".to_string()] {
-        let scenario =
-            Scenario::parse(&supported_hcl().replace("Nginx should be running", &description))
-                .unwrap();
-        let error = scenario.validate_for_repo().unwrap_err();
+        let scenario = Scenario::parse_course(
+            &supported_hcl().replace("Nginx should be running", &description),
+        )
+        .unwrap();
+        let error = scenario
+            .validate_technical_for_builder_arch("amd64")
+            .unwrap_err();
         assert!(matches!(
             error,
             ScenarioError::InvalidScenarioField { field, message }
@@ -629,7 +639,6 @@ fn rejects_probe_descriptions_that_cannot_be_safe_cli_labels() {
 fn parses_vm_packages_from_root_attributes() {
     let hcl = r#"
 scenario "vm-packages" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -651,7 +660,7 @@ scenario "vm-packages" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
+    let scenario = Scenario::parse_course(hcl).unwrap();
     let vm = scenario.vm_by_name("web").unwrap();
     assert_eq!(vm.packages, vec!["nginx", "curl"]);
 }
@@ -660,7 +669,6 @@ scenario "vm-packages" {
 fn errors_on_managed_paths_units_and_commands() {
     let hcl = r#"
 scenario "managed-assets" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -689,13 +697,14 @@ scenario "managed-assets" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(error, ScenarioError::ManagedPath { .. }));
 
     let hcl = r#"
 scenario "managed-unit" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -724,13 +733,14 @@ scenario "managed-unit" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(error, ScenarioError::ManagedUnit { .. }));
 
     let hcl = r#"
 scenario "managed-command" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -758,8 +768,10 @@ scenario "managed-command" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(error, ScenarioError::ManagedCommand { .. }));
 }
 
@@ -767,7 +779,6 @@ scenario "managed-command" {
 fn errors_on_invalid_kino_timing() {
     let hcl = r#"
 scenario "invalid-kino-timing" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -793,8 +804,10 @@ scenario "invalid-kino-timing" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(error, ScenarioError::InvalidKinoDefaults { .. }));
 }
 
@@ -802,7 +815,6 @@ scenario "invalid-kino-timing" {
 fn errors_on_invalid_command_json_path_probe() {
     let hcl = r#"
 scenario "invalid-command-json-path" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -823,8 +835,10 @@ scenario "invalid-command-json-path" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(
         error,
         ScenarioError::InvalidProbeConfig { probe, .. } if probe == "check-command"
@@ -835,7 +849,6 @@ scenario "invalid-command-json-path" {
 fn errors_on_invalid_desired_state() {
     let hcl = r#"
 scenario "invalid-desired-state" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -858,8 +871,10 @@ scenario "invalid-desired-state" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(
         error,
         ScenarioError::InvalidProbeConfig { probe, .. } if probe == "api-ready"
@@ -870,7 +885,6 @@ scenario "invalid-desired-state" {
 fn errors_on_missing_vm_probe_reference() {
     let hcl = r#"
 scenario "missing-vm-probe" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -891,8 +905,10 @@ scenario "missing-vm-probe" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    let error = scenario.validate_for_repo().unwrap_err();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    let error = scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap_err();
     assert!(matches!(
         error,
         ScenarioError::ProbeNotFound(probe) if probe == "missing-probe"
@@ -903,16 +919,9 @@ scenario "missing-vm-probe" {
 fn parses_k8s_scale_deployment_action() {
     let hcl = r#"
 scenario "scale-action" {
-  title = "Scale Action"
-  category = "test"
-  tags = ["kubernetes"]
-  difficulty = "medium"
-  estimated_minutes = 20
   image "debian-12-minimal" {
     base = "trixie"
   }
-  description = "Scale a deployment"
-  briefing = "Restore the expected deployment replica count."
   solution { body = "Scale the api deployment back to one replica." }
 
   kino {
@@ -941,8 +950,10 @@ scenario "scale-action" {
 }
 "#;
 
-    let scenario = Scenario::parse(hcl).unwrap();
-    scenario.validate_for_repo().unwrap();
+    let scenario = Scenario::parse_course(hcl).unwrap();
+    scenario
+        .validate_technical_for_builder_arch("amd64")
+        .unwrap();
 
     let vm = scenario.vm_by_name("control-plane").unwrap();
     assert!(matches!(
@@ -960,7 +971,6 @@ scenario "scale-action" {
 fn errors_on_invalid_k8s_scale_deployment_action() {
     let hcl = r#"
 scenario "invalid-scale-action" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -990,14 +1000,13 @@ scenario "invalid-scale-action" {
 }
 "#;
 
-    let error = Scenario::parse(hcl).unwrap_err();
+    let error = Scenario::parse_course(hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("k8s_scale_deployment block missing required attribute 'replicas'"))
     );
 
     let hcl = r#"
 scenario "invalid-scale-action-kubectl" {
-  category = "test"
   image "debian-12-minimal" {
     base = "trixie"
   }
@@ -1029,7 +1038,7 @@ scenario "invalid-scale-action-kubectl" {
 }
 "#;
 
-    let error = Scenario::parse(hcl).unwrap_err();
+    let error = Scenario::parse_course(hcl).unwrap_err();
     assert!(
         matches!(error, ScenarioError::InvalidScenario(message) if message.contains("k8s_scale_deployment block does not support attribute 'kubectl'"))
     );

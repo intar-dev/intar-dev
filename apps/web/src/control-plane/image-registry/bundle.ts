@@ -11,9 +11,9 @@ import {
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
-  syncScenarioCourseCatalogSnapshot,
-  validateScenarioCourseCatalogReferences,
-} from "@/lib/scenario-course-catalogs";
+  syncCourseCatalogSnapshot,
+  validateCourseCatalogReferences,
+} from "@/lib/course-catalogs";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import { stageReusableCandidateManifests } from "@/lib/scenario-catalog-candidates";
 import {
@@ -77,7 +77,7 @@ export async function handleBundleUpload(
 
   const db = drizzle(env.DB);
   const courseCatalog = meta.value.bundleMeta.courseCatalog;
-  const invalidScenarioIds = await validateScenarioCourseCatalogReferences(
+  const invalidScenarioIds = await validateCourseCatalogReferences(
     db,
     {
       snapshot: courseCatalog,
@@ -112,7 +112,7 @@ export async function handleBundleUpload(
     meta: meta.value.bundleMeta,
     nowUnixMs: now,
   });
-  await syncScenarioCourseCatalogSnapshot(db, {
+  await syncCourseCatalogSnapshot(db, {
     snapshot: courseCatalog,
     sourceRevision: meta.value.rev,
     organizationId: null,

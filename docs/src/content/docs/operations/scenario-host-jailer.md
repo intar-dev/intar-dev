@@ -42,10 +42,10 @@ unavailable allocation returns `boot_capacity_pending` and is retried with
 jitter. Legacy launch requests are rejected; a host without the complete v2
 contract is unschedulable.
 
-Catalog manifests are V3 and carry `cpu_millis` plus `vcpu_count`. The
-coordinated bridge is V6; its V2 desired-state, capacity, resource, and report
-documents carry millicore totals and per-VM quota/accounting state. There is no
-V2-catalog or V5-bridge compatibility shim.
+Catalog manifests are V4 and carry `cpu_millis` plus `vcpu_count`. The
+coordinated bridge is V7; its desired-state, host-state-report, and VM-report
+schemas are V4, V5, and V4. The host-capacity and VM-resource objects are V2.
+There is no V1-catalog or pre-V7 bridge compatibility shim.
 
 ## Root-owned runtime boundary
 

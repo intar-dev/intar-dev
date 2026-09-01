@@ -11,7 +11,7 @@ import {
   type CourseLectureBlocker,
   type CourseLectureState,
   type ResolvedCourseLecture,
-} from "@/lib/scenario-course-catalogs";
+} from "@/lib/course-catalogs";
 import { requireOrganizationRole } from "@/lib/organizations";
 
 export interface OrganizationAssignmentRecord {
