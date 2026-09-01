@@ -554,6 +554,104 @@ test.describe("wide operational density", () => {
 });
 
 test.describe("lecture reading flow", () => {
+  test("completed scenarios are easy to run again", async ({ page, ui }) => {
+    ui.configure({ sessionRole: "learner", runState: "archived" });
+    const course = ui.server.state.courseCatalog[0]!;
+    const lecture = course.lectures[1]!;
+    lecture.scenarioReady = true;
+
+    await page.goto("/courses", { waitUntil: "domcontentloaded" });
+    await ui.settle();
+    await page.getByRole("link", { name: /Linux operations/i }).click();
+    const courseAction = page.getByRole("link", {
+      name: /Repair a broken nginx service.*Run again/i,
+    });
+    await expect(courseAction).toBeVisible();
+    await courseAction.click();
+
+    const theory = page.getByRole("heading", { name: "Service recovery" });
+    const rerun = page.getByRole("button", { name: "Run scenario again" });
+    await expect(theory).toBeVisible();
+    await expect(rerun).toBeVisible();
+    await expect(page.getByRole("button", { name: "Review runs" })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /Next lecture: Trace an intermittent DNS failure/i }),
+    ).toBeVisible();
+    const theoryBox = await theory.boundingBox();
+    const rerunBox = await rerun.boundingBox();
+    expect(theoryBox).not.toBeNull();
+    expect(rerunBox).not.toBeNull();
+    expect(theoryBox?.y ?? Number.POSITIVE_INFINITY).toBeLessThan(
+      rerunBox?.y ?? Number.NEGATIVE_INFINITY,
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await rerun.scrollIntoViewIfNeeded();
+    await expect(rerun).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    await rerun.click();
+    await expect(page).toHaveURL("/runs/run-active");
+    expect(ui.server.requests).toContain(
+      "POST /api/scenarios/repair-nginx/start",
+    );
+  });
+
+  test("a completed lecture resumes its active rerun", async ({ page, ui }) => {
+    ui.configure({ sessionRole: "learner", runState: "archived" });
+    const course = ui.server.state.courseCatalog[0]!;
+    const lecture = course.lectures[1]!;
+    lecture.scenarioReady = true;
+    lecture.activeRunId = "run-active";
+
+    await page.goto(`/courses/${course.courseId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await ui.settle();
+    const courseResume = page.getByRole("link", {
+      name: /Repair a broken nginx service.*Resume/i,
+    });
+    await expect(courseResume).toBeVisible();
+    await courseResume.click();
+
+    await expect(
+      page.getByRole("heading", { name: "Continue your scenario" }),
+    ).toBeVisible();
+    const resume = page.getByRole("button", { name: "Resume scenario" });
+    await expect(resume).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Run scenario again" }),
+    ).toHaveCount(0);
+    await resume.click();
+    await expect(page).toHaveURL("/runs/run-active");
+  });
+
+  test("a completed lecture explains when rerun is preparing", async ({
+    page,
+    ui,
+  }) => {
+    ui.configure({ sessionRole: "learner", runState: "archived" });
+    const course = ui.server.state.courseCatalog[0]!;
+    const lecture = course.lectures[1]!;
+    lecture.scenarioReady = false;
+    await page.goto(
+      `/courses/${course.courseId}/lectures/${lecture.lectureId}`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await ui.settle();
+
+    await expect(
+      page.getByRole("button", { name: "Scenario preparing" }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("status").filter({
+        hasText: "Run again will become available when the scenario image is ready.",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Run scenario again" }),
+    ).toHaveCount(0);
+  });
+
   test("mobile keeps theory before the scenario action", async ({ page, ui }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await ui.open({ ...routeCase("lecture"), theme: "light" });

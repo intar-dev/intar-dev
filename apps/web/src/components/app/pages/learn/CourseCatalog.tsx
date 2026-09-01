@@ -632,6 +632,7 @@ function LectureStatus({ lecture }: { lecture: CourseLectureSummary }) {
 }
 
 function lectureActionLabel(lecture: CourseLectureSummary) {
+  if (lecture.activeRunId) return "Resume";
   switch (lecture.state) {
     case "locked":
       return "Locked";
@@ -642,7 +643,9 @@ function lectureActionLabel(lecture: CourseLectureSummary) {
     case "in_progress":
       return "Resume";
     case "completed":
-      return "Review";
+      return lecture.scenarioId && lecture.scenarioReady !== false
+        ? "Run again"
+        : "Review";
   }
 }
 

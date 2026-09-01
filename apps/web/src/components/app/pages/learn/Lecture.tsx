@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { ArrowLeft, ArrowRight, BookOpen, LockKeyhole } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  BookOpen,
+  LockKeyhole,
+  RotateCcw,
+} from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import {
   ScenarioStartCancelledError,
@@ -305,7 +311,8 @@ function LectureActionPanel({
               : "Mark this lecture complete"
             : lecture.state === "waiting_for_scenario"
               ? "Scenario is being prepared"
-              : lecture.state === "in_progress"
+              : lecture.state === "in_progress" ||
+                  (lecture.state === "completed" && lecture.activeRunId)
                 ? "Continue your scenario"
                 : lecture.state === "completed"
                   ? "Scenario complete"
@@ -327,9 +334,12 @@ function LectureActionPanel({
         />
       )}
 
-      {lecture.state === "waiting_for_scenario" ? (
+      {!isTheoryOnly &&
+      (lecture.state === "waiting_for_scenario" || lecture.scenarioReady === false) ? (
         <p role="status" className="text-support text-muted-foreground">
-          The theory is ready. The scenario action will become available when its image is ready.
+          {lecture.state === "completed"
+            ? "Run again will become available when the scenario image is ready."
+            : "The theory is ready. The scenario action will become available when its image is ready."}
         </p>
       ) : null}
       {lecture.state === "completed" && !isTheoryOnly ? (
@@ -386,7 +396,10 @@ function LinkedLectureAction({
   startPending: boolean;
   onStart: () => void;
 }) {
-  if (lecture.state === "in_progress") {
+  if (
+    lecture.state === "in_progress" ||
+    (lecture.state === "completed" && lecture.activeRunId)
+  ) {
     return lecture.activeRunId ? (
       <Button
         className="w-full sm:w-auto"
@@ -408,7 +421,6 @@ function LinkedLectureAction({
       </Button>
     );
   }
-  if (lecture.state === "completed") return null;
   if (lecture.state === "locked") {
     return (
       <p className="inline-flex items-center gap-2 text-support text-muted-foreground">
@@ -417,10 +429,15 @@ function LinkedLectureAction({
       </p>
     );
   }
+  const rerun = lecture.state === "completed";
   return (
     <Button onClick={onStart} disabled={startPending} className="w-full sm:w-auto">
-      {startPending ? "Starting scenario…" : "Start scenario"}
-      <ArrowRight className="size-4" />
+      {startPending
+        ? "Starting scenario…"
+        : rerun
+          ? "Run scenario again"
+          : "Start scenario"}
+      {rerun ? <RotateCcw className="size-4" /> : <ArrowRight className="size-4" />}
     </Button>
   );
 }
