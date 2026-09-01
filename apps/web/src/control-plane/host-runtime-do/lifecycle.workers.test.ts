@@ -34,6 +34,7 @@ import {
   env,
   eq,
   drizzle,
+  courseCatalogs,
   hostDesiredState,
   scenarioRuns,
   vmScenarios,
@@ -571,6 +572,38 @@ async function seedCatalogImage(sha256: string): Promise<void> {
   const db = drizzle(env.DB);
   const now = Date.now();
   await db.batch([
+    db.insert(courseCatalogs).values({
+      scopeKey: "public",
+      organizationId: null,
+      catalogJson: {
+        version: 2,
+        courses: [
+          {
+            courseId: "host-runtime-cache",
+            title: "Host runtime cache",
+            summary: "Cache test course.",
+            bodyMarkdown: "Cache test course body.",
+            sequential: false,
+            lectures: [
+              {
+                lectureId: "cache-image",
+                title: "Cache image",
+                summary: "Cache image test lecture.",
+                bodyMarkdown: "Cache image test lecture body.",
+                category: "test",
+                tags: [],
+                difficulty: "easy",
+                estimatedMinutes: 10,
+                scenarioId: testImageKey.scenario,
+              },
+            ],
+          },
+        ],
+      },
+      sourceRevision: "fixture",
+      createdAt: now,
+      updatedAt: now,
+    }),
     db.insert(vmScenarios).values({
       scenarioId: testImageKey.scenario,
       organizationId: null,

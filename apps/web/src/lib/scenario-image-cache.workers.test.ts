@@ -6,12 +6,14 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
+  courseCatalogs,
   hostActualState,
   hostDesiredState,
   organization,
   user,
   vmScenarios,
   vmScenarioVms,
+  type CourseCatalogSnapshotV2,
 } from "@/db/schema";
 import type {
   DesiredBuildV1,
@@ -74,6 +76,16 @@ describe("scenario image cache reconciliation", () => {
       }),
     ]);
     await Promise.all([
+      seedCourseCatalog({
+        organizationId: null,
+        scenarioIds: ["public-disabled", "public-arm"],
+      }),
+      seedCourseCatalog({
+        organizationId: "org-a",
+        scenarioIds: ["org-a-private"],
+      }),
+    ]);
+    await Promise.all([
       seedHost({ hostId: "public-agent", organizationId: null }),
       seedHost({ hostId: "org-a-agent", organizationId: "org-a" }),
     ]);
@@ -115,12 +127,59 @@ describe("scenario image cache reconciliation", () => {
     ]);
   });
 
+  it("reconciles only the host architecture from a mixed-architecture catalog", async () => {
+    await Promise.all([
+      seedScenario({
+        scenarioId: "x86-scenario",
+        organizationId: null,
+        arch: "x86_64",
+        sha256: PUBLIC_SHA,
+      }),
+      seedScenario({
+        scenarioId: "arm-scenario",
+        organizationId: null,
+        arch: "aarch64",
+        sha256: PUBLIC_ARM_SHA,
+      }),
+    ]);
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["x86-scenario", "arm-scenario"],
+    });
+    await seedHost({ hostId: "x86-agent", organizationId: null });
+    await mutateStoredHostDesiredState(
+      drizzle(env.DB),
+      "x86-agent",
+      Date.now(),
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: image("arm-scenario", "old-vm", "x86_64"),
+          image_id: ORG_A_SHA,
+        });
+      },
+    );
+
+    const result = await reconcileHostScenarioImages(drizzle(env.DB), {
+      hostId: "x86-agent",
+      architecture: "x86_64",
+      nowUnixMs: Date.now(),
+    });
+
+    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
+      `x86-scenario:vm:x86_64:${PUBLIC_SHA}`,
+    ]);
+  });
+
   it("excludes builders and disabled hosts while prewarming placement-paused agents", async () => {
     await seedScenario({
       scenarioId: "public-scenario",
       organizationId: null,
       arch: "x86_64",
       sha256: PUBLIC_SHA,
+    });
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["public-scenario"],
     });
     await Promise.all([
       seedHost({ hostId: "builder", organizationId: null, role: "builder" }),
@@ -167,6 +226,10 @@ describe("scenario image cache reconciliation", () => {
       organizationId: null,
       arch: "x86_64",
       sha256: PUBLIC_SHA,
+    });
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["rolling-scenario"],
     });
     await seedHost({ hostId: "active-agent", organizationId: null });
     const workshopImage = image("workshop-checkpoint", "vm", "x86_64");
@@ -220,12 +283,192 @@ describe("scenario image cache reconciliation", () => {
     expect(after.vms[0]?.image_id).toBe(PUBLIC_SHA);
   });
 
+  it("removes cache keys for replaced VM names while retaining current-key rollback SHAs", async () => {
+    const currentImage = await seedScenario({
+      scenarioId: "renamed-vm",
+      organizationId: null,
+      arch: "x86_64",
+      sha256: PUBLIC_SHA,
+    });
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["renamed-vm"],
+    });
+    await seedHost({ hostId: "renamed-vm-agent", organizationId: null });
+    const oldVmImage = image("renamed-vm", "old-vm", "x86_64");
+    const db = drizzle(env.DB);
+    await mutateStoredHostDesiredState(
+      db,
+      "renamed-vm-agent",
+      Date.now(),
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: currentImage,
+          image_id: ORG_A_SHA,
+        });
+        upsertDesiredCachedImage(draft, {
+          image_key: oldVmImage,
+          image_id: ORG_B_SHA,
+        });
+      },
+    );
+
+    const result = await reconcileHostScenarioImages(db, {
+      hostId: "renamed-vm-agent",
+      architecture: "x86_64",
+      nowUnixMs: Date.now() + 1,
+    });
+
+    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
+      `renamed-vm:vm:x86_64:${PUBLIC_SHA}`,
+      `renamed-vm:vm:x86_64:${ORG_A_SHA}`,
+    ]);
+  });
+
+  it("removes unlinked scenario cache entries but preserves workshop entries", async () => {
+    const linkedImage = await seedScenario({
+      scenarioId: "linked-scenario",
+      organizationId: null,
+      arch: "x86_64",
+      sha256: PUBLIC_SHA,
+    });
+    const unlinkedImage = await seedScenario({
+      scenarioId: "broken-nginx",
+      organizationId: null,
+      arch: "x86_64",
+      sha256: ORG_A_SHA,
+      enabled: false,
+    });
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["linked-scenario"],
+    });
+    await seedHost({ hostId: "cache-agent", organizationId: null });
+    const workshopImage = image(
+      "workshop-checkpoint",
+      "workshop-runtime",
+      "x86_64",
+    );
+    const db = drizzle(env.DB);
+    await mutateStoredHostDesiredState(
+      db,
+      "cache-agent",
+      Date.now(),
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: unlinkedImage,
+          image_id: ORG_A_SHA,
+        });
+        upsertDesiredCachedImage(draft, {
+          image_key: workshopImage,
+          image_id: ORG_B_SHA,
+        });
+      },
+    );
+
+    const result = await reconcileHostScenarioImages(db, {
+      hostId: "cache-agent",
+      architecture: "x86_64",
+      nowUnixMs: Date.now() + 1,
+    });
+
+    expect(result.outcome).toBe("changed");
+    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
+      `linked-scenario:vm:x86_64:${PUBLIC_SHA}`,
+      `workshop-checkpoint:workshop-runtime:x86_64:${ORG_B_SHA}`,
+    ]);
+    expect(requiredState(result).cached_images).not.toContainEqual({
+      image_key: unlinkedImage,
+      image_id: ORG_A_SHA,
+    });
+    expect(requiredState(result).cached_images).toContainEqual({
+      image_key: linkedImage,
+      image_id: PUBLIC_SHA,
+    });
+  });
+
+  it("fails closed without a V2 catalog while preserving Workshop cache keys", async () => {
+    const scenarioImage = await seedScenario({
+      scenarioId: "unlinked-scenario",
+      organizationId: null,
+      arch: "x86_64",
+      sha256: PUBLIC_SHA,
+      enabled: false,
+    });
+    await seedHost({ hostId: "no-catalog-agent", organizationId: null });
+    const workshopImage = image("workshop-runtime", "workspace", "x86_64");
+    const db = drizzle(env.DB);
+    await mutateStoredHostDesiredState(
+      db,
+      "no-catalog-agent",
+      Date.now(),
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: scenarioImage,
+          image_id: PUBLIC_SHA,
+        });
+        upsertDesiredCachedImage(draft, {
+          image_key: workshopImage,
+          image_id: ORG_A_SHA,
+        });
+      },
+    );
+
+    const result = await reconcileHostScenarioImages(db, {
+      hostId: "no-catalog-agent",
+      architecture: "x86_64",
+      nowUnixMs: Date.now() + 1,
+    });
+
+    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
+      `workshop-runtime:workspace:x86_64:${ORG_A_SHA}`,
+    ]);
+  });
+
+  it("preserves legacy Workshop-prefixed technical cache keys", async () => {
+    const legacyWorkshopImage = await seedScenario({
+      scenarioId: "workshop-legacy",
+      organizationId: null,
+      arch: "x86_64",
+      sha256: PUBLIC_SHA,
+      enabled: false,
+    });
+    await seedHost({ hostId: "legacy-workshop-agent", organizationId: null });
+    const db = drizzle(env.DB);
+    await mutateStoredHostDesiredState(
+      db,
+      "legacy-workshop-agent",
+      Date.now(),
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: legacyWorkshopImage,
+          image_id: PUBLIC_SHA,
+        });
+      },
+    );
+
+    const result = await reconcileHostScenarioImages(db, {
+      hostId: "legacy-workshop-agent",
+      architecture: "x86_64",
+      nowUnixMs: Date.now() + 1,
+    });
+
+    expect(result.outcome).toBe("unchanged");
+    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
+      `workshop-legacy:vm:x86_64:${PUBLIC_SHA}`,
+    ]);
+  });
+
   it("is idempotent and preserves a concurrent desired-VM mutation", async () => {
     const catalogImage = await seedScenario({
       scenarioId: "public-scenario",
       organizationId: null,
       arch: "x86_64",
       sha256: PUBLIC_SHA,
+    });
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["public-scenario"],
     });
     await seedHost({ hostId: "racing-agent", organizationId: null });
     const db = drizzle(env.DB);
@@ -273,12 +516,65 @@ describe("scenario image cache reconciliation", () => {
     expect(finalState.cached_images[0]?.image_key).toEqual(catalogImage);
   });
 
+  it("retries after a catalog replacement races its desired-state CAS", async () => {
+    await Promise.all([
+      seedScenario({
+        scenarioId: "initial-scenario",
+        organizationId: null,
+        arch: "x86_64",
+        sha256: PUBLIC_SHA,
+      }),
+      seedScenario({
+        scenarioId: "replacement-scenario",
+        organizationId: null,
+        arch: "x86_64",
+        sha256: ORG_A_SHA,
+      }),
+    ]);
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["initial-scenario"],
+    });
+    await seedHost({ hostId: "catalog-race-agent", organizationId: null });
+    const replacementCatalog = JSON.stringify(
+      courseCatalog(["replacement-scenario"]),
+    ).replaceAll("'", "''");
+    await env.DB.prepare(
+      `CREATE TRIGGER replace_course_catalog_after_first_cache_write
+       AFTER UPDATE OF version ON host_desired_state
+       WHEN NEW.host_id = 'catalog-race-agent' AND OLD.version = 0
+       BEGIN
+         UPDATE course_catalogs
+         SET catalog_json = '${replacementCatalog}',
+             source_revision = 'replacement-revision',
+             updated_at = 2
+         WHERE scope_key = 'public';
+       END`,
+    ).run();
+
+    const result = await reconcileHostScenarioImages(drizzle(env.DB), {
+      hostId: "catalog-race-agent",
+      architecture: "x86_64",
+      nowUnixMs: 1,
+    });
+
+    expect(result.outcome).toBe("changed");
+    expect(requiredState(result).version).toBe(2);
+    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
+      `replacement-scenario:vm:x86_64:${ORG_A_SHA}`,
+    ]);
+  });
+
   it("accepts a same-millisecond current report after prior-session state is cleared", async () => {
     await seedScenario({
       scenarioId: "public-scenario",
       organizationId: null,
       arch: "x86_64",
       sha256: PUBLIC_SHA,
+    });
+    await seedCourseCatalog({
+      organizationId: null,
+      scenarioIds: ["public-scenario"],
     });
     await seedHost({ hostId: "reinstalled-agent", organizationId: null });
     const db = drizzle(env.DB);
@@ -375,6 +671,50 @@ async function seedHost(input: {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+}
+
+async function seedCourseCatalog(input: {
+  organizationId: string | null;
+  scenarioIds: string[];
+}): Promise<void> {
+  const now = Date.now();
+  const scopeKey = input.organizationId
+    ? `organization:${input.organizationId}`
+    : "public";
+  await drizzle(env.DB).insert(courseCatalogs).values({
+    scopeKey,
+    organizationId: input.organizationId,
+    catalogJson: courseCatalog(input.scenarioIds),
+    sourceRevision: "test-revision",
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function courseCatalog(scenarioIds: string[]): CourseCatalogSnapshotV2 {
+  return {
+    version: 2,
+    courses: [
+      {
+        courseId: "course",
+        title: "Course",
+        summary: "Course summary",
+        bodyMarkdown: "Course body",
+        sequential: false,
+        lectures: scenarioIds.map((scenarioId, index) => ({
+          lectureId: `lecture-${index + 1}`,
+          title: scenarioId,
+          summary: "Lecture summary",
+          bodyMarkdown: "Lecture body",
+          category: "test",
+          tags: [],
+          difficulty: "easy",
+          estimatedMinutes: 10,
+          scenarioId,
+        })),
+      },
+    ],
+  };
 }
 
 async function seedScenario(input: {

@@ -793,6 +793,14 @@ describe("course catalog bundle metadata", () => {
       },
       {
         version: 2,
+        courses: [
+          courseMeta({
+            lectures: [lectureMeta({ scenario_id: "workshop-checkpoint" })],
+          }),
+        ],
+      },
+      {
+        version: 2,
         courses: [courseMeta({ course_id: " linux-operations " })],
       },
       {

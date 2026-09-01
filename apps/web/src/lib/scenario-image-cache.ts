@@ -1,11 +1,22 @@
-import { and, eq, exists, isNull, or, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  eq,
+  exists,
+  inArray,
+  isNull,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   agentHosts,
+  courseCatalogs,
   hostActualState,
   hostDesiredState,
   vmScenarios,
   vmScenarioVms,
+  type CourseCatalogSnapshotV2,
   type AgentHostRole,
 } from "@/db/schema";
 import type {
@@ -15,6 +26,7 @@ import type {
 import type { ImageArchitecture, ImageKey } from "@/generated/catalog";
 import {
   IMAGE_KEY_RE,
+  WORKSHOP_IMAGE_SCENARIO_PREFIX,
   isImageArchitecture,
   isImageKey,
   normalizeSha256,
@@ -61,6 +73,12 @@ export interface ReconcileScenarioImagesForScopeResult {
 
 const PUBLICATION_RECONCILIATION_CONCURRENCY = 4;
 
+interface ScenarioCacheIntent {
+  images: DesiredCachedImageV1[];
+  scenarioIds: Set<string>;
+  linkedImageKeys: Set<string>;
+}
+
 /**
  * Reconciles the scenario-image portion of one host's desired cache.
  *
@@ -96,7 +114,7 @@ export async function reconcileHostScenarioImages(
       return { outcome: "stale_host_snapshot", desiredState: current };
     }
 
-    const images = await listVisibleScenarioImages(
+    const intent = await loadScenarioCacheIntent(
       db,
       host.organizationId,
       input.architecture,
@@ -105,15 +123,25 @@ export async function reconcileHostScenarioImages(
       current,
       (draft) => {
         // cached_images is shared by scenario and workshop/runtime intent and
-        // carries no provenance marker. Preserve same-architecture entries
-        // owned by other subsystems, but never let a host advertise an image
-        // for hardware it cannot run. Upsert replaces an older SHA for the
-        // same catalog key. Running VM SHAs remain independently protected by
+        // carries no provenance marker. Scoped scenario IDs remove stale VM
+        // keys, while a current V2 course catalog preserves rollback SHAs for
+        // still-linked exact keys. Workshop-prefixed vm_scenarios are never
+        // claimed, including legacy direct-publish rows. Preserve other same-
+        // architecture entries.
+        // Without a V2 catalog, no scenario key is linked and cache intent
+        // fails closed. Running VM SHAs remain independently protected by
         // desired.vms.
         draft.cached_images = draft.cached_images.filter(
-          (image) => image.image_key.arch === input.architecture,
+          (image) => {
+            const identity = imageKeyIdentity(image.image_key);
+            return (
+              image.image_key.arch === input.architecture &&
+              (!intent.scenarioIds.has(image.image_key.scenario) ||
+                intent.linkedImageKeys.has(identity))
+            );
+          },
         );
-        for (const image of images) {
+        for (const image of intent.images) {
           upsertDesiredCachedImage(draft, image);
         }
       },
@@ -177,12 +205,15 @@ export async function reconcileHostScenarioImages(
     // A catalog publication can commit between the target read and our CAS.
     // Verify the snapshot after the write/no-op; if it moved, loop and apply
     // the new generation before returning.
-    const latestImages = await listVisibleScenarioImages(
+    const latestIntent = await loadScenarioCacheIntent(
       db,
       host.organizationId,
       input.architecture,
     );
-    if (imageSetFingerprint(latestImages) !== imageSetFingerprint(images)) {
+    if (
+      scenarioCacheIntentFingerprint(latestIntent) !==
+      scenarioCacheIntentFingerprint(intent)
+    ) {
       continue;
     }
 
@@ -370,42 +401,79 @@ export async function tryReconcileHostScenarioImagesFromActualState(
   }
 }
 
-export async function listVisibleScenarioImages(
+async function loadScenarioCacheIntent(
   db: DrizzleD1Database,
   organizationId: string | null,
   architecture: ImageArchitecture,
-): Promise<DesiredCachedImageV1[]> {
-  const rows = await db
-    .select({
-      imageKey: vmScenarioVms.imageKeyJson,
-      imageSha256: vmScenarioVms.imageSha256,
-      imageFormat: vmScenarioVms.imageFormat,
-      imageVirtualSizeBytes: vmScenarioVms.imageVirtualSizeBytes,
-      chunkManifestSha256: vmScenarioVms.chunkManifestSha256,
-      guestBootstrapAbi: vmScenarioVms.guestBootstrapAbi,
-      kernelSha256: vmScenarioVms.kernelSha256,
-      initrdSha256: vmScenarioVms.initrdSha256,
-      bootCmdline: vmScenarioVms.bootCmdline,
-    })
-    .from(vmScenarioVms)
-    .innerJoin(
-      vmScenarios,
-      eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
-    )
-    .where(
-      organizationId
-        ? or(
-            isNull(vmScenarios.organizationId),
-            eq(vmScenarios.organizationId, organizationId),
-          )
-        : isNull(vmScenarios.organizationId),
-    )
-    .orderBy(vmScenarios.scenarioId, vmScenarioVms.ordinal);
-
+): Promise<ScenarioCacheIntent> {
+  const scopeKeys = [
+    "public",
+    ...(organizationId ? [`organization:${organizationId}`] : []),
+  ];
+  const visibleScope = organizationId
+    ? or(
+        isNull(vmScenarios.organizationId),
+        eq(vmScenarios.organizationId, organizationId),
+      )
+    : isNull(vmScenarios.organizationId);
+  const [catalogRows, scenarioRows, rows] = await Promise.all([
+    db
+      .select({ catalog: courseCatalogs.catalogJson })
+      .from(courseCatalogs)
+      .where(inArray(courseCatalogs.scopeKey, scopeKeys)),
+    db
+      .select({ scenarioId: vmScenarios.scenarioId })
+      .from(vmScenarios)
+      .where(visibleScope),
+    db
+      .select({
+        scenarioId: vmScenarios.scenarioId,
+        imageKey: vmScenarioVms.imageKeyJson,
+        imageSha256: vmScenarioVms.imageSha256,
+        imageFormat: vmScenarioVms.imageFormat,
+        imageVirtualSizeBytes: vmScenarioVms.imageVirtualSizeBytes,
+        chunkManifestSha256: vmScenarioVms.chunkManifestSha256,
+        guestBootstrapAbi: vmScenarioVms.guestBootstrapAbi,
+        kernelSha256: vmScenarioVms.kernelSha256,
+        initrdSha256: vmScenarioVms.initrdSha256,
+        bootCmdline: vmScenarioVms.bootCmdline,
+      })
+      .from(vmScenarioVms)
+      .innerJoin(
+        vmScenarios,
+        eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
+      )
+      .where(visibleScope)
+      .orderBy(vmScenarios.scenarioId, vmScenarioVms.ordinal),
+  ]);
+  const linkedScenarioIds = linkedScenarioIdsFromCatalogs(
+    catalogRows.map((row) => row.catalog),
+  );
   const byKey = new Map<string, DesiredCachedImageV1>();
+  const scenarioIds = new Set(
+    scenarioRows
+      .map((row) => row.scenarioId)
+      .filter(
+        (scenarioId) =>
+          !scenarioId.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX),
+      ),
+  );
+  const linkedImageKeys = new Set<string>();
   for (const row of rows) {
     if (!validScenarioImageKey(row.imageKey)) continue;
+    if (
+      row.scenarioId.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX) ||
+      row.imageKey.scenario.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX)
+    ) {
+      continue;
+    }
     if (row.imageKey.arch !== architecture) continue;
+    const identity = imageKeyIdentity(row.imageKey);
+    if (linkedScenarioIds.has(row.scenarioId)) {
+      linkedImageKeys.add(identity);
+    } else {
+      continue;
+    }
     const imageSha256 = normalizeSha256(row.imageSha256 ?? "");
     if (
       !imageSha256 ||
@@ -420,7 +488,6 @@ export async function listVisibleScenarioImages(
       continue;
     }
 
-    const identity = imageKeyIdentity(row.imageKey);
     const existing = byKey.get(identity);
     if (existing && existing.image_id !== imageSha256) {
       throw new Error(
@@ -432,11 +499,32 @@ export async function listVisibleScenarioImages(
       image_id: imageSha256,
     });
   }
-  return [...byKey.values()].sort((left, right) =>
-    imageKeyIdentity(left.image_key).localeCompare(
-      imageKeyIdentity(right.image_key),
+  return {
+    images: [...byKey.values()].sort((left, right) =>
+      imageKeyIdentity(left.image_key).localeCompare(
+        imageKeyIdentity(right.image_key),
+      ),
     ),
-  );
+    scenarioIds,
+    linkedImageKeys,
+  };
+}
+
+function linkedScenarioIdsFromCatalogs(
+  catalogs: CourseCatalogSnapshotV2[],
+): Set<string> {
+  const scenarioIds = new Set<string>();
+  for (const catalog of catalogs) {
+    if (catalog.version !== 2) {
+      throw new Error("scenario image cache requires a V2 course catalog");
+    }
+    for (const course of catalog.courses) {
+      for (const lecture of course.lectures) {
+        if (lecture.scenarioId) scenarioIds.add(lecture.scenarioId);
+      }
+    }
+  }
+  return scenarioIds;
 }
 
 export function isRuntimeImageCacheHost(host: {
@@ -532,6 +620,10 @@ function imageKeyIdentity(imageKey: ImageKey): string {
   return `${imageKey.scenario}:${imageKey.vm}:${imageKey.arch}`;
 }
 
-function imageSetFingerprint(images: DesiredCachedImageV1[]): string {
-  return JSON.stringify(images);
+function scenarioCacheIntentFingerprint(intent: ScenarioCacheIntent): string {
+  return JSON.stringify({
+    images: intent.images,
+    scenarioIds: [...intent.scenarioIds].sort(),
+    linkedImageKeys: [...intent.linkedImageKeys].sort(),
+  });
 }
