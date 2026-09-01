@@ -15,7 +15,7 @@ const { authMock, dbMock } = imageRegistryMocks();
 describe("image registry agent routes", () => {
   beforeEach(resetImageRegistryMocks);
 
-  it("advertises only valid chunked direct-boot image index entries", async () => {
+  it("deduplicates and advertises only valid chunked direct-boot image index entries", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
       agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
@@ -61,6 +61,7 @@ describe("image registry agent routes", () => {
     });
     dbMock.drizzle.mockReturnValueOnce(
       imageIndexDb([
+        valid,
         valid,
         invalidFormat,
         invalidBoot,
@@ -165,6 +166,9 @@ describe("image registry agent routes", () => {
     const chunkManifestSha256 = "d".repeat(64);
     const kernelSha256 = "b".repeat(64);
     const initrdSha256 = "c".repeat(64);
+    const liveManifestSha256 = "e".repeat(64);
+    const liveKernelSha256 = "f".repeat(64);
+    const liveInitrdSha256 = "0".repeat(64);
     const imageKey = {
       scenario: "broken-nginx",
       vm: "web",
@@ -172,7 +176,15 @@ describe("image registry agent routes", () => {
     };
     dbMock.drizzle.mockReturnValueOnce(
       imageIndexDb(
-        [],
+        [
+          imageIndexRow({
+            imageSha256: imageId,
+            chunkManifestSha256: liveManifestSha256,
+            kernelSha256: liveKernelSha256,
+            initrdSha256: liveInitrdSha256,
+            bootCmdline: "root=/dev/vda rw console=ttyS0 live",
+          }),
+        ],
         [{
           docJson: {
             schema_version: 4,
@@ -223,6 +235,14 @@ describe("image registry agent routes", () => {
       ),
     );
     const bucketHead = vi.fn(async (key: string) => {
+      if (key === `image-manifests/v1/${liveManifestSha256}.json`) {
+        return {
+          customMetadata: {
+            manifest_sha256: liveManifestSha256,
+            image_id: imageId,
+          },
+        };
+      }
       if (key === `image-manifests/v1/${chunkManifestSha256}.json`) {
         return {
           customMetadata: {
@@ -232,6 +252,13 @@ describe("image registry agent routes", () => {
         };
       }
       if (key === `artifacts/${kernelSha256}` || key === `artifacts/${initrdSha256}`) {
+        const sha256 = key.slice("artifacts/".length);
+        return { customMetadata: { artifact_sha256: sha256 } };
+      }
+      if (
+        key === `artifacts/${liveKernelSha256}` ||
+        key === `artifacts/${liveInitrdSha256}`
+      ) {
         const sha256 = key.slice("artifacts/".length);
         return { customMetadata: { artifact_sha256: sha256 } };
       }
@@ -256,6 +283,7 @@ describe("image registry agent routes", () => {
         chunk_manifest_sha256: chunkManifestSha256,
       }],
     });
+    expect(bucketHead).toHaveBeenCalledTimes(6);
   });
 
   it("streams raw-zstd images to verified agents", async () => {

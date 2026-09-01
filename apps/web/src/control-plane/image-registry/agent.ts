@@ -353,6 +353,19 @@ async function addChunkedImageIndexEntry(
   }
 
   const imageKey = registryImageKey(source.imageKey);
+  const identity = `${imageKey}:${imageId}`;
+  const existing = byKey.get(identity);
+  if (
+    existing?.image_format === source.imageFormat &&
+    existing.image_virtual_size_bytes === source.imageVirtualSizeBytes &&
+    existing.chunk_manifest_sha256 === chunkManifestSha256 &&
+    existing.guest_bootstrap_abi === source.guestBootstrapAbi &&
+    existing.boot.kernel_sha256 === kernelSha256 &&
+    existing.boot.initrd_sha256 === initrdSha256 &&
+    existing.boot.cmdline === bootCmdline
+  ) {
+    return;
+  }
   const object = await env.VM_IMAGE_REGISTRY_BUCKET.head(
     imageManifestObjectKey(chunkManifestSha256),
   );
@@ -365,7 +378,7 @@ async function addChunkedImageIndexEntry(
     return;
   }
 
-  byKey.set(`${imageKey}:${imageId}`, {
+  byKey.set(identity, {
     image_key: imageKey,
     image_id: imageId,
     image_format: source.imageFormat,
