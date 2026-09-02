@@ -5,10 +5,6 @@
     "": {
       "name": "@intar/monorepo",
       "devDependencies": {
-        "@intar/provider-contracts": "workspace:*",
-        "@intar/provider-testkit": "workspace:*",
-        "@intar/provider-worker-core": "workspace:*",
-        "@intar/workshop-contracts": "workspace:*",
         "typescript": "^6.0.3",
         "vitest": "^4.1.10",
         "wrangler": "^4.125.0",
@@ -26,8 +22,6 @@
         "@better-auth/sso": "1.7.0-beta.10",
         "@fontsource-variable/atkinson-hyperlegible-next": "^5.2.6",
         "@fontsource-variable/recursive": "^5.2.8",
-        "@intar/provider-contracts": "workspace:*",
-        "@intar/workshop-contracts": "workspace:*",
         "@noble/curves": "^2.2.0",
         "@paralleldrive/cuid2": "^3.3.0",
         "@tailwindcss/vite": "^4.3.2",
@@ -65,31 +59,6 @@
         "vitest": "^4.1.10",
         "wrangler": "^4.125.0",
       },
-    },
-    "packages/provider-contracts": {
-      "name": "@intar/provider-contracts",
-      "version": "0.1.0",
-      "dependencies": {
-        "@intar/workshop-contracts": "workspace:*",
-      },
-    },
-    "packages/provider-testkit": {
-      "name": "@intar/provider-testkit",
-      "version": "0.1.0",
-      "dependencies": {
-        "@intar/provider-contracts": "workspace:*",
-      },
-    },
-    "packages/provider-worker-core": {
-      "name": "@intar/provider-worker-core",
-      "version": "0.1.0",
-      "dependencies": {
-        "@intar/provider-contracts": "workspace:*",
-      },
-    },
-    "packages/workshop-contracts": {
-      "name": "@intar/workshop-contracts",
-      "version": "0.1.0",
     },
   },
   "overrides": {
@@ -415,15 +384,7 @@
 
     "@img/sharp-win32-x64": ["@img/sharp-win32-x64@0.35.2", "", { "os": "win32", "cpu": "x64" }, "sha512-imoOyBcoM/iiUr4J6VPpCNjPnjvP/Gks95898yB8YqoGGYmHYbOyCuNv9FMhFgtaiHFGbHW8bxKqRV6VjtXThQ=="],
 
-    "@intar/provider-contracts": ["@intar/provider-contracts@workspace:packages/provider-contracts"],
-
-    "@intar/provider-testkit": ["@intar/provider-testkit@workspace:packages/provider-testkit"],
-
-    "@intar/provider-worker-core": ["@intar/provider-worker-core@workspace:packages/provider-worker-core"],
-
     "@intar/website": ["@intar/website@workspace:apps/web"],
-
-    "@intar/workshop-contracts": ["@intar/workshop-contracts@workspace:packages/workshop-contracts"],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
 

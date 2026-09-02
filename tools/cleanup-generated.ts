@@ -8,9 +8,6 @@ const generatedPaths = [
   ".work",
   "apps/web/.astro",
   "apps/web/dist",
-  "apps/web/workers/providers/hetzner/.wrangler/dry-run",
-  "apps/web/workers/providers/gcp/.wrangler/dry-run",
-  "tools/providers/live-capability-probe/.wrangler",
 ] as const;
 
 for (const portable of generatedPaths) {

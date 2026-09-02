@@ -1,6 +1,6 @@
 {
-  "route_id": "01j-workshop-app-argocd",
-  "url": "https://01j-workshop-app-argocd.workshop.example.test/?__intar_bootstrap=single-use-token",
+  "route_id": "01j-workspace-app-argocd",
+  "url": "https://01j-workspace-app-argocd.workspace.example.test/?__intar_bootstrap=single-use-token",
   "bootstrap_expires_at": 1799996460,
   "expires_at": 1800000000
 }

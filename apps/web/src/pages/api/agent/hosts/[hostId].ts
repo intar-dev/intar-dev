@@ -6,8 +6,6 @@ import {
   hostActualState,
   hostDesiredState,
   imageBuilds,
-  runtimeExecutions,
-  workshopPublications,
 } from "@/db/schema";
 import type {
   DesiredBuildV1,
@@ -22,7 +20,6 @@ import {
   parseInventory,
   requireAdminUserContext,
 } from "@/lib/agent-bridge";
-import { nonDetachableWorkshopPublication } from "@/lib/agent-host-deletion";
 import {
   accessInviteError,
   accessInviteJson,
@@ -109,40 +106,6 @@ export const DELETE: APIRoute = async ({ request, params }) => {
 
     const db = drizzle(env.DB);
 
-    const activeWorkshopRuntimes = await db
-      .select({ executionId: runtimeExecutions.id })
-      .from(runtimeExecutions)
-      .where(
-        and(
-          eq(runtimeExecutions.hostId, host.id),
-          eq(runtimeExecutions.domainKind, "workshop"),
-          inArray(runtimeExecutions.state, [
-            "queued",
-            "provisioning",
-            "ready",
-            "archiving",
-          ]),
-        ),
-      )
-      .limit(1);
-    if (activeWorkshopRuntimes.length > 0) {
-      return hostHasActiveWorkshopRuntimesResponse(host.id);
-    }
-
-    const unfinishedWorkshopPublications = await db
-      .select({ publicationId: workshopPublications.id })
-      .from(workshopPublications)
-      .where(
-        and(
-          eq(workshopPublications.builderHostId, host.id),
-          nonDetachableWorkshopPublication(),
-        ),
-      )
-      .limit(1);
-    if (unfinishedWorkshopPublications.length > 0) {
-      return hostHasUnfinishedWorkshopPublicationsResponse(host.id);
-    }
-
     if (host.role === "builder") {
       const activeBuilds = await db
         .select({ buildId: imageBuilds.id })
@@ -211,32 +174,6 @@ function hostHasActiveBuildsResponse(hostId: string): Response {
     {
       error: "builder host has active image builds and must be drained first",
       code: "host_has_active_builds",
-      hostId,
-    },
-    { status: 409 },
-  );
-}
-
-function hostHasActiveWorkshopRuntimesResponse(hostId: string): Response {
-  return accessInviteJson(
-    {
-      error:
-        "host has active workshop runtimes and must be drained or recovered first",
-      code: "host_has_active_workshop_runtimes",
-      hostId,
-    },
-    { status: 409 },
-  );
-}
-
-function hostHasUnfinishedWorkshopPublicationsResponse(
-  hostId: string,
-): Response {
-  return accessInviteJson(
-    {
-      error:
-        "host has unfinished workshop publications and must be completed or cleaned up first",
-      code: "host_has_unfinished_workshop_publications",
       hostId,
     },
     { status: 409 },

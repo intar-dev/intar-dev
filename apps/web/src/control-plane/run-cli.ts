@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
@@ -7,12 +7,7 @@ import {
   runtimeVmActualState,
   runtimeVms,
   scenarioRuns,
-  member,
   accessAllowlist,
-  workshopSessionMembers,
-  workshopSessions,
-  workshopWorkspaceGenerations,
-  workshopWorkspaces,
 } from "@/db/schema";
 import {
   RUN_CLI_MAX_COMPLETION_ALIASES,
@@ -44,12 +39,6 @@ import {
 } from "@/lib/scenario-hints";
 import { getScenarioRunForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
 import { isVerificationPassed } from "@/lib/verification-copy";
-import {
-  revealWorkshopHintForRunCli,
-  type WorkshopRunCliMutationFence,
-} from "@/lib/workshops/progress";
-import { requireWorkshopsEnabledForSession } from "@/lib/workshops/feature-flag";
-import { getWorkshopSessionProjection } from "@/lib/workshops/projection";
 
 /** Keep the HTTP body below the private framed broker limit. */
 export const RUN_CLI_MAX_BODY_BYTES = RUN_CLI_MAX_FRAME_BYTES;
@@ -60,22 +49,14 @@ const RUN_CLI_PRIVATE_HEADERS = {
   "cache-control": "private, no-store",
 } as const;
 
-type RunCliSubject =
-  | {
-      kind: "scenario";
-      userId: string;
-      runId: string;
-      runtimeVmName: string;
-      mutationFence: ScenarioRunCliMutationFence;
-      retryScope: string;
-    }
-  | {
-      kind: "workshop";
-      userId: string;
-      sessionId: string;
-      mutationFence: WorkshopRunCliMutationFence;
-      requireWorkshopEnabled?: () => Promise<void>;
-    };
+type RunCliSubject = {
+  kind: "scenario";
+  userId: string;
+  runId: string;
+  runtimeVmName: string;
+  mutationFence: ScenarioRunCliMutationFence;
+  retryScope: string;
+};
 
 interface KvmRunCliFence {
   subject: RunCliSubject;
@@ -87,7 +68,7 @@ interface KvmRunCliFence {
 interface KvmRunCliRow {
   executionId: string;
   executionHostId: string | null;
-  executionDomainKind: "scenario" | "workshop" | "workshop_certification";
+  executionDomainKind: "scenario";
   executionDomainId: string;
   executionUserId: string;
   executionGeneration: number;
@@ -101,28 +82,6 @@ interface KvmRunCliRow {
   scenarioUserId: string | null;
   scenarioActiveKey: string | null;
   scenarioDeleteRequestedAt: number | null;
-  workspaceId: string | null;
-  workspaceSessionId: string | null;
-  workspaceUserId: string | null;
-  workspaceCurrentGenerationId: string | null;
-  workspaceGenerationId: string | null;
-  workspaceGenerationOrdinal: number | null;
-  workspaceGenerationExecutionId: string | null;
-  workspaceGenerationHostId: string | null;
-  workspaceGenerationState: string | null;
-  workspaceRosterRole: string | null;
-  workspaceRosterEnabled: boolean | null;
-  workshopSessionState: string | null;
-  workshopMembershipId: string | null;
-  workshopMembershipRole: string | null;
-}
-
-export interface AuthenticatedWorkspaceRunCliSubject {
-  executionId: string;
-  workspaceId: string;
-  generation: number;
-  sessionId: string;
-  userId: string;
 }
 
 /**
@@ -231,63 +190,6 @@ export async function handleAgentRunCliRequest(
         retryable: true,
       });
   }
-  if (current.subject.kind === "workshop") {
-    try {
-      await requireWorkshopsEnabledForSession(current.subject.sessionId);
-    } catch {
-      return runCliErrorResponse({
-        requestId: parsed.request.request_id,
-        status: 200,
-        code: "unavailable",
-        message: "This workshop workspace is no longer active.",
-        retryable: true,
-      });
-    }
-  }
-  return response;
-}
-
-/**
- * The direct-cloud workspace agent has already authenticated a current,
- * generation-bound report credential.  It calls this after it publishes a
- * fresh Kino snapshot for `check_sync`.
- */
-export async function handleWorkspaceRunCliRequest(input: {
-  request: Request;
-  subject: AuthenticatedWorkspaceRunCliSubject;
-  verifyCurrent?: () => Promise<boolean>;
-  /** Test-only seam; production uses the normal organization feature gate. */
-  requireWorkshopEnabled?: () => Promise<void>;
-}): Promise<Response> {
-  const parsed = await parseRunCliRequest(input.request);
-  if (!parsed.ok) return parsed.response;
-  const response = await handleRunCliSubjectRequest({
-    request: parsed.request,
-    subject: {
-      kind: "workshop",
-      userId: input.subject.userId,
-      sessionId: input.subject.sessionId,
-      mutationFence: {
-        executionId: input.subject.executionId,
-        workspaceId: input.subject.workspaceId,
-        generation: input.subject.generation,
-        sessionId: input.subject.sessionId,
-        userId: input.subject.userId,
-      },
-      ...(input.requireWorkshopEnabled
-        ? { requireWorkshopEnabled: input.requireWorkshopEnabled }
-        : {}),
-    },
-  });
-  if (input.verifyCurrent && !(await input.verifyCurrent())) {
-    return runCliErrorResponse({
-      requestId: parsed.request.request_id,
-      status: 200,
-      code: "unavailable",
-      message: "This workshop workspace is no longer active.",
-      retryable: true,
-    });
-  }
   return response;
 }
 
@@ -316,13 +218,7 @@ async function handleRunCliSubjectRequest(input: {
   async function dispatchRunCliAction(params: {
     request: RunCliRequestV1;
   }): Promise<RunCliSuccessResultV1> {
-    if (input.subject.kind === "scenario") {
-      return dispatchScenarioRunCliAction({
-        action: params.request.action,
-        subject: input.subject,
-      });
-    }
-    return dispatchWorkshopRunCliAction({
+    return dispatchScenarioRunCliAction({
       action: params.request.action,
       subject: input.subject,
     });
@@ -417,114 +313,6 @@ async function dispatchScenarioRunCliAction(input: {
   };
 }
 
-async function dispatchWorkshopRunCliAction(input: {
-  action: RunCliActionV1;
-  subject: Extract<RunCliSubject, { kind: "workshop" }>;
-}): Promise<RunCliSuccessResultV1> {
-  await (
-    input.subject.requireWorkshopEnabled?.() ??
-    requireWorkshopsEnabledForSession(input.subject.sessionId)
-  );
-  let projection = await getWorkshopSessionProjection({
-    sessionId: input.subject.sessionId,
-    userId: input.subject.userId,
-  });
-  if (
-    projection.session.viewer.role !== "participant" ||
-    !projection.session.viewer.workspaceEnabled ||
-    projection.session.viewer.canFacilitate
-  ) {
-    throw runCliFailure(
-      "unauthorized",
-      "This Intar command is only available in a participant workspace.",
-      false,
-    );
-  }
-  if (
-    projection.session.state !== "lobby" &&
-    projection.session.state !== "live"
-  ) {
-    throw runCliFailure(
-      "unavailable",
-      "This workshop workspace is no longer active.",
-      true,
-    );
-  }
-  const module = currentWorkshopModule(projection);
-  if (!module) {
-    throw runCliFailure(
-      "locked",
-      "No workshop module is available yet.",
-      true,
-    );
-  }
-
-  if (input.action.kind === "completion") {
-    return {
-      kind: "completion",
-      aliases: workshopCompletionAliases(module),
-    };
-  }
-
-  if (input.action.kind === "hint_reveal") {
-    const hint = workshopHintForAlias(
-      module,
-      input.action.alias,
-      input.action.expected_ordinal,
-    );
-    if (!hint || (!hint.revealed && !hint.ready)) {
-      throw runCliFailure(
-        "locked",
-        "No hint is ready for that module.",
-        false,
-      );
-    }
-    if (!hint.revealed) {
-      await revealWorkshopHintForRunCli({
-        sessionId: input.subject.sessionId,
-        userId: input.subject.userId,
-        moduleId: module.id,
-        hintId: hint.id,
-        mutationFence: input.subject.mutationFence,
-      });
-      projection = await getWorkshopSessionProjection({
-        sessionId: input.subject.sessionId,
-        userId: input.subject.userId,
-      });
-    }
-  } else if (input.action.kind === "solution_reveal") {
-    // Workshop disclosure belongs to the facilitator and is shared with the
-    // room. A learner SSH terminal never changes that policy.
-    throw runCliFailure(
-      "locked",
-      "Only the workshop facilitator can release the solution.",
-      false,
-    );
-  }
-
-  const currentModule = currentWorkshopModule(projection);
-  if (!currentModule) {
-    throw runCliFailure(
-      "locked",
-      "No workshop module is available yet.",
-      true,
-    );
-  }
-  return {
-    kind: "ok",
-    view: workshopRunCliView(
-      projection,
-      await opaqueRetryScope([
-        "workshop",
-        input.subject.mutationFence.executionId,
-        input.subject.mutationFence.workspaceId,
-        String(input.subject.mutationFence.generation),
-        currentModule.id,
-      ]),
-    ),
-  };
-}
-
 /**
  * Completion is deliberately a smaller projection than `scenarioRunCliView`.
  * It never serializes labels, titles, bodies, probe IDs, or solution state.
@@ -572,24 +360,6 @@ function scenarioCompletionAliases(
     }
   }
   return boundedCompletionAliases(aliases);
-}
-
-/** Completion aliases are generated from ordinal positions, never content. */
-function workshopCompletionAliases(
-  module: NonNullable<ReturnType<typeof currentWorkshopModule>>,
-): string[] {
-  if (module.hints.length > RUN_CLI_MAX_HINTS) {
-    throw runCliFailure(
-      "unavailable",
-      "Hints are unavailable for this workshop module.",
-      true,
-    );
-  }
-  return boundedCompletionAliases(
-    module.hints.flatMap((hint, ordinal) =>
-      hint.revealed ? [] : [`hint-${ordinal + 1}`],
-    ),
-  );
 }
 
 function boundedCompletionAliases(aliases: Iterable<string>): string[] {
@@ -759,137 +529,11 @@ function scenarioHintForAliasOrdinal(
   );
 }
 
-function workshopRunCliView(
-  projection: Awaited<ReturnType<typeof getWorkshopSessionProjection>>,
-  retryScope: string,
-): RunCliViewV1 {
-  const module = currentWorkshopModule(projection);
-  if (!module) {
-    throw runCliFailure(
-      "locked",
-      "No workshop module is available yet.",
-      true,
-    );
-  }
-  if (module.hints.length > RUN_CLI_MAX_HINTS) {
-    throw runCliFailure(
-      "unavailable",
-      "Hints are unavailable for this workshop module.",
-      true,
-    );
-  }
-  if (module.probes.length > RUN_CLI_MAX_PROBE_IDS) {
-    throw runCliFailure(
-      "unavailable",
-      "Checks are unavailable for this workshop module.",
-      true,
-    );
-  }
-  assertViewTextBudget([
-    projection.session.title,
-    module.title,
-    ...module.probes.map((probe) => probe.label),
-    ...module.hints.flatMap((hint) =>
-      hint.revealed
-        ? [hint.title, hint.bodyMarkdown ?? ""]
-        : [],
-    ),
-    ...(module.solutionRevealed && module.solutionMarkdown
-      ? [module.solutionMarkdown]
-      : []),
-  ]);
-  const checks = boundedChecks(module.probes.map((probe, ordinal) => ({
-    probe_id: probe.id,
-    alias: `check-${ordinal + 1}`,
-    label: safeSingleLine(probe.label, `Check ${ordinal + 1}`),
-    status: workshopCheckStatus(probe.status),
-  })) satisfies RunCliCheckV1[]);
-  const entries = module.hints.map((hint, ordinal) => ({
-    ordinal: ordinal + 1,
-    state: hint.revealed
-      ? ("revealed" satisfies RunCliHintStateV1)
-      : ("ready" satisfies RunCliHintStateV1),
-    ...(hint.revealed ? { title: safeSingleLine(hint.title, `Hint ${ordinal + 1}`) } : {}),
-    ...(hint.revealed && hint.bodyMarkdown !== null
-      ? { body_markdown: safeMarkdown(hint.bodyMarkdown) }
-      : {}),
-  })) satisfies RunCliHintEntryV1[];
-  const solutionRevealed = module.solutionRevealed && module.solutionMarkdown !== null;
-  return boundedView({
-    retry_scope: retryScope,
-    run: {
-      kind: "workshop" satisfies RunCliRunKindV1,
-      title: safeSingleLine(projection.session.title, "Intar workshop"),
-      context: safeSingleLine(module.title, "Workshop module"),
-    },
-    checks,
-    // Workshop hints are deliberately independent. One public group per
-    // hint makes `hint-N` both a display target and a safe completion value
-    // without inventing scenario-style sequencing.
-    hint_groups: entries.map((entry, ordinal) => ({
-      alias: `hint-${ordinal + 1}`,
-      // The module title is already in the run context. Do not repeat it for
-      // every hint group: a hostile title must not multiply the response.
-      label: `Hint ${ordinal + 1}`,
-      revealed_count: entry.state === "revealed" ? 1 : 0,
-      total_count: 1,
-      can_reveal: entry.state === "ready",
-      entries: [entry],
-    })) satisfies RunCliHintGroupV1[],
-    solution: {
-      state: solutionRevealed
-        ? ("revealed" satisfies RunCliSolutionStateV1)
-        : ("unavailable" satisfies RunCliSolutionStateV1),
-      assisted: false,
-      ...(solutionRevealed
-        ? { body_markdown: safeMarkdown(module.solutionMarkdown!) }
-        : {}),
-    },
-  });
-}
-
-function currentWorkshopModule(
-  projection: Awaited<ReturnType<typeof getWorkshopSessionProjection>>,
-) {
-  const focused = projection.session.currentModuleId;
-  return (
-    (focused
-      ? projection.session.modules.find(
-          (module) => module.id === focused && module.released,
-        )
-      : undefined) ?? projection.session.modules.find((module) => module.released) ?? null
-  );
-}
-
-function workshopHintForAlias(
-  module: NonNullable<ReturnType<typeof currentWorkshopModule>>,
-  alias: string,
-  expectedOrdinal: number,
-) {
-  const ordinal = hintOrdinal(alias);
-  if (ordinal === null || expectedOrdinal !== 1) return null;
-  const hint = module.hints[ordinal];
-  return hint
-    ? {
-        id: hint.id,
-        revealed: hint.revealed,
-        ready: !hint.revealed,
-      }
-    : null;
-}
-
 function scenarioCheckStatus(status: string): RunCliCheckStatusV1 {
   if (isVerificationPassed(status)) return "pass";
   return failedStatus(status) ? "fail" : "unknown";
 }
 
-function workshopCheckStatus(
-  status: "pass" | "fail" | "pending" | "unknown",
-): RunCliCheckStatusV1 {
-  if (status === "pass") return "pass";
-  if (status === "fail") return "fail";
-  return "unknown";
-}
 
 function failedStatus(status: string): boolean {
   return ["fail", "failed", "error", "errored"].includes(
@@ -959,20 +603,6 @@ async function resolveKvmRunCliFence(input: {
       scenarioUserId: scenarioRuns.userId,
       scenarioActiveKey: scenarioRuns.activeKey,
       scenarioDeleteRequestedAt: scenarioRuns.deleteRequestedAt,
-      workspaceId: workshopWorkspaces.id,
-      workspaceSessionId: workshopWorkspaces.sessionId,
-      workspaceUserId: workshopWorkspaces.userId,
-      workspaceCurrentGenerationId: workshopWorkspaces.currentGenerationId,
-      workspaceGenerationId: workshopWorkspaceGenerations.id,
-      workspaceGenerationOrdinal: workshopWorkspaceGenerations.ordinal,
-      workspaceGenerationExecutionId: workshopWorkspaceGenerations.runtimeExecutionId,
-      workspaceGenerationHostId: workshopWorkspaceGenerations.hostId,
-      workspaceGenerationState: workshopWorkspaceGenerations.state,
-      workspaceRosterRole: workshopSessionMembers.role,
-      workspaceRosterEnabled: workshopSessionMembers.workspaceEnabled,
-      workshopSessionState: workshopSessions.state,
-      workshopMembershipId: member.id,
-      workshopMembershipRole: member.role,
     })
     .from(runtimeExecutions)
     .innerJoin(runtimeVms, eq(runtimeVms.executionId, runtimeExecutions.id))
@@ -995,36 +625,6 @@ async function resolveKvmRunCliFence(input: {
       and(
         eq(scenarioRuns.runId, runtimeExecutions.domainId),
         eq(scenarioRuns.runtimeExecutionId, runtimeExecutions.id),
-      ),
-    )
-    .leftJoin(
-      workshopWorkspaces,
-      eq(workshopWorkspaces.id, runtimeExecutions.domainId),
-    )
-    .leftJoin(
-      workshopWorkspaceGenerations,
-      eq(
-        workshopWorkspaceGenerations.runtimeExecutionId,
-        runtimeExecutions.id,
-      ),
-    )
-    .leftJoin(
-      workshopSessionMembers,
-      and(
-        eq(workshopSessionMembers.sessionId, workshopWorkspaces.sessionId),
-        eq(workshopSessionMembers.userId, workshopWorkspaces.userId),
-      ),
-    )
-    .leftJoin(
-      workshopSessions,
-      eq(workshopSessions.id, workshopWorkspaces.sessionId),
-    )
-    .leftJoin(
-      member,
-      and(
-        eq(member.organizationId, workshopSessions.organizationId),
-        eq(member.userId, workshopWorkspaces.userId),
-        isNull(member.workshopAccessRevokingAt),
       ),
     )
     .where(
@@ -1075,44 +675,7 @@ async function resolveKvmRunCliFence(input: {
       },
     };
   }
-  if (
-    row.executionDomainKind !== "workshop" ||
-    row.workspaceId !== row.executionDomainId ||
-    row.workspaceUserId !== row.executionUserId ||
-    !row.workspaceSessionId ||
-    row.workspaceCurrentGenerationId !== row.workspaceGenerationId ||
-    row.workspaceGenerationOrdinal !== row.executionGeneration ||
-    row.workspaceGenerationExecutionId !== row.executionId ||
-    row.workspaceGenerationHostId !== input.hostId ||
-    row.workspaceGenerationState !== "ready"
-    || row.workspaceRosterRole !== "participant"
-    || row.workspaceRosterEnabled !== true
-    || !["lobby", "live"].includes(row.workshopSessionState ?? "")
-    || row.workshopMembershipId === null
-    || ["owner", "admin"].includes(row.workshopMembershipRole ?? "")
-  ) {
-    return null;
-  }
-  return {
-    executionId: row.executionId,
-    vmName: row.runtimeVmName,
-    jailGeneration: input.jailGeneration,
-      subject: {
-      kind: "workshop",
-      userId: row.executionUserId,
-      sessionId: row.workspaceSessionId,
-        mutationFence: {
-        executionId: row.executionId,
-        workspaceId: row.workspaceId,
-        generation: row.executionGeneration,
-        sessionId: row.workspaceSessionId,
-        userId: row.executionUserId,
-        hostId: input.hostId,
-        runtimeVmName: row.runtimeVmName,
-          jailGeneration: input.jailGeneration,
-        },
-    },
-  };
+  return null;
 }
 
 function isCurrentKvmRunCliRow(
@@ -1587,13 +1150,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function checkOrdinal(alias: string): number | null {
   const match = /^check-([1-9]\d*)$/.exec(alias);
-  if (!match) return null;
-  const ordinal = Number(match[1]);
-  return Number.isSafeInteger(ordinal) && ordinal > 0 ? ordinal - 1 : null;
-}
-
-function hintOrdinal(alias: string): number | null {
-  const match = /^hint-([1-9]\d*)$/.exec(alias);
   if (!match) return null;
   const ordinal = Number(match[1]);
   return Number.isSafeInteger(ordinal) && ordinal > 0 ? ordinal - 1 : null;

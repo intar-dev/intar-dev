@@ -39,7 +39,6 @@ pub use guest_tools::{
     GuestToolsDiskManifestV1, write_guest_tools_disk,
 };
 pub use manifest::{build_direct_manifest_json, combine_scenario_manifests};
-pub use provision::{RuntimeActivationInput, render_runtime_activation_script};
 pub use qemu::{
     BUILD_BOOT_CMDLINE, DirectBootQemuCommand, DirectBootQemuInput, PUBLISHED_BOOT_CMDLINE,
     render_direct_boot_qemu_command,

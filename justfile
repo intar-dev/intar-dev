@@ -12,22 +12,17 @@ check-rust:
 
 check-js:
     bun run check:imports
-    bun run check:providers
     bun run check:deploy
     bun run check:database-migrations
     bun run --cwd apps/web types:cf:check
     bun run --cwd apps/web db:schema:check
-    bun run --cwd apps/web/workers/providers/hetzner types:cf:check
-    bun run --cwd apps/web/workers/providers/hetzner check
-    bun run --cwd apps/web/workers/providers/gcp types:cf:check
-    bun run --cwd apps/web/workers/providers/gcp check
 
 check: check-rust check-js
 
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-test-rust: hydrate
+test-rust:
     cargo test --workspace
 
 test-js:
@@ -43,7 +38,7 @@ build-js:
 
 build: build-rust build-js
 
-verify: hydrate
+verify:
     sh crates/intar-jailerd/tests/install-process-audit.sh crates/intar-jailerd/deploy/install.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
@@ -64,13 +59,6 @@ check-generated-contracts:
 
 check-generated: generate
     git diff --exit-code -- apps/web/src/generated
-
-hydrate:
-    bun run hydrate
-
-check-hydrated: hydrate
-    cargo run --locked -p intar-workshop-cli -- validate .work/workshops/platform-engineering
-    bun tools/workshops/check-app-routing.ts .work/workshops/platform-engineering
 
 clean-generated:
     bun run clean:generated

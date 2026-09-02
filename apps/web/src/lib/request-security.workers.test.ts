@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_API_JSON_BODY_BYTES,
   MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES,
-  MAX_PROVIDER_JSON_BODY_BYTES,
   guardBetterAuthRequest,
   guardCanonicalRequestPath,
   guardCustomApiMutation,
@@ -65,26 +64,10 @@ const BODYLESS_CUSTOM_MUTATIONS = [
   ["DELETE", "/api/organizations/org/sso"],
   ["POST", "/api/organizations/org/sso/verification"],
   ["POST", "/api/organizations/org/sso/verify"],
-  ["DELETE", "/api/organizations/org/workshop-providers/provider-1"],
-  [
-    "POST",
-    "/api/organizations/org/workshop-providers/provider-1/manual-cleanup",
-  ],
-  [
-    "POST",
-    "/api/organizations/org/workshop-sessions/session-1/cost/override",
-  ],
-  [
-    "POST",
-    "/api/organizations/org/workshop-sessions/session-1/cost/refresh",
-  ],
-  ["DELETE", "/api/organizations/org/workshops/tokens/token-1"],
   ["DELETE", "/api/profile/ssh-keys/key-1"],
   ["DELETE", "/api/scenarios/runs/run-1"],
   ["POST", "/api/scenarios/runs/run-1/destroy"],
   ["POST", "/api/scenarios/runs/run-1/solution/reveal"],
-  ["DELETE", "/api/workshops/session-1/help-requests/request-1"],
-  ["POST", "/api/workshops/session-1/presence"],
 ] as const;
 
 describe("worker API request security", () => {
@@ -321,19 +304,6 @@ describe("worker API request security", () => {
     }
   });
 
-  it("rejects provider mutation bodies at the 64 KiB edge boundary", async () => {
-    const oversized = await guardCustomApiMutation(
-      customMutation("/api/organizations/org/workshop-providers", {
-        headers: { "content-type": "application/json" },
-        body: "x".repeat(MAX_PROVIDER_JSON_BODY_BYTES + 1),
-      }),
-      securityEnv(),
-    );
-    expect(oversized.ok).toBe(false);
-    if (oversized.ok) throw new Error("expected provider body rejection");
-    expect(oversized.response.status).toBe(413);
-  });
-
   it("accepts multipart only for declared, bounded organization bundle uploads", async () => {
     const valid = await guardCustomApiMutation(
       customMutation("/api/organizations/example/scenarios/bundles", {
@@ -489,19 +459,9 @@ describe("worker API request security", () => {
     ).toBe("scenario-start");
     expect(
       sensitiveRateLimitActionFor(
-        customMutation("/api/organizations/org/workshop-sessions"),
-      ),
-    ).toBe("workshop-start");
-    expect(
-      sensitiveRateLimitActionFor(
         customMutation("/api/scenarios/runs/run-1/ssh"),
       ),
     ).toBe("ssh-issuance");
-    expect(
-      sensitiveRateLimitActionFor(
-        customMutation("/api/workshops/session-1/terminal"),
-      ),
-    ).toBe("terminal-issuance");
     expect(
       sensitiveRateLimitActionFor(
         customMutation("/api/admin/builds/build-1/retry"),
@@ -512,35 +472,6 @@ describe("worker API request security", () => {
         "build-start",
       );
     }
-    expect(
-      sensitiveRateLimitActionFor(
-        customMutation("/api/organizations/org/workshop-providers"),
-      ),
-    ).toBe("provider-connect");
-    for (const method of ["PATCH", "DELETE"]) {
-      expect(
-        sensitiveRateLimitActionFor(
-          customMutation(
-            "/api/organizations/org/workshop-providers/connection",
-            { method },
-          ),
-        ),
-      ).toBe("provider-mutation");
-    }
-    expect(
-      sensitiveRateLimitActionFor(
-        customMutation(
-          "/api/organizations/org/workshop-providers/connection/rotate",
-        ),
-      ),
-    ).toBe("provider-rotate");
-    expect(
-      sensitiveRateLimitActionFor(
-        customMutation(
-          "/api/organizations/org/workshop-providers/connection/manual-cleanup",
-        ),
-      ),
-    ).toBe("provider-cleanup");
     expect(
       sensitiveRateLimitActionFor(customMutation("/api/auth/sign-in/social")),
     ).toBe("auth-start");

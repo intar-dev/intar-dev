@@ -64,20 +64,11 @@ jobs:
 
       - name: Pin and verify production configuration
         env:
-          WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
           SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           set -euo pipefail
           config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
-          patched="${RUNNER_TEMP}/website-wrangler.json"
           test -f "${config}"
-          test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}"
-          jq \
-            --arg keys "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}" \
-            '.vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON = $keys' \
-            "${config}" > "${patched}"
-          mv "${patched}" "${config}"
-
           database_id="$(jq -er '
             [.d1_databases[] | select(.binding == "DB")] |
             select(length == 1) | .[0].database_id

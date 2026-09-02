@@ -14,9 +14,6 @@ import { useBreadcrumbOverrides, usePageChromeValue } from "./page-chrome";
 const SEGMENT_LABELS: Record<string, string> = {
   admin: "Admin",
   courses: "Courses",
-  workshops: "Workshops",
-  present: "Presenter",
-  projector: "Projector",
   scenarios: "Scenarios",
   runs: "My runs",
   organizations: "Organizations",

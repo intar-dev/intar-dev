@@ -71,55 +71,6 @@ export type {
   AccessInviteKind,
   AccessInviteState,
 } from "./schema/application";
-export {
-  workshopAssistGrants,
-  workshopEvents,
-  workshopHelpRequests,
-  workshopModuleProgress,
-  workshopRouteIssuanceIntents,
-  workshopSessionMembers,
-  workshopSessions,
-  workshopTemplateRevisions,
-  workshopTemplates,
-  workshopWorkspaceGenerations,
-  workshopWorkspaces,
-} from "./schema/workshops";
-export {
-  gcpConnectionDetails,
-  hetznerConnectionDetails,
-  providerAuditEvents,
-  providerConnections,
-  providerCredentialVersions,
-  providerPriceLineItems,
-  providerPriceObservations,
-  runtimeActualState,
-  runtimeArtifactUploadGrants,
-  runtimeCheckpointBundles,
-  runtimeGuestCredentials,
-  runtimeGuestReports,
-  runtimeProviderAllocations,
-  runtimeProviderCostLedger,
-  runtimeProviderOperations,
-  runtimeProviderReconciliation,
-  runtimeProviderResources,
-  workshopRuntimeProfileCertifications,
-  workshopRuntimeProfiles,
-  workshopSessionCostForecastLineItems,
-  workshopSessionCostForecasts,
-  workshopSessionCostSummaries,
-  workshopSessionRuntimeSelections,
-} from "./schema/multicloud";
-export type {
-  DirectCloudProviderKind,
-  ProviderConnectionState,
-  ProviderOperationState,
-  StoredResolvedRuntimeProfile,
-} from "./schema/multicloud";
-export {
-  workshopPublicationCheckpoints,
-  workshopPublications,
-  workshopRegistryTokens,
-} from "./schema/workshop-registry";
 export type {
   AgentHostRole,
   HostCpuReservationQuotaPhase,
@@ -136,24 +87,5 @@ export type {
   HostResourceReservationState,
   RuntimeDomainKind,
   RuntimeExecutionState,
-} from "./schema/runtime";
-export type {
-  WorkshopCurrentHealth,
-  WorkshopExplainBackStatus,
-  WorkshopHelpRequestStatus,
-  WorkshopProvisionState,
-  WorkshopSessionRole,
-  WorkshopSessionState,
-  WorkshopTechnicalStatus,
-  WorkshopWorkspaceGenerationState,
-  WorkshopWorkspaceState,
-} from "./schema/workshops";
-export type {
   RuntimeProviderKind,
-  WorkshopManifestV2,
-} from "@intar/workshop-contracts";
-export type {
-  WorkshopCheckpointBuildStatus,
-  WorkshopCertificationState,
-  WorkshopPublicationStatus,
-} from "./schema/workshop-registry";
+} from "./schema/runtime";

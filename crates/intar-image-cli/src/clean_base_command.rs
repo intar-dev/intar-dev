@@ -43,13 +43,10 @@ test "${ID}" = debian
 test "${VERSION_ID}" = 13
 test "$(uname -m)" = x86_64
 test "$(dpkg --print-architecture)" = amd64
-for command in docker containerd ctr podman buildah skopeo kubelet kubectl talosctl intar-workspace-agent kino; do
+for command in docker containerd ctr podman buildah skopeo kubelet kubectl talosctl kino; do
   ! command -v "${command}" >/dev/null 2>&1
 done
 for path in \
-  /opt/platform-engineering-workshop \
-  /opt/Platform-Engineering-Workshop \
-  /usr/local/bin/intar-workspace-agent \
   /usr/local/bin/kino \
   /usr/local/libexec/intar \
   /var/lib/docker \

@@ -9,8 +9,6 @@ import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
-  workshopWorkspaceGenerations,
-  workshopWorkspaces,
   type RuntimeDomainKind,
 } from "@/db/schema";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
@@ -49,7 +47,6 @@ export interface ResolvedRunVm {
   hostId: string;
   userId: string;
   scenarioId: string | null;
-  workshopSessionId: string | null;
   vmId: string;
   runtimeVmId: string | null;
   runtimeVmName: string;
@@ -310,58 +307,6 @@ export async function resolveRunVm(input: {
     return resolveLegacyScenarioRunVm(input);
   }
 
-  if (runtime.domainKind === "workshop") {
-    const generationRows = await input.db
-      .select({
-        generationId: workshopWorkspaceGenerations.id,
-        generationOrdinal: workshopWorkspaceGenerations.ordinal,
-        generationHostId: workshopWorkspaceGenerations.hostId,
-        generationState: workshopWorkspaceGenerations.state,
-        workspaceId: workshopWorkspaces.id,
-        workspaceUserId: workshopWorkspaces.userId,
-        currentGenerationId: workshopWorkspaces.currentGenerationId,
-        sessionId: workshopWorkspaces.sessionId,
-      })
-      .from(workshopWorkspaceGenerations)
-      .innerJoin(
-        workshopWorkspaces,
-        eq(workshopWorkspaces.id, workshopWorkspaceGenerations.workspaceId),
-      )
-      .where(eq(workshopWorkspaceGenerations.runtimeExecutionId, runtime.runId))
-      .limit(1);
-    const generation = generationRows[0];
-    const historicalArchive =
-      generation?.generationState === "archiving" ||
-      generation?.generationState === "archived" ||
-      generation?.generationState === "failed";
-    if (
-      !generation ||
-      generation.generationOrdinal !== runtime.generation ||
-      generation.generationHostId !== runtime.hostId ||
-      generation.workspaceId !== runtime.domainId ||
-      generation.workspaceUserId !== runtime.userId ||
-      runtime.organizationId === null ||
-      runtime.agentHostOrganizationId !== runtime.organizationId ||
-      (generation.currentGenerationId !== generation.generationId &&
-        !historicalArchive)
-    ) {
-      return null;
-    }
-    return {
-      domainKind: "workshop",
-      domainId: runtime.domainId,
-      runId: runtime.runId,
-      hostId: runtime.hostId,
-      userId: runtime.userId,
-      scenarioId: null,
-      workshopSessionId: generation.sessionId,
-      vmId: runtime.vmId,
-      runtimeVmId: runtime.runtimeVmId,
-      runtimeVmName: runtime.runtimeVmName,
-      artifactWritesSealed: runtime.artifactWritesSealed,
-    };
-  }
-
   const scenarioRows = await input.db
     .select({
       scenarioId: scenarioRuns.scenarioId,
@@ -393,7 +338,6 @@ export async function resolveRunVm(input: {
     hostId: runtime.hostId,
     userId: runtime.userId,
     scenarioId: scenario.scenarioId,
-    workshopSessionId: null,
     vmId: runtime.vmId,
     runtimeVmId: runtime.runtimeVmId,
     runtimeVmName: runtime.runtimeVmName,
@@ -439,7 +383,6 @@ async function resolveLegacyScenarioRunVm(input: {
     hostId: row.hostId,
     userId: row.userId,
     scenarioId: row.scenarioId,
-    workshopSessionId: null,
     vmId: vm.id,
     runtimeVmId: null,
     runtimeVmName: vm.runtimeVmName,
@@ -486,10 +429,6 @@ export async function loadArtifactForRunVm(
         storageKind: "runtime",
       };
     }
-    if (runVm.domainKind === "workshop") {
-      return null;
-    }
-
     // Runtime rows take precedence as soon as that ledger exists. Preserve
     // the migration fallback used by `loadArtifactStatesForRunVm` without
     // reloading its full ordered list for every multipart request.
@@ -617,7 +556,7 @@ export async function loadArtifactStatesForRunVm(
   runVm: ResolvedRunVm,
 ): Promise<SourceArtifactState[]> {
   const runtimeRows = await loadRuntimeArtifactStatesForRunVm(db, runVm);
-  if (runtimeRows.length || runVm.domainKind === "workshop") {
+  if (runtimeRows.length) {
     return runtimeRows;
   }
   return loadLegacyArtifactStatesForRunVm(db, runVm);

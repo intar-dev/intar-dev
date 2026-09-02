@@ -2,20 +2,12 @@ import { env } from "cloudflare:workers";
 import { archiveRuntimeExecution } from "@/lib/runtime-executions";
 import { loadRunRow } from "@/lib/scenario-runs/storage";
 import { revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
-import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
-import {
-  markRuntimeExecutionDesiredAbsent,
-  revokeWorkshopWorkspaceRoutes,
-} from "@/lib/workshops/runtime-orchestrator";
 
 type ExpiredRuntimeExecutionRow = {
   execution_id: string;
-  domain_kind: "scenario" | "workshop";
+  domain_kind: "scenario";
   domain_id: string;
   generation: number;
-  workshop_generation_id: string | null;
-  terminal_route_usernames_json: string | string[] | null;
-  application_route_ids_json: string | string[] | null;
 };
 
 export interface RuntimeLeaseExpiryResult {
@@ -38,19 +30,10 @@ export async function expireOverdueRuntimeExecutions(
        execution.id AS execution_id,
        execution.domain_kind,
        execution.domain_id,
-       execution.generation,
-       generation.id AS workshop_generation_id,
-       workspace.terminal_route_usernames_json,
-       workspace.application_route_ids_json
+       execution.generation
      FROM runtime_executions execution
-     LEFT JOIN workshop_workspace_generations generation
-       ON execution.domain_kind = 'workshop'
-      AND generation.runtime_execution_id = execution.id
-      AND generation.ordinal = execution.generation
-     LEFT JOIN workshop_workspaces workspace
-       ON execution.domain_kind = 'workshop'
-      AND workspace.id = execution.domain_id
      WHERE execution.host_id = ?
+       AND execution.domain_kind = 'scenario'
        AND execution.lease_expires_at IS NOT NULL
        AND execution.lease_expires_at <= ?
        AND execution.state <> 'archived'
@@ -70,52 +53,14 @@ export async function expireOverdueRuntimeExecutions(
   const failedExecutionIds: string[] = [];
   for (const execution of rows.results) {
     try {
-      if (execution.domain_kind === "scenario") {
-        const run = await loadRunRow(execution.domain_id);
-        if (run) await revokeScenarioRunRoutes(run);
-      } else {
-        await revokeWorkshopWorkspaceRoutes({
-          workspaceId: execution.domain_id,
-          terminalRouteUsernames: jsonStrings(
-            execution.terminal_route_usernames_json,
-          ),
-          applicationRouteIds: jsonStrings(
-            execution.application_route_ids_json,
-          ),
-          now,
-        });
-        if (execution.workshop_generation_id) {
-          await recordWorkshopGenerationState({
-            generationId: execution.workshop_generation_id,
-            update: {
-              state: "archiving",
-              runtimeExecutionId: execution.execution_id,
-              observedAt: now,
-            },
-          });
-        }
-      }
-
-      await markRuntimeExecutionDesiredAbsent(execution.execution_id, now);
+      const run = await loadRunRow(execution.domain_id);
+      if (run) await revokeScenarioRunRoutes(run);
       await archiveRuntimeExecution({
         executionId: execution.execution_id,
         expectedGeneration: execution.generation,
         endedAt: now,
       });
 
-      if (
-        execution.domain_kind === "workshop" &&
-        execution.workshop_generation_id
-      ) {
-        await recordWorkshopGenerationState({
-          generationId: execution.workshop_generation_id,
-          update: {
-            state: "archived",
-            runtimeExecutionId: execution.execution_id,
-            observedAt: now,
-          },
-        });
-      }
       expiredExecutionIds.push(execution.execution_id);
     } catch (error) {
       failedExecutionIds.push(execution.execution_id);
@@ -132,19 +77,4 @@ export async function expireOverdueRuntimeExecutions(
   }
 
   return { expiredExecutionIds, failedExecutionIds };
-}
-
-function jsonStrings(value: string | string[] | null): string[] {
-  if (Array.isArray(value)) {
-    return value.filter((item) => typeof item === "string");
-  }
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
-  } catch {
-    return [];
-  }
 }

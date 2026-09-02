@@ -15,15 +15,12 @@ on:
       - "package.json"
       - "bun.lock"
       - "tsconfig.base.json"
-      - "packages/provider-contracts/**"
-      - "packages/workshop-contracts/**"
       - "tools/check-import-boundaries.ts"
       - "tools/database/**"
       - "tools/deploy/**"
       - "tools/flagship/**"
       - "crates/intar-image-scenario/**"
       - "apps/web/**"
-      - "!apps/web/workers/providers/**"
   pull_request:
     paths:
       - ".github/workflows/website-deploy.yml"
@@ -35,15 +32,12 @@ on:
       - "package.json"
       - "bun.lock"
       - "tsconfig.base.json"
-      - "packages/provider-contracts/**"
-      - "packages/workshop-contracts/**"
       - "tools/check-import-boundaries.ts"
       - "tools/database/**"
       - "tools/deploy/**"
       - "tools/flagship/**"
       - "crates/intar-image-scenario/**"
       - "apps/web/**"
-      - "!apps/web/workers/providers/**"
 
 permissions:
   actions: read

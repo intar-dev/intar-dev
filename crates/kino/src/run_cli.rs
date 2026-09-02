@@ -695,9 +695,7 @@ async fn run_fresh_checks_with_progress(
         Err(_) => return unavailable_result(),
     };
 
-    // Direct-cloud workshops use this action to publish the now-fresh local
-    // state immediately. KVM's existing ready push races independently, but
-    // the same action makes command semantics consistent for both runtimes.
+    // Publish the fresh local state before the command returns.
     if broker
         .view(RunCliActionV1::CheckSync, BROKER_REQUEST_TIMEOUT)
         .await
@@ -2028,9 +2026,8 @@ mod tests {
         let zero_status = render_status(&zero_checks, TerminalStyle::from_values(false, false, 80));
         assert!(zero_status.contains("Next: intar status"));
 
-        let mut all_passed_workshop = zero_checks;
-        all_passed_workshop.run.kind = RunCliRunKindV1::Workshop;
-        all_passed_workshop
+        let mut all_passed = zero_checks;
+        all_passed
             .checks
             .push(intar_contracts::run_cli::RunCliCheckV1 {
                 probe_id: "check".to_owned(),
@@ -2038,15 +2035,10 @@ mod tests {
                 label: "Check".to_owned(),
                 status: RunCliCheckStatusV1::Pass,
             });
-        let all_passed_status = render_status(
-            &all_passed_workshop,
-            TerminalStyle::from_values(false, false, 80),
-        );
+        let all_passed_status =
+            render_status(&all_passed, TerminalStyle::from_values(false, false, 80));
         assert!(all_passed_status.contains("Next: intar status"));
-        let no_hint_list = render_hints(
-            &all_passed_workshop,
-            TerminalStyle::from_values(false, false, 80),
-        );
+        let no_hint_list = render_hints(&all_passed, TerminalStyle::from_values(false, false, 80));
         assert!(no_hint_list.contains("Next: intar status"));
     }
 

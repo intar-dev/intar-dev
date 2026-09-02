@@ -24,7 +24,6 @@ function AppShellContent() {
       state.resolvedLocation?.pathname ?? state.location.pathname,
   });
   const previousPath = useRef(pathname);
-  const projectorMode = /^\/workshops\/[^/]+\/projector\/?$/.test(pathname);
   const fullscreenWorkspace = usePageChromeValue(pathname)?.fullscreen === true;
 
   useEffect(() => {
@@ -39,17 +38,7 @@ function AppShellContent() {
   }, [pathname]);
 
   return (
-    <>
-      {projectorMode ? (
-        <main
-          id="main-content"
-          tabIndex={-1}
-          className="flex min-h-svh min-w-0 flex-col bg-background focus:outline-none"
-        >
-          <Outlet />
-        </main>
-      ) : (
-        <SidebarProvider
+    <SidebarProvider
           className={fullscreenWorkspace ? "min-h-[100dvh]" : undefined}
           keyboardShortcutEnabled={!fullscreenWorkspace}
         >
@@ -70,9 +59,7 @@ function AppShellContent() {
               <Outlet />
             </main>
           </SidebarInset>
-        </SidebarProvider>
-      )}
-    </>
+    </SidebarProvider>
   );
 }
 

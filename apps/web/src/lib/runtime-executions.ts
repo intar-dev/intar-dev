@@ -462,30 +462,7 @@ export async function createRuntimeExecution(
         generation, source_execution_id, checkpoint_id, state,
         lease_expires_at, archive_requested_at, ended_at, created_at, updated_at
       )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, 'queued', ?, NULL, NULL, ?, ?
-      WHERE ? <> 'workshop'
-         OR EXISTS (
-           SELECT 1
-           FROM workshop_workspaces workspace
-           JOIN workshop_sessions session ON session.id = workspace.session_id
-           JOIN workshop_workspace_generations generation
-             ON generation.workspace_id = workspace.id
-            AND generation.id = workspace.current_generation_id
-           JOIN workshop_session_members roster
-             ON roster.session_id = session.id
-            AND roster.user_id = workspace.user_id
-            AND roster.workspace_enabled = 1
-           JOIN member organization_member
-             ON organization_member.organization_id = session.organization_id
-            AND organization_member.user_id = workspace.user_id
-           WHERE workspace.id = ?
-             AND workspace.user_id = ?
-             AND session.organization_id = ?
-             AND session.state IN ('lobby', 'live')
-             AND workspace.state NOT IN ('ending', 'ended')
-             AND generation.state NOT IN ('archiving', 'archived')
-             AND organization_member.workshop_access_revoking_at IS NULL
-         )`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, 'queued', ?, NULL, NULL, ?, ?)`,
     ).bind(
       executionId,
       userId,
@@ -499,10 +476,6 @@ export async function createRuntimeExecution(
       leaseExpiresAt,
       now,
       now,
-      input.domainKind,
-      domainId,
-      userId,
-      organizationId,
     ),
     ...vms.map((vm) => runtimeVmInsert(vm, now)),
   ];
@@ -533,7 +506,7 @@ export async function createRuntimeExecution(
       throw appError(
         409,
         "runtime_execution_authorization_changed",
-        "workshop runtime provisioning is no longer authorized",
+        "runtime provisioning is no longer authorized",
       );
     }
   } catch (error) {
@@ -627,31 +600,6 @@ export async function createRuntimeRecoveryGeneration(
       FROM runtime_executions source
       WHERE source.id = ?
         AND source.generation = ?
-        AND (
-          source.domain_kind <> 'workshop'
-          OR EXISTS (
-            SELECT 1
-            FROM workshop_workspaces workspace
-            JOIN workshop_sessions session ON session.id = workspace.session_id
-            JOIN workshop_workspace_generations workspace_generation
-              ON workspace_generation.workspace_id = workspace.id
-             AND workspace_generation.id = workspace.current_generation_id
-            JOIN workshop_session_members roster
-              ON roster.session_id = session.id
-             AND roster.user_id = workspace.user_id
-             AND roster.workspace_enabled = 1
-            JOIN member organization_member
-              ON organization_member.organization_id = session.organization_id
-             AND organization_member.user_id = workspace.user_id
-            WHERE workspace.id = source.domain_id
-              AND workspace.user_id = source.user_id
-              AND session.organization_id = source.organization_id
-              AND session.state IN ('lobby', 'live')
-              AND workspace.state NOT IN ('ending', 'ended')
-              AND workspace_generation.state NOT IN ('archiving', 'archived')
-              AND organization_member.workshop_access_revoking_at IS NULL
-          )
-        )
         AND NOT EXISTS (
           SELECT 1
           FROM runtime_executions newer
@@ -688,7 +636,7 @@ export async function createRuntimeRecoveryGeneration(
   // A failed provisioning attempt may already have archived the source and
   // released its slot. Upsert transfers an existing source slot or recreates
   // the missing slot atomically; the guard deliberately aborts the batch if a
-  // different scenario or workshop claimed the user in the meantime.
+  // a different scenario claimed the user in the meantime.
   statements.push(
     env.DB.prepare(
       `INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)
@@ -744,13 +692,6 @@ export async function createRuntimeRecoveryGeneration(
   try {
     const results = await env.DB.batch(statements);
     if (changes(results[0]) !== 1) {
-      if (source.domain_kind === "workshop") {
-        throw appError(
-          409,
-          "runtime_execution_authorization_changed",
-          "workshop runtime provisioning is no longer authorized",
-        );
-      }
       throw runtimeGenerationStale(source);
     }
   } catch (error) {
@@ -761,19 +702,6 @@ export async function createRuntimeRecoveryGeneration(
       current.current_generation !== input.expectedGeneration
     ) {
       throw runtimeGenerationStale(current ?? source);
-    }
-    if (
-      source.domain_kind === "workshop" &&
-      errorChainMatches(
-        error,
-        /FOREIGN KEY constraint failed|workshop runtime provisioning is no longer authorized/i,
-      )
-    ) {
-      throw appError(
-        409,
-        "runtime_execution_authorization_changed",
-        "workshop runtime provisioning is no longer authorized",
-      );
     }
     if (isActiveRuntimeSlotConflict(error)) {
       throw activeRuntimeSlotConflict();
@@ -1254,28 +1182,11 @@ function validateProviderIdentity(input: {
   hostId: string | null;
   domainKind: RuntimeDomainKind;
 }): void {
-  if (input.providerKind === "agent_kvm") {
-    if (input.providerConnectionId !== null) {
-      throw appError(
-        400,
-        "runtime_provider_identity_invalid",
-        "agent runtimes cannot reference an external provider connection",
-      );
-    }
-    return;
-  }
-  if (
-    (input.providerKind !== "hetzner_cloud" &&
-      input.providerKind !== "gcp_compute") ||
-    (input.domainKind !== "workshop" &&
-      input.domainKind !== "workshop_certification") ||
-    !input.providerConnectionId ||
-    input.hostId !== null
-  ) {
+  if (input.providerConnectionId !== null) {
     throw appError(
       400,
       "runtime_provider_identity_invalid",
-      "direct-cloud runtimes require a workshop or certification provider connection and no agent host",
+      "agent runtimes cannot reference an external provider connection",
     );
   }
 }
@@ -1458,7 +1369,7 @@ function activeRuntimeSlotConflict() {
   return appError(
     409,
     "runtime_active_slot_conflict",
-    "the user already has an active scenario or workshop runtime",
+    "the user already has an active scenario runtime",
   );
 }
 

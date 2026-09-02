@@ -546,13 +546,13 @@ mod tests {
     async fn route_revoke_cancels_a_pre_upgrade_browser_admission() {
         let registry = SessionRegistry::default();
         let lease = registry.register(
-            "workshop-helper-route".to_owned(),
+            "workspace-helper-route".to_owned(),
             SessionKind::BrowserTerminal,
             None,
         );
         let cancelled = lease.token();
 
-        registry.terminate_username("workshop-helper-route").await;
+        registry.terminate_username("workspace-helper-route").await;
 
         assert!(cancelled.is_cancelled());
     }

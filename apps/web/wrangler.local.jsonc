@@ -15,25 +15,12 @@
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
     "STARGATE_WORKSPACE_APP_BASE_DOMAIN": "intar.app",
-    "WORKSPACE_AGENT_CONTROL_PLANE_URL": "http://localhost:4321",
   },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"],
   },
-  "services": [
-    {
-      "binding": "HETZNER_PROVIDER_SERVICE",
-      "service": "intar-provider-hetzner",
-      "entrypoint": "HetznerProviderService"
-    },
-    {
-      "binding": "GCP_PROVIDER_SERVICE",
-      "service": "intar-provider-gcp",
-      "entrypoint": "GcpProviderService"
-    }
-  ],
   "d1_databases": [
     {
       "binding": "DB",

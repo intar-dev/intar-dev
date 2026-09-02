@@ -2285,7 +2285,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "intar-contracts",
- "intar-workshop-builder",
  "schemars",
  "serde_json",
 ]
@@ -2423,97 +2422,6 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
-]
-
-[[package]]
-name = "intar-workshop-builder"
-version = "0.1.22"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "ed25519-dalek 2.2.0",
- "flate2",
- "fs2",
- "intar-contracts",
- "intar-image-build",
- "intar-image-upload",
- "intar-workshop-manifest",
- "reqwest",
- "russh",
- "rustix",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tar",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
- "xattr",
- "zstd",
-]
-
-[[package]]
-name = "intar-workshop-cli"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "clap",
- "intar-workshop-manifest",
- "reqwest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "intar-workshop-manifest"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "hcl-rs",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tar",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "intar-workspace-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base16ct 1.0.0",
- "base64",
- "clap",
- "ed25519-dalek 2.2.0",
- "flate2",
- "futures-util",
- "intar-contracts",
- "intar-kino-proto",
- "nix",
- "prost",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tar",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
- "zstd",
 ]
 
 [[package]]

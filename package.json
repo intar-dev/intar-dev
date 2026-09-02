@@ -12,27 +12,20 @@
     "packages/*"
   ],
   "devDependencies": {
-    "@intar/provider-contracts": "workspace:*",
-    "@intar/provider-testkit": "workspace:*",
-    "@intar/provider-worker-core": "workspace:*",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.125.0"
   },
   "scripts": {
-    "check:flagship": "bun test tools/flagship/workshop-multicloud-targeting.test.ts",
     "check:imports": "bun tools/check-import-boundaries.ts",
     "check:deploy": "vitest run tools/deploy",
     "check:database-migrations": "bun run --cwd apps/web db:check && bun test tools/database",
     "clean:generated": "bun tools/cleanup-generated.ts",
-    "hydrate": "bun tools/workshops/platform-engineering/hydrate.ts",
-    "check:providers": "bun tools/providers/check-conformance.ts",
-    "test:providers": "bun run --cwd apps/web/workers/providers/hetzner test && bun run --cwd apps/web/workers/providers/gcp test",
     "test:web": "bun run --cwd apps/web test",
     "build:web": "bun run --cwd apps/web build",
-    "check": "bun run check:flagship && bun run check:imports && bun run check:providers && bun run check:deploy && bun run check:database-migrations && bun run --cwd apps/web db:schema:check",
-    "test": "bun run check && bun run test:providers && bun run test:web",
-    "build": "bun run check:providers && bun run build:web"
+    "check": "bun run check:imports && bun run check:deploy && bun run check:database-migrations && bun run --cwd apps/web db:schema:check",
+    "test": "bun run check && bun run test:web",
+    "build": "bun run build:web"
   },
   "overrides": {
     "@better-auth/core": "1.7.0-beta.10",

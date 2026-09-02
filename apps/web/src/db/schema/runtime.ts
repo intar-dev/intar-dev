@@ -9,16 +9,12 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 import type { VmActualStateV2, VmPhase } from "@/generated/bridge";
-import type { RuntimeProviderKind } from "@intar/workshop-contracts";
 import { organization, user } from "./core";
 import { agentHosts } from "./platform";
 import { jsonText, nowMsDefault } from "./shared";
 
-export type RuntimeDomainKind =
-  | "scenario"
-  | "workshop"
-  | "workshop_certification";
-export type { RuntimeProviderKind } from "@intar/workshop-contracts";
+export type RuntimeDomainKind = "scenario";
+export type RuntimeProviderKind = "agent_kvm";
 export type RuntimeExecutionState =
   | "queued"
   | "provisioning"
@@ -90,15 +86,15 @@ export const runtimeExecutions = sqliteTable(
     index("runtime_executions_source_idx").on(table.sourceExecutionId),
     check(
       "runtime_executions_domain_kind_valid",
-      sql`${table.domainKind} in ('scenario', 'workshop', 'workshop_certification')`,
+      sql`${table.domainKind} = 'scenario'`,
     ),
     check(
       "runtime_executions_provider_kind_valid",
-      sql`${table.providerKind} in ('agent_kvm', 'hetzner_cloud', 'gcp_compute')`,
+      sql`${table.providerKind} = 'agent_kvm'`,
     ),
     check(
       "runtime_executions_provider_identity_valid",
-      sql`(${table.providerKind} = 'agent_kvm' AND ${table.providerConnectionId} is null) OR (${table.providerKind} in ('hetzner_cloud', 'gcp_compute') AND ${table.domainKind} in ('workshop', 'workshop_certification') AND ${table.providerConnectionId} is not null AND ${table.hostId} is null)`,
+      sql`${table.providerConnectionId} is null`,
     ),
     check(
       "runtime_executions_generation_positive",

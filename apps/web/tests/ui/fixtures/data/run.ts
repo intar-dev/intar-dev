@@ -181,7 +181,7 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
         hostname: "web",
         phase: lifecycle.vmPhase,
         phaseTitle: lifecycle.vmPhase,
-        phaseDetail: "System state reported by the workshop host.",
+        phaseDetail: "System state reported by the agent host.",
         progressPercent: lifecycle.progress,
         terminalPhase: lifecycle.terminal,
         terminalReason: state === "failed" ? "guest failed" : null,

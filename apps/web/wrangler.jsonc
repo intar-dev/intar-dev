@@ -28,25 +28,11 @@
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
     "STARGATE_WORKSPACE_APP_BASE_DOMAIN": "intar.app",
-    "WORKSPACE_AGENT_CONTROL_PLANE_URL": "https://intar.dev",
-    "WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON": "{}",
   },
   "vpc_services": [
     {
       "binding": "STARGATE_ADMIN_SERVICE",
       "service_id": "019cfe24-0643-7f91-baa3-cd890fdb8af4",
-    },
-  ],
-  "services": [
-    {
-      "binding": "HETZNER_PROVIDER_SERVICE",
-      "service": "intar-provider-hetzner",
-      "entrypoint": "HetznerProviderService",
-    },
-    {
-      "binding": "GCP_PROVIDER_SERVICE",
-      "service": "intar-provider-gcp",
-      "entrypoint": "GcpProviderService",
     },
   ],
   "assets": {

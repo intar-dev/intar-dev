@@ -9,13 +9,6 @@ pub(super) fn append_runtime_assets(
     guest_tools_delivery: GuestToolsDelivery,
 ) -> Result<()> {
     writeln!(script, "install -d -m 0755 /etc/kino /etc/intar").context("format error")?;
-    if guest_tools_delivery == GuestToolsDelivery::StagedKino {
-        writeln!(script, "install -m 0755 /tmp/kino /usr/local/bin/kino")
-            .context("format error")?;
-        writeln!(script, "ln -sfn kino {}", shell_quote(INTAR_RUN_CLI_PATH))
-            .context("format error")?;
-        writeln!(script, "/usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
-    }
     writeln!(script).context("format error")?;
 
     writeln!(

@@ -41,7 +41,7 @@ describe("protected OIDC secret migration workflow", () => {
       "SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}",
       ".can_admins_bypass == false",
       ".prevent_self_review == true",
-      "SINGLE OPERATOR WORKSHOP CONTROL PLANE",
+      "SINGLE OPERATOR CONTROL PLANE",
       'test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"',
       'test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"',
       'test "${remaining_seconds}" -le 604800',

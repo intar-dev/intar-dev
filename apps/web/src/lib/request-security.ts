@@ -7,7 +7,6 @@ export const NO_STORE_HEADERS = {
 } as const;
 
 export const MAX_API_JSON_BODY_BYTES = 1024 * 1024;
-export const MAX_PROVIDER_JSON_BODY_BYTES = 64 * 1024;
 export const MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES =
   65 * 1024 * 1024;
 
@@ -21,15 +20,9 @@ type RequestSecurityEnv = Pick<
 type SensitiveRateLimitAction =
   | "auth-start"
   | "scenario-start"
-  | "workshop-start"
-  | "terminal-issuance"
   | "ssh-issuance"
   | "build-start"
-  | "build-retry"
-  | "provider-connect"
-  | "provider-mutation"
-  | "provider-rotate"
-  | "provider-cleanup";
+  | "build-retry";
 
 type RateLimitAction =
   | SensitiveRateLimitAction
@@ -177,9 +170,7 @@ export async function guardCustomApiMutation(
     return { ok: true, request };
   }
 
-  const maxBodyBytes = isProviderMutationPath(pathname)
-    ? MAX_PROVIDER_JSON_BODY_BYTES
-    : MAX_API_JSON_BODY_BYTES;
+  const maxBodyBytes = MAX_API_JSON_BODY_BYTES;
   const declaredLengthHeader = request.headers.get("content-length");
   let declaredLength: number | null = null;
   if (declaredLengthHeader !== null) {
@@ -320,45 +311,14 @@ export function sensitiveRateLimitActionFor(
   if (/^\/api\/scenarios\/[^/]+\/start$/u.test(pathname)) {
     return "scenario-start";
   }
-  if (
-    /^\/api\/organizations\/[^/]+\/workshop-sessions$/u.test(pathname) ||
-    /^\/api\/workshops\/[^/]+\/actions$/u.test(pathname)
-  ) {
-    return "workshop-start";
-  }
   if (/^\/api\/scenarios\/runs\/[^/]+\/ssh$/u.test(pathname)) {
     return "ssh-issuance";
-  }
-  if (/^\/api\/workshops\/[^/]+\/terminal$/u.test(pathname)) {
-    return "terminal-issuance";
   }
   if (isOrganizationScenarioBundleUpload(pathname)) {
     return "build-start";
   }
   if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {
     return "build-retry";
-  }
-  if (/^\/api\/organizations\/[^/]+\/workshop-providers$/u.test(pathname)) {
-    return "provider-connect";
-  }
-  if (
-    /^\/api\/organizations\/[^/]+\/workshop-providers\/[^/]+$/u.test(pathname)
-  ) {
-    return "provider-mutation";
-  }
-  if (
-    /^\/api\/organizations\/[^/]+\/workshop-providers\/[^/]+\/rotate$/u.test(
-      pathname,
-    )
-  ) {
-    return "provider-rotate";
-  }
-  if (
-    /^\/api\/organizations\/[^/]+\/workshop-providers\/[^/]+\/manual-cleanup$/u.test(
-      pathname,
-    )
-  ) {
-    return "provider-cleanup";
   }
   return null;
 }
@@ -450,21 +410,11 @@ function isBetterAuthStartPath(pathname: string): boolean {
 }
 
 function isPrehandledBearerApiPath(pathname: string): boolean {
-  return (
-    pathname === "/api/agent/bootstrap" ||
-    pathname === "/api/agent/connect" ||
-    pathname.startsWith("/api/runtime/workspace-agent/")
-  );
+  return pathname === "/api/agent/bootstrap" || pathname === "/api/agent/connect";
 }
 
 function isOrganizationScenarioBundleUpload(pathname: string): boolean {
   return /^\/api\/organizations\/[^/]+\/scenarios\/bundles$/u.test(pathname);
-}
-
-function isProviderMutationPath(pathname: string): boolean {
-  return /^\/api\/organizations\/[^/]+\/workshop-providers(?:\/|$)/u.test(
-    pathname,
-  );
 }
 
 function isJsonContentType(value: string | null): boolean {

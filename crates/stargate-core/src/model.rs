@@ -738,7 +738,7 @@ mod tests {
             russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("client key");
 
         let request = IssueTerminalSessionRequest {
-            route_username: "workshop-helper-browser".to_owned(),
+            route_username: "workspace-helper-browser".to_owned(),
             target_username: "ubuntu".to_owned(),
             target_ip: "127.0.0.1".to_owned(),
             target_port: 22,

@@ -16,8 +16,6 @@ import {
   hostActualState,
   hostResourceReservations,
   type RuntimeExecutionState,
-  type WorkshopManifestV2,
-  type WorkshopWorkspaceGenerationState,
 } from "@/db/schema";
 import {
   commitHostCpuReservation,
@@ -36,10 +34,6 @@ import {
   recordHostBuildReports,
 } from "@/lib/build-scheduler";
 import { expireOverdueRunLeases } from "@/lib/scenario-runs";
-import {
-  archiveRuntimeExecution,
-  updateRuntimeExecutionState,
-} from "@/lib/runtime-executions";
 import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
 import { recordRuntimeVmActualState } from "@/lib/runtime-vm-state";
 import {
@@ -52,12 +46,8 @@ import type {
   HostDesiredStateV2,
   HostStateReportV2,
   VmActualStateV2,
-  VmProbeSnapshotV1,
   VmReportV2,
 } from "@/generated/bridge";
-import { recordWorkshopProbeReport } from "@/lib/workshops/progress";
-import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
-import { recoverWorkshopRuntimesFromFailedHost } from "@/lib/workshops/runtime-orchestrator";
 import { reconcileHostScenarioImages } from "@/lib/scenario-image-cache";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import {
@@ -65,8 +55,6 @@ import {
   maintenanceJsonResponse,
 } from "@/maintenance";
 
-export const WORKSHOP_HOST_FAILURE_RECOVERY_AFTER_MS = 90_000;
-export const WORKSHOP_HOST_FAILURE_RECOVERY_BATCH_SIZE = 8;
 export const SCENARIO_IMAGE_CACHE_RECONCILIATION_INTERVAL_MS = 5 * 60_000;
 const SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY =
   "scenario-image-cache-next-reconciliation-at-ms";
@@ -76,7 +64,7 @@ type RuntimeVmReportContext = {
   userId: string;
   organizationId: string | null;
   hostId: string;
-  domainKind: "scenario" | "workshop";
+  domainKind: "scenario";
   domainId: string;
   generation: number;
   state: RuntimeExecutionState;
@@ -84,23 +72,6 @@ type RuntimeVmReportContext = {
   runtimeVmId: string;
   vmId: string;
   runtimeVmName: string;
-};
-
-type CurrentWorkshopRuntimeContext = {
-  generationId: string;
-  workspaceId: string;
-  organizationId: string;
-  sessionId: string;
-  participantUserId: string;
-  manifest: WorkshopManifestV2;
-};
-
-type RuntimeVmAggregateRow = {
-  vmId: string;
-  terminalHost: string | null;
-  phase: VmActualStateV2["phase"] | null;
-  report: VmActualStateV2 | null;
-  observedAt: number | null;
 };
 
 export class HostRuntimeDO extends HostRuntimeBase {
@@ -145,9 +116,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    await this.reconcileHost(hostId, {
-      recoverUnavailableWorkshopRuntimes: true,
-    });
+    await this.reconcileHost(hostId);
   }
 
   override async webSocketMessage(
@@ -914,7 +883,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
         );
       });
     }
-    await this.applyRuntimeInventoryReport(hostId, report, expectedSessionId);
     await this.withCpuReservationLock(async () => {
       await reconcileHostCpuReservations(db, hostId, now);
     });
@@ -980,8 +948,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
         } catch (error) {
           // Scenario projection remains authoritative during the shared-runtime
           // migration. A missing mirror credential must not regress its
-          // established lifecycle; workshop errors remain observable and are
-          // retried by the agent's next report.
+          // established lifecycle. Mirror errors are retried by the agent's
+          // next report.
           console.error(
             JSON.stringify({
               message: "runtime VM report projection failed",
@@ -1018,72 +986,11 @@ export class HostRuntimeDO extends HostRuntimeBase {
       );
   }
 
-  private async applyRuntimeInventoryReport(
-    hostId: string,
-    report: HostStateReportV2,
-    expectedSessionId: string,
-  ): Promise<void> {
-    for (const actual of report.vms) {
-      await this.withRunProjectionLock(actual.run_id, async () => {
-        try {
-          await this.applyRuntimeVmActualState(
-            hostId,
-            actual,
-            actual.updated_at_unix_ms,
-            expectedSessionId,
-            { workshopsOnly: true },
-          );
-        } catch (error) {
-          logRuntimeProjectionFailure(hostId, actual, error);
-        }
-      });
-    }
-
-    const desired = await loadOrCreateHostDesiredState(
-      drizzle(this.env.DB),
-      hostId,
-      Date.now(),
-    );
-    if (report.applied_desired_version < desired.version) return;
-
-    const reported = new Set(
-      report.vms.map((vm) => runtimeVmIdentity(vm.run_id, vm.vm_name)),
-    );
-    for (const expected of desired.vms) {
-      if (
-        expected.desired_phase !== "running" ||
-        reported.has(runtimeVmIdentity(expected.run_id, expected.vm_name))
-      ) {
-        continue;
-      }
-      const missing = missingRuntimeVmActualState(
-        expected.run_id,
-        expected.vm_name,
-        report.observed_at_unix_ms,
-        report.applied_desired_version,
-      );
-      await this.withRunProjectionLock(expected.run_id, async () => {
-        try {
-          await this.applyRuntimeVmActualState(
-            hostId,
-            missing,
-            report.observed_at_unix_ms,
-            expectedSessionId,
-            { workshopsOnly: true },
-          );
-        } catch (error) {
-          logRuntimeProjectionFailure(hostId, missing, error);
-        }
-      });
-    }
-  }
-
   private async applyRuntimeVmActualState(
     hostId: string,
     report: VmActualStateV2,
     observedAt: number,
     expectedSessionId: string,
-    options: { workshopsOnly?: boolean } = {},
   ): Promise<void> {
     const context = await this.loadRuntimeVmReportContext(
       hostId,
@@ -1091,20 +998,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       report.vm_name,
     );
     if (!context) return;
-    if (options.workshopsOnly && context.domainKind !== "workshop") return;
-    if (
-      context.domainKind === "workshop" &&
-      (context.state === "archived" || context.state === "failed")
-    ) {
-      return;
-    }
-
-    const workshop =
-      context.domainKind === "workshop"
-        ? await this.loadCurrentWorkshopRuntimeContext(context)
-        : null;
-    if (context.domainKind === "workshop" && !workshop) return;
-
     const outcome = await recordRuntimeVmActualState({
       executionId: context.executionId,
       expectedGeneration: context.generation,
@@ -1130,73 +1023,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
         ),
       );
 
-    // Scenario lifecycle remains projected by persistRunState above. The
-    // generic mirror intentionally stops here until every scenario start has
-    // runtime access credentials.
-    if (!workshop) return;
-    if (
-      !(await this.isActiveHostSession({
-        hostId,
-        activeSessionId: expectedSessionId,
-      }))
-    ) {
-      return;
-    }
-    const currentWorkshop =
-      await this.loadCurrentWorkshopRuntimeContext(context);
-    if (
-      !currentWorkshop ||
-      currentWorkshop.generationId !== workshop.generationId
-    ) {
-      return;
-    }
-
-    const actual = await this.loadRuntimeVmAggregate(context.executionId);
-    const aggregateObservedAt = actual.reduce(
-      (latest, vm) => Math.max(latest, vm.observedAt ?? 0),
-      now,
-    );
-    const aggregate = aggregateRuntimeExecutionState({
-      currentState: context.state,
-      archiveRequestedAt: context.archiveRequestedAt,
-      actual,
-    });
-    try {
-      if (aggregate.state === "archived") {
-        await archiveRuntimeExecution({
-          executionId: context.executionId,
-          expectedGeneration: context.generation,
-          endedAt: aggregateObservedAt,
-        });
-      } else {
-        await updateRuntimeExecutionState({
-          executionId: context.executionId,
-          expectedGeneration: context.generation,
-          state: aggregate.state,
-          observedAt: aggregateObservedAt,
-        });
-      }
-    } catch {
-      // A checkpoint restore can install a newer execution while this report
-      // is being aggregated. The current-generation guard is authoritative.
-      return;
-    }
-
-    await recordWorkshopGenerationState({
-      generationId: currentWorkshop.generationId,
-      update: {
-        state: runtimeStateToWorkshopGenerationState(aggregate.state),
-        runtimeExecutionId: context.executionId,
-        hostId,
-        error: aggregate.error,
-        observedAt: aggregateObservedAt,
-      },
-    });
-    await this.projectWorkshopProbeProgress(
-      currentWorkshop,
-      actual,
-      aggregateObservedAt,
-    );
   }
 
   private async loadRuntimeVmReportContext(
@@ -1237,7 +1063,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         user_id: string;
         organization_id: string | null;
         host_id: string;
-        domain_kind: "scenario" | "workshop";
+        domain_kind: "scenario";
         domain_id: string;
         generation: number;
         state: RuntimeExecutionState;
@@ -1261,111 +1087,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       vmId: row.vm_id,
       runtimeVmName: row.runtime_vm_name,
     };
-  }
-
-  private async loadCurrentWorkshopRuntimeContext(
-    runtime: RuntimeVmReportContext,
-  ): Promise<CurrentWorkshopRuntimeContext | null> {
-    const row = await this.env.DB.prepare(
-      `SELECT
-         generation.id AS generation_id,
-         workspace.id AS workspace_id,
-         session.organization_id,
-         workspace.session_id,
-         workspace.user_id AS participant_user_id,
-         revision.manifest_json
-       FROM workshop_workspace_generations generation
-       INNER JOIN workshop_workspaces workspace
-         ON workspace.id = generation.workspace_id
-        AND workspace.current_generation_id = generation.id
-       INNER JOIN workshop_sessions session ON session.id = workspace.session_id
-       INNER JOIN workshop_template_revisions revision
-         ON revision.id = session.template_revision_id
-       WHERE generation.runtime_execution_id = ?
-         AND generation.ordinal = ?
-         AND generation.host_id = ?
-         AND workspace.id = ?
-         AND workspace.user_id = ?
-         AND session.state IN ('lobby', 'live')
-       LIMIT 1`,
-    )
-      .bind(
-        runtime.executionId,
-        runtime.generation,
-        runtime.hostId,
-        runtime.domainId,
-        runtime.userId,
-      )
-      .first<{
-        generation_id: string;
-        workspace_id: string;
-        organization_id: string;
-        session_id: string;
-        participant_user_id: string;
-        manifest_json: string;
-      }>();
-    if (!row) return null;
-    return {
-      generationId: row.generation_id,
-      workspaceId: row.workspace_id,
-      organizationId: row.organization_id,
-      sessionId: row.session_id,
-      participantUserId: row.participant_user_id,
-      manifest: JSON.parse(row.manifest_json) as WorkshopManifestV2,
-    };
-  }
-
-  private async loadRuntimeVmAggregate(
-    executionId: string,
-  ): Promise<RuntimeVmAggregateRow[]> {
-    const rows = await this.env.DB.prepare(
-      `SELECT
-         vm.vm_id,
-         vm.terminal_host,
-         actual.phase,
-         actual.report_json,
-         actual.observed_at
-       FROM runtime_vms vm
-       LEFT JOIN runtime_vm_actual_state actual
-         ON actual.runtime_vm_id = vm.id
-        AND actual.execution_id = vm.execution_id
-       WHERE vm.execution_id = ?
-       ORDER BY vm.ordinal ASC`,
-    )
-      .bind(executionId)
-      .all<{
-        vm_id: string;
-        terminal_host: string | null;
-        phase: VmActualStateV2["phase"] | null;
-        report_json: string | null;
-        observed_at: number | null;
-      }>();
-    return rows.results.map((row) => ({
-      vmId: row.vm_id,
-      terminalHost: row.terminal_host,
-      phase: row.phase,
-      report: row.report_json
-        ? (JSON.parse(row.report_json) as VmActualStateV2)
-        : null,
-      observedAt: row.observed_at,
-    }));
-  }
-
-  private async projectWorkshopProbeProgress(
-    workshop: CurrentWorkshopRuntimeContext,
-    actual: RuntimeVmAggregateRow[],
-    observedAt: number,
-  ): Promise<void> {
-    const snapshots = latestProbeSnapshots(actual);
-    await recordWorkshopProbeReport({
-      database: this.env.DB,
-      organizationId: workshop.organizationId,
-      sessionId: workshop.sessionId,
-      participantUserId: workshop.participantUserId,
-      manifest: workshop.manifest,
-      probes: snapshots,
-      observedAt,
-    });
   }
 
   private async applyBridgeBuildReport(
@@ -1408,7 +1129,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string,
     options?: {
       reconcileCpuReservations?: boolean;
-      recoverUnavailableWorkshopRuntimes?: boolean;
     },
   ): Promise<void> {
     const now = Date.now();
@@ -1426,16 +1146,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
 
     const activeSocket = await this.findActiveSocket(hostId);
-    if (options?.recoverUnavailableWorkshopRuntimes && !activeSocket) {
-      const host = await this.loadRequiredHost(hostId);
-      if (workshopHostFailureRecoveryIsDue(host, now)) {
-        await recoverWorkshopRuntimesFromFailedHost({
-          hostId,
-          now,
-          maxWorkspaces: WORKSHOP_HOST_FAILURE_RECOVERY_BATCH_SIZE,
-        });
-      }
-    }
     if (activeSocket?.attachment.bridgeProtocol === "v6") {
       const lag = await this.loadDesiredVersionLag(hostId, now);
       const shouldRepushLaggingVersion =
@@ -1846,20 +1556,6 @@ function admissionFromValues(
     : null;
 }
 
-function workshopHostFailureRecoveryIsDue(
-  host: Pick<
-    typeof agentHosts.$inferSelect,
-    "disconnectedAt" | "lastHeartbeatAt"
-  >,
-  now: number,
-): boolean {
-  const unavailableSince = host.disconnectedAt ?? host.lastHeartbeatAt;
-  return (
-    unavailableSince !== null &&
-    now - unavailableSince >= WORKSHOP_HOST_FAILURE_RECOVERY_AFTER_MS
-  );
-}
-
 function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {
   return {
     run_id: report.run_id,
@@ -1883,115 +1579,6 @@ function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {
     ...(report.archive !== undefined ? { archive: report.archive } : {}),
     ...(report.error !== undefined ? { error: report.error } : {}),
   };
-}
-
-function missingRuntimeVmActualState(
-  executionId: string,
-  runtimeVmName: string,
-  observedAt: number,
-  desiredVersion: number,
-): VmActualStateV2 {
-  const reason = "VM is missing from the authoritative host inventory";
-  return {
-    run_id: executionId,
-    vm_name: runtimeVmName,
-    desired_version: desiredVersion,
-    phase: "absent",
-    terminal: {
-      state: "failed",
-      reason,
-      observed_at_unix_ms: observedAt,
-    },
-    ssh_host_keys_openssh: [],
-    probes: [],
-    error: reason,
-    updated_at_unix_ms: observedAt,
-  };
-}
-
-function runtimeVmIdentity(executionId: string, runtimeVmName: string): string {
-  return `${executionId}\0${runtimeVmName}`;
-}
-
-function logRuntimeProjectionFailure(
-  hostId: string,
-  report: Pick<VmActualStateV2, "run_id" | "vm_name">,
-  error: unknown,
-): void {
-  console.error(
-    JSON.stringify({
-      message: "runtime VM report projection failed",
-      hostId,
-      executionId: report.run_id,
-      runtimeVmName: report.vm_name,
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
-}
-
-function aggregateRuntimeExecutionState(input: {
-  currentState: RuntimeExecutionState;
-  archiveRequestedAt: number | null;
-  actual: RuntimeVmAggregateRow[];
-}): {
-  state: RuntimeExecutionState;
-  error: string | null;
-} {
-  const archiving =
-    input.archiveRequestedAt !== null || input.currentState === "archiving";
-  const allReported =
-    input.actual.length > 0 && input.actual.every((vm) => vm.phase !== null);
-  if (archiving) {
-    const allAbsent =
-      allReported &&
-      input.actual.every(
-        (vm) => vm.phase === "absent" || vm.phase === "stopped",
-      );
-    return { state: allAbsent ? "archived" : "archiving", error: null };
-  }
-
-  const failed = input.actual.find(
-    (vm) =>
-      vm.phase === "failed" || vm.phase === "absent" || vm.phase === "stopped",
-  );
-  if (failed) {
-    return {
-      state: "failed",
-      error:
-        failed.report?.error?.trim() ||
-        `VM ${failed.vmId} reported ${failed.phase}`,
-    };
-  }
-
-  const ready =
-    allReported &&
-    input.actual.every(
-      (vm) =>
-        (vm.phase === "ready" || vm.phase === "solved") &&
-        vm.terminalHost !== null,
-    );
-  return { state: ready ? "ready" : "provisioning", error: null };
-}
-
-function runtimeStateToWorkshopGenerationState(
-  state: RuntimeExecutionState,
-): WorkshopWorkspaceGenerationState {
-  return state;
-}
-
-function latestProbeSnapshots(
-  actual: RuntimeVmAggregateRow[],
-): Map<string, VmProbeSnapshotV1> {
-  const snapshots = new Map<string, VmProbeSnapshotV1>();
-  for (const vm of actual) {
-    for (const probe of vm.report?.probes ?? []) {
-      const current = snapshots.get(probe.id);
-      if (!current || probe.checked_at_unix_ms >= current.checked_at_unix_ms) {
-        snapshots.set(probe.id, probe);
-      }
-    }
-  }
-  return snapshots;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

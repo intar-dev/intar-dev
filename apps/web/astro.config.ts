@@ -16,14 +16,6 @@ export default defineConfig({
     configPath: isLocalDevelopment
       ? "./wrangler.local.jsonc"
       : "./wrangler.jsonc",
-    auxiliaryWorkers: [
-      {
-        configPath: "./workers/providers/hetzner/wrangler.jsonc",
-      },
-      {
-        configPath: "./workers/providers/gcp/wrangler.jsonc",
-      },
-    ],
     persistState: isLocalDevelopment
       ? process.env.PLAYWRIGHT_UI === "1"
         ? false

@@ -18,7 +18,6 @@ import {
   destroyScenarioRunForUser,
   revokeScenarioRoutesForUser,
 } from "@/lib/scenario-runs";
-import { revokeLiveWorkshopCapabilitiesForBetaUser } from "@/lib/workshops/membership-revocation";
 
 interface CurrentRevocation {
   revocation_id: string;
@@ -117,13 +116,6 @@ export async function cleanupBetaRevocation(params: {
         .bind(params.userId, params.revocationId, cleanupAttemptId),
       env.DB
         .prepare(
-          `UPDATE workshop_registry_tokens
-           SET revoked_at = coalesce(revoked_at, cast(unixepoch('subsecond') * 1000 as integer))
-           WHERE created_by = ?1 AND ${fence}`,
-        )
-        .bind(params.userId, params.revocationId, cleanupAttemptId),
-      env.DB
-        .prepare(
           `UPDATE agent_bootstrap_tokens
            SET revoked_at = coalesce(revoked_at, unixepoch('subsec') * 1000)
            WHERE host_id IN (
@@ -173,10 +165,6 @@ export async function cleanupBetaRevocation(params: {
     );
     externalCleanupDispatched = true;
     await revokeScenarioRoutesForUser(params.userId);
-    await revokeLiveWorkshopCapabilitiesForBetaUser({
-      userId: params.userId,
-      actorUserId: params.actorUserId,
-    });
 
     for (const host of personalHosts) {
       await assertRevocationFence(

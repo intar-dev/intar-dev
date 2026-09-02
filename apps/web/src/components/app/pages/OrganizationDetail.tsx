@@ -149,18 +149,6 @@ export function OrganizationDetail() {
             >
               Courses
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              render={
-                <Link
-                  to="/organizations/$orgId/workshops"
-                  params={{ orgId: detail.id }}
-                />
-              }
-            >
-              Workshops
-            </Button>
           </div>
         }
       />

@@ -154,16 +154,7 @@ describe("Drizzle-managed production D1 schema", () => {
         "access_events",
         "scenario_runs",
         "course_unit_completions",
-        "workshop_templates",
-        "workshop_route_issuance_intents",
-        "workshop_runtime_profiles",
-        "provider_connections",
         "runtime_executions",
-        "runtime_provider_allocations",
-        "runtime_provider_resources",
-        "runtime_provider_operations",
-        "provider_price_observations",
-        "runtime_provider_cost_ledger",
       ]),
     );
     expect(names).not.toEqual(
@@ -200,15 +191,6 @@ describe("Drizzle-managed production D1 schema", () => {
     expect(inviteSchema).toContain("172800000");
     expect(inviteSchema).toContain("1209600000");
 
-    const allocationColumns = await env.DB.prepare(
-      "PRAGMA table_info('runtime_provider_allocations')",
-    ).all<{ name: string; notnull: number }>();
-    expect(
-      allocationColumns.results.find(
-        (column) => column.name === "price_observation_id",
-      ),
-    ).toMatchObject({ notnull: 1 });
-
     const runtimeVmColumns = await env.DB.prepare(
       "PRAGMA table_info('runtime_vms')",
     ).all<{ name: string; notnull: number }>();
@@ -230,30 +212,6 @@ describe("Drizzle-managed production D1 schema", () => {
       ]),
     );
 
-    const routeIndexes = await env.DB.prepare(
-      `SELECT name, "unique" AS is_unique
-       FROM pragma_index_list('workshop_route_issuance_intents')
-       WHERE name IN (
-         'workshop_route_issuance_intents_route_uidx',
-         'workshop_route_issuance_intents_member_idx'
-       ) ORDER BY name`,
-    ).all<{ name: string; is_unique: number }>();
-    expect(routeIndexes.results).toEqual([
-      { name: "workshop_route_issuance_intents_member_idx", is_unique: 0 },
-      { name: "workshop_route_issuance_intents_route_uidx", is_unique: 1 },
-    ]);
-
-    const contentIndexes = await env.DB.prepare(
-      `SELECT name, "unique" AS is_unique
-       FROM pragma_index_list('workshop_template_revisions')
-       WHERE name IN (
-         'workshop_template_revisions_content_idx',
-         'workshop_template_revisions_content_uidx'
-       ) ORDER BY name`,
-    ).all<{ name: string; is_unique: number }>();
-    expect(contentIndexes.results).toEqual([
-      { name: "workshop_template_revisions_content_idx", is_unique: 0 },
-    ]);
   });
 });
 

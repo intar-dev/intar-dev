@@ -23,20 +23,6 @@ export function adminScenarioRunArtifactContentPath(
   return `/api/admin/runs/${run}/artifacts/${artifact}/content`;
 }
 
-export function workshopArtifactContentPath(
-  sessionId: string,
-  artifactId: string,
-): string {
-  return `/api/workshops/${canonicalResourceIdSegment(sessionId)}/artifacts/${canonicalResourceIdSegment(artifactId)}/content`;
-}
-
-export function workshopTerminalTranscriptPath(
-  sessionId: string,
-  terminalSessionId: string,
-): string {
-  return `/api/workshops/${canonicalResourceIdSegment(sessionId)}/terminal-sessions/${canonicalResourceIdSegment(terminalSessionId)}/transcript`;
-}
-
 function canonicalResourceIdSegment(value: string): string {
   if (!CANONICAL_RESOURCE_ID_SEGMENT.test(value)) {
     throw new TypeError("resource id is not a canonical path segment");

@@ -3,8 +3,8 @@ title: Learner run CLI
 description: Use the in-run intar command from an SSH terminal.
 ---
 
-Use `intar` inside an active learner run or Workshop workspace. It works over
-SSH. Each command does one action and then exits. It does not open a menu, ask a
+Use `intar` inside an active learner run. It works over SSH. Each command does
+one action and then exits. It does not open a menu, ask a
 question, read standard input, or produce JSON.
 
 ## Commands
@@ -13,7 +13,7 @@ question, read standard input, or produce JSON.
 | --- | --- |
 | `intar` | Show a short summary and the next useful command. |
 | `intar status` | Show the current run summary. |
-| `intar check` | Run fresh checks for the current VM or released Workshop module. |
+| `intar check` | Run fresh checks for the current VM. |
 | `intar hints` | List safe hint targets and their state. |
 | `intar hint <alias>` | Reveal an available hint for that target. |
 | `intar solution` | Show the solution state, or a solution that is available. |
@@ -25,10 +25,8 @@ The CLI has no JSON output. Use `intar help` to see its commands.
 Run `intar hints` before you request a hint. It shows the aliases that you can
 use. Bash completion can also show them.
 
-Scenario hint aliases name a hint ladder, such as `general` or `check-1`. The
-command reveals only the next allowed hint in that ladder. Workshop aliases name
-individual hints, such as `hint-1`. Workshop hints are independent; they do not
-use Scenario hint order.
+Hint aliases name a hint ladder, such as `general` or `check-1`. The command
+reveals only the next allowed hint in that ladder.
 
 ## Checks and browser updates
 
@@ -52,11 +50,6 @@ reveals only content that is available to the learner.
 Scenario learners can run `intar solution reveal`. This action takes effect at
 once. It shows the full solution. If the Scenario is not solved, it marks the
 run as assisted. It does not ask for confirmation.
-
-Workshop learners cannot reveal a solution. `intar solution` shows a Workshop
-solution only after a facilitator releases it for the current module. In a
-Workshop, `intar solution reveal` is unavailable and does not change the
-solution state.
 
 ## Bash completion and plain output
 
@@ -94,24 +87,19 @@ images after the platform enables the feature. Existing active runs and
 workspaces do not gain it. Operators must deploy in this order:
 
 1. Deploy the control plane with `LEARNER_RUN_CLI_V1_ENFORCEMENT=off`.
-2. Deploy host agents, Kino, the workspace agent, and the Workshop
-   builder/publisher. Publish the new Workshop runtime-tool bundle format, and
-   rebuild the Scenario and KVM Workshop images.
+2. Deploy host agents and Kino, and then rebuild the Scenario images.
 3. Confirm fresh host reports and image caches, then deploy
    `LEARNER_RUN_CLI_V1_ENFORCEMENT=on`.
 
 The final setting makes KVM selection require `supports_run_cli_v1`. Keeping
 it off during the earlier steps prevents an old host inventory from blocking
-all KVM allocations while the new images are still being prepared. It also
-keeps direct-cloud cloud-init from installing `intar`, its completion, or its
-private broker before the new Workshop bundle pins a CLI-capable Kino release.
+all KVM allocations while the new images are still being prepared.
 
 | Problem | Action |
 | --- | --- |
 | `intar: command not found` | This is an older environment. Start a new run after the feature is enabled. |
 | `intar check` exits `1` | This is a real failed check. Repair the work, then run `intar check` again. |
 | A hint is unavailable | Run `intar hints` and use a listed alias. Scenario hint ladders must stay in order. |
-| A Workshop solution is unavailable | Ask the facilitator to release the solution in Intar. |
 | The CLI exits `4` | The run is still open. Retry after a short wait. If it continues, reconnect through Intar and check the run state. |
 | Tab completion is missing | Use an interactive Bash SSH session. Reconnect through the normal Intar SSH terminal. |
 

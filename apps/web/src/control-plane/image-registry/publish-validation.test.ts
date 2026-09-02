@@ -358,47 +358,6 @@ describe("image registry publish validation", () => {
     expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
   });
 
-  it("rejects Workshop-prefixed scenario ids before writing objects", async () => {
-    const manifest = publishManifest({
-      imageSha256: "a".repeat(64),
-      artifactSha256: "b".repeat(64),
-    });
-    const vm = manifest.vms[0];
-    if (!vm) {
-      throw new Error("expected publish manifest vm");
-    }
-    manifest.scenario_id = "workshop-direct";
-    manifest.name = "workshop-direct";
-    manifest.vms = [
-      {
-        ...vm,
-        image_key: { ...vm.image_key, scenario: "workshop-direct" },
-      },
-    ];
-    const form = new FormData();
-    form.set("manifest", JSON.stringify(manifest));
-    const bucketPut = vi.fn();
-
-    const response = await handleImageRegistryRequest(
-      new Request("https://intar.test/registry/v1/publish", {
-        method: "POST",
-        headers: { authorization: "Bearer publish-secret" },
-        body: form,
-      }),
-      {
-        REGISTRY_PUBLISH_TOKEN: "publish-secret",
-        VM_IMAGE_REGISTRY_BUCKET: { put: bucketPut },
-      } as unknown as Cloudflare.Env,
-    );
-
-    expect(response?.status).toBe(400);
-    await expect(response?.json()).resolves.toEqual({
-      error: "manifest scenario_id is invalid",
-    });
-    expect(bucketPut).not.toHaveBeenCalled();
-    expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
-  });
-
   it("rejects publish manifests with unsafe vm names before writing objects", async () => {
     const manifest = publishManifest({
       imageSha256: "a".repeat(64),

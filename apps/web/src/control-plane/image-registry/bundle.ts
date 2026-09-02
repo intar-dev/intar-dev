@@ -27,7 +27,6 @@ import {
   isImageArchitecture,
   isPositiveU32,
   isScenarioDifficulty,
-  WORKSHOP_IMAGE_SCENARIO_PREFIX,
 } from "./shared";
 
 type ParsedBundleMeta = ImageBuildBundleMeta & {
@@ -487,7 +486,6 @@ function normalizeCourseCatalogLecture(
     if (
       !scenarioId ||
       !isSafeBundleRev(scenarioId) ||
-      scenarioId.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX) ||
       scenarioIds.has(scenarioId)
     ) {
       return null;

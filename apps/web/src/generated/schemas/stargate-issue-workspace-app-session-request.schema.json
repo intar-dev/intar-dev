@@ -4,7 +4,7 @@
   "type": "object",
   "properties": {
     "create_only": {
-      "description": "Refuse to replace an existing route with this identifier. Workshop\napplication issuance uses this to make a generated public hostname a\ncollision-safe reservation; callers that omit it retain the existing\nroute-rotation behavior.",
+      "description": "Refuse to replace an existing route with this identifier.",
       "type": "boolean",
       "default": false
     },

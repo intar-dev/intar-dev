@@ -110,7 +110,7 @@ test("the sidebar does not fetch the full run archive just to draw its badge", a
   ui,
 }) => {
   await ui.open({
-    path: "/workshops",
+    path: "/courses",
     sessionRole: "learner",
     theme: "light",
   });
@@ -221,27 +221,6 @@ test("dashboard fetches the native SSH module only after its dialog opens", asyn
   }
 });
 
-test("workshop remote-access modules stay deferred until a workshop control opens them", async ({
-  page,
-  ui,
-}) => {
-  const modules = deferredModuleRequests(page);
-  try {
-    await ui.open({
-      path: "/workshops/workshop-live",
-      sessionRole: "learner",
-      theme: "light",
-    });
-    expect(modules.count("terminal")).toBe(0);
-    expect(modules.count("nativeSsh")).toBe(0);
-
-    await page.getByRole("button", { name: "Open terminal" }).click();
-    await expect.poll(() => modules.count("terminal")).toBeGreaterThan(0);
-  } finally {
-    modules.dispose();
-  }
-});
-
 test("run workspace only fetches the terminal after live status makes a VM ready", async ({
   page,
   ui,
@@ -342,11 +321,6 @@ const TIMING_ROUTES = [
     sessionRole: "learner",
     runState: "booting",
   },
-  {
-    id: "workshop-live",
-    path: "/workshops/workshop-live",
-    sessionRole: "learner",
-  },
 ] as const;
 
 type TimingSample = {
@@ -385,9 +359,6 @@ async function waitForRouteContent(
     await expect(page.locator("[data-run-workspace]")).toBeVisible();
     return;
   }
-  await expect(
-    page.getByRole("button", { name: "Open terminal" }),
-  ).toBeVisible();
 }
 
 async function prepareWarmNavigation(
@@ -395,10 +366,8 @@ async function prepareWarmNavigation(
   route: (typeof TIMING_ROUTES)[number],
 ) {
   if (route.id === "courses") {
-    await sidebarLink(page, "Workshops").click();
-    await expect(
-      page.getByRole("link", { name: /Platform Engineering · July cohort/i }),
-    ).toBeVisible();
+    await sidebarLink(page, "My runs").click();
+    await expect(page.getByRole("heading", { name: "Active work" })).toBeVisible();
     return;
   }
   if (route.id === "admin") {
@@ -415,10 +384,6 @@ async function prepareWarmNavigation(
     ).toBeVisible();
     return;
   }
-  await sidebarLink(page, "Workshops").click();
-  await expect(
-    page.getByRole("link", { name: /Platform Engineering · July cohort/i }),
-  ).toBeVisible();
 }
 
 async function activateWarmRoute(
@@ -437,9 +402,6 @@ async function activateWarmRoute(
     await page.getByRole("button", { name: "Resume", exact: true }).click();
     return;
   }
-  await page
-    .getByRole("link", { name: /Platform Engineering · July cohort/i })
-    .click();
 }
 
 test("records warm navigation timings for the main app routes", async ({

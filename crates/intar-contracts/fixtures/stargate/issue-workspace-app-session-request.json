@@ -1,5 +1,5 @@
 {
-  "route_id": "01j-workshop-app-argocd",
+  "route_id": "01j-workspace-app-argocd",
   "create_only": false,
   "target_username": "user",
   "target_ip": "10.77.0.2",

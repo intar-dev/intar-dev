@@ -34,9 +34,6 @@ export default defineConfig({
           STARGATE_ROUTE_TTL_SECONDS: "14400",
           STARGATE_WORKSPACE_APP_BASE_DOMAIN: "intar.app",
           STARGATE_EGRESS_IPV4_CIDRS: "192.0.2.10/32",
-          WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON:
-            '{"test-key":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}',
-          WORKSPACE_AGENT_CONTROL_PLANE_URL: "https://intar.test",
         },
         d1Databases: ["DB"],
         durableObjects: {

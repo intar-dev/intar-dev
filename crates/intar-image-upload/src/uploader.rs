@@ -784,8 +784,8 @@ mod tests {
     fn validates_atomic_image_blob_identity() {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let image = UploadImageBlob {
-            image_key: "workshop-publication-checkpoint-workspace-x86_64".to_owned(),
-            scenario_id: "workshop-publication-checkpoint".to_owned(),
+            image_key: "publication-checkpoint-workspace-x86_64".to_owned(),
+            scenario_id: "publication-checkpoint".to_owned(),
             vm_name: "workspace".to_owned(),
             sha256: "a".repeat(64),
             source_path: temp.path().to_path_buf(),

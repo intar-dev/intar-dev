@@ -420,7 +420,7 @@ describe("image registry source bundles", () => {
       new File(
         [
           sourceBundleFixtureWithCurriculum(
-            ["workshop-cluster"],
+            ["missing-cluster"],
             [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
           ),
         ],
@@ -508,7 +508,7 @@ describe("image registry source bundles", () => {
               content_hash: "d".repeat(64),
             },
             {
-              scenario_id: "workshop-cluster",
+              scenario_id: "invalid-cluster",
               arch: "x86_64",
               content_hash: "not-a-sha256",
             },
@@ -840,14 +840,6 @@ describe("course catalog bundle metadata", () => {
       {
         version: 2,
         courses: [courseMeta({ course_id: "../unsafe" })],
-      },
-      {
-        version: 2,
-        courses: [
-          courseMeta({
-            lectures: [lectureMeta({ scenario_id: "workshop-checkpoint" })],
-          }),
-        ],
       },
       {
         version: 2,

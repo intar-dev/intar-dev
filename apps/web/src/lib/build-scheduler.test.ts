@@ -36,7 +36,7 @@ describe("build scheduler", () => {
     const db = assignmentDb({
       queuedRows: [
         queuedBuild("build-1", "broken-nginx"),
-        queuedBuild("build-2", "workshop-cluster"),
+        queuedBuild("build-2", "sandbox-cluster"),
         queuedBuild("build-arm", "arm-only", "aarch64"),
       ],
       builderRows: [
@@ -160,7 +160,7 @@ describe("build scheduler", () => {
     expect(smallDraft.builds).toEqual([
       expect.objectContaining({
         build_id: "build-2",
-        scenario_id: "workshop-cluster",
+        scenario_id: "sandbox-cluster",
         arch: "x86_64",
         bundle_ref: "builds/bundles/abc123.tar.gz",
       }),
@@ -298,7 +298,7 @@ describe("build scheduler", () => {
         db as never,
         "builder-1",
         buildReport({
-          scenarioId: "workshop-cluster",
+          scenarioId: "sandbox-cluster",
           contentHash: "f".repeat(64),
         }),
         2_000,
@@ -384,7 +384,7 @@ describe("build scheduler", () => {
           }),
           buildReport({
             phase: "failed",
-            scenarioId: "workshop-cluster",
+            scenarioId: "sandbox-cluster",
             contentHash: "f".repeat(64),
           }),
           buildReport({

@@ -190,7 +190,7 @@ function archivedRun(
   return {
     host: {
       id: "host-1",
-      name: "Workshop host",
+      name: "Agent host",
     },
     run: {
       id: "run-1",

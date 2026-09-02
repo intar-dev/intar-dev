@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn renders_direct_kernel_boot_qemu_args() {
-        const TRUSTED_BOOT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 intar.workshop=1";
+        const TRUSTED_BOOT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 intar.build=1";
         let config = QemuBuildConfig {
             accelerator: "kvm".to_string(),
             qemuargs: vec![vec!["-device".to_string(), "virtio-rng-pci".to_string()]],

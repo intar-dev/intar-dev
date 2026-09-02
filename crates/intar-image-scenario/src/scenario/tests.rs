@@ -927,7 +927,7 @@ scenario "scale-action" {
   kino {
     probe "api-ready" {
       kind          = "k8s_pod_state"
-      namespace     = "workshop"
+      namespace     = "checkpoint"
       selector      = "app=api"
       desired_state = "condition:Ready"
       description   = "API pod should be ready"
@@ -940,7 +940,7 @@ scenario "scale-action" {
     step "break-workload" {
       k8s_scale_deployment {
         name      = "api"
-        namespace = "workshop"
+        namespace = "checkpoint"
         replicas  = 0
       }
     }
@@ -963,7 +963,7 @@ scenario "scale-action" {
             namespace,
             replicas,
             kubeconfig: None,
-        } if name == "api" && namespace == "workshop" && *replicas == 0
+        } if name == "api" && namespace == "checkpoint" && *replicas == 0
     ));
 }
 
@@ -978,7 +978,7 @@ scenario "invalid-scale-action" {
   kino {
     probe "api-ready" {
       kind          = "k8s_pod_state"
-      namespace     = "workshop"
+      namespace     = "checkpoint"
       selector      = "app=api"
       desired_state = "condition:Ready"
       description   = "API pod should be ready"
@@ -991,7 +991,7 @@ scenario "invalid-scale-action" {
     step "break-workload" {
       k8s_scale_deployment {
         name      = "api"
-        namespace = "workshop"
+        namespace = "checkpoint"
       }
     }
 
@@ -1014,7 +1014,7 @@ scenario "invalid-scale-action-kubectl" {
   kino {
     probe "api-ready" {
       kind          = "k8s_pod_state"
-      namespace     = "workshop"
+      namespace     = "checkpoint"
       selector      = "app=api"
       desired_state = "condition:Ready"
       description   = "API pod should be ready"
@@ -1027,7 +1027,7 @@ scenario "invalid-scale-action-kubectl" {
     step "break-workload" {
       k8s_scale_deployment {
         name      = "api"
-        namespace = "workshop"
+        namespace = "checkpoint"
         replicas  = 0
         kubectl   = "scale deployment/api --replicas=0"
       }

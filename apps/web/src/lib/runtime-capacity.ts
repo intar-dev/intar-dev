@@ -33,7 +33,7 @@ export interface ActiveRuntimeResourceSnapshot {
 }
 
 /**
- * Loads the shared scenario/workshop reservation ledger. Expired pending rows
+ * Loads the scenario reservation ledger. Expired pending rows
  * deliberately stop consuming capacity, while committed rows remain charged
  * until teardown has been observed and releases them.
  */

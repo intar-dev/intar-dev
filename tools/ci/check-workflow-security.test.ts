@@ -37,9 +37,6 @@ function check(
     "docs/wrangler.jsonc",
     "apps/web/wrangler.jsonc",
     "apps/web/wrangler.local.jsonc",
-    "apps/web/workers/providers/gcp/wrangler.jsonc",
-    "apps/web/workers/providers/hetzner/wrangler.jsonc",
-    "tools/providers/live-capability-probe/wrangler.jsonc",
   ]) {
     const target = join(root, path);
     mkdirSync(join(target, ".."), { recursive: true });

@@ -92,10 +92,7 @@ pub struct IssueWorkspaceAppSessionRequest {
     /// is a public route identity, not an authorization secret, and must not
     /// contain user-provided labels or resource names.
     pub route_id: String,
-    /// Refuse to replace an existing route with this identifier. Workshop
-    /// application issuance uses this to make a generated public hostname a
-    /// collision-safe reservation; callers that omit it retain the existing
-    /// route-rotation behavior.
+    /// Refuse to replace an existing route with this identifier.
     #[serde(default)]
     pub create_only: bool,
     pub target_username: String,

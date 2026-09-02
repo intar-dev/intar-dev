@@ -23,7 +23,6 @@ import {
   isProbePhase,
   isOptionalString,
   artifactFilenameMatches,
-  WORKSHOP_IMAGE_SCENARIO_PREFIX,
 } from "./shared";
 
 export type PreparedBootArtifact = {
@@ -266,10 +265,7 @@ export function validateManifest(
   if (!scenarioId) {
     return jsonResponse({ error: "manifest scenario_id is required" }, 400);
   }
-  if (
-    !isSafeRegistrySlug(scenarioId) ||
-    scenarioId.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX)
-  ) {
+  if (!isSafeRegistrySlug(scenarioId)) {
     return jsonResponse({ error: "manifest scenario_id is invalid" }, 400);
   }
   if (!hasValidScenarioMetadata(manifest, scenarioId)) {

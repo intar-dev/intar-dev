@@ -4,11 +4,6 @@ import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifac
 import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
-import { handleWorkshopRegistryRequest } from "@/control-plane/workshop-registry/v2";
-import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspace-agent";
-import { openDueWorkshopLobbies } from "@/lib/workshops/auto-lobby";
-import { sweepWorkshopProviderRuntimes } from "@/lib/workshops/provider-runtime";
-import { recoverWorkshopRuntimesFromFailedProvider } from "@/lib/workshops/runtime-orchestrator";
 import { handleMaintenanceMode } from "@/maintenance";
 import { hardenJoinResponse } from "@/lib/join-security";
 import {
@@ -43,23 +38,9 @@ export default {
       return respond(await handleAgentConnect(request, env));
     }
 
-    const workspaceAgentResponse =
-      await handleWorkspaceAgentControlPlaneRequest(request, env);
-    if (workspaceAgentResponse) {
-      return respond(workspaceAgentResponse);
-    }
-
     const registryResponse = await handleImageRegistryRequest(request, env);
     if (registryResponse) {
       return respond(registryResponse);
-    }
-
-    const workshopRegistryResponse = await handleWorkshopRegistryRequest(
-      request,
-      env,
-    );
-    if (workshopRegistryResponse) {
-      return respond(workshopRegistryResponse);
     }
 
     if (url.pathname.startsWith("/agent/runs")) {
@@ -86,7 +67,7 @@ export default {
         : response;
     return respond(applicationResponse);
   },
-  async scheduled(controller, env) {
+  async scheduled(_controller, env) {
     // Planned control-plane maintenance must be database-independent. Cron work
     // is part of the same maintenance fence as HTTP traffic; otherwise a minute
     // tick can issue or mutate runtimes while the control plane is fenced.
@@ -94,24 +75,6 @@ export default {
       console.info(JSON.stringify({ event: "scheduled_maintenance_fenced" }));
       return;
     }
-    const [lobbies, providerRuntimes] = await Promise.all([
-      openDueWorkshopLobbies({ now: controller.scheduledTime }),
-      sweepWorkshopProviderRuntimes({ now: controller.scheduledTime }),
-    ]);
-    // Provider observations decide whether a failed direct-cloud learner needs
-    // reconstruction. Run recovery after that sweep so a durable
-    // `reconstruct_required` transition can be acted on in the same minute.
-    const providerRecoveries = await recoverWorkshopRuntimesFromFailedProvider({
-      now: controller.scheduledTime,
-    });
-    console.info(
-      JSON.stringify({
-        event: "workshop_minute_sweep",
-        lobbies,
-        providerRuntimes,
-        providerRecoveries,
-      }),
-    );
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 

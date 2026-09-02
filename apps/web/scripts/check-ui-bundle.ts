@@ -12,7 +12,6 @@ const leafBudgets = [
   { prefix: "App", maximumKiB: 40, required: true },
   { prefix: "Dashboard", maximumKiB: 12, required: true },
   { prefix: "ScenarioRun", maximumKiB: 22, required: true },
-  { prefix: "WorkshopRoom", maximumKiB: 18, required: true },
   { prefix: "RunArtifactViewer", maximumKiB: 8, required: false },
   { prefix: "NativeSshDialogButton", maximumKiB: 24, required: true },
   { prefix: "terminal", maximumKiB: 95, required: true },
@@ -21,7 +20,6 @@ const leafBudgets = [
 const routeClosureBudgets = [
   { prefix: "Dashboard", maximumKiB: 28 },
   { prefix: "ScenarioRun", maximumKiB: 80 },
-  { prefix: "WorkshopRoom", maximumKiB: 90 },
 ] as const;
 
 const onDemandPrefixes = [

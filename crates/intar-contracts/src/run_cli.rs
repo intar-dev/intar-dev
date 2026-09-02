@@ -238,7 +238,7 @@ impl RunCliViewV1 {
 }
 
 /// Public context needed for a concise CLI header. `context` is a safe display
-/// label (for example a VM or released workshop module), never an identifier.
+/// label (for example a VM name), never an identifier.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct RunCliRunV1 {
@@ -252,7 +252,6 @@ pub struct RunCliRunV1 {
 #[serde(rename_all = "snake_case")]
 pub enum RunCliRunKindV1 {
     Scenario,
-    Workshop,
 }
 
 /// A safe check projection. `probe_id` is an internal broker selector and must
@@ -319,9 +318,7 @@ pub enum RunCliHintStateV1 {
     Locked,
 }
 
-/// Full-solution state. `sealed` is the scenario state that may be explicitly
-/// revealed; `unavailable` is used for a workshop solution not released by a
-/// facilitator. Only `revealed` may contain `body_markdown`.
+/// Full-solution state. Only `revealed` may contain `body_markdown`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct RunCliSolutionV1 {

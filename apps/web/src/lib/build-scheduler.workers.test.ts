@@ -499,7 +499,7 @@ describe("build scheduler bundle supersession", () => {
 
     let activeCallbacks = 0;
     let maximumActiveCallbacks = 0;
-    const other = { scenarioId: "workshop-cluster", arch: "x86_64" as const };
+    const other = { scenarioId: "sandbox-cluster", arch: "x86_64" as const };
     await Promise.all([
       withImageBuildCoordinationLocks(db, [key, other, key], async () => {
         activeCallbacks += 1;

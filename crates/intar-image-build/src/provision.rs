@@ -38,42 +38,9 @@ const GUEST_NETWORK_READY_TIMEOUT_SECONDS: u64 = 30;
 // agent's 360-second whole-runtime window for the other first-boot phases.
 const GUEST_SSH_READY_TIMEOUT_SECONDS: u64 = 2 * 60;
 
-/// Inputs for the reusable guest runtime activation layer.
-///
-/// This intentionally accepts only pre-rendered Kino configuration and safe
-/// learner-facing MOTD text. Scenario actions, hints, solutions, and other
-/// authoring content never enter this layer.
-#[derive(Debug, Clone, Copy)]
-pub struct RuntimeActivationInput<'a> {
-    pub kino_template: &'a str,
-    pub motd: &'a str,
-    pub cpu_millis: u32,
-    pub requires_kubernetes_modules: bool,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuestToolsDelivery {
     ReadOnlyDisk,
-    StagedKino,
-}
-
-/// Render the root-run activation script shared by scenario and KVM workshop
-/// images. The caller must stage the Kino binary at `/tmp/kino` first.
-pub fn render_runtime_activation_script(input: RuntimeActivationInput<'_>) -> Result<String> {
-    let mut script = String::new();
-    writeln!(script, "#!/usr/bin/env bash").context("format error")?;
-    writeln!(script, "set -euo pipefail").context("format error")?;
-    writeln!(script).context("format error")?;
-    append_runtime_activation_log_phase(&mut script)?;
-    append_runtime_activation(
-        &mut script,
-        input.kino_template,
-        input.motd,
-        input.cpu_millis,
-        input.requires_kubernetes_modules,
-        GuestToolsDelivery::StagedKino,
-    )?;
-    Ok(script)
 }
 
 pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) -> Result<String> {
@@ -268,10 +235,7 @@ fn append_script_body(
     append_final_cleanup(script)
 }
 
-/// Append the stable runtime layer used by both published scenario images and
-/// prepared KVM workshop images. It deliberately excludes scenario actions,
-/// package installation, and image cleanup so callers can compose those
-/// lifecycle-specific steps around it.
+/// Append the stable runtime layer used by published scenario images.
 fn append_runtime_activation(
     script: &mut String,
     kino_template: &str,
@@ -291,25 +255,8 @@ fn append_runtime_activation(
     append_ssh_runtime_gate(script)
 }
 
-fn append_runtime_activation_log_phase(script: &mut String) -> Result<()> {
-    writeln!(script, "log_phase() {{").context("format error")?;
-    writeln!(script, "  local phase=\"$1\"").context("format error")?;
-    writeln!(script, "  local status=\"$2\"").context("format error")?;
-    writeln!(
-        script,
-        "  printf '[intar-runtime-activation] ts=%s phase=%s status=%s\\n' \"$(date -Ins)\" \"$phase\" \"$status\""
-    )
-    .context("format error")?;
-    writeln!(script, "}}").context("format error")?;
-    writeln!(script).context("format error")?;
-    Ok(())
-}
-
 fn append_ssh_runtime_gate(script: &mut String) -> Result<()> {
-    // A prepared workshop base must support two mutually exclusive boot
-    // paths. Build and checkpoint proof boots attach INTARBUILD, whereas
-    // learner runs attach INTARRUN. Conditions let systemd select the right
-    // path before either service can take over SSH.
+    // Build boots attach INTARBUILD, whereas learner runs attach INTARRUN.
     writeln!(
         script,
         "install -d -o root -g root -m 0755 /etc/systemd/system/intar-scenario.service.d /etc/systemd/system/intar-build.service.d"

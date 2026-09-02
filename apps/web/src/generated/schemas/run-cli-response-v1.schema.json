@@ -252,12 +252,11 @@
     "RunCliRunKindV1": {
       "type": "string",
       "enum": [
-        "scenario",
-        "workshop"
+        "scenario"
       ]
     },
     "RunCliRunV1": {
-      "description": "Public context needed for a concise CLI header. `context` is a safe display\nlabel (for example a VM or released workshop module), never an identifier.",
+      "description": "Public context needed for a concise CLI header. `context` is a safe display\nlabel (for example a VM name), never an identifier.",
       "type": "object",
       "properties": {
         "context": {
@@ -288,7 +287,7 @@
       ]
     },
     "RunCliSolutionV1": {
-      "description": "Full-solution state. `sealed` is the scenario state that may be explicitly\nrevealed; `unavailable` is used for a workshop solution not released by a\nfacilitator. Only `revealed` may contain `body_markdown`.",
+      "description": "Full-solution state. Only `revealed` may contain `body_markdown`.",
       "type": "object",
       "properties": {
         "assisted": {

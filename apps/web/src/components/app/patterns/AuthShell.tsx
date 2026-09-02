@@ -38,7 +38,7 @@ export function AuthShell({
 
           <div className="order-2 flex max-w-lg flex-col items-start gap-4 lg:order-1 lg:gap-8">
             <div className="space-y-4">
-              <p className="text-label">Systems workshop access</p>
+              <p className="text-label">Systems training access</p>
               <p className="text-feature-title text-balance">
                 One identity from briefing to verified repair.
               </p>
@@ -56,7 +56,7 @@ export function AuthShell({
                 ],
                 [
                   "02",
-                  "Enter the workshop",
+                  "Start the work",
                   "Open an assigned or self-directed scenario.",
                 ],
                 [

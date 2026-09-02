@@ -5,7 +5,6 @@ import { describe, expect, it } from "vitest";
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const deployWorkflow = read(".github/workflows/website-deploy.yml");
 const validationWorkflow = read(".github/workflows/website.yml");
-const providerRollout = read(".github/workflows/control-plane-rollout.yml");
 const deployScript = read("tools/deploy/deploy-web.sh");
 
 describe("automatic web deployment workflow", () => {
@@ -13,9 +12,6 @@ describe("automatic web deployment workflow", () => {
     expect(validationWorkflow).toContain("push:");
     expect(validationWorkflow).toContain("branches:\n      - main");
     expect(validationWorkflow).toContain('      - "apps/web/**"');
-    expect(validationWorkflow).toContain(
-      '      - "!apps/web/workers/providers/**"',
-    );
     expect(validationWorkflow).not.toContain("workflow_dispatch:");
     expect(validationWorkflow).toContain(
       "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
@@ -149,7 +145,7 @@ describe("automatic web deployment workflow", () => {
 
   it("has no manual web confirmation or unrelated production work", () => {
     for (const retired of [
-      "DEPLOY WORKSHOP CONTROL PLANE",
+      "DEPLOY CONTROL PLANE",
       "OIDC CANARY PASSED",
       "oidc-secret-migration.ts",
       "Validate provider capability contract",
@@ -163,16 +159,6 @@ describe("automatic web deployment workflow", () => {
     }
     expect(deployWorkflow).not.toContain("workflow_dispatch:");
     expect(deployWorkflow).toContain("environment:\n      name: production");
-  });
-
-  it("leaves provider deployment in its provider-only workflow", () => {
-    expect(providerRollout).toContain("Multicloud provider rollout");
-    expect(providerRollout).toContain(
-      "uses: ./.github/workflows/provider-workers.yml",
-    );
-    expect(providerRollout).not.toContain("website-deploy.yml");
-    expect(providerRollout).not.toContain("web_confirmation");
-    expect(providerRollout).not.toContain("oidc_canary");
   });
 
   it("passes only web runtime secrets into the deployed Worker", () => {

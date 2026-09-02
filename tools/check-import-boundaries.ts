@@ -5,12 +5,6 @@ import { dirname, extname, join, relative, resolve, sep } from "node:path";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
 const projectRoots = [
-  "apps/web/workers/providers/hetzner",
-  "apps/web/workers/providers/gcp",
-  "packages/provider-contracts",
-  "packages/provider-worker-core",
-  "packages/provider-testkit",
-  "packages/workshop-contracts",
   "apps/web",
 ]
   .map((path) => resolve(repositoryRoot, path))

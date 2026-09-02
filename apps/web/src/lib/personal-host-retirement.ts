@@ -20,10 +20,8 @@ import {
   imageBuilds,
   runtimeExecutions,
   scenarioRuns,
-  workshopPublications,
 } from "@/db/schema";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
-import { nonDetachableWorkshopPublication } from "@/lib/agent-host-deletion";
 
 interface RetirePersonalHostInput {
   d1: D1Database;
@@ -108,17 +106,6 @@ export async function retirePersonalHost(
           and(
             eq(imageBuilds.hostId, hostId),
             inArray(imageBuilds.status, ["assigned", "building"]),
-          ),
-        ),
-    ),
-    notExists(
-      db
-        .select({ id: workshopPublications.id })
-        .from(workshopPublications)
-        .where(
-          and(
-            eq(workshopPublications.builderHostId, hostId),
-            nonDetachableWorkshopPublication(),
           ),
         ),
     ),

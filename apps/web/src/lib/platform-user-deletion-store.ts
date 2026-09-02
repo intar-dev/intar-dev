@@ -163,7 +163,7 @@ export async function assertPlatformUserDeletionAllowed(
 
 /**
  * Irreversibly removes the user's authentication and authorization records.
- * The user row becomes an anonymous tombstone so retained workshop, provider,
+ * The user row becomes an anonymous tombstone so retained runtime,
  * and security history keeps valid foreign keys without retaining profile data.
  */
 export async function finalizePlatformUserDeletion(

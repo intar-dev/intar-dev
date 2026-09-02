@@ -960,8 +960,8 @@ test("unknown route has a designed recovery path", async ({ page, ui }) => {
   );
   await expect(
     page
-      .getByRole("link", { name: /home|courses|workshop/i })
-      .or(page.getByRole("button", { name: /home|courses|workshop/i }))
+      .getByRole("link", { name: /home|courses/i })
+      .or(page.getByRole("button", { name: /home|courses/i }))
       .first(),
   ).toBeVisible();
 });

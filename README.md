@@ -3,10 +3,8 @@
 Monorepo for the intar platform:
 
 - `crates/` contains the Rust workspace for the agent, kino, stargate, and shared contracts.
-- `apps/web/` contains the Cloudflare-hosted web/control plane and its private
-  auxiliary provider Workers.
-- `packages/` contains the provider-neutral TypeScript contracts and testkit.
-- `content/` contains authored Course, Scenario, and Workshop source locks.
+- `apps/web/` contains the Cloudflare-hosted web and control plane.
+- `content/` contains authored Course and Scenario source locks.
 
 Common commands:
 
@@ -15,7 +13,6 @@ bun install --frozen-lockfile
 just check
 just test
 just build
-just check-hydrated
 just check-generated
 ```
 

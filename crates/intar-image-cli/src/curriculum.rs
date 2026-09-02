@@ -22,7 +22,6 @@ const COURSE_MARKDOWN_FILE: &str = "course.md";
 const LECTURE_MARKDOWN_FILE: &str = "lecture.md";
 const SCENARIO_HCL_FILE: &str = "scenario.hcl";
 const MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
-const WORKSHOP_IMAGE_SCENARIO_PREFIX: &str = "workshop-";
 
 #[derive(Debug, Clone)]
 pub(super) struct CurriculumSource {
@@ -180,13 +179,6 @@ pub(super) fn load_curriculum(courses_root: &Path) -> Result<CurriculumSource> {
                     );
                 }
                 validate_safe_cli_slug("scenario id", &scenario.name)?;
-                if scenario.name.starts_with(WORKSHOP_IMAGE_SCENARIO_PREFIX) {
-                    bail!(
-                        "course scenario ID '{}' uses reserved '{}' prefix",
-                        scenario.name,
-                        WORKSHOP_IMAGE_SCENARIO_PREFIX
-                    );
-                }
                 if !scenario_ids.insert(scenario.name.clone()) {
                     bail!("duplicate scenario ID '{}'", scenario.name);
                 }
@@ -561,21 +553,6 @@ mod tests {
         fs::remove_dir_all(temp.path().join("course-b")).unwrap();
         let error = load_curriculum(temp.path()).unwrap_err();
         assert!(format!("{error:#}").contains("course-mode scenario must not define title"));
-    }
-
-    #[test]
-    fn rejects_reserved_workshop_scenario_ids() {
-        let temp = tempfile::tempdir().unwrap();
-        write_course(
-            temp.path(),
-            "course",
-            "01-lab",
-            Some("workshop-checkpoint"),
-            "Lab",
-        );
-
-        let error = load_curriculum(temp.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("reserved 'workshop-' prefix"));
     }
 
     #[cfg(unix)]

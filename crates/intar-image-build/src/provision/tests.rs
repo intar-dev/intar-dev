@@ -10,8 +10,7 @@ use tempfile::tempdir;
 
 use super::{
     FAILED_STEP_LOG_TAIL_BYTES, GeneratedStepScript, INTAR_RUN_CLI_COMPLETION_PATH,
-    INTAR_RUN_CLI_PATH, RuntimeActivationInput, append_step_scripts,
-    render_runtime_activation_script, render_scenario_provision_script, shell_quote,
+    INTAR_RUN_CLI_PATH, append_step_scripts, render_scenario_provision_script, shell_quote,
 };
 
 fn render_minimal_provision_script() -> String {
@@ -63,25 +62,7 @@ fn render_minimal_supervisor_prefix() -> String {
 }
 
 fn render_minimal_runtime_activation() -> String {
-    render_runtime_activation_script(RuntimeActivationInput {
-        kino_template: r#"server {
-  bind = "vsock://__INTAR_KINO_CID__:__INTAR_KINO_PORT__"
-}
-
-probe "check-one" {
-  kind = "service"
-  service = "nginx"
-  state = "running"
-  intar_alias = "check-1"
-  intar_label = "Nginx should be running"
-  intar_phase = "scenario"
-}
-"#,
-        motd: "Intar workshop runtime\n",
-        cpu_millis: 1_000,
-        requires_kubernetes_modules: true,
-    })
-    .unwrap()
+    render_minimal_provision_script()
 }
 
 fn run_bash(script: &str, syntax_only: bool) -> Output {
@@ -136,8 +117,8 @@ fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
     let script = render_minimal_runtime_activation();
 
     assert!(script.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"));
-    assert!(script.contains("install -m 0755 /tmp/kino /usr/local/bin/kino"));
-    assert!(!script.contains("wait_for_labeled_device INTARTOOLS"));
+    assert!(!script.contains("install -m 0755 /tmp/kino /usr/local/bin/kino"));
+    assert!(script.contains("wait_for_labeled_device INTARTOOLS"));
     assert!(script.contains("/usr/local/bin/intar"));
     assert!(script.contains("'/usr/local/bin/intar' help >/dev/null 2>&1"));
     assert!(!script.contains("'/usr/local/bin/intar' --"));
@@ -146,8 +127,8 @@ fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
     assert!(script.contains("vsock://2:18082"));
     assert!(script.contains("KINO_CONTROL_SOCKET=\"$kino_control_socket\""));
     assert!(script.contains("systemctl enable intar-scenario.service"));
-    assert!(!script.contains("systemctl disable intar-build.service"));
-    assert!(!script.contains("rm -f /etc/systemd/system/intar-build.service"));
+    assert!(script.contains("systemctl disable intar-build.service"));
+    assert!(script.contains("rm -f /etc/systemd/system/intar-build.service"));
 
     let (_, runtime_drop_in_and_rest) = script.split_once("<<'EOF_INTAR_RUNTIME_DISK'\n").unwrap();
     let (runtime_drop_in, _) = runtime_drop_in_and_rest
@@ -1008,7 +989,7 @@ packages = ["nginx"]
 fn provision_script_renders_k8s_scale_deployment_action() {
     let scenario = Scenario::parse_course(
         r#"
-scenario "workshop-cluster" {
+scenario "sandbox-cluster" {
   image "debian-12-minimal" {
 base = "trixie"
   }
@@ -1029,7 +1010,7 @@ probes = ["k3s-running"]
 step "break-workload" {
   k8s_scale_deployment {
     name = "hello-web"
-    namespace = "workshop"
+    namespace = "checkpoint"
     replicas = 0
   }
 }
@@ -1042,7 +1023,8 @@ step "break-workload" {
     let script = render_scenario_provision_script(&scenario, vm).unwrap();
     assert!(script.contains("export KUBECONFIG=/etc/rancher/k3s/k3s.yaml"));
     assert!(
-        script.contains("kubectl scale 'deployment/hello-web' --replicas=0 --namespace 'workshop'")
+        script
+            .contains("kubectl scale 'deployment/hello-web' --replicas=0 --namespace 'checkpoint'")
     );
     let (_, modules_and_rest) = script.split_once("<<'EOF_RUNTIME_MODULES'\n").unwrap();
     let (modules, _) = modules_and_rest

@@ -153,62 +153,6 @@ const courseLectureRoute = createRoute({
   ),
 });
 
-const workshopsRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "workshops",
-  head: () =>
-    routeHead(
-      "Workshops",
-      "Join upcoming and live facilitator-led infrastructure workshops.",
-    ),
-  component: lazyRouteComponent(
-    () => import("./pages/workshops/WorkshopsList"),
-    "WorkshopsList",
-  ),
-});
-
-const workshopRoomRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "workshops/$sessionId",
-  head: () =>
-    routeHead(
-      "Workshop room",
-      "Follow the live agenda, use your persistent workspace, and request facilitator help.",
-    ),
-  component: lazyRouteComponent(
-    () => import("./pages/workshops/WorkshopRoom"),
-    "WorkshopRoom",
-  ),
-});
-
-const workshopPresentationRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "workshops/$sessionId/present",
-  head: () =>
-    routeHead(
-      "Workshop presenter",
-      "Control the shared workshop presentation with private presenter notes.",
-    ),
-  component: lazyRouteComponent(
-    () => import("./pages/workshops/WorkshopPresentation"),
-    "WorkshopPresentation",
-  ),
-});
-
-const workshopProjectorRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "workshops/$sessionId/projector",
-  head: () =>
-    routeHead(
-      "Workshop projector",
-      "Show the current workshop slide, timer, and room announcement.",
-    ),
-  component: lazyRouteComponent(
-    () => import("./pages/workshops/WorkshopPresentation"),
-    "WorkshopProjector",
-  ),
-});
-
 const scenarioRunRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "runs/$runId",
@@ -333,20 +277,6 @@ const organizationPrivateCourseLectureRoute = createRoute({
   ),
 });
 
-const organizationWorkshopsRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "organizations/$orgId/workshops",
-  head: () =>
-    routeHead(
-      "Organization workshops",
-      "Manage private workshop templates, rosters, capacity, and live sessions.",
-    ),
-  component: lazyRouteComponent(
-    () => import("./pages/workshops/OrganizationWorkshops"),
-    "OrganizationWorkshops",
-  ),
-});
-
 const profileRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "profile",
@@ -453,10 +383,6 @@ const routeTree = rootRoute.addChildren([
     courseCatalogRoute,
     courseDetailRoute,
     courseLectureRoute,
-    workshopsRoute,
-    workshopRoomRoute,
-    workshopPresentationRoute,
-    workshopProjectorRoute,
     scenarioRunRoute,
     runsListRoute,
     organizationsRoute,
@@ -466,7 +392,6 @@ const routeTree = rootRoute.addChildren([
     organizationPrivateCourseRoute,
     organizationPublicCourseLectureRoute,
     organizationPrivateCourseLectureRoute,
-    organizationWorkshopsRoute,
     profileRoute,
     adminOverviewRoute,
     adminHostsRoute,

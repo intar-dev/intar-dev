@@ -232,12 +232,12 @@ describe("scenario image cache reconciliation", () => {
       scenarioIds: ["rolling-scenario"],
     });
     await seedHost({ hostId: "active-agent", organizationId: null });
-    const workshopImage = image("workshop-checkpoint", "vm", "x86_64");
+    const manualImage = image("manual-checkpoint", "vm", "x86_64");
     const runningScenarioVm = desiredVm(scenarioImage, PUBLIC_SHA, "run-1");
-    const runningWorkshopVm = desiredVm(
-      workshopImage,
+    const runningManualVm = desiredVm(
+      manualImage,
       ORG_A_SHA,
-      "workshop-run",
+      "manual-run",
     );
     const build = desiredBuild();
     const db = drizzle(env.DB);
@@ -251,11 +251,11 @@ describe("scenario image cache reconciliation", () => {
           image_id: PUBLIC_SHA,
         });
         upsertDesiredCachedImage(draft, {
-          image_key: workshopImage,
+          image_key: manualImage,
           image_id: ORG_A_SHA,
         });
         upsertDesiredVm(draft, runningScenarioVm);
-        upsertDesiredVm(draft, runningWorkshopVm);
+        upsertDesiredVm(draft, runningManualVm);
         upsertDesiredBuild(draft, build);
       },
     );
@@ -274,13 +274,12 @@ describe("scenario image cache reconciliation", () => {
     const after = requiredState(result);
 
     expect(imageIdentities(after.cached_images)).toEqual([
+      `manual-checkpoint:vm:x86_64:${ORG_A_SHA}`,
       `rolling-scenario:vm:x86_64:${PUBLIC_SHA}`,
       `rolling-scenario:vm:x86_64:${nextSha}`,
-      `workshop-checkpoint:vm:x86_64:${ORG_A_SHA}`,
     ]);
     expect(after.vms).toEqual(before.vms);
     expect(after.builds).toEqual(before.builds);
-    expect(after.vms[0]?.image_id).toBe(PUBLIC_SHA);
   });
 
   it("removes cache keys for replaced VM names while retaining current-key rollback SHAs", async () => {
@@ -325,140 +324,6 @@ describe("scenario image cache reconciliation", () => {
     ]);
   });
 
-  it("removes unlinked scenario cache entries but preserves workshop entries", async () => {
-    const linkedImage = await seedScenario({
-      scenarioId: "linked-scenario",
-      organizationId: null,
-      arch: "x86_64",
-      sha256: PUBLIC_SHA,
-    });
-    const unlinkedImage = await seedScenario({
-      scenarioId: "broken-nginx",
-      organizationId: null,
-      arch: "x86_64",
-      sha256: ORG_A_SHA,
-      enabled: false,
-    });
-    await seedCourseCatalog({
-      organizationId: null,
-      scenarioIds: ["linked-scenario"],
-    });
-    await seedHost({ hostId: "cache-agent", organizationId: null });
-    const workshopImage = image(
-      "workshop-checkpoint",
-      "workshop-runtime",
-      "x86_64",
-    );
-    const db = drizzle(env.DB);
-    await mutateStoredHostDesiredState(
-      db,
-      "cache-agent",
-      Date.now(),
-      (draft) => {
-        upsertDesiredCachedImage(draft, {
-          image_key: unlinkedImage,
-          image_id: ORG_A_SHA,
-        });
-        upsertDesiredCachedImage(draft, {
-          image_key: workshopImage,
-          image_id: ORG_B_SHA,
-        });
-      },
-    );
-
-    const result = await reconcileHostScenarioImages(db, {
-      hostId: "cache-agent",
-      architecture: "x86_64",
-      nowUnixMs: Date.now() + 1,
-    });
-
-    expect(result.outcome).toBe("changed");
-    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
-      `linked-scenario:vm:x86_64:${PUBLIC_SHA}`,
-      `workshop-checkpoint:workshop-runtime:x86_64:${ORG_B_SHA}`,
-    ]);
-    expect(requiredState(result).cached_images).not.toContainEqual({
-      image_key: unlinkedImage,
-      image_id: ORG_A_SHA,
-    });
-    expect(requiredState(result).cached_images).toContainEqual({
-      image_key: linkedImage,
-      image_id: PUBLIC_SHA,
-    });
-  });
-
-  it("fails closed without a V2 catalog while preserving Workshop cache keys", async () => {
-    const scenarioImage = await seedScenario({
-      scenarioId: "unlinked-scenario",
-      organizationId: null,
-      arch: "x86_64",
-      sha256: PUBLIC_SHA,
-      enabled: false,
-    });
-    await seedHost({ hostId: "no-catalog-agent", organizationId: null });
-    const workshopImage = image("workshop-runtime", "workspace", "x86_64");
-    const db = drizzle(env.DB);
-    await mutateStoredHostDesiredState(
-      db,
-      "no-catalog-agent",
-      Date.now(),
-      (draft) => {
-        upsertDesiredCachedImage(draft, {
-          image_key: scenarioImage,
-          image_id: PUBLIC_SHA,
-        });
-        upsertDesiredCachedImage(draft, {
-          image_key: workshopImage,
-          image_id: ORG_A_SHA,
-        });
-      },
-    );
-
-    const result = await reconcileHostScenarioImages(db, {
-      hostId: "no-catalog-agent",
-      architecture: "x86_64",
-      nowUnixMs: Date.now() + 1,
-    });
-
-    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
-      `workshop-runtime:workspace:x86_64:${ORG_A_SHA}`,
-    ]);
-  });
-
-  it("preserves legacy Workshop-prefixed technical cache keys", async () => {
-    const legacyWorkshopImage = await seedScenario({
-      scenarioId: "workshop-legacy",
-      organizationId: null,
-      arch: "x86_64",
-      sha256: PUBLIC_SHA,
-      enabled: false,
-    });
-    await seedHost({ hostId: "legacy-workshop-agent", organizationId: null });
-    const db = drizzle(env.DB);
-    await mutateStoredHostDesiredState(
-      db,
-      "legacy-workshop-agent",
-      Date.now(),
-      (draft) => {
-        upsertDesiredCachedImage(draft, {
-          image_key: legacyWorkshopImage,
-          image_id: PUBLIC_SHA,
-        });
-      },
-    );
-
-    const result = await reconcileHostScenarioImages(db, {
-      hostId: "legacy-workshop-agent",
-      architecture: "x86_64",
-      nowUnixMs: Date.now() + 1,
-    });
-
-    expect(result.outcome).toBe("unchanged");
-    expect(imageIdentities(requiredState(result).cached_images)).toEqual([
-      `workshop-legacy:vm:x86_64:${PUBLIC_SHA}`,
-    ]);
-  });
-
   it("is idempotent and preserves a concurrent desired-VM mutation", async () => {
     const catalogImage = await seedScenario({
       scenarioId: "public-scenario",
@@ -487,7 +352,7 @@ describe("scenario image cache reconciliation", () => {
     expect(second.outcome).toBe("unchanged");
     expect(requiredState(second)).toEqual(firstState);
 
-    const workshopImage = image("workshop", "vm", "x86_64");
+    const manualImage = image("manual", "vm", "x86_64");
     await Promise.all([
       reconcileHostScenarioImages(db, {
         hostId: "racing-agent",
@@ -496,24 +361,28 @@ describe("scenario image cache reconciliation", () => {
       }),
       mutateStoredHostDesiredState(db, "racing-agent", now + 2, (draft) => {
         upsertDesiredCachedImage(draft, {
-          image_key: workshopImage,
+          image_key: manualImage,
           image_id: ORG_A_SHA,
         });
         upsertDesiredVm(
           draft,
-          desiredVm(workshopImage, ORG_A_SHA, "workshop-run"),
+          desiredVm(manualImage, ORG_A_SHA, "manual-run"),
         );
       }),
     ]);
 
     const finalState = await storedDesiredState("racing-agent");
     expect(imageIdentities(finalState.cached_images)).toEqual([
+      `manual:vm:x86_64:${ORG_A_SHA}`,
       `public-scenario:vm:x86_64:${PUBLIC_SHA}`,
-      `workshop:vm:x86_64:${ORG_A_SHA}`,
     ]);
     expect(finalState.vms).toHaveLength(1);
     expect(finalState.builds).toEqual([]);
-    expect(finalState.cached_images[0]?.image_key).toEqual(catalogImage);
+    expect(
+      finalState.cached_images.find(
+        (image) => image.image_key.scenario === "public-scenario",
+      )?.image_key,
+    ).toEqual(catalogImage);
   });
 
   it("retries after a catalog replacement races its desired-state CAS", async () => {

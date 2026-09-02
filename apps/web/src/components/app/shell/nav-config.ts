@@ -6,7 +6,6 @@ import {
   Library,
   ListChecks,
   MessageCircle,
-  Presentation,
   Server,
   UserPlus,
   Users,
@@ -50,14 +49,6 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: BookOpen,
         requires: "signedIn",
         matchPrefix: "/courses",
-      },
-      {
-        id: "workshops",
-        label: "Workshops",
-        to: "/workshops",
-        icon: Presentation,
-        requires: "signedIn",
-        matchPrefix: "/workshops",
       },
       {
         id: "runs",

@@ -32,7 +32,6 @@ import {
 
 const NO_PROFILE_KEY_CODES = new Set([
   "scenario_native_ssh_key_required",
-  "workshop_native_ssh_key_required",
 ]);
 
 export interface NativeSshSessionRequest {

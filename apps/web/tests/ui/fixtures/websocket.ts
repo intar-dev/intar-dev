@@ -2,7 +2,7 @@ import type { Page, WebSocketRoute } from "@playwright/test";
 import type { MockApiServer } from "./mock-api";
 
 const terminalTranscript = Buffer.from(
-  "\r\nintar workshop shell\r\nroot@web:~# systemctl status nginx\r\n" +
+  "\r\nintar scenario shell\r\nroot@web:~# systemctl status nginx\r\n" +
     "nginx.service - A high performance web server\r\n" +
     "   Active: failed (Result: exit-code)\r\nroot@web:~# ",
   "utf8",

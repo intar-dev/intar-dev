@@ -13,15 +13,9 @@ const hostRuntimeMock = vi.hoisted(() => ({ retireHostRuntime: vi.fn() }));
 const hostRetirementMock = vi.hoisted(() => ({
   retirePersonalHost: vi.fn(),
 }));
-const hostDeletionMock = vi.hoisted(() => ({
-  nonDetachableWorkshopPublication: vi.fn(() => "unfinished-publication"),
-}));
 const dbMock = vi.hoisted(() => {
   const state = {
-    activeWorkshopRuntimes: [] as Array<{ executionId: string }>,
-    unfinishedWorkshopPublications: [] as Array<{ publicationId: string }>,
     activeBuilds: [] as Array<{ buildId: string }>,
-    limitedSelectCall: 0,
   };
   const db = {
     select: vi.fn(() => {
@@ -29,14 +23,7 @@ const dbMock = vi.hoisted(() => {
         from: vi.fn(),
         where: vi.fn(),
         limit: vi.fn(() => {
-          const rows =
-            state.limitedSelectCall === 0
-              ? state.activeWorkshopRuntimes
-              : state.limitedSelectCall === 1
-                ? state.unfinishedWorkshopPublications
-                : state.activeBuilds;
-          state.limitedSelectCall += 1;
-          return Promise.resolve(rows);
+          return Promise.resolve(state.activeBuilds);
         }),
       };
       query.from.mockReturnValue(query);
@@ -48,7 +35,6 @@ const dbMock = vi.hoisted(() => {
 });
 
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
-vi.mock("@/lib/agent-host-deletion", () => hostDeletionMock);
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeMock);
 vi.mock("@/lib/personal-host-retirement", () => hostRetirementMock);
 vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
@@ -65,10 +51,7 @@ const BETA_ADMISSION = {
 describe("personal host removal route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    dbMock.state.activeWorkshopRuntimes = [];
-    dbMock.state.unfinishedWorkshopPublications = [];
     dbMock.state.activeBuilds = [];
-    dbMock.state.limitedSelectCall = 0;
     agentBridgeMock.requireAdminUserContext.mockResolvedValue({
       ok: true,
       context: { userId: "user-1", betaAdmission: BETA_ADMISSION },
@@ -123,32 +106,6 @@ describe("personal host removal route", () => {
       betaAdmission: BETA_ADMISSION,
     });
     expect(hostRuntimeMock.retireHostRuntime).toHaveBeenCalledWith("host-1");
-  });
-
-  it("requires active workshop runtimes to be drained", async () => {
-    dbMock.state.activeWorkshopRuntimes = [{ executionId: "runtime-1" }];
-
-    const response = await removeHostRequest();
-
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toMatchObject({
-      code: "host_has_active_workshop_runtimes",
-    });
-    expect(hostRetirementMock.retirePersonalHost).not.toHaveBeenCalled();
-  });
-
-  it("requires unfinished publications to be cleaned up", async () => {
-    dbMock.state.unfinishedWorkshopPublications = [
-      { publicationId: "publication-1" },
-    ];
-
-    const response = await removeHostRequest();
-
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toMatchObject({
-      code: "host_has_unfinished_workshop_publications",
-    });
-    expect(hostRetirementMock.retirePersonalHost).not.toHaveBeenCalled();
   });
 
   it("requires active builder work to be drained", async () => {

@@ -399,68 +399,6 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("workshop learner probes use safe binary indicators", async ({
-    page,
-    ui,
-  }, testInfo) => {
-    await ui.open({ ...routeCase("workshop-room"), theme: "light" });
-
-    const verification = page
-      .getByText("Live verification", { exact: true })
-      .locator("xpath=parent::div/parent::div");
-    await expect(verification).toContainText("1 Verified");
-    await expect(verification).toContainText("1 Needs repair");
-    await expect(verification).toContainText("Verification objective 1");
-    await expect(verification).toContainText("Verification objective 2");
-    await expect(verification).not.toContainText("talos-members");
-    await expect(verification).not.toContainText("cilium-connectivity");
-    await expect(verification).not.toContainText("3/3 members ready");
-    await expect(verification).not.toContainText("DNS egress policy");
-    await expectNoAxeViolations(page, testInfo);
-  });
-
-  test("facilitator probe rows stay binary when verification is unavailable", async ({
-    page,
-    ui,
-  }, testInfo) => {
-    await ui.open({ ...routeCase("workshop-control-room"), theme: "light" });
-    const roster = page.getByRole("region", {
-      name: "Participant roster details",
-    });
-    await expect(roster).toHaveAttribute("tabindex", "0");
-    await roster.focus();
-    await expect(roster).toBeFocused();
-    const session = ui.server.state.workshopSession as {
-      roster: Array<{
-        userId: string;
-        progress: Array<Record<string, unknown>>;
-      }>;
-    };
-    const learner = session.roster.find(
-      (member) => member.userId === "user-learner",
-    );
-    const activeProgress = learner?.progress.find(
-      (progress) => progress.moduleId === "01",
-    );
-    if (!activeProgress) throw new Error("workshop probe fixture is missing");
-    activeProgress.verificationUnavailable = true;
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await ui.settle();
-
-    const probeLists = page.locator('ul[aria-label$=" probe status"]');
-    const probeText = (await probeLists.allTextContents()).join(" ");
-    expect(probeText).toContain("Verification objective 1");
-    expect(probeText).toContain("Verified");
-    expect(probeText).toContain("Needs repair");
-    expect(probeText).not.toMatch(
-      /workspace-ready|talos-members|cilium-connectivity|\bpass\b|\bfail\b|\bpending\b|\bunknown\b/i,
-    );
-    await expect(
-      page.getByText("Verification unavailable").first(),
-    ).toBeVisible();
-    await expectNoAxeViolations(page, testInfo);
-  });
-
   test("beta invite ready announcement", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("join-beta"), theme: "light" });
 
@@ -633,7 +571,7 @@ test.describe("focused state accessibility", () => {
   test("host removal confirmation", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
     await expect(
-      page.getByRole("heading", { name: "workshop-eu-1" }),
+      page.getByRole("heading", { name: "agent-eu-1" }),
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Host actions" }).click();
@@ -647,12 +585,12 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
 
     await dialog
-      .getByLabel("Type workshop-eu-1 to confirm")
-      .fill("workshop-eu-1");
+      .getByLabel("Type agent-eu-1 to confirm")
+      .fill("agent-eu-1");
     await dialog.getByRole("button", { name: "Remove host" }).click();
 
     await expect(
-      page.getByRole("heading", { name: "workshop-eu-1" }),
+      page.getByRole("heading", { name: "agent-eu-1" }),
     ).toHaveCount(0);
     await expect(
       page.getByRole("heading", { name: "No hosts yet" }),

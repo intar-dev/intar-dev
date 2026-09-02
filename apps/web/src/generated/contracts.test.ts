@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import Ajv2020 from "ajv/dist/2020";
 import type { AnySchema } from "ajv";
-import { isWorkshopManifestV2 } from "@intar/workshop-contracts";
 
 const ajv = new Ajv2020({ strict: false });
 
@@ -26,46 +25,6 @@ describe("generated contract schemas", () => {
       "schemas/catalog-scenario-manifest-v4.schema.json",
       "fixtures/catalog/scenario-manifest-v4.json",
     )).toBe(true);
-  });
-
-  it("validates the Rust hydrated Workshop v2 fixture in TypeScript", () => {
-    const fixture = readJson("fixtures/workshop/workshop-manifest-v2.json");
-    expect(validateValue("schemas/workshop-manifest-v2.schema.json", fixture)).toBe(true);
-    expect(isWorkshopManifestV2(fixture)).toBe(true);
-  });
-
-  it.each([
-    ["attribution", (fixture: Record<string, any>) => delete fixture.workshop.attribution],
-    ["application.releaseModuleId", (fixture: Record<string, any>) => delete fixture.workspace.applications[0].releaseModuleId],
-    ["runtimeProfile.requestedSystemImage", (fixture: Record<string, any>) => delete fixture.workspace.runtimeProfiles[0].requestedSystemImage],
-    ["runtimeProfile.immutableSystemImage", (fixture: Record<string, any>) => delete fixture.workspace.runtimeProfiles[0].immutableSystemImage],
-    ["runtimeProfile.hardware", (fixture: Record<string, any>) => delete fixture.workspace.runtimeProfiles[0].hardware],
-    ["module.catchUpCheckpointId", (fixture: Record<string, any>) => delete fixture.modules[0].catchUpCheckpointId],
-    ["hint.title", (fixture: Record<string, any>) => delete fixture.modules[0].hints[0].title],
-    ["slide.title", (fixture: Record<string, any>) => delete fixture.presentation.slides[0].title],
-  ])("rejects a hydrated Workshop v2 fixture without %s", (_field, mutate) => {
-    const fixture = readJson(
-      "fixtures/workshop/workshop-manifest-v2.json",
-    ) as Record<string, any>;
-    mutate(fixture);
-
-    expect(isWorkshopManifestV2(fixture)).toBe(false);
-    expect(validateValue("schemas/workshop-manifest-v2.schema.json", fixture)).toBe(false);
-  });
-
-  it.each([
-    ["ARM hardware", (fixture: Record<string, any>) => fixture.workspace.runtimeProfiles[0].hardware.architecture = "arm64"],
-    ["a missing GCP machine type", (fixture: Record<string, any>) => delete fixture.workspace.runtimeProfiles[0].machineType],
-    ["an unsupported GCP root disk", (fixture: Record<string, any>) => fixture.workspace.runtimeProfiles[0].rootDiskType = "pd-ssd"],
-    ["agent KVM with cloud metadata", (fixture: Record<string, any>) => fixture.workspace.runtimeProfiles[0].provider = "agent_kvm"],
-  ])("rejects a hydrated Workshop v2 fixture with %s", (_case, mutate) => {
-    const fixture = readJson(
-      "fixtures/workshop/workshop-manifest-v2.json",
-    ) as Record<string, any>;
-    mutate(fixture);
-
-    expect(isWorkshopManifestV2(fixture)).toBe(false);
-    expect(validateValue("schemas/workshop-manifest-v2.schema.json", fixture)).toBe(false);
   });
 
   it("rejects a v3 scenario manifest version", () => {

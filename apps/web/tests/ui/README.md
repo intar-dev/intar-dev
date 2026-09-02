@@ -11,7 +11,7 @@ bundle.
 - `bun run test:ui:visual` runs the Chromium visual suites.
   - `routes.visual.spec.ts`: 23 routes × 2 themes × desktop/mobile = 92.
   - `dense.visual.spec.ts`: 9 dense routes × 2 themes × tablet = 18.
-  - `states.visual.spec.ts`: 53 focused run, workshop, organization, build,
+  - `states.visual.spec.ts`: focused run, organization, build,
     and people snapshots.
   - The visual baseline count is therefore exactly 163.
 - `bun run test:ui:a11y` runs 173 checks: axe on all 23 routes in both themes;

@@ -76,8 +76,7 @@ solutions, and build steps. Do not set `title`, `category`, `tags`,
 `difficulty`, `estimated_minutes`, `description`, or `briefing` in course HCL.
 The Lecture Markdown body is the learner briefing.
 
-Scenario IDs are globally unique safe slugs. The `workshop-` prefix is reserved
-for Workshop runtime images and cannot be used by a Course Scenario.
+Scenario IDs are globally unique safe slugs.
 
 ## Build and publish
 

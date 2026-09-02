@@ -39,27 +39,6 @@ export const ROUTE_CASES = [
     path: "/courses/operations/lectures/02-repair-nginx",
     sessionRole: "learner",
   },
-  { id: "workshops", path: "/workshops", sessionRole: "learner" },
-  {
-    id: "workshop-room",
-    path: "/workshops/workshop-live",
-    sessionRole: "learner",
-  },
-  {
-    id: "workshop-control-room",
-    path: "/workshops/workshop-live",
-    sessionRole: "instructor",
-  },
-  {
-    id: "workshop-presenter",
-    path: "/workshops/workshop-live/present",
-    sessionRole: "instructor",
-  },
-  {
-    id: "workshop-projector",
-    path: "/workshops/workshop-live/projector",
-    sessionRole: "learner",
-  },
   { id: "runs", path: "/runs", sessionRole: "learner" },
   { id: "run-workspace", path: "/runs/run-active", sessionRole: "learner" },
   {
@@ -70,11 +49,6 @@ export const ROUTE_CASES = [
   {
     id: "organization-detail",
     path: "/organizations/org-platform",
-    sessionRole: "owner",
-  },
-  {
-    id: "organization-workshops",
-    path: "/organizations/org-platform/workshops",
     sessionRole: "owner",
   },
   { id: "profile", path: "/profile", sessionRole: "learner" },
@@ -112,9 +86,6 @@ const byId = new Map<string, RouteCase>(
 
 export const DENSE_ROUTE_CASES = [
   "run-workspace",
-  "workshop-room",
-  "workshop-control-room",
-  "organization-workshops",
   "organization-detail",
   "admin-overview",
   "admin-hosts",

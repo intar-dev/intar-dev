@@ -50,7 +50,7 @@ export interface RunCliRunV1 {
   context?: string;
 }
 
-export type RunCliRunKindV1 = "scenario" | "workshop";
+export type RunCliRunKindV1 = "scenario";
 
 /** `probe_id` is for the private broker only. The learner CLI must not render it. */
 export interface RunCliCheckV1 {

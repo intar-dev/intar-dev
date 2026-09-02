@@ -27,7 +27,6 @@ import type { HostDesiredStateV2 } from "@/generated/bridge";
 export const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 export const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
 export const RUNTIME_LEASE_CLEANUP_RETRY_MS = 10_000;
-export const WORKSHOP_RECOVERY_RETRY_MS = 10_000;
 
 export interface SocketAttachment {
   hostId: string;
@@ -343,35 +342,12 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       drizzle(this.env.DB),
       hostId,
     );
-    const pendingWorkshopRecovery = await this.env.DB.prepare(
-      `SELECT 1 AS pending
-       FROM workshop_workspaces workspace
-       INNER JOIN workshop_workspace_generations generation
-         ON generation.id = workspace.current_generation_id
-       INNER JOIN workshop_sessions session ON session.id = workspace.session_id
-       WHERE session.state IN ('lobby', 'live')
-         AND workspace.state IN ('recovering', 'failed')
-         AND generation.state IN ('queued', 'failed')
-         AND EXISTS (
-           SELECT 1
-           FROM workshop_events event
-           WHERE event.session_id = workspace.session_id
-             AND event.type = 'workspace.host_failure_recovery_requested'
-             AND json_extract(event.payload_json, '$.generationId') = generation.id
-             AND json_extract(event.payload_json, '$.failedHostId') = ?
-         )
-       LIMIT 1`,
-    )
-      .bind(hostId)
-      .first<{ pending: number }>();
-
     if (
       !activeSocket &&
       !undeliveredDesired &&
       typeof nextLeaseExpiry !== "number" &&
       typeof nextRuntimeLeaseExpiry !== "number" &&
       typeof nextReservationExpiry !== "number" &&
-      !pendingWorkshopRecovery &&
       desiredState.builds.length === 0
     ) {
       // A lagging applied version alone does not keep the alarm armed:
@@ -395,9 +371,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     }
     if (typeof nextReservationExpiry === "number") {
       candidates.push(Math.max(now + 1, nextReservationExpiry + 1));
-    }
-    if (pendingWorkshopRecovery) {
-      candidates.push(now + WORKSHOP_RECOVERY_RETRY_MS);
     }
     if (lag.lagging && activeSocket) {
       candidates.push(now + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);

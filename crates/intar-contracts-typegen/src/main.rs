@@ -29,7 +29,6 @@ use intar_contracts::{
         IssueWorkspaceAppSessionResponse,
     },
 };
-use intar_workshop_builder::HydratedWorkshopManifestV2;
 use schemars::schema_for;
 
 fn main() -> Result<()> {
@@ -41,8 +40,6 @@ fn main() -> Result<()> {
         .context("create stargate fixture directory")?;
     fs::create_dir_all(fixture_dir.join("catalog")).context("create catalog fixture directory")?;
     fs::create_dir_all(fixture_dir.join("bridge")).context("create bridge fixture directory")?;
-    fs::create_dir_all(fixture_dir.join("workshop"))
-        .context("create workshop fixture directory")?;
     fs::create_dir_all(fixture_dir.join("run-cli")).context("create run CLI fixture directory")?;
 
     for obsolete in [
@@ -91,10 +88,6 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("catalog-course-catalog-v2.schema.json"),
         &schema_for!(CourseCatalogSnapshotV2),
-    )?;
-    write_schema(
-        &schema_dir.join("workshop-manifest-v2.schema.json"),
-        &schema_for!(HydratedWorkshopManifestV2),
     )?;
     write_schema(
         &schema_dir.join("bridge-host-desired-state-v2.schema.json"),
@@ -166,10 +159,6 @@ fn main() -> Result<()> {
     copy_fixture(
         "crates/intar-contracts/fixtures/catalog/scenario-manifest-v4.json",
         &fixture_dir.join("catalog/scenario-manifest-v4.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-workshop-builder/fixtures/hydrated-workshop-manifest-v2.json",
-        &fixture_dir.join("workshop/workshop-manifest-v2.json"),
     )?;
     copy_fixture(
         "crates/intar-contracts/fixtures/bridge/host-desired-state-v2.json",
@@ -904,7 +893,7 @@ export interface RunCliRunV1 {
   context?: string;
 }
 
-export type RunCliRunKindV1 = "scenario" | "workshop";
+export type RunCliRunKindV1 = "scenario";
 
 /** `probe_id` is for the private broker only. The learner CLI must not render it. */
 export interface RunCliCheckV1 {

@@ -26,7 +26,6 @@ import type {
 import type { ImageArchitecture, ImageKey } from "@/generated/catalog";
 import {
   IMAGE_KEY_RE,
-  WORKSHOP_IMAGE_SCENARIO_PREFIX,
   isImageArchitecture,
   isImageKey,
   normalizeSha256,
@@ -122,11 +121,9 @@ export async function reconcileHostScenarioImages(
     const next = mutateDesiredState(
       current,
       (draft) => {
-        // cached_images is shared by scenario and workshop/runtime intent and
-        // carries no provenance marker. Scoped scenario IDs remove stale VM
-        // keys, while a current V2 course catalog preserves rollback SHAs for
-        // still-linked exact keys. Workshop-prefixed vm_scenarios are never
-        // claimed, including legacy direct-publish rows. Preserve other same-
+        // cached_images carries no provenance marker. Scoped scenario IDs
+        // remove stale VM keys, while a current V2 course catalog preserves
+        // rollback SHAs for still-linked exact keys. Preserve other same-
         // architecture entries.
         // Without a V2 catalog, no scenario key is linked and cache intent
         // fails closed. Running VM SHAs remain independently protected by
@@ -450,23 +447,10 @@ async function loadScenarioCacheIntent(
     catalogRows.map((row) => row.catalog),
   );
   const byKey = new Map<string, DesiredCachedImageV1>();
-  const scenarioIds = new Set(
-    scenarioRows
-      .map((row) => row.scenarioId)
-      .filter(
-        (scenarioId) =>
-          !scenarioId.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX),
-      ),
-  );
+  const scenarioIds = new Set(scenarioRows.map((row) => row.scenarioId));
   const linkedImageKeys = new Set<string>();
   for (const row of rows) {
     if (!validScenarioImageKey(row.imageKey)) continue;
-    if (
-      row.scenarioId.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX) ||
-      row.imageKey.scenario.startsWith(WORKSHOP_IMAGE_SCENARIO_PREFIX)
-    ) {
-      continue;
-    }
     if (row.imageKey.arch !== architecture) continue;
     const identity = imageKeyIdentity(row.imageKey);
     if (linkedScenarioIds.has(row.scenarioId)) {

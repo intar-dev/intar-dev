@@ -437,11 +437,11 @@ mod tests {
     fn workspace_app_domain_requires_canonical_dns_labels() {
         assert!(valid_dns_suffix("intar.app"));
         assert!(valid_dns_suffix("apps2.internal"));
-        assert!(!valid_dns_suffix("Workshop-Apps.intar.app"));
-        assert!(!valid_dns_suffix("workshop-apps..intar.app"));
-        assert!(!valid_dns_suffix("-workshop.intar.app"));
-        assert!(!valid_dns_suffix("workshop.intar.app."));
-        assert!(!valid_dns_suffix("https://workshop.intar.app"));
+        assert!(!valid_dns_suffix("Workspace-Apps.intar.app"));
+        assert!(!valid_dns_suffix("workspace-apps..intar.app"));
+        assert!(!valid_dns_suffix("-workspace.intar.app"));
+        assert!(!valid_dns_suffix("workspace.intar.app."));
+        assert!(!valid_dns_suffix("https://workspace.intar.app"));
     }
 
     #[test]

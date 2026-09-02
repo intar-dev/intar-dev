@@ -97,7 +97,7 @@ describe("build scheduler core", () => {
     expect(
       shouldAcceptBuildReport({
         ...accepted,
-        reportScenarioId: "workshop-cluster",
+        reportScenarioId: "sandbox-cluster",
       }),
     ).toBe(false);
     expect(

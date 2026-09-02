@@ -94,7 +94,6 @@ const MAX_SCENARIO_TRANSCRIPTS_PER_STATEMENT = Math.floor(
 );
 // Transcript objects are independent. A small fixed fan-out avoids unbounded
 // R2 subrequests while leaving headroom below Workers' six-connection limit.
-const MAX_CONCURRENT_TRANSCRIPT_PUTS = 4;
 const timelineTextEncoder = new TextEncoder();
 const timelineTextDecoder = new TextDecoder();
 
@@ -107,7 +106,6 @@ interface TimelineSessionWork {
   session: NormalizedTimelineSession;
   recordingArtifact:
     Awaited<ReturnType<typeof loadArtifactStatesForRunVm>>[number] | null;
-  transcriptR2Key: string | null;
 }
 
 export async function handleAgentRunArtifactRequest(
@@ -735,38 +733,13 @@ async function handleRunTimeline(
       session.entry.castArtifactId === null
         ? null
         : (artifactById.get(session.entry.castArtifactId) ?? null);
-    const transcriptR2Key =
-      runVm.domainKind === "workshop" && runtimeVmId
-        ? buildTerminalTranscriptObjectKey({
-            runId: runVm.runId,
-            runtimeVmId,
-            sessionIndex: session.entry.index,
-          })
-        : null;
-    return { session, recordingArtifact, transcriptR2Key };
+    return { session, recordingArtifact };
   });
 
   const scenarioTimelineJson =
     runVm.domainKind === "scenario"
       ? JSON.stringify(sessions.map((session) => session.entry))
       : null;
-
-  // R2 is not transactional, so make every transcript landing succeed before
-  // publishing its ledger. A retry overwrites the same keys. If D1 later
-  // rejects the atomic publication, these objects remain undiscoverable.
-  await runBounded(
-    timelineWork.filter((work) => work.transcriptR2Key !== null),
-    MAX_CONCURRENT_TRANSCRIPT_PUTS,
-    async (work) => {
-      const transcriptR2Key = work.transcriptR2Key;
-      if (transcriptR2Key === null) return;
-      await env.VM_RUN_ARTIFACTS_BUCKET.put(
-        transcriptR2Key,
-        work.session.transcript,
-        { httpMetadata: { contentType: "text/plain; charset=utf-8" } },
-      );
-    },
-  );
 
   const publication = await publishTimelineAtomically({
     d1: db.$client,
@@ -781,44 +754,6 @@ async function handleRunTimeline(
   }
 
   return jsonResponse({ ok: true });
-}
-
-/**
- * Do not let a rejected `Promise.all()` abandon sibling R2 puts. This worker
- * pool awaits every in-flight operation, stops scheduling after the first
- * failure, and only then rethrows it.
- */
-async function runBounded<T>(
-  values: readonly T[],
-  maxConcurrent: number,
-  operation: (value: T) => Promise<void>,
-): Promise<void> {
-  let next = 0;
-  let failed = false;
-  let failure: unknown;
-  const worker = async (): Promise<void> => {
-    while (!failed) {
-      const index = next;
-      next += 1;
-      if (index >= values.length) return;
-      try {
-        await operation(values[index]!);
-      } catch (error) {
-        failed = true;
-        failure = error;
-        return;
-      }
-    }
-  };
-
-  await Promise.all(
-    Array.from({ length: Math.min(maxConcurrent, values.length) }, () =>
-      worker(),
-    ),
-  );
-  if (failed) {
-    throw failure;
-  }
 }
 
 /**
@@ -1026,7 +961,7 @@ function buildRuntimeTerminalSessionStatements(input: {
         work.recordingArtifact?.storageKind === "runtime"
           ? work.recordingArtifact.id
           : null,
-        work.transcriptR2Key,
+        null,
         input.now,
         input.now,
       ];
@@ -1209,23 +1144,6 @@ function normalizeBoundedIdentifier(value: unknown, maxBytes: number): string {
 
 function isJsonObject(value: unknown): value is object {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function buildTerminalTranscriptObjectKey(input: {
-  runId: string;
-  runtimeVmId: string;
-  sessionIndex: number;
-}): string {
-  return [
-    "runtime-transcripts",
-    sanitizeTranscriptKeySegment(input.runId),
-    sanitizeTranscriptKeySegment(input.runtimeVmId),
-    `${input.sessionIndex}.txt`,
-  ].join("/");
-}
-
-function sanitizeTranscriptKeySegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-");
 }
 
 function normalizeTimelineSessions(

@@ -98,7 +98,7 @@ function probe(
 ): ScenarioProbeRecord {
   return {
     scenarioVmId: "vm-id",
-    scenarioVmName: "workshop",
+    scenarioVmName: "scenario",
     ordinal: 1,
     name: "probe-id",
     description: "Repair the service.",
@@ -115,11 +115,11 @@ function vm(): ScenarioVmRecord {
   return {
     id: "vm-id",
     ordinal: 1,
-    name: "workshop",
+    name: "scenario",
     image: "ubuntu-24.04",
     imageKey: {
       scenario: "raw-scenario-id",
-      vm: "workshop",
+      vm: "scenario",
       arch: "x86_64",
     },
     imageSha256: "HIDDEN_IMAGE_HASH",
