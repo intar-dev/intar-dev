@@ -3,7 +3,7 @@ import { defineConfig } from "drizzle-kit";
 const baseConfig = {
   dialect: "sqlite",
   schema: "./src/db/schema.ts",
-  out: "./migrations",
+  out: process.env.DRIZZLE_MIGRATIONS_OUT?.trim() || "./migrations",
   breakpoints: true,
   migrations: {
     prefix: "index",

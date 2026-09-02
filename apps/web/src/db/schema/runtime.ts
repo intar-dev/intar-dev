@@ -84,17 +84,19 @@ export const runtimeExecutions = sqliteTable(
       table.updatedAt,
     ),
     index("runtime_executions_source_idx").on(table.sourceExecutionId),
+    // Keep the old database checks until Drizzle can rebuild this shared table
+    // on D1 without cascading deletes. Application types remain scenario-only.
     check(
       "runtime_executions_domain_kind_valid",
-      sql`${table.domainKind} = 'scenario'`,
+      sql`${table.domainKind} in ('scenario', 'workshop', 'workshop_certification')`,
     ),
     check(
       "runtime_executions_provider_kind_valid",
-      sql`${table.providerKind} = 'agent_kvm'`,
+      sql`${table.providerKind} in ('agent_kvm', 'hetzner_cloud', 'gcp_compute')`,
     ),
     check(
       "runtime_executions_provider_identity_valid",
-      sql`${table.providerConnectionId} is null`,
+      sql`(${table.providerKind} = 'agent_kvm' AND ${table.providerConnectionId} is null) OR (${table.providerKind} in ('hetzner_cloud', 'gcp_compute') AND ${table.domainKind} in ('workshop', 'workshop_certification') AND ${table.providerConnectionId} is not null AND ${table.hostId} is null)`,
     ),
     check(
       "runtime_executions_generation_positive",

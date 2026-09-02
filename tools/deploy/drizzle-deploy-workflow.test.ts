@@ -44,6 +44,9 @@ describe("automatic web deployment workflow", () => {
 
   it("uses maintenance only when a generated D1 migration is pending", () => {
     const plan = deployWorkflow.indexOf("Plan production D1 migrations");
+    const rehearsal = deployWorkflow.indexOf(
+      "Rehearse migrations on disposable D1",
+    );
     const preMigrationEvidence = deployWorkflow.indexOf(
       "Capture pre-migration D1 evidence",
     );
@@ -52,15 +55,20 @@ describe("automatic web deployment workflow", () => {
     );
     const drain = deployWorkflow.indexOf("Drain and recheck maintenance");
     const migrate = deployWorkflow.indexOf("Apply pending D1 migrations");
+    const purge = deployWorkflow.indexOf("Remove retired runtime domains");
     const verify = deployWorkflow.indexOf("Verify production D1 schema");
     const deploy = deployWorkflow.indexOf("Deploy production at 100 percent");
 
     expect(plan).toBeGreaterThan(-1);
     expect(preMigrationEvidence).toBeGreaterThan(plan);
+    expect(rehearsal).toBeGreaterThan(plan);
+    expect(preMigrationEvidence).toBeGreaterThan(rehearsal);
     expect(maintenance).toBeGreaterThan(plan);
     expect(maintenance).toBeGreaterThan(preMigrationEvidence);
     expect(drain).toBeGreaterThan(maintenance);
     expect(migrate).toBeGreaterThan(drain);
+    expect(purge).toBeGreaterThan(migrate);
+    expect(verify).toBeGreaterThan(purge);
     expect(verify).toBeGreaterThan(migrate);
     expect(deploy).toBeGreaterThan(verify);
     expect(deployWorkflow).toContain("--expect observed-ledger-prefix");
@@ -69,6 +77,17 @@ describe("automatic web deployment workflow", () => {
     );
     expect(deployWorkflow).toContain("sleep 30");
     expect(deployWorkflow).toContain("bun run db:migrate:production");
+    expect(deployWorkflow).toContain(
+      "bun tools/database/rehearse-removal-migration.ts",
+    );
+    expect(deployWorkflow).toContain("d1-removal-rehearsal.json");
+    expect(deployWorkflow).toContain(
+      "steps.migrations.outputs.applied == '13' && steps.migrations.outputs.committed == '14'",
+    );
+    expect(deployWorkflow).toContain(
+      "bun tools/database/purge-removed-runtime-domains.ts",
+    );
+    expect(deployWorkflow).toContain("removed-runtime-domains.json");
     expect(deployWorkflow).toContain("--expect full");
     expect(deployWorkflow).not.toContain("wrangler d1 migrations");
   });

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "79ee8b28-490a-4725-8b0f-33a3077424b2",
+  "id": "e6abdf52-4aa0-456c-b8d0-d361873deb87",
   "prevId": "19648446-772f-47ff-a766-6ff30bd0f98c",
   "tables": {
     "access_allowlist": {
@@ -4100,15 +4100,15 @@
       "checkConstraints": {
         "runtime_executions_domain_kind_valid": {
           "name": "runtime_executions_domain_kind_valid",
-          "value": "\"runtime_executions\".\"domain_kind\" = 'scenario'"
+          "value": "\"runtime_executions\".\"domain_kind\" in ('scenario', 'workshop', 'workshop_certification')"
         },
         "runtime_executions_provider_kind_valid": {
           "name": "runtime_executions_provider_kind_valid",
-          "value": "\"runtime_executions\".\"provider_kind\" = 'agent_kvm'"
+          "value": "\"runtime_executions\".\"provider_kind\" in ('agent_kvm', 'hetzner_cloud', 'gcp_compute')"
         },
         "runtime_executions_provider_identity_valid": {
           "name": "runtime_executions_provider_identity_valid",
-          "value": "\"runtime_executions\".\"provider_connection_id\" is null"
+          "value": "(\"runtime_executions\".\"provider_kind\" = 'agent_kvm' AND \"runtime_executions\".\"provider_connection_id\" is null) OR (\"runtime_executions\".\"provider_kind\" in ('hetzner_cloud', 'gcp_compute') AND \"runtime_executions\".\"domain_kind\" in ('workshop', 'workshop_certification') AND \"runtime_executions\".\"provider_connection_id\" is not null AND \"runtime_executions\".\"host_id\" is null)"
         },
         "runtime_executions_generation_positive": {
           "name": "runtime_executions_generation_positive",

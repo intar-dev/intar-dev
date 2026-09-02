@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { pruneDrizzleSnapshots } from "./prune-drizzle-snapshots";
+import { rehearsalSeedStatements } from "./rehearse-removal-migration";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const webRoot = join(repositoryRoot, "apps/web");
@@ -110,6 +111,65 @@ describe("Drizzle-generated D1 migrations", () => {
         database
           .query(
             "SELECT count(*) AS count FROM sqlite_schema WHERE type = 'trigger'",
+          )
+          .get(),
+      ).toEqual({ count: 0 });
+    } finally {
+      database.close(false);
+    }
+  });
+
+  test("removes linked provider data without changing scenario runtime data", () => {
+    const database = new Database(":memory:", { strict: true });
+    try {
+      database.exec("PRAGMA foreign_keys = ON");
+      const journal = readJson<DrizzleJournal>(
+        join(metadataRoot, "_journal.json"),
+      );
+      const removal = journal.entries.at(-1);
+      if (!removal || removal.idx !== 13) {
+        throw new Error("expected removal migration at index 13");
+      }
+      database.transaction(() => {
+        for (const entry of journal.entries.slice(0, -1)) {
+          applyMigration(database, entry.tag);
+        }
+      })();
+
+      for (const statement of rehearsalSeedStatements()) {
+        database.exec(statement.sql);
+      }
+
+      database.transaction(() => applyMigration(database, removal.tag))();
+
+      expect(
+        database
+          .query(
+            "SELECT id FROM runtime_executions WHERE domain_kind = 'scenario'",
+          )
+          .all(),
+      ).toEqual([{ id: "execution-1" }]);
+      expect(
+        database
+          .query(
+            "SELECT vm.id FROM runtime_vms vm JOIN runtime_executions execution ON execution.id = vm.execution_id WHERE execution.domain_kind = 'scenario'",
+          )
+          .all(),
+      ).toEqual([{ id: "runtime-vm-1" }]);
+      expect(
+        database
+          .query(
+            "SELECT artifact.id FROM runtime_artifacts artifact JOIN runtime_executions execution ON execution.id = artifact.execution_id WHERE execution.domain_kind = 'scenario'",
+          )
+          .all(),
+      ).toEqual([{ id: "artifact-1" }]);
+      expect(
+        database.query("PRAGMA foreign_key_check").all(),
+      ).toEqual([]);
+      expect(
+        database
+          .query(
+            "SELECT count(*) AS count FROM sqlite_schema WHERE type = 'table' AND (name LIKE 'workshop_%' OR name LIKE 'provider_%' OR name IN ('gcp_connection_details', 'hetzner_connection_details'))",
           )
           .get(),
       ).toEqual({ count: 0 });

@@ -153,6 +153,16 @@ jobs:
             "${applied}" "${committed}" "${pending}" \
             >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Rehearse migrations on disposable D1
+        if: steps.migrations.outputs.pending == 'true' && steps.migrations.outputs.applied == '13' && steps.migrations.outputs.committed == '14'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          bun tools/database/rehearse-removal-migration.ts \
+            --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
+
       - name: Capture pre-migration D1 evidence
         if: steps.migrations.outputs.pending == 'true'
         working-directory: ${{ github.workspace }}
@@ -315,6 +325,16 @@ jobs:
           bun run db:migrate:production 2>&1 | \
             tee "${RUNNER_TEMP}/production-d1-migrate.log"
 
+      - name: Remove retired runtime domains
+        if: steps.migrations.outputs.pending == 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
+          RUNTIME_PURGE_EVIDENCE: ${{ runner.temp }}/removed-runtime-domains.json
+        run: bun tools/database/purge-removed-runtime-domains.ts
+
       - name: Verify production D1 schema
         working-directory: ${{ github.workspace }}
         env:
@@ -362,12 +382,14 @@ jobs:
           name: website-production-${{ github.sha }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/production-d1-plan.json
+            ${{ runner.temp }}/d1-removal-rehearsal.json
             ${{ runner.temp }}/production-d1-info.json
             ${{ runner.temp }}/production-d1-bookmark.json
             ${{ runner.temp }}/pre-migration-run-drain-audit.json
             ${{ runner.temp }}/pre-migration-assignment-counts.json
             ${{ runner.temp }}/pre-migration-enabled-scenarios.json
             ${{ runner.temp }}/production-d1-migrate.log
+            ${{ runner.temp }}/removed-runtime-domains.json
             ${{ runner.temp }}/production-d1-verified.json
             ${{ runner.temp }}/maintenance-after-drain-deployment.json
             ${{ runner.temp }}/maintenance-after-drain.json
