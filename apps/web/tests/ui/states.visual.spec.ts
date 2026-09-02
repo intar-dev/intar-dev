@@ -41,17 +41,9 @@ async function expectStandardRunShell(
   page: Parameters<typeof expectRouteScreenshot>[0],
 ) {
   await expect(page.locator("[data-run-page]")).toHaveCount(0);
-  await expect(page.locator("[data-run-back]")).toHaveCount(0);
-  await expect(page.locator("[data-slot='sidebar-trigger']")).toBeVisible();
-}
-
-async function collapseDesktopSidebar(
-  page: Parameters<typeof expectRouteScreenshot>[0],
-) {
-  const sidebar = page.locator("[data-slot='sidebar']").first();
-  await expect(sidebar).toHaveAttribute("data-state", "expanded");
-  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
-  await expect(sidebar).toHaveAttribute("data-state", "collapsed");
+  await expect(page.locator("[data-course-run-page]")).toBeVisible();
+  await expect(page.locator("[data-run-back]")).toBeVisible();
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
 }
 
 async function expectDesktopMissionPane(
@@ -83,6 +75,39 @@ async function openMobileMissionAndHints(
 test.describe("focused visual states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
+  test("course detail · desktop", async ({ page, ui }) => {
+    await ui.open({
+      path: "/courses/operations",
+      sessionRole: "learner",
+      theme: "light",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Course lectures" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "course-detail-light-desktop");
+  });
+
+  test("course detail · mobile", async ({ page, ui }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await ui.open({
+      path: "/courses/operations",
+      sessionRole: "learner",
+      theme: "light",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Course lectures" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "course-detail-light-mobile");
+  });
+
+  test("course filters · mobile disclosure", async ({ page, ui }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+    await page.locator("summary").filter({ hasText: "Filters" }).click();
+    await expect(page.getByRole("button", { name: "Easy" })).toBeVisible();
+    await expectRouteScreenshot(page, "course-filters-open-light-mobile");
+  });
+
   test("lecture · completed scenario actions", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("lecture"),
@@ -96,14 +121,58 @@ test.describe("focused visual states", () => {
 
     await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
     await expect(
-      page.getByRole("link", { name: /^Next lecture:/ }),
+      page.getByRole("link", { name: "Next lecture" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Run scenario again" }),
+      page.getByRole("button", { name: "Run again" }),
     ).toBeVisible();
     await expectRouteScreenshot(
       page,
       "lecture-completed-scenario-actions-light-desktop",
+    );
+  });
+
+  test("lecture · completed scenario actions · mobile", async ({ page, ui }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await ui.open({
+      ...routeCase("lecture"),
+      theme: "light",
+      runState: "archived",
+    });
+    const lecture = ui.server.state.courseCatalog[0]!.lectures[1]!;
+    lecture.scenarioReady = true;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(page.getByRole("link", { name: "Next lecture" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expectRouteScreenshot(
+      page,
+      "lecture-completed-scenario-actions-light-mobile",
+    );
+  });
+
+  test("lecture · long next action at tablet width", async ({ page, ui }) => {
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await ui.open({
+      ...routeCase("lecture"),
+      theme: "light",
+      runState: "archived",
+    });
+    const course = ui.server.state.courseCatalog[0]!;
+    course.lectures[1]!.scenarioReady = true;
+    course.lectures[1]!.category =
+      "platform-observability-with-a-deliberately-long-category-name";
+    course.lectures[2]!.title =
+      "Trace an intermittent DNS failure across a deliberately long production service boundary";
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(page.getByRole("link", { name: "Next lecture" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expectRouteScreenshot(
+      page,
+      "lecture-completed-long-next-light-tablet",
     );
   });
 
@@ -608,10 +677,10 @@ test.describe("focused mobile workspace", () => {
   });
 });
 
-test.describe("wide short saved recaps", () => {
+test.describe("wide short course recaps", () => {
   test.use({ viewport: { width: 2048, height: 690 } });
 
-  test("ended early with collapsed navigation", async ({ page, ui }) => {
+  test("ended early", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
@@ -624,64 +693,60 @@ test.describe("wide short saved recaps", () => {
     await ui.settle();
 
     await expectStandardRunShell(page);
-    await collapseDesktopSidebar(page);
     await expect(
       page.getByRole("heading", { name: "Ended early", exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(
       page,
-      "run-ended-early-recap-dark-wide-short-collapsed",
+      "run-ended-early-recap-dark-wide-short",
     );
   });
 
-  test("failed with collapsed navigation", async ({ page, ui }) => {
+  test("failed", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "failed",
     });
     await expectStandardRunShell(page);
-    await collapseDesktopSidebar(page);
     await expect(
       page.getByRole("heading", { name: "Could not finish", exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(
       page,
-      "run-failed-recap-dark-wide-short-collapsed",
+      "run-failed-recap-dark-wide-short",
     );
   });
 
-  test("settled with collapsed navigation", async ({ page, ui }) => {
+  test("settled", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "archived",
     });
     await expectStandardRunShell(page);
-    await collapseDesktopSidebar(page);
     await expect(
       page.getByRole("heading", { name: "Solved", exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(
       page,
-      "run-settled-recap-dark-wide-short-collapsed",
+      "run-settled-recap-dark-wide-short",
     );
   });
 
-  test("saving with collapsed navigation", async ({ page, ui }) => {
+  test("saving", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "ending",
     });
     await expectStandardRunShell(page);
-    await collapseDesktopSidebar(page);
     await expect(
       page.getByRole("heading", { name: "Saving your run…", exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(
       page,
-      "run-saving-recap-dark-wide-short-collapsed",
+      "run-saving-recap-dark-wide-short",
     );
   });
 });

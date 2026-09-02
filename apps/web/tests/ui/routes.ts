@@ -85,6 +85,8 @@ const byId = new Map<string, RouteCase>(
 );
 
 export const DENSE_ROUTE_CASES = [
+  "course-catalog",
+  "lecture",
   "run-workspace",
   "organization-detail",
   "admin-overview",

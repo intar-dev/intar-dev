@@ -113,6 +113,35 @@ async function expectStandardRunChrome(
     hasDeleteAction?: boolean;
   } = {},
 ) {
+  const courseFrame = page.locator("[data-course-run-page]");
+  if ((await courseFrame.count()) === 1) {
+    const header = page.locator("[data-run-workspace-header]");
+    await expect(page.locator("[data-slot='sidebar-wrapper']")).toHaveCount(1);
+    await expect(page.locator("[data-slot='sidebar-inset']")).toHaveCount(1);
+    await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+    await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+    await expect(
+      page.getByRole("navigation", { name: "Breadcrumb" }),
+    ).toHaveCount(0);
+    await expect(header).toHaveCount(1);
+    await expect(
+      header.getByRole("heading", { level: 1, name: title }),
+    ).toBeVisible();
+    await expect(page.locator("[data-run-page]")).toHaveCount(0);
+    await expect(page.locator("[data-run-navigation]")).toHaveCount(1);
+    await expect(page.locator("[data-run-back]")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Page actions" })).toHaveCount(
+      0,
+    );
+    if (options.status) await expect(header).toContainText(options.status);
+    const deleteRun = header.getByRole("button", {
+      name: "Delete run…",
+      exact: true,
+    });
+    await expect(deleteRun).toHaveCount(0);
+    return;
+  }
+
   const appBar = page.locator("header").filter({
     has: page.getByRole("heading", { level: 1, name: title, exact: true }),
   });
@@ -1101,14 +1130,14 @@ test.describe("focused state accessibility", () => {
       title: "Solved",
       replay: "Replay unavailable.",
       status: "Solved",
-      hasDeleteAction: true,
+      hasDeleteAction: false,
     },
     {
       runState: "replay",
       title: "Solved",
       replay: "Watch replay",
       status: "Solved",
-      hasDeleteAction: true,
+      hasDeleteAction: false,
     },
   ] as const) {
     test(`saved run recap · ${recap.runState}`, async ({
@@ -1185,20 +1214,9 @@ test.describe("focused state accessibility", () => {
       }
 
       if (recap.runState === "replay") {
-        const deleteRun = page.getByRole("button", { name: /^Delete run/ });
-        await expect(deleteRun).toBeVisible();
-        await expectFinePointerControlHeight(
-          deleteRun,
-          FINE_POINTER_COMPACT_CONTROL_HEIGHT,
-          "Delete run app bar action",
-        );
-        await deleteRun.click();
-        const deleteRunDialog = page.getByRole("dialog", {
-          name: "Delete this run?",
-        });
-        await expect(deleteRunDialog).toBeVisible();
-        await deleteRunDialog.getByRole("button", { name: "Keep run" }).click();
-        await expect(deleteRunDialog).toBeHidden();
+        await expect(
+          page.getByRole("button", { name: /^Delete run/ }),
+        ).toHaveCount(0);
       }
 
       await expectNoHorizontalOverflow(page);
@@ -1221,7 +1239,7 @@ test.describe("focused state accessibility", () => {
 
     await expectStandardRunChrome(page, "Repair a broken nginx service", {
       status: "Solved",
-      hasDeleteAction: true,
+      hasDeleteAction: false,
     });
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
@@ -1282,7 +1300,7 @@ test.describe("focused state accessibility", () => {
 
     await expectStandardRunChrome(page, "Repair a broken nginx service", {
       status: "Ended early",
-      hasDeleteAction: true,
+      hasDeleteAction: false,
     });
     await expect(
       page.getByRole("heading", { name: "Ended early", exact: true }),
@@ -2146,12 +2164,11 @@ test.describe("small-screen access management", () => {
 
     await expectStandardRunChrome(page, "Repair a broken nginx service", {
       status: "Solved",
-      hasDeleteAction: true,
+      hasDeleteAction: false,
     });
-    await expectCoarsePointerTarget(
+    await expect(
       page.getByRole("button", { name: "Delete run…", exact: true }),
-      "320px Delete run action",
-    );
+    ).toHaveCount(0);
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
     await carousel.scrollIntoViewIfNeeded();

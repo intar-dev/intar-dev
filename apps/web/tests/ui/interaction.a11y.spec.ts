@@ -52,18 +52,20 @@ async function expectForegroundRunWorkspaceShell(page: Page) {
   ).toHaveCount(0);
 }
 
-async function expectSavedRunAppShell(page: Page) {
+async function expectSavedCourseRunFrame(page: Page) {
   const appBar = page.locator("header").filter({
     has: page.locator("[data-slot='sidebar-trigger']"),
   });
 
   await expect(page.locator("[data-run-page]")).toHaveCount(0);
-  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(0);
-  await expect(page.locator("[data-run-navigation]")).toHaveCount(0);
-  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
-  await expect(appBar).toHaveCount(1);
+  await expect(page.locator("[data-course-run-page]")).toHaveCount(1);
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(1);
+  await expect(page.locator("[data-run-navigation]")).toHaveCount(1);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+  await expect(appBar).toHaveCount(0);
   await expect(
-    appBar.getByRole("heading", {
+    page.getByRole("heading", {
       level: 1,
       name: "Repair a broken nginx service",
     }),
@@ -72,9 +74,6 @@ async function expectSavedRunAppShell(page: Page) {
     page.getByRole("button", { name: "Page actions" }),
   ).toHaveCount(0);
 
-  if ((page.viewportSize()?.width ?? 0) >= 1024) {
-    await expect(page.locator("[data-slot='sidebar']")).toHaveCount(1);
-  }
 }
 
 test("keyboard-only landing navigation keeps focus visible", async ({
@@ -338,24 +337,60 @@ test("a theory-only lecture completes and exposes the next unit", async ({
   await page.getByRole("button", { name: "Complete lecture" }).click();
 
   await expect(
-    page.getByRole("link", { name: /Next lecture: Repair a broken nginx service/i }),
+    page.getByText("Repair a broken nginx service", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Next lecture" })).toBeVisible();
   expect(ui.server.requests).toContain(
     `POST /api/courses/${course.courseId}/lectures/${theory.lectureId}/complete`,
   );
 });
 
-test("course capacity reports pool use without promising a launch", async ({
+test("course browsing keeps infrastructure load out of the learner view", async ({
   page,
   ui,
 }) => {
   ui.server.state.capacityPressure = 68;
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
 
-  await expect(page.getByRole("status")).toContainText("68% pool use");
+  await expect(page.getByText("68% pool use", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Scenario capacity", { exact: true })).toHaveCount(0);
+});
+
+test("course filters stay compact until the learner needs them", async ({
+  page,
+  ui,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+
+  const filterSummary = page.locator("summary").filter({ hasText: "Filters" });
+  await expect(filterSummary).toBeVisible();
+  await expect(page.getByRole("button", { name: "Easy" })).toBeHidden();
+  await filterSummary.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Easy" })).toBeVisible();
+  await page.getByLabel("Filter lectures by category").click();
+  await page.getByRole("option", { name: "Linux services" }).click();
+  await expect(filterSummary).toContainText("Filters · 1");
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("category"))
+    .toBe("Linux services");
   await expect(
-    page.getByRole("progressbar", { name: "Scenario capacity used" }),
-  ).toHaveAttribute("aria-valuenow", "68");
+    page.getByRole("link", { name: /Systems concepts/i }),
+  ).toHaveCount(0);
+  await page.getByLabel("Filter lectures by tags").click();
+  await page
+    .getByRole("menuitemcheckbox", { name: "operations" })
+    .click();
+  await expect(filterSummary).toContainText("Filters · 2");
+  await expect
+    .poll(() =>
+      JSON.parse(
+        new URL(page.url()).searchParams.get("tags") ?? "[]",
+      ) as string[],
+    )
+    .toContain("operations");
+  await expectNoHorizontalOverflow(page);
 });
 
 test("organization assignments point to the required lecture", async ({
@@ -482,7 +517,7 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     theme: "dark",
     runState: "ending",
   });
-  await expectSavedRunAppShell(page);
+  await expectSavedCourseRunFrame(page);
   const savingSteps = page.getByRole("list", { name: "Saving steps" });
   await expect(savingSteps).toBeVisible();
   await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
@@ -506,17 +541,17 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
   ).toBe(true);
 });
 
-test("archived run uses the normal app shell", async ({ page, ui }) => {
+test("archived course run stays in the learner frame", async ({ page, ui }) => {
   await ui.open({
     ...routeCase("run-workspace"),
     theme: "dark",
     runState: "archived",
   });
 
-  await expectSavedRunAppShell(page);
+  await expectSavedCourseRunFrame(page);
   await expect(
     page.getByRole("button", { name: "Delete run…" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });
 
 test.describe("wide operational density", () => {
@@ -570,13 +605,14 @@ test.describe("lecture reading flow", () => {
     await courseAction.click();
 
     const theory = page.getByRole("heading", { name: "Service recovery" });
-    const rerun = page.getByRole("button", { name: "Run scenario again" });
+    const rerun = page.getByRole("button", { name: "Run again" });
     await expect(theory).toBeVisible();
     await expect(rerun).toBeVisible();
     await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
-    const nextLecture = page.getByRole("link", {
-      name: /Next lecture: Trace an intermittent DNS failure/i,
-    });
+    await expect(
+      page.getByText("Trace an intermittent DNS failure", { exact: true }),
+    ).toBeVisible();
+    const nextLecture = page.getByRole("link", { name: "Next lecture" });
     await expect(nextLecture).toBeVisible();
     await expect(nextLecture).toHaveClass(/bg-primary/);
     await expect(rerun).toHaveClass(/border-border/);
@@ -584,7 +620,7 @@ test.describe("lecture reading flow", () => {
       .getByRole("region", { name: "Scenario complete" })
       .textContent();
     expect(completedActionText?.indexOf("Next lecture")).toBeLessThan(
-      completedActionText?.indexOf("Run scenario again") ?? -1,
+      completedActionText?.indexOf("Run again") ?? -1,
     );
     const theoryBox = await theory.boundingBox();
     const rerunBox = await rerun.boundingBox();
@@ -628,10 +664,64 @@ test.describe("lecture reading flow", () => {
     const resume = page.getByRole("button", { name: "Resume scenario" });
     await expect(resume).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Run scenario again" }),
+      page.getByRole("button", { name: "Run again" }),
     ).toHaveCount(0);
     await resume.click();
     await expect(page).toHaveURL("/runs/run-active");
+  });
+
+  test("long next lecture titles stay outside stable action labels", async ({
+    page,
+    ui,
+  }) => {
+    await page.setViewportSize({ width: 768, height: 1024 });
+    ui.configure({ sessionRole: "learner", runState: "archived" });
+    const course = ui.server.state.courseCatalog[0]!;
+    const lecture = course.lectures[1]!;
+    const next = course.lectures[2]!;
+    const longTitle =
+      "Trace an intermittent DNS failure across a deliberately long production service boundary";
+    lecture.scenarioReady = true;
+    lecture.category =
+      "platform-observability-with-a-deliberately-long-category-name";
+    next.title = longTitle;
+
+    await page.goto(
+      `/courses/${course.courseId}/lectures/${lecture.lectureId}`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await ui.settle();
+
+    const nextAction = page.getByRole("link", { name: "Next lecture" });
+    await expect(page.getByText(longTitle, { exact: true })).toBeVisible();
+    await expect(nextAction).toBeVisible();
+    await expect(nextAction).not.toContainText(longTitle);
+    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expect(
+      page.locator('[data-page-width="content"]'),
+    ).toHaveAttribute("data-page-align", "start");
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("the final lecture gives a clear course exit", async ({ page, ui }) => {
+    ui.configure({ sessionRole: "learner", runState: "archived" });
+    const course = ui.server.state.courseCatalog[0]!;
+    const lecture = course.lectures.at(-1)!;
+    lecture.state = "completed";
+    lecture.scenarioReady = true;
+    lecture.activeRunId = null;
+
+    await page.goto(
+      `/courses/${course.courseId}/lectures/${lecture.lectureId}`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await ui.settle();
+
+    await expect(page.getByText("Course complete", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Back to course" }),
+    ).toHaveAttribute("href", `/courses/${course.courseId}`);
+    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
   });
 
   test("a completed lecture explains when rerun is preparing", async ({
@@ -657,7 +747,7 @@ test.describe("lecture reading flow", () => {
       }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Run scenario again" }),
+      page.getByRole("button", { name: "Run again" }),
     ).toHaveCount(0);
   });
 
@@ -797,7 +887,7 @@ test.describe("coarse pointer and mobile overflow", () => {
     ui.server.state.run = makeMultiReplayRun();
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
-    await expectSavedRunAppShell(page);
+    await expectSavedCourseRunFrame(page);
 
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
@@ -909,7 +999,7 @@ test("replay carousel remains ordered at 200% text", async ({ page, ui }) => {
   ui.server.state.run = makeMultiReplayRun();
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
-  await expectSavedRunAppShell(page);
+  await expectSavedCourseRunFrame(page);
   await page.evaluate(() => {
     document.documentElement.style.fontSize = "200%";
   });

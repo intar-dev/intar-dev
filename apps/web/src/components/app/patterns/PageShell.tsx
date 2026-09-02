@@ -3,11 +3,13 @@ import { cn } from "@/lib/utils";
 
 export type PageShellWidth = "narrow" | "content" | "default" | "workspace";
 export type Density = "comfortable" | "compact";
+export type PageShellAlignment = "center" | "start";
 
 interface PageShellProps {
   children: ReactNode;
   width?: PageShellWidth;
   density?: Density;
+  align?: PageShellAlignment;
 }
 
 // Pure layout container for page content. Page chrome (title, status,
@@ -17,13 +19,16 @@ export function PageShell({
   children,
   width = "default",
   density = "comfortable",
+  align = "center",
 }: PageShellProps) {
   return (
     <div
       data-density={density}
+      data-page-align={align}
       data-page-width={width}
       className={cn(
-        "mx-auto flex w-full flex-1 flex-col",
+        "flex w-full flex-1 flex-col",
+        align === "center" ? "mx-auto" : "mr-auto",
         density === "comfortable"
           ? "gap-(--space-xl)"
           : "gap-(--space-md)",

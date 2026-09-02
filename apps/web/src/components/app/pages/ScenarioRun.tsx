@@ -32,6 +32,7 @@ import {
   type CourseCatalogResponse,
   type CourseRouteRef,
 } from "@/components/app/pages/learn/course-wire";
+import { CourseLink } from "@/components/app/pages/learn/course-links";
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import {
@@ -635,6 +636,8 @@ export function ScenarioRun() {
   ]);
 
   const runIsLive = attemptData?.activity === "foreground";
+  const runCourseRoute = courseRouteForRun(attemptData?.courseLocation);
+  const runUsesCourseFrame = Boolean(runCourseRoute);
   const deleteRunAction = useMemo(
     () =>
       canDeleteRun ? (
@@ -653,7 +656,7 @@ export function ScenarioRun() {
     title: attemptData?.title ?? "Scenario run",
     status: runIsLive ? undefined : runStatusDisplay,
     action: runIsLive ? undefined : deleteRunAction,
-    fullscreen: runIsLive,
+    fullscreen: runIsLive || runUsesCourseFrame,
   });
 
   const runActions =
@@ -831,8 +834,11 @@ export function ScenarioRun() {
   }
 
   if (attemptData.activity !== "foreground") {
-    return (
-      <PageShell width="content">
+    const recap = (
+      <PageShell
+        width="content"
+        align={attemptData.activity === "settled" ? "start" : "center"}
+      >
         {runDialogs}
         {errorAlerts}
         <Suspense
@@ -853,6 +859,18 @@ export function ScenarioRun() {
           />
         </Suspense>
       </PageShell>
+    );
+    return runCourseRoute && attemptData.courseLocation ? (
+      <CourseRunPageFrame
+        title={attemptData.title}
+        status={runStatusDisplay}
+        courseTitle={attemptData.courseLocation.courseTitle}
+        route={runCourseRoute}
+      >
+        {recap}
+      </CourseRunPageFrame>
+    ) : (
+      recap
     );
   }
 
@@ -977,6 +995,52 @@ function RunPageFrame({ children }: { children: ReactNode }) {
       data-run-page
       className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
     >
+      {children}
+    </div>
+  );
+}
+
+function CourseRunPageFrame({
+  title,
+  status,
+  courseTitle,
+  route,
+  children,
+}: {
+  title: string;
+  status?: ReactNode;
+  courseTitle: string;
+  route: CourseRouteRef;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      data-course-run-page
+      className="flex min-h-[100dvh] min-w-0 flex-col bg-background"
+    >
+      <header
+        className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2"
+        data-run-navigation
+        data-run-workspace-header
+      >
+        <span className="min-w-0" data-run-back>
+          <CourseLink
+            route={route}
+            className={buttonVariants({
+              variant: "ghost",
+              className:
+                "-ml-2 max-w-[min(16rem,45vw)] [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
+            })}
+          >
+            <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
+            <span className="truncate">{courseTitle}</span>
+          </CourseLink>
+        </span>
+        <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-section-title">
+          {title}
+        </h1>
+        {status ? <div className="min-w-0">{status}</div> : null}
+      </header>
       {children}
     </div>
   );

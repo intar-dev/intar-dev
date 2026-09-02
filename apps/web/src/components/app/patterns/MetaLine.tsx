@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
@@ -30,12 +30,13 @@ export function MetaLine({ items, className }: MetaLineProps) {
       )}
     >
       {visible.map((item, index) => (
-        <Fragment key={index}>
+        <span
+          key={index}
+          className="inline-flex min-w-0 items-start gap-1.5"
+        >
           {index > 0 ? <span aria-hidden="true">·</span> : null}
-          <span className="inline-flex min-w-0 items-center gap-1.5">
-            {item}
-          </span>
-        </Fragment>
+          <span className="min-w-0 [overflow-wrap:anywhere]">{item}</span>
+        </span>
       ))}
     </p>
   );

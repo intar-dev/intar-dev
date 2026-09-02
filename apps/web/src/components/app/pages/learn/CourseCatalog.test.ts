@@ -53,6 +53,38 @@ describe("course lecture filters", () => {
       }).map((lecture) => lecture.lectureId),
     ).toEqual(["02-dns"]);
   });
+
+  it("uses lecture filters to remove courses with no matching lecture", () => {
+    const concepts: CourseCatalogCourse = {
+      ...course,
+      courseId: "concepts",
+      title: "Systems concepts",
+      lectures: [
+        lecture("01-models", "Build a system model", {
+          category: "theory",
+          tags: ["models"],
+        }),
+      ],
+    };
+
+    expect(
+      filterCourses([course, concepts], {
+        q: "",
+        difficulty: undefined,
+        category: "services",
+        tags: [],
+      }),
+    ).toEqual([course]);
+
+    expect(
+      filterCourses([course, concepts], {
+        q: "Linux operations",
+        difficulty: undefined,
+        category: "theory",
+        tags: [],
+      }),
+    ).toEqual([]);
+  });
 });
 
 function lecture(

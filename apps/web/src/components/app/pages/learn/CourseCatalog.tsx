@@ -5,7 +5,8 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  Gauge,
+  ChevronDown,
+  ListFilter,
   LockKeyhole,
   Users,
 } from "lucide-react";
@@ -21,7 +22,7 @@ import { ErrorState, EmptyState } from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -231,6 +232,8 @@ function CourseCatalogPage({
     <CourseFilters
       search={searchText}
       onSearchChange={setSearchText}
+      searchLabel={courseId ? "Search lectures" : "Search courses and lectures"}
+      searchPlaceholder={courseId ? "Search lectures…" : "Search courses and lectures…"}
       searchState={searchState}
       categories={allCategories}
       tags={allTags}
@@ -246,7 +249,7 @@ function CourseCatalogPage({
   }
   if (catalog.error) {
     return (
-      <PageShell width="content">
+      <PageShell width="content" align="start">
         <ErrorState
           title="Could not load courses"
           description={
@@ -261,7 +264,7 @@ function CourseCatalogPage({
   }
   if (courseId && !course) {
     return (
-      <PageShell width="content">
+      <PageShell width="content" align="start">
         <ErrorState
           title="Course not available"
           description="This course is not available in the current catalog."
@@ -278,7 +281,6 @@ function CourseCatalogPage({
         filters={filters}
         filtersActive={filtersActive}
         onClearFilters={clearFilters}
-        capacityPressure={catalog.data?.capacityPressure ?? null}
       />
     );
   }
@@ -289,7 +291,6 @@ function CourseCatalogPage({
       filters={filters}
       filtersActive={filtersActive}
       onClearFilters={clearFilters}
-      capacityPressure={catalog.data?.capacityPressure ?? null}
       assignments={assignments.data?.assignments ?? []}
       search={compactCatalogSearch({
         ...searchState,
@@ -305,7 +306,6 @@ function CourseIndex({
   filters,
   filtersActive,
   onClearFilters,
-  capacityPressure,
   assignments,
   search,
 }: {
@@ -314,17 +314,16 @@ function CourseIndex({
   filters: ReactNode;
   filtersActive: boolean;
   onClearFilters: () => void;
-  capacityPressure: number | null;
   assignments: MyAssignmentsResponse["assignments"];
   search: ReturnType<typeof compactCatalogSearch>;
 }) {
   return (
-    <PageShell width="content">
+    <PageShell width="content" align="start">
       <ContentHeader
         title="Courses"
+        titleClassName="max-sm:sr-only"
         summary="Learn the idea first, then apply it in a scenario."
       />
-      {capacityPressure !== null ? <CourseCapacityPressure pressure={capacityPressure} /> : null}
       {assignments.length ? <CourseAssignments assignments={assignments} /> : null}
       {filters}
       {courses.length ? (
@@ -423,7 +422,6 @@ function CourseDetail({
   filters,
   filtersActive,
   onClearFilters,
-  capacityPressure,
 }: {
   course: CourseCatalogCourse;
   lectures: readonly CourseLectureSummary[];
@@ -431,7 +429,6 @@ function CourseDetail({
   filters: ReactNode;
   filtersActive: boolean;
   onClearFilters: () => void;
-  capacityPressure: number | null;
 }) {
   const route = courseRouteForCatalogCourse(course, organizationId);
   const complete = course.lectures.filter(
@@ -439,11 +436,12 @@ function CourseDetail({
   ).length;
 
   return (
-    <PageShell width="content">
+    <PageShell width="content" align="start">
       <div className="space-y-4">
         <CourseIndexBackLink organizationId={organizationId} />
         <ContentHeader
           title={course.title}
+          titleClassName="max-sm:sr-only"
           summary={course.summary}
           meta={
             <MetaLine
@@ -455,7 +453,6 @@ function CourseDetail({
           }
         />
       </div>
-      {capacityPressure !== null ? <CourseCapacityPressure pressure={capacityPressure} /> : null}
       {course.bodyMarkdown.trim() ? (
         <section className="prose-measure border-y py-6 text-body leading-7">
           <Markdown pageContent>{course.bodyMarkdown}</Markdown>
@@ -591,7 +588,7 @@ function LectureListItem({
           </span>
         ) : null}
       </span>
-      <span className="flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text">
+      <span className="col-start-2 flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:col-start-auto sm:justify-self-end">
         {lectureActionLabel(lecture)}
         {lecture.state === "locked" ? (
           <LockKeyhole className="size-4" aria-hidden />
@@ -606,7 +603,7 @@ function LectureListItem({
   );
 
   const className = cn(
-    "group flex min-h-20 items-start gap-3 px-4 py-4 outline-none sm:items-center sm:gap-4 sm:px-6",
+    "group grid min-h-20 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 outline-none sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-6",
     lecture.state === "locked"
       ? "bg-muted/35 text-muted-foreground"
       : "transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40",
@@ -659,40 +656,6 @@ function courseMatchesScope(
     return course.organizationId === organizationId;
   }
   return course.organizationId === null;
-}
-
-function CourseCapacityPressure({ pressure }: { pressure: number }) {
-  const summary = pressure === 100 ? "100% pool use · At capacity" : `${pressure}% pool use`;
-  return (
-    <div
-      aria-label="Scenario capacity"
-      className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground"
-    >
-      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-        <Gauge className="size-3.5" aria-hidden />
-        Scenario capacity
-      </span>
-      <span role="status" aria-atomic="true" className="tabular-nums">
-        {summary}
-      </span>
-      <span
-        role="progressbar"
-        aria-label="Scenario capacity used"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={pressure}
-        className="block h-1 w-24 bg-border/70 sm:w-32"
-      >
-        <span
-          className={cn("block h-full", pressure === 100 ? "bg-destructive" : "bg-muted-foreground")}
-          style={{ width: `${pressure}%` }}
-        />
-      </span>
-      <span className="sr-only">
-        This is the highest use across pooled CPU, memory, and disk.
-      </span>
-    </div>
-  );
 }
 
 function CourseAssignments({
@@ -773,6 +736,8 @@ function AssignmentLink({
 function CourseFilters({
   search,
   onSearchChange,
+  searchLabel,
+  searchPlaceholder,
   searchState,
   categories,
   tags,
@@ -783,6 +748,8 @@ function CourseFilters({
 }: {
   search: string;
   onSearchChange: (value: string) => void;
+  searchLabel: string;
+  searchPlaceholder: string;
   searchState: NormalizedCatalogSearch;
   categories: readonly string[];
   tags: readonly string[];
@@ -791,90 +758,129 @@ function CourseFilters({
   onToggleTag: (tag: string) => void;
   onClear: () => void;
 }) {
+  const activeFilterCount =
+    Number(Boolean(searchState.difficulty)) +
+    Number(Boolean(searchState.category)) +
+    searchState.tags.length;
+
   return (
     <FilterBar
       search={search}
       onSearchChange={onSearchChange}
-      searchPlaceholder="Search courses and lectures…"
-      searchLabel="Search courses and lectures"
+      searchPlaceholder={searchPlaceholder}
+      searchLabel={searchLabel}
       filtersActive={filtersActive}
       stackSearchOnMobile
       onClear={onClear}
     >
-      <div className="flex flex-wrap items-center gap-2">
-        {SCENARIO_DIFFICULTIES.map((difficulty) => (
-          <FilterChip
-            key={difficulty}
-            active={searchState.difficulty === difficulty}
-            onClick={() =>
-              onFilter({
-                ...searchState,
-                difficulty:
-                  searchState.difficulty === difficulty ? undefined : difficulty,
-              })
-            }
-          >
-            {difficulty}
-          </FilterChip>
-        ))}
-      </div>
-      {categories.length ? (
-        <Select
-          value={searchState.category ?? "all"}
-          onValueChange={(value) =>
-            onFilter({
-              ...searchState,
-              category: typeof value === "string" && value !== "all" ? value : undefined,
-            })
-          }
+      <details className="group relative max-sm:w-full">
+        <summary
+          className={cn(
+            buttonVariants({ variant: "outline", size: "sm" }),
+            "cursor-pointer list-none [&::-webkit-details-marker]:hidden",
+          )}
         >
-          <SelectTrigger size="sm" aria-label="Filter lectures by category">
-            Category: {searchState.category ?? "All"}
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All categories</SelectItem>
-            {categories.map((category) => (
-              <SelectItem key={category} value={category}>
-                {category}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      ) : null}
-      {tags.length ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button type="button" variant="outline" size="sm" aria-label="Filter lectures by tags" />
+          <ListFilter className="size-3.5" aria-hidden />
+          Filters{activeFilterCount ? ` · ${activeFilterCount}` : ""}
+          <ChevronDown
+            className="size-3.5 transition-transform group-open:rotate-180 motion-reduce:transition-none"
+            aria-hidden
+          />
+        </summary>
+        <div className="mt-2 grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:absolute sm:left-0 sm:z-20 sm:w-80">
+          <fieldset className="space-y-2">
+            <legend className="text-label">Difficulty</legend>
+            <div className="flex flex-wrap items-center gap-2">
+              {SCENARIO_DIFFICULTIES.map((difficulty) => (
+                <FilterChip
+                  key={difficulty}
+                  active={searchState.difficulty === difficulty}
+                  onClick={() =>
+                    onFilter({
+                      ...searchState,
+                      difficulty:
+                        searchState.difficulty === difficulty
+                          ? undefined
+                          : difficulty,
+                    })
+                  }
+                >
+                  {difficulty}
+                </FilterChip>
+              ))}
+            </div>
+          </fieldset>
+          {categories.length ? (
+            <Select
+              value={searchState.category ?? "all"}
+              onValueChange={(value) =>
+                onFilter({
+                  ...searchState,
+                  category:
+                    typeof value === "string" && value !== "all"
+                      ? value
+                      : undefined,
+                })
               }
             >
-              Tags{searchState.tags.length ? ` · ${searchState.tags.length}` : ""}
-            </DropdownMenuTrigger>
-            <DropdownMenuContent className="max-h-72 min-w-48">
-              {tags.map((tag) => (
-                <DropdownMenuCheckboxItem
+              <SelectTrigger
+                className="w-full"
+                size="sm"
+                aria-label="Filter lectures by category"
+              >
+                Category: {searchState.category ?? "All"}
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All categories</SelectItem>
+                {categories.map((category) => (
+                  <SelectItem key={category} value={category}>
+                    {category}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+          {tags.length ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label="Filter lectures by tags"
+                    />
+                  }
+                >
+                  Tags{searchState.tags.length ? ` · ${searchState.tags.length}` : ""}
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="max-h-72 min-w-48">
+                  {tags.map((tag) => (
+                    <DropdownMenuCheckboxItem
+                      key={tag}
+                      checked={searchState.tags.includes(tag)}
+                      onCheckedChange={() => onToggleTag(tag)}
+                    >
+                      {tag}
+                    </DropdownMenuCheckboxItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              {searchState.tags.map((tag) => (
+                <FilterChip
                   key={tag}
-                  checked={searchState.tags.includes(tag)}
-                  onCheckedChange={() => onToggleTag(tag)}
+                  active
+                  onClick={() => onToggleTag(tag)}
+                  className="normal-case"
                 >
                   {tag}
-                </DropdownMenuCheckboxItem>
+                </FilterChip>
               ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-          {searchState.tags.map((tag) => (
-            <FilterChip
-              key={tag}
-              active
-              onClick={() => onToggleTag(tag)}
-              className="normal-case"
-            >
-              {tag}
-            </FilterChip>
-          ))}
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </details>
     </FilterBar>
   );
 }
@@ -883,10 +889,7 @@ export function filterCourses(
   courses: readonly CourseCatalogCourse[],
   filters: NormalizedCatalogSearch,
 ): CourseCatalogCourse[] {
-  return courses.filter(
-    (course) =>
-      courseMatchesText(course, filters.q) || filterLectures(course, filters).length > 0,
-  );
+  return courses.filter((course) => filterLectures(course, filters).length > 0);
 }
 
 export function filterLectures(
@@ -919,7 +922,7 @@ function matchesText(query: string, values: readonly string[]): boolean {
 
 function CourseCatalogLoading() {
   return (
-    <PageShell width="content">
+    <PageShell width="content" align="start">
       <div role="status" className="space-y-6">
         <span className="sr-only">Loading courses…</span>
         <Skeleton className="h-8 w-72 max-w-full" />

@@ -24,6 +24,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CourseLink, LectureLink } from "./course-links";
+import { CourseNextAction } from "./CourseNextAction";
 import {
   CourseLectureLockedError,
   completeCourseLecture,
@@ -149,7 +150,7 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
   if (lockedError) {
     const blocker = lockedError.blockedBy;
     return (
-      <PageShell width="content">
+      <PageShell width="content" align="start">
         <EmptyState
           className="prose-measure"
           title="This lecture is locked"
@@ -176,7 +177,7 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
   }
   if (detailQuery.error && !detail) {
     return (
-      <PageShell width="content">
+      <PageShell width="content" align="start">
         <ErrorState
           className="prose-measure"
           title="Could not load this lecture"
@@ -195,7 +196,7 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
   }
 
   return (
-    <PageShell width="content">
+    <PageShell width="content" align="start">
       <div className="prose-measure space-y-6">
         {detailQuery.error ? (
           <Alert>
@@ -208,13 +209,14 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
         <div className="space-y-4">
           <CourseLink
             route={route}
-            className="-ml-2 inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+            className="-ml-2 inline-flex min-h-11 max-w-full items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors [overflow-wrap:anywhere] hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
           >
             <ArrowLeft className="size-4" aria-hidden />
             Back to {detail.course.title}
           </CourseLink>
           <ContentHeader
             title={detail.lecture.title}
+            titleClassName="max-sm:sr-only"
             summary={detail.lecture.summary}
             meta={<LectureMeta lecture={detail.lecture} />}
           />
@@ -224,24 +226,24 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
           <Markdown pageContent>{detail.lecture.bodyMarkdown}</Markdown>
         </section>
 
-        <LectureActionPanel
-          lecture={detail.lecture}
-          route={route}
-          completePending={complete.isPending}
-          completeError={complete.error}
-          onComplete={() => complete.mutate()}
-          startPending={startScenario.isPending}
-          startError={startScenario.error}
-          waitingForCapacity={waitingForCapacity}
-          startNotice={startNotice}
-          onStart={() => startScenario.mutate()}
-          onStopWaiting={() => {
-            startAbortRef.current?.abort();
-            setWaitingForCapacity(false);
-            setStartNotice("Stopped waiting. You can try again when you are ready.");
-          }}
-        />
       </div>
+      <LectureActionPanel
+        lecture={detail.lecture}
+        route={route}
+        completePending={complete.isPending}
+        completeError={complete.error}
+        onComplete={() => complete.mutate()}
+        startPending={startScenario.isPending}
+        startError={startScenario.error}
+        waitingForCapacity={waitingForCapacity}
+        startNotice={startNotice}
+        onStart={() => startScenario.mutate()}
+        onStopWaiting={() => {
+          startAbortRef.current?.abort();
+          setWaitingForCapacity(false);
+          setStartNotice("Stopped waiting. You can try again when you are ready.");
+        }}
+      />
     </PageShell>
   );
 }
@@ -292,7 +294,11 @@ function LectureActionPanel({
   const next = lecture.nextLecture;
   const nextRoute = next ? { ...route, courseId: next.courseId } : route;
   const completeButton = (
-    <Button onClick={onComplete} disabled={completePending} className="w-full sm:w-auto">
+    <Button
+      onClick={onComplete}
+      disabled={completePending}
+      className="w-full [@media(pointer:coarse)]:min-h-11 sm:w-auto"
+    >
       {completePending ? "Completing lecture…" : "Complete lecture"}
       <ArrowRight className="size-4" />
     </Button>
@@ -301,7 +307,7 @@ function LectureActionPanel({
   return (
     <section
       aria-labelledby="lecture-next-action"
-      className="space-y-4 border-y border-brand-border bg-brand-subtle/55 px-4 py-5 sm:px-5"
+      className="w-full max-w-4xl space-y-5 border-t pt-6 pb-2"
     >
       <div className="space-y-1">
         <h2 id="lecture-next-action" className="text-section-title">
@@ -327,7 +333,7 @@ function LectureActionPanel({
           completeButton
         )
       ) : lecture.state === "completed" ? (
-        <div className="flex flex-wrap gap-2">
+        <div className="space-y-5">
           {lecture.activeRunId ? (
             <>
               <LinkedLectureAction
@@ -335,20 +341,27 @@ function LectureActionPanel({
                 startPending={startPending}
                 onStart={onStart}
               />
-              <NextLectureLink
-                next={next}
-                route={nextRoute}
-                variant="outline"
-              />
+              <div className="border-t pt-4">
+                <NextLectureLink
+                  next={next}
+                  route={nextRoute}
+                  variant="outline"
+                />
+              </div>
             </>
           ) : (
             <>
               <NextLectureLink next={next} route={nextRoute} />
-              <LinkedLectureAction
-                lecture={lecture}
-                startPending={startPending}
-                onStart={onStart}
-              />
+              <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-support text-muted-foreground">
+                  Want more practice?
+                </p>
+                <LinkedLectureAction
+                  lecture={lecture}
+                  startPending={startPending}
+                  onStart={onStart}
+                />
+              </div>
             </>
           )}
         </div>
@@ -420,7 +433,7 @@ function LinkedLectureAction({
   ) {
     return lecture.activeRunId ? (
       <Button
-        className="w-full sm:w-auto"
+        className="w-full [@media(pointer:coarse)]:min-h-11 sm:w-auto"
         render={<Link to="/runs/$runId" params={{ runId: lecture.activeRunId }} />}
       >
         Resume scenario
@@ -437,7 +450,7 @@ function LinkedLectureAction({
       <Button
         disabled
         variant={lecture.state === "completed" ? "outline" : "default"}
-        className="w-full sm:w-auto"
+        className="w-full [@media(pointer:coarse)]:min-h-11 sm:w-auto"
       >
         Scenario preparing
       </Button>
@@ -457,12 +470,12 @@ function LinkedLectureAction({
       onClick={onStart}
       disabled={startPending}
       variant={rerun ? "outline" : "default"}
-      className="w-full sm:w-auto"
+      className="w-full [@media(pointer:coarse)]:min-h-11 sm:w-auto"
     >
       {startPending
         ? "Starting scenario…"
         : rerun
-          ? "Run scenario again"
+          ? "Run again"
           : "Start scenario"}
       {rerun ? <RotateCcw className="size-4" /> : <ArrowRight className="size-4" />}
     </Button>
@@ -479,21 +492,23 @@ function NextLectureLink({
   variant?: "default" | "outline";
 }) {
   return next ? (
-    <Button
-      variant={variant}
-      className="w-full sm:w-auto"
-      render={
-        <LectureLink route={route} lectureId={next.lectureId}>
-          Next lecture: {next.title}
-          <ArrowRight className="size-4" />
-        </LectureLink>
-      }
-    />
+    <CourseNextAction route={route} lecture={next} variant={variant} />
   ) : (
-    <p className="inline-flex items-center gap-2 text-support text-muted-foreground">
-      <BookOpen className="size-4" aria-hidden />
-      You completed this course.
-    </p>
+    <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+      <div className="flex items-start gap-3">
+        <BookOpen className="mt-0.5 size-4 text-success" aria-hidden />
+        <div className="space-y-1">
+          <p className="text-card-title">Course complete</p>
+          <p className="text-support text-muted-foreground">
+            You completed every lecture in this course.
+          </p>
+        </div>
+      </div>
+      <Button
+        className="w-full [@media(pointer:coarse)]:min-h-11 md:w-auto"
+        render={<CourseLink route={route}>Back to course</CourseLink>}
+      />
+    </div>
   );
 }
 
@@ -520,7 +535,7 @@ function lectureBreadcrumbLabels(route: CourseRouteRef, courseTitle: string) {
 
 function LectureLoading() {
   return (
-    <PageShell width="content">
+    <PageShell width="content" align="start">
       <div role="status" className="prose-measure space-y-8">
         <span className="sr-only">Loading lecture…</span>
         <Skeleton className="h-8 w-72 max-w-full" />

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
 
 // The modest in-flow header for content pages (scenario briefing, organization
 // detail). Deliberately NOT a heading — the same string is already the
@@ -14,6 +15,7 @@ interface ContentHeaderProps {
   meta?: ReactNode;
   /** Transitional slot — page actions belong in the app bar. */
   actions?: ReactNode;
+  titleClassName?: string;
 }
 
 export function ContentHeader({
@@ -22,12 +24,20 @@ export function ContentHeader({
   summary,
   meta,
   actions,
+  titleClassName,
 }: ContentHeaderProps) {
   return (
     <div className="flex flex-wrap items-end justify-between gap-3">
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="text-page-title">{title}</p>
+          <p
+            className={cn(
+              "text-page-title text-pretty [overflow-wrap:anywhere]",
+              titleClassName,
+            )}
+          >
+            {title}
+          </p>
           {badge}
         </div>
         {summary ? (

@@ -15,6 +15,19 @@ async function expectStandardRunChrome(page: Page) {
   ).toHaveCount(1);
 }
 
+async function expectCourseRunFrame(page: Page) {
+  await expect(page.locator("[data-run-page]")).toHaveCount(0);
+  await expect(page.locator("[data-course-run-page]")).toHaveCount(1);
+  await expect(page.locator("[data-run-navigation]")).toHaveCount(1);
+  await expect(page.locator("[data-run-back]")).toHaveCount(1);
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(1);
+  await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(0);
+}
+
 test("the full-screen boot screen keeps the mission visible and does not steal focus when the shell opens", async ({
   page,
   ui,
@@ -645,7 +658,7 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   const savingHeading = page.getByRole("heading", { name: "Saving your run…" });
   await expect(savingHeading).toBeVisible();
   await expect(savingHeading).toBeFocused();
-  await expectStandardRunChrome(page);
+  await expectCourseRunFrame(page);
   await expect(page.locator("[data-run-lease-countdown]")).toHaveText(
     "1:25:00 left",
   );
@@ -673,11 +686,9 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   ui.server.state.run.outcome = "succeeded";
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingSteps).toBeVisible();
-  const appBar = page
-    .locator("header")
-    .filter({ has: page.locator("[data-slot='sidebar-trigger']") });
-  await expect(appBar).toContainText("Saving");
-  await expect(appBar).not.toContainText("Solved");
+  const courseHeader = page.locator("[data-run-workspace-header]");
+  await expect(courseHeader).toContainText("Saving");
+  await expect(courseHeader).not.toContainText("Solved");
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
@@ -686,8 +697,8 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
     timeout: 5_000,
   });
   await expect(settledHeading).toBeFocused();
-  await expectStandardRunChrome(page);
-  await expect(page.getByRole("button", { name: "Delete run…" })).toBeVisible();
+  await expectCourseRunFrame(page);
+  await expect(page.getByRole("button", { name: "Delete run…" })).toHaveCount(0);
   await expect(recap.getByRole("heading", { name: "Final checks" })).toBeVisible();
   await expect(savingSteps).toHaveCount(0);
   await expect(recap).not.toHaveAttribute("aria-busy");
@@ -740,7 +751,7 @@ test("saving stages advance from real server state and announce each change once
     runState: "ending",
   });
 
-  await expectStandardRunChrome(page);
+  await expectCourseRunFrame(page);
   const steps = page.getByRole("list", { name: "Saving steps" });
   const announcement = page.locator("[data-run-sequence-announcement]");
   await expect(steps.locator('[aria-current="step"]')).toContainText(
@@ -814,7 +825,7 @@ test("saving shows a calm reassurance only after one stage stalls", async ({
     runState: "ending",
   });
 
-  await expectStandardRunChrome(page);
+  await expectCourseRunFrame(page);
   const reassurance = page.locator("[data-run-saving-stalled]");
   await expect(
     page.getByRole("heading", { name: "Saving your run…" }),
@@ -849,7 +860,7 @@ test("a replay carousel keeps learner-facing parts in order", async ({
   await page.goto(route.path, { waitUntil: "domcontentloaded" });
   await ui.settle();
 
-  await expectStandardRunChrome(page);
+  await expectCourseRunFrame(page);
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
   await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
   await recap.getByRole("button", { name: "Watch replay" }).click();
@@ -984,7 +995,7 @@ test("a rejected shutdown stays in the confirmation dialog with learner-safe cop
   );
 });
 
-test("deleting a private run preserves its organization course context", async ({
+test("course recaps keep run deletion out of the learning flow", async ({
   page,
   ui,
 }) => {
@@ -1006,11 +1017,12 @@ test("deleting a private run preserves its organization course context", async (
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
 
-  await page.getByRole("button", { name: "Delete run…" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByRole("button", { name: "Delete run" }).click();
-
-  await expect(page).toHaveURL(
+  await expectCourseRunFrame(page);
+  await expect(page.getByRole("button", { name: "Delete run…" })).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: "Platform repair sequence" }),
+  ).toHaveAttribute(
+    "href",
     "/organizations/org-platform/courses/private/operations",
   );
 });
@@ -1019,11 +1031,14 @@ test("a failed saved-run deletion stays generic and recoverable", async ({
   page,
   ui,
 }) => {
-  await ui.open({
-    ...routeCase("run-workspace"),
-    theme: "dark",
+  const route = routeCase("run-workspace");
+  ui.configure({
+    sessionRole: route.sessionRole,
     runState: "archived",
   });
+  ui.server.state.run.courseLocation = null;
+  await page.goto(route.path, { waitUntil: "domcontentloaded" });
+  await ui.settle();
   ui.server.state.variant = "error";
   await page.route("**/api/scenarios/runs/run-active", async (route) => {
     if (route.request().method() === "DELETE") {
@@ -1085,12 +1100,15 @@ test("a saved solved run gives one next learner action without audit details", a
   await expect(recap.getByRole("heading", { name: "Solved" })).toBeVisible();
   await expect(
     recap.getByRole("link", {
-      name: "Next lecture: Trace an intermittent DNS failure",
+      name: "Next lecture",
     }),
   ).toHaveAttribute(
     "href",
     "/courses/operations/lectures/03-trace-dns",
   );
+  await expect(
+    recap.getByText("Trace an intermittent DNS failure", { exact: true }),
+  ).toBeVisible();
   await expect(recap.getByText("Run timeline", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);
@@ -1146,7 +1164,7 @@ for (const recapCase of [
       runState: recapCase.state,
     });
 
-    await expectStandardRunChrome(page);
+    await expectCourseRunFrame(page);
     const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
     await expect(recap.getByRole("heading", { name: recapCase.title })).toBeVisible();
     if (recapCase.replay) {

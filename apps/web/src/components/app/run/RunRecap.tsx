@@ -30,6 +30,7 @@ import {
   courseRouteForRun,
   type CourseLectureSummary,
 } from "@/components/app/pages/learn/course-wire";
+import { CourseNextAction } from "@/components/app/pages/learn/CourseNextAction";
 import { scenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
 import type {
   CourseLocation,
@@ -277,7 +278,10 @@ export function RunRecap({
 
       <RunReplaySection run={run} />
 
-      <section aria-labelledby="run-recap-next-heading">
+      <section
+        aria-labelledby="run-recap-next-heading"
+        className="w-full max-w-4xl border-t pt-6"
+      >
         <h2 id="run-recap-next-heading" className="text-section-title">
           {recap.kind === "solved" ? "Keep learning" : "Give it another try"}
         </h2>
@@ -413,29 +417,20 @@ function DefaultNextAction({
 }) {
   const linkClassName = cn(
     buttonVariants({ variant: "default", size: "default" }),
-    "min-h-11 w-full max-w-full whitespace-normal sm:min-h-10 sm:w-auto [@media(pointer:coarse)]:min-h-11",
+    "min-h-11 w-full max-w-full sm:min-h-10 sm:w-auto [@media(pointer:coarse)]:min-h-11",
   );
 
   const route = courseRouteForRun(courseLocation);
   const lectureId = courseLocation?.lectureId ?? null;
 
   if (recapKind === "solved" && route && nextLecture) {
-    return (
-      <LectureLink
-        route={route}
-        lectureId={nextLecture.lectureId}
-        className={linkClassName}
-      >
-        Next lecture: {nextLecture.title}
-        <ArrowRight className="size-4" aria-hidden="true" />
-      </LectureLink>
-    );
+    return <CourseNextAction route={route} lecture={nextLecture} />;
   }
 
   if (recapKind === "solved" && route && courseLocation) {
     return (
       <CourseLink route={route} className={linkClassName}>
-        Back to {courseLocation.courseTitle}
+        Back to course
         <ArrowLeft className="size-4" aria-hidden="true" />
       </CourseLink>
     );
