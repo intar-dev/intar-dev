@@ -210,7 +210,7 @@ export function ScenarioShellStatusCard(props: {
         {isTransient ? (
           <LoaderCircle className="size-8 text-primary motion-safe:animate-spin" />
         ) : null}
-        <div className="max-w-md space-y-2">
+        <div className="space-y-2">
           <p className="text-sm font-medium text-foreground">
             {props.phase === "failed"
               ? "Scenario run stopped"

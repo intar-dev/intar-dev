@@ -50,7 +50,7 @@ export function AdminPeople() {
   };
 
   return (
-    <PageShell width="workspace" density="compact">
+    <PageShell variant="workspace" density="compact">
       <Tabs
         value={activeTab}
         onValueChange={(value) => setTab(value as AdminPeopleTab)}

@@ -150,7 +150,7 @@ export function RunArtifactViewer({
           </div>
         ) : viewer.error ? (
           <div className="flex min-h-[22rem] items-center justify-center">
-            <div className="max-w-lg text-support text-destructive">
+            <div className="text-support text-destructive">
               {viewer.error}
             </div>
           </div>
@@ -189,7 +189,7 @@ export function RunArtifactViewer({
           </div>
 
           {viewer ? (
-            <dl className="flex max-w-2xl flex-wrap items-start gap-x-4 gap-y-2 text-caption">
+            <dl className="flex flex-wrap items-start gap-x-4 gap-y-2 text-caption">
               <ArtifactMeta label="Size" value={formatBytes(viewer.artifact.sizeBytes)} />
               {!hideInternalMetadata ? (
                 <>
@@ -306,14 +306,14 @@ export function RunArtifactViewer({
           {!viewer ? (
             <div className="flex min-h-[22rem] flex-col items-center justify-center px-6 py-8 text-center">
               <p className="text-support font-medium">Artifacts open inline.</p>
-              <p className="mt-2 max-w-md text-support text-muted-foreground">
+              <p className="mt-2 text-support text-muted-foreground">
                 Logs use a read-only text viewer and cast files replay inline,
                 with a raw fallback when needed.
               </p>
             </div>
           ) : viewer.error ? (
             <div className="flex min-h-[22rem] items-center justify-center px-6 py-8">
-              <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
+              <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
                 {viewer.error}
               </div>
             </div>
@@ -378,7 +378,7 @@ export function AsciicastReplaySurface({
     return (
       <div className={minimal ? "p-0" : "p-4"}>
         <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
-          <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
             {replayPlayerErrorCopy(playerError, minimal)}
           </div>
         </div>
@@ -397,7 +397,7 @@ export function AsciicastReplaySurface({
             {minimal ? "Preparing replay" : "Preparing replay surface"}
           </p>
           {!minimal ? (
-            <p className="max-w-md text-support text-muted-foreground">
+            <p className="text-support text-muted-foreground">
               Cast playback waits for the complete `.cast` stream so timing and
               frame boundaries stay correct. The Raw tab remains available
               while bytes are arriving.

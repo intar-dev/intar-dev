@@ -20,6 +20,10 @@ export interface PageChrome {
   title?: string | null | undefined;
   /** One small status token (StatusToken/Badge) shown right of the crumbs. */
   status?: ReactNode;
+  /** Optional cross-flow return link shown before the page title. */
+  back?: ReactNode;
+  /** Optional compact page utility, such as the mobile course outline. */
+  utility?: ReactNode;
   /** THE one primary page action: a single small Button. */
   action?: ReactNode;
   /** Overflow DropdownMenuItem elements; the ⋯ menu renders only when set. */
@@ -53,6 +57,8 @@ function chromeEquals(a: PageChrome | undefined, b: PageChrome): boolean {
     a !== undefined &&
     a.title === b.title &&
     Object.is(a.status, b.status) &&
+    Object.is(a.back, b.back) &&
+    Object.is(a.utility, b.utility) &&
     Object.is(a.action, b.action) &&
     Object.is(a.menu, b.menu) &&
     a.fullscreen === b.fullscreen &&
@@ -145,13 +151,24 @@ export function usePageChrome(chrome: PageChrome): void {
     select: (state) =>
       state.resolvedLocation?.pathname ?? state.location.pathname,
   });
-  const { title, status, action, menu, breadcrumbLabels, fullscreen } = chrome;
+  const {
+    title,
+    status,
+    back,
+    utility,
+    action,
+    menu,
+    breadcrumbLabels,
+    fullscreen,
+  } = chrome;
 
   useEffect(() => {
     if (!set || !clear) return;
     if (
       title == null &&
       !status &&
+      !back &&
+      !utility &&
       !action &&
       !menu &&
       !breadcrumbLabels &&
@@ -162,6 +179,8 @@ export function usePageChrome(chrome: PageChrome): void {
     set(pathname, {
       title,
       status,
+      back,
+      utility,
       action,
       menu,
       breadcrumbLabels,
@@ -174,6 +193,8 @@ export function usePageChrome(chrome: PageChrome): void {
     pathname,
     title,
     status,
+    back,
+    utility,
     action,
     menu,
     breadcrumbLabels,

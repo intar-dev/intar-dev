@@ -131,15 +131,15 @@ export function getRunLearningTriggerCopy(input: {
     ? `${input.revealedHints} of ${input.totalHints} hints revealed`
     : "No hints are available";
   return {
-    visibleLabel: "Theory and hints",
+    visibleLabel: `Checks ${input.passedChecks}/${input.totalChecks}`,
     accessibleLabel: `Open lecture theory and hints. ${hints}. ${checks}.`,
   };
 }
 
 /**
  * The permanent desktop guidance pane. ScenarioRun places this in its second
- * grid column; the pane owns exactly one scroll surface so terminal work stays
- * fixed in the first column.
+ * grid column. Its pinned checks and supporting content stay reachable while
+ * terminal work remains fixed in the first column.
  */
 export function RunLearningPanel(props: RunLearningPanelProps) {
   const { className, ...contentProps } = props;
@@ -157,13 +157,13 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
       aria-label="Lecture theory and hints"
       data-run-learning-panel
       className={cn(
-        "hidden h-full min-h-0 w-[min(24rem,40dvw)] max-w-[40dvw] shrink-0 border-l min-[960px]:flex min-[960px]:flex-col",
+        "hidden h-full min-h-0 min-w-0 w-full border-l bg-background min-[960px]:flex min-[960px]:flex-col",
         className,
       )}
     >
       <div
         data-run-learning-panel-scroll
-        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4 py-4"
+        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-background px-4 py-4"
         role="region"
         aria-label="Lecture theory and hints content"
         tabIndex={0}
@@ -277,7 +277,7 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
           <LearningPanelClose />
           <div
             data-run-learning-mobile-scroll
-            className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain px-4"
+            className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-popover px-4"
             role="region"
             aria-label="Lecture theory and hints content"
             tabIndex={0}
@@ -324,8 +324,23 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
   return (
     <div
       data-run-learning-panel-content
-      className={cn("space-y-6 pb-6", props.className)}
+      className={cn("space-y-6 bg-inherit pb-6", props.className)}
     >
+      {state !== "booting" ? (
+        <div
+          className="sticky top-0 z-20 -mx-1 bg-inherit px-1 pb-3"
+          data-run-pinned-checks
+        >
+          <Checks
+            headingId={checksHeadingId}
+            probes={props.probes}
+            objectives={objectives}
+            passedChecks={passedChecks}
+            pinned
+          />
+        </div>
+      ) : null}
+
       <LectureTheory
         headingId={theoryHeadingId}
         briefingMarkdown={props.briefingMarkdown}
@@ -335,15 +350,6 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
 
       {state === "booting" ? (
         <WorkOrder headingId={workOrderHeadingId} objectives={objectives} />
-      ) : null}
-
-      {state !== "booting" ? (
-        <Checks
-          headingId={checksHeadingId}
-          probes={props.probes}
-          objectives={objectives}
-          passedChecks={passedChecks}
-        />
       ) : null}
 
       <Hints
@@ -432,7 +438,7 @@ function LectureTheory(props: {
       {theory ? (
         <Markdown
           headingOffset={1}
-          className="mt-3 max-w-[68ch] space-y-3 text-sm leading-6"
+          className="mt-3 space-y-3 text-sm leading-6"
         >
           {theory}
         </Markdown>
@@ -487,12 +493,19 @@ function Checks(props: {
   probes: readonly ScenarioProbeStatus[];
   objectives: readonly ScenarioObjective[];
   passedChecks: number;
+  pinned?: boolean;
 }) {
   const checks = getLearnerChecks(props.probes, props.objectives);
 
   return (
-    <section aria-labelledby={props.headingId}>
-      <div className="flex items-center justify-between gap-3">
+    <section
+      aria-labelledby={props.headingId}
+      className={cn(
+        props.pinned &&
+          "flex max-h-[min(44dvh,24rem)] min-h-0 flex-col border-b bg-inherit pb-1",
+      )}
+    >
+      <div className="flex shrink-0 items-center justify-between gap-3">
         <p id={props.headingId} className="text-label">
           Checks
         </p>
@@ -504,30 +517,40 @@ function Checks(props: {
         </span>
       </div>
       {checks.length ? (
-        <ol className="mt-4 divide-y border-y">
+        <ol
+          tabIndex={props.pinned ? 0 : undefined}
+          aria-label={props.pinned ? "Checks list" : undefined}
+          className={cn(
+            "mt-4 divide-y border-y",
+            props.pinned &&
+              "min-h-0 overflow-y-auto overscroll-contain pr-1",
+          )}
+        >
           {checks.map((check) => {
             return (
               <li
                 key={check.key}
-                className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 py-4"
+                className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 py-4"
               >
                 <span className="mt-0.5">
                   <CheckStatusIcon status={check.status} />
                 </span>
-                <span className="min-w-0 text-sm font-medium leading-6">
-                  {check.title}
-                </span>
-                <span
-                  className={cn(
-                    "pt-0.5 text-xs font-medium whitespace-nowrap",
-                    check.status === "verified"
-                      ? "text-success"
-                      : check.status === "checking"
-                        ? "text-warning"
-                        : "text-destructive",
-                  )}
-                >
-                  {check.statusLabel}
+                <span className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                  <span className="min-w-0 flex-1 text-sm font-medium leading-6 [overflow-wrap:anywhere]">
+                    {check.title}
+                  </span>
+                  <span
+                    className={cn(
+                      "pt-0.5 text-xs font-medium whitespace-nowrap",
+                      check.status === "verified"
+                        ? "text-success"
+                        : check.status === "checking"
+                          ? "text-warning"
+                          : "text-destructive",
+                    )}
+                  >
+                    {check.statusLabel}
+                  </span>
                 </span>
               </li>
             );

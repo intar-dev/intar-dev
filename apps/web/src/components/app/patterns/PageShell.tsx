@@ -1,15 +1,13 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
-export type PageShellWidth = "narrow" | "content" | "default" | "workspace";
+export type PageShellVariant = "page" | "workspace";
 export type Density = "comfortable" | "compact";
-export type PageShellAlignment = "center" | "start";
 
 interface PageShellProps {
   children: ReactNode;
-  width?: PageShellWidth;
+  variant?: PageShellVariant;
   density?: Density;
-  align?: PageShellAlignment;
 }
 
 // Pure layout container for page content. Page chrome (title, status,
@@ -17,25 +15,20 @@ interface PageShellProps {
 // with a ContentHeader.
 export function PageShell({
   children,
-  width = "default",
+  variant = "page",
   density = "comfortable",
-  align = "center",
 }: PageShellProps) {
   return (
     <div
       data-density={density}
-      data-page-align={align}
-      data-page-width={width}
+      data-page-variant={variant}
       className={cn(
         "flex w-full flex-1 flex-col",
-        align === "center" ? "mx-auto" : "mr-auto",
         density === "comfortable"
           ? "gap-(--space-xl)"
           : "gap-(--space-md)",
-        width === "narrow" && "max-w-2xl px-[var(--page-inset)] py-4 sm:py-6",
-        width === "content" && "max-w-5xl px-[var(--page-inset)] py-4 sm:py-6",
-        width === "default" && "max-w-7xl px-[var(--page-inset)] py-4 sm:py-6",
-        width === "workspace" && "px-[var(--workspace-inset)] py-3 sm:py-4",
+        variant === "page" && "px-[var(--page-inset)] py-4 sm:py-6",
+        variant === "workspace" && "px-[var(--workspace-inset)] py-3 sm:py-4",
       )}
     >
       {children}

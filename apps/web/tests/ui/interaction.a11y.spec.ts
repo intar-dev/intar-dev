@@ -52,27 +52,30 @@ async function expectForegroundRunWorkspaceShell(page: Page) {
   ).toHaveCount(0);
 }
 
-async function expectSavedCourseRunFrame(page: Page) {
+async function expectSavedRunShell(page: Page) {
   const appBar = page.locator("header").filter({
     has: page.locator("[data-slot='sidebar-trigger']"),
   });
 
   await expect(page.locator("[data-run-page]")).toHaveCount(0);
-  await expect(page.locator("[data-course-run-page]")).toHaveCount(1);
-  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(1);
-  await expect(page.locator("[data-run-navigation]")).toHaveCount(1);
-  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
-  await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
-  await expect(appBar).toHaveCount(0);
+  await expect(page.locator("[data-course-run-page]")).toHaveCount(0);
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(0);
+  await expect(page.locator("[data-run-navigation]")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
+  await expect(appBar).toHaveCount(1);
   await expect(
     page.getByRole("heading", {
       level: 1,
       name: "Repair a broken nginx service",
     }),
   ).toBeVisible();
+  await expect(page.locator("[data-run-back]")).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(1);
   await expect(
     page.getByRole("button", { name: "Page actions" }),
-  ).toHaveCount(0);
+  ).toHaveCount((page.viewportSize()?.width ?? 0) < 640 ? 1 : 0);
 
 }
 
@@ -161,18 +164,18 @@ test("organization course breadcrumbs stay inside the learner frame", async ({
     sessionRole: "owner",
     theme: "light",
   });
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
 
   await page.getByRole("link", { name: /Linux operations/i }).click();
   await expect(page).toHaveURL(
     "/organizations/org-platform/courses/public/operations",
   );
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
 
   await page
     .getByRole("link", { name: /Repair a broken nginx service.*Resume/i })
     .click();
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
   const publicBreadcrumb = page.getByRole("navigation", {
     name: "Breadcrumb",
   });
@@ -189,7 +192,7 @@ test("organization course breadcrumbs stay inside the learner frame", async ({
   await publicBreadcrumb.getByRole("link", { name: "Courses" }).click();
   await page.getByRole("link", { name: /Platform repair sequence/i }).click();
   await page.getByRole("link", { name: /Private service context.*Read/i }).click();
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
   const privateBreadcrumb = page.getByRole("navigation", {
     name: "Breadcrumb",
   });
@@ -245,10 +248,10 @@ test("course breadcrumbs keep one content frame and authored headings", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
 
   await page.getByRole("link", { name: /Linux operations/i }).click();
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
   await expect(
     page.getByRole("heading", { level: 2, name: "How to use this course" }),
   ).toBeVisible();
@@ -258,7 +261,7 @@ test("course breadcrumbs keep one content frame and authored headings", async ({
       name: /Repair a broken nginx service.*Resume/i,
     })
     .click();
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
   await expect(
     page.getByRole("heading", { level: 2, name: "Service recovery" }),
   ).toBeVisible();
@@ -296,7 +299,7 @@ test("a direct locked lecture route keeps its body sealed", async ({ page, ui })
     theme: "light",
   });
 
-  await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+  await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
 
   await expect(
     page.getByRole("heading", { name: "This lecture is locked" }),
@@ -308,6 +311,11 @@ test("a direct locked lecture route keeps its body sealed", async ({ page, ui })
     "href",
     "/courses/operations/lectures/02-repair-nginx",
   );
+  const currentOutlineItem = page.locator(
+    '[data-course-outline-rail] [data-current="true"][data-lecture-state="locked"]',
+  );
+  await expect(currentOutlineItem).toBeVisible();
+  await expect(currentOutlineItem.getByRole("link")).toHaveCount(0);
 });
 
 test("a theory-only lecture completes and exposes the next unit", async ({
@@ -334,19 +342,18 @@ test("a theory-only lecture completes and exposes the next unit", async ({
   await expect(
     page.getByRole("heading", { name: "Observe first" }),
   ).toBeVisible();
-  await expect(page.getByText("Lecture 1 of 3", { exact: true })).toBeVisible();
   await expect(
-    page.getByRole("link", { name: "Previous lecture" }),
+    page.getByText("Lecture 1 of 3 · 0 complete", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: theory.title, exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("navigation", { name: "Lecture navigation" }),
-  ).toHaveCount(0);
+    page.getByRole("navigation", { name: `${course.title} lectures` }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Complete lecture" }).click();
 
-  await expect(
-    page.getByText("Repair a broken nginx service", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByRole("link", { name: "Next lecture" })).toBeVisible();
+  await expect(page.getByRole("link", { name: next.title })).toBeVisible();
   expect(ui.server.requests).toContain(
     `POST /api/courses/${course.courseId}/lectures/${theory.lectureId}/complete`,
   );
@@ -524,7 +531,7 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     theme: "dark",
     runState: "ending",
   });
-  await expectSavedCourseRunFrame(page);
+  await expectSavedRunShell(page);
   const savingSteps = page.getByRole("list", { name: "Saving steps" });
   await expect(savingSteps).toBeVisible();
   await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
@@ -555,10 +562,10 @@ test("archived course run stays in the learner frame", async ({ page, ui }) => {
     runState: "archived",
   });
 
-  await expectSavedCourseRunFrame(page);
+  await expectSavedRunShell(page);
   await expect(
     page.getByRole("button", { name: "Delete run…" }),
-  ).toHaveCount(0);
+  ).toBeVisible();
 });
 
 test.describe("wide operational density", () => {
@@ -619,24 +626,29 @@ test.describe("lecture reading flow", () => {
     await expect(
       page.getByText("Trace an intermittent DNS failure", { exact: true }),
     ).toBeVisible();
-    const nextLecture = page.getByRole("link", { name: "Next lecture" });
-    const previousLecture = page.getByRole("link", {
-      name: "Previous lecture",
+    const outline = page.getByRole("navigation", {
+      name: `${course.title} lectures`,
+    });
+    const nextLecture = outline.getByRole("link", {
+      name: course.lectures[2]!.title,
+    });
+    const previousLecture = outline.getByRole("link", {
+      name: course.lectures[0]!.title,
     });
     await expect(previousLecture).toHaveAttribute(
       "href",
       "/courses/operations/lectures/01-operating-model",
     );
-    await expect(page.getByText("Lecture 2 of 3", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Lecture 2 of 3 · 2 complete", { exact: true }),
+    ).toBeVisible();
     await expect(nextLecture).toBeVisible();
-    await expect(nextLecture).toHaveClass(/bg-primary/);
+    await expect(nextLecture).toBeVisible();
     await expect(rerun).toHaveClass(/border-border/);
     const completedActionText = await page
       .getByRole("region", { name: "Scenario complete" })
       .textContent();
-    expect(completedActionText?.indexOf("Next lecture")).toBeLessThan(
-      completedActionText?.indexOf("Run again") ?? -1,
-    );
+    expect(completedActionText).not.toContain("Next lecture");
     const theoryBox = await theory.boundingBox();
     const rerunBox = await rerun.boundingBox();
     expect(theoryBox).not.toBeNull();
@@ -707,26 +719,23 @@ test.describe("lecture reading flow", () => {
     );
     await ui.settle();
 
-    const nextAction = page.getByRole("link", { name: "Next lecture" });
-    await expect(page.getByText(longTitle, { exact: true })).toBeVisible();
-    await expect(nextAction).toBeVisible();
-    await expect(nextAction).not.toContainText(longTitle);
     await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await page.getByRole("button", { name: /Open course outline/ }).click();
+    const nextAction = page.getByRole("link", { name: longTitle });
+    await expect(nextAction).toBeVisible();
     await expect(
-      page.locator('[data-page-width="content"]'),
-    ).toHaveAttribute("data-page-align", "start");
+      page.locator('[data-page-variant="page"]'),
+    ).toHaveCSS("max-width", "none");
     await expectNoHorizontalOverflow(page);
   });
 
-  test("previous lecture navigation works with the keyboard", async ({
+  test("course outline navigation works with the keyboard", async ({
     page,
     ui,
   }) => {
     await ui.open({ ...routeCase("lecture"), theme: "light" });
 
-    const previousLecture = page.getByRole("link", {
-      name: "Previous lecture",
-    });
+    const previousLecture = page.getByRole("link", { name: "Operating model" });
     await previousLecture.focus();
     await page.keyboard.press("Enter");
 
@@ -753,10 +762,8 @@ test.describe("lecture reading flow", () => {
     await ui.settle();
 
     await expect(page.getByText("Course complete", { exact: true })).toBeVisible();
-    await expect(page.getByText("Lecture 3 of 3", { exact: true })).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: "Previous lecture" }),
-    ).toHaveAttribute(
+    await expect(page.getByText("Lecture 3 of 3 · 3 complete", { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Repair a broken nginx service" })).toHaveAttribute(
       "href",
       "/courses/operations/lectures/02-repair-nginx",
     );
@@ -822,7 +829,7 @@ test.describe("lecture reading flow", () => {
       variant: "loading",
     });
 
-    await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+    await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Lecture");
   });
 
@@ -833,7 +840,7 @@ test.describe("lecture reading flow", () => {
       variant: "error",
     });
 
-    await expect(page.locator('[data-page-width="content"]')).toHaveCount(1);
+    await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
     await expect(
       page.getByRole("heading", { name: "Could not load this lecture" }),
     ).toBeVisible({ timeout: 12_000 });
@@ -844,9 +851,12 @@ test.describe("lecture reading flow", () => {
 
   for (const viewport of [
     { id: "small", width: 320, height: 700 },
+    { id: "mobile", width: 390, height: 844 },
     { id: "landscape", width: 667, height: 375 },
-    { id: "tablet", width: 1100, height: 800 },
+    { id: "tablet", width: 768, height: 1024 },
+    { id: "wide tablet", width: 1100, height: 800 },
     { id: "desktop", width: 1440, height: 900 },
+    { id: "wide", width: 2048, height: 944 },
   ]) {
     test(`${viewport.id} keeps lecture content within the page`, async ({
       page,
@@ -861,6 +871,20 @@ test.describe("lecture reading flow", () => {
       await expect(
         page.getByRole("button", { name: "Resume scenario" }),
       ).toBeVisible();
+      await expect(
+        page.locator('[data-page-variant="page"]'),
+      ).toHaveCSS("max-width", "none");
+      if (viewport.width >= 1100) {
+        await expect(page.locator("[data-course-outline-rail]")).toBeVisible();
+        await expect(
+          page.getByRole("button", { name: /Open course outline/ }),
+        ).toBeHidden();
+      } else {
+        await expect(page.locator("[data-course-outline-rail]")).toBeHidden();
+        await expect(
+          page.getByRole("button", { name: /Open course outline/ }),
+        ).toBeVisible();
+      }
       await expectNoHorizontalOverflow(page);
     });
   }
@@ -929,7 +953,7 @@ test.describe("coarse pointer and mobile overflow", () => {
     ui.server.state.run = makeMultiReplayRun();
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
-    await expectSavedCourseRunFrame(page);
+    await expectSavedRunShell(page);
 
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
@@ -1041,7 +1065,7 @@ test("replay carousel remains ordered at 200% text", async ({ page, ui }) => {
   ui.server.state.run = makeMultiReplayRun();
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
-  await expectSavedCourseRunFrame(page);
+  await expectSavedRunShell(page);
   await page.evaluate(() => {
     document.documentElement.style.fontSize = "200%";
   });

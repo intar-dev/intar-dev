@@ -24,6 +24,7 @@ import {
 } from "@/components/app/patterns/StatusToken";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { presentScenarioRun } from "@/lib/run-phase";
 import {
   courseRouteForRun,
@@ -32,7 +33,6 @@ import {
   type CourseCatalogResponse,
   type CourseRouteRef,
 } from "@/components/app/pages/learn/course-wire";
-import { CourseLink } from "@/components/app/pages/learn/course-links";
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import {
@@ -636,8 +636,6 @@ export function ScenarioRun() {
   ]);
 
   const runIsLive = attemptData?.activity === "foreground";
-  const runCourseRoute = courseRouteForRun(attemptData?.courseLocation);
-  const runUsesCourseFrame = Boolean(runCourseRoute);
   const deleteRunAction = useMemo(
     () =>
       canDeleteRun ? (
@@ -645,6 +643,7 @@ export function ScenarioRun() {
           type="button"
           size="sm"
           variant="destructive"
+          className="hidden sm:inline-flex"
           onClick={() => setDeleteRunDialogOpen(true)}
         >
           Delete run…
@@ -652,11 +651,48 @@ export function ScenarioRun() {
       ) : undefined,
     [canDeleteRun],
   );
+  const deleteRunMenu = useMemo(
+    () =>
+      canDeleteRun ? (
+        <DropdownMenuItem
+          variant="destructive"
+          className="sm:hidden"
+          onClick={() => setDeleteRunDialogOpen(true)}
+        >
+          Delete run…
+        </DropdownMenuItem>
+      ) : undefined,
+    [canDeleteRun],
+  );
+  const runBackTarget = attemptData
+    ? getRunReturnTarget(attemptData.courseLocation)
+    : null;
+  const runBackNavigation = useMemo(() => {
+    if (runIsLive || !runBackTarget) return undefined;
+    return (
+      <a
+        href={runBackTarget.href}
+        aria-label={runBackTarget.label}
+        data-run-back
+        className="inline-flex min-h-9 min-w-9 items-center justify-center gap-1.5 rounded-lg px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+      >
+        <ArrowLeft className="size-4" aria-hidden="true" />
+        <span className="hidden md:inline">{runBackTarget.text}</span>
+      </a>
+    );
+  }, [
+    runBackTarget?.href,
+    runBackTarget?.label,
+    runBackTarget?.text,
+    runIsLive,
+  ]);
   usePageChrome({
     title: attemptData?.title ?? "Scenario run",
     status: runIsLive ? undefined : runStatusDisplay,
+    back: runBackNavigation,
     action: runIsLive ? undefined : deleteRunAction,
-    fullscreen: runIsLive || runUsesCourseFrame,
+    menu: runIsLive ? undefined : deleteRunMenu,
+    fullscreen: runIsLive,
   });
 
   const runActions =
@@ -818,7 +854,7 @@ export function ScenarioRun() {
 
   if (!attemptData) {
     return (
-      <PageShell width="content">
+      <PageShell>
         {runDialogs}
         {errorAlerts}
         {!attempt.error ? (
@@ -834,11 +870,8 @@ export function ScenarioRun() {
   }
 
   if (attemptData.activity !== "foreground") {
-    const recap = (
-      <PageShell
-        width="content"
-        align={attemptData.activity === "settled" ? "start" : "center"}
-      >
+    return (
+      <PageShell>
         {runDialogs}
         {errorAlerts}
         <Suspense
@@ -860,18 +893,6 @@ export function ScenarioRun() {
         </Suspense>
       </PageShell>
     );
-    return runCourseRoute && attemptData.courseLocation ? (
-      <CourseRunPageFrame
-        title={attemptData.title}
-        status={runStatusDisplay}
-        courseTitle={attemptData.courseLocation.courseTitle}
-        route={runCourseRoute}
-      >
-        {recap}
-      </CourseRunPageFrame>
-    ) : (
-      recap
-    );
   }
 
   // A live run owns the viewport: runtime on the left, learning reference on
@@ -881,7 +902,7 @@ export function ScenarioRun() {
       {runDialogs}
       <div
         data-run-workspace
-        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden [@media(min-width:960px)]:grid-cols-[minmax(0,1fr)_min(24rem,40vw)]"
+        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden [@media(min-width:960px)]:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
       >
         <div
           data-run-work-area
@@ -957,7 +978,7 @@ export function ScenarioRun() {
                 >
                   {showSelectedVmPreparation ? (
                     <div
-                      className="m-auto w-full max-w-2xl py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:py-6"
+                      className="m-auto w-full py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:py-6"
                       data-run-sequence-frame
                     >
                       <ScenarioStepScreen
@@ -995,52 +1016,6 @@ function RunPageFrame({ children }: { children: ReactNode }) {
       data-run-page
       className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
     >
-      {children}
-    </div>
-  );
-}
-
-function CourseRunPageFrame({
-  title,
-  status,
-  courseTitle,
-  route,
-  children,
-}: {
-  title: string;
-  status?: ReactNode;
-  courseTitle: string;
-  route: CourseRouteRef;
-  children: ReactNode;
-}) {
-  return (
-    <div
-      data-course-run-page
-      className="flex min-h-[100dvh] min-w-0 flex-col bg-background"
-    >
-      <header
-        className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2"
-        data-run-navigation
-        data-run-workspace-header
-      >
-        <span className="min-w-0" data-run-back>
-          <CourseLink
-            route={route}
-            className={buttonVariants({
-              variant: "ghost",
-              className:
-                "-ml-2 max-w-[min(16rem,45vw)] [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
-            })}
-          >
-            <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
-            <span className="truncate">{courseTitle}</span>
-          </CourseLink>
-        </span>
-        <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-section-title">
-          {title}
-        </h1>
-        {status ? <div className="min-w-0">{status}</div> : null}
-      </header>
       {children}
     </div>
   );
@@ -1098,11 +1073,33 @@ function getRunReturnTarget(location: CourseLocation | null | undefined): {
   text: string;
 } {
   const route = courseRouteForRun(location);
-  if (!route || !location?.lectureId) {
+  if (!route) {
     return { href: "/runs", label: "Back to My runs", text: "My runs" };
   }
 
   const courseId = encodeURIComponent(route.courseId);
+  if (!location?.lectureId) {
+    switch (route.scope) {
+      case "public":
+        return {
+          href: `/courses/${courseId}`,
+          label: "Back to course",
+          text: location?.courseTitle ?? "Course",
+        };
+      case "organization-public":
+      case "organization-private": {
+        const organizationId = encodeURIComponent(route.organizationId!);
+        const visibility =
+          route.scope === "organization-private" ? "private" : "public";
+        return {
+          href: `/organizations/${organizationId}/courses/${visibility}/${courseId}`,
+          label: "Back to course",
+          text: location?.courseTitle ?? "Course",
+        };
+      }
+    }
+  }
+
   const lectureId = encodeURIComponent(location.lectureId);
   switch (route.scope) {
     case "public":

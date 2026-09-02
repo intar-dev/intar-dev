@@ -17,7 +17,7 @@ import type {
 } from "./run-types";
 
 describe("run learning panel", () => {
-  it("uses a stable theory and hints mobile trigger with learner-safe counts", () => {
+  it("shows check progress in the mobile trigger with learner-safe detail", () => {
     expect(
       getRunLearningTriggerCopy({
         passedChecks: 1,
@@ -26,7 +26,7 @@ describe("run learning panel", () => {
         totalHints: 2,
       }),
     ).toEqual({
-      visibleLabel: "Theory and hints",
+      visibleLabel: "Checks 1/3",
       accessibleLabel:
         "Open lecture theory and hints. 1 of 2 hints revealed. 1 of 3 checks verified.",
     });
@@ -38,7 +38,7 @@ describe("run learning panel", () => {
         totalHints: 0,
       }),
     ).toEqual({
-      visibleLabel: "Theory and hints",
+      visibleLabel: "Checks 3/3",
       accessibleLabel:
         "Open lecture theory and hints. No hints are available. 3 of 3 checks verified.",
     });
@@ -67,8 +67,9 @@ describe("run learning panel", () => {
       'aria-label="Lecture theory and hints content"',
     );
     expect(desktopMarkup).toContain('tabindex="0"');
-    expect(desktopMarkup).toContain("w-[min(24rem,40dvw)]");
-    expect(desktopMarkup).toContain("max-w-[40dvw]");
+    expect(desktopMarkup).toContain("w-full");
+    expect(desktopMarkup).not.toContain("max-w-[40dvw]");
+    expect(desktopMarkup).toContain('data-run-pinned-checks="true"');
     expect(desktopMarkup).toContain("Lecture theory");
     expect(desktopMarkup).toContain("Repair the service safely.");
     expect(desktopMarkup).not.toContain('data-run-learning-panel-trigger="true"');
@@ -78,7 +79,7 @@ describe("run learning panel", () => {
 
     expect(mobileMarkup).toContain('data-run-learning-mobile="true"');
     expect(mobileMarkup).toContain('data-run-learning-panel-trigger="true"');
-    expect(mobileMarkup).toContain("Theory and hints");
+    expect(mobileMarkup).toContain("Checks 0/1");
     expect(mobileMarkup).toContain(
       'aria-label="Open lecture theory and hints. 0 of 2 hints revealed. 0 of 1 checks verified."',
     );
@@ -141,20 +142,22 @@ describe("run learning panel", () => {
     expect(markup).toContain("Learner check 8");
   });
 
-  it("puts lecture theory before checks, hints, and solution", () => {
+  it("pins checks before long theory, hints, and solution", () => {
     const markup = renderContent({
       briefingMarkdown: "Read the **service status** before you change it.",
     });
 
     expect(markup).toContain("Lecture theory");
     expect(markup).toContain("service status");
+    expect(markup.indexOf("Checks")).toBeLessThan(
+      markup.indexOf("Lecture theory"),
+    );
     expect(markup.indexOf("Lecture theory")).toBeLessThan(
       markup.indexOf("service status"),
     );
     expect(markup.indexOf("service status")).toBeLessThan(
-      markup.indexOf("Checks"),
+      markup.indexOf("Hints"),
     );
-    expect(markup.indexOf("Checks")).toBeLessThan(markup.indexOf("Hints"));
     expect(markup.indexOf("Hints")).toBeLessThan(
       markup.indexOf("Full solution"),
     );

@@ -131,7 +131,7 @@ export function AdminBuilds() {
   ).length;
 
   return (
-    <PageShell width="workspace" density="compact">
+    <PageShell variant="workspace" density="compact">
       <Section
         variant="flat"
         density="compact"

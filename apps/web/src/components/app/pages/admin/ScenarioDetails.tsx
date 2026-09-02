@@ -188,7 +188,7 @@ export function ScenarioDetails() {
   });
 
   return (
-    <PageShell width="workspace" density="compact">
+    <PageShell variant="workspace" density="compact">
       {scenario.error ? (
         <ErrorState
           title="Could not load scenario"
@@ -370,7 +370,7 @@ export function ScenarioLearnerPreview({
       title="Learner preview"
       description="The briefing learners read before they start."
     >
-      <Markdown className="prose-measure text-sm leading-7">
+      <Markdown className="text-sm leading-7">
         {briefingMarkdown}
       </Markdown>
       <div className="mt-4 divide-y border-t">
@@ -392,7 +392,7 @@ export function ScenarioLearnerPreview({
         ) : null}
         <DisclosureRow title="Solution" meta="Learner-gated" density="compact">
           {solutionMarkdown.trim() ? (
-            <Markdown className="prose-measure text-sm leading-7">
+            <Markdown className="text-sm leading-7">
               {solutionMarkdown}
             </Markdown>
           ) : (
@@ -513,7 +513,7 @@ function VerificationObjective({
           <p className="text-sm text-muted-foreground">{description}</p>
         ) : null}
         {probe.bodyMarkdown?.trim() ? (
-          <Markdown className="prose-measure text-sm leading-7 text-muted-foreground">
+          <Markdown className="text-sm leading-7 text-muted-foreground">
             {probe.bodyMarkdown}
           </Markdown>
         ) : null}

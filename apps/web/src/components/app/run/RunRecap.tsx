@@ -191,7 +191,7 @@ export function RunRecap({
         >
           {recap.title}
         </h2>
-        <p className="mt-2 max-w-[54ch] text-support text-muted-foreground">
+        <p className="mt-2 text-support text-muted-foreground">
           {recap.description}
         </p>
       </header>
@@ -214,7 +214,7 @@ export function RunRecap({
             {objectives.map((objective) => (
               <li
                 key={objective.key}
-                className="grid min-h-11 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-3 py-4"
+                className="grid min-h-11 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 py-4"
               >
                 {objective.status === "verified" ? (
                   <CheckCircle2
@@ -227,20 +227,22 @@ export function RunRecap({
                     aria-hidden="true"
                   />
                 )}
-                <span className="min-w-0 text-support font-medium">
-                  {objective.title}
-                </span>
-                <span
-                  className={cn(
-                    "text-support font-medium whitespace-nowrap",
-                    objective.status === "verified"
-                      ? "text-success"
-                      : "text-destructive",
-                  )}
-                >
-                  {objective.status === "verified"
-                    ? "Verified"
-                    : "Needs repair"}
+                <span className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-1">
+                  <span className="min-w-0 flex-1 text-support font-medium [overflow-wrap:anywhere]">
+                    {objective.title}
+                  </span>
+                  <span
+                    className={cn(
+                      "text-support font-medium whitespace-nowrap",
+                      objective.status === "verified"
+                        ? "text-success"
+                        : "text-destructive",
+                    )}
+                  >
+                    {objective.status === "verified"
+                      ? "Verified"
+                      : "Needs repair"}
+                  </span>
                 </span>
               </li>
             ))}
@@ -280,7 +282,7 @@ export function RunRecap({
 
       <section
         aria-labelledby="run-recap-next-heading"
-        className="w-full max-w-4xl border-t pt-6"
+        className="w-full border-t pt-6"
       >
         <h2 id="run-recap-next-heading" className="text-section-title">
           {recap.kind === "solved" ? "Keep learning" : "Give it another try"}
@@ -356,7 +358,7 @@ function RunSavingProgress({
         footer={
           isStalled ? (
             <p
-              className="max-w-[52ch] text-support text-muted-foreground"
+              className="text-support text-muted-foreground"
               data-run-saving-stalled
               role="status"
             >

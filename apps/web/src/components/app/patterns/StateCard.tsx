@@ -47,7 +47,7 @@ function StateShell({
             {title}
           </Heading>
           {description ? (
-            <p className="max-w-md text-sm leading-6 text-muted-foreground">
+            <p className="text-sm leading-6 text-muted-foreground">
               {description}
             </p>
           ) : null}

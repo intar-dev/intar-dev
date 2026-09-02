@@ -14,7 +14,7 @@ export function CourseNextAction({
 }) {
   return (
     <div
-      className="grid w-full max-w-4xl min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center"
+      className="grid w-full min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center"
       data-course-next-action
     >
       <div className="min-w-0 space-y-1">

@@ -41,9 +41,9 @@ async function expectStandardRunShell(
   page: Parameters<typeof expectRouteScreenshot>[0],
 ) {
   await expect(page.locator("[data-run-page]")).toHaveCount(0);
-  await expect(page.locator("[data-course-run-page]")).toBeVisible();
+  await expect(page.locator("[data-course-run-page]")).toHaveCount(0);
   await expect(page.locator("[data-run-back]")).toBeVisible();
-  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
 }
 
 async function expectDesktopMissionPane(
@@ -121,7 +121,7 @@ test.describe("focused visual states", () => {
 
     await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
     await expect(
-      page.getByRole("link", { name: "Next lecture" }),
+      page.getByRole("link", { name: "Trace an intermittent DNS failure" }),
     ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Run again" }),
@@ -144,7 +144,9 @@ test.describe("focused visual states", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
 
-    await expect(page.getByRole("link", { name: "Next lecture" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /Open course outline/ }),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
     await expectRouteScreenshot(
       page,
@@ -168,8 +170,13 @@ test.describe("focused visual states", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
 
-    await expect(page.getByRole("link", { name: "Next lecture" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await page.getByRole("button", { name: /Open course outline/ }).click();
+    await expect(
+      page.getByRole("link", {
+        name: /Trace an intermittent DNS failure across a deliberately long production service boundary/,
+      }),
+    ).toBeVisible();
     await expectRouteScreenshot(
       page,
       "lecture-completed-long-next-light-tablet",

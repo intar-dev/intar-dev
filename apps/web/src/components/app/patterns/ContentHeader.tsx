@@ -41,7 +41,7 @@ export function ContentHeader({
           {badge}
         </div>
         {summary ? (
-          <p className="prose-measure text-support text-muted-foreground">
+          <p className="text-support text-muted-foreground">
             {summary}
           </p>
         ) : null}

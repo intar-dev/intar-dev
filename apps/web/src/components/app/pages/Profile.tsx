@@ -150,7 +150,7 @@ export function Profile() {
   const user = session?.user ?? null;
 
   return (
-    <PageShell width="content">
+    <PageShell>
       <Section
         title="Account"
         description="This identity is recorded on every scenario run you start."
@@ -285,7 +285,7 @@ export function Profile() {
               <KeyRound className="size-6 text-muted-foreground" />
               <div>
                 <p className="text-sm font-medium">No public keys yet</p>
-                <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
+                <p className="mt-1 text-sm leading-6 text-muted-foreground">
                   Intar can issue a temporary key for each run. Save a public
                   key if you want native SSH to reuse your local identity.
                 </p>

@@ -164,7 +164,7 @@ export function ScenarioRegistry() {
   };
 
   return (
-    <PageShell width="workspace" density="compact">
+    <PageShell variant="workspace" density="compact">
       {scenarios.error ? (
         <ErrorState
           title="Could not load scenarios"

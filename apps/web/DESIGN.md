@@ -159,7 +159,7 @@ The system uses little decoration. A border, a small tonal change, or a small sh
 - Rust actions with clear text labels.
 - Dense but readable app frame and metadata.
 - Quiet borders and small, functional depth.
-- Narrow reading rails for Markdown content.
+- Fluid page columns for Markdown content.
 
 ## Colors
 
@@ -216,15 +216,17 @@ The palette uses warm neutrals for structure, rust for action, and semantic colo
 
 The normal app frame has a 16rem sidebar on desktop and a 3rem compact sidebar. The mobile sidebar is a sheet that is 18rem wide. The app bar is 3rem high and keeps the page title visible.
 
-Page shells use a 42rem narrow measure, a 64rem content measure, or an 80rem default measure. Page inset grows from 1rem to 1.5rem at 40rem and to 2rem at 64rem. The spacing scale is the source for the gaps and padding in all three measures.
+Authenticated page shells fill the available app viewport through 2048px. Page inset grows from 1rem to 1.5rem at 40rem and to 2rem at 64rem. Page content must not add a maximum width that leaves unused app space.
 
-Long Markdown uses a 68ch reading rail. Work surfaces can add a 24rem right learning panel from 960px, with a maximum width of 40dvw. The same learning content uses a bottom sheet below that breakpoint.
+Lecture pages use one fluid column below 1100px and a three-to-one content and course-outline grid from 1100px. The mobile app bar opens the same course outline in a bottom sheet. Live run workspaces use a two-to-one terminal and learning grid from 960px. Checks stay pinned above long theory and hints.
 
 ### Named Rules
 
 **The One Frame Rule.** Keep app navigation in the sidebar and page identity in the app bar. Do not make a second page header compete with the app bar heading.
 
-**The Reading Rail Rule.** Keep long instructional text on the narrow measure. Put an action panel after the reading unit when the content leads to one next action.
+**The Fluid Content Rule.** Let page content use the available app viewport. Put a lecture action after the reading unit and use the course outline for lecture navigation.
+
+**The Full-Screen Work Rule.** Only a foreground run hides the normal app frame. Saving, recap, and replay use the normal sidebar and app bar.
 
 ## Elevation & Depth
 
@@ -293,7 +295,7 @@ Use a brand-subtle panel with top and bottom brand borders when a reading unit h
 
 - **Do** use the semantic color properties so light and dark themes keep the same roles.
 - **Do** keep direct status words with dots, icons, and live feedback.
-- **Do** keep long Markdown on the 68ch reading rail.
+- **Do** let long Markdown use its fluid page or panel column.
 - **Do** use the mono metadata line for static counts, durations, and course facts.
 - **Do** use the rust action color for the one main action in a local area.
 

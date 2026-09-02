@@ -15,22 +15,22 @@ Learners need the technical model before they repair the linked system. They rea
 
 ## Direction
 
-Keep the established Intar visual system. Use a narrow reading measure, visible course and unit context, and one action section after the Markdown body. Locked content never appears. Waiting, active, failed, and completed states use direct text as well as color.
+Keep the established Intar visual system. Use the full available page width, a visible course outline, and one action section after the Markdown body. Locked content never appears. Waiting, active, failed, and completed states use direct text as well as color.
 
 ## Direction contract
 
 THESIS: One ordered reading path teaches the model before the scenario; it refuses a catalog of equal-weight scenario cards.
 
-OWN-WORLD: Warm neutral ground, the existing Intar sidebar frame, quiet borders, direct status text, rust actions, and a narrow Markdown reading rail.
+OWN-WORLD: Warm neutral ground, the existing Intar sidebar frame, quiet borders, direct status text, rust actions, fluid content, and a persistent course outline.
 
 STORY: The learner sees the course position, reads the theory, understands the unit state, and then starts or completes one unit.
 
-FIRST VIEWPORT: Course context and the lecture title lead. Metadata follows. Theory fills the narrow central rail. The primary scenario or completion action comes only after the body.
+FIRST VIEWPORT: Course context and the lecture title lead. Metadata follows. Theory fills the fluid main column. A right outline shows lecture position and course progress from 1100px; the app bar opens it below that width. The primary scenario or completion action comes only after the body.
 
-FORM: Reading rail with a trailing scenario gate; form 1 of 1; seed key `course-lecture-reading-first-v2`.
+FORM: Fluid reading column, responsive course outline, and trailing scenario gate; form 1 of 1; seed key `course-lecture-reading-first-v3`.
 
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
 
 ## Constraints
 
-The server owns access and sequence checks. The interface must work with keyboard and screen readers on mobile and desktop. Do not add a new visual identity, a hero, decorative cards, or an action above the theory.
+The server owns access and sequence checks. The interface must work with keyboard and screen readers on mobile and desktop. Only a foreground run uses the full-screen shell. Checks stay visible above long run theory. Do not add a new visual identity, a hero, decorative cards, or a scenario action above the theory.

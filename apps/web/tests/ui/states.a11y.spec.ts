@@ -111,37 +111,9 @@ async function expectStandardRunChrome(
   options: {
     status?: string;
     hasDeleteAction?: boolean;
+    hasBack?: boolean;
   } = {},
 ) {
-  const courseFrame = page.locator("[data-course-run-page]");
-  if ((await courseFrame.count()) === 1) {
-    const header = page.locator("[data-run-workspace-header]");
-    await expect(page.locator("[data-slot='sidebar-wrapper']")).toHaveCount(1);
-    await expect(page.locator("[data-slot='sidebar-inset']")).toHaveCount(1);
-    await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
-    await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
-    await expect(
-      page.getByRole("navigation", { name: "Breadcrumb" }),
-    ).toHaveCount(0);
-    await expect(header).toHaveCount(1);
-    await expect(
-      header.getByRole("heading", { level: 1, name: title }),
-    ).toBeVisible();
-    await expect(page.locator("[data-run-page]")).toHaveCount(0);
-    await expect(page.locator("[data-run-navigation]")).toHaveCount(1);
-    await expect(page.locator("[data-run-back]")).toHaveCount(1);
-    await expect(page.getByRole("button", { name: "Page actions" })).toHaveCount(
-      0,
-    );
-    if (options.status) await expect(header).toContainText(options.status);
-    const deleteRun = header.getByRole("button", {
-      name: "Delete run…",
-      exact: true,
-    });
-    await expect(deleteRun).toHaveCount(0);
-    return;
-  }
-
   const appBar = page.locator("header").filter({
     has: page.getByRole("heading", { level: 1, name: title, exact: true }),
   });
@@ -162,11 +134,11 @@ async function expectStandardRunChrome(
   ).toBeVisible();
   await expect(page.locator("[data-run-page]")).toHaveCount(0);
   await expect(page.locator("[data-run-navigation]")).toHaveCount(0);
-  await expect(page.locator("[data-run-back]")).toHaveCount(0);
-  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Page actions" })).toHaveCount(
-    0,
+  await expect(page.locator("[data-run-back]")).toHaveCount(
+    options.hasBack === false ? 0 : 1,
   );
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(0);
+  const pageActions = page.getByRole("button", { name: "Page actions" });
 
   if (options.status) {
     await expect(appBar).toContainText(options.status);
@@ -180,10 +152,17 @@ async function expectStandardRunChrome(
     exact: true,
   });
   if (options.hasDeleteAction) {
-    await expect(allDeleteRunActions).toHaveCount(1);
-    await expect(deleteRun).toBeVisible();
+    if (viewport && viewport.width < 640) {
+      await expect(allDeleteRunActions).toHaveCount(0);
+      await expect(pageActions).toBeVisible();
+    } else {
+      await expect(allDeleteRunActions).toHaveCount(1);
+      await expect(deleteRun).toBeVisible();
+      await expect(pageActions).toHaveCount(0);
+    }
   } else {
     await expect(allDeleteRunActions).toHaveCount(0);
+    await expect(pageActions).toHaveCount(0);
   }
 }
 
@@ -275,20 +254,16 @@ async function expectPersistentDesktopLearningPanel(page: Page) {
   await expect(runLearningTrigger(page)).toBeHidden();
   await expect(runLearningSheet(page)).toHaveCount(0);
 
-  const [panelBox, workAreaBox, viewport, rootFontSize] = await Promise.all([
+  const [panelBox, workAreaBox, viewport] = await Promise.all([
     panel.boundingBox(),
     workArea.boundingBox(),
     page.viewportSize(),
-    page.evaluate(() =>
-      Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
-    ),
   ]);
   expect(panelBox).not.toBeNull();
   expect(workAreaBox).not.toBeNull();
   expect(viewport).not.toBeNull();
-  const maxWidth = Math.min(24 * rootFontSize, viewport!.width * 0.4);
-  expect(panelBox!.width).toBeLessThanOrEqual(maxWidth + 1);
-  expect(panelBox!.width).toBeCloseTo(maxWidth, 0);
+  expect(panelBox!.width).toBeCloseTo(viewport!.width / 3, 0);
+  expect(workAreaBox!.width).toBeCloseTo((viewport!.width * 2) / 3, 0);
   expect(panelBox!.x).toBeGreaterThanOrEqual(
     workAreaBox!.x + workAreaBox!.width - 1,
   );
@@ -917,7 +892,7 @@ test.describe("focused state accessibility", () => {
       await expect(
         page.getByText("Loading your run…", { exact: true }),
       ).toBeVisible();
-      await expectStandardRunChrome(page, "Scenario run");
+      await expectStandardRunChrome(page, "Scenario run", { hasBack: false });
       await expectNoAxeViolations(page, testInfo);
     } finally {
       releaseRunResponse?.();
@@ -1130,14 +1105,14 @@ test.describe("focused state accessibility", () => {
       title: "Solved",
       replay: "Replay unavailable.",
       status: "Solved",
-      hasDeleteAction: false,
+      hasDeleteAction: true,
     },
     {
       runState: "replay",
       title: "Solved",
       replay: "Watch replay",
       status: "Solved",
-      hasDeleteAction: false,
+      hasDeleteAction: true,
     },
   ] as const) {
     test(`saved run recap · ${recap.runState}`, async ({
@@ -1213,12 +1188,6 @@ test.describe("focused state accessibility", () => {
         ).toBeVisible();
       }
 
-      if (recap.runState === "replay") {
-        await expect(
-          page.getByRole("button", { name: /^Delete run/ }),
-        ).toHaveCount(0);
-      }
-
       await expectNoHorizontalOverflow(page);
       await expectNoAxeViolations(page, testInfo);
     });
@@ -1239,7 +1208,7 @@ test.describe("focused state accessibility", () => {
 
     await expectStandardRunChrome(page, "Repair a broken nginx service", {
       status: "Solved",
-      hasDeleteAction: false,
+      hasDeleteAction: true,
     });
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
@@ -1300,7 +1269,7 @@ test.describe("focused state accessibility", () => {
 
     await expectStandardRunChrome(page, "Repair a broken nginx service", {
       status: "Ended early",
-      hasDeleteAction: false,
+      hasDeleteAction: true,
     });
     await expect(
       page.getByRole("heading", { name: "Ended early", exact: true }),
@@ -1706,10 +1675,15 @@ test.describe("long check rows", () => {
       runState: "running",
     });
     const run = ui.server.state.run as {
+      lectureBodyMarkdown: string;
       objectives: Array<Record<string, unknown>>;
       scenarioProbes: Array<Record<string, unknown>>;
       vms: Array<{ scenarioProbes: Array<Record<string, unknown>> }>;
     };
+    run.lectureBodyMarkdown = Array.from(
+      { length: 30 },
+      (_, index) => `## Long theory section ${index + 1}\n\nLong lecture detail.`,
+    ).join("\n\n");
     const probes = Array.from({ length: 12 }, (_, index) => ({
       id: `check-${index + 1}`,
       label: `hidden-check-${index + 1}`,
@@ -1723,7 +1697,7 @@ test.describe("long check rows", () => {
       probeName: probe.id,
       vmName: "web",
       label: probe.label,
-      title: `Learner check ${index + 1}`,
+      title: `Learner check ${index + 1} with a deliberately long description that must keep its status visible`,
       bodyMarkdown: "Hidden objective detail",
       hintCount: 0,
     }));
@@ -1741,8 +1715,11 @@ test.describe("long check rows", () => {
     await expect(
       checks.getByText("1/12 verified", { exact: true }),
     ).toBeVisible();
-    const lastCheck = checks.getByText("Learner check 12", { exact: true });
-    const scroller = panel.locator("[data-run-learning-panel-scroll]");
+    const lastCheck = checks.getByText(
+      "Learner check 12 with a deliberately long description that must keep its status visible",
+      { exact: true },
+    );
+    const scroller = checks.getByRole("list");
     const terminal = page.locator(".xterm");
     const [terminalBeforeScroll, pageScrollBefore] = await Promise.all([
       terminal.boundingBox(),
@@ -1759,6 +1736,9 @@ test.describe("long check rows", () => {
     });
     expect(scrollState.scrollHeight).toBeGreaterThan(scrollState.clientHeight);
     expect(scrollState.scrollTop).toBeGreaterThan(0);
+    await expect(
+      checks.getByText("1/12 verified", { exact: true }),
+    ).toBeVisible();
     expect(await page.evaluate(() => window.scrollY)).toBe(pageScrollBefore);
     const terminalAfterScroll = await terminal.boundingBox();
     expect(terminalAfterScroll).not.toBeNull();
@@ -1770,7 +1750,10 @@ test.describe("long check rows", () => {
     );
     await lastCheck.scrollIntoViewIfNeeded();
     await expect(lastCheck).toBeVisible();
-    await expect(lastCheck).toHaveText("Learner check 12");
+    await expect(lastCheck).toContainText("Learner check 12");
+    await expect(
+      lastCheck.locator("xpath=..").getByText("Verified", { exact: true }),
+    ).toBeVisible();
 
     const terminalRequestsBeforeResize = ui.server.requests.filter(
       (request) => request === "POST /api/scenarios/runs/run-active/ssh",
@@ -2164,11 +2147,11 @@ test.describe("small-screen access management", () => {
 
     await expectStandardRunChrome(page, "Repair a broken nginx service", {
       status: "Solved",
-      hasDeleteAction: false,
+      hasDeleteAction: true,
     });
     await expect(
-      page.getByRole("button", { name: "Delete run…", exact: true }),
-    ).toHaveCount(0);
+      page.getByRole("button", { name: "Page actions" }),
+    ).toBeVisible();
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
     await carousel.scrollIntoViewIfNeeded();

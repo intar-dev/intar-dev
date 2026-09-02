@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronRight, EllipsisVertical } from "lucide-react";
+import { ArrowLeft, ChevronRight, EllipsisVertical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -147,6 +147,7 @@ export function AppBar() {
   const crumbs = buildCrumbs(pathname, overrides);
   const final = crumbs[crumbs.length - 1];
   const ancestors = crumbs.slice(0, -1);
+  const parent = ancestors[ancestors.length - 1];
 
   // Every app route's single visible h1, in every data state. Never wrap it
   // in BreadcrumbPage or add aria-current — a role would strip the heading
@@ -165,45 +166,57 @@ export function AppBar() {
   ) : null;
 
   return (
-    <header className="sticky top-0 z-30 flex h-[var(--app-bar-h)] shrink-0 items-center gap-2 border-b bg-background px-[var(--page-inset)]">
-      <SidebarTrigger className="-ml-1" />
-      <Separator
-        orientation="vertical"
-        className="data-[orientation=vertical]:h-4"
-      />
-      {ancestors.length ? (
-        <nav aria-label="Breadcrumb" className="flex min-w-0 items-center">
-          <ol className="flex min-w-0 items-center gap-1.5">
-            {ancestors.map((ancestor) =>
-              ancestor.to ? (
-                <li
-                  key={ancestor.to}
-                  className="hidden shrink-0 items-center gap-1.5 sm:flex"
-                >
-                  <Link
-                    to={ancestor.to}
-                    className="rounded-sm text-sm text-muted-foreground transition-colors hover:text-foreground"
+    <header className="sticky top-0 z-30 grid h-[var(--app-bar-h)] shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b bg-background px-[var(--page-inset)]">
+      <div className="flex min-w-0 items-center gap-2" data-app-bar-leading>
+        <SidebarTrigger className="-ml-1" />
+        <Separator
+          orientation="vertical"
+          className="data-[orientation=vertical]:h-4"
+        />
+        {chrome?.back ? (
+          <span className="flex min-w-0 items-center">{chrome.back}</span>
+        ) : parent?.to ? (
+          <Link
+            to={parent.to}
+            aria-label={`Back to ${parent.label}`}
+            className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40 sm:hidden [@media(pointer:coarse)]:size-11"
+          >
+            <ArrowLeft className="size-4" aria-hidden="true" />
+          </Link>
+        ) : null}
+      </div>
+      <nav aria-label="Breadcrumb" className="flex min-w-0 items-center">
+        <ol className="flex min-w-0 items-center gap-1.5">
+          {!chrome?.back
+            ? ancestors.map((ancestor) =>
+                ancestor.to ? (
+                  <li
+                    key={ancestor.to}
+                    className="hidden shrink-0 items-center gap-1.5 sm:flex"
                   >
-                    {ancestor.label}
-                  </Link>
-                  <ChevronRight
-                    aria-hidden="true"
-                    className="size-3.5 text-muted-foreground/60"
-                  />
-                </li>
-              ) : null,
-            )}
-            <li className="flex min-w-0 items-center">{heading}</li>
-          </ol>
-        </nav>
-      ) : (
-        heading
-      )}
-      <div className="ml-auto flex shrink-0 items-center gap-2">
+                    <Link
+                      to={ancestor.to}
+                      className="rounded-sm text-sm text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      {ancestor.label}
+                    </Link>
+                    <ChevronRight
+                      aria-hidden="true"
+                      className="size-3.5 text-muted-foreground/60"
+                    />
+                  </li>
+                ) : null,
+              )
+            : null}
+          <li className="flex min-w-0 items-center" data-app-bar-title>
+            {heading}
+          </li>
+        </ol>
+      </nav>
+      <div className="flex min-w-0 shrink-0 items-center gap-2" data-app-bar-trailing>
+        {chrome?.utility}
         {chrome?.status ? (
-          <span className="inline-flex max-w-36 min-w-0 sm:max-w-none">
-            {chrome.status}
-          </span>
+          <span className="inline-flex min-w-0">{chrome.status}</span>
         ) : null}
         {chrome?.action}
         {chrome?.menu ? (
@@ -213,6 +226,7 @@ export function AppBar() {
                 <Button
                   variant="ghost"
                   size="icon-sm"
+                  className={chrome.action ? "sm:hidden" : undefined}
                   aria-label="Page actions"
                 />
               }

@@ -133,7 +133,7 @@ export function Organizations() {
     role === "owner" ? "Owner" : role === "admin" ? "Admin" : "Member";
 
   return (
-    <PageShell width="content">
+    <PageShell>
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>

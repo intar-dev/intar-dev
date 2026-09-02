@@ -36,7 +36,7 @@ export function Section({
           <div className="space-y-1">
             {title ? <h2 className="text-section-title">{title}</h2> : null}
             {description ? (
-              <p className="text-metadata prose-measure">{description}</p>
+              <p className="text-metadata">{description}</p>
             ) : null}
           </div>
           {actions ? (

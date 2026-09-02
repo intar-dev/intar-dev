@@ -249,7 +249,7 @@ function CourseCatalogPage({
   }
   if (catalog.error) {
     return (
-      <PageShell width="content" align="start">
+      <PageShell>
         <ErrorState
           title="Could not load courses"
           description={
@@ -264,7 +264,7 @@ function CourseCatalogPage({
   }
   if (courseId && !course) {
     return (
-      <PageShell width="content" align="start">
+      <PageShell>
         <ErrorState
           title="Course not available"
           description="This course is not available in the current catalog."
@@ -318,7 +318,7 @@ function CourseIndex({
   search: ReturnType<typeof compactCatalogSearch>;
 }) {
   return (
-    <PageShell width="content" align="start">
+    <PageShell>
       <ContentHeader
         title="Courses"
         titleClassName="max-sm:sr-only"
@@ -388,7 +388,7 @@ function CourseIndexItem({
         <span className="block text-page-title text-balance [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text">
           {course.title}
         </span>
-        <span className="prose-measure block text-body text-muted-foreground text-pretty">
+        <span className="block text-body text-muted-foreground text-pretty">
           {course.summary}
         </span>
         <span className="block pt-1">
@@ -436,7 +436,7 @@ function CourseDetail({
   ).length;
 
   return (
-    <PageShell width="content" align="start">
+    <PageShell>
       <div className="space-y-4">
         <CourseIndexBackLink organizationId={organizationId} />
         <ContentHeader
@@ -454,7 +454,7 @@ function CourseDetail({
         />
       </div>
       {course.bodyMarkdown.trim() ? (
-        <section className="prose-measure border-y py-6 text-body leading-7">
+        <section className="border-y py-6 text-body leading-7">
           <Markdown pageContent>{course.bodyMarkdown}</Markdown>
         </section>
       ) : null}
@@ -922,7 +922,7 @@ function matchesText(query: string, values: readonly string[]): boolean {
 
 function CourseCatalogLoading() {
   return (
-    <PageShell width="content" align="start">
+    <PageShell>
       <div role="status" className="space-y-6">
         <span className="sr-only">Loading courses…</span>
         <Skeleton className="h-8 w-72 max-w-full" />

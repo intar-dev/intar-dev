@@ -102,7 +102,7 @@ export function RunsList() {
   const pastRunGroups = groupSettledRunsByScenario(pastRuns);
 
   return (
-    <PageShell width="content" density="comfortable">
+    <PageShell density="comfortable">
       {runs.error ? (
         <ErrorState
           title="Could not load runs"

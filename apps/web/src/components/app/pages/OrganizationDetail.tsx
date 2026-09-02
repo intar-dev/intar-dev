@@ -80,7 +80,7 @@ export function OrganizationDetail() {
 
   if (organization.error) {
     return (
-      <PageShell width="content">
+      <PageShell>
         <ErrorState
           title="Could not load organization"
           description={
@@ -95,7 +95,7 @@ export function OrganizationDetail() {
   }
   if (!detail) {
     return (
-      <PageShell width="content">
+      <PageShell>
         <div role="status" className="space-y-6">
           <span className="sr-only">Loading organization…</span>
           <Skeleton className="h-8 w-72 max-w-full" />
@@ -114,7 +114,7 @@ export function OrganizationDetail() {
         : "Member";
 
   return (
-    <PageShell width="workspace" density="compact">
+    <PageShell variant="workspace" density="compact">
       <ContentHeader
         title={detail.name}
         badge={

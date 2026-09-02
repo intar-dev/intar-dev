@@ -544,7 +544,7 @@ export function Dashboard() {
     archiveSearch.trim() || archiveOutcomeFilter,
   );
   return (
-    <PageShell width="workspace" density="compact">
+    <PageShell variant="workspace" density="compact">
       <Section
         title="Operational ledger"
         description="Current fleet posture from the latest host reports."
@@ -1107,7 +1107,7 @@ function OperationalEmptyState({
   return (
     <div className="rounded-lg bg-muted/30 px-4 py-3">
       <h3 className="text-card-title">{title}</h3>
-      <p className="mt-1 max-w-2xl text-metadata">{description}</p>
+      <p className="mt-1 text-metadata">{description}</p>
     </div>
   );
 }

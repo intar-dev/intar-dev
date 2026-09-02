@@ -120,7 +120,7 @@ export function AdminHosts() {
   });
 
   return (
-    <PageShell width="workspace" density="compact">
+    <PageShell variant="workspace" density="compact">
       <div className="space-y-3 empty:hidden">
         {hosts.error ? (
           <Alert variant="destructive">
