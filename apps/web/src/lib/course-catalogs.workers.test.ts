@@ -388,6 +388,7 @@ describe("V2 course catalogs", () => {
         course("sequence", [
           lecture("theory"),
           lecture("task", "task"),
+          lecture("final"),
         ]),
       ),
       sourceRevision: "sequence-revision",
@@ -426,7 +427,48 @@ describe("V2 course catalogs", () => {
       }),
     ).resolves.toMatchObject({
       ok: true,
-      detail: { lecture: { state: "available" } },
+      detail: {
+        lecture: {
+          state: "available",
+          previousLecture: {
+            courseId: "sequence",
+            lectureId: "theory",
+            title: "theory",
+          },
+          nextLecture: {
+            courseId: "sequence",
+            lectureId: "final",
+            title: "final",
+          },
+          lectureOrdinal: 2,
+          lectureCount: 3,
+        },
+      },
+    });
+
+    await expect(
+      loadCourseLectureDetailForUser({
+        db,
+        userId: learnerId,
+        organizationId: null,
+        courseId: "sequence",
+        lectureId: "final",
+        allowSequenceBypass: true,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      detail: {
+        lecture: {
+          previousLecture: {
+            courseId: "sequence",
+            lectureId: "task",
+            title: "task",
+          },
+          nextLecture: null,
+          lectureOrdinal: 3,
+          lectureCount: 3,
+        },
+      },
     });
 
     const completed = await completePureCourseLectureForUser({
@@ -439,7 +481,10 @@ describe("V2 course catalogs", () => {
     });
     expect(completed.lecture).toMatchObject({
       state: "completed",
+      previousLecture: null,
       nextLecture: { courseId: "sequence", lectureId: "task", title: "task" },
+      lectureOrdinal: 1,
+      lectureCount: 3,
     });
     await completePureCourseLectureForUser({
       db,
@@ -465,7 +510,7 @@ describe("V2 course catalogs", () => {
       courseId: "sequence",
       lectureId: "task",
       lectureOrdinal: 2,
-      lectureCount: 2,
+      lectureCount: 3,
       scenarioReady: true,
     });
     await expect(

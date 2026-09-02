@@ -334,6 +334,13 @@ test("a theory-only lecture completes and exposes the next unit", async ({
   await expect(
     page.getByRole("heading", { name: "Observe first" }),
   ).toBeVisible();
+  await expect(page.getByText("Lecture 1 of 3", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Previous lecture" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", { name: "Lecture navigation" }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Complete lecture" }).click();
 
   await expect(
@@ -613,6 +620,14 @@ test.describe("lecture reading flow", () => {
       page.getByText("Trace an intermittent DNS failure", { exact: true }),
     ).toBeVisible();
     const nextLecture = page.getByRole("link", { name: "Next lecture" });
+    const previousLecture = page.getByRole("link", {
+      name: "Previous lecture",
+    });
+    await expect(previousLecture).toHaveAttribute(
+      "href",
+      "/courses/operations/lectures/01-operating-model",
+    );
+    await expect(page.getByText("Lecture 2 of 3", { exact: true })).toBeVisible();
     await expect(nextLecture).toBeVisible();
     await expect(nextLecture).toHaveClass(/bg-primary/);
     await expect(rerun).toHaveClass(/border-border/);
@@ -703,6 +718,26 @@ test.describe("lecture reading flow", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("previous lecture navigation works with the keyboard", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({ ...routeCase("lecture"), theme: "light" });
+
+    const previousLecture = page.getByRole("link", {
+      name: "Previous lecture",
+    });
+    await previousLecture.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(page).toHaveURL(
+      "/courses/operations/lectures/01-operating-model",
+    );
+    await expect(
+      page.getByRole("heading", { name: "Observe first" }),
+    ).toBeVisible();
+  });
+
   test("the final lecture gives a clear course exit", async ({ page, ui }) => {
     ui.configure({ sessionRole: "learner", runState: "archived" });
     const course = ui.server.state.courseCatalog[0]!;
@@ -718,6 +753,13 @@ test.describe("lecture reading flow", () => {
     await ui.settle();
 
     await expect(page.getByText("Course complete", { exact: true })).toBeVisible();
+    await expect(page.getByText("Lecture 3 of 3", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Previous lecture" }),
+    ).toHaveAttribute(
+      "href",
+      "/courses/operations/lectures/02-repair-nginx",
+    );
     await expect(
       page.getByRole("link", { name: "Back to course" }),
     ).toHaveAttribute("href", `/courses/${course.courseId}`);

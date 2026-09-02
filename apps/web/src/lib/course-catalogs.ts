@@ -79,7 +79,10 @@ export interface CourseCatalogForUser {
 
 export interface CourseLectureDetailForUser extends CourseCatalogLectureSummary {
   bodyMarkdown: string;
+  previousLecture: CourseLectureBlocker | null;
   nextLecture: CourseLectureBlocker | null;
+  lectureOrdinal: number;
+  lectureCount: number;
 }
 
 export interface CourseLectureDetailResponse {
@@ -418,6 +421,7 @@ export async function loadCourseLectureDetailForUser(input: {
     return { ok: false, blockedBy: lecture.blockedBy };
   }
 
+  const previous = course.lectures[lectureIndex - 1];
   const next = course.lectures[lectureIndex + 1];
   return {
     ok: true,
@@ -432,9 +436,14 @@ export async function loadCourseLectureDetailForUser(input: {
       lecture: {
         ...toCourseLectureSummary(lecture),
         bodyMarkdown: lecture.lecture.bodyMarkdown,
+        previousLecture: previous
+          ? courseLectureBlocker(course.course.courseId, previous.lecture)
+          : null,
         nextLecture: next
           ? courseLectureBlocker(course.course.courseId, next.lecture)
           : null,
+        lectureOrdinal: lectureIndex + 1,
+        lectureCount: course.lectures.length,
       },
     },
   };

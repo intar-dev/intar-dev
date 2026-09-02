@@ -1109,6 +1109,9 @@ test("a saved solved run gives one next learner action without audit details", a
   await expect(
     recap.getByText("Trace an intermittent DNS failure", { exact: true }),
   ).toBeVisible();
+  await expect(
+    recap.getByRole("link", { name: "Previous lecture" }),
+  ).toHaveCount(0);
   await expect(recap.getByText("Run timeline", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);
   await expect(recap.getByText("Command log", { exact: true })).toHaveCount(0);

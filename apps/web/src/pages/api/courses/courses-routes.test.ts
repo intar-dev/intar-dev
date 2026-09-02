@@ -62,7 +62,10 @@ const detail = {
     blockedBy: null,
     activeRunId: null,
     scenarioReady: null,
+    previousLecture: null,
     nextLecture: null,
+    lectureOrdinal: 1,
+    lectureCount: 1,
   },
 };
 

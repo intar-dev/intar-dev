@@ -25,11 +25,14 @@ export function CourseNextAction({
       </div>
       <Button
         variant={variant}
-        className="w-full [@media(pointer:coarse)]:min-h-11 md:w-auto"
+        className="group w-full [@media(pointer:coarse)]:min-h-11 md:w-auto"
         render={
           <LectureLink route={route} lectureId={lecture.lectureId}>
             Next lecture
-            <ArrowRight className="size-4" />
+            <ArrowRight
+              className="size-4 motion-safe:transition-transform motion-safe:group-hover:translate-x-0.5"
+              aria-hidden
+            />
           </LectureLink>
         }
       />

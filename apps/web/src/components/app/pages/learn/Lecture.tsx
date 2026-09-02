@@ -291,8 +291,7 @@ function LectureActionPanel({
   onStopWaiting: () => void;
 }) {
   const isTheoryOnly = !lecture.scenarioId;
-  const next = lecture.nextLecture;
-  const nextRoute = next ? { ...route, courseId: next.courseId } : route;
+  const hasPrevious = Boolean(lecture.previousLecture);
   const completeButton = (
     <Button
       onClick={onComplete}
@@ -309,7 +308,7 @@ function LectureActionPanel({
       aria-labelledby="lecture-next-action"
       className="w-full max-w-4xl space-y-5 border-t pt-6 pb-2"
     >
-      <div className="space-y-1">
+      <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
         <h2 id="lecture-next-action" className="text-section-title">
           {isTheoryOnly
             ? lecture.state === "completed"
@@ -324,13 +323,25 @@ function LectureActionPanel({
                   ? "Scenario complete"
                   : "Start the scenario"}
         </h2>
+        {!hasPrevious && lecture.state !== "completed" ? (
+          <p className="text-label tabular-nums">
+            Lecture {lecture.lectureOrdinal} of {lecture.lectureCount}
+          </p>
+        ) : null}
       </div>
 
       {isTheoryOnly ? (
         lecture.state === "completed" ? (
-          <NextLectureLink next={next} route={nextRoute} />
+          <LectureCourseNavigation lecture={lecture} route={route} showNext />
         ) : (
-          completeButton
+          <div className="space-y-5">
+            {completeButton}
+            {hasPrevious ? (
+              <div className="border-t pt-4">
+                <LectureCourseNavigation lecture={lecture} route={route} />
+              </div>
+            ) : null}
+          </div>
         )
       ) : lecture.state === "completed" ? (
         <div className="space-y-5">
@@ -342,16 +353,21 @@ function LectureActionPanel({
                 onStart={onStart}
               />
               <div className="border-t pt-4">
-                <NextLectureLink
-                  next={next}
-                  route={nextRoute}
-                  variant="outline"
+                <LectureCourseNavigation
+                  lecture={lecture}
+                  route={route}
+                  showNext
+                  nextVariant="outline"
                 />
               </div>
             </>
           ) : (
             <>
-              <NextLectureLink next={next} route={nextRoute} />
+              <LectureCourseNavigation
+                lecture={lecture}
+                route={route}
+                showNext
+              />
               <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-support text-muted-foreground">
                   Want more practice?
@@ -366,11 +382,18 @@ function LectureActionPanel({
           )}
         </div>
       ) : (
-        <LinkedLectureAction
-          lecture={lecture}
-          startPending={startPending}
-          onStart={onStart}
-        />
+        <div className="space-y-5">
+          <LinkedLectureAction
+            lecture={lecture}
+            startPending={startPending}
+            onStart={onStart}
+          />
+          {hasPrevious ? (
+            <div className="border-t pt-4">
+              <LectureCourseNavigation lecture={lecture} route={route} />
+            </div>
+          ) : null}
+        </div>
       )}
 
       {!isTheoryOnly &&
@@ -482,33 +505,79 @@ function LinkedLectureAction({
   );
 }
 
-function NextLectureLink({
-  next,
+function LectureCourseNavigation({
+  lecture,
   route,
-  variant = "default",
+  showNext = false,
+  nextVariant = "default",
 }: {
-  next: CourseLectureDetail["nextLecture"];
+  lecture: CourseLectureDetail;
   route: CourseRouteRef;
-  variant?: "default" | "outline";
+  showNext?: boolean;
+  nextVariant?: "default" | "outline";
 }) {
-  return next ? (
-    <CourseNextAction route={route} lecture={next} variant={variant} />
-  ) : (
-    <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
-      <div className="flex items-start gap-3">
-        <BookOpen className="mt-0.5 size-4 text-success" aria-hidden />
-        <div className="space-y-1">
-          <p className="text-card-title">Course complete</p>
-          <p className="text-support text-muted-foreground">
-            You completed every lecture in this course.
-          </p>
-        </div>
+  const previous = lecture.previousLecture;
+  const next = showNext ? lecture.nextLecture : null;
+  const nextRoute = next ? { ...route, courseId: next.courseId } : route;
+
+  return (
+    <nav
+      aria-label="Lecture navigation"
+      className="min-w-0 space-y-5"
+      data-course-lecture-navigation
+    >
+      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p
+          className={`order-first text-label tabular-nums ${previous ? "sm:order-last" : "sm:ml-auto"}`}
+        >
+          Lecture {lecture.lectureOrdinal} of {lecture.lectureCount}
+        </p>
+        {previous ? (
+          <Button
+            variant="outline"
+            className="group w-full [@media(pointer:coarse)]:min-h-11 sm:order-first sm:w-auto"
+            render={
+              <LectureLink
+                route={route}
+                lectureId={previous.lectureId}
+              >
+                <ArrowLeft
+                  className="size-4 motion-safe:transition-transform motion-safe:group-hover:-translate-x-0.5"
+                  aria-hidden
+                />
+                Previous lecture
+              </LectureLink>
+            }
+          />
+        ) : null}
       </div>
-      <Button
-        className="w-full [@media(pointer:coarse)]:min-h-11 md:w-auto"
-        render={<CourseLink route={route}>Back to course</CourseLink>}
-      />
-    </div>
+
+      {showNext ? (
+        next ? (
+          <CourseNextAction
+            route={nextRoute}
+            lecture={next}
+            variant={nextVariant}
+          />
+        ) : (
+          <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+            <div className="flex items-start gap-3">
+              <BookOpen className="mt-0.5 size-4 text-success" aria-hidden />
+              <div className="space-y-1">
+                <p className="text-card-title">Course complete</p>
+                <p className="text-support text-muted-foreground">
+                  You completed every lecture in this course.
+                </p>
+              </div>
+            </div>
+            <Button
+              className="w-full [@media(pointer:coarse)]:min-h-11 md:w-auto"
+              render={<CourseLink route={route}>Back to course</CourseLink>}
+            />
+          </div>
+        )
+      ) : null}
+    </nav>
   );
 }
 

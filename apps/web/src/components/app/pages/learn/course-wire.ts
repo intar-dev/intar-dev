@@ -70,7 +70,10 @@ export interface CourseCatalogResponse {
 
 export interface CourseLectureDetail extends CourseLectureSummary {
   bodyMarkdown: string;
+  previousLecture: CourseLectureBlocker | null;
   nextLecture: CourseLectureBlocker | null;
+  lectureOrdinal: number;
+  lectureCount: number;
 }
 
 export interface CourseLectureDetailResponse {

@@ -123,6 +123,7 @@ function courseLectureDetail(
   if (lecture.state === "locked") {
     return { locked: true as const, blockedBy: lecture.blockedBy };
   }
+  const previous = course.lectures[lectureIndex - 1] ?? null;
   const next = course.lectures[lectureIndex + 1] ?? null;
   const courseSummary = {
     courseId: course.courseId,
@@ -138,6 +139,13 @@ function courseLectureDetail(
       lecture: {
         ...courseLectureSummary(lecture),
         bodyMarkdown: lecture.bodyMarkdown,
+        previousLecture: previous
+          ? {
+              courseId: course.courseId,
+              lectureId: previous.lectureId,
+              title: previous.title,
+            }
+          : null,
         nextLecture: next
           ? {
               courseId: course.courseId,
@@ -145,6 +153,8 @@ function courseLectureDetail(
               title: next.title,
             }
           : null,
+        lectureOrdinal: lectureIndex + 1,
+        lectureCount: course.lectures.length,
       },
     },
   };
