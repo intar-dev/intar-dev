@@ -873,6 +873,7 @@ export function ScenarioRun() {
             title={attemptData.title}
             status={runStatusDisplay}
             actions={runActions}
+            returnTarget={getRunReturnTarget(attemptData.courseLocation)}
             mobileGuidance={
               guidanceProps ? (
                 <RunLearningPanelMobile {...guidanceProps} />
@@ -976,26 +977,6 @@ function RunPageFrame({ children }: { children: ReactNode }) {
       data-run-page
       className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
     >
-      <header
-        className="flex h-12 shrink-0 items-center border-b bg-background px-3"
-        data-run-navigation
-      >
-        {/* Keep this a document navigation. Repeated run/list transitions hit
-            the current router intent-preload bug, and leaving the document
-            also guarantees that the terminal transport is released. */}
-        <a
-          href="/runs"
-          className={buttonVariants({
-            variant: "ghost",
-            className: "-ml-2 [@media(pointer:coarse)]:min-h-11",
-          })}
-          aria-label="Back to My runs"
-          data-run-back
-        >
-          <ArrowLeft className="size-4" aria-hidden="true" />
-          Back
-        </a>
-      </header>
       {children}
     </div>
   );
@@ -1005,18 +986,36 @@ function RunWorkspaceHeader({
   title,
   status,
   actions,
+  returnTarget,
   mobileGuidance,
 }: {
   title: string;
   status?: ReactNode;
   actions?: ReactNode;
+  returnTarget: { href: string; label: string; text: string };
   mobileGuidance?: ReactNode;
 }) {
   return (
-    <div
+    <header
       className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2"
+      data-run-navigation
       data-run-workspace-header
     >
+      {/* Keep this a document navigation. Leaving the document guarantees that
+          the terminal transport is released before the lecture loads. */}
+      <a
+        href={returnTarget.href}
+        className={buttonVariants({
+          variant: "ghost",
+          className:
+            "-ml-2 shrink-0 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
+        })}
+        aria-label={returnTarget.label}
+        data-run-back
+      >
+        <ArrowLeft className="size-4" aria-hidden="true" />
+        {returnTarget.text}
+      </a>
       <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-section-title">
         {title}
       </h1>
@@ -1025,8 +1024,41 @@ function RunWorkspaceHeader({
         {mobileGuidance}
         {actions}
       </div>
-    </div>
+    </header>
   );
+}
+
+function getRunReturnTarget(location: CourseLocation | null | undefined): {
+  href: string;
+  label: string;
+  text: string;
+} {
+  const route = courseRouteForRun(location);
+  if (!route || !location?.lectureId) {
+    return { href: "/runs", label: "Back to My runs", text: "My runs" };
+  }
+
+  const courseId = encodeURIComponent(route.courseId);
+  const lectureId = encodeURIComponent(location.lectureId);
+  switch (route.scope) {
+    case "public":
+      return {
+        href: `/courses/${courseId}/lectures/${lectureId}`,
+        label: "Back to lecture",
+        text: "Lecture",
+      };
+    case "organization-public":
+    case "organization-private": {
+      const organizationId = encodeURIComponent(route.organizationId!);
+      const visibility =
+        route.scope === "organization-private" ? "private" : "public";
+      return {
+        href: `/organizations/${organizationId}/courses/${visibility}/${courseId}/lectures/${lectureId}`,
+        label: "Back to lecture",
+        text: "Lecture",
+      };
+    }
+  }
 }
 
 async function fetchCurrentCourseCatalog(

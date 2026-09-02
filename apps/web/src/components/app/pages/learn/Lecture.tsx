@@ -326,6 +326,32 @@ function LectureActionPanel({
         ) : (
           completeButton
         )
+      ) : lecture.state === "completed" ? (
+        <div className="flex flex-wrap gap-2">
+          {lecture.activeRunId ? (
+            <>
+              <LinkedLectureAction
+                lecture={lecture}
+                startPending={startPending}
+                onStart={onStart}
+              />
+              <NextLectureLink
+                next={next}
+                route={nextRoute}
+                variant="outline"
+              />
+            </>
+          ) : (
+            <>
+              <NextLectureLink next={next} route={nextRoute} />
+              <LinkedLectureAction
+                lecture={lecture}
+                startPending={startPending}
+                onStart={onStart}
+              />
+            </>
+          )}
+        </div>
       ) : (
         <LinkedLectureAction
           lecture={lecture}
@@ -341,14 +367,6 @@ function LectureActionPanel({
             ? "Run again will become available when the scenario image is ready."
             : "The theory is ready. The scenario action will become available when its image is ready."}
         </p>
-      ) : null}
-      {lecture.state === "completed" && !isTheoryOnly ? (
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" render={<Link to="/runs" />}>
-            Review runs
-          </Button>
-          <NextLectureLink next={next} route={nextRoute} />
-        </div>
       ) : null}
       {completeError ? (
         <InlineFeedback tone="error">
@@ -416,7 +434,11 @@ function LinkedLectureAction({
   }
   if (lecture.state === "waiting_for_scenario" || lecture.scenarioReady === false) {
     return (
-      <Button disabled className="w-full sm:w-auto">
+      <Button
+        disabled
+        variant={lecture.state === "completed" ? "outline" : "default"}
+        className="w-full sm:w-auto"
+      >
         Scenario preparing
       </Button>
     );
@@ -431,7 +453,12 @@ function LinkedLectureAction({
   }
   const rerun = lecture.state === "completed";
   return (
-    <Button onClick={onStart} disabled={startPending} className="w-full sm:w-auto">
+    <Button
+      onClick={onStart}
+      disabled={startPending}
+      variant={rerun ? "outline" : "default"}
+      className="w-full sm:w-auto"
+    >
       {startPending
         ? "Starting scenario…"
         : rerun
@@ -445,12 +472,16 @@ function LinkedLectureAction({
 function NextLectureLink({
   next,
   route,
+  variant = "default",
 }: {
   next: CourseLectureDetail["nextLecture"];
   route: CourseRouteRef;
+  variant?: "default" | "outline";
 }) {
   return next ? (
     <Button
+      variant={variant}
+      className="w-full sm:w-auto"
       render={
         <LectureLink route={route} lectureId={next.lectureId}>
           Next lecture: {next.title}

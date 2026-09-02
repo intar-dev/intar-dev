@@ -46,8 +46,11 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
   expect(runPageBox).not.toBeNull();
   expect(Math.round(runPageBox!.height)).toBe(page.viewportSize()!.height);
   await expect(
-    page.getByRole("link", { name: "Back to My runs" }),
-  ).toHaveAttribute("href", "/runs");
+    page.getByRole("link", { name: "Back to lecture" }),
+  ).toHaveAttribute(
+    "href",
+    "/courses/operations/lectures/02-repair-nginx",
+  );
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
@@ -86,7 +89,7 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
   await expect(page.getByRole("button", { name: "SSH command" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "End run…" })).toBeVisible();
 
-  const focusTarget = page.getByRole("link", { name: "Back to My runs" });
+  const focusTarget = page.getByRole("link", { name: "Back to lecture" });
   await focusTarget.focus();
   ui.server.setRunState("running");
 
@@ -94,6 +97,24 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
   await expect(panel).toBeVisible();
   await expect(page.getByRole("button", { name: "SSH command" })).toBeEnabled();
   await expect(focusTarget).toBeFocused();
+});
+
+test("an active run without course context keeps its history exit", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "running",
+  });
+  ui.server.state.run.courseLocation = null;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await expect(
+    page.getByRole("link", { name: "Back to My runs" }),
+  ).toHaveAttribute("href", "/runs");
 });
 
 test("the permanent desktop guidance pane keeps progressive hints and solution help learner-safe", async ({

@@ -378,9 +378,9 @@ async function prepareWarmNavigation(
     return;
   }
   if (route.id === "run-active") {
-    await page.getByRole("link", { name: "Back to My runs" }).click();
+    await page.getByRole("link", { name: "Back to lecture" }).click();
     await expect(
-      page.getByRole("heading", { name: "Active work" }),
+      page.getByRole("heading", { name: "Service recovery" }),
     ).toBeVisible();
     return;
   }
@@ -399,7 +399,7 @@ async function activateWarmRoute(
     return;
   }
   if (route.id === "run-active") {
-    await page.getByRole("button", { name: "Resume", exact: true }).click();
+    await page.getByRole("button", { name: "Resume scenario" }).click();
     return;
   }
 }

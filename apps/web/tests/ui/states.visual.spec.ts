@@ -83,6 +83,30 @@ async function openMobileMissionAndHints(
 test.describe("focused visual states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
+  test("lecture · completed scenario actions", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("lecture"),
+      theme: "light",
+      runState: "archived",
+    });
+    const lecture = ui.server.state.courseCatalog[0]!.lectures[1]!;
+    lecture.scenarioReady = true;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("link", { name: /^Next lecture:/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Run scenario again" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(
+      page,
+      "lecture-completed-scenario-actions-light-desktop",
+    );
+  });
+
   test("run · running mission pane", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),

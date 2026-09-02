@@ -39,7 +39,7 @@ async function expectForegroundRunWorkspaceShell(page: Page) {
   await expect(
     page
       .locator("[data-run-navigation]")
-      .getByRole("link", { name: "Back to My runs" }),
+      .getByRole("link", { name: "Back to lecture" }),
   ).toBeVisible();
   await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
   await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
@@ -573,10 +573,19 @@ test.describe("lecture reading flow", () => {
     const rerun = page.getByRole("button", { name: "Run scenario again" });
     await expect(theory).toBeVisible();
     await expect(rerun).toBeVisible();
-    await expect(page.getByRole("button", { name: "Review runs" })).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: /Next lecture: Trace an intermittent DNS failure/i }),
-    ).toBeVisible();
+    await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
+    const nextLecture = page.getByRole("link", {
+      name: /Next lecture: Trace an intermittent DNS failure/i,
+    });
+    await expect(nextLecture).toBeVisible();
+    await expect(nextLecture).toHaveClass(/bg-primary/);
+    await expect(rerun).toHaveClass(/border-border/);
+    const completedActionText = await page
+      .getByRole("region", { name: "Scenario complete" })
+      .textContent();
+    expect(completedActionText?.indexOf("Next lecture")).toBeLessThan(
+      completedActionText?.indexOf("Run scenario again") ?? -1,
+    );
     const theoryBox = await theory.boundingBox();
     const rerunBox = await rerun.boundingBox();
     expect(theoryBox).not.toBeNull();

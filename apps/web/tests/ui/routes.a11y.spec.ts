@@ -21,7 +21,7 @@ test.describe("all-route accessibility", () => {
           const workspace = page.locator("[data-run-page]");
           const back = page
             .locator("[data-run-navigation]")
-            .getByRole("link", { name: "Back to My runs" });
+            .getByRole("link", { name: "Back to lecture" });
 
           await expect(workspace).toBeVisible();
           await expect(workspaceHeader).toHaveCount(1);
@@ -31,8 +31,11 @@ test.describe("all-route accessibility", () => {
               name: "Repair a broken nginx service",
             }),
           ).toBeVisible();
-          await expect(back).toHaveText("Back");
-          await expect(back).toHaveAttribute("href", "/runs");
+          await expect(back).toHaveText("Lecture");
+          await expect(back).toHaveAttribute(
+            "href",
+            "/courses/operations/lectures/02-repair-nginx",
+          );
           await expect(page.locator("header")).toHaveCount(1);
           await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
           // The shell keeps its inert inset mounted so the run can move to its

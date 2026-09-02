@@ -85,10 +85,13 @@ async function expectRunWorkspaceHeader(page: Page, title: string) {
 
   const back = page
     .locator("[data-run-navigation]")
-    .getByRole("link", { name: "Back to My runs" });
+    .getByRole("link", { name: "Back to lecture" });
   await expect(back).toBeVisible();
-  await expect(back).toHaveText("Back");
-  await expect(back).toHaveAttribute("href", "/runs");
+  await expect(back).toHaveText("Lecture");
+  await expect(back).toHaveAttribute(
+    "href",
+    "/courses/operations/lectures/02-repair-nginx",
+  );
 }
 
 async function expectRunWorkspaceChrome(page: Page) {
@@ -217,11 +220,11 @@ async function expectCoarsePointerTarget(
 async function expectDesktopCompactRunControls(page: Page) {
   const back = page
     .locator("[data-run-navigation]")
-    .getByRole("link", { name: "Back to My runs" });
+    .getByRole("link", { name: "Back to lecture" });
   await expectFinePointerControlHeight(
     back,
     FINE_POINTER_DEFAULT_CONTROL_HEIGHT,
-    "Back to My runs link",
+    "Back to lecture link",
   );
   await expectFinePointerControlHeight(
     runSshButton(page),
@@ -1362,8 +1365,8 @@ test.describe("focused mobile state accessibility", () => {
     await expectCoarsePointerTarget(
       page
         .locator("[data-run-navigation]")
-        .getByRole("link", { name: "Back to My runs" }),
-      "mobile Back to My runs link",
+        .getByRole("link", { name: "Back to lecture" }),
+      "mobile Back to lecture link",
     );
     const actions = page.getByRole("group", { name: "Run actions" });
     const ssh = actions.getByRole("button", { name: "SSH command" });
