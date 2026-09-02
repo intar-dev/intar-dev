@@ -9,8 +9,12 @@ import {
   type ReactNode,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
+import {
+  requestScenarioStartWithCapacityWait,
+  ScenarioStartCancelledError,
+} from "@/components/app/lib/scenario-start";
 import {
   HttpResponseError,
   isAccessResponseError,
@@ -27,6 +31,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { presentScenarioRun } from "@/lib/run-phase";
 import {
+  courseCatalogQueryKey,
   courseRouteForRun,
   fetchCourseCatalog,
   findNextCourseLecture,
@@ -56,6 +61,7 @@ import {
   type ScenarioRunStatus,
   type ScenarioRunResponse,
   type ScenarioDestroyAcceptedResponse,
+  type ScenarioStatusStep,
 } from "@/components/app/run/run-types";
 import type {
   CourseLocation,
@@ -92,6 +98,161 @@ const LazyDeleteRunDialog = lazy(() =>
 interface ScenarioRunStatusPollResult {
   status: ScenarioRunStatus | null;
   version: string;
+}
+
+export function ScenarioRunStart() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { scenarioId } = useParams({ from: "/app/runs/start/$scenarioId" });
+  const search = useSearch({ from: "/app/runs/start/$scenarioId" });
+  const organizationId = search.organizationId ?? null;
+  const abortRef = useRef<AbortController | null>(null);
+  const [startState, setStartState] = useState<
+    "requesting" | "waiting" | "failed"
+  >("requesting");
+  const [startError, setStartError] = useState<string | null>(null);
+  const courseCatalog = useQuery({
+    queryKey: courseCatalogQueryKey(organizationId),
+    queryFn: () => fetchCourseCatalog(organizationId),
+    enabled: Boolean(search.courseId && search.lectureId),
+    staleTime: 30_000,
+    retry: false,
+  });
+  const title =
+    findStartLectureTitle(courseCatalog.data, search) ?? "Scenario run";
+  const returnTarget = getStartReturnTarget(search);
+
+  const startScenario = useCallback(() => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setStartState("requesting");
+    setStartError(null);
+
+    void requestScenarioStartWithCapacityWait(scenarioId, {
+      signal: controller.signal,
+      organizationId,
+      onCapacityWait: () => setStartState("waiting"),
+    })
+      .then(async ({ runId, run }) => {
+        queryClient.setQueryData<ScenarioRunResponse>(
+          ["scenarios", "run", runId],
+          { run: presentScenarioRun(run) },
+        );
+        void queryClient.invalidateQueries({
+          queryKey: courseCatalogQueryKey(organizationId),
+        });
+        await navigate({
+          to: "/runs/$runId",
+          params: { runId },
+          replace: true,
+        });
+      })
+      .catch((error: unknown) => {
+        if (
+          controller.signal.aborted ||
+          error instanceof ScenarioStartCancelledError
+        ) {
+          return;
+        }
+        setStartState("failed");
+        setStartError(
+          error instanceof Error
+            ? error.message
+            : "Could not start the scenario.",
+        );
+      });
+  }, [navigate, organizationId, queryClient, scenarioId]);
+
+  useEffect(() => {
+    startScenario();
+    return () => abortRef.current?.abort();
+  }, [startScenario]);
+
+  usePageChrome({ title, fullscreen: true });
+
+  const waitingForCapacity = startState === "waiting";
+  const failed = startState === "failed";
+  const steps: ScenarioStatusStep[] = [
+    {
+      id: "request",
+      label: "Start requested",
+      detail: failed
+        ? "The scenario run could not be created."
+        : "Creating a secure scenario run.",
+      state: failed ? "failed" : waitingForCapacity ? "done" : "active",
+    },
+    {
+      id: "capacity",
+      label: "Reserve capacity",
+      detail: "Waiting for an available practice machine.",
+      state: waitingForCapacity ? "active" : "pending",
+    },
+    {
+      id: "workspace",
+      label: "Prepare workspace",
+      detail: "Machine startup continues as soon as the run is accepted.",
+      state: "pending",
+    },
+  ];
+
+  return (
+    <RunPageFrame>
+      <div
+        data-run-work-area
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
+        <RunWorkspaceHeader
+          title={title}
+          status={
+            <StatusToken
+              tone={failed ? "danger" : "pending"}
+              word={
+                failed
+                  ? "Could not start"
+                  : waitingForCapacity
+                    ? "Waiting for capacity"
+                    : "Starting"
+              }
+              compactWord={
+                failed ? "Failed" : waitingForCapacity ? "Waiting" : "Starting"
+              }
+              pulse={!failed}
+            />
+          }
+          returnTarget={returnTarget}
+        />
+        <div
+          data-run-start-sequence
+          className="flex min-h-0 flex-1 overflow-y-auto p-3 sm:p-4"
+        >
+          <div className="m-auto w-full" data-run-sequence-frame>
+            <ScenarioStepScreen
+              title={
+                failed ? "The run did not start" : "Preparing your workspace"
+              }
+              description={
+                failed
+                  ? (startError ?? "Could not start the scenario.")
+                  : waitingForCapacity
+                    ? "A practice machine is busy. We will retry for up to 60 seconds."
+                    : "Starting your scenario."
+              }
+              steps={steps}
+              listLabel="Startup steps"
+              footer={
+                failed ? (
+                  <Button type="button" onClick={startScenario}>
+                    Try again
+                  </Button>
+                ) : undefined
+              }
+            />
+          </div>
+        </div>
+      </div>
+    </RunPageFrame>
+  );
 }
 
 export function ScenarioRun() {
@@ -1097,6 +1258,61 @@ function RunWorkspaceHeader({
       </div>
     </header>
   );
+}
+
+interface ScenarioRunStartLocation {
+  scope: string | undefined;
+  organizationId: string | undefined;
+  courseId: string | undefined;
+  lectureId: string | undefined;
+}
+
+function findStartLectureTitle(
+  catalog: CourseCatalogResponse | undefined,
+  location: ScenarioRunStartLocation,
+): string | null {
+  if (!catalog || !location.courseId || !location.lectureId) return null;
+  const course = catalog.courses.find((candidate) => {
+    if (candidate.courseId !== location.courseId) return false;
+    return location.scope === "organization-private"
+      ? candidate.organizationId === location.organizationId
+      : candidate.organizationId === null;
+  });
+  return (
+    course?.lectures.find(
+      (lecture) => lecture.lectureId === location.lectureId,
+    )?.title ?? null
+  );
+}
+
+function getStartReturnTarget(
+  location: ScenarioRunStartLocation,
+): { href: string; label: string; text: string } {
+  if (!location.scope || !location.courseId || !location.lectureId) {
+    return { href: "/courses", label: "Back to courses", text: "Courses" };
+  }
+
+  const courseId = encodeURIComponent(location.courseId);
+  const lectureId = encodeURIComponent(location.lectureId);
+  if (location.scope === "public") {
+    return {
+      href: `/courses/${courseId}/lectures/${lectureId}`,
+      label: "Back to lecture",
+      text: "Lecture",
+    };
+  }
+
+  if (!location.organizationId) {
+    return { href: "/courses", label: "Back to courses", text: "Courses" };
+  }
+  const organizationId = encodeURIComponent(location.organizationId);
+  const visibility =
+    location.scope === "organization-private" ? "private" : "public";
+  return {
+    href: `/organizations/${organizationId}/courses/${visibility}/${courseId}/lectures/${lectureId}`,
+    label: "Back to lecture",
+    text: "Lecture",
+  };
 }
 
 function getRunReturnTarget(location: CourseLocation | null | undefined): {

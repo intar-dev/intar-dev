@@ -61,6 +61,9 @@ export function safeDynamicPageLabel(pathname: string): string | null {
   if (/^\/runs\/[^/]+$/.test(pathname)) {
     return "Scenario run";
   }
+  if (/^\/runs\/start\/[^/]+$/.test(pathname)) {
+    return "Starting run";
+  }
   if (isLecturePage(pathname)) {
     return "Lecture";
   }

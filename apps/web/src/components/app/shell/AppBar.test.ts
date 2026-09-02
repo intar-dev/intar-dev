@@ -10,6 +10,9 @@ describe("safe dynamic app-bar labels", () => {
     expect(safeDynamicPageLabel("/runs/run_technical_identifier")).toBe(
       "Scenario run",
     );
+    expect(safeDynamicPageLabel("/runs/start/repair-nginx")).toBe(
+      "Starting run",
+    );
     expect(
       safeDynamicPageLabel("/courses/linux-operations/lectures/broken-nginx"),
     ).toBe("Lecture");

@@ -1,30 +1,17 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useMemo, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import {
-  ArrowLeft,
   ArrowRight,
   BookOpen,
   LockKeyhole,
   RotateCcw,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
-import {
-  ScenarioStartCancelledError,
-  requestScenarioStartWithCapacityWait,
-} from "@/components/app/lib/scenario-start";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { ContentHeader } from "@/components/app/patterns/ContentHeader";
 import { MetaDifficulty, MetaLine } from "@/components/app/patterns/MetaLine";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { ScenarioStepScreen } from "@/components/app/run/StatusScreens";
-import type { ScenarioStatusStep } from "@/components/app/run/run-types";
 import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
@@ -120,11 +107,7 @@ export function OrganizationPrivateLecture() {
 
 // Design contract: theory comes first; the scenario action follows the reading.
 function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: string }) {
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const startAbortRef = useRef<AbortController | null>(null);
-  const [waitingForCapacity, setWaitingForCapacity] = useState(false);
-  const [startNotice, setStartNotice] = useState<string | null>(null);
   const detailQuery = useQuery({
     queryKey: ["courses", "lecture", route.organizationId, route.courseId, lectureId],
     queryFn: () => fetchCourseLecture(route, lectureId),
@@ -144,13 +127,6 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
   // Never render a cached lecture body when the server now reports a lock.
   const detail = lockedError ? null : (detailQuery.data ?? null);
 
-  useEffect(
-    () => () => {
-      startAbortRef.current?.abort();
-    },
-    [],
-  );
-
   const complete = useMutation({
     mutationFn: () => completeCourseLecture(route, lectureId),
     onSuccess: (next) => {
@@ -161,32 +137,6 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
       void queryClient.invalidateQueries({
         queryKey: courseCatalogQueryKey(route.organizationId),
       });
-    },
-  });
-
-  const startScenario = useMutation({
-    mutationFn: async () => {
-      const scenarioId = detail?.lecture.scenarioId;
-      if (!scenarioId) throw new Error("This lecture has no scenario.");
-      const controller = new AbortController();
-      startAbortRef.current = controller;
-      setStartNotice(null);
-      setWaitingForCapacity(false);
-      return requestScenarioStartWithCapacityWait(scenarioId, {
-        signal: controller.signal,
-        onCapacityWait: () => setWaitingForCapacity(true),
-        organizationId: route.organizationId,
-      });
-    },
-    onSuccess: ({ runId }) => {
-      void queryClient.invalidateQueries({
-        queryKey: courseCatalogQueryKey(route.organizationId),
-      });
-      void navigate({ to: "/runs/$runId", params: { runId } });
-    },
-    onSettled: () => {
-      startAbortRef.current = null;
-      setWaitingForCapacity(false);
     },
   });
 
@@ -215,13 +165,7 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
     title: detail?.lecture.title ?? "Lecture",
     breadcrumbLabels,
     utility: outlineUtility,
-    fullscreen: startScenario.isPending,
   });
-  const stopScenarioStart = () => {
-    startAbortRef.current?.abort();
-    setWaitingForCapacity(false);
-    setStartNotice("Stopped waiting. You can try again when you are ready.");
-  };
 
   if (lockedError) {
     const blocker = lockedError.blockedBy;
@@ -272,16 +216,6 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
       </LectureLayout>
     );
   }
-  if (startScenario.isPending) {
-    return (
-      <LectureScenarioStartSequence
-        title={detail.lecture.title}
-        waitingForCapacity={waitingForCapacity}
-        onCancel={stopScenarioStart}
-      />
-    );
-  }
-
   return (
     <LectureLayout course={outlineCourse} route={route} lectureId={lectureId}>
       <div className="min-w-0 space-y-6">
@@ -312,94 +246,9 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
           completePending={complete.isPending}
           completeError={complete.error}
           onComplete={() => complete.mutate()}
-          startPending={startScenario.isPending}
-          startError={startScenario.error}
-          waitingForCapacity={waitingForCapacity}
-          startNotice={startNotice}
-          onStart={() => startScenario.mutate()}
-          onStopWaiting={stopScenarioStart}
         />
       </div>
     </LectureLayout>
-  );
-}
-
-function LectureScenarioStartSequence({
-  title,
-  waitingForCapacity,
-  onCancel,
-}: {
-  title: string;
-  waitingForCapacity: boolean;
-  onCancel: () => void;
-}) {
-  const steps: ScenarioStatusStep[] = [
-    {
-      id: "request",
-      label: "Start requested",
-      detail: "Creating a secure scenario run.",
-      state: waitingForCapacity ? "done" : "active",
-    },
-    {
-      id: "capacity",
-      label: "Reserve capacity",
-      detail: "Waiting for an available practice machine.",
-      state: waitingForCapacity ? "active" : "pending",
-    },
-    {
-      id: "workspace",
-      label: "Prepare workspace",
-      detail: "Machine startup continues as soon as the run is accepted.",
-      state: "pending",
-    },
-  ];
-
-  return (
-    <div
-      data-run-page
-      data-lecture-start-sequence
-      className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
-    >
-      <header
-        className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2"
-        data-run-navigation
-        data-run-workspace-header
-      >
-        <Button
-          type="button"
-          variant="ghost"
-          className="-ml-2 shrink-0 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
-          aria-label="Back to lecture"
-          onClick={onCancel}
-        >
-          <ArrowLeft className="size-4" aria-hidden="true" />
-          Lecture
-        </Button>
-        <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-section-title">
-          {title}
-        </h1>
-        <StatusToken
-          tone="pending"
-          word={waitingForCapacity ? "Waiting for capacity" : "Starting"}
-          compactWord={waitingForCapacity ? "Waiting" : "Starting"}
-          pulse
-        />
-      </header>
-      <div className="flex min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
-        <div className="m-auto w-full" data-run-sequence-frame>
-          <ScenarioStepScreen
-            title="Preparing your workspace"
-            description={
-              waitingForCapacity
-                ? "A practice machine is busy. We will retry for up to 60 seconds."
-                : "Starting your scenario."
-            }
-            steps={steps}
-            listLabel="Startup steps"
-          />
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -426,24 +275,12 @@ function LectureActionPanel({
   completePending,
   completeError,
   onComplete,
-  startPending,
-  startError,
-  waitingForCapacity,
-  startNotice,
-  onStart,
-  onStopWaiting,
 }: {
   lecture: CourseLectureDetail;
   route: CourseRouteRef;
   completePending: boolean;
   completeError: unknown;
   onComplete: () => void;
-  startPending: boolean;
-  startError: unknown;
-  waitingForCapacity: boolean;
-  startNotice: string | null;
-  onStart: () => void;
-  onStopWaiting: () => void;
 }) {
   const isTheoryOnly = !lecture.scenarioId;
   const courseComplete =
@@ -500,8 +337,7 @@ function LectureActionPanel({
           ) : null}
           <LinkedLectureAction
             lecture={lecture}
-            startPending={startPending}
-            onStart={onStart}
+            route={route}
           />
           {courseComplete && !lecture.activeRunId ? (
             <div className="border-t pt-5">
@@ -512,8 +348,7 @@ function LectureActionPanel({
       ) : (
         <LinkedLectureAction
           lecture={lecture}
-          startPending={startPending}
-          onStart={onStart}
+          route={route}
         />
       )}
 
@@ -531,32 +366,6 @@ function LectureActionPanel({
             ? completeError.message
             : "Could not complete this lecture."}
         </InlineFeedback>
-      ) : null}
-      {startError && !(startError instanceof ScenarioStartCancelledError) ? (
-        <InlineFeedback tone="error">
-          {startError instanceof Error
-            ? startError.message
-            : "Could not start the scenario."}
-        </InlineFeedback>
-      ) : null}
-      {startNotice ? (
-        <p role="status" className="text-support text-muted-foreground">
-          {startNotice}
-        </p>
-      ) : null}
-      {startPending ? (
-        <div className="space-y-2">
-          <InlineFeedback tone="pending">
-            {waitingForCapacity
-              ? "A practice machine is busy. Retrying for up to 60 seconds."
-              : "Preparing your practice machine…"}
-          </InlineFeedback>
-          {waitingForCapacity ? (
-            <Button type="button" variant="outline" onClick={onStopWaiting}>
-              Stop waiting
-            </Button>
-          ) : null}
-        </div>
       ) : null}
     </section>
   );
@@ -584,12 +393,10 @@ function CourseCompleteAction({ route }: { route: CourseRouteRef }) {
 
 function LinkedLectureAction({
   lecture,
-  startPending,
-  onStart,
+  route,
 }: {
   lecture: CourseLectureDetail;
-  startPending: boolean;
-  onStart: () => void;
+  route: CourseRouteRef;
 }) {
   if (
     lecture.state === "in_progress" ||
@@ -629,18 +436,25 @@ function LinkedLectureAction({
     );
   }
   const rerun = lecture.state === "completed";
+  if (!lecture.scenarioId) return null;
   return (
     <Button
-      onClick={onStart}
-      disabled={startPending}
       variant={rerun ? "outline" : "default"}
       className="w-full [@media(pointer:coarse)]:min-h-11 sm:w-auto"
+      render={
+        <Link
+          to="/runs/start/$scenarioId"
+          params={{ scenarioId: lecture.scenarioId }}
+          search={{
+            scope: route.scope,
+            organizationId: route.organizationId ?? undefined,
+            courseId: route.courseId,
+            lectureId: lecture.lectureId,
+          }}
+        />
+      }
     >
-      {startPending
-        ? "Starting scenario…"
-        : rerun
-          ? "Run again"
-          : "Start scenario"}
+      {rerun ? "Run again" : "Start scenario"}
       {rerun ? <RotateCcw className="size-4" /> : <ArrowRight className="size-4" />}
     </Button>
   );

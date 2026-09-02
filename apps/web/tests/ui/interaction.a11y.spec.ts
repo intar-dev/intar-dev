@@ -651,7 +651,8 @@ test.describe("lecture reading flow", () => {
     await page.getByRole("button", { name: "Run again" }).click();
 
     try {
-      await expect(page.locator("[data-lecture-start-sequence]")).toBeVisible();
+      await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+      await expect(page.locator("[data-run-start-sequence]")).toBeVisible();
       await expect(
         page.getByRole("heading", { name: "Preparing your workspace" }),
       ).toBeVisible();
@@ -668,7 +669,7 @@ test.describe("lecture reading flow", () => {
     }
 
     await expect(page).toHaveURL("/runs/run-active");
-    await expect(page.locator("[data-lecture-start-sequence]")).toHaveCount(0);
+    await expect(page.locator("[data-run-start-sequence]")).toHaveCount(0);
     await expect(page.locator("[data-run-workspace]")).toBeVisible();
   });
 

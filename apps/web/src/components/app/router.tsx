@@ -153,6 +153,21 @@ const courseLectureRoute = createRoute({
   ),
 });
 
+const scenarioRunStartRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "runs/start/$scenarioId",
+  validateSearch: validateScenarioRunStartSearch,
+  head: () =>
+    routeHead(
+      "Starting run",
+      "Reserve capacity and prepare the scenario workspace.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/ScenarioRun"),
+    "ScenarioRunStart",
+  ),
+});
+
 const scenarioRunRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "runs/$runId",
@@ -383,6 +398,7 @@ const routeTree = rootRoute.addChildren([
     courseCatalogRoute,
     courseDetailRoute,
     courseLectureRoute,
+    scenarioRunStartRoute,
     scenarioRunRoute,
     runsListRoute,
     organizationsRoute,
@@ -419,6 +435,23 @@ function routeHead(title: string, description: string) {
       { title: `${title} · intar.dev` },
       { name: "description", content: description },
     ],
+  };
+}
+
+function validateScenarioRunStartSearch(search: Record<string, unknown>) {
+  const text = (value: unknown) =>
+    typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const scope =
+    search.scope === "public" ||
+    search.scope === "organization-public" ||
+    search.scope === "organization-private"
+      ? search.scope
+      : undefined;
+  return {
+    scope,
+    organizationId: text(search.organizationId),
+    courseId: text(search.courseId),
+    lectureId: text(search.lectureId),
   };
 }
 

@@ -25,7 +25,7 @@ OWN-WORLD: Warm neutral ground, the existing Intar sidebar frame, quiet borders,
 
 STORY: The learner sees the course position, reads the theory, understands the unit state, and then starts or completes one unit.
 
-FIRST VIEWPORT: Course context and the lecture title lead. Metadata follows. Theory fills the fluid main column. A right outline shows lecture position and course progress from 1100px; the app bar opens it below that width. The primary scenario or completion action comes only after the body and switches immediately to the focused startup sequence.
+FIRST VIEWPORT: Course context and the lecture title lead. Metadata follows. Theory fills the fluid main column. A right outline shows lecture position and course progress from 1100px; the app bar opens it below that width. The primary scenario or completion action comes only after the body and opens the focused run shell before the start request begins.
 
 FORM: Fluid reading column, responsive course outline, and trailing scenario gate; form 1 of 1; seed key `course-lecture-reading-first-v3`.
 

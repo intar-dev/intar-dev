@@ -224,7 +224,8 @@ test.describe("focused visual states", () => {
     await page.getByRole("button", { name: "Run again" }).click();
 
     try {
-      await expect(page.locator("[data-lecture-start-sequence]")).toBeVisible();
+      await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+      await expect(page.locator("[data-run-start-sequence]")).toBeVisible();
       await expectRouteScreenshot(page, "lecture-starting-scenario-dark-desktop");
     } finally {
       releaseStart?.();
