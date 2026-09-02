@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudflareD1RestClient, type D1Statement } from "./d1-rest-client";
+import { applyRemovalMigration } from "./apply-removal-migration";
 import { verifyGeneratedD1Schema } from "./generated-d1-schema";
 import { purgeRemovedRuntimeDomains } from "./purge-removed-runtime-domains";
 
@@ -45,7 +46,7 @@ if (import.meta.main) {
     prepareBaselineMigrations(baselineRoot);
     await migrate(databaseId, baselineRoot);
     await client.batch(rehearsalSeedStatements());
-    await migrate(databaseId, migrationsRoot);
+    await applyRemovalMigration(client);
     const cleanup = await purgeRemovedRuntimeDomains(client);
     const proof = await verifyGeneratedD1Schema(client, { expectation: "full" });
     const scenarioCounts = await client.batchRead?.([

@@ -76,7 +76,9 @@ describe("automatic web deployment workflow", () => {
       "if: steps.migrations.outputs.pending == 'true'",
     );
     expect(deployWorkflow).toContain("sleep 30");
-    expect(deployWorkflow).toContain("bun run db:migrate:production");
+    expect(deployWorkflow).toContain(
+      "bun tools/database/apply-removal-migration.ts",
+    );
     expect(deployWorkflow).toContain(
       "bun tools/database/rehearse-removal-migration.ts",
     );

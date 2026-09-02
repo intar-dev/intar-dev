@@ -318,11 +318,11 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          DRIZZLE_D1_HTTP: "1"
+          CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
+          MIGRATION_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-migrate.json
         run: |
           set -euo pipefail
-          export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
-          bun run db:migrate:production 2>&1 | \
+          bun tools/database/apply-removal-migration.ts 2>&1 | \
             tee "${RUNNER_TEMP}/production-d1-migrate.log"
 
       - name: Remove retired runtime domains
@@ -389,6 +389,7 @@ jobs:
             ${{ runner.temp }}/pre-migration-assignment-counts.json
             ${{ runner.temp }}/pre-migration-enabled-scenarios.json
             ${{ runner.temp }}/production-d1-migrate.log
+            ${{ runner.temp }}/production-d1-migrate.json
             ${{ runner.temp }}/removed-runtime-domains.json
             ${{ runner.temp }}/production-d1-verified.json
             ${{ runner.temp }}/maintenance-after-drain-deployment.json
