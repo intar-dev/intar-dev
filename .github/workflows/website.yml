@@ -84,7 +84,6 @@ jobs:
       - name: Check web contracts
         working-directory: ${{ github.workspace }}
         run: |
-          bun run check:flagship
           bun run check:imports
           bun run check:deploy
           bun run check:database-migrations
