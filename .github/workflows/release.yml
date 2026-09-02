@@ -30,7 +30,6 @@ on:
         required: false
         type: string
         default: ""
-        default: ""
 
 permissions:
   actions: read
