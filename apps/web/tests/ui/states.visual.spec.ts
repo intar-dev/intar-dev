@@ -46,6 +46,15 @@ async function expectStandardRunShell(
   await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(1);
 }
 
+async function expectShutdownRunShell(
+  page: Parameters<typeof expectRouteScreenshot>[0],
+) {
+  await expect(page.locator("[data-run-page]")).toBeVisible();
+  await expect(page.locator("[data-run-shutdown-sequence]")).toBeVisible();
+  await expect(page.locator("[data-run-back]")).toBeVisible();
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+}
+
 async function expectDesktopMissionPane(
   page: Parameters<typeof expectRouteScreenshot>[0],
 ) {
@@ -183,6 +192,45 @@ test.describe("focused visual states", () => {
     );
   });
 
+  test("lecture · focused scenario start", async ({ page, ui }) => {
+    const course = ui.server.state.courseCatalog[0]!;
+    const lecture = course.lectures[1]!;
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    await page.route("**/api/scenarios/*/start", async (route) => {
+      await startGate;
+      ui.server.setRunState("launching");
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accepted: true,
+          runId: "run-active",
+          scenarioId: "repair-nginx",
+          acceptedAt: Date.now(),
+          reused: false,
+          run: ui.server.state.run,
+        }),
+      });
+    });
+    await ui.open({
+      path: `/courses/${course.courseId}/lectures/${lecture.lectureId}`,
+      sessionRole: "learner",
+      theme: "dark",
+      runState: "archived",
+    });
+    await page.getByRole("button", { name: "Run again" }).click();
+
+    try {
+      await expect(page.locator("[data-lecture-start-sequence]")).toBeVisible();
+      await expectRouteScreenshot(page, "lecture-starting-scenario-dark-desktop");
+    } finally {
+      releaseStart?.();
+    }
+  });
+
   test("run · running mission pane", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
@@ -258,26 +306,26 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "run-solved-workspace-action-dark-desktop");
   });
 
-  test("run · saving recap", async ({ page, ui }) => {
+  test("run · shutdown sequence", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "ending",
     });
-    await expectStandardRunShell(page);
+    await expectShutdownRunShell(page);
     await expect(
       page.getByRole("heading", { name: "Saving your run…" }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-desktop");
   });
 
-  test("run · saving recap · light", async ({ page, ui }) => {
+  test("run · shutdown sequence · light", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "light",
       runState: "ending",
     });
-    await expectStandardRunShell(page);
+    await expectShutdownRunShell(page);
     await expect(
       page.getByRole("heading", { name: "Saving your run…" }),
     ).toBeVisible();
@@ -290,7 +338,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expectStandardRunShell(page);
+    await expectShutdownRunShell(page);
     const currentStep = page
       .getByRole("list", { name: "Saving steps" })
       .locator('[aria-current="step"]');
@@ -650,13 +698,13 @@ test.describe("focused mobile workspace", () => {
     await expectRouteScreenshot(page, "run-solved-workspace-action-dark-mobile");
   });
 
-  test("saving recap progress", async ({ page, ui }) => {
+  test("shutdown sequence progress", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
       theme: "dark",
       runState: "ending",
     });
-    await expectStandardRunShell(page);
+    await expectShutdownRunShell(page);
     await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expect(page.locator("[data-run-lease-countdown]")).not.toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-mobile");
@@ -747,7 +795,7 @@ test.describe("wide short course recaps", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expectStandardRunShell(page);
+    await expectShutdownRunShell(page);
     await expect(
       page.getByRole("heading", { name: "Saving your run…", exact: true }),
     ).toBeVisible();
@@ -793,7 +841,7 @@ test.describe("short landscape run workspace", () => {
       theme: "dark",
       runState: "ending",
     });
-    await expectStandardRunShell(page);
+    await expectShutdownRunShell(page);
     await expect(page.getByRole("list", { name: "Saving steps" })).toBeVisible();
     await expectRouteScreenshot(page, "run-saving-recap-dark-landscape");
   });

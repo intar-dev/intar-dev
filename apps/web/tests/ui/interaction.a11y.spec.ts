@@ -79,6 +79,17 @@ async function expectSavedRunShell(page: Page) {
 
 }
 
+async function expectShutdownRunShell(page: Page) {
+  await expect(page.locator("[data-run-page]")).toHaveCount(1);
+  await expect(page.locator("[data-run-shutdown-sequence]")).toBeVisible();
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(1);
+  await expect(page.locator("[data-run-back]")).toBeVisible();
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(0);
+}
+
 test("keyboard-only landing navigation keeps focus visible", async ({
   page,
   ui,
@@ -531,7 +542,7 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     theme: "dark",
     runState: "ending",
   });
-  await expectSavedRunShell(page);
+  await expectShutdownRunShell(page);
   const savingSteps = page.getByRole("list", { name: "Saving steps" });
   await expect(savingSteps).toBeVisible();
   await expect(savingSteps.locator("[data-run-sequence-step]")).toHaveCount(5);
@@ -603,6 +614,64 @@ test.describe("wide operational density", () => {
 });
 
 test.describe("lecture reading flow", () => {
+  test("start action switches to the focused startup sequence before acceptance", async ({
+    page,
+    ui,
+  }) => {
+    ui.configure({ sessionRole: "learner", runState: "archived" });
+    const course = ui.server.state.courseCatalog[0]!;
+    const lecture = course.lectures[1]!;
+    lecture.scenarioReady = true;
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    await page.route("**/api/scenarios/*/start", async (route) => {
+      await startGate;
+      ui.server.setRunState("launching");
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accepted: true,
+          runId: "run-active",
+          scenarioId: "repair-nginx",
+          acceptedAt: Date.now(),
+          reused: false,
+          run: ui.server.state.run,
+        }),
+      });
+    });
+
+    await page.goto(
+      `/courses/${course.courseId}/lectures/${lecture.lectureId}`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await ui.settle();
+    await page.getByRole("button", { name: "Run again" }).click();
+
+    try {
+      await expect(page.locator("[data-lecture-start-sequence]")).toBeVisible();
+      await expect(
+        page.getByRole("heading", { name: "Preparing your workspace" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("list", { name: "Startup steps" }).getByRole("listitem"),
+      ).toHaveCount(3);
+      await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+      await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+      await expect(page.getByRole("region", { name: "Lecture content" })).toHaveCount(
+        0,
+      );
+    } finally {
+      releaseStart?.();
+    }
+
+    await expect(page).toHaveURL("/runs/run-active");
+    await expect(page.locator("[data-lecture-start-sequence]")).toHaveCount(0);
+    await expect(page.locator("[data-run-workspace]")).toBeVisible();
+  });
+
   test("completed scenarios are easy to run again", async ({ page, ui }) => {
     ui.configure({ sessionRole: "learner", runState: "archived" });
     const course = ui.server.state.courseCatalog[0]!;

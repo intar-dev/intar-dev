@@ -8,6 +8,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
+  ArrowLeft,
   ArrowRight,
   BookOpen,
   LockKeyhole,
@@ -22,6 +23,8 @@ import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { ContentHeader } from "@/components/app/patterns/ContentHeader";
 import { MetaDifficulty, MetaLine } from "@/components/app/patterns/MetaLine";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import { ScenarioStepScreen } from "@/components/app/run/StatusScreens";
+import type { ScenarioStatusStep } from "@/components/app/run/run-types";
 import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
@@ -212,7 +215,13 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
     title: detail?.lecture.title ?? "Lecture",
     breadcrumbLabels,
     utility: outlineUtility,
+    fullscreen: startScenario.isPending,
   });
+  const stopScenarioStart = () => {
+    startAbortRef.current?.abort();
+    setWaitingForCapacity(false);
+    setStartNotice("Stopped waiting. You can try again when you are ready.");
+  };
 
   if (lockedError) {
     const blocker = lockedError.blockedBy;
@@ -263,6 +272,15 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
       </LectureLayout>
     );
   }
+  if (startScenario.isPending) {
+    return (
+      <LectureScenarioStartSequence
+        title={detail.lecture.title}
+        waitingForCapacity={waitingForCapacity}
+        onCancel={stopScenarioStart}
+      />
+    );
+  }
 
   return (
     <LectureLayout course={outlineCourse} route={route} lectureId={lectureId}>
@@ -299,14 +317,89 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
           waitingForCapacity={waitingForCapacity}
           startNotice={startNotice}
           onStart={() => startScenario.mutate()}
-          onStopWaiting={() => {
-            startAbortRef.current?.abort();
-            setWaitingForCapacity(false);
-            setStartNotice("Stopped waiting. You can try again when you are ready.");
-          }}
+          onStopWaiting={stopScenarioStart}
         />
       </div>
     </LectureLayout>
+  );
+}
+
+function LectureScenarioStartSequence({
+  title,
+  waitingForCapacity,
+  onCancel,
+}: {
+  title: string;
+  waitingForCapacity: boolean;
+  onCancel: () => void;
+}) {
+  const steps: ScenarioStatusStep[] = [
+    {
+      id: "request",
+      label: "Start requested",
+      detail: "Creating a secure scenario run.",
+      state: waitingForCapacity ? "done" : "active",
+    },
+    {
+      id: "capacity",
+      label: "Reserve capacity",
+      detail: "Waiting for an available practice machine.",
+      state: waitingForCapacity ? "active" : "pending",
+    },
+    {
+      id: "workspace",
+      label: "Prepare workspace",
+      detail: "Machine startup continues as soon as the run is accepted.",
+      state: "pending",
+    },
+  ];
+
+  return (
+    <div
+      data-run-page
+      data-lecture-start-sequence
+      className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+    >
+      <header
+        className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2"
+        data-run-navigation
+        data-run-workspace-header
+      >
+        <Button
+          type="button"
+          variant="ghost"
+          className="-ml-2 shrink-0 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+          aria-label="Back to lecture"
+          onClick={onCancel}
+        >
+          <ArrowLeft className="size-4" aria-hidden="true" />
+          Lecture
+        </Button>
+        <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-section-title">
+          {title}
+        </h1>
+        <StatusToken
+          tone="pending"
+          word={waitingForCapacity ? "Waiting for capacity" : "Starting"}
+          compactWord={waitingForCapacity ? "Waiting" : "Starting"}
+          pulse
+        />
+      </header>
+      <div className="flex min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
+        <div className="m-auto w-full" data-run-sequence-frame>
+          <ScenarioStepScreen
+            title="Preparing your workspace"
+            description={
+              waitingForCapacity
+                ? "A practice machine is busy. We will retry for up to 60 seconds."
+                : "Starting your scenario."
+            }
+            steps={steps}
+            listLabel="Startup steps"
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -31,8 +31,8 @@ export interface PageChrome {
   /** Labels for route ancestors when a catalog supplies human-readable names. */
   breadcrumbLabels?: Readonly<Record<string, string>> | undefined;
   /**
-   * Lets a live run take over the viewport. This is internal shell state, not
-   * a browser Fullscreen API request.
+   * Lets startup, live work, or shutdown take over the viewport. This is
+   * internal shell state, not a browser Fullscreen API request.
    */
   fullscreen?: boolean | undefined;
 }

@@ -28,6 +28,19 @@ async function expectSavedRunChrome(page: Page) {
   ).toHaveCount(1);
 }
 
+async function expectShutdownRunChrome(page: Page) {
+  await expect(page.locator("[data-run-page]")).toHaveCount(1);
+  await expect(page.locator("[data-run-shutdown-sequence]")).toHaveCount(1);
+  await expect(page.locator("[data-run-navigation]")).toHaveCount(1);
+  await expect(page.locator("[data-run-back]")).toHaveCount(1);
+  await expect(page.locator("[data-run-workspace-header]")).toHaveCount(1);
+  await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", { name: "Breadcrumb" }),
+  ).toHaveCount(0);
+}
+
 test("the full-screen boot screen keeps the mission visible and does not steal focus when the shell opens", async ({
   page,
   ui,
@@ -658,7 +671,7 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   const savingHeading = page.getByRole("heading", { name: "Saving your run…" });
   await expect(savingHeading).toBeVisible();
   await expect(savingHeading).toBeFocused();
-  await expectSavedRunChrome(page);
+  await expectShutdownRunChrome(page);
   await expect(page.locator("[data-run-lease-countdown]")).toHaveText(
     "1:25:00 left",
   );
@@ -686,9 +699,9 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   ui.server.state.run.outcome = "succeeded";
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingSteps).toBeVisible();
-  const appBarTrailing = page.locator("[data-app-bar-trailing]");
-  await expect(appBarTrailing).toContainText("Saving");
-  await expect(appBarTrailing).not.toContainText("Solved");
+  const shutdownHeader = page.locator("[data-run-workspace-header]");
+  await expect(shutdownHeader).toContainText("Saving");
+  await expect(shutdownHeader).not.toContainText("Solved");
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
@@ -751,7 +764,7 @@ test("saving stages advance from real server state and announce each change once
     runState: "ending",
   });
 
-  await expectSavedRunChrome(page);
+  await expectShutdownRunChrome(page);
   const steps = page.getByRole("list", { name: "Saving steps" });
   const announcement = page.locator("[data-run-sequence-announcement]");
   await expect(steps.locator('[aria-current="step"]')).toContainText(
@@ -825,7 +838,7 @@ test("saving shows a calm reassurance only after one stage stalls", async ({
     runState: "ending",
   });
 
-  await expectSavedRunChrome(page);
+  await expectShutdownRunChrome(page);
   const reassurance = page.locator("[data-run-saving-stalled]");
   await expect(
     page.getByRole("heading", { name: "Saving your run…" }),

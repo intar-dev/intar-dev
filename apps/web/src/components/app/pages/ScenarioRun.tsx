@@ -636,6 +636,9 @@ export function ScenarioRun() {
   ]);
 
   const runIsLive = attemptData?.activity === "foreground";
+  const runUsesFocusedShell =
+    attemptData?.activity === "foreground" ||
+    attemptData?.activity === "background";
   const deleteRunAction = useMemo(
     () =>
       canDeleteRun ? (
@@ -668,7 +671,7 @@ export function ScenarioRun() {
     ? getRunReturnTarget(attemptData.courseLocation)
     : null;
   const runBackNavigation = useMemo(() => {
-    if (runIsLive || !runBackTarget) return undefined;
+    if (runUsesFocusedShell || !runBackTarget) return undefined;
     return (
       <a
         href={runBackTarget.href}
@@ -684,15 +687,15 @@ export function ScenarioRun() {
     runBackTarget?.href,
     runBackTarget?.label,
     runBackTarget?.text,
-    runIsLive,
+    runUsesFocusedShell,
   ]);
   usePageChrome({
     title: attemptData?.title ?? "Scenario run",
-    status: runIsLive ? undefined : runStatusDisplay,
+    status: runUsesFocusedShell ? undefined : runStatusDisplay,
     back: runBackNavigation,
-    action: runIsLive ? undefined : deleteRunAction,
-    menu: runIsLive ? undefined : deleteRunMenu,
-    fullscreen: runIsLive,
+    action: runUsesFocusedShell ? undefined : deleteRunAction,
+    menu: runUsesFocusedShell ? undefined : deleteRunMenu,
+    fullscreen: runUsesFocusedShell,
   });
 
   const runActions =
@@ -869,28 +872,57 @@ export function ScenarioRun() {
     );
   }
 
+  const runRecap = (
+    <Suspense
+      fallback={
+        <section
+          className="flex flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
+          role="status"
+        >
+          Loading your recap…
+        </section>
+      }
+    >
+      <LazyRunRecap
+        run={attemptData}
+        courseLocation={attemptData.courseLocation}
+        nextLecture={nextCourseLecture}
+        headingRef={recapHeadingRef}
+      />
+    </Suspense>
+  );
+
+  if (attemptData.activity === "background") {
+    return (
+      <RunPageFrame>
+        {runDialogs}
+        <div
+          data-run-work-area
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
+        >
+          <RunWorkspaceHeader
+            title={attemptData.title}
+            status={runStatusDisplay}
+            returnTarget={getRunReturnTarget(attemptData.courseLocation)}
+          />
+          <div
+            data-run-shutdown-sequence
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 sm:p-4"
+          >
+            <div className="shrink-0 space-y-2 empty:hidden">{errorAlerts}</div>
+            {runRecap}
+          </div>
+        </div>
+      </RunPageFrame>
+    );
+  }
+
   if (attemptData.activity !== "foreground") {
     return (
       <PageShell>
         {runDialogs}
         {errorAlerts}
-        <Suspense
-          fallback={
-            <section
-              className="flex flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
-              role="status"
-            >
-              Loading your recap…
-            </section>
-          }
-        >
-          <LazyRunRecap
-            run={attemptData}
-            courseLocation={attemptData.courseLocation}
-            nextLecture={nextCourseLecture}
-            headingRef={recapHeadingRef}
-          />
-        </Suspense>
+        {runRecap}
       </PageShell>
     );
   }

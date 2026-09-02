@@ -105,6 +105,13 @@ async function expectRunWorkspaceChrome(page: Page) {
   );
 }
 
+async function expectShutdownRunChrome(page: Page, title: string) {
+  await expectRunWorkspaceHeader(page, title);
+  await expectRunWorkspaceChrome(page);
+  await expect(page.locator("[data-run-page]")).toHaveCount(1);
+  await expect(page.locator("[data-run-shutdown-sequence]")).toHaveCount(1);
+}
+
 async function expectStandardRunChrome(
   page: Page,
   title: string,
@@ -1067,9 +1074,7 @@ test.describe("focused state accessibility", () => {
     await expect(
       page.getByRole("heading", { name: "Saving your run…" }),
     ).toBeVisible();
-    await expectStandardRunChrome(page, "Repair a broken nginx service", {
-      status: "Saving",
-    });
+    await expectShutdownRunChrome(page, "Repair a broken nginx service");
     await expect(runLearningPanel(page)).toHaveCount(0);
     await expectLearnerSafeRunCopy(page.locator("main"));
     await expectNoHorizontalOverflow(page);
@@ -1125,10 +1130,14 @@ test.describe("focused state accessibility", () => {
         runState: recap.runState,
       });
 
-      await expectStandardRunChrome(page, "Repair a broken nginx service", {
-        status: recap.status,
-        hasDeleteAction: recap.hasDeleteAction,
-      });
+      if (recap.runState === "ending" || recap.runState === "rendering") {
+        await expectShutdownRunChrome(page, "Repair a broken nginx service");
+      } else {
+        await expectStandardRunChrome(page, "Repair a broken nginx service", {
+          status: recap.status,
+          hasDeleteAction: recap.hasDeleteAction,
+        });
+      }
       await expect(
         page.getByRole("heading", { name: recap.title, exact: true }),
       ).toBeVisible();
@@ -1477,9 +1486,7 @@ test.describe("focused mobile state accessibility", () => {
       runState: "ending",
     });
 
-    await expectStandardRunChrome(page, "Repair a broken nginx service", {
-      status: "Saving",
-    });
+    await expectShutdownRunChrome(page, "Repair a broken nginx service");
     const savingSteps = page.getByRole("list", { name: "Saving steps" });
     await expect(savingSteps).toBeVisible();
     await expect(page.locator("[data-run-lease-countdown]")).not.toBeVisible();
@@ -1708,6 +1715,35 @@ test.describe("long check rows", () => {
 
     await expectPersistentDesktopLearningPanel(page);
     const panel = runLearningPanel(page);
+    const supportScroller = panel.locator("[data-run-learning-panel-scroll]");
+    const pinnedChecks = panel.locator("[data-run-pinned-checks]");
+    await supportScroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    const pinnedSurface = await pinnedChecks.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const topElement = document.elementFromPoint(
+        bounds.left + bounds.width / 2,
+        bounds.top + bounds.height - 2,
+      );
+      const section = element.querySelector("section");
+      const list = element.querySelector("ol");
+      return {
+        backgroundColor: getComputedStyle(element).backgroundColor,
+        coversScrolledContent: Boolean(topElement && element.contains(topElement)),
+        sectionBottomBorder: section
+          ? getComputedStyle(section).borderBottomWidth
+          : null,
+        listBottomBorder: list ? getComputedStyle(list).borderBottomWidth : null,
+      };
+    });
+    expect(pinnedSurface.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(pinnedSurface.coversScrolledContent).toBe(true);
+    expect(pinnedSurface.sectionBottomBorder).toBe("0px");
+    expect(pinnedSurface.listBottomBorder).toBe("1px");
+    await supportScroller.evaluate((element) => {
+      element.scrollTop = 0;
+    });
     const checks = runLearningContent(panel).getByRole("region", {
       name: "Checks",
     });
@@ -2009,9 +2045,7 @@ test.describe("short run workspace", () => {
       runState: "ending",
     });
 
-    await expectStandardRunChrome(page, "Repair a broken nginx service", {
-      status: "Saving",
-    });
+    await expectShutdownRunChrome(page, "Repair a broken nginx service");
     const savingSteps = page.getByRole("list", { name: "Saving steps" });
     await savingSteps.scrollIntoViewIfNeeded();
     await expect(savingSteps).toBeVisible();
@@ -2091,9 +2125,7 @@ test.describe("small-screen access management", () => {
       runState: "rendering",
     });
 
-    await expectStandardRunChrome(page, "Repair a broken nginx service", {
-      status: "Saving",
-    });
+    await expectShutdownRunChrome(page, "Repair a broken nginx service");
     const savingSteps = page.getByRole("list", { name: "Saving steps" });
     await expect(savingSteps).toBeVisible();
     await expect(page.locator("[data-run-lease-countdown]")).not.toBeVisible();

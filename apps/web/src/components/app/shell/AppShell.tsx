@@ -65,7 +65,7 @@ function AppShellContent() {
 
 // Keep this component in the tree while a run changes activity. It preserves
 // SidebarInset and its Outlet identity, so ScenarioRun does not remount when
-// the active workspace returns to the normal app chrome for saving or recap.
+// the focused run returns to the normal app chrome for its settled recap.
 function AppShellNavigation({ hidden }: { hidden: boolean }) {
   if (hidden) return null;
 

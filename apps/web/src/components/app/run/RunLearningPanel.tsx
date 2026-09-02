@@ -157,13 +157,13 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
       aria-label="Lecture theory and hints"
       data-run-learning-panel
       className={cn(
-        "hidden h-full min-h-0 min-w-0 w-full border-l bg-background min-[960px]:flex min-[960px]:flex-col",
+        "hidden h-full min-h-0 min-w-0 w-full border-l bg-card min-[960px]:flex min-[960px]:flex-col",
         className,
       )}
     >
       <div
         data-run-learning-panel-scroll
-        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-background px-4 py-4"
+        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-card px-4 py-4"
         role="region"
         aria-label="Lecture theory and hints content"
         tabIndex={0}
@@ -271,13 +271,13 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
           side="bottom"
           showCloseButton={false}
           data-run-learning-mobile-sheet
-          className="max-h-[min(78dvh,42rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] !shadow-none motion-reduce:transition-none"
+          className="max-h-[min(78dvh,42rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t bg-card pb-[max(1rem,env(safe-area-inset-bottom))] !shadow-none motion-reduce:transition-none"
         >
           <LearningPanelA11yHeader />
           <LearningPanelClose />
           <div
             data-run-learning-mobile-scroll
-            className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-popover px-4"
+            className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-card px-4"
             role="region"
             aria-label="Lecture theory and hints content"
             tabIndex={0}
@@ -324,11 +324,11 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
   return (
     <div
       data-run-learning-panel-content
-      className={cn("space-y-6 bg-inherit pb-6", props.className)}
+      className={cn("space-y-6 bg-card pb-6", props.className)}
     >
       {state !== "booting" ? (
         <div
-          className="sticky top-0 z-20 -mx-1 bg-inherit px-1 pb-3"
+          className="sticky top-0 z-20 -mx-1 isolate bg-card px-1 pb-3"
           data-run-pinned-checks
         >
           <Checks
@@ -502,7 +502,7 @@ function Checks(props: {
       aria-labelledby={props.headingId}
       className={cn(
         props.pinned &&
-          "flex max-h-[min(44dvh,24rem)] min-h-0 flex-col border-b bg-inherit pb-1",
+          "flex max-h-[min(44dvh,24rem)] min-h-0 flex-col bg-card",
       )}
     >
       <div className="flex shrink-0 items-center justify-between gap-3">

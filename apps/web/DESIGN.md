@@ -218,7 +218,7 @@ The normal app frame has a 16rem sidebar on desktop and a 3rem compact sidebar. 
 
 Authenticated page shells fill the available app viewport through 2048px. Page inset grows from 1rem to 1.5rem at 40rem and to 2rem at 64rem. Page content must not add a maximum width that leaves unused app space.
 
-Lecture pages use one fluid column below 1100px and a three-to-one content and course-outline grid from 1100px. The mobile app bar opens the same course outline in a bottom sheet. Live run workspaces use a two-to-one terminal and learning grid from 960px. Checks stay pinned above long theory and hints.
+Lecture pages use one fluid column below 1100px and a three-to-one content and course-outline grid from 1100px. The mobile app bar opens the same course outline in a bottom sheet. Live run workspaces use a two-to-one terminal and learning grid from 960px. The learning panel uses the lighter card surface, and its checks stay pinned above long theory and hints.
 
 ### Named Rules
 
@@ -226,7 +226,7 @@ Lecture pages use one fluid column below 1100px and a three-to-one content and c
 
 **The Fluid Content Rule.** Let page content use the available app viewport. Put a lecture action after the reading unit and use the course outline for lecture navigation.
 
-**The Full-Screen Work Rule.** Only a foreground run hides the normal app frame. Saving, recap, and replay use the normal sidebar and app bar.
+**The Full-Screen Work Rule.** Starting, live work, and shutdown use the focused run shell. The normal sidebar and app bar return only when the settled recap or replay is ready.
 
 ## Elevation & Depth
 

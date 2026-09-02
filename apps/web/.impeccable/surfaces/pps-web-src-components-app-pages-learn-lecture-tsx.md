@@ -25,7 +25,7 @@ OWN-WORLD: Warm neutral ground, the existing Intar sidebar frame, quiet borders,
 
 STORY: The learner sees the course position, reads the theory, understands the unit state, and then starts or completes one unit.
 
-FIRST VIEWPORT: Course context and the lecture title lead. Metadata follows. Theory fills the fluid main column. A right outline shows lecture position and course progress from 1100px; the app bar opens it below that width. The primary scenario or completion action comes only after the body.
+FIRST VIEWPORT: Course context and the lecture title lead. Metadata follows. Theory fills the fluid main column. A right outline shows lecture position and course progress from 1100px; the app bar opens it below that width. The primary scenario or completion action comes only after the body and switches immediately to the focused startup sequence.
 
 FORM: Fluid reading column, responsive course outline, and trailing scenario gate; form 1 of 1; seed key `course-lecture-reading-first-v3`.
 
@@ -33,4 +33,4 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Constraints
 
-The server owns access and sequence checks. The interface must work with keyboard and screen readers on mobile and desktop. Only a foreground run uses the full-screen shell. Checks stay visible above long run theory. Do not add a new visual identity, a hero, decorative cards, or a scenario action above the theory.
+The server owns access and sequence checks. The interface must work with keyboard and screen readers on mobile and desktop. Startup, live work, and shutdown use the full-screen run shell; settled recap and replay use the normal app frame. Checks stay visible above long run theory. Do not add a new visual identity, a hero, decorative cards, or a scenario action above the theory.
