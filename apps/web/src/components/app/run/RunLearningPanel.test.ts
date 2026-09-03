@@ -44,12 +44,37 @@ describe("run learning panel", () => {
     });
   });
 
-  it("treats startup phases as a work order and every other active phase as checks", () => {
+  it("identifies startup phases for the work order", () => {
     expect(getRunLearningPanelState("launching")).toBe("booting");
     expect(getRunLearningPanelState("waiting_for_target")).toBe("booting");
     expect(getRunLearningPanelState("running")).toBe("running");
     expect(getRunLearningPanelState("solved")).toBe("solved");
     expect(getRunLearningPanelState("failed")).toBe("running");
+  });
+
+  it("keeps checks above the work order while the workspace starts", () => {
+    const markup = renderContent({ phase: "booting" });
+
+    expect(markup).toContain("Checks");
+    expect(markup).toContain("Work order");
+    expect(markup.indexOf("Checks")).toBeLessThan(
+      markup.indexOf("Work order"),
+    );
+  });
+
+  it("uses the same panel while the run record loads", () => {
+    const markup = renderContent({
+      checksPending: true,
+      probes: [],
+      objectives: [],
+      hints: [],
+      briefingMarkdown: "",
+    });
+
+    expect(markup).toContain("Checks will appear when the run is created.");
+    expect(markup).toContain("No lecture theory is available for this run.");
+    expect(markup).not.toContain("Hints");
+    expect(markup).not.toContain("Reveal the full solution");
   });
 
   it("renders a permanent desktop aside and a separate 44px mobile trigger", () => {

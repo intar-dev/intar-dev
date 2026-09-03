@@ -88,6 +88,14 @@ async function expectShutdownRunShell(page: Page) {
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
+  if ((page.viewportSize()?.width ?? 0) >= 960) {
+    await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
+  } else {
+    await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
+    await expect(
+      page.locator("[data-run-learning-panel-trigger]"),
+    ).toBeVisible();
+  }
 }
 
 test("keyboard-only landing navigation keeps focus visible", async ({
@@ -653,6 +661,10 @@ test.describe("lecture reading flow", () => {
     try {
       await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
       await expect(page.locator("[data-run-start-sequence]")).toBeVisible();
+      await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
+      await expect(
+        page.getByText("Checks will appear when the run is created."),
+      ).toBeVisible();
       await expect(
         page.getByRole("heading", { name: "Preparing your workspace" }),
       ).toBeVisible();

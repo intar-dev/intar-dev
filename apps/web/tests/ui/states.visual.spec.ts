@@ -53,6 +53,14 @@ async function expectShutdownRunShell(
   await expect(page.locator("[data-run-shutdown-sequence]")).toBeVisible();
   await expect(page.locator("[data-run-back]")).toBeVisible();
   await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  if ((page.viewportSize()?.width ?? 0) >= 960) {
+    await expectDesktopMissionPane(page);
+  } else {
+    await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
+    await expect(
+      page.locator("[data-run-learning-panel-trigger]"),
+    ).toBeVisible();
+  }
 }
 
 async function expectDesktopMissionPane(
@@ -226,6 +234,10 @@ test.describe("focused visual states", () => {
     try {
       await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
       await expect(page.locator("[data-run-start-sequence]")).toBeVisible();
+      await expectDesktopMissionPane(page);
+      await expect(
+        page.getByText("Checks will appear when the run is created."),
+      ).toBeVisible();
       await expectRouteScreenshot(page, "lecture-starting-scenario-dark-desktop");
     } finally {
       releaseStart?.();

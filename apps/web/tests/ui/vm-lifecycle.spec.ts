@@ -39,6 +39,14 @@ async function expectShutdownRunChrome(page: Page) {
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
+  if ((page.viewportSize()?.width ?? 0) >= 960) {
+    await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
+  } else {
+    await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
+    await expect(
+      page.locator("[data-run-learning-panel-trigger]"),
+    ).toBeVisible();
+  }
 }
 
 test("the full-screen boot screen keeps the mission visible and does not steal focus when the shell opens", async ({
@@ -89,6 +97,9 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
   const panel = page.locator("[data-run-learning-panel]");
   await expect(panel).toBeVisible();
   const panelContent = panel.locator("[data-run-learning-panel-content]");
+  await expect(
+    panelContent.getByRole("region", { name: "Checks" }),
+  ).toBeVisible();
   await expect(
     panelContent.getByText("Lecture theory: Repair a broken nginx service", {
       exact: true,

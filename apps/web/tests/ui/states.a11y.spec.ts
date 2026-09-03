@@ -110,6 +110,13 @@ async function expectShutdownRunChrome(page: Page, title: string) {
   await expectRunWorkspaceChrome(page);
   await expect(page.locator("[data-run-page]")).toHaveCount(1);
   await expect(page.locator("[data-run-shutdown-sequence]")).toHaveCount(1);
+  if ((page.viewportSize()?.width ?? 0) >= 960) {
+    await expect(runLearningPanel(page)).toBeVisible();
+    await expect(runLearningTrigger(page)).toBeHidden();
+  } else {
+    await expect(runLearningPanel(page)).toBeHidden();
+    await expect(runLearningTrigger(page)).toBeVisible();
+  }
 }
 
 async function expectStandardRunChrome(
@@ -1075,7 +1082,7 @@ test.describe("focused state accessibility", () => {
       page.getByRole("heading", { name: "Saving your run…" }),
     ).toBeVisible();
     await expectShutdownRunChrome(page, "Repair a broken nginx service");
-    await expect(runLearningPanel(page)).toHaveCount(0);
+    await expect(runLearningPanel(page)).toBeVisible();
     await expectLearnerSafeRunCopy(page.locator("main"));
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
@@ -1141,7 +1148,11 @@ test.describe("focused state accessibility", () => {
       await expect(
         page.getByRole("heading", { name: recap.title, exact: true }),
       ).toBeVisible();
-      await expect(runLearningPanel(page)).toHaveCount(0);
+      if (recap.runState === "ending" || recap.runState === "rendering") {
+        await expect(runLearningPanel(page)).toBeVisible();
+      } else {
+        await expect(runLearningPanel(page)).toHaveCount(0);
+      }
       await expect(page.locator('ol[aria-label="Run timeline"]')).toHaveCount(
         0,
       );

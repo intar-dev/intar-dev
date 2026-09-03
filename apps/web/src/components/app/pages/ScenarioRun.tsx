@@ -36,6 +36,7 @@ import {
   fetchCourseCatalog,
   findNextCourseLecture,
   type CourseCatalogResponse,
+  type CourseLectureDetailResponse,
   type CourseRouteRef,
 } from "@/components/app/pages/learn/course-wire";
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
@@ -43,6 +44,7 @@ import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import {
   RunLearningPanel,
   RunLearningPanelMobile,
+  type RunLearningPanelProps,
 } from "@/components/app/run/RunLearningPanel";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
@@ -118,9 +120,40 @@ export function ScenarioRunStart() {
     staleTime: 30_000,
     retry: false,
   });
+  const lectureDetail =
+    search.courseId && search.lectureId
+      ? queryClient.getQueryData<CourseLectureDetailResponse>([
+          "courses",
+          "lecture",
+          organizationId,
+          search.courseId,
+          search.lectureId,
+        ])
+      : undefined;
   const title =
-    findStartLectureTitle(courseCatalog.data, search) ?? "Scenario run";
+    lectureDetail?.lecture.title ??
+    findStartLectureTitle(courseCatalog.data, search) ??
+    "Scenario run";
   const returnTarget = getStartReturnTarget(search);
+  const startGuidanceProps: RunLearningPanelProps = {
+    briefingMarkdown: "",
+    lectureMarkdown: lectureDetail?.lecture.bodyMarkdown ?? null,
+    lectureTitle: lectureDetail?.lecture.title ?? null,
+    phase: "launching" as const,
+    probes: [],
+    objectives: [],
+    hints: [],
+    solution: {
+      unlocked: false,
+      revealed: false,
+      assisted: false,
+      revealedAt: null,
+      bodyMarkdown: null,
+    },
+    checksPending: true,
+    onRevealHint: () => undefined,
+    onRevealSolution: () => undefined,
+  };
 
   const startScenario = useCallback(() => {
     abortRef.current?.abort();
@@ -197,61 +230,54 @@ export function ScenarioRunStart() {
   ];
 
   return (
-    <RunPageFrame>
-      <div
-        data-run-work-area
-        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
-      >
-        <RunWorkspaceHeader
-          title={title}
-          status={
-            <StatusToken
-              tone={failed ? "danger" : "pending"}
-              word={
-                failed
-                  ? "Could not start"
-                  : waitingForCapacity
-                    ? "Waiting for capacity"
-                    : "Starting"
-              }
-              compactWord={
-                failed ? "Failed" : waitingForCapacity ? "Waiting" : "Starting"
-              }
-              pulse={!failed}
-            />
+    <RunWorkspaceShell
+      title={title}
+      status={
+        <StatusToken
+          tone={failed ? "danger" : "pending"}
+          word={
+            failed
+              ? "Could not start"
+              : waitingForCapacity
+                ? "Waiting for capacity"
+                : "Starting"
           }
-          returnTarget={returnTarget}
+          compactWord={
+            failed ? "Failed" : waitingForCapacity ? "Waiting" : "Starting"
+          }
+          pulse={!failed}
         />
-        <div
-          data-run-start-sequence
-          className="flex min-h-0 flex-1 overflow-y-auto p-3 sm:p-4"
-        >
-          <div className="m-auto w-full" data-run-sequence-frame>
-            <ScenarioStepScreen
-              title={
-                failed ? "The run did not start" : "Preparing your workspace"
-              }
-              description={
-                failed
-                  ? (startError ?? "Could not start the scenario.")
-                  : waitingForCapacity
-                    ? "A practice machine is busy. We will retry for up to 60 seconds."
-                    : "Starting your scenario."
-              }
-              steps={steps}
-              listLabel="Startup steps"
-              footer={
-                failed ? (
-                  <Button type="button" onClick={startScenario}>
-                    Try again
-                  </Button>
-                ) : undefined
-              }
-            />
-          </div>
+      }
+      returnTarget={returnTarget}
+      guidance={startGuidanceProps}
+    >
+      <div
+        data-run-start-sequence
+        className="flex min-h-0 flex-1 overflow-y-auto p-3 sm:p-4"
+      >
+        <div className="m-auto w-full" data-run-sequence-frame>
+          <ScenarioStepScreen
+            title={failed ? "The run did not start" : "Preparing your workspace"}
+            description={
+              failed
+                ? (startError ?? "Could not start the scenario.")
+                : waitingForCapacity
+                  ? "A practice machine is busy. We will retry for up to 60 seconds."
+                  : "Starting your scenario."
+            }
+            steps={steps}
+            listLabel="Startup steps"
+            footer={
+              failed ? (
+                <Button type="button" onClick={startScenario}>
+                  Try again
+                </Button>
+              ) : undefined
+            }
+          />
         </div>
       </div>
-    </RunPageFrame>
+    </RunWorkspaceShell>
   );
 }
 
@@ -901,36 +927,6 @@ export function ScenarioRun() {
       </div>
     ) : null;
 
-  const guidanceProps =
-    attemptData?.activity === "foreground"
-      ? {
-          briefingMarkdown: attemptData.briefingMarkdown,
-          lectureMarkdown: attemptData.lectureBodyMarkdown ?? null,
-          lectureTitle: attemptData.lectureTitle ?? null,
-          phase: attemptData.phase,
-          probes: selectedProbes,
-          vmName: selectedVm?.scenarioVmName ?? null,
-          objectives: attemptData.objectives,
-          hints: attemptData.hints,
-          solution: attemptData.solution,
-          onRevealHint: (hintKey: string) => revealHint.mutate(hintKey),
-          pendingHintKey: revealHint.isPending
-            ? (revealHint.variables ?? null)
-            : null,
-          hintError:
-            revealHint.error instanceof Error ? revealHint.error.message : null,
-          failedHintKey: revealHint.error
-            ? (revealHint.variables ?? null)
-            : null,
-          onRevealSolution: () => revealSolution.mutate(),
-          solutionPending: revealSolution.isPending,
-          solutionError:
-            revealSolution.error instanceof Error
-              ? revealSolution.error.message
-              : null,
-        }
-      : null;
-
   // The browser tab carries live-run state while the user is elsewhere.
   const scenarioName = attemptData?.title ?? null;
   useEffect(() => {
@@ -1033,6 +1029,31 @@ export function ScenarioRun() {
     );
   }
 
+  const guidanceProps: RunLearningPanelProps = {
+    briefingMarkdown: attemptData.briefingMarkdown,
+    lectureMarkdown: attemptData.lectureBodyMarkdown ?? null,
+    lectureTitle: attemptData.lectureTitle ?? null,
+    phase: attemptData.phase,
+    probes: selectedProbes,
+    vmName: selectedVm?.scenarioVmName ?? null,
+    objectives: attemptData.objectives,
+    hints: attemptData.hints,
+    solution: attemptData.solution,
+    onRevealHint: (hintKey: string) => revealHint.mutate(hintKey),
+    pendingHintKey: revealHint.isPending
+      ? (revealHint.variables ?? null)
+      : null,
+    hintError:
+      revealHint.error instanceof Error ? revealHint.error.message : null,
+    failedHintKey: revealHint.error ? (revealHint.variables ?? null) : null,
+    onRevealSolution: () => revealSolution.mutate(),
+    solutionPending: revealSolution.isPending,
+    solutionError:
+      revealSolution.error instanceof Error
+        ? revealSolution.error.message
+        : null,
+  };
+
   const runRecap = (
     <Suspense
       fallback={
@@ -1055,26 +1076,21 @@ export function ScenarioRun() {
 
   if (attemptData.activity === "background") {
     return (
-      <RunPageFrame>
-        {runDialogs}
+      <RunWorkspaceShell
+        before={runDialogs}
+        title={attemptData.title}
+        status={runStatusDisplay}
+        returnTarget={getRunReturnTarget(attemptData.courseLocation)}
+        guidance={guidanceProps}
+      >
         <div
-          data-run-work-area
-          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
+          data-run-shutdown-sequence
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 sm:p-4"
         >
-          <RunWorkspaceHeader
-            title={attemptData.title}
-            status={runStatusDisplay}
-            returnTarget={getRunReturnTarget(attemptData.courseLocation)}
-          />
-          <div
-            data-run-shutdown-sequence
-            className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 sm:p-4"
-          >
-            <div className="shrink-0 space-y-2 empty:hidden">{errorAlerts}</div>
-            {runRecap}
-          </div>
+          <div className="shrink-0 space-y-2 empty:hidden">{errorAlerts}</div>
+          {runRecap}
         </div>
-      </RunPageFrame>
+      </RunWorkspaceShell>
     );
   }
 
@@ -1091,28 +1107,15 @@ export function ScenarioRun() {
   // A live run owns the viewport: runtime on the left, learning reference on
   // the right, and no page-level scroll around either surface.
   return (
-    <RunPageFrame>
-      {runDialogs}
-      <div
-        data-run-workspace
-        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden [@media(min-width:960px)]:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
-      >
-        <div
-          data-run-work-area
-          className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background"
-        >
-          <RunWorkspaceHeader
-            title={attemptData.title}
-            status={runStatusDisplay}
-            actions={runActions}
-            returnTarget={getRunReturnTarget(attemptData.courseLocation)}
-            mobileGuidance={
-              guidanceProps ? (
-                <RunLearningPanelMobile {...guidanceProps} />
-              ) : null
-            }
-          />
-          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-3 [@media(max-height:500px)]:!p-3">
+    <RunWorkspaceShell
+      before={runDialogs}
+      title={attemptData.title}
+      status={runStatusDisplay}
+      actions={runActions}
+      returnTarget={getRunReturnTarget(attemptData.courseLocation)}
+      guidance={guidanceProps}
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-3 [@media(max-height:500px)]:!p-3">
             <div className="shrink-0 space-y-2 empty:hidden">
               {errorAlerts}
             </div>
@@ -1194,10 +1197,49 @@ export function ScenarioRun() {
                 </div>
               )}
             </section>
-          </div>
-        </div>
+      </div>
+    </RunWorkspaceShell>
+  );
+}
 
-        {guidanceProps ? <RunLearningPanel {...guidanceProps} /> : null}
+function RunWorkspaceShell({
+  before,
+  title,
+  status,
+  actions,
+  returnTarget,
+  guidance,
+  children,
+}: {
+  before?: ReactNode;
+  title: string;
+  status?: ReactNode;
+  actions?: ReactNode;
+  returnTarget: { href: string; label: string; text: string };
+  guidance: RunLearningPanelProps;
+  children: ReactNode;
+}) {
+  return (
+    <RunPageFrame>
+      {before}
+      <div
+        data-run-workspace
+        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden [@media(min-width:960px)]:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
+      >
+        <div
+          data-run-work-area
+          className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+        >
+          <RunWorkspaceHeader
+            title={title}
+            status={status}
+            actions={actions}
+            returnTarget={returnTarget}
+            mobileGuidance={<RunLearningPanelMobile {...guidance} />}
+          />
+          {children}
+        </div>
+        <RunLearningPanel {...guidance} />
       </div>
     </RunPageFrame>
   );

@@ -33,4 +33,4 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Constraints
 
-The server owns access and sequence checks. The interface must work with keyboard and screen readers on mobile and desktop. Startup, live work, and shutdown use the full-screen run shell; settled recap and replay use the normal app frame. Checks stay visible above long run theory. Do not add a new visual identity, a hero, decorative cards, or a scenario action above the theory.
+The server owns access and sequence checks. The interface must work with keyboard and screen readers on mobile and desktop. Startup, live work, and shutdown use one full-screen run workspace with checks pinned above the learning panel; settled recap and replay use the normal app frame. Do not add a new visual identity, a hero, decorative cards, or a scenario action above the theory.

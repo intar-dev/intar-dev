@@ -70,6 +70,8 @@ export interface RunLearningPanelProps {
   hintError?: string | null;
   /** Set this to the failed mutation's hint key so the error stays beside its action. */
   failedHintKey?: string | null;
+  /** The run record does not exist yet, so authored checks are still loading. */
+  checksPending?: boolean;
   onRevealSolution: () => void;
   solutionPending?: boolean;
   /** A non-empty value means the solution reveal failed. Its text is never rendered. */
@@ -191,12 +193,17 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
     () => scopeHintsToVm(props.hints, props.vmName),
     [props.hints, props.vmName],
   );
-  const copy = getRunLearningTriggerCopy({
-    passedChecks,
-    totalChecks: props.probes.length,
-    revealedHints: countRevealedHints(hints),
-    totalHints: hints.length,
-  });
+  const copy = props.checksPending
+    ? {
+        visibleLabel: "Checks loading",
+        accessibleLabel: "Open lecture theory. Checks are loading.",
+      }
+    : getRunLearningTriggerCopy({
+        passedChecks,
+        totalChecks: props.probes.length,
+        revealedHints: countRevealedHints(hints),
+        totalHints: hints.length,
+      });
   const announcement = useCheckAnnouncement({
     passedChecks,
     totalChecks: props.probes.length,
@@ -326,20 +333,19 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
       data-run-learning-panel-content
       className={cn("space-y-6 bg-card pb-6", props.className)}
     >
-      {state !== "booting" ? (
-        <div
-          className="sticky top-0 z-20 -mx-1 isolate bg-card px-1 pb-3"
-          data-run-pinned-checks
-        >
-          <Checks
-            headingId={checksHeadingId}
-            probes={props.probes}
-            objectives={objectives}
-            passedChecks={passedChecks}
-            pinned
-          />
-        </div>
-      ) : null}
+      <div
+        className="sticky top-0 z-20 -mx-1 isolate bg-card px-1 pb-3"
+        data-run-pinned-checks
+      >
+        <Checks
+          headingId={checksHeadingId}
+          probes={props.probes}
+          objectives={objectives}
+          passedChecks={passedChecks}
+          pending={props.checksPending === true}
+          pinned
+        />
+      </div>
 
       <LectureTheory
         headingId={theoryHeadingId}
@@ -348,29 +354,33 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
         lectureTitle={props.lectureTitle}
       />
 
-      {state === "booting" ? (
-        <WorkOrder headingId={workOrderHeadingId} objectives={objectives} />
+      {!props.checksPending ? (
+        <>
+          {state === "booting" ? (
+            <WorkOrder headingId={workOrderHeadingId} objectives={objectives} />
+          ) : null}
+
+          <Hints
+            headingId={hintsHeadingId}
+            hints={hints}
+            objectives={objectives}
+            onRevealHint={props.onRevealHint}
+            pendingHintKey={props.pendingHintKey ?? null}
+            hintError={props.hintError ?? null}
+            failedHintKey={props.failedHintKey ?? null}
+            revealedHints={revealedHints}
+          />
+
+          <Solution
+            headingId={solutionHeadingId}
+            solution={props.solution}
+            requiresConfirmation={state !== "solved"}
+            onRevealSolution={props.onRevealSolution}
+            pending={props.solutionPending ?? false}
+            error={props.solutionError ?? null}
+          />
+        </>
       ) : null}
-
-      <Hints
-        headingId={hintsHeadingId}
-        hints={hints}
-        objectives={objectives}
-        onRevealHint={props.onRevealHint}
-        pendingHintKey={props.pendingHintKey ?? null}
-        hintError={props.hintError ?? null}
-        failedHintKey={props.failedHintKey ?? null}
-        revealedHints={revealedHints}
-      />
-
-      <Solution
-        headingId={solutionHeadingId}
-        solution={props.solution}
-        requiresConfirmation={state !== "solved"}
-        onRevealSolution={props.onRevealSolution}
-        pending={props.solutionPending ?? false}
-        error={props.solutionError ?? null}
-      />
     </div>
   );
 }
@@ -493,6 +503,7 @@ function Checks(props: {
   probes: readonly ScenarioProbeStatus[];
   objectives: readonly ScenarioObjective[];
   passedChecks: number;
+  pending?: boolean;
   pinned?: boolean;
 }) {
   const checks = getLearnerChecks(props.probes, props.objectives);
@@ -509,12 +520,18 @@ function Checks(props: {
         <p id={props.headingId} className="text-label">
           Checks
         </p>
-        <span
-          className="shrink-0 text-xs text-muted-foreground tabular-nums"
-          aria-label={`${props.passedChecks} of ${checks.length} checks verified`}
-        >
-          {props.passedChecks}/{checks.length} verified
-        </span>
+        {props.pending ? (
+          <span className="shrink-0 text-xs text-muted-foreground" role="status">
+            Loading
+          </span>
+        ) : (
+          <span
+            className="shrink-0 text-xs text-muted-foreground tabular-nums"
+            aria-label={`${props.passedChecks} of ${checks.length} checks verified`}
+          >
+            {props.passedChecks}/{checks.length} verified
+          </span>
+        )}
       </div>
       {checks.length ? (
         <ol
@@ -558,7 +575,9 @@ function Checks(props: {
         </ol>
       ) : (
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          No checks are available yet.
+          {props.pending
+            ? "Checks will appear when the run is created."
+            : "No checks are available yet."}
         </p>
       )}
     </section>

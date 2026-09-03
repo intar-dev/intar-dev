@@ -226,7 +226,7 @@ Lecture pages use one fluid column below 1100px and a three-to-one content and c
 
 **The Fluid Content Rule.** Let page content use the available app viewport. Put a lecture action after the reading unit and use the course outline for lecture navigation.
 
-**The Full-Screen Work Rule.** A lecture action opens the focused run shell before it sends the start request. Startup, live work, and shutdown stay in that shell. The normal sidebar and app bar return only when the settled recap or replay is ready.
+**The Full-Screen Work Rule.** A lecture action opens the focused run shell before it sends the start request. Startup, live work, and shutdown use the same workspace grid and keep the checks and learning panel available. The normal sidebar and app bar return only when the settled recap or replay is ready.
 
 ## Elevation & Depth
 
