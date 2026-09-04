@@ -1,7 +1,10 @@
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
 
@@ -169,6 +172,34 @@ class BenchmarkReleaseTest(unittest.TestCase):
             self.assertEqual(record["rebuild"]["queued_image_builds"], 1)
             self.assertEqual(record["rebuild"]["assigned_image_builds_observed"], 4)
 
+    def test_observer_provenance_preserves_the_original_harness_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            record_path = root / "record.json"
+            prepared = benchmark.prepare_catalog(
+                self.prepare_args(source, root / "prepared", record_path, "unchanged")
+            )
+
+            observed = benchmark.make_parser().parse_args(
+                [
+                    "observe",
+                    "--record",
+                    str(record_path),
+                    "--workflow-sha",
+                    "f" * 40,
+                    "--workflow-run-id",
+                    "42",
+                ]
+            )
+            record = benchmark.record_observer_provenance(observed)
+
+            self.assertEqual(
+                record["context"]["harness_fingerprint"],
+                prepared["context"]["harness_fingerprint"],
+            )
+            self.assertEqual(record["observer_provenance"][0]["workflow_run_id"], 42)
+
     def complete_record(
         self,
         root: Path,
@@ -292,6 +323,19 @@ class BenchmarkReleaseTest(unittest.TestCase):
             self.assertIsNone(late["threshold_passed"])
             self.assertTrue(late["passed"])
 
+    def test_recovered_observer_record_is_not_a_strict_comparison_sample(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record_path = Path(
+                self.complete_record(root, "baseline", "recovered", 100, "warm", 1)
+            )
+            record = benchmark.load_record(record_path)
+            record["observer_provenance"] = [{"workflow_run_id": 42}]
+            benchmark.write_json(record_path, record)
+
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "recovered observer records"):
+                benchmark.sample_from_record(benchmark.load_record(record_path), "baseline", "warm")
+
     def test_status_observation_records_available_build_phase_timestamps(self):
         record = {
             "schema_version": benchmark.RECORD_SCHEMA_VERSION,
@@ -322,6 +366,32 @@ class BenchmarkReleaseTest(unittest.TestCase):
         self.assertIn("first_build_phase_building", events)
         self.assertIn("first_build_phase_publishing", events)
         self.assertIsInstance(record["metrics"]["queue_observed_until_building_ms"], int)
+
+    def test_registry_request_declares_the_benchmark_user_agent(self):
+        request = benchmark.registry_request("revision-1", "test-token")
+        self.assertEqual(request.get_header("User-agent"), benchmark.BENCHMARK_USER_AGENT)
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+    def test_http_error_diagnostic_is_bounded_and_does_not_echo_authentication(self):
+        headers = Message()
+        headers["Content-Type"] = "text/html; charset=utf-8"
+        headers["CF-Ray"] = "abc123"
+        headers["Authorization"] = "Bearer should-not-appear"
+        error = urllib.error.HTTPError(
+            "https://intar.dev/registry/v1/builds/revisions/revision-1?tools=stable",
+            403,
+            "forbidden",
+            headers,
+            io.BytesIO(b"<html><title>Access denied by edge policy</title></html>"),
+        )
+
+        message = benchmark.http_error_message(error)
+
+        self.assertIn("HTTP 403", message)
+        self.assertIn("content_type=text/html; charset=utf-8", message)
+        self.assertIn("cf_ray=abc123", message)
+        self.assertIn("diagnostic=Access denied by edge policy", message)
+        self.assertNotIn("should-not-appear", message)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import collections
 import hashlib
+import html
 import json
 import os
 import re
@@ -47,6 +48,9 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 EVENT_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+BENCHMARK_USER_AGENT = "Intar-Image-Benchmark/1"
+MAX_HTTP_ERROR_BODY_BYTES = 4096
+MAX_HTTP_DIAGNOSTIC_CHARS = 200
 
 
 class BenchmarkError(RuntimeError):
@@ -411,6 +415,28 @@ def mark_record(args: argparse.Namespace) -> dict[str, Any]:
     return record
 
 
+def record_observer_provenance(args: argparse.Namespace) -> dict[str, Any]:
+    record_path = Path(args.record)
+    record = load_record(record_path)
+    provenance = record.setdefault("observer_provenance", [])
+    if not isinstance(provenance, list):
+        fail("benchmark record has invalid observer provenance")
+    workflow_sha = require_source_sha(args.workflow_sha)
+    workflow_run_id = require_iteration(args.workflow_run_id)
+    observed = now_event("observer_started")
+    provenance.append(
+        {
+            "workflow_sha": workflow_sha,
+            "workflow_run_id": workflow_run_id,
+            "at_unix_ms": observed["at_unix_ms"],
+            "at_rfc3339": observed["at_rfc3339"],
+        }
+    )
+    record["events"].append(observed)
+    write_json(record_path, record)
+    return record
+
+
 def record_bundle_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     if args.queued < 0 or args.assigned < 0:
         fail("bundle receipt counts must be nonnegative")
@@ -454,17 +480,61 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def registry_request(revision: str, token: str) -> urllib.request.Request:
+    require_revision(revision)
+    url = f"{REGISTRY_ORIGIN}/registry/v1/builds/revisions/{revision}?tools=stable"
+    return urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": BENCHMARK_USER_AGENT,
+        },
+        method="GET",
+    )
+
+
+def safe_http_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", value)
+    value = " ".join("".join(character if character.isprintable() else " " for character in value).split())
+    return value[:MAX_HTTP_DIAGNOSTIC_CHARS] or None
+
+
+def http_error_message(error: urllib.error.HTTPError) -> str:
+    headers = error.headers
+    content_type = safe_http_text(headers.get("Content-Type") if headers else None)
+    cf_ray = safe_http_text(headers.get("CF-Ray") if headers else None)
+    try:
+        body = error.read(MAX_HTTP_ERROR_BODY_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        body = ""
+    diagnostic: str | None = None
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError:
+        value = None
+    if isinstance(value, dict):
+        diagnostic = safe_http_text(value.get("error") or value.get("title"))
+    if diagnostic is None:
+        title = re.search(r"<title(?:\s[^>]*)?>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        diagnostic = safe_http_text(html.unescape(title.group(1))) if title else None
+    details = [f"HTTP {error.code}"]
+    if content_type:
+        details.append(f"content_type={content_type}")
+    if cf_ray:
+        details.append(f"cf_ray={cf_ray}")
+    if diagnostic:
+        details.append(f"diagnostic={diagnostic}")
+    return "registry status returned " + "; ".join(details)
+
+
 def registry_status(revision: str) -> dict[str, Any]:
     token = os.environ.get("INTAR_IMAGE_PUBLISH_TOKEN", "")
     if not token:
         fail("INTAR_IMAGE_PUBLISH_TOKEN is required for registry status")
-    require_revision(revision)
-    url = f"{REGISTRY_ORIGIN}/registry/v1/builds/revisions/{revision}?tools=stable"
-    request = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        method="GET",
-    )
+    request = registry_request(revision, token)
     opener = urllib.request.build_opener(NoRedirect())
     try:
         with opener.open(request, timeout=30) as response:
@@ -472,7 +542,7 @@ def registry_status(revision: str) -> dict[str, Any]:
                 fail(f"registry status returned HTTP {response.status}")
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        fail(f"registry status returned HTTP {error.code}")
+        fail(http_error_message(error))
     except urllib.error.URLError:
         fail("registry status request failed")
     except json.JSONDecodeError:
@@ -678,6 +748,11 @@ def poll_record(args: argparse.Namespace) -> dict[str, Any]:
 def sample_from_record(
     record: dict[str, Any], implementation: str, sample_mode: str
 ) -> dict[str, Any]:
+    observer_provenance = record.get("observer_provenance", [])
+    if not isinstance(observer_provenance, list):
+        fail("benchmark record has invalid observer provenance")
+    if observer_provenance:
+        fail("recovered observer records cannot satisfy the strict three-sample gate")
     context = record.get("context")
     if not isinstance(context, dict):
         fail("benchmark comparison record lacks context")
@@ -953,6 +1028,11 @@ def make_parser() -> argparse.ArgumentParser:
     mark.add_argument("--record", required=True)
     mark.add_argument("--event", required=True)
 
+    observe = commands.add_parser("observe", help="record a poll-only observer without changing the sample")
+    observe.add_argument("--record", required=True)
+    observe.add_argument("--workflow-sha", required=True)
+    observe.add_argument("--workflow-run-id", required=True)
+
     accept = commands.add_parser("accept", help="record the authenticated bundle upload receipt")
     accept.add_argument("--record", required=True)
     accept.add_argument("--queued", type=int, required=True)
@@ -982,6 +1062,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"revision": record["context"]["revision"], "status": record["status"]}))
         elif args.command == "mark":
             mark_record(args)
+        elif args.command == "observe":
+            record_observer_provenance(args)
         elif args.command == "accept":
             record_bundle_acceptance(args)
         elif args.command == "poll":
