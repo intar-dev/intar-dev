@@ -9,7 +9,6 @@ import type {
 } from "@/db/schema";
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 
 export interface RuntimeVmSpec {
   vmId: string;
@@ -61,21 +60,6 @@ export interface CreateRuntimeExecutionInput {
   reservationState?: HostResourceReservationState;
   reservationExpiresAt?: number | null;
   reservationResources?: RuntimeExecutionHandle["resources"];
-  now?: number;
-}
-
-export interface CreateRuntimeRecoveryGenerationInput {
-  sourceExecutionId: string;
-  expectedGeneration: number;
-  executionId?: string;
-  hostId?: string | null;
-  providerKind?: RuntimeProviderKind;
-  providerConnectionId?: string | null;
-  checkpointId: string;
-  leaseExpiresAt?: number | null;
-  vms: RuntimeVmSpec[];
-  reservationState?: HostResourceReservationState;
-  reservationExpiresAt?: number | null;
   now?: number;
 }
 
@@ -548,187 +532,6 @@ export async function createRuntimeExecution(
   };
 }
 
-export async function createRuntimeRecoveryGeneration(
-  input: CreateRuntimeRecoveryGenerationInput,
-): Promise<RuntimeExecutionHandle> {
-  const source = await requireCurrentRuntimeGeneration(
-    input.sourceExecutionId,
-    input.expectedGeneration,
-  );
-  const executionId = normalizedOptionalId(input.executionId) ?? createAppId();
-  const hostId =
-    input.hostId === undefined
-      ? source.host_id
-      : normalizedOptionalId(input.hostId);
-  const providerKind = input.providerKind ?? source.provider_kind;
-  const providerConnectionId =
-    input.providerConnectionId === undefined
-      ? source.provider_connection_id
-      : normalizedOptionalId(input.providerConnectionId);
-  validateProviderIdentity({
-    providerKind,
-    providerConnectionId,
-    hostId,
-    domainKind: source.domain_kind,
-  });
-  const checkpointId = requiredId(input.checkpointId, "checkpointId");
-  const now = validTimestamp(input.now ?? Date.now(), "now");
-  const leaseExpiresAt = optionalTimestamp(
-    input.leaseExpiresAt,
-    "leaseExpiresAt",
-  );
-  const vms = prepareVmRows(executionId, input.vms);
-  const resources = sumResources(vms);
-  const reservationState = input.reservationState ?? "pending";
-  const reservationExpiresAt = optionalTimestamp(
-    input.reservationExpiresAt,
-    "reservationExpiresAt",
-  );
-
-  const statements: D1PreparedStatement[] = [
-    env.DB.prepare(
-      `INSERT INTO runtime_executions (
-        id, user_id, organization_id, host_id, provider_kind,
-        provider_connection_id, domain_kind, domain_id,
-        generation, source_execution_id, checkpoint_id, state,
-        lease_expires_at, archive_requested_at, ended_at, created_at, updated_at
-      )
-      SELECT
-        ?, source.user_id, source.organization_id, ?, ?, ?, source.domain_kind,
-        source.domain_id, source.generation + 1, source.id, ?, 'queued',
-        ?, NULL, NULL, ?, ?
-      FROM runtime_executions source
-      WHERE source.id = ?
-        AND source.generation = ?
-        AND NOT EXISTS (
-          SELECT 1
-          FROM runtime_executions newer
-          WHERE newer.domain_kind = source.domain_kind
-            AND newer.domain_id = source.domain_id
-            AND newer.generation > source.generation
-        )`,
-    ).bind(
-      executionId,
-      hostId,
-      providerKind,
-      providerConnectionId,
-      checkpointId,
-      leaseExpiresAt,
-      now,
-      now,
-      source.id,
-      input.expectedGeneration,
-    ),
-    ...vms.map((vm) => runtimeVmInsert(vm, now)),
-  ];
-  if (hostId) {
-    statements.push(
-      resourceReservationInsert({
-        executionId,
-        hostId,
-        resources,
-        state: reservationState,
-        expiresAt: reservationExpiresAt,
-        now,
-      }),
-    );
-  }
-  // A failed provisioning attempt may already have archived the source and
-  // released its slot. Upsert transfers an existing source slot or recreates
-  // the missing slot atomically; the guard deliberately aborts the batch if a
-  // a different scenario claimed the user in the meantime.
-  statements.push(
-    env.DB.prepare(
-      `INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)
-       SELECT source.user_id, ?, ?
-       FROM runtime_executions source
-       WHERE source.id = ? AND source.generation = ?
-       ON CONFLICT (user_id) DO UPDATE SET
-         execution_id = excluded.execution_id,
-         acquired_at = excluded.acquired_at
-       WHERE active_runtime_slots.execution_id = ?`,
-    ).bind(executionId, now, source.id, input.expectedGeneration, source.id),
-    // If another domain owns the user slot, force the named unique constraint
-    // instead of manufacturing an invalid FK value. That keeps the conflict
-    // recognizable on D1 and rolls the complete recovery batch back.
-    env.DB.prepare(
-      `INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)
-       SELECT source.user_id, ?, ?
-       FROM runtime_executions source
-       WHERE source.id = ? AND source.generation = ?
-         AND NOT EXISTS (
-           SELECT 1
-           FROM active_runtime_slots slot
-           WHERE slot.user_id = source.user_id
-             AND slot.execution_id = ?
-         )`,
-    ).bind(
-      executionId,
-      now,
-      source.id,
-      input.expectedGeneration,
-      executionId,
-    ),
-    env.DB.prepare(
-      `UPDATE scenario_runs
-       SET runtime_execution_id = ?
-       WHERE runtime_execution_id = ?`,
-    ).bind(executionId, source.id),
-    env.DB.prepare(
-      `UPDATE host_resource_reservations
-       SET state = 'released', released_at = ?, updated_at = ?
-       WHERE execution_id = ? AND state <> 'released'`,
-    ).bind(now, now, source.id),
-    env.DB.prepare(
-      `UPDATE runtime_executions
-       SET state = 'archived',
-           archive_requested_at = coalesce(archive_requested_at, ?),
-           ended_at = coalesce(ended_at, ?),
-           updated_at = ?
-       WHERE id = ? AND generation = ?`,
-    ).bind(now, now, now, source.id, input.expectedGeneration),
-  );
-
-  try {
-    const results = await env.DB.batch(statements);
-    if (changes(results[0]) !== 1) {
-      throw runtimeGenerationStale(source);
-    }
-  } catch (error) {
-    const current = await loadRuntimeExecutionIdentity(source.id);
-    if (
-      !current ||
-      current.generation !== input.expectedGeneration ||
-      current.current_generation !== input.expectedGeneration
-    ) {
-      throw runtimeGenerationStale(current ?? source);
-    }
-    if (isActiveRuntimeSlotConflict(error)) {
-      throw activeRuntimeSlotConflict();
-    }
-    throw error;
-  }
-
-  return {
-    executionId,
-    userId: source.user_id,
-    organizationId: source.organization_id,
-    hostId,
-    providerKind,
-    providerConnectionId,
-    domainKind: source.domain_kind,
-    domainId: source.domain_id,
-    generation: input.expectedGeneration + 1,
-    sourceExecutionId: source.id,
-    checkpointId,
-    state: "queued",
-    leaseExpiresAt,
-    createdAt: now,
-    vms,
-    resources,
-  };
-}
-
 export async function releaseActiveRuntimeSlot(input: {
   executionId: string;
   expectedGeneration: number;
@@ -1001,121 +804,6 @@ export async function recordRuntimeVmTerminalTarget(input: {
       throw runtimeGenerationStale(execution);
     }
   }
-}
-
-export async function loadCurrentRuntimeVmTerminalTarget(input: {
-  executionId: string;
-  expectedGeneration: number;
-  vmId?: string;
-}): Promise<{
-  executionId: string;
-  generation: number;
-  domainKind: RuntimeDomainKind;
-  domainId: string;
-  userId: string;
-  organizationId: string | null;
-  hostId: string;
-  vmId: string;
-  runtimeVmName: string;
-  target: {
-    host: string;
-    port: number;
-    username: string;
-    hostKeyOpenssh: string;
-    privateKeyOpenssh: string;
-    observedAt: number;
-  };
-}> {
-  const execution = await requireCurrentRuntimeGeneration(
-    input.executionId,
-    input.expectedGeneration,
-  );
-  const transportSourceId =
-    execution.host_id ??
-    (execution.provider_connection_id
-      ? `provider:${execution.provider_connection_id}`
-      : null);
-  if (!transportSourceId) {
-    throw appError(
-      409,
-      "runtime_terminal_not_ready",
-      "runtime execution has not been assigned to a transport source",
-    );
-  }
-  const vmId = normalizedOptionalId(input.vmId);
-  const row = await env.DB.prepare(
-    `SELECT
-       vm.vm_id,
-       vm.runtime_vm_name,
-       vm.terminal_host,
-       vm.terminal_port,
-       vm.terminal_username,
-       vm.terminal_host_key_openssh,
-       vm.terminal_private_key_ciphertext_b64,
-       vm.terminal_private_key_iv_b64,
-       vm.terminal_observed_at
-     FROM runtime_vms vm
-     WHERE vm.execution_id = ?
-       AND (? IS NULL OR vm.vm_id = ?)
-     ORDER BY vm.ordinal ASC
-     LIMIT 1`,
-  )
-    .bind(execution.id, vmId, vmId)
-    .first<{
-      vm_id: string;
-      runtime_vm_name: string;
-      terminal_host: string | null;
-      terminal_port: number | null;
-      terminal_username: string | null;
-      terminal_host_key_openssh: string | null;
-      terminal_private_key_ciphertext_b64: string | null;
-      terminal_private_key_iv_b64: string | null;
-      terminal_observed_at: number | null;
-    }>();
-  if (!row) {
-    throw appError(404, "runtime_vm_not_found", "runtime VM not found");
-  }
-  if (
-    !row.terminal_host ||
-    !row.terminal_port ||
-    !row.terminal_username ||
-    !row.terminal_host_key_openssh ||
-    !row.terminal_private_key_ciphertext_b64 ||
-    !row.terminal_private_key_iv_b64 ||
-    row.terminal_observed_at === null
-  ) {
-    throw appError(
-      409,
-      "runtime_terminal_not_ready",
-      "runtime terminal target is still warming up",
-    );
-  }
-  return {
-    executionId: execution.id,
-    generation: execution.generation,
-    domainKind: execution.domain_kind,
-    domainId: execution.domain_id,
-    userId: execution.user_id,
-    organizationId: execution.organization_id,
-    hostId: transportSourceId,
-    vmId: row.vm_id,
-    runtimeVmName: row.runtime_vm_name,
-    target: {
-      host: row.terminal_host,
-      port: row.terminal_port,
-      username: row.terminal_username,
-      hostKeyOpenssh: row.terminal_host_key_openssh,
-      privateKeyOpenssh: await decryptRuntimePrivateKey({
-        executionId: execution.id,
-        vmId: row.vm_id,
-        runtimeVmName: row.runtime_vm_name,
-        hostKeyOpenssh: row.terminal_host_key_openssh,
-        ciphertextB64: row.terminal_private_key_ciphertext_b64,
-        ivB64: row.terminal_private_key_iv_b64,
-      }),
-      observedAt: row.terminal_observed_at,
-    },
-  };
 }
 
 export async function requireCurrentRuntimeGeneration(
@@ -1455,26 +1143,6 @@ async function encryptRuntimePrivateKey(input: {
   };
 }
 
-async function decryptRuntimePrivateKey(input: {
-  executionId: string;
-  vmId: string;
-  runtimeVmName: string;
-  hostKeyOpenssh: string;
-  ciphertextB64: string;
-  ivB64: string;
-}): Promise<string> {
-  const plaintext = await crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: toArrayBuffer(base64ToBytes(input.ivB64)),
-      additionalData: toArrayBuffer(runtimeKeyContext(input)),
-    },
-    await runtimeEncryptionKey(),
-    toArrayBuffer(base64ToBytes(input.ciphertextB64)),
-  );
-  return textDecoder.decode(plaintext);
-}
-
 async function runtimeEncryptionKey(): Promise<CryptoKey> {
   const secret = env.SCENARIO_RUN_KEY_ENCRYPTION_SECRET?.trim();
   if (!secret) {
@@ -1511,15 +1179,6 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
   }
   return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const output = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    output[index] = binary.charCodeAt(index);
-  }
-  return output;
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {

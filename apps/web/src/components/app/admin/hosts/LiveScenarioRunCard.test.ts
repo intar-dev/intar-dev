@@ -14,7 +14,6 @@ vi.mock("@/components/remote-access/NativeSshDialogButton", () => {
   nativeSshModule.loadCount += 1;
   return {
     NativeSshDialog: () => null,
-    NativeSshDialogButton: () => null,
   };
 });
 

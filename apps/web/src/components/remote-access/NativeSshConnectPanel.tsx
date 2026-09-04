@@ -77,7 +77,7 @@ class NativeSshRequestError extends Error {
 type CopyTarget = "command" | "knownHosts" | null;
 
 // Issues a native-SSH route on mount and shows the credentials. Rendered
-// inline on the run page and inside NativeSshDialogButton's dialog.
+// inline on the run page and inside NativeSshDialog's dialog.
 export function NativeSshConnectPanel({
   sessionRequest,
 }: {

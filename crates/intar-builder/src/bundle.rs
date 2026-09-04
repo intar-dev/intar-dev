@@ -17,13 +17,6 @@ use intar_image_scenario::{BaseImageCatalog, Scenario};
 
 const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BundleVerification {
-    pub scenario_id: String,
-    pub content_hash: String,
-    pub target_arch: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct BundleBuildInput {
     pub build: DesiredBuildV1,
@@ -259,65 +252,28 @@ fn add_bundle_entry_size(total: &mut u64, size: u64, path: &Path) -> Result<()> 
 pub fn verify_bundle_for_build(
     bundle_root: &Path,
     build: &DesiredBuildV1,
-) -> Result<BundleVerification> {
+) -> Result<BundleBuildInput> {
     validate_desired_build_identity(build)?;
-    let target_arch = builder_arch(&build.arch);
-    let base_catalog_path = bundle_root.join("base-images.hcl");
-    let scenario_path = bundle_root
-        .join("scenarios")
-        .join(&build.scenario_id)
-        .join("scenario.hcl");
-    let scenario_dir = scenario_path
-        .parent()
-        .ok_or_else(|| anyhow!("scenario path has no parent"))?;
-    let _lecture = course_lecture_for_scenario(bundle_root, &build.scenario_id)?;
-
-    let base_catalog = BaseImageCatalog::from_file(&base_catalog_path).with_context(|| {
-        format!(
-            "failed to load base image catalog from '{}'",
-            base_catalog_path.display()
-        )
-    })?;
-    let scenario = Scenario::from_course_file(&scenario_path)
-        .with_context(|| format!("failed to load scenario '{}'", scenario_path.display()))?;
-    if scenario.name != build.scenario_id {
-        bail!(
-            "desired scenario id '{}' does not match scenario file '{}'",
-            build.scenario_id,
-            scenario.name
-        );
-    }
-    scenario
-        .validate_technical_for_builder_arch(target_arch)
-        .with_context(|| format!("scenario '{}' failed validation", scenario.name))?;
-    base_catalog
-        .validate_for_builder_arch(target_arch)
-        .with_context(|| format!("base image catalog failed validation for '{target_arch}'"))?;
-    base_catalog
-        .validate_scenario_for_builder_arch(&scenario, target_arch)
-        .with_context(|| format!("scenario '{}' base images failed validation", scenario.name))?;
-
-    let base_definition = scenario_base_definition_identity(&scenario, &base_catalog, target_arch)?;
-    let content_hash = scenario_content_hash(&ScenarioContentHashInput {
-        scenario_id: &scenario.name,
-        scenario_dir,
-        base_definition: &base_definition,
-        target_arch,
-    })?;
-    if !content_hash.eq_ignore_ascii_case(&build.content_hash) {
+    let mut input = inspect_bundle_build_input(
+        bundle_root,
+        &build.scenario_id,
+        build.arch.clone(),
+        &build.rev,
+    )?;
+    if !input
+        .build
+        .content_hash
+        .eq_ignore_ascii_case(&build.content_hash)
+    {
         bail!(
             "desired build content hash mismatch for {}: expected {}, computed {}",
             build.scenario_id,
             build.content_hash,
-            content_hash
+            input.build.content_hash
         );
     }
-
-    Ok(BundleVerification {
-        scenario_id: scenario.name,
-        content_hash,
-        target_arch: target_arch.to_owned(),
-    })
+    input.build = build.clone();
+    Ok(input)
 }
 
 pub fn inspect_bundle_build_input(
@@ -712,8 +668,10 @@ mod tests {
         let build = desired_build(&expected_hash);
         let verified = verify_bundle_for_build(temp.path(), &build).unwrap();
 
-        assert_eq!(verified.scenario_id, "broken-nginx");
-        assert_eq!(verified.content_hash, expected_hash);
+        assert_eq!(verified.build, build);
+        assert_eq!(verified.scenario.name, "broken-nginx");
+        assert_eq!(verified.build.content_hash, expected_hash);
+        assert_eq!(verified.lecture.title, "Broken Nginx");
 
         let wrong_hash = desired_build(&"f".repeat(64));
         let error = verify_bundle_for_build(temp.path(), &wrong_hash).unwrap_err();

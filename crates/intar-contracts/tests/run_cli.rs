@@ -4,10 +4,10 @@ use intar_contracts::{
         RUN_CLI_FRAME_HEADER_BYTES, RUN_CLI_MAX_COMPLETION_ALIASES, RUN_CLI_MAX_HINT_ALIAS_BYTES,
         RUN_CLI_MAX_PROBE_ID_BYTES, RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES,
         RUN_CLI_MAX_RETRY_SCOPE_BYTES, RunCliFrameError, RunCliProbeCheckEventKindV1,
-        RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliProbeCheckResponseV1,
-        RunCliProbeCheckResultV1, RunCliProbeCheckStreamError, RunCliProbeCheckStreamValidatorV1,
-        RunCliRequestV1, RunCliResponseV1, RunCliResultV1, RunCliValidationError,
-        decode_run_cli_frame, encode_run_cli_frame, run_cli_frame_payload_len,
+        RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliProbeCheckResultV1,
+        RunCliProbeCheckStreamError, RunCliProbeCheckStreamValidatorV1, RunCliRequestV1,
+        RunCliResponseV1, RunCliResultV1, RunCliValidationError, decode_run_cli_frame,
+        encode_run_cli_frame, run_cli_frame_payload_len,
     },
 };
 
@@ -208,14 +208,10 @@ fn run_cli_response_fixture_round_trips_without_sealed_content() {
 }
 
 #[test]
-fn run_cli_probe_check_fixtures_round_trip() {
+fn run_cli_probe_check_request_fixture_round_trips() {
     let request: RunCliProbeCheckRequestV1 = fixture("probe-check-request-v1.json");
     request.validate().expect("fixture request is valid");
     assert_fixture_round_trip(&request, "probe-check-request-v1.json");
-
-    let response: RunCliProbeCheckResponseV1 = fixture("probe-check-response-v1.json");
-    response.validate().expect("fixture response is valid");
-    assert_fixture_round_trip(&response, "probe-check-response-v1.json");
 }
 
 #[test]
@@ -531,9 +527,6 @@ where
         "probe-check-request-v1.json" => {
             include_str!("../fixtures/run-cli/probe-check-request-v1.json")
         }
-        "probe-check-response-v1.json" => {
-            include_str!("../fixtures/run-cli/probe-check-response-v1.json")
-        }
         "probe-check-event-v1.json" => {
             include_str!("../fixtures/run-cli/probe-check-event-v1.json")
         }
@@ -558,9 +551,6 @@ where
         }
         "probe-check-request-v1.json" => serde_json::from_str(include_str!(
             "../fixtures/run-cli/probe-check-request-v1.json"
-        )),
-        "probe-check-response-v1.json" => serde_json::from_str(include_str!(
-            "../fixtures/run-cli/probe-check-response-v1.json"
         )),
         "probe-check-event-v1.json" => serde_json::from_str(include_str!(
             "../fixtures/run-cli/probe-check-event-v1.json"

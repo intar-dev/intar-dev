@@ -43,27 +43,5 @@ fn registry_config_for_url(url: &str) -> ImageRegistryConfig {
     }
 }
 
-fn registry_index(entries: &[(&str, &str, &str)]) -> Vec<u8> {
-    registry_index_with_boot(entries, &"b".repeat(64), &"c".repeat(64), 11)
-}
-
-fn registry_index_with_boot(
-    entries: &[(&str, &str, &str)],
-    kernel_sha256: &str,
-    initrd_sha256: &str,
-    virtual_size_bytes: u64,
-) -> Vec<u8> {
-    let images = entries
-        .iter()
-        .map(|(image_key, image_sha256, download_url)| {
-            format!(
-                r#"{{"image_key":"{image_key}","image_sha256":"{image_sha256}","image_format":"raw_zstd","image_virtual_size_bytes":{virtual_size_bytes},"boot":{{"kernel_sha256":"{kernel_sha256}","initrd_sha256":"{initrd_sha256}","cmdline":"root=/dev/vda rw"}},"download_url":"{download_url}"}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(r#"{{"images":[{images}]}}"#).into_bytes()
-}
-
 mod registry;
 mod tools;

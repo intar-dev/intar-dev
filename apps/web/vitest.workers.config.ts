@@ -32,7 +32,6 @@ export default defineConfig({
           STARGATE_ADMIN_AUTH_ISSUER: "intar.dev",
           STARGATE_ADMIN_AUTH_SECRET: "test-stargate-secret",
           STARGATE_ROUTE_TTL_SECONDS: "14400",
-          STARGATE_WORKSPACE_APP_BASE_DOMAIN: "intar.app",
           STARGATE_EGRESS_IPV4_CIDRS: "192.0.2.10/32",
         },
         d1Databases: ["DB"],

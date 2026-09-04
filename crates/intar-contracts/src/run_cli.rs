@@ -4,10 +4,11 @@
 //! contain the safe projection required to render the CLI: never raw probe
 //! values, command output, host identity, credentials, or sealed content.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::collections::BTreeSet;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use thiserror::Error;
 
 /// Version of the private broker and local Kino control protocol.
 pub const RUN_CLI_PROTOCOL_VERSION: u16 = 1;
@@ -385,20 +386,6 @@ impl RunCliProbeCheckRequestV1 {
     }
 }
 
-/// One aggregate local Kino response. It contains no raw probe value,
-/// command, output, or error text; new fresh-check callers should use
-/// [`RunCliProbeCheckEventV1`] to stream real per-probe completions instead.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct RunCliProbeCheckResponseV1 {
-    #[schemars(range(min = 1, max = 1))]
-    pub protocol_version: u16,
-    #[schemars(length(min = 1, max = 128), regex(pattern = "^[A-Za-z0-9._-]+$"))]
-    pub request_id: String,
-    #[schemars(length(max = 128))]
-    pub checks: Vec<RunCliProbeCheckResultV1>,
-}
-
 /// One event in a bounded local Kino probe-check stream. Every event carries
 /// the request envelope so a client can reject cross-request or stale frames.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -526,80 +513,28 @@ impl RunCliProbeCheckStreamValidatorV1 {
 
 /// A local Kino stream was malformed, stale, or incomplete. Variants do not
 /// contain probe IDs, preserving the no-raw-probe-data transport boundary.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum RunCliProbeCheckStreamError {
-    InvalidRequest(RunCliValidationError),
-    InvalidEvent(RunCliValidationError),
+    #[error("run CLI probe-check request is invalid")]
+    InvalidRequest(#[source] RunCliValidationError),
+    #[error("run CLI probe-check event is invalid")]
+    InvalidEvent(#[source] RunCliValidationError),
+    #[error("run CLI probe-check event request ID does not match")]
     RequestIdMismatch,
+    #[error("run CLI probe-check event returned an unknown probe")]
     UnknownProbeResult,
+    #[error("run CLI probe-check event repeated a probe")]
     DuplicateProbeResult,
+    #[error("run CLI probe-check completion count does not match")]
     CompletedCountMismatch {
         expected: usize,
         observed: usize,
         declared: usize,
     },
+    #[error("run CLI probe-check event followed completion")]
     EventAfterComplete,
+    #[error("run CLI probe-check stream ended before completion")]
     MissingComplete,
-}
-
-impl fmt::Display for RunCliProbeCheckStreamError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidRequest(_) => {
-                formatter.write_str("run CLI probe-check request is invalid")
-            }
-            Self::InvalidEvent(_) => formatter.write_str("run CLI probe-check event is invalid"),
-            Self::RequestIdMismatch => {
-                formatter.write_str("run CLI probe-check event request ID does not match")
-            }
-            Self::UnknownProbeResult => {
-                formatter.write_str("run CLI probe-check event returned an unknown probe")
-            }
-            Self::DuplicateProbeResult => {
-                formatter.write_str("run CLI probe-check event repeated a probe")
-            }
-            Self::CompletedCountMismatch { .. } => {
-                formatter.write_str("run CLI probe-check completion count does not match")
-            }
-            Self::EventAfterComplete => {
-                formatter.write_str("run CLI probe-check event followed completion")
-            }
-            Self::MissingComplete => {
-                formatter.write_str("run CLI probe-check stream ended before completion")
-            }
-        }
-    }
-}
-
-impl Error for RunCliProbeCheckStreamError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidRequest(error) | Self::InvalidEvent(error) => Some(error),
-            Self::RequestIdMismatch
-            | Self::UnknownProbeResult
-            | Self::DuplicateProbeResult
-            | Self::CompletedCountMismatch { .. }
-            | Self::EventAfterComplete
-            | Self::MissingComplete => None,
-        }
-    }
-}
-
-impl RunCliProbeCheckResponseV1 {
-    /// Check the response envelope and internal result identifiers.
-    pub fn validate(&self) -> Result<(), RunCliValidationError> {
-        validate_protocol_version(self.protocol_version)?;
-        validate_request_id(&self.request_id)?;
-        if self.checks.len() > RUN_CLI_MAX_PROBE_IDS {
-            return Err(RunCliValidationError::TooManyProbeIds {
-                maximum: RUN_CLI_MAX_PROBE_IDS,
-            });
-        }
-        for (index, check) in self.checks.iter().enumerate() {
-            validate_probe_id(&check.probe_id, index)?;
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -612,149 +547,70 @@ pub struct RunCliProbeCheckResultV1 {
 }
 
 /// Validation failure for untrusted private-broker inputs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum RunCliValidationError {
+    #[error("unsupported run CLI protocol version {received}; expected {expected}")]
     UnsupportedProtocolVersion { expected: u16, received: u16 },
+    #[error("run CLI request id must not be empty")]
     EmptyRequestId,
+    #[error("run CLI request id must be an ASCII token or UUID")]
     InvalidRequestId,
+    #[error("run CLI request id exceeds {maximum} bytes")]
     RequestIdTooLong { maximum: usize },
+    #[error("run CLI retry scope must not be empty")]
     EmptyRetryScope,
+    #[error("run CLI retry scope must be an opaque safe token")]
     InvalidRetryScope,
+    #[error("run CLI retry scope exceeds {maximum} bytes")]
     RetryScopeTooLong { maximum: usize },
+    #[error("run CLI hint alias must not be empty")]
     EmptyHintAlias,
+    #[error(
+        "run CLI hint alias must start with a lowercase letter or digit and use only lowercase letters, digits, or hyphens"
+    )]
     InvalidHintAlias,
+    #[error("run CLI hint alias exceeds {maximum} bytes")]
     HintAliasTooLong { maximum: usize },
+    #[error("run CLI completion returns more than {maximum} aliases")]
     TooManyCompletionAliases { maximum: usize },
+    #[error("run CLI completion alias at index {index} is invalid")]
     InvalidCompletionAlias { index: usize },
+    #[error("run CLI completion alias at index {index} is not sorted and unique")]
     CompletionAliasesNotSortedUnique { index: usize },
+    #[error("run CLI expected hint ordinal must be at least 1")]
     InvalidExpectedHintOrdinal,
+    #[error("run CLI probe ids must not be empty")]
     EmptyProbeIds,
+    #[error("run CLI request selects more than {maximum} probes")]
     TooManyProbeIds { maximum: usize },
+    #[error("run CLI probe id at index {index} must not be empty")]
     EmptyProbeId { index: usize },
+    #[error("run CLI probe id at index {index} must be a safe identifier")]
     InvalidProbeId { index: usize },
+    #[error("run CLI probe id at index {index} exceeds {maximum} bytes")]
     ProbeIdTooLong { index: usize, maximum: usize },
+    #[error("run CLI probe id at index {index} is duplicated")]
     DuplicateProbeId { index: usize },
+    #[error("run CLI completed probe count is invalid")]
     InvalidCompletedProbeCount,
+    #[error("run CLI response view is invalid")]
     InvalidView,
+    #[error("run CLI response result is invalid for the request action")]
     UnexpectedResultForAction,
 }
 
-impl fmt::Display for RunCliValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnsupportedProtocolVersion { expected, received } => write!(
-                formatter,
-                "unsupported run CLI protocol version {received}; expected {expected}"
-            ),
-            Self::EmptyRequestId => formatter.write_str("run CLI request id must not be empty"),
-            Self::InvalidRequestId => {
-                formatter.write_str("run CLI request id must be an ASCII token or UUID")
-            }
-            Self::RequestIdTooLong { maximum } => {
-                write!(formatter, "run CLI request id exceeds {maximum} bytes")
-            }
-            Self::EmptyRetryScope => formatter.write_str("run CLI retry scope must not be empty"),
-            Self::InvalidRetryScope => {
-                formatter.write_str("run CLI retry scope must be an opaque safe token")
-            }
-            Self::RetryScopeTooLong { maximum } => {
-                write!(formatter, "run CLI retry scope exceeds {maximum} bytes")
-            }
-            Self::EmptyHintAlias => formatter.write_str("run CLI hint alias must not be empty"),
-            Self::InvalidHintAlias => formatter.write_str(
-                "run CLI hint alias must start with a lowercase letter or digit and use only lowercase letters, digits, or hyphens",
-            ),
-            Self::HintAliasTooLong { maximum } => {
-                write!(formatter, "run CLI hint alias exceeds {maximum} bytes")
-            }
-            Self::TooManyCompletionAliases { maximum } => {
-                write!(formatter, "run CLI completion returns more than {maximum} aliases")
-            }
-            Self::InvalidCompletionAlias { index } => {
-                write!(formatter, "run CLI completion alias at index {index} is invalid")
-            }
-            Self::CompletionAliasesNotSortedUnique { index } => {
-                write!(
-                    formatter,
-                    "run CLI completion alias at index {index} is not sorted and unique"
-                )
-            }
-            Self::InvalidExpectedHintOrdinal => {
-                formatter.write_str("run CLI expected hint ordinal must be at least 1")
-            }
-            Self::EmptyProbeIds => formatter.write_str("run CLI probe ids must not be empty"),
-            Self::TooManyProbeIds { maximum } => {
-                write!(
-                    formatter,
-                    "run CLI request selects more than {maximum} probes"
-                )
-            }
-            Self::EmptyProbeId { index } => {
-                write!(
-                    formatter,
-                    "run CLI probe id at index {index} must not be empty"
-                )
-            }
-            Self::InvalidProbeId { index } => write!(
-                formatter,
-                "run CLI probe id at index {index} must be a safe identifier"
-            ),
-            Self::ProbeIdTooLong { index, maximum } => write!(
-                formatter,
-                "run CLI probe id at index {index} exceeds {maximum} bytes"
-            ),
-            Self::DuplicateProbeId { index } => {
-                write!(formatter, "run CLI probe id at index {index} is duplicated")
-            }
-            Self::InvalidCompletedProbeCount => {
-                formatter.write_str("run CLI completed probe count is invalid")
-            }
-            Self::InvalidView => formatter.write_str("run CLI response view is invalid"),
-            Self::UnexpectedResultForAction => {
-                formatter.write_str("run CLI response result is invalid for the request action")
-            }
-        }
-    }
-}
-
-impl Error for RunCliValidationError {}
-
 /// Errors from length-prefixed JSON framing. These errors intentionally retain
 /// no serialized payload, so callers do not accidentally log learner content.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum RunCliFrameError {
+    #[error("run CLI frame payload is {received} bytes; maximum is {maximum}")]
     PayloadTooLarge { maximum: usize, received: usize },
+    #[error("run CLI frame length is {received} bytes; expected {expected}")]
     InvalidFrameLength { expected: usize, received: usize },
+    #[error("run CLI frame payload must not be empty")]
     EmptyPayload,
-    InvalidJson(serde_json::Error),
-}
-
-impl fmt::Display for RunCliFrameError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PayloadTooLarge { maximum, received } => write!(
-                formatter,
-                "run CLI frame payload is {received} bytes; maximum is {maximum}"
-            ),
-            Self::InvalidFrameLength { expected, received } => write!(
-                formatter,
-                "run CLI frame length is {received} bytes; expected {expected}"
-            ),
-            Self::EmptyPayload => formatter.write_str("run CLI frame payload must not be empty"),
-            Self::InvalidJson(_) => formatter.write_str("run CLI frame contains invalid JSON"),
-        }
-    }
-}
-
-impl Error for RunCliFrameError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidJson(error) => Some(error),
-            Self::PayloadTooLarge { .. } | Self::InvalidFrameLength { .. } | Self::EmptyPayload => {
-                None
-            }
-        }
-    }
+    #[error("run CLI frame contains invalid JSON")]
+    InvalidJson(#[source] serde_json::Error),
 }
 
 /// Serialize a message as a bounded big-endian u32 length-prefixed JSON frame.

@@ -6,7 +6,6 @@ pub(super) fn append_runtime_assets(
     scenario_motd: &str,
     cpu_millis: u32,
     requires_kubernetes_modules: bool,
-    guest_tools_delivery: GuestToolsDelivery,
 ) -> Result<()> {
     writeln!(script, "install -d -m 0755 /etc/kino /etc/intar").context("format error")?;
     writeln!(script).context("format error")?;
@@ -407,74 +406,57 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "  return 1").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
-    if guest_tools_delivery == GuestToolsDelivery::ReadOnlyDisk {
-        writeln!(script, "install_guest_tools() {{").context("format error")?;
-        writeln!(script, "  log_phase tools_mount start").context("format error")?;
-        writeln!(
-            script,
-            "  tools_device=\"$(wait_for_labeled_device INTARTOOLS)\""
-        )
-        .context("format error")?;
-        writeln!(script, "  install -d -m 0755 \"$tools_mount_path\"").context("format error")?;
-        writeln!(
-            script,
-            "  mount -t ext4 -o ro,nosuid,nodev \"$tools_device\" \"$tools_mount_path\""
-        )
-        .context("format error")?;
-        writeln!(script, "  [ -f \"$tools_mount_path/manifest.json\" ] || {{ echo 'guest tools manifest is missing' >&2; return 1; }}").context("format error")?;
-        writeln!(script, "  [ -x \"$tools_mount_path/bin/kino\" ] || {{ echo 'Kino guest tool is missing or not executable' >&2; return 1; }}").context("format error")?;
-        writeln!(script, "  [ \"$INTAR_GUEST_BOOTSTRAP_ABI\" = 1 ] || {{ echo 'guest tools bootstrap ABI is unsupported' >&2; return 1; }}").context("format error")?;
-        writeln!(script, "  grep -Fq '\"schema_version\":1' \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest schema is invalid' >&2; return 1; }}").context("format error")?;
-        writeln!(script, "  grep -Fq \"\\\"bootstrap_abi\\\":$INTAR_GUEST_BOOTSTRAP_ABI\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest ABI mismatch' >&2; return 1; }}").context("format error")?;
-        writeln!(script, "  grep -Fq \"\\\"kino_sha256\\\":\\\"$INTAR_KINO_SHA256\\\"\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest Kino SHA-256 mismatch' >&2; return 1; }}").context("format error")?;
-        writeln!(
-            script,
-            "  actual_kino_sha256=\"$(sha256sum \"$tools_mount_path/bin/kino\" | cut -d ' ' -f 1)\""
-        )
-        .context("format error")?;
-        writeln!(
-            script,
-            "  actual_kino_size=\"$(stat -c '%s' \"$tools_mount_path/bin/kino\")\""
-        )
-        .context("format error")?;
-        writeln!(script, "  [ \"$actual_kino_sha256\" = \"$INTAR_KINO_SHA256\" ] || {{ echo 'Kino guest tool SHA-256 mismatch' >&2; return 1; }}").context("format error")?;
-        writeln!(script, "  grep -Fq \"\\\"kino_size_bytes\\\":$actual_kino_size\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest Kino size mismatch' >&2; return 1; }}").context("format error")?;
-        writeln!(
-            script,
-            "  ln -sfn \"$tools_mount_path/bin/kino\" /usr/local/bin/kino"
-        )
-        .context("format error")?;
-        writeln!(
-            script,
-            "  ln -sfn \"$tools_mount_path/bin/kino\" {}",
-            shell_quote(INTAR_RUN_CLI_PATH)
-        )
-        .context("format error")?;
-        writeln!(script, "  /usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
-        writeln!(
-            script,
-            "  {} help >/dev/null 2>&1",
-            shell_quote(INTAR_RUN_CLI_PATH)
-        )
-        .context("format error")?;
-        writeln!(script, "  log_phase tools_mount end").context("format error")?;
-        writeln!(script, "}}").context("format error")?;
-    } else {
-        writeln!(script, "install_guest_tools() {{").context("format error")?;
-        writeln!(script, "  log_phase tools_mount start").context("format error")?;
-        writeln!(script, "  [ -x /usr/local/bin/kino ] || {{ echo 'baked Kino guest tool is missing' >&2; return 1; }}").context("format error")?;
-        writeln!(script, "  /usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
-        writeln!(script, "  ln -sfn kino {}", shell_quote(INTAR_RUN_CLI_PATH))
-            .context("format error")?;
-        writeln!(
-            script,
-            "  {} help >/dev/null 2>&1",
-            shell_quote(INTAR_RUN_CLI_PATH)
-        )
-        .context("format error")?;
-        writeln!(script, "  log_phase tools_mount end").context("format error")?;
-        writeln!(script, "}}").context("format error")?;
-    }
+    writeln!(script, "install_guest_tools() {{").context("format error")?;
+    writeln!(script, "  log_phase tools_mount start").context("format error")?;
+    writeln!(
+        script,
+        "  tools_device=\"$(wait_for_labeled_device INTARTOOLS)\""
+    )
+    .context("format error")?;
+    writeln!(script, "  install -d -m 0755 \"$tools_mount_path\"").context("format error")?;
+    writeln!(
+        script,
+        "  mount -t ext4 -o ro,nosuid,nodev \"$tools_device\" \"$tools_mount_path\""
+    )
+    .context("format error")?;
+    writeln!(script, "  [ -f \"$tools_mount_path/manifest.json\" ] || {{ echo 'guest tools manifest is missing' >&2; return 1; }}").context("format error")?;
+    writeln!(script, "  [ -x \"$tools_mount_path/bin/kino\" ] || {{ echo 'Kino guest tool is missing or not executable' >&2; return 1; }}").context("format error")?;
+    writeln!(script, "  [ \"$INTAR_GUEST_BOOTSTRAP_ABI\" = 1 ] || {{ echo 'guest tools bootstrap ABI is unsupported' >&2; return 1; }}").context("format error")?;
+    writeln!(script, "  grep -Fq '\"schema_version\":1' \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest schema is invalid' >&2; return 1; }}").context("format error")?;
+    writeln!(script, "  grep -Fq \"\\\"bootstrap_abi\\\":$INTAR_GUEST_BOOTSTRAP_ABI\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest ABI mismatch' >&2; return 1; }}").context("format error")?;
+    writeln!(script, "  grep -Fq \"\\\"kino_sha256\\\":\\\"$INTAR_KINO_SHA256\\\"\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest Kino SHA-256 mismatch' >&2; return 1; }}").context("format error")?;
+    writeln!(
+        script,
+        "  actual_kino_sha256=\"$(sha256sum \"$tools_mount_path/bin/kino\" | cut -d ' ' -f 1)\""
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  actual_kino_size=\"$(stat -c '%s' \"$tools_mount_path/bin/kino\")\""
+    )
+    .context("format error")?;
+    writeln!(script, "  [ \"$actual_kino_sha256\" = \"$INTAR_KINO_SHA256\" ] || {{ echo 'Kino guest tool SHA-256 mismatch' >&2; return 1; }}").context("format error")?;
+    writeln!(script, "  grep -Fq \"\\\"kino_size_bytes\\\":$actual_kino_size\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest Kino size mismatch' >&2; return 1; }}").context("format error")?;
+    writeln!(
+        script,
+        "  ln -sfn \"$tools_mount_path/bin/kino\" /usr/local/bin/kino"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  ln -sfn \"$tools_mount_path/bin/kino\" {}",
+        shell_quote(INTAR_RUN_CLI_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "  /usr/local/bin/kino --help >/dev/null 2>&1").context("format error")?;
+    writeln!(
+        script,
+        "  {} help >/dev/null 2>&1",
+        shell_quote(INTAR_RUN_CLI_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "  log_phase tools_mount end").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "grow_root_filesystem() {{").context("format error")?;
     writeln!(script, "  case \"${{INTAR_ROOT_RESIZE_REQUIRED:-1}}\" in").context("format error")?;

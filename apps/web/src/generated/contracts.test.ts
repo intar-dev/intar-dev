@@ -116,13 +116,6 @@ describe("generated contract schemas", () => {
     )).toBe(true);
   });
 
-  it("validates the local Kino probe-check response fixture", () => {
-    expect(validateFixture(
-      "schemas/run-cli-probe-check-response-v1.schema.json",
-      "fixtures/run-cli/probe-check-response-v1.json",
-    )).toBe(true);
-  });
-
   it("validates local Kino probe-check event fixtures", () => {
     expect(validateFixture(
       "schemas/run-cli-probe-check-event-v1.schema.json",

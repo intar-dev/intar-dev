@@ -4,7 +4,6 @@ pub(super) async fn builder_worker_loop(
     cfg: config::BuilderConfig,
     report_tx: mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
     mut desired_revision: watch::Receiver<u64>,
-    cpu_gate: Arc<Semaphore>,
     worker_id: u16,
 ) {
     while *desired_revision.borrow() == 0 {
@@ -23,7 +22,7 @@ pub(super) async fn builder_worker_loop(
     repair_scan.tick().await;
     loop {
         loop {
-            match process_next_queued_build(&cfg, &report_tx, &cpu_gate).await {
+            match process_next_queued_build(&cfg, &report_tx).await {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(error) => {
@@ -47,7 +46,6 @@ pub(super) async fn builder_worker_loop(
 pub(super) async fn process_next_queued_build(
     cfg: &config::BuilderConfig,
     report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
-    cpu_gate: &Arc<Semaphore>,
 ) -> Result<bool> {
     let Some(job) = ({
         let db = db::BuilderDb::open(&cfg.builder.state_db)?;
@@ -58,7 +56,7 @@ pub(super) async fn process_next_queued_build(
     let result = async {
         emit_build_report(cfg, report_tx, &job.build_id).await?;
 
-        let result = run_claimed_build_job(cfg, &job, report_tx, cpu_gate).await;
+        let result = run_claimed_build_job(cfg, &job, report_tx).await;
         if let Err(error) = result {
             let error_message = format!("{error:#}");
             let now = now_unix_ms();
@@ -108,10 +106,9 @@ pub(super) async fn run_claimed_build_job(
     cfg: &config::BuilderConfig,
     job: &db::BuildJobRow,
     report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
-    cpu_gate: &Arc<Semaphore>,
 ) -> Result<()> {
     let mut log_files = Vec::new();
-    let result = run_claimed_build_job_inner(cfg, job, report_tx, cpu_gate, &mut log_files).await;
+    let result = run_claimed_build_job_inner(cfg, job, report_tx, &mut log_files).await;
     if result.is_err() {
         upload_build_logs_with_fresh_token_best_effort(
             cfg,
@@ -128,7 +125,6 @@ async fn run_claimed_build_job_inner(
     cfg: &config::BuilderConfig,
     job: &db::BuildJobRow,
     report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
-    cpu_gate: &Arc<Semaphore>,
     log_files: &mut Vec<BuildLogFile>,
 ) -> Result<()> {
     let desired_build = job.desired_build();
@@ -148,17 +144,10 @@ async fn run_claimed_build_job_inner(
             .with_context(|| format!("failed to remove '{}'", bundle_root.display()))?;
     }
     unpack_bundle_archive(&bundle_archive, &bundle_root)?;
-    if let Err(error) =
-        verify_bundle_or_drop_cached_archive(&bundle_archive, &bundle_root, &desired_build).await
-    {
-        return Err(non_retryable_build_error(error));
-    }
-    let bundle_input = inspect_bundle_build_input(
-        &bundle_root,
-        &desired_build.scenario_id,
-        desired_build.arch.clone(),
-        &desired_build.rev,
-    )?;
+    let bundle_input =
+        verify_bundle_or_drop_cached_archive(&bundle_archive, &bundle_root, &desired_build)
+            .await
+            .map_err(non_retryable_build_error)?;
     let build_config = qemu_build_config_for_job(cfg, &desired_build);
 
     let mut outputs = Vec::new();
@@ -219,10 +208,6 @@ async fn run_claimed_build_job_inner(
             config: build_config.clone(),
             base_image: base_image.clone(),
         };
-        let cpu_permit = Arc::clone(cpu_gate)
-            .acquire_many_owned(4)
-            .await
-            .context("builder CPU gate closed")?;
         let raw_result = tokio::task::spawn_blocking(move || {
             let rendered = run_direct_build_to_raw(&request)?;
             let scan = scan_raw_image_chunks(&rendered.paths.root_disk_path)?;
@@ -230,7 +215,6 @@ async fn run_claimed_build_job_inner(
         })
         .await
         .context("direct QEMU build worker panicked")?;
-        drop(cpu_permit);
         let (rendered, scan) = match raw_result {
             Ok(output) => output,
             Err(error) => return Err(error),
@@ -272,16 +256,11 @@ async fn run_claimed_build_job_inner(
         .context("image chunk lookup worker panicked")??;
         ensure_build_still_desired(cfg, &job.build_id)?;
 
-        let cpu_permit = Arc::clone(cpu_gate)
-            .acquire_many_owned(4)
-            .await
-            .context("builder CPU gate closed")?;
         let output_result = tokio::task::spawn_blocking(move || {
             finish_direct_build_from_scan(rendered, &scan, &reused)
         })
         .await
         .context("image chunk compression worker panicked")?;
-        drop(cpu_permit);
         let output = match output_result {
             Ok(output) => output,
             Err(error) => return Err(error),

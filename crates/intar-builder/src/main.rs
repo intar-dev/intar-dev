@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -25,14 +24,15 @@ use intar_image_upload::{
     Error as ImageUploadError, ImageChunkLookup, ImageUploadConfig, ImageUploader,
     PublishArtifactFile, PublishBuildIdentity, PublishChunkedImage, PublishImageChunkFile,
 };
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
 use crate::bridge::host_architecture;
 use crate::bundle::{
-    download_bundle_archive, inspect_bundle_build_input, unpack_bundle_archive, validate_build_id,
-    validate_bundle_rev, verify_bundle_for_build,
+    BundleBuildInput, download_bundle_archive, inspect_bundle_build_input, unpack_bundle_archive,
+    validate_build_id, validate_bundle_rev, validate_desired_build_identity,
+    verify_bundle_for_build,
 };
 
 const FIRST_RETRY_DELAY_MS: i64 = 60_000;
@@ -151,18 +151,15 @@ async fn run(args: RunCommand) -> Result<()> {
     }
     let (report_tx, report_rx) = mpsc::channel(128);
     let (desired_ready_tx, desired_ready_rx) = watch::channel(0_u64);
-    let cpu_gate = Arc::new(Semaphore::new(8));
     for worker_id in 0..cfg.jobs.max_concurrent_builds {
         let worker_cfg = cfg.clone();
         let worker_report_tx = report_tx.clone();
         let worker_desired_ready = desired_ready_rx.clone();
-        let worker_cpu_gate = Arc::clone(&cpu_gate);
         tokio::spawn(async move {
             builder_worker_loop(
                 worker_cfg,
                 worker_report_tx,
                 worker_desired_ready,
-                worker_cpu_gate,
                 worker_id,
             )
             .await;
@@ -199,7 +196,7 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
     unpack_bundle_archive(&bundle_archive, &bundle_root)?;
     let bundle_input =
         inspect_bundle_build_input(&bundle_root, &args.scenario, host_architecture(), &rev)?;
-    let verification = verify_bundle_for_build(&bundle_root, &bundle_input.build)?;
+    validate_desired_build_identity(&bundle_input.build)?;
     let build_config = qemu_build_config_for_job(&cfg, &bundle_input.build);
     let now = now_unix_ms();
     db.upsert_build_job(&bundle_input.build, "building", 1, None, now)?;
@@ -207,7 +204,7 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
         scenario = %bundle_input.scenario.name,
         bundle = %bundle_archive.display(),
         rev = %bundle_input.build.rev,
-        content_hash = %verification.content_hash,
+        content_hash = %bundle_input.build.content_hash,
         work_root = %cfg.builder.work_root.display(),
         qemu_binary = %build_config.qemu_binary.display(),
         mmdebstrap_binary = %build_config.mmdebstrap_binary.display(),
@@ -490,9 +487,9 @@ async fn verify_bundle_or_drop_cached_archive(
     bundle_archive: &Path,
     bundle_root: &Path,
     desired_build: &intar_contracts::bridge::DesiredBuildV1,
-) -> Result<()> {
+) -> Result<BundleBuildInput> {
     match verify_bundle_for_build(bundle_root, desired_build) {
-        Ok(_) => Ok(()),
+        Ok(input) => Ok(input),
         Err(error) => {
             if let Err(remove_error) = tokio::fs::remove_file(bundle_archive).await
                 && remove_error.kind() != std::io::ErrorKind::NotFound

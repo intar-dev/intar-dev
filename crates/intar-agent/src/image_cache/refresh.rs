@@ -206,8 +206,6 @@ mod tests {
     fn image(image_key: &str, image_id: &str) -> RegistryImageRecord {
         RegistryImageRecord {
             image_key: image_key.to_owned(),
-            image_filename: format!("{image_key}.chunks.json"),
-            image_sha256: image_id.to_owned(),
             image_id: image_id.to_owned(),
             image_virtual_size_bytes: 4 * 1024 * 1024,
             chunk_manifest_sha256: "c".repeat(64),
@@ -217,7 +215,6 @@ mod tests {
                 initrd_sha256: "e".repeat(64),
                 cmdline: "root=/dev/vda rw".to_owned(),
             },
-            download_url: "/manifest".to_owned(),
             manifest_download_url: "/manifest".to_owned(),
             chunk_download_base_url: "/chunks".to_owned(),
         }

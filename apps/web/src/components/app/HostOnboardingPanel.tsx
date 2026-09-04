@@ -5,7 +5,6 @@ import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 
 export type HostRole = "agent" | "builder";
 
@@ -248,11 +247,16 @@ export function HostOnboardingPanel({
               </InlineFeedback>
             ) : null}
 
-            <ScrollArea className="h-[24rem] rounded-xl border bg-muted/30">
+            <div
+              role="region"
+              tabIndex={0}
+              aria-label="Generated bridge configuration"
+              className="h-[24rem] overflow-auto rounded-xl border bg-muted/30 outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+            >
               <pre className="p-4 text-xs leading-6 text-foreground">
                 <code>{generated.bridgeConfigToml}</code>
               </pre>
-            </ScrollArea>
+            </div>
 
             <ol className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
               <li className="rounded-xl bg-muted/40 px-4 py-3">

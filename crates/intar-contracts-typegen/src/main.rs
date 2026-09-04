@@ -21,8 +21,7 @@ use intar_contracts::{
         RUN_CLI_MAX_COMPLETION_ALIASES, RUN_CLI_MAX_FRAME_BYTES, RUN_CLI_MAX_HINT_ALIAS_BYTES,
         RUN_CLI_MAX_PROBE_ID_BYTES, RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES,
         RUN_CLI_MAX_RETRY_SCOPE_BYTES, RUN_CLI_PROTOCOL_VERSION, RUN_CLI_SCHEMA_VERSION,
-        RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliProbeCheckResponseV1,
-        RunCliRequestV1, RunCliResponseV1,
+        RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliRequestV1, RunCliResponseV1,
     },
     stargate::{
         IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
@@ -50,6 +49,7 @@ fn main() -> Result<()> {
         "schemas/bridge-vm-report-v1.schema.json",
         "schemas/bridge-message-v5.schema.json",
         "schemas/bridge-message-v6.schema.json",
+        "schemas/run-cli-probe-check-response-v1.schema.json",
         "fixtures/catalog/scenario-manifest-v2.json",
         "fixtures/catalog/scenario-manifest-v3.json",
         "fixtures/bridge/host-desired-state-v1.json",
@@ -57,6 +57,7 @@ fn main() -> Result<()> {
         "fixtures/bridge/vm-report-v1.json",
         "fixtures/bridge/sync-request-v5.json",
         "fixtures/bridge/sync-request-v6.json",
+        "fixtures/run-cli/probe-check-response-v1.json",
     ] {
         remove_file_if_exists(&out_dir.join(obsolete))?;
     }
@@ -126,10 +127,6 @@ fn main() -> Result<()> {
         &schema_for!(RunCliProbeCheckRequestV1),
     )?;
     write_schema(
-        &schema_dir.join("run-cli-probe-check-response-v1.schema.json"),
-        &schema_for!(RunCliProbeCheckResponseV1),
-    )?;
-    write_schema(
         &schema_dir.join("run-cli-probe-check-event-v1.schema.json"),
         &schema_for!(RunCliProbeCheckEventV1),
     )?;
@@ -195,10 +192,6 @@ fn main() -> Result<()> {
     copy_fixture(
         "crates/intar-contracts/fixtures/run-cli/probe-check-request-v1.json",
         &fixture_dir.join("run-cli/probe-check-request-v1.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/run-cli/probe-check-response-v1.json",
-        &fixture_dir.join("run-cli/probe-check-response-v1.json"),
     )?;
     copy_fixture(
         "crates/intar-contracts/fixtures/run-cli/probe-check-event-v1.json",
@@ -955,13 +948,6 @@ export interface RunCliProbeCheckRequestV1 {
   protocol_version: number;
   request_id: string;
   probe_ids: string[];
-}
-
-/** Aggregate compatibility response; fresh checks stream `RunCliProbeCheckEventV1`. */
-export interface RunCliProbeCheckResponseV1 {
-  protocol_version: number;
-  request_id: string;
-  checks: RunCliProbeCheckResultV1[];
 }
 
 export interface RunCliProbeCheckEventV1 {

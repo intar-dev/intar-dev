@@ -246,24 +246,15 @@ fn scenario_runtime_timeout_context_reports_existing_vsock_socket() {
 
 #[test]
 fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
-    let cached_image = image_cache::CachedImage {
-        image_key: "broken".to_string(),
-        image_sha256: "a".repeat(64),
-        raw_path: PathBuf::from("/cache/images/broken.raw"),
-        raw_sha256: "d".repeat(64),
-        kernel_path: PathBuf::from("/cache/artifacts/vmlinuz"),
-        initrd_path: PathBuf::from("/cache/artifacts/initrd.img"),
-        kernel_sha256: "b".repeat(64),
-        initrd_sha256: "c".repeat(64),
-        cmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4".to_string(),
-        virtual_size_bytes: 2 * 1024 * 1024 * 1024,
-    };
+    let kernel_path = PathBuf::from("/cache/artifacts/vmlinuz");
+    let initrd_path = PathBuf::from("/cache/artifacts/initrd.img");
+    let cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4";
     let paths = JailPathMap {
         host_jail_root: PathBuf::from("/work/jails/vm-demo/root"),
         host_api_socket: PathBuf::from("/work/jails/vm-demo/root/run/cloud-hypervisor.sock"),
         host_vsock_socket: PathBuf::from("/work/jails/vm-demo/root/run/kino.vsock"),
-        host_kernel: cached_image.kernel_path.clone(),
-        host_initrd: Some(cached_image.initrd_path.clone()),
+        host_kernel: kernel_path,
+        host_initrd: Some(initrd_path),
         host_root_disk: PathBuf::from("/work/vms/vm-demo/root.raw"),
         host_runtime_disk: PathBuf::from("/work/vms/vm-demo/runtime.vfat"),
         host_recording_disk: PathBuf::from("/work/runs/run-1/vm-demo/recordings.vfat"),
@@ -285,7 +276,7 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
 
     let cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
         name: "vm-demo",
-        cmdline: &cached_image.cmdline,
+        cmdline,
         paths: &paths,
         vcpus: 2,
         memory_mib: 768,

@@ -11,53 +11,6 @@ fn ch_is_not_created_error(err: &ChError) -> bool {
     matches!(err, ChError::HttpStatus { status: 404, .. })
 }
 
-fn launch_operation_fixture() -> (VmLaunchRequest, PreparedImageV2Result) {
-    let image_sha256 = Sha256Digest::parse("e".repeat(64)).expect("image digest");
-    let artifact_sha256 = Sha256Digest::parse("f".repeat(64)).expect("artifact digest");
-    let prepared_source = |name: &str, access| ArtifactSource {
-        source_root: PREPARED_IMAGE_SOURCE_ROOT,
-        relative_path: PathBuf::from(image_sha256.as_str()).join(name),
-        sha256: Some(artifact_sha256.clone()),
-        access,
-    };
-    let agent_source = |name: &str, access| ArtifactSource {
-        source_root: 0,
-        relative_path: PathBuf::from(name),
-        sha256: None,
-        access,
-    };
-    let prepared = PreparedImageV2Result {
-        image_sha256: image_sha256.clone(),
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        root_disk: prepared_source("root.raw", ArtifactAccess::ReadWrite),
-        kernel: prepared_source("kernel", ArtifactAccess::ReadOnly),
-        initrd: Some(prepared_source("initrd", ArtifactAccess::ReadOnly)),
-        fast_template_store: true,
-    };
-    let request = VmLaunchRequest {
-        run_id: ValidatedId::parse("run-1").expect("run ID"),
-        vm_id: ValidatedId::parse("vm-1").expect("VM ID"),
-        cpu_millis: 1_000,
-        vcpu_count: 1,
-        memory_mib: 512,
-        root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
-        tap_name: "tap-test".to_string(),
-        mac_address: "02:00:00:00:00:01".to_string(),
-        guest_ip_cidr: "10.77.0.2/28".to_string(),
-        ssh_public_port: Some(22_000),
-        vsock_cid: 3,
-        artifacts: SourceArtifacts {
-            root_disk: prepared.root_disk.clone(),
-            kernel: prepared.kernel.clone(),
-            initrd: prepared.initrd.clone(),
-            runtime_disk: agent_source("runtime.raw", ArtifactAccess::ReadOnly),
-            recording_disk: agent_source("recordings.vfat", ArtifactAccess::ReadWrite),
-            tools_disk: None,
-        },
-    };
-    (request, prepared)
-}
-
 mod launch;
 fn ch_is_not_started_error(err: &ChError) -> bool {
     matches!(err, ChError::HttpStatus { status: 405, .. })

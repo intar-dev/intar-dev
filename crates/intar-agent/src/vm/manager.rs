@@ -29,8 +29,6 @@ use intar_jailer_protocol::{
     TrustedDirectorySource, ValidatedId, VmCpuPhase, VmCpuRuntimeState, VmIdentityRequest,
     VmInspection, VmLaunchRequest, VmLaunchResult,
 };
-#[cfg(test)]
-use intar_jailer_protocol::{LaunchVmV2Request, PrepareImageV2Request, PreparedImageV2Result};
 use reqwest::Client as HttpClient;
 use russh::{
     Disconnect, Preferred,

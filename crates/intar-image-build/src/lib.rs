@@ -12,10 +12,7 @@ mod rootfs;
 mod seed;
 mod ssh;
 
-pub use artifact::{
-    RawZstdArtifact, expand_raw_zstd_sparse, expand_raw_zstd_sparse_with_cancel, sha256_file_hex,
-    write_raw_zstd_artifact, write_raw_zstd_artifact_with_cancel,
-};
+pub use artifact::{RawZstdArtifact, sha256_file_hex, write_raw_zstd_artifact};
 pub use chunked::{
     ChunkedImageArtifact, EncodedImageChunkArtifact, ReusedEncodedImageChunk, ScannedChunkedImage,
     ScannedImageChunk, reconstruct_chunked_image, scan_raw_image_chunks,

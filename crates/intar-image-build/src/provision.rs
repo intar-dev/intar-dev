@@ -38,11 +38,6 @@ const GUEST_NETWORK_READY_TIMEOUT_SECONDS: u64 = 30;
 // agent's 360-second whole-runtime window for the other first-boot phases.
 const GUEST_SSH_READY_TIMEOUT_SECONDS: u64 = 2 * 60;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GuestToolsDelivery {
-    ReadOnlyDisk,
-}
-
 pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) -> Result<String> {
     let mut script = String::new();
     let derived_kino = scenario
@@ -95,7 +90,7 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
     writeln!(script).context("format error")?;
     // The mmdebstrap base rootfs ships without apt package lists, so package
     // installs must be able to lazily run apt-get update first.
-    append_package_helpers(&mut script, &vm.packages, &step_scripts, true)?;
+    append_package_helpers(&mut script, &vm.packages)?;
     append_script_body(
         &mut script,
         &kino_template,
@@ -107,12 +102,7 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
     Ok(script)
 }
 
-fn append_package_helpers(
-    script: &mut String,
-    required_packages: &[String],
-    step_scripts: &[GeneratedStepScript],
-    allow_apt_update: bool,
-) -> Result<()> {
+fn append_package_helpers(script: &mut String, required_packages: &[String]) -> Result<()> {
     writeln!(script, "log_phase() {{").context("format error")?;
     writeln!(script, "  local phase=\"$1\"").context("format error")?;
     writeln!(script, "  local status=\"$2\"").context("format error")?;
@@ -123,29 +113,25 @@ fn append_package_helpers(
     .context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
-    if allow_apt_update {
-        writeln!(script, "apt_lists_updated=0").context("format error")?;
-        writeln!(script).context("format error")?;
-        writeln!(script, "ensure_package_lists_updated() {{").context("format error")?;
-        writeln!(script, "  if [ \"$apt_lists_updated\" -eq 1 ]; then").context("format error")?;
-        writeln!(script, "    return").context("format error")?;
-        writeln!(script, "  fi").context("format error")?;
-        writeln!(script, "  log_phase apt_update start").context("format error")?;
-        writeln!(script, "  apt-get update").context("format error")?;
-        writeln!(script, "  log_phase apt_update end").context("format error")?;
-        writeln!(script, "  apt_lists_updated=1").context("format error")?;
-        writeln!(script, "}}").context("format error")?;
-        writeln!(script).context("format error")?;
-    }
+    writeln!(script, "apt_lists_updated=0").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "ensure_package_lists_updated() {{").context("format error")?;
+    writeln!(script, "  if [ \"$apt_lists_updated\" -eq 1 ]; then").context("format error")?;
+    writeln!(script, "    return").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(script, "  log_phase apt_update start").context("format error")?;
+    writeln!(script, "  apt-get update").context("format error")?;
+    writeln!(script, "  log_phase apt_update end").context("format error")?;
+    writeln!(script, "  apt_lists_updated=1").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
     writeln!(script, "install_packages() {{").context("format error")?;
     writeln!(script, "  local phase=\"$1\"").context("format error")?;
     writeln!(script, "  shift").context("format error")?;
     writeln!(script, "  if [ \"$#\" -eq 0 ]; then").context("format error")?;
     writeln!(script, "    return").context("format error")?;
     writeln!(script, "  fi").context("format error")?;
-    if allow_apt_update {
-        writeln!(script, "  ensure_package_lists_updated").context("format error")?;
-    }
+    writeln!(script, "  ensure_package_lists_updated").context("format error")?;
     writeln!(script, "  log_phase \"$phase\" start").context("format error")?;
     writeln!(
         script,
@@ -153,17 +139,6 @@ fn append_package_helpers(
     )
     .context("format error")?;
     writeln!(script, "  log_phase \"$phase\" end").context("format error")?;
-    writeln!(script, "}}").context("format error")?;
-    writeln!(script).context("format error")?;
-    writeln!(script, "write_text_file() {{").context("format error")?;
-    writeln!(script, "  local path=\"$1\"").context("format error")?;
-    writeln!(script, "  local mode=\"$2\"").context("format error")?;
-    writeln!(script, "  local marker=\"$3\"").context("format error")?;
-    writeln!(script, "  install -d -m 0755 \"$(dirname -- \"$path\")\"").context("format error")?;
-    writeln!(script, "  cat >\"$path\" <<EOF_TEXT").context("format error")?;
-    writeln!(script, "$marker").context("format error")?;
-    writeln!(script, "EOF_TEXT").context("format error")?;
-    writeln!(script, "  chmod \"$mode\" \"$path\"").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     let mut required_packages = required_packages.to_vec();
@@ -180,15 +155,6 @@ fn append_package_helpers(
             .join(" ")
     )
     .context("format error")?;
-    writeln!(script, "step_script_paths=()").context("format error")?;
-    for generated in step_scripts {
-        writeln!(
-            script,
-            "step_script_paths+=({})",
-            shell_quote(&generated.path)
-        )
-        .context("format error")?;
-    }
     writeln!(script).context("format error")?;
     Ok(())
 }
@@ -229,7 +195,6 @@ fn append_script_body(
         scenario_motd,
         vm.cpu_millis,
         requires_kubernetes_modules,
-        GuestToolsDelivery::ReadOnlyDisk,
     )?;
     append_scenario_image_finalization(script)?;
     append_final_cleanup(script)
@@ -242,7 +207,6 @@ fn append_runtime_activation(
     motd: &str,
     cpu_millis: u32,
     requires_kubernetes_modules: bool,
-    guest_tools_delivery: GuestToolsDelivery,
 ) -> Result<()> {
     append_runtime_assets(
         script,
@@ -250,7 +214,6 @@ fn append_runtime_activation(
         motd,
         cpu_millis,
         requires_kubernetes_modules,
-        guest_tools_delivery,
     )?;
     append_ssh_runtime_gate(script)
 }

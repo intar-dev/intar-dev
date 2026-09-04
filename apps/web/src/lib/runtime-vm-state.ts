@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { VmActualStateV2 } from "@/generated/bridge";
-import { appError, errorChainMatches } from "@/lib/app-error";
-import { generateSshEd25519KeyPair } from "@/lib/ssh-ed25519";
+import { appError } from "@/lib/app-error";
 import {
   recordRuntimeVmTerminalTarget,
   requireCurrentRuntimeGeneration,
@@ -17,105 +16,6 @@ export interface RuntimeVmAccessKey {
   runtimeVmName: string;
   publicKeyOpenssh: string;
   privateKeyOpenssh: string;
-}
-
-export async function ensureRuntimeVmAccessKeys(input: {
-  executionId: string;
-  expectedGeneration: number;
-  now?: number;
-}): Promise<RuntimeVmAccessKey[]> {
-  const execution = await requireCurrentRuntimeGeneration(
-    input.executionId,
-    input.expectedGeneration,
-  );
-  const now = timestamp(input.now ?? Date.now(), "now");
-  const vms = await env.DB.prepare(
-    `SELECT id, vm_id, runtime_vm_name
-     FROM runtime_vms
-     WHERE execution_id = ?
-     ORDER BY ordinal ASC`,
-  )
-    .bind(execution.id)
-    .all<{
-      id: string;
-      vm_id: string;
-      runtime_vm_name: string;
-    }>();
-  if (!vms.results.length) {
-    throw appError(409, "runtime_vm_missing", "runtime execution has no VMs");
-  }
-
-  for (const vm of vms.results) {
-    const existing = await env.DB.prepare(
-      `SELECT runtime_vm_id
-       FROM runtime_vm_access_keys
-       WHERE runtime_vm_id = ? AND execution_id = ?`,
-    )
-      .bind(vm.id, execution.id)
-      .first<{ runtime_vm_id: string }>();
-    if (existing) continue;
-
-    const keyPair = generateSshEd25519KeyPair(
-      `intar:${execution.id}:${vm.runtime_vm_name}`,
-    );
-    const encrypted = await encryptAccessKey({
-      executionId: execution.id,
-      runtimeVmId: vm.id,
-      vmId: vm.vm_id,
-      runtimeVmName: vm.runtime_vm_name,
-      publicKeyOpenssh: keyPair.publicKeyOpenssh,
-      privateKeyOpenssh: keyPair.privateKeyOpenssh,
-    });
-    try {
-      await env.DB.prepare(
-        `INSERT INTO runtime_vm_access_keys (
-           runtime_vm_id, execution_id, public_key_openssh,
-           private_key_ciphertext_b64, private_key_iv_b64, created_at
-         )
-         SELECT ?, ?, ?, ?, ?, ?
-         WHERE EXISTS (
-           SELECT 1
-           FROM runtime_executions current
-           WHERE current.id = ?
-             AND current.generation = ?
-             AND NOT EXISTS (
-               SELECT 1 FROM runtime_executions newer
-               WHERE newer.domain_kind = current.domain_kind
-                 AND newer.domain_id = current.domain_id
-                 AND newer.generation > current.generation
-             )
-         )`,
-      )
-        .bind(
-          vm.id,
-          execution.id,
-          keyPair.publicKeyOpenssh,
-          encrypted.ciphertextB64,
-          encrypted.ivB64,
-          now,
-          execution.id,
-          input.expectedGeneration,
-        )
-        .run();
-    } catch (error) {
-      if (
-        !errorChainMatches(error, /runtime_vm_access_keys|UNIQUE constraint/)
-      ) {
-        throw error;
-      }
-    }
-  }
-
-  await requireCurrentRuntimeGeneration(execution.id, input.expectedGeneration);
-  return Promise.all(
-    vms.results.map((vm) =>
-      loadRuntimeVmAccessKey({
-        executionId: execution.id,
-        expectedGeneration: input.expectedGeneration,
-        vmId: vm.vm_id,
-      }),
-    ),
-  );
 }
 
 export async function loadRuntimeVmAccessKey(input: {
@@ -303,26 +203,6 @@ export async function recordRuntimeVmActualState(input: {
   return "updated";
 }
 
-async function encryptAccessKey(input: RuntimeVmAccessKey): Promise<{
-  ciphertextB64: string;
-  ivB64: string;
-}> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv: copyBuffer(iv),
-      additionalData: copyBuffer(accessKeyContext(input)),
-    },
-    await encryptionKey(),
-    copyBuffer(textEncoder.encode(input.privateKeyOpenssh)),
-  );
-  return {
-    ciphertextB64: bytesToBase64(new Uint8Array(ciphertext)),
-    ivB64: bytesToBase64(iv),
-  };
-}
-
 async function decryptAccessKey(input: {
   executionId: string;
   runtimeVmId: string;
@@ -396,14 +276,6 @@ function timestamp(value: number, label: string): number {
     );
   }
   return value;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-  }
-  return btoa(binary);
 }
 
 function base64ToBytes(value: string): Uint8Array {

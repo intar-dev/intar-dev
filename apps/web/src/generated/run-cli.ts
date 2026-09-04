@@ -114,13 +114,6 @@ export interface RunCliProbeCheckRequestV1 {
   probe_ids: string[];
 }
 
-/** Aggregate compatibility response; fresh checks stream `RunCliProbeCheckEventV1`. */
-export interface RunCliProbeCheckResponseV1 {
-  protocol_version: number;
-  request_id: string;
-  checks: RunCliProbeCheckResultV1[];
-}
-
 export interface RunCliProbeCheckEventV1 {
   protocol_version: number;
   request_id: string;

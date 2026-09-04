@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -19,19 +19,6 @@ pub fn write_raw_zstd_artifact(
     compressed_path: &Path,
     sha256_path: &Path,
 ) -> Result<RawZstdArtifact> {
-    write_raw_zstd_artifact_with_cancel(raw_path, compressed_path, sha256_path, || false)
-}
-
-/// Write a raw-zstd artifact while periodically checking whether the caller
-/// has cancelled the operation. Partial compressed and checksum files are
-/// removed before a cancellation or other write failure is returned.
-pub fn write_raw_zstd_artifact_with_cancel(
-    raw_path: &Path,
-    compressed_path: &Path,
-    sha256_path: &Path,
-    is_cancelled: impl Fn() -> bool,
-) -> Result<RawZstdArtifact> {
-    check_cancelled(&is_cancelled)?;
     let raw_metadata = fs::symlink_metadata(raw_path)
         .with_context(|| format!("failed to stat raw image '{}'", raw_path.display()))?;
     if !raw_metadata.is_file() {
@@ -76,12 +63,10 @@ pub fn write_raw_zstd_artifact_with_cancel(
         encoder
             .set_pledged_src_size(Some(virtual_size_bytes))
             .context("failed to set zstd pledged source size")?;
-        copy_with_buffer(&mut raw, &mut encoder, &is_cancelled)?;
-        check_cancelled(&is_cancelled)?;
+        std::io::copy(&mut raw, &mut encoder).context("failed to compress raw image")?;
         encoder.finish().context("failed to finish zstd image")?;
 
-        let sha256_hex = sha256_file_hex_with_cancel(compressed_path, &is_cancelled)?;
-        check_cancelled(&is_cancelled)?;
+        let sha256_hex = sha256_file_hex(compressed_path)?;
         fs::write(
             sha256_path,
             format!(
@@ -113,134 +98,16 @@ pub fn write_raw_zstd_artifact_with_cancel(
     })
 }
 
-/// Expand a raw-zstd image while preserving zero runs as sparse file holes and
-/// enforcing the advertised virtual size. Returns the SHA-256 of the expanded
-/// raw bytes.
-pub fn expand_raw_zstd_sparse(
-    compressed_path: &Path,
-    raw_path: &Path,
-    virtual_size_bytes: u64,
-) -> Result<String> {
-    expand_raw_zstd_sparse_with_cancel(compressed_path, raw_path, virtual_size_bytes, || false)
-}
-
-/// Expand a raw-zstd image while periodically checking whether the caller has
-/// cancelled the operation. Any partially expanded raw file is removed.
-pub fn expand_raw_zstd_sparse_with_cancel(
-    compressed_path: &Path,
-    raw_path: &Path,
-    virtual_size_bytes: u64,
-    is_cancelled: impl Fn() -> bool,
-) -> Result<String> {
-    check_cancelled(&is_cancelled)?;
-    if virtual_size_bytes == 0 {
-        bail!("advertised raw-zstd virtual size is zero");
-    }
-    let input = fs::File::open(compressed_path)
-        .with_context(|| format!("failed to open '{}'", compressed_path.display()))?;
-    let mut decoder = zstd::stream::read::Decoder::new(input)
-        .with_context(|| format!("failed to open zstd stream '{}'", compressed_path.display()))?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(raw_path)
-        .with_context(|| format!("failed to create '{}'", raw_path.display()))?;
-
-    let result = (|| {
-        let mut written = 0_u64;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 64 * 1024];
-        loop {
-            check_cancelled(&is_cancelled)?;
-            let read = decoder
-                .read(&mut buffer)
-                .with_context(|| format!("failed to decompress '{}'", compressed_path.display()))?;
-            if read == 0 {
-                break;
-            }
-            written = written
-                .checked_add(u64::try_from(read).context("decompressed chunk size overflow")?)
-                .context("decompressed image size overflow")?;
-            if written > virtual_size_bytes {
-                bail!(
-                    "decompressed image '{}' exceeds advertised virtual size: {written} > {virtual_size_bytes}",
-                    compressed_path.display()
-                );
-            }
-            hasher.update(&buffer[..read]);
-            if buffer[..read].iter().all(|byte| *byte == 0) {
-                output
-                    .seek(SeekFrom::Current(
-                        i64::try_from(read).context("sparse seek overflow")?,
-                    ))
-                    .with_context(|| format!("failed to seek '{}'", raw_path.display()))?;
-            } else {
-                output
-                    .write_all(&buffer[..read])
-                    .with_context(|| format!("failed to write '{}'", raw_path.display()))?;
-            }
-        }
-        if written != virtual_size_bytes {
-            bail!(
-                "decompressed image '{}' size does not match advertised virtual size: {written} != {virtual_size_bytes}",
-                compressed_path.display()
-            );
-        }
-        output
-            .set_len(virtual_size_bytes)
-            .with_context(|| format!("failed to size '{}'", raw_path.display()))?;
-        output
-            .sync_all()
-            .with_context(|| format!("failed to sync '{}'", raw_path.display()))?;
-        Ok(hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect())
-    })();
-    if result.is_err() {
-        drop(output);
-        let _ = fs::remove_file(raw_path);
-    }
-    result
-}
-
-fn copy_with_buffer(
-    reader: &mut fs::File,
-    writer: &mut zstd::stream::Encoder<'_, fs::File>,
-    is_cancelled: &impl Fn() -> bool,
-) -> Result<()> {
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        check_cancelled(is_cancelled)?;
-        let read = reader
-            .read(&mut buffer)
-            .context("failed to read raw image")?;
-        if read == 0 {
-            break;
-        }
-        writer
-            .write_all(&buffer[..read])
-            .context("failed to write compressed image")?;
-    }
-    Ok(())
-}
-
 /// Return the SHA-256 hex digest for a file.
 ///
 /// # Errors
 /// Returns an error if the file cannot be read.
 pub fn sha256_file_hex(path: &Path) -> Result<String> {
-    sha256_file_hex_with_cancel(path, &|| false)
-}
-
-fn sha256_file_hex_with_cancel(path: &Path, is_cancelled: &impl Fn() -> bool) -> Result<String> {
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to open '{}'", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; 1024 * 1024];
     loop {
-        check_cancelled(is_cancelled)?;
         let read = file
             .read(&mut buffer)
             .with_context(|| format!("failed to read '{}'", path.display()))?;
@@ -256,25 +123,13 @@ fn sha256_file_hex_with_cancel(path: &Path, is_cancelled: &impl Fn() -> bool) ->
         .collect())
 }
 
-fn check_cancelled(is_cancelled: &impl Fn() -> bool) -> Result<()> {
-    if is_cancelled() {
-        bail!("raw-zstd artifact operation cancelled");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::io::Read as _;
 
-    use std::cell::Cell;
-
-    use super::{
-        expand_raw_zstd_sparse, expand_raw_zstd_sparse_with_cancel, write_raw_zstd_artifact,
-        write_raw_zstd_artifact_with_cancel,
-    };
+    use super::write_raw_zstd_artifact;
 
     #[test]
     fn raw_zstd_artifact_round_trips_and_hashes_compressed_bytes() {
@@ -323,72 +178,20 @@ mod tests {
     }
 
     #[test]
-    fn sparse_expansion_round_trips_and_rejects_wrong_size() {
-        let temp = tempfile::tempdir().unwrap();
-        let compressed = temp.path().join("root.raw.zst");
-        let expanded = temp.path().join("root.raw");
-        let bytes = [
-            vec![0_u8; 128 * 1024],
-            b"payload".to_vec(),
-            vec![0_u8; 128 * 1024],
-        ]
-        .concat();
-        std::fs::write(&compressed, zstd::encode_all(bytes.as_slice(), 0).unwrap()).unwrap();
-
-        let digest = expand_raw_zstd_sparse(&compressed, &expanded, bytes.len() as u64).unwrap();
-        assert_eq!(std::fs::read(&expanded).unwrap(), bytes);
-        assert_eq!(digest.len(), 64);
-
-        let wrong = temp.path().join("wrong.raw");
-        let error = expand_raw_zstd_sparse(&compressed, &wrong, 1024).unwrap_err();
-        assert!(error.to_string().contains("advertised virtual size"));
-        assert!(!wrong.exists());
-    }
-
-    #[test]
-    fn cancelled_compression_removes_partial_outputs() {
+    fn write_failure_removes_partial_outputs() {
         let temp = tempfile::tempdir().unwrap();
         let raw_path = temp.path().join("root.raw");
         let compressed_path = temp.path().join("root.raw.zst");
-        let checksum_path = temp.path().join("root.raw.zst.sha256");
-        std::fs::write(&raw_path, vec![7_u8; 3 * 1024 * 1024]).unwrap();
-        let checks = Cell::new(0_u8);
-
-        let error = write_raw_zstd_artifact_with_cancel(
-            &raw_path,
-            &compressed_path,
-            &checksum_path,
-            || {
-                checks.set(checks.get().saturating_add(1));
-                checks.get() >= 3
-            },
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("cancelled"));
-        assert!(!compressed_path.exists());
-        assert!(!checksum_path.exists());
-        assert!(raw_path.exists());
-    }
-
-    #[test]
-    fn cancelled_expansion_removes_partial_raw_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let compressed = temp.path().join("root.raw.zst");
-        let expanded = temp.path().join("root.raw");
-        let bytes = vec![9_u8; 512 * 1024];
-        std::fs::write(&compressed, zstd::encode_all(bytes.as_slice(), 0).unwrap()).unwrap();
-        let checks = Cell::new(0_u8);
+        let checksum_path = temp.path().join("checksum-directory");
+        std::fs::write(&raw_path, b"raw image").unwrap();
+        std::fs::create_dir(&checksum_path).unwrap();
 
         let error =
-            expand_raw_zstd_sparse_with_cancel(&compressed, &expanded, bytes.len() as u64, || {
-                checks.set(checks.get().saturating_add(1));
-                checks.get() >= 3
-            })
-            .unwrap_err();
+            write_raw_zstd_artifact(&raw_path, &compressed_path, &checksum_path).unwrap_err();
 
-        assert!(error.to_string().contains("cancelled"));
-        assert!(!expanded.exists());
-        assert!(compressed.exists());
+        assert!(error.to_string().contains("failed to write checksum"));
+        assert!(!compressed_path.exists());
+        assert!(checksum_path.is_dir());
+        assert!(raw_path.exists());
     }
 }
