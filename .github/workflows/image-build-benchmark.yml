@@ -1,0 +1,305 @@
+name: Image build benchmark
+run-name: >-
+  Image build benchmark ${{ inputs.implementation }} ${{ inputs.sample_mode }}
+  ${{ inputs.variant }} #${{ inputs.iteration }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario_source_sha:
+        description: Exact lowercase 40-character commit SHA from intar-dev/scenarios.
+        required: true
+        type: string
+      cli_version:
+        description: Released intar-image-cli semantic version for this sample. Baseline is fixed to the current v11 reference release 0.4.3.
+        required: true
+        type: string
+      implementation:
+        description: Measurement label only. The builder owner prepares the matching host binary outside this workflow.
+        required: true
+        type: choice
+        options:
+          - baseline
+          - candidate
+      sample_mode:
+        description: warm reuses the externally prepared cache; no-cache-prepared was prepared externally and this workflow does not clear caches.
+        required: true
+        type: choice
+        options:
+          - warm
+          - no-cache-prepared
+      variant:
+        description: One benchmark mutation for this sample.
+        required: true
+        type: choice
+        options:
+          - unchanged
+          - runtime
+          - late-step
+      iteration:
+        description: Positive sample number. Use a distinct value for each of the three samples.
+        required: true
+        type: string
+      build_label:
+        description: Safe benchmark label recorded in the JSON evidence.
+        required: true
+        type: string
+      builder_profile:
+        description: Safe externally prepared builder profile label recorded in the JSON evidence.
+        required: true
+        type: string
+      expected_builder_binary_sha256:
+        description: Operator-attested lowercase SHA-256 of the prepared builder binary. This workflow records it but cannot verify a host binary.
+        required: true
+        type: string
+      external_preparation_evidence_id:
+        description: Safe ID for the operator evidence that prepared this sample cache state and builder profile.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-build-benchmark-production
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Bundle, observe, and retain benchmark evidence
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    timeout-minutes: 360
+
+    steps:
+      - name: Validate protected dispatch
+        env:
+          BUILD_LABEL: ${{ inputs.build_label }}
+          BUILDER_PROFILE: ${{ inputs.builder_profile }}
+          CLI_VERSION: ${{ inputs.cli_version }}
+          EXPECTED_BUILDER_BINARY_SHA256: ${{ inputs.expected_builder_binary_sha256 }}
+          EXTERNAL_PREPARATION_EVIDENCE_ID: ${{ inputs.external_preparation_evidence_id }}
+          IMPLEMENTATION: ${{ inputs.implementation }}
+          ITERATION: ${{ inputs.iteration }}
+          SAMPLE_MODE: ${{ inputs.sample_mode }}
+          SCENARIO_SOURCE_SHA: ${{ inputs.scenario_source_sha }}
+          VARIANT: ${{ inputs.variant }}
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
+          [[ "${SCENARIO_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CLI_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${EXPECTED_BUILDER_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${EXTERNAL_PREPARATION_EVIDENCE_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          [[ "${ITERATION}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${BUILD_LABEL}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          [[ "${BUILDER_PROFILE}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          if [ "${IMPLEMENTATION}" = "baseline" ]; then
+            test "${CLI_VERSION}" = "0.4.3"
+          else
+            test "${CLI_VERSION}" != "0.4.3"
+          fi
+
+      - name: Check out benchmark harness at the workflow SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify benchmark harness revision
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Fingerprint benchmark harness
+        id: harness
+        run: |
+          set -euo pipefail
+          fingerprint="$(
+            { sha256sum .github/workflows/image-build-benchmark.yml; sha256sum tools/image-build/benchmark-release.py; } \
+              | sha256sum | awk '{print $1}'
+          )"
+          [[ "${fingerprint}" =~ ^[0-9a-f]{64}$ ]]
+          printf 'fingerprint=%s\n' "${fingerprint}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out the exact scenario source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: intar-dev/scenarios
+          ref: ${{ inputs.scenario_source_sha }}
+          path: scenario-source
+          persist-credentials: false
+
+      - name: Verify scenario source revision
+        env:
+          SCENARIO_SOURCE_SHA: ${{ inputs.scenario_source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C scenario-source rev-parse HEAD)" = "${SCENARIO_SOURCE_SHA}"
+
+      - name: Allocate isolated benchmark files
+        id: paths
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d "${RUNNER_TEMP}/image-build-benchmark.XXXXXX")"
+          printf 'workdir=%s\n' "${workdir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download and verify the released image CLI
+        env:
+          CLI_VERSION: ${{ inputs.cli_version }}
+          WORKDIR: ${{ steps.paths.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          [[ "${CLI_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          cli_root="${WORKDIR}/cli"
+          archive="intar-image-cli_${CLI_VERSION}_linux_amd64.tar.gz"
+          checksums="intar-image-cli_${CLI_VERSION}_checksums.txt"
+          release_root="https://github.com/intar-dev/intar-dev/releases/download/image-cli%2Fv${CLI_VERSION}"
+          mkdir -p "${cli_root}"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "${cli_root}/${checksums}" \
+            "${release_root}/${checksums}"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "${cli_root}/${archive}" \
+            "${release_root}/${archive}"
+          awk -v archive="${archive}" \
+            '$1 ~ /^[0-9a-f]{64}$/ && $2 == archive && NF == 2 { print $1 "  " $2 }' \
+            "${cli_root}/${checksums}" > "${cli_root}/release-checksum.txt"
+          test "$(wc -l < "${cli_root}/release-checksum.txt" | tr -d ' ')" = "1"
+          (
+            cd "${cli_root}"
+            sha256sum --check --strict release-checksum.txt
+          )
+          mapfile -t release_files < <(
+            tar -tzf "${cli_root}/${archive}" | sed 's#^\./##' | LC_ALL=C sort
+          )
+          expected_files=(base-images.hcl intar-image-cli)
+          if [ "${release_files[*]}" != "${expected_files[*]}" ]; then
+            echo "The released CLI archive has unexpected paths." >&2
+            exit 1
+          fi
+          tar -xzf "${cli_root}/${archive}" -C "${cli_root}"
+          test -x "${cli_root}/intar-image-cli"
+          test -f "${cli_root}/base-images.hcl"
+          test "$("${cli_root}/intar-image-cli" --version)" = "intar-image-cli ${CLI_VERSION}"
+          "${cli_root}/intar-image-cli" --version > "${WORKDIR}/cli-version.txt"
+
+      - name: Prepare a temporary complete catalog
+        env:
+          BUILD_LABEL: ${{ inputs.build_label }}
+          BUILDER_PROFILE: ${{ inputs.builder_profile }}
+          CLI_VERSION: ${{ inputs.cli_version }}
+          EXPECTED_BUILDER_BINARY_SHA256: ${{ inputs.expected_builder_binary_sha256 }}
+          EXTERNAL_PREPARATION_EVIDENCE_ID: ${{ inputs.external_preparation_evidence_id }}
+          HARNESS_FINGERPRINT: ${{ steps.harness.outputs.fingerprint }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          IMPLEMENTATION: ${{ inputs.implementation }}
+          ITERATION: ${{ inputs.iteration }}
+          SAMPLE_MODE: ${{ inputs.sample_mode }}
+          SCENARIO_SOURCE_SHA: ${{ inputs.scenario_source_sha }}
+          VARIANT: ${{ inputs.variant }}
+          WORKDIR: ${{ steps.paths.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          revision="image-build-benchmark-${IMPLEMENTATION}-${SAMPLE_MODE}-${VARIANT}-i${ITERATION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "${revision}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
+          python3 tools/image-build/benchmark-release.py prepare \
+            --source-root "${GITHUB_WORKSPACE}/scenario-source" \
+            --destination-root "${WORKDIR}/catalog" \
+            --record "${WORKDIR}/benchmark.json" \
+            --revision "${revision}" \
+            --source-sha "${SCENARIO_SOURCE_SHA}" \
+            --workflow-sha "${WORKFLOW_SHA}" \
+            --harness-fingerprint "${HARNESS_FINGERPRINT}" \
+            --cli-version "${CLI_VERSION}" \
+            --implementation "${IMPLEMENTATION}" \
+            --sample-mode "${SAMPLE_MODE}" \
+            --variant "${VARIANT}" \
+            --iteration "${ITERATION}" \
+            --build-label "${BUILD_LABEL}" \
+            --builder-profile "${BUILDER_PROFILE}" \
+            --expected-builder-binary-sha256 "${EXPECTED_BUILDER_BINARY_SHA256}" \
+            --external-preparation-evidence-id "${EXTERNAL_PREPARATION_EVIDENCE_ID}"
+
+      - name: Validate the complete temporary catalog
+        env:
+          WORKDIR: ${{ steps.paths.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          python3 tools/image-build/benchmark-release.py mark \
+            --record "${WORKDIR}/benchmark.json" --event validation_started
+          "${WORKDIR}/cli/intar-image-cli" validate \
+            --courses-root "${WORKDIR}/catalog/courses" \
+            --base-images "${WORKDIR}/cli/base-images.hcl" \
+            > "${WORKDIR}/validate.log" 2>&1
+          python3 tools/image-build/benchmark-release.py mark \
+            --record "${WORKDIR}/benchmark.json" --event validation_completed
+
+      - name: Bundle and queue the full candidate catalog
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+          WORKDIR: ${{ steps.paths.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
+          revision="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context"]["revision"])' "${WORKDIR}/benchmark.json")"
+          python3 tools/image-build/benchmark-release.py mark \
+            --record "${WORKDIR}/benchmark.json" --event bundle_started
+          "${WORKDIR}/cli/intar-image-cli" bundle \
+            --courses-root "${WORKDIR}/catalog/courses" \
+            --base-images "${WORKDIR}/cli/base-images.hcl" \
+            --rev "${revision}" \
+            --output "${WORKDIR}/${revision}.tar.gz" \
+            --url "https://intar.dev/registry/v1/bundles" \
+            > "${WORKDIR}/bundle.log" 2>&1
+          upload_line="$(grep -F "uploaded bundle ${revision} -> https://intar.dev/registry/v1/bundles" "${WORKDIR}/bundle.log")"
+          test "$(printf '%s\n' "${upload_line}" | wc -l | tr -d ' ')" = "1"
+          if [[ ! "${upload_line}" =~ \(([0-9]+)\ queued,\ ([0-9]+)\ assigned\)$ ]]; then
+            echo "The CLI upload receipt has an unexpected format." >&2
+            exit 1
+          fi
+          queued="${BASH_REMATCH[1]}"
+          assigned="${BASH_REMATCH[2]}"
+          sha256sum "${WORKDIR}/${revision}.tar.gz" > "${WORKDIR}/bundle.sha256"
+          python3 tools/image-build/benchmark-release.py accept \
+            --record "${WORKDIR}/benchmark.json" \
+            --queued "${queued}" \
+            --assigned "${assigned}"
+
+      - name: Wait for complete stable-tool build and host readiness
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+          WORKDIR: ${{ steps.paths.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
+          python3 tools/image-build/benchmark-release.py poll \
+            --record "${WORKDIR}/benchmark.json" \
+            --timeout-seconds 20700 \
+            --interval-seconds 15
+
+      - name: Write benchmark summary
+        if: always()
+        env:
+          WORKDIR: ${{ steps.paths.outputs.workdir }}
+        run: |
+          if [ -f "${WORKDIR}/benchmark.json" ]; then
+            python3 tools/image-build/benchmark-release.py summary \
+              --record "${WORKDIR}/benchmark.json" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload benchmark JSON evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: image-build-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.paths.outputs.workdir }}/benchmark.json
+            ${{ steps.paths.outputs.workdir }}/bundle.sha256
+            ${{ steps.paths.outputs.workdir }}/cli-version.txt
+            ${{ steps.paths.outputs.workdir }}/cli/release-checksum.txt
+          if-no-files-found: warn
+          retention-days: 30
