@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::{env, fs};
-
-use intar_contracts::catalog::ImageArchitecture;
+use std::{env, fs, process::Command};
 
 use crate::config::BuilderConfig;
+use intar_contracts::catalog::ImageArchitecture;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreflightStatus {
@@ -82,12 +81,29 @@ pub fn collect_preflight_with_environment(
         &cfg.qemu.qemu_binary,
         &env.path_entries,
     );
+    push_qemu_version_check(&mut checks, &cfg.qemu.qemu_binary, &env.path_entries);
     push_command_check(
         &mut checks,
-        "mmdebstrap binary",
-        &cfg.qemu.mmdebstrap_binary,
+        "qemu-img binary",
+        cfg.qemu.layered.qemu_img_binary.to_string_lossy().as_ref(),
         &env.path_entries,
     );
+    push_command_check(
+        &mut checks,
+        "buildctl binary",
+        cfg.qemu.layered.buildctl_binary.to_string_lossy().as_ref(),
+        &env.path_entries,
+    );
+    let buildkit_socket = layered_oci_cache_root(cfg).join("buildkitd.sock");
+    push_socket_check(&mut checks, "buildkitd socket", &buildkit_socket);
+    push_command_check(
+        &mut checks,
+        "umoci binary",
+        cfg.qemu.layered.umoci_binary.to_string_lossy().as_ref(),
+        &env.path_entries,
+    );
+    push_command_check(&mut checks, "zstd binary", "zstd", &env.path_entries);
+    push_pinned_image_check(&mut checks, &cfg.qemu.layered.debian_image);
     push_command_check(
         &mut checks,
         "mke2fs binary",
@@ -166,6 +182,72 @@ fn push_command_check(
     }
 }
 
+fn push_qemu_version_check(
+    checks: &mut Vec<PreflightCheck>,
+    command: &str,
+    path_entries: &[PathBuf],
+) {
+    let Some(path) = resolve_command(command, path_entries) else {
+        checks.push(fail(
+            "qemu version",
+            "cannot read the QEMU version because the configured binary is unavailable",
+        ));
+        return;
+    };
+    let output = match Command::new(&path).arg("--version").output() {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            checks.push(fail(
+                "qemu version",
+                format!(
+                    "'{} --version' exited with {}",
+                    path.display(),
+                    output.status
+                ),
+            ));
+            return;
+        }
+        Err(error) => {
+            checks.push(fail(
+                "qemu version",
+                format!("failed to run '{} --version': {error}", path.display()),
+            ));
+            return;
+        }
+    };
+    let output = match String::from_utf8(output.stdout) {
+        Ok(output) => output,
+        Err(_) => {
+            checks.push(fail("qemu version", "QEMU version output is not UTF-8"));
+            return;
+        }
+    };
+    match parse_qemu_major_version(&output) {
+        Some(major @ 10..) => checks.push(pass(
+            "qemu version",
+            format!("QEMU major version {major} supports structured exec channels"),
+        )),
+        Some(major) => checks.push(fail(
+            "qemu version",
+            format!("QEMU major version {major} is below required version 10"),
+        )),
+        None => checks.push(fail(
+            "qemu version",
+            "QEMU version output does not contain a parseable major version",
+        )),
+    }
+}
+
+fn parse_qemu_major_version(output: &str) -> Option<u32> {
+    let mut words = output.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "version" {
+            return words.next()?.split('.').next()?.parse().ok();
+        }
+    }
+    None
+}
+
 fn push_char_device_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &Path) {
     match path.metadata() {
         Ok(metadata) if is_char_device(&metadata) => {
@@ -240,6 +322,58 @@ fn push_dir_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &Path) {
             ));
         }
     }
+}
+
+fn layered_oci_cache_root(cfg: &BuilderConfig) -> PathBuf {
+    cfg.qemu
+        .layered
+        .oci_cache_root
+        .clone()
+        .unwrap_or_else(|| cfg.builder.cache_root.join("oci"))
+}
+
+fn push_socket_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &Path) {
+    match path.metadata() {
+        Ok(metadata) if is_socket(&metadata) => {
+            checks.push(pass(name, format!("found {}", path.display())));
+        }
+        Ok(_) => checks.push(fail(
+            name,
+            format!("'{}' exists but is not a Unix socket", path.display()),
+        )),
+        Err(_) => checks.push(fail(
+            name,
+            format!(
+                "'{}' is missing; start the configured BuildKit daemon",
+                path.display()
+            ),
+        )),
+    }
+}
+
+fn push_pinned_image_check(checks: &mut Vec<PreflightCheck>, image: &str) {
+    if is_pinned_oci_image(image) {
+        checks.push(pass(
+            "layered Debian image",
+            "uses an immutable SHA-256 digest",
+        ));
+    } else {
+        checks.push(fail(
+            "layered Debian image",
+            "qemu.layered.debian_image must use @sha256: followed by 64 lowercase hex characters",
+        ));
+    }
+}
+
+fn is_pinned_oci_image(image: &str) -> bool {
+    let Some((repository, digest)) = image.rsplit_once("@sha256:") else {
+        return false;
+    };
+    !repository.is_empty()
+        && digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn push_job_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {
@@ -338,6 +472,18 @@ fn is_char_device(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_char_device()
 }
 
+#[cfg(unix)]
+fn is_socket(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+
+    metadata.file_type().is_socket()
+}
+
+#[cfg(not(unix))]
+fn is_socket(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 #[cfg(not(unix))]
 fn is_char_device(metadata: &std::fs::Metadata) -> bool {
     metadata.is_file()
@@ -384,6 +530,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
@@ -411,23 +559,48 @@ mod tests {
         make_executable(&path);
     }
 
+    #[cfg(unix)]
+    fn fake_qemu(dir: &std::path::Path, version_output: &str) {
+        let path = dir.join("qemu-system-x86_64");
+        fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' '{version_output}'\n"),
+        )
+        .unwrap();
+        make_executable(&path);
+    }
+
+    #[test]
+    fn parses_qemu_major_version() {
+        assert_eq!(
+            super::parse_qemu_major_version("QEMU emulator version 10.0.11 (Debian)"),
+            Some(10)
+        );
+        assert_eq!(
+            super::parse_qemu_major_version("QEMU emulator version 11.1"),
+            Some(11)
+        );
+        assert_eq!(super::parse_qemu_major_version("QEMU emulator"), None);
+    }
+
     #[test]
     fn resolves_commands_from_explicit_path_or_path_entries() {
         let temp = TempDir::new().unwrap();
-        fake_tool(temp.path(), "mmdebstrap");
-        let command = resolve_command("mmdebstrap", &[temp.path().to_path_buf()]);
-        assert_eq!(command, Some(temp.path().join("mmdebstrap")));
+        fake_tool(temp.path(), "qemu-img");
+        let command = resolve_command("qemu-img", &[temp.path().to_path_buf()]);
+        assert_eq!(command, Some(temp.path().join("qemu-img")));
         let absolute = resolve_command(
-            temp.path().join("mmdebstrap").to_str().unwrap(),
+            temp.path().join("qemu-img").to_str().unwrap(),
             &[temp.path().to_path_buf()],
         );
-        assert_eq!(absolute, Some(temp.path().join("mmdebstrap")));
+        assert_eq!(absolute, Some(temp.path().join("qemu-img")));
         assert_eq!(
             resolve_command("missing", &[temp.path().to_path_buf()]),
             None
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn reports_ready_linux_kvm_builder_host() {
         let temp = TempDir::new().unwrap();
@@ -439,9 +612,15 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         fs::create_dir_all(&cache).unwrap();
         fs::create_dir_all(&state).unwrap();
+        let oci_cache = cache.join("oci");
+        fs::create_dir_all(&oci_cache).unwrap();
+        let _buildkit_socket = UnixListener::bind(oci_cache.join("buildkitd.sock")).unwrap();
+        fake_qemu(&bin, "QEMU emulator version 10.0.11");
         for tool in [
-            "qemu-system-x86_64",
-            "mmdebstrap",
+            "qemu-img",
+            "buildctl",
+            "umoci",
+            "zstd",
             "mke2fs",
             "e2fsck",
             "resize2fs",
@@ -457,7 +636,7 @@ mod tests {
         cfg.builder.state_db = state.join("builder.sqlite3");
         let env = PreflightEnvironment {
             host_arch: intar_contracts::catalog::ImageArchitecture::X86_64,
-            path_entries: vec![bin],
+            path_entries: vec![bin.clone()],
             kvm_path: PathBuf::from("/dev/null"),
             vhost_vsock_path: PathBuf::from("/dev/null"),
         };
@@ -530,6 +709,91 @@ mod tests {
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "bridge configuration" && check.status == PreflightStatus::Warn
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oci_builder_requires_tools_socket_and_pinned_debian_image() {
+        let temp = TempDir::new().unwrap();
+        let bin = temp.path().join("bin");
+        let work = temp.path().join("work");
+        let cache = temp.path().join("cache");
+        let state = temp.path().join("state");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let oci_cache = cache.join("oci");
+        fs::create_dir_all(&oci_cache).unwrap();
+        let buildkit_socket = UnixListener::bind(oci_cache.join("buildkitd.sock")).unwrap();
+        fake_qemu(&bin, "QEMU emulator version 10.0.11");
+        for tool in [
+            "qemu-img",
+            "buildctl",
+            "umoci",
+            "zstd",
+            "mke2fs",
+            "e2fsck",
+            "resize2fs",
+        ] {
+            fake_tool(&bin, tool);
+        }
+        let mut cfg = BuilderConfig::default();
+        cfg.bridge.enabled = false;
+        cfg.builder.work_root = work;
+        cfg.builder.cache_root = cache;
+        cfg.builder.state_db = state.join("builder.sqlite3");
+        let env = PreflightEnvironment {
+            host_arch: intar_contracts::catalog::ImageArchitecture::X86_64,
+            path_entries: vec![bin.clone()],
+            kvm_path: PathBuf::from("/dev/null"),
+            vhost_vsock_path: PathBuf::from("/dev/null"),
+        };
+
+        let report = collect_preflight_with_environment(&cfg, &env);
+
+        assert_eq!(report.failure_count(), 0);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "layered Debian image" && check.status == PreflightStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "buildkitd socket" && check.status == PreflightStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "qemu version" && check.status == PreflightStatus::Pass
+        }));
+
+        drop(buildkit_socket);
+        fs::remove_file(oci_cache.join("buildkitd.sock")).unwrap();
+        let report = collect_preflight_with_environment(&cfg, &env);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "buildkitd socket" && check.status == PreflightStatus::Fail
+        }));
+
+        cfg.qemu.layered.debian_image = "debian:trixie-slim".to_string();
+        let report = collect_preflight_with_environment(&cfg, &env);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "layered Debian image" && check.status == PreflightStatus::Fail
+        }));
+
+        cfg.qemu.layered.debian_image =
+            format!("docker.io/library/debian@sha256:{}", "A".repeat(64));
+        let report = collect_preflight_with_environment(&cfg, &env);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "layered Debian image" && check.status == PreflightStatus::Fail
+        }));
+
+        fake_qemu(&bin, "QEMU emulator version 7.2");
+        let report = collect_preflight_with_environment(&cfg, &env);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "qemu version" && check.status == PreflightStatus::Fail
+        }));
+
+        fake_qemu(&bin, "QEMU emulator version unknown");
+        let report = collect_preflight_with_environment(&cfg, &env);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "qemu version" && check.status == PreflightStatus::Fail
         }));
     }
 }

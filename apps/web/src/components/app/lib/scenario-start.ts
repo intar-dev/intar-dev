@@ -37,6 +37,8 @@ export async function requestScenarioStartWithCapacityWait(
     signal: AbortSignal;
     onCapacityWait: () => void;
     organizationId?: string | null;
+    candidateRevision?: string;
+    candidateBuildId?: string;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   const startedAt = Date.now();
@@ -48,7 +50,15 @@ export async function requestScenarioStartWithCapacityWait(
       return await requestScenarioStart(
         scenarioId,
         options.signal,
-        options.organizationId ?? null,
+        {
+          organizationId: options.organizationId ?? null,
+          ...(options.candidateRevision
+            ? { candidateRevision: options.candidateRevision }
+            : {}),
+          ...(options.candidateBuildId
+            ? { candidateBuildId: options.candidateBuildId }
+            : {}),
+        },
       );
     } catch (error) {
       if (options.signal.aborted) {
@@ -80,7 +90,11 @@ export async function requestScenarioStartWithCapacityWait(
 async function requestScenarioStart(
   scenarioId: string,
   signal: AbortSignal,
-  organizationId: string | null,
+  options: {
+    organizationId: string | null;
+    candidateRevision?: string;
+    candidateBuildId?: string;
+  },
 ): Promise<ScenarioStartAcceptedResponse> {
   let response: Response;
   try {
@@ -91,7 +105,17 @@ async function requestScenarioStart(
         credentials: "include",
         signal,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(organizationId ? { organizationId } : {}),
+        body: JSON.stringify({
+          ...(options.organizationId
+            ? { organizationId: options.organizationId }
+            : {}),
+          ...(options.candidateRevision
+            ? { candidateRevision: options.candidateRevision }
+            : {}),
+          ...(options.candidateBuildId
+            ? { candidateBuildId: options.candidateBuildId }
+            : {}),
+        }),
       },
     );
   } catch (error) {

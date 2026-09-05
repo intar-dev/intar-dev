@@ -17,10 +17,10 @@ use std::time::Instant;
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    DIRECT_PROVISION_COMMAND, DirectBuildPrepareInput, DirectBuildRequest, DirectQemuShutdownInput,
-    QEMU_EXIT_POLL_INTERVAL, QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL, RenderedDirectBuild,
-    SSH_POLL_INTERVAL, acknowledged_qmp_shutdown_with_cancel, connect_qmp_socket,
-    prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
+    DirectBuildPrepareInput, DirectBuildRequest, DirectQemuShutdownInput, QEMU_EXIT_POLL_INTERVAL,
+    QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL, RenderedDirectBuild, SSH_POLL_INTERVAL,
+    acknowledged_qmp_shutdown_with_cancel, connect_qmp_socket, prepare_direct_build_inputs,
+    render_direct_build, wait_for_qemu_shutdown,
 };
 use crate::config::QemuBuildConfig;
 
@@ -89,7 +89,6 @@ base_image "trixie" {
     config.work_root = work_root;
 
     render_direct_build(&DirectBuildRequest {
-        scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
         scenario,
         lecture: test_lecture(),
         vm_name: "web".to_string(),
@@ -102,16 +101,6 @@ base_image "trixie" {
 #[test]
 fn ssh_readiness_poll_does_not_hammer_guest_limits() {
     assert_eq!(SSH_POLL_INTERVAL, std::time::Duration::from_secs(2));
-}
-
-#[test]
-fn direct_provisioning_requires_success_before_host_poweroff() {
-    assert_eq!(
-        DIRECT_PROVISION_COMMAND,
-        "sudo bash /tmp/intar-provision.sh"
-    );
-    assert!(!DIRECT_PROVISION_COMMAND.contains("shutdown"));
-    assert!(!DIRECT_PROVISION_COMMAND.contains("&&"));
 }
 
 #[test]

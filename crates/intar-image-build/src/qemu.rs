@@ -31,9 +31,8 @@ pub struct DirectBootQemuCommand {
 
 #[must_use]
 pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> DirectBootQemuCommand {
-    let accelerator = effective_qemu_accelerator(&input.config.accelerator);
-    let cpu_model = qemu_cpu_model(accelerator);
-    let mut args = vec![
+    let accelerator = input.config.accelerator.trim();
+    let args = vec![
         "-display".to_string(),
         "none".to_string(),
         "-nodefaults".to_string(),
@@ -41,7 +40,7 @@ pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> Direc
         "-machine".to_string(),
         format!("q35,accel={accelerator}"),
         "-cpu".to_string(),
-        cpu_model.to_string(),
+        "host".to_string(),
         "-smp".to_string(),
         input.cpu_count.to_string(),
         "-m".to_string(),
@@ -77,29 +76,11 @@ pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> Direc
             input.qmp_socket_path.display()
         ),
     ];
-    args.extend(input.config.qemuargs.iter().flatten().cloned());
 
     DirectBootQemuCommand {
         binary: input.config.qemu_binary.clone(),
         args,
     }
-}
-
-#[must_use]
-pub fn effective_qemu_accelerator(configured: &str) -> &str {
-    match configured.trim() {
-        "" | "none" => "tcg",
-        other => other,
-    }
-}
-
-#[must_use]
-pub fn uses_tcg_accelerator(configured: &str) -> bool {
-    effective_qemu_accelerator(configured) == "tcg"
-}
-
-fn qemu_cpu_model(accelerator: &str) -> &str {
-    if accelerator == "tcg" { "max" } else { "host" }
 }
 
 #[cfg(test)]
@@ -110,7 +91,7 @@ mod tests {
 
     use super::{
         BUILD_BOOT_CMDLINE, DirectBootQemuInput, PUBLISHED_BOOT_CMDLINE,
-        effective_qemu_accelerator, render_direct_boot_qemu_command, uses_tcg_accelerator,
+        render_direct_boot_qemu_command,
     };
     use crate::config::QemuBuildConfig;
 
@@ -119,7 +100,6 @@ mod tests {
         const TRUSTED_BOOT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 intar.build=1";
         let config = QemuBuildConfig {
             accelerator: "kvm".to_string(),
-            qemuargs: vec![vec!["-device".to_string(), "virtio-rng-pci".to_string()]],
             ..QemuBuildConfig::default()
         };
         let command = render_direct_boot_qemu_command(&DirectBootQemuInput {
@@ -188,16 +168,10 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "unix:/work/qmp.sock,server=on,wait=off")
         );
-        assert!(
-            command
-                .args
-                .windows(2)
-                .any(|pair| pair == ["-device", "virtio-rng-pci"])
-        );
     }
 
     #[test]
-    fn maps_none_accelerator_to_tcg_and_keeps_published_cmdline_quiet() {
+    fn defaults_to_kvm_and_keeps_published_cmdline_quiet() {
         let config = QemuBuildConfig::default();
         let command = render_direct_boot_qemu_command(&DirectBootQemuInput {
             config: &config,
@@ -217,20 +191,10 @@ mod tests {
             command
                 .args
                 .windows(2)
-                .any(|pair| pair == ["-machine", "q35,accel=tcg"])
+                .any(|pair| pair == ["-machine", "q35,accel=kvm"])
         );
-        assert!(command.args.windows(2).any(|pair| pair == ["-cpu", "max"]));
+        assert!(command.args.windows(2).any(|pair| pair == ["-cpu", "host"]));
         assert!(PUBLISHED_BOOT_CMDLINE.contains("quiet loglevel=4"));
         assert!(!BUILD_BOOT_CMDLINE.contains("quiet"));
-    }
-
-    #[test]
-    fn normalizes_empty_and_none_accelerators_to_tcg() {
-        assert_eq!(effective_qemu_accelerator(""), "tcg");
-        assert_eq!(effective_qemu_accelerator("none"), "tcg");
-        assert_eq!(effective_qemu_accelerator(" kvm "), "kvm");
-        assert!(uses_tcg_accelerator(""));
-        assert!(uses_tcg_accelerator("none"));
-        assert!(!uses_tcg_accelerator("kvm"));
     }
 }

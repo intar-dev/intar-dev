@@ -1,15 +1,17 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   agentHosts,
   imageBuildBundles,
   imageBuilds,
+  scenarioCatalogCandidates,
 } from "@/db/schema";
 import { jsonResponse, requireAdminUserContext } from "@/lib/agent-bridge";
 import {
   isSafeAdminBuildId,
+  selectAdminCandidateProof,
   serializeAdminBuildDetail,
 } from "@/lib/admin-build-response";
 
@@ -36,6 +38,7 @@ export const GET: APIRoute = async ({ request, params }) => {
       arch: imageBuilds.arch,
       rev: imageBuilds.rev,
       contentHash: imageBuilds.contentHash,
+      organizationId: imageBuilds.organizationId,
       hostId: imageBuilds.hostId,
       hostName: agentHosts.name,
       hostRole: agentHosts.role,
@@ -48,6 +51,7 @@ export const GET: APIRoute = async ({ request, params }) => {
       logR2Key: imageBuilds.logR2Key,
       timings: imageBuilds.timingsJson,
       bundleR2Key: imageBuildBundles.r2Key,
+      bundleOrganizationId: imageBuildBundles.organizationId,
       bundleMeta: imageBuildBundles.metaJson,
       createdAt: imageBuilds.createdAt,
       updatedAt: imageBuilds.updatedAt,
@@ -63,5 +67,37 @@ export const GET: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "build not found" }, { status: 404 });
   }
 
-  return jsonResponse({ build: serializeAdminBuildDetail(build) });
+  const candidates = await drizzle(env.DB)
+    .select({
+      revision: scenarioCatalogCandidates.revision,
+      buildId: scenarioCatalogCandidates.buildId,
+      organizationId: scenarioCatalogCandidates.organizationId,
+      bundleOrganizationId: imageBuildBundles.organizationId,
+      bundleMeta: imageBuildBundles.metaJson,
+      updatedAt: scenarioCatalogCandidates.updatedAt,
+    })
+    .from(scenarioCatalogCandidates)
+    .innerJoin(
+      imageBuildBundles,
+      eq(imageBuildBundles.rev, scenarioCatalogCandidates.revision),
+    )
+    .where(
+      and(
+        eq(scenarioCatalogCandidates.buildId, build.id),
+        eq(scenarioCatalogCandidates.scenarioId, build.scenarioId),
+        build.organizationId
+          ? eq(scenarioCatalogCandidates.organizationId, build.organizationId)
+          : isNull(scenarioCatalogCandidates.organizationId),
+        build.organizationId
+          ? eq(imageBuildBundles.organizationId, build.organizationId)
+          : isNull(imageBuildBundles.organizationId),
+      ),
+    );
+
+  return jsonResponse({
+    build: serializeAdminBuildDetail({
+      ...build,
+      candidateProof: selectAdminCandidateProof({ build, candidates }),
+    }),
+  });
 };

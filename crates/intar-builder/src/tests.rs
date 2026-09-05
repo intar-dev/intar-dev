@@ -60,7 +60,6 @@ fn concurrent_build_ids_and_hashes_get_disjoint_paths() {
 
     assert_ne!(first.work_root, second.work_root);
     assert_ne!(first.output_root, second.output_root);
-    assert_eq!(first.base_cache_root, second.base_cache_root);
 }
 
 #[tokio::test]

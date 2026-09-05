@@ -115,6 +115,8 @@ struct BuildCommand {
     config: Option<PathBuf>,
     #[arg(long)]
     no_upload: bool,
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +127,8 @@ struct BuildAllCommand {
     config: Option<PathBuf>,
     #[arg(long)]
     no_upload: bool,
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Debug, Args)]
@@ -266,7 +270,10 @@ fn render_command(args: &RenderCommand) -> Result<()> {
 }
 
 fn build_command(args: &BuildCommand) -> Result<()> {
-    let config = load_build_config(args.config.as_deref())?;
+    let mut config = load_build_config(args.config.as_deref())?;
+    if args.no_cache {
+        config.qemu.layered.use_cache = false;
+    }
     let curriculum = load_curriculum(&args.courses_root)?;
     let scenarios = selected_course_scenarios(&curriculum, args.scenario.as_deref())?;
     if scenarios.is_empty() {
@@ -312,7 +319,10 @@ fn build_command(args: &BuildCommand) -> Result<()> {
 }
 
 fn build_all_command(args: &BuildAllCommand) -> Result<()> {
-    let config = load_build_config(args.config.as_deref())?;
+    let mut config = load_build_config(args.config.as_deref())?;
+    if args.no_cache {
+        config.qemu.layered.use_cache = false;
+    }
     let curriculum = load_curriculum(&args.courses_root)?;
     if curriculum.scenarios.is_empty() {
         return Ok(());
@@ -508,7 +518,6 @@ fn prepare_direct_render_request(
         .with_context(|| format!("base image '{}' not found in catalog", image.base))?;
 
     Ok(DirectBuildRequest {
-        scenario_path: source.scenario_path.clone(),
         scenario: scenario.clone(),
         lecture: source.lecture.clone(),
         vm_name: vm_name.to_string(),

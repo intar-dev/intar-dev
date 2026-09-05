@@ -74,6 +74,10 @@ import {
   applyLectureBriefingPresentation,
   assertCourseScenarioStartAllowed,
 } from "@/lib/course-catalogs";
+import {
+  isSafeBuildId,
+  isSafeBundleRev,
+} from "@/control-plane/image-registry/shared";
 import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
 import { deleteStargateRoute, stargateRouteTtlMs } from "@/lib/stargate";
 import {
@@ -86,7 +90,9 @@ import {
   activeRunConflictError,
   activeKeyFor,
   parseRunState,
+  type ScenarioRunLaunchSource,
 } from "./storage";
+import { loadCandidateScenarioRunSource } from "./candidate";
 import { deterministicRuntimeVmName } from "./runtime-vm-name";
 
 export { deterministicRuntimeVmName } from "./runtime-vm-name";
@@ -105,12 +111,35 @@ export type ScenarioRouteType =
   | "native_profile_keys"
   | "native_issued_key";
 
+async function loadScenarioForStart(input: {
+  db: DrizzleD1Database;
+  scenarioId: string;
+  organizationId: string | null;
+  candidateProof: { revision: string; buildId: string } | null;
+}): Promise<ScenarioRunLaunchSource | null> {
+  if (input.candidateProof) {
+    return loadCandidateScenarioRunSource(input.db, {
+      revision: input.candidateProof.revision,
+      buildId: input.candidateProof.buildId,
+      scenarioId: input.scenarioId,
+      organizationId: input.organizationId,
+    });
+  }
+  const [scenario] = await loadEnabledScenarioRows(
+    input.scenarioId,
+    input.organizationId,
+  );
+  return scenario ?? null;
+}
+
 export async function startScenarioRunInternal(params: {
   scenarioId: string;
   userId: string;
   betaAdmission: BetaAdmissionEpoch;
   organizationId?: string | null;
   hostId?: string;
+  candidateRevision?: string;
+  candidateBuildId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
 }): Promise<{
@@ -124,12 +153,61 @@ export async function startScenarioRunInternal(params: {
     ...(params.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
   });
   const organizationId = params.organizationId ?? null;
+  const candidateRevision =
+    params.candidateRevision === undefined
+      ? null
+      : params.candidateRevision.trim();
+  const candidateBuildId =
+    params.candidateBuildId === undefined
+      ? null
+      : params.candidateBuildId.trim();
+  if ((candidateRevision === null) !== (candidateBuildId === null)) {
+    throw appError(
+      400,
+      "candidate_proof_identity_incomplete",
+      "candidate revision and build id are both required",
+    );
+  }
+  if (
+    candidateRevision !== null &&
+    candidateBuildId !== null &&
+    (!isSafeBundleRev(candidateRevision) || !isSafeBuildId(candidateBuildId))
+  ) {
+    throw appError(
+      400,
+      "candidate_proof_identity_invalid",
+      "candidate revision or build id is invalid",
+    );
+  }
+  const candidateProof =
+    candidateRevision !== null && candidateBuildId !== null
+      ? { revision: candidateRevision, buildId: candidateBuildId }
+      : null;
+  if (candidateProof && !params.allowDrainedAdminProof) {
+    throw appError(
+      403,
+      "candidate_proof_admin_required",
+      "candidate proofs require administrator authorization",
+    );
+  }
   const db = drizzle(env.DB);
-  const [[scenario], active] = await Promise.all([
-    loadEnabledScenarioRows(params.scenarioId, organizationId),
+  const [scenario, active] = await Promise.all([
+    loadScenarioForStart({
+      db,
+      scenarioId: params.scenarioId,
+      organizationId,
+      candidateProof,
+    }),
     loadActiveRunRow(params.userId),
   ]);
   if (!scenario) {
+    if (candidateProof) {
+      throw appError(
+        409,
+        "scenario_candidate_not_ready",
+        "candidate scenario is unavailable or not ready",
+      );
+    }
     throw appError(404, "scenario_not_found", "scenario not found");
   }
   // Resolve the V2 unit before an active-run reuse can return. This keeps an
@@ -144,6 +222,9 @@ export async function startScenarioRunInternal(params: {
   });
   await assertScenarioStartAdmission(params.userId, params.betaAdmission);
   if (active) {
+    if (candidateProof || active.state.candidateSource) {
+      throw activeRunConflictError(active.title);
+    }
     if (
       active.scenarioId === scenario.scenarioId &&
       active.organizationId === organizationId
@@ -167,10 +248,9 @@ export async function startScenarioRunInternal(params: {
     throw activeRunConflictError(active.title);
   }
 
-  const briefing = applyLectureBriefingPresentation(
-    scenario.briefing,
-    courseLecture.lecture,
-  );
+  const briefing = scenario.candidateSource
+    ? scenario.briefing
+    : applyLectureBriefingPresentation(scenario.briefing, courseLecture.lecture);
 
   const runId = createAppId();
   const createdAt = Date.now();
@@ -249,6 +329,9 @@ export async function startScenarioRunInternal(params: {
   });
   const state = recomputeRunState({
     ...initial,
+    ...(scenario.candidateSource
+      ? { candidateSource: scenario.candidateSource }
+      : {}),
     phase: "provisioning",
     phaseTitle: "Provisioning",
     phaseDetail: "Queueing launch delivery.",

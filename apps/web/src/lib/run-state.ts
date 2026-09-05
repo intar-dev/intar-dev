@@ -142,6 +142,12 @@ export interface RunVmStateDocument {
   provisioning: RunVmProvisioningSpec;
 }
 
+/** Immutable origin for an administrator-started staged-image proof run. */
+export interface CandidateRunSourceIdentityV1 {
+  revision: string;
+  buildId: string;
+}
+
 export interface RunStateDocument {
   phase: RunPhase;
   phaseTitle: string;
@@ -155,6 +161,7 @@ export interface RunStateDocument {
   replayArtifacts: ScenarioReplayArtifact[];
   terminalTarget: TerminalTarget;
   vms: RunVmStateDocument[];
+  candidateSource?: CandidateRunSourceIdentityV1;
 }
 
 export const RUN_PHASE_ORDER: Record<RunPhase, number> = {
@@ -283,6 +290,9 @@ export function recomputeRunState(current: RunStateDocument): RunStateDocument {
   const descriptor = describeRunPhase(phase, vms, current.phaseDetail);
 
   return {
+    ...(current.candidateSource
+      ? { candidateSource: current.candidateSource }
+      : {}),
     phase,
     phaseTitle: descriptor.title,
     phaseDetail: descriptor.detail,

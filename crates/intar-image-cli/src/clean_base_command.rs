@@ -142,6 +142,7 @@ pub(super) fn build_base_command(args: &BuildBaseCommand) -> Result<()> {
     validate_output_path(&args.output)?;
 
     let mut config = load_build_config(Some(&args.config))?.qemu;
+    config.layered.use_cache = false;
     validate_config(&config)?;
     let catalog = load_base_image_catalog(&args.base_images)?;
     let base = catalog
@@ -390,10 +391,6 @@ fn validate_config(config: &QemuBuildConfig) -> Result<()> {
     );
     ensure!(config.accelerator == "kvm", "clean-base proof requires KVM");
     ensure!(
-        config.qemuargs.is_empty(),
-        "clean-base proof rejects custom QEMU arguments"
-    );
-    ensure!(
         (1..=16).contains(&config.build_cpus),
         "clean-base build CPU count is out of bounds"
     );
@@ -403,7 +400,9 @@ fn validate_config(config: &QemuBuildConfig) -> Result<()> {
     );
     for (label, path) in [
         ("qemu", &config.qemu_binary),
-        ("mmdebstrap", &config.mmdebstrap_binary),
+        ("qemu-img", &config.layered.qemu_img_binary),
+        ("buildctl", &config.layered.buildctl_binary),
+        ("umoci", &config.layered.umoci_binary),
         ("mke2fs", &config.mke2fs_binary),
         ("e2fsck", &config.e2fsck_binary),
     ] {

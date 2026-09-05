@@ -1,6 +1,7 @@
 import type { ImageArchitecture } from "@/generated/catalog";
 import type { ImageBuildStatus, ImageBuildTimings } from "@/db/schema";
 import { canRetryImageBuild } from "@/lib/build-scheduler-core";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 
 const ADMIN_BUILD_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -24,10 +25,27 @@ export interface AdminBuildResponseRow {
 }
 
 export interface AdminBuildDetailResponseRow extends AdminBuildResponseRow {
+  organizationId: string | null;
+  bundleOrganizationId: string | null;
   hostRole: "agent" | "builder" | null;
   hostConnected: boolean | null;
   hostLastHeartbeatAt: number | null;
   bundleMeta: unknown;
+  candidateProof: AdminCandidateProof | null;
+}
+
+export interface AdminCandidateProof {
+  revision: string;
+  buildId: string;
+}
+
+export interface AdminCandidateProofCandidate {
+  revision: string;
+  buildId: string;
+  organizationId: string | null;
+  bundleOrganizationId: string | null;
+  bundleMeta: unknown;
+  updatedAt: number;
 }
 
 export function isSafeAdminBuildId(value: string): boolean {
@@ -59,6 +77,7 @@ export function serializeAdminBuildSummary(row: AdminBuildResponseRow) {
 export function serializeAdminBuildDetail(row: AdminBuildDetailResponseRow) {
   return {
     ...serializeAdminBuildSummary(row),
+    organizationId: row.organizationId,
     host: row.hostId
       ? {
           id: row.hostId,
@@ -73,5 +92,108 @@ export function serializeAdminBuildDetail(row: AdminBuildDetailResponseRow) {
       r2Key: row.bundleR2Key,
       meta: row.bundleMeta,
     },
+    candidateAvailable: row.candidateProof !== null,
+    candidateProof: row.candidateProof,
   };
+}
+
+export function selectAdminCandidateProof(input: {
+  build: Pick<
+    AdminBuildDetailResponseRow,
+    | "id"
+    | "scenarioId"
+    | "arch"
+    | "contentHash"
+    | "organizationId"
+    | "bundleOrganizationId"
+    | "bundleMeta"
+    | "status"
+  >;
+  candidates: AdminCandidateProofCandidate[];
+}): AdminCandidateProof | null {
+  if (
+    input.build.status !== "succeeded" ||
+    input.build.organizationId !== input.build.bundleOrganizationId ||
+    !hasExactBundleScenario(input.build.bundleMeta, {
+      scenarioId: input.build.scenarioId,
+      arch: input.build.arch,
+      contentHash: input.build.contentHash,
+      requireCandidateChannel: false,
+    })
+  ) {
+    return null;
+  }
+
+  const candidate = input.candidates
+    .filter(
+      (value) =>
+        value.buildId === input.build.id &&
+        value.organizationId === input.build.organizationId &&
+        value.bundleOrganizationId === input.build.organizationId &&
+        hasExactBundleScenario(value.bundleMeta, {
+          scenarioId: input.build.scenarioId,
+          arch: input.build.arch,
+          contentHash: input.build.contentHash,
+          requireCandidateChannel: true,
+        }),
+    )
+    .sort(
+      (left, right) =>
+        right.updatedAt - left.updatedAt ||
+        left.revision.localeCompare(right.revision),
+    )[0];
+  return candidate
+    ? { revision: candidate.revision, buildId: candidate.buildId }
+    : null;
+}
+
+function hasExactBundleScenario(
+  value: unknown,
+  input: {
+    scenarioId: string;
+    arch: ImageArchitecture;
+    contentHash: string;
+    requireCandidateChannel: boolean;
+  },
+): boolean {
+  if (!isRecord(value) || !isCurrentBuildBundle(value)) return false;
+  return (
+    (!input.requireCandidateChannel || value.catalogChannel === "candidate") &&
+    value.scenarios.some(
+      (scenario) =>
+        scenario.scenarioId === input.scenarioId &&
+        scenario.arch === input.arch &&
+        scenario.contentHash === input.contentHash,
+    )
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCurrentBuildBundle(
+  value: Record<string, unknown>,
+): value is {
+  buildFormatVersion: string;
+  catalogChannel?: "candidate" | "live";
+  scenarios: Array<{
+    scenarioId: string;
+    arch: ImageArchitecture;
+    contentHash: string;
+  }>;
+} {
+  return (
+    value.buildFormatVersion === IMAGE_BUILD_FORMAT_VERSION &&
+    Array.isArray(value.scenarios) &&
+    value.scenarios.every(
+      (scenario) =>
+        typeof scenario === "object" &&
+        scenario !== null &&
+        !Array.isArray(scenario) &&
+        typeof scenario.scenarioId === "string" &&
+        (scenario.arch === "x86_64" || scenario.arch === "aarch64") &&
+        typeof scenario.contentHash === "string",
+    )
+  );
 }

@@ -106,7 +106,7 @@ The `scenarios/` tree has only technical Scenario files. It excludes
 `lecture.md`. The technical scenario hash and image-builder input also exclude
 `lecture.md`. A Markdown-only change updates the catalog and presentation data
 without a VM image build. A HCL or runtime-file change creates a new
-`intar-image-build-v11` technical hash.
+`intar-image-build-v12` technical hash.
 
 Every upload contains the complete V2 snapshot for its public or organization
 scope. The server replaces that scope's catalog; it does not merge Courses from

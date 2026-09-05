@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   isSafeAdminBuildId,
+  selectAdminCandidateProof,
   serializeAdminBuildDetail,
   serializeAdminBuildSummary,
   type AdminBuildDetailResponseRow,
 } from "@/lib/admin-build-response";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 
 describe("admin build response serialization", () => {
   it("summarizes build rows without exposing raw log object keys", () => {
@@ -28,6 +30,75 @@ describe("admin build response serialization", () => {
     expect(serialized).not.toHaveProperty("logR2Key");
   });
 
+  it("offers proof runs only for staged successful candidate builds", () => {
+    const candidateProof = selectAdminCandidateProof({
+      build: { ...buildRow, status: "succeeded" },
+      candidates: [
+        {
+          revision: "candidate-revision",
+          buildId: "build-1",
+          organizationId: null,
+          bundleOrganizationId: null,
+          updatedAt: 2,
+          bundleMeta: {
+            buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+            catalogChannel: "candidate",
+            scenarios: [
+              {
+                scenarioId: "broken-nginx",
+                arch: "x86_64",
+                contentHash: "f".repeat(64),
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const serialized = serializeAdminBuildDetail({
+      ...buildRow,
+      status: "succeeded",
+      candidateProof,
+    });
+
+    expect(serialized.candidateAvailable).toBe(true);
+    expect(serialized.candidateProof).toEqual({
+      revision: "candidate-revision",
+      buildId: "build-1",
+    });
+  });
+
+  it("selects the latest current-format staged revision for a reused live build", () => {
+    const proof = selectAdminCandidateProof({
+      build: { ...buildRow, status: "succeeded" },
+      candidates: [
+        candidateProofRow("candidate-earlier", 1),
+        candidateProofRow("candidate-latest", 2),
+      ],
+    });
+
+    expect(proof).toEqual({
+      revision: "candidate-latest",
+      buildId: "build-1",
+    });
+  });
+
+  it("does not offer a proof run for a prior-format candidate bundle", () => {
+    const proof = selectAdminCandidateProof({
+      build: { ...buildRow, status: "succeeded" },
+      candidates: [
+        {
+          ...candidateProofRow("candidate-v11", 2),
+          bundleMeta: {
+            ...candidateProofRow("candidate-v11", 2).bundleMeta,
+            buildFormatVersion: "intar-image-build-v11",
+          },
+        },
+      ],
+    });
+
+    expect(proof).toBeNull();
+  });
+
   it("adds host and bundle detail for build detail responses", () => {
     const serialized = serializeAdminBuildDetail(buildRow);
 
@@ -42,7 +113,7 @@ describe("admin build response serialization", () => {
       rev: "abc123",
       r2Key: "builds/bundles/abc123.tar.gz",
       meta: {
-        buildFormatVersion: "intar-image-build-v11",
+        buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -100,6 +171,8 @@ const buildRow: AdminBuildDetailResponseRow = {
   arch: "x86_64",
   rev: "abc123",
   contentHash: "f".repeat(64),
+  organizationId: null,
+  bundleOrganizationId: null,
   hostId: "builder-1",
   hostName: "Builder One",
   hostRole: "builder",
@@ -117,7 +190,7 @@ const buildRow: AdminBuildDetailResponseRow = {
   },
   bundleR2Key: "builds/bundles/abc123.tar.gz",
   bundleMeta: {
-    buildFormatVersion: "intar-image-build-v11",
+    buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
     scenarios: [
       {
         scenarioId: "broken-nginx",
@@ -126,6 +199,28 @@ const buildRow: AdminBuildDetailResponseRow = {
       },
     ],
   },
+  candidateProof: null,
   createdAt: 1_762_041_600_000,
   updatedAt: 1_762_041_660_000,
 };
+
+function candidateProofRow(revision: string, updatedAt: number) {
+  return {
+    revision,
+    buildId: "build-1",
+    organizationId: null,
+    bundleOrganizationId: null,
+    updatedAt,
+    bundleMeta: {
+      buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+      catalogChannel: "candidate" as const,
+      scenarios: [
+        {
+          scenarioId: "broken-nginx",
+          arch: "x86_64" as const,
+          contentHash: "f".repeat(64),
+        },
+      ],
+    },
+  };
+}

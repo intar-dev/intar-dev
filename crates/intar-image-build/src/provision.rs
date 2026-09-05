@@ -26,6 +26,7 @@ const KINO_RUNTIME_CONFIG_PATH: &str = "/run/intar/kino.hcl";
 const KINO_CONTROL_SOCKET_PATH: &str = "/run/intar/kino-control.sock";
 const INTAR_RUN_CLI_BROKER_PATH: &str = "/run/intar/run-cli-broker";
 const INTAR_RUN_CLI_BROKER_URI: &str = "vsock://2:18082";
+const INITIAL_BOOT_FILES_PATH: &str = "/run/intar-build-state/initial-boot-files";
 const FAILED_STEP_LOG_TAIL_BYTES: usize = 64 * 1024;
 // The virtio-net device and its final udev name are not guaranteed to exist
 // when the scenario supervisor first runs. Bound discovery and configuration
@@ -38,12 +39,93 @@ const GUEST_NETWORK_READY_TIMEOUT_SECONDS: u64 = 30;
 // agent's 360-second whole-runtime window for the other first-boot phases.
 const GUEST_SSH_READY_TIMEOUT_SECONDS: u64 = 2 * 60;
 
-pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) -> Result<String> {
-    let mut script = String::new();
+/// One independently executable part of scenario provisioning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProvisionStage {
+    pub(crate) id: String,
+    pub(crate) kind: ProvisionStageKind,
+    pub(crate) script: String,
+}
+
+/// The ordered part of scenario provisioning represented by a [`ProvisionStage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProvisionStageKind {
+    Packages,
+    AuthoredStep { index: usize },
+    Runtime,
+    Cleanup,
+}
+
+struct ProvisionInputs {
+    kino_template: String,
+    scenario_motd: String,
+    requires_kubernetes_modules: bool,
+    step_scripts: Vec<GeneratedStepScript>,
+}
+
+/// Render provisioning as independently executable stages in guest execution order.
+pub(crate) fn render_scenario_build_stages(
+    scenario: &Scenario,
+    vm: &VmDefinition,
+) -> Result<Vec<ProvisionStage>> {
+    let inputs = render_provision_inputs(scenario, vm)?;
+    let mut stages = Vec::with_capacity(inputs.step_scripts.len() + 3);
+
+    let mut packages = String::new();
+    append_script_header(&mut packages)?;
+    append_package_helpers(&mut packages, &vm.packages)?;
+    append_package_stage_setup(&mut packages)?;
+    append_initial_boot_files_state(&mut packages)?;
+    append_package_stage_body(&mut packages)?;
+    stages.push(ProvisionStage {
+        id: String::from("packages"),
+        kind: ProvisionStageKind::Packages,
+        script: packages,
+    });
+
+    for (index, step_script) in inputs.step_scripts.iter().enumerate() {
+        let mut script = String::new();
+        append_stage_prelude(&mut script)?;
+        append_step_scripts(&mut script, std::slice::from_ref(step_script))?;
+        stages.push(ProvisionStage {
+            id: format!("step-{index}"),
+            kind: ProvisionStageKind::AuthoredStep { index },
+            script,
+        });
+    }
+
+    let mut runtime = String::new();
+    append_stage_prelude(&mut runtime)?;
+    append_runtime_activation(
+        &mut runtime,
+        &inputs.kino_template,
+        &inputs.scenario_motd,
+        vm.cpu_millis,
+        inputs.requires_kubernetes_modules,
+    )?;
+    stages.push(ProvisionStage {
+        id: String::from("runtime"),
+        kind: ProvisionStageKind::Runtime,
+        script: runtime,
+    });
+
+    let mut cleanup = String::new();
+    append_stage_prelude(&mut cleanup)?;
+    append_staged_scenario_image_finalization(&mut cleanup)?;
+    append_final_cleanup(&mut cleanup)?;
+    stages.push(ProvisionStage {
+        id: String::from("cleanup"),
+        kind: ProvisionStageKind::Cleanup,
+        script: cleanup,
+    });
+
+    Ok(stages)
+}
+
+fn render_provision_inputs(scenario: &Scenario, vm: &VmDefinition) -> Result<ProvisionInputs> {
     let derived_kino = scenario
         .derive_kino_config_for_vm(&vm.name)
         .context("failed to derive Kino config")?;
-    let kino_template = derived_kino.config_hcl.clone();
     let scenario_motd = render_scenario_motd(&derived_kino.probe_descriptors)
         .context("failed to render scenario motd")?;
     let requires_kubernetes_modules = derived_kino
@@ -64,8 +146,16 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
                         | VmAction::K8sScaleDeployment { .. }
                 )
             });
-    let step_scripts = render_vm_step_scripts(vm)?;
 
+    Ok(ProvisionInputs {
+        kino_template: derived_kino.config_hcl,
+        scenario_motd,
+        requires_kubernetes_modules,
+        step_scripts: render_vm_step_scripts(vm)?,
+    })
+}
+
+fn append_script_header(script: &mut String) -> Result<()> {
     writeln!(script, "#!/usr/bin/env bash").context("format error")?;
     writeln!(script, "set -euo pipefail").context("format error")?;
     writeln!(script).context("format error")?;
@@ -88,21 +178,15 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
     )
     .context("format error")?;
     writeln!(script).context("format error")?;
-    // The mmdebstrap base rootfs ships without apt package lists, so package
-    // installs must be able to lazily run apt-get update first.
-    append_package_helpers(&mut script, &vm.packages)?;
-    append_script_body(
-        &mut script,
-        &kino_template,
-        &scenario_motd,
-        &step_scripts,
-        vm,
-        requires_kubernetes_modules,
-    )?;
-    Ok(script)
+    Ok(())
 }
 
-fn append_package_helpers(script: &mut String, required_packages: &[String]) -> Result<()> {
+fn append_stage_prelude(script: &mut String) -> Result<()> {
+    append_script_header(script)?;
+    append_log_phase(script)
+}
+
+fn append_log_phase(script: &mut String) -> Result<()> {
     writeln!(script, "log_phase() {{").context("format error")?;
     writeln!(script, "  local phase=\"$1\"").context("format error")?;
     writeln!(script, "  local status=\"$2\"").context("format error")?;
@@ -113,6 +197,11 @@ fn append_package_helpers(script: &mut String, required_packages: &[String]) -> 
     .context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
+    Ok(())
+}
+
+fn append_package_helpers(script: &mut String, required_packages: &[String]) -> Result<()> {
+    append_log_phase(script)?;
     writeln!(script, "apt_lists_updated=0").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "ensure_package_lists_updated() {{").context("format error")?;
@@ -159,21 +248,12 @@ fn append_package_helpers(script: &mut String, required_packages: &[String]) -> 
     Ok(())
 }
 
-fn append_script_body(
-    script: &mut String,
-    kino_template: &str,
-    scenario_motd: &str,
-    step_scripts: &[GeneratedStepScript],
-    vm: &VmDefinition,
-    requires_kubernetes_modules: bool,
-) -> Result<()> {
+fn append_package_stage_setup(script: &mut String) -> Result<()> {
     writeln!(script, "install -d -m 0755 /usr/share/keyrings").context("format error")?;
-    writeln!(
-        script,
-        "initial_boot_files=\"$(find /boot -mindepth 1 -maxdepth 1 -printf '%P\\n' 2>/dev/null | sort || true)\""
-    )
-    .context("format error")?;
-    writeln!(script).context("format error")?;
+    Ok(())
+}
+
+fn append_package_stage_body(script: &mut String) -> Result<()> {
     writeln!(
         script,
         "install_packages scenario_packages \"${{required_packages[@]}}\""
@@ -185,19 +265,37 @@ fn append_script_body(
         "install -d -m 0770 {}",
         shell_quote(RECORDING_MOUNT_PATH)
     )
-    .context("format error")?;
+    .context("format error")
+}
 
-    append_step_scripts(script, step_scripts)?;
-
-    append_runtime_activation(
+fn append_initial_boot_files_state(script: &mut String) -> Result<()> {
+    writeln!(
         script,
-        kino_template,
-        scenario_motd,
-        vm.cpu_millis,
-        requires_kubernetes_modules,
-    )?;
-    append_scenario_image_finalization(script)?;
-    append_final_cleanup(script)
+        "install -d -o root -g root -m 0755 {}",
+        shell_quote("/run/intar-build-state")
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "install -o root -g root -m 0644 /dev/null {}",
+        shell_quote(INITIAL_BOOT_FILES_PATH)
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "find /boot -mindepth 1 -maxdepth 1 -printf '%P\\n' 2>/dev/null | sort >{} || true",
+        shell_quote(INITIAL_BOOT_FILES_PATH)
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "chown root:root {} && chmod 0644 {}",
+        shell_quote(INITIAL_BOOT_FILES_PATH),
+        shell_quote(INITIAL_BOOT_FILES_PATH)
+    )
+    .context("format error")?;
+    writeln!(script).context("format error")?;
+    Ok(())
 }
 
 /// Append the stable runtime layer used by published scenario images.
@@ -370,6 +468,29 @@ fn append_scenario_image_finalization(script: &mut String) -> Result<()> {
     writeln!(script, "fstrim -v / || true").context("format error")?;
     writeln!(script, "log_phase image_finalize end").context("format error")?;
     Ok(())
+}
+
+fn append_staged_scenario_image_finalization(script: &mut String) -> Result<()> {
+    writeln!(
+        script,
+        "initial_boot_files_path={}",
+        shell_quote(INITIAL_BOOT_FILES_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "if [ ! -f \"$initial_boot_files_path\" ]; then").context("format error")?;
+    writeln!(
+        script,
+        "  echo 'initial /boot file state is missing; cannot finalize scenario image' >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "  exit 1").context("format error")?;
+    writeln!(script, "fi").context("format error")?;
+    writeln!(
+        script,
+        "initial_boot_files=\"$(cat \"$initial_boot_files_path\")\""
+    )
+    .context("format error")?;
+    append_scenario_image_finalization(script)
 }
 
 fn append_step_scripts(script: &mut String, step_scripts: &[GeneratedStepScript]) -> Result<()> {
@@ -583,6 +704,7 @@ fn append_final_cleanup(script: &mut String) -> Result<()> {
     writeln!(script, "log_phase acpi_poweroff_handler end").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "log_phase cleanup start").context("format error")?;
+    writeln!(script, "rm -f {}", shell_quote(INITIAL_BOOT_FILES_PATH)).context("format error")?;
     writeln!(script, "apt-get clean || true").context("format error")?;
     writeln!(
         script,

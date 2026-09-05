@@ -27,7 +27,7 @@ pub(super) fn scenario_base_definition_identity(
             .definition_for_arch(target_arch)
             .with_context(|| {
                 format!(
-                    "base image '{}' has no {target_arch} mmdebstrap definition",
+                    "base image '{}' has no {target_arch} OCI rootfs definition",
                     image.base
                 )
             })?;

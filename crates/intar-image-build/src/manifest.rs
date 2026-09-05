@@ -249,7 +249,6 @@ base_image "trixie" {
         )
         .unwrap();
         let rendered = render_direct_build(&DirectBuildRequest {
-            scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
             scenario,
             lecture: lecture_fixture(),
             vm_name: "web".to_string(),

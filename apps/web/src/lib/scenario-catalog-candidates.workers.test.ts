@@ -17,6 +17,7 @@ import {
 import type { HostStateReportV2 } from "@/generated/bridge";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { stageReusableCandidateManifests } from "@/lib/scenario-catalog-candidates";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -34,7 +35,7 @@ describe("reused candidate presentation", () => {
     await seedReusedBuilds(db, ["task"]);
 
     const meta: ImageBuildBundleMeta = {
-      buildFormatVersion: "intar-image-build-v11",
+      buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
       catalogChannel: "candidate",
       scenarios: [{ scenarioId: "task", arch: "x86_64", contentHash }],
       courseCatalog: {
@@ -162,7 +163,7 @@ async function seedReusedBuilds(
     rev: "published",
     r2Key: "builds/bundles/published.tar.gz",
     metaJson: {
-      buildFormatVersion: "intar-image-build-v11",
+      buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
       scenarios: [],
     },
     createdAt: 1,
@@ -239,7 +240,7 @@ async function seedAgentHost(
 
 function reusedMeta(ids: string[]): ImageBuildBundleMeta {
   return {
-    buildFormatVersion: "intar-image-build-v11",
+    buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
     catalogChannel: "candidate",
     scenarios: ids.map((scenarioId) => ({
       scenarioId,

@@ -1,6 +1,10 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
+import {
+  isSafeBuildId,
+  isSafeBundleRev,
+} from "@/control-plane/image-registry/shared";
 import { isSafeScenarioId } from "@/lib/scenario-id";
 import {
   courseLocationFromRunSnapshot,
@@ -13,6 +17,8 @@ export const prerender = false;
 interface StartScenarioBody {
   hostId?: unknown;
   organizationId?: unknown;
+  candidateRevision?: unknown;
+  candidateBuildId?: unknown;
 }
 
 export const POST: APIRoute = async ({ request, params }) => {
@@ -29,6 +35,8 @@ export const POST: APIRoute = async ({ request, params }) => {
 
   let hostId: string | undefined;
   let organizationId: string | null = null;
+  let candidateRevision: string | undefined;
+  let candidateBuildId: string | undefined;
   if (request.headers.get("content-type")?.includes("application/json")) {
     let parsedBody: unknown;
     try {
@@ -63,6 +71,24 @@ export const POST: APIRoute = async ({ request, params }) => {
         { status: 400 },
       );
     }
+    if (
+      body.candidateRevision !== undefined &&
+      typeof body.candidateRevision !== "string"
+    ) {
+      return jsonResponse(
+        { error: "candidateRevision must be a string" },
+        { status: 400 },
+      );
+    }
+    if (
+      body.candidateBuildId !== undefined &&
+      typeof body.candidateBuildId !== "string"
+    ) {
+      return jsonResponse(
+        { error: "candidateBuildId must be a string" },
+        { status: 400 },
+      );
+    }
     const organizationKey =
       typeof body.organizationId === "string"
         ? body.organizationId.trim() || null
@@ -86,6 +112,34 @@ export const POST: APIRoute = async ({ request, params }) => {
     if (hostId && !authz.context.isAdmin) {
       return jsonResponse({ error: "admin required" }, { status: 403 });
     }
+    if (
+      body.candidateRevision !== undefined ||
+      body.candidateBuildId !== undefined
+    ) {
+      if (
+        typeof body.candidateRevision !== "string" ||
+        typeof body.candidateBuildId !== "string"
+      ) {
+        return jsonResponse(
+          { error: "candidateRevision and candidateBuildId are required" },
+          { status: 400 },
+        );
+      }
+      candidateRevision = body.candidateRevision.trim();
+      candidateBuildId = body.candidateBuildId.trim();
+      if (
+        !isSafeBundleRev(candidateRevision) ||
+        !isSafeBuildId(candidateBuildId)
+      ) {
+        return jsonResponse(
+          { error: "candidateRevision or candidateBuildId is invalid" },
+          { status: 400 },
+        );
+      }
+      if (!authz.context.isAdmin) {
+        return jsonResponse({ error: "admin required" }, { status: 403 });
+      }
+    }
   }
 
   try {
@@ -95,6 +149,9 @@ export const POST: APIRoute = async ({ request, params }) => {
       betaAdmission: authz.context.betaAdmission,
       ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
+      ...(candidateRevision && candidateBuildId
+        ? { candidateRevision, candidateBuildId }
+        : {}),
       ...(authz.context.isAdmin ? { allowDrainedAdminProof: true } : {}),
       ...(authz.context.isAdmin ? { allowSequenceBypass: true } : {}),
     });

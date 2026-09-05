@@ -28,6 +28,7 @@ import {
   type RunPhase,
   type ScenarioReplayArtifact,
   type RunStateDocument,
+  type CandidateRunSourceIdentityV1,
 } from "@/lib/run-state";
 import {
   buildScenarioRunHintViews,
@@ -58,6 +59,16 @@ export interface ScenarioRunContentSnapshot {
   solutionMarkdown: string;
 }
 
+export interface ScenarioRunLaunchSource {
+  scenarioId: string;
+  organizationId: string | null;
+  enabledAt: number;
+  briefing: ReturnType<typeof deriveScenarioBriefing>;
+  content: ScenarioRunContentSnapshot;
+  launchSpecs: ReturnType<typeof buildScenarioLaunchSpecs>;
+  candidateSource?: CandidateRunSourceIdentityV1;
+}
+
 export async function loadEnabledScenarioRows(
   scenarioId?: string,
   organizationId: string | null = null,
@@ -68,14 +79,20 @@ export async function loadEnabledScenarioRows(
       )
     : await listEnabledScenarios({ organizationId });
 
-  return scenarios.map((scenario) => ({
+  return scenarios.map(scenarioRunLaunchSourceFromDetail);
+}
+
+export function scenarioRunLaunchSourceFromDetail(
+  scenario: ScenarioDetailRecord,
+): ScenarioRunLaunchSource {
+  return {
     scenarioId: scenario.scenarioId,
     organizationId: scenario.organizationId,
     enabledAt: scenario.enabledAt ?? Date.now(),
     briefing: deriveScenarioBriefing(scenario),
     content: scenarioRunContentSnapshot(scenario),
     launchSpecs: buildScenarioLaunchSpecs(scenario),
-  }));
+  };
 }
 
 export function scenarioRunContentSnapshot(

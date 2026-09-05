@@ -10,6 +10,7 @@ import {
   vmScenarios,
 } from "@/db/schema";
 import { catalogRowsFromScenarioManifest } from "@/lib/catalog-manifest";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { reconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
@@ -67,6 +68,12 @@ export async function handleCandidateCatalogPromotion(
   const bundle = bundles[0];
   if (!bundle || bundle.meta.catalogChannel !== "candidate") {
     return jsonResponse({ error: "candidate bundle revision not found" }, 404);
+  }
+  if (bundle.meta.buildFormatVersion !== IMAGE_BUILD_FORMAT_VERSION) {
+    return jsonResponse(
+      { error: "candidate bundle uses an unsupported image build format" },
+      409,
+    );
   }
   const expected = bundle.meta.scenarios;
   const builds = await db
