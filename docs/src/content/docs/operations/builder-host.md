@@ -158,9 +158,11 @@ The decimal 6,442 MB cap plus 2 GiB stays below the 8 GiB total budget.
 `--oci-max-parallelism 2` matches the two permitted OCI build steps. Change
 all three values together when `oci_cache_bytes` changes.
 
-Keep the currently installed production builder binary available until the OCI
-and VM proof passes. A controlled rollback selects that binary; it does not use
-a configuration switch.
+Keep the installed builder binary as a measurement reference. Do not use it
+alone for rollback: an older builder recomputes the v11 content hash and rejects
+a v12 desired hash. A rollback requires matched previous builder, image CLI, and
+control-plane releases. The source has one build backend and no backend selector.
+Published image contracts do not change.
 
 ## Cache, Publication, and Proof
 
