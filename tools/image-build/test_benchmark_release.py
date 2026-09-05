@@ -354,9 +354,9 @@ class BenchmarkReleaseTest(unittest.TestCase):
                 "host_count": 1,
                 "build_status_counts": {"building": 2},
                 "build_phase_counts": {"building": 1, "publishing": 1},
-                "ready_host_count": 0,
+                "ready_host_count": 1,
                 "all_builds_succeeded": False,
-                "all_hosts_ready": False,
+                "all_hosts_ready": True,
                 "build_updated_at_min_unix_ms": 1,
                 "build_updated_at_max_unix_ms": 2,
                 "failed_build_count": 0,
@@ -365,6 +365,7 @@ class BenchmarkReleaseTest(unittest.TestCase):
         events = {event["name"] for event in record["events"]}
         self.assertIn("first_build_phase_building", events)
         self.assertIn("first_build_phase_publishing", events)
+        self.assertNotIn("first_all_hosts_ready", events)
         self.assertIsInstance(record["metrics"]["queue_observed_until_building_ms"], int)
 
     def test_registry_request_declares_the_benchmark_user_agent(self):

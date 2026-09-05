@@ -672,7 +672,7 @@ def observe_status(record: dict[str, Any], summary: dict[str, Any]) -> None:
         add_event_once(record, f"first_build_phase_{phase}")
     if summary["all_builds_succeeded"]:
         add_event_once(record, "first_all_builds_succeeded")
-    if summary["all_hosts_ready"]:
+    if summary["all_builds_succeeded"] and summary["all_hosts_ready"]:
         add_event_once(record, "first_all_hosts_ready")
     update_metrics(record)
 
