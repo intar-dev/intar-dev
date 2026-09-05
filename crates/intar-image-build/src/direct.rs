@@ -1,16 +1,19 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 #[cfg(unix)]
-use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Error, Result, anyhow, bail, ensure};
+use fs2::FileExt;
 use intar_contracts::catalog::{CourseCatalogLectureV2, ScenarioManifestV4};
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
@@ -43,6 +46,7 @@ const QEMU_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const QMP_IO_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const QMP_READ_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const WORK_LOCK_FILENAME: &str = ".intar-build.lock";
 
 #[derive(Debug, Clone)]
 pub struct DirectBuildRequest {
@@ -81,6 +85,22 @@ pub struct RenderedDirectBuild {
     pub base_image: BaseImageSpec,
     pub base_rootfs: RootfsBuildPlan,
     pub disk: ScenarioDiskPlan,
+    _lease: Arc<DirectBuildLease>,
+}
+
+#[derive(Debug)]
+struct DirectBuildLease {
+    work_lock: fs::File,
+    output_lock: fs::File,
+}
+
+impl Drop for DirectBuildLease {
+    fn drop(&mut self) {
+        // Explicit unlock makes a just-dropped render lease immediately
+        // visible to another local CLI invocation on macOS and Linux.
+        let _ = FileExt::unlock(&self.output_lock);
+        let _ = FileExt::unlock(&self.work_lock);
+    }
 }
 
 pub struct DirectBuildPrepareInput<'a> {
@@ -131,6 +151,7 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         .with_context(|| format!("vm '{}' not found", request.vm_name))?;
 
     let paths = direct_build_paths(request, &vm);
+    let lease = acquire_direct_build_lease(&paths)?;
     let base_rootfs = render_rootfs_build_plan(&request.base_image, &request.config);
     let disk = render_scenario_disk_plan(
         &base_rootfs.paths.base_ext4_path,
@@ -173,6 +194,7 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         base_image: request.base_image.clone(),
         base_rootfs,
         disk,
+        _lease: lease,
     })
 }
 
@@ -357,6 +379,70 @@ fn direct_build_paths(request: &DirectBuildRequest, vm: &VmDefinition) -> Direct
         serial_log_path: work_root.join("serial.log"),
         qmp_socket_path: work_root.join(QMP_SOCKET_FILE_NAME),
         work_root,
+    }
+}
+
+fn acquire_direct_build_lease(paths: &DirectBuildPaths) -> Result<Arc<DirectBuildLease>> {
+    let work_lock_path = paths.work_root.join(WORK_LOCK_FILENAME);
+    let output_lock_path = paths.output_chunks_dir.with_extension("lock");
+    let work_lock = open_direct_build_lock(&work_lock_path)?;
+    lock_direct_build_path(&work_lock, &work_lock_path, "work directory")?;
+
+    let output_lock = match open_direct_build_lock(&output_lock_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let _ = FileExt::unlock(&work_lock);
+            return Err(error);
+        }
+    };
+    if let Err(error) = lock_direct_build_path(&output_lock, &output_lock_path, "output stem") {
+        let _ = FileExt::unlock(&work_lock);
+        return Err(error);
+    }
+
+    Ok(Arc::new(DirectBuildLease {
+        work_lock,
+        output_lock,
+    }))
+}
+
+fn open_direct_build_lock(path: &Path) -> Result<fs::File> {
+    let parent = path
+        .parent()
+        .context("direct build lock path has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create direct build lock directory '{}'",
+            parent.display()
+        )
+    })?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .with_context(|| format!("failed to open direct build lock '{}'", path.display()))
+}
+
+fn lock_direct_build_path(lock: &fs::File, path: &Path, resource: &str) -> Result<()> {
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            bail!(
+                "direct build is busy: {resource} '{}' is already in use",
+                path.display()
+            );
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to lock direct build {resource} '{}'",
+                path.display()
+            )
+        }),
     }
 }
 
