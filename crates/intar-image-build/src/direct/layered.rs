@@ -21,6 +21,45 @@ use qmp::Qmp;
 
 const PROVISIONING_ABI: &str = "intar-qemu-stages-v1";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+const VIRTIO_BALLOON_DEVICE: &str = "virtio-balloon-pci,id=intar-balloon,free-page-reporting=on";
+const VIRTIO_BALLOON_VERIFY_COMMAND: &str = r#"set -eu
+modprobe virtio_balloon
+driver=/sys/bus/virtio/drivers/virtio_balloon
+test -d "$driver"
+page_reporting_order=/sys/module/page_reporting/parameters/page_reporting_order
+test -r "$page_reporting_order"
+test -w "$page_reporting_order"
+for device in /sys/bus/virtio/devices/virtio*; do
+  test -e "$device/device" || continue
+  test -L "$device/driver" || continue
+  if test "$(readlink -f "$device/driver")" = "$driver"; then
+    exit 0
+  fi
+done
+exit 1
+"#;
+const CHECKPOINT_MEMORY_RELEASE_COMMAND: &str = r#"set -eu
+sync
+fstrim / || true
+page_reporting_order=/sys/module/page_reporting/parameters/page_reporting_order
+test -r "$page_reporting_order"
+test -w "$page_reporting_order"
+previous_order=$(cat "$page_reporting_order")
+restore_order() {
+  printf '%s\n' "$previous_order" > "$page_reporting_order"
+}
+trap restore_order EXIT
+printf 0 > "$page_reporting_order"
+test "$(cat "$page_reporting_order")" = 0
+sync
+printf 3 > /proc/sys/vm/drop_caches
+sleep 3
+test "$(cat "$page_reporting_order")" = 0
+restore_order
+trap - EXIT
+test "$(cat "$page_reporting_order")" = "$previous_order"
+sync
+"#;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -457,6 +496,25 @@ fn cold_guest(rendered: &RenderedDirectBuild, runtime: &tokio::runtime::Runtime)
         &guest.key.private_key,
         runtime,
     )?);
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .context("virtio balloon driver setup deadline expired")?;
+    let ssh = guest
+        .ssh
+        .as_mut()
+        .context("cold build guest has no SSH session")?;
+    timeout_in_runtime(
+        runtime,
+        remaining,
+        "virtio balloon driver setup",
+        ssh.run(
+            &format!(
+                "sudo bash -c {}",
+                shell_quote(VIRTIO_BALLOON_VERIFY_COMMAND)
+            ),
+            true,
+        ),
+    )?;
     Ok(guest)
 }
 
@@ -809,9 +867,17 @@ fn capture(
         .context("provision deadline expired before checkpoint")?;
     runtime.block_on(async {
         tokio::time::timeout(remaining, async {
-            // Drop discarded filesystem blocks from qcow2 before freezing it.
-            // This changes no live files and avoids caching deleted package data.
-            ssh.run("sync && (sudo fstrim / || true)", true).await?;
+            // Release only clean guest cache pages before QMP freezes RAM.
+            // The script restores the reporting order before this control
+            // session closes, even when an earlier command fails.
+            ssh.run(
+                &format!(
+                    "sudo bash -c {}",
+                    shell_quote(CHECKPOINT_MEMORY_RELEASE_COMMAND)
+                ),
+                true,
+            )
+            .await?;
             ssh.disconnect().await
         })
         .await
@@ -961,8 +1027,17 @@ fn layered_args(rendered: &RenderedDirectBuild, disk: &Path, ssh_port: u16) -> V
         }
     }
     replace_serial_log_with_append(&mut args, &rendered.paths.serial_log_path);
-    args.extend(["-device".to_string(), "vmgenid,guid=auto".to_string()]);
+    append_layered_devices(&mut args);
     args
+}
+
+fn append_layered_devices(args: &mut Vec<String>) {
+    args.extend([
+        "-device".to_string(),
+        "vmgenid,guid=auto".to_string(),
+        "-device".to_string(),
+        VIRTIO_BALLOON_DEVICE.to_string(),
+    ]);
 }
 
 fn replace_serial_log_with_append(args: &mut Vec<String>, serial_log_path: &Path) {
@@ -1322,6 +1397,62 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "file:/work/serial.log")
         );
+    }
+
+    #[test]
+    fn balloon_device_is_stable_and_invalidates_checkpoint_identity() {
+        let mut devices = Vec::new();
+        append_layered_devices(&mut devices);
+        assert_eq!(
+            devices
+                .windows(2)
+                .filter(|pair| pair[0] == "-device" && pair[1] == VIRTIO_BALLOON_DEVICE)
+                .count(),
+            1
+        );
+        assert!(
+            devices
+                .windows(2)
+                .any(|pair| pair == ["-device", "vmgenid,guid=auto"])
+        );
+
+        let identity = |qemu_devices: Vec<String>| CheckpointIdentity {
+            scenario_id: "scenario".to_string(),
+            vm_name: "vm".to_string(),
+            parent_prefix: "base".to_string(),
+            stage_bytes: b"stage".to_vec(),
+            base_sha256: "a".repeat(64),
+            kernel_sha256: "b".repeat(64),
+            initrd_sha256: "c".repeat(64),
+            disk_geometry_bytes: 1,
+            qemu_version: "qemu".to_string(),
+            qemu_cpu: "host".to_string(),
+            qemu_devices,
+            provisioning_abi: PROVISIONING_ABI.to_string(),
+        };
+        let without_balloon = vec!["-device".to_string(), "vmgenid,guid=auto".to_string()];
+        assert_ne!(
+            identity(devices).cache_key().unwrap(),
+            identity(without_balloon).cache_key().unwrap()
+        );
+    }
+
+    #[test]
+    fn balloon_guest_commands_keep_reporting_treatment_bounded() {
+        assert!(VIRTIO_BALLOON_VERIFY_COMMAND.contains("modprobe virtio_balloon"));
+        assert!(VIRTIO_BALLOON_VERIFY_COMMAND.contains("/sys/bus/virtio/drivers/virtio_balloon"));
+        assert!(VIRTIO_BALLOON_VERIFY_COMMAND.contains(
+            "page_reporting_order=/sys/module/page_reporting/parameters/page_reporting_order"
+        ));
+        assert!(VIRTIO_BALLOON_VERIFY_COMMAND.contains("test -w \"$page_reporting_order\""));
+        assert!(CHECKPOINT_MEMORY_RELEASE_COMMAND.contains("fstrim / || true"));
+        assert!(CHECKPOINT_MEMORY_RELEASE_COMMAND.contains("drop_caches"));
+        assert!(CHECKPOINT_MEMORY_RELEASE_COMMAND.contains(
+            "page_reporting_order=/sys/module/page_reporting/parameters/page_reporting_order"
+        ));
+        assert!(CHECKPOINT_MEMORY_RELEASE_COMMAND.contains("trap restore_order EXIT"));
+        assert!(CHECKPOINT_MEMORY_RELEASE_COMMAND.contains("sleep 3"));
+        assert!(CHECKPOINT_MEMORY_RELEASE_COMMAND.contains("trap - EXIT"));
     }
 
     #[test]
