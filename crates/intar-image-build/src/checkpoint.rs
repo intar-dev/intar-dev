@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use fs2::FileExt;
+use intar_image_scenario::{hash_field, hex_digest, sha256_bytes_hex as sha256_bytes};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -839,26 +840,6 @@ fn require_non_empty(name: &str, value: &str) -> Result<()> {
 
 fn usize_to_u64(value: usize) -> [u8; 8] {
     u64::try_from(value).unwrap_or(u64::MAX).to_le_bytes()
-}
-
-fn hash_field(hasher: &mut Sha256, name: &str, value: &[u8]) {
-    hasher.update(name.as_bytes());
-    hasher.update([0]);
-    hasher.update((value.len() as u64).to_le_bytes());
-    hasher.update(value);
-    hasher.update([0xff]);
-}
-
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes))
 }
 
 fn prepare_cache_root(root: &Path) -> Result<()> {
@@ -1988,14 +1969,16 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use serde_json::json;
+    use sha2::{Digest as _, Sha256};
 
     use super::{
         CheckpointCache, CheckpointCacheConfig, CheckpointIdentity, CheckpointLease,
         CheckpointPublish, CheckpointSlot, ENTRY_FILE_COMPLETE, ENTRY_FILE_MEMORY,
         ENTRY_FILE_METADATA, ENTRY_FILE_QCOW2, ENTRY_FILE_SEED, MovedSources, ScopeIndex,
         create_private_dir, current_scope_index, entries_stored_bytes, entry_path,
-        fail_next_scope_index_write, fail_publication, move_or_copy_payload, payload_digest,
-        referenced_entry_keys, scope_index_path, sha256_bytes,
+        fail_next_scope_index_write, fail_publication, hash_field, hex_digest,
+        move_or_copy_payload, payload_digest, referenced_entry_keys, scope_index_path,
+        sha256_bytes,
     };
 
     fn identity(stage: &[u8]) -> CheckpointIdentity {
@@ -2084,6 +2067,20 @@ mod tests {
         assert_ne!(
             key_before_a_later_step_edit,
             changed_stage.cache_key().unwrap()
+        );
+    }
+
+    #[test]
+    fn shared_hash_helpers_keep_the_checkpoint_wire_format() {
+        let mut hasher = Sha256::new();
+        hash_field(&mut hasher, "field", b"value");
+        assert_eq!(
+            hex_digest(hasher.finalize()),
+            "12b4d850e072c0d26a95b2e8192430e5464fb87cfe622820587f146dbae60b9c"
+        );
+        assert_eq!(
+            sha256_bytes(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 
