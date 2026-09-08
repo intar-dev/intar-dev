@@ -19,6 +19,7 @@ import type {
   HostStateReportV2,
 } from "@/generated/bridge";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { resetD1Database } from "@/test/d1-migrations";
 
 const IMAGE_ID = "a".repeat(64);
@@ -57,7 +58,7 @@ describe("image revision completion status", () => {
       rev: "revision-1",
       r2Key: "builds/bundles/revision-1.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v11",
+        buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -121,7 +122,7 @@ describe("image revision completion status", () => {
       .update(imageBuildBundles)
       .set({
         metaJson: {
-          buildFormatVersion: "intar-image-build-v11",
+          buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
           scenarios: [],
         },
       })

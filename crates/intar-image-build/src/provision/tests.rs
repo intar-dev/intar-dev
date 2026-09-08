@@ -10,14 +10,15 @@ use tempfile::tempdir;
 
 use super::{
     FAILED_STEP_LOG_TAIL_BYTES, GeneratedStepScript, INTAR_RUN_CLI_COMPLETION_PATH,
-    INTAR_RUN_CLI_PATH, append_step_scripts, render_scenario_provision_script, shell_quote,
+    INTAR_RUN_CLI_PATH, ProvisionStageKind, append_step_scripts, render_scenario_build_stages,
+    shell_quote,
 };
 
-fn render_minimal_provision_script() -> String {
-    render_minimal_provision_script_with_cpu("1")
+fn render_minimal_build_stages() -> Vec<super::ProvisionStage> {
+    render_minimal_build_stages_with_cpu("1")
 }
 
-fn render_minimal_provision_script_with_cpu(cpu: &str) -> String {
+fn render_minimal_build_stages_with_cpu(cpu: &str) -> Vec<super::ProvisionStage> {
     let source = r#"
 scenario "ssh-readiness" {
   solution { body = "SSH starts automatically." }
@@ -45,12 +46,20 @@ probes = ["ssh-running"]
     .replace("__CPU__", cpu);
     let scenario = Scenario::parse_course(&source).unwrap();
     let vm = scenario.vm_by_name("server").unwrap();
-    render_scenario_provision_script(&scenario, vm).unwrap()
+    render_scenario_build_stages(&scenario, vm).unwrap()
+}
+
+fn stage_script(stages: Vec<super::ProvisionStage>, kind: ProvisionStageKind) -> String {
+    stages
+        .into_iter()
+        .find(|stage| stage.kind == kind)
+        .unwrap()
+        .script
 }
 
 fn render_minimal_supervisor() -> String {
-    let provision = render_minimal_provision_script();
-    let (_, runtime_and_rest) = provision.split_once("<<'EOF_RUNTIME'\n").unwrap();
+    let runtime = render_minimal_runtime_stage();
+    let (_, runtime_and_rest) = runtime.split_once("<<'EOF_RUNTIME'\n").unwrap();
     let (runtime, _) = runtime_and_rest.split_once("\nEOF_RUNTIME\n").unwrap();
     format!("{runtime}\n")
 }
@@ -61,8 +70,33 @@ fn render_minimal_supervisor_prefix() -> String {
     format!("{prefix}\n")
 }
 
-fn render_minimal_runtime_activation() -> String {
-    render_minimal_provision_script()
+fn render_minimal_runtime_stage() -> String {
+    stage_script(render_minimal_build_stages(), ProvisionStageKind::Runtime)
+}
+
+fn render_minimal_runtime_stage_with_cpu(cpu: &str) -> String {
+    stage_script(
+        render_minimal_build_stages_with_cpu(cpu),
+        ProvisionStageKind::Runtime,
+    )
+}
+
+fn render_minimal_cleanup_stage() -> String {
+    stage_script(render_minimal_build_stages(), ProvisionStageKind::Cleanup)
+}
+
+fn render_build_stages(source: &str) -> Vec<super::ProvisionStage> {
+    let scenario = Scenario::parse_course(source).unwrap();
+    let vm = scenario.vm_by_name("server").unwrap();
+    render_scenario_build_stages(&scenario, vm).unwrap()
+}
+
+fn stage_text(stages: &[super::ProvisionStage]) -> String {
+    stages
+        .iter()
+        .map(|stage| stage.script.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn run_bash(script: &str, syntax_only: bool) -> Output {
@@ -113,8 +147,208 @@ fn unit_conditions_allow(drop_in: &str, present_paths: &[&str]) -> bool {
 }
 
 #[test]
+fn build_stages_keep_earlier_scripts_stable_for_a_late_step_change() {
+    let source = |late_command: &str| {
+        format!(
+            r#"
+scenario "staged-provision" {{
+  image "debian-13-minimal" {{
+    base = "trixie"
+  }}
+
+  kino {{
+    probe "ssh-running" {{
+      kind = "service"
+      service = "ssh"
+      state = "running"
+      description = "SSH should be running"
+    }}
+  }}
+
+  vm "server" {{
+    image = "debian-13-minimal"
+    probes = ["ssh-running"]
+    packages = ["nginx"]
+
+    step "configure" {{
+      command {{
+        cmd = "printf 'early-stage-token\\n'"
+      }}
+    }}
+
+    step "late-change" {{
+      command {{
+        cmd = "printf '{late_command}\\n'"
+      }}
+    }}
+  }}
+}}
+"#
+        )
+    };
+    let first = render_build_stages(&source("late-stage-token-one"));
+    let second = render_build_stages(&source("late-stage-token-two"));
+
+    assert_eq!(first.len(), 5);
+    assert_eq!(first[0].id, "packages");
+    assert_eq!(first[0].kind, ProvisionStageKind::Packages);
+    assert_eq!(first[1].id, "step-0");
+    assert_eq!(first[1].kind, ProvisionStageKind::AuthoredStep { index: 0 });
+    assert_eq!(first[2].id, "step-1");
+    assert_eq!(first[2].kind, ProvisionStageKind::AuthoredStep { index: 1 });
+    assert_eq!(first[3].kind, ProvisionStageKind::Runtime);
+    assert_eq!(first[4].kind, ProvisionStageKind::Cleanup);
+
+    assert_eq!(first[0].script, second[0].script);
+    assert_eq!(first[1].script, second[1].script);
+    assert_ne!(first[2].script, second[2].script);
+    assert_eq!(first[3].script, second[3].script);
+    assert_eq!(first[4].script, second[4].script);
+    assert!(first[1].script.contains("early-stage-token"));
+    assert!(!first[1].script.contains("late-stage-token"));
+    assert!(first[2].script.contains("late-stage-token-one"));
+    assert!(!first[2].script.contains("early-stage-token"));
+}
+
+#[test]
+fn build_stages_keep_package_boot_state_and_authored_step_behavior() {
+    let stages = render_build_stages(
+        r#"
+scenario "staged-provision" {
+  image "debian-13-minimal" {
+    base = "trixie"
+  }
+
+  kino {
+    probe "ssh-running" {
+      kind = "service"
+      service = "ssh"
+      state = "running"
+      description = "SSH should be running"
+    }
+  }
+
+  vm "server" {
+    image = "debian-13-minimal"
+    probes = ["ssh-running"]
+
+    step "configure" {
+      command {
+        cmd = "printf 'visible failure output\\n'; exit 37"
+      }
+    }
+
+    step "break-app" {
+      command {
+        cmd = "printf 'hidden failure output\\n'; exit 42"
+      }
+    }
+  }
+}
+"#,
+    );
+
+    let packages = &stages[0].script;
+    assert!(packages.contains("bootstrap_username='ubuntu'"));
+    assert!(packages.contains("ensure_package_lists_updated()"));
+    assert!(packages.contains("APT::Periodic::Unattended-Upgrade \"0\";"));
+    assert!(packages.contains("install -d -o root -g root -m 0755 '/run/intar-build-state'"));
+    assert!(packages.contains(
+        "install -o root -g root -m 0644 /dev/null '/run/intar-build-state/initial-boot-files'"
+    ));
+    assert!(packages.contains("chown root:root '/run/intar-build-state/initial-boot-files' && chmod 0644 '/run/intar-build-state/initial-boot-files'"));
+    assert!(!packages.contains("/run/intar-build/initial-boot-files"));
+
+    let visible = &stages[1].script;
+    assert!(visible.contains("if bash '/usr/local/bin/intar-step-server-configure.sh'; then"));
+    assert!(visible.contains("scenario step failed"));
+    assert!(visible.contains("exit \"$step_status\""));
+    assert!(visible.contains("visible failure output"));
+    assert!(!visible.contains("hidden failure output"));
+
+    let hidden = &stages[2].script;
+    assert!(hidden.contains("exec >/dev/null 2>&1"));
+    assert!(hidden.contains("bash '/run/intar-step-server-break-app.sh'"));
+    assert!(hidden.contains("hidden failure output"));
+    assert!(!hidden.contains("scenario step failed"));
+    assert!(!hidden.contains("visible failure output"));
+
+    let directory = tempdir().unwrap();
+    let visible_path = directory.path().join("visible-step.sh");
+    let visible_log_dir = directory.path().join("visible-log");
+    let visible_log_path = visible_log_dir.join("step.log");
+    let visible_stage = visible
+        .replace(
+            &shell_quote("/usr/local/bin/intar-step-server-configure.sh"),
+            &shell_quote(&visible_path.to_string_lossy()),
+        )
+        .replace(
+            "LOG_DIR=/var/log/intar",
+            &format!(
+                "LOG_DIR={}",
+                shell_quote(&visible_log_dir.to_string_lossy())
+            ),
+        )
+        .replace(
+            &shell_quote("/var/log/intar/step-server-configure.log"),
+            &shell_quote(&visible_log_path.to_string_lossy()),
+        );
+    let visible_output = run_bash(&visible_stage, false);
+    assert_eq!(visible_output.status.code(), Some(37));
+    let visible_stderr = String::from_utf8_lossy(&visible_output.stderr);
+    assert!(visible_stderr.contains("scenario step failed"));
+    assert!(visible_stderr.contains("visible failure output"));
+
+    let hidden_path = directory.path().join("hidden-step.sh");
+    let hidden_stage = hidden.replace(
+        &shell_quote("/run/intar-step-server-break-app.sh"),
+        &shell_quote(&hidden_path.to_string_lossy()),
+    );
+    let hidden_output = run_bash(&hidden_stage, false);
+    assert_eq!(hidden_output.status.code(), Some(42));
+    assert!(!String::from_utf8_lossy(&hidden_output.stdout).contains("hidden failure output"));
+    assert!(hidden_output.stderr.is_empty());
+    assert!(!hidden_path.exists());
+
+    for stage in &stages {
+        assert!(
+            stage
+                .script
+                .starts_with("#!/usr/bin/env bash\nset -euo pipefail\n")
+        );
+        let syntax = run_bash(&stage.script, true);
+        assert!(
+            syntax.status.success(),
+            "bash -n rejected {}: {}",
+            stage.id,
+            String::from_utf8_lossy(&syntax.stderr)
+        );
+    }
+
+    for stage in [&stages[3], &stages[4]] {
+        assert!(stage.script.contains("bootstrap_username='ubuntu'"));
+        assert!(
+            stage
+                .script
+                .contains("kino_vsock_cid_placeholder='__INTAR_KINO_CID__'")
+        );
+        assert!(stage.script.contains("log_phase()"));
+    }
+    assert!(
+        stages[4]
+            .script
+            .contains("initial_boot_files_path='/run/intar-build-state/initial-boot-files'")
+    );
+    assert!(
+        stages[4]
+            .script
+            .contains("rm -f '/run/intar-build-state/initial-boot-files'")
+    );
+}
+
+#[test]
 fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
-    let script = render_minimal_runtime_activation();
+    let script = render_minimal_runtime_stage();
 
     assert!(script.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"));
     assert!(!script.contains("install -m 0755 /tmp/kino /usr/local/bin/kino"));
@@ -127,8 +361,6 @@ fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
     assert!(script.contains("vsock://2:18082"));
     assert!(script.contains("KINO_CONTROL_SOCKET=\"$kino_control_socket\""));
     assert!(script.contains("systemctl enable intar-scenario.service"));
-    assert!(script.contains("systemctl disable intar-build.service"));
-    assert!(script.contains("rm -f /etc/systemd/system/intar-build.service"));
 
     let (_, runtime_drop_in_and_rest) = script.split_once("<<'EOF_INTAR_RUNTIME_DISK'\n").unwrap();
     let (runtime_drop_in, _) = runtime_drop_in_and_rest
@@ -170,7 +402,7 @@ fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
 
 #[test]
 fn runtime_activation_bash_completion_loads_and_keeps_dynamic_calls_bounded() {
-    let script = render_minimal_runtime_activation();
+    let script = render_minimal_runtime_stage();
     let (_, completion_and_rest) = script.split_once("<<'EOF_INTAR_COMPLETION'\n").unwrap();
     let (completion, _) = completion_and_rest
         .split_once("\nEOF_INTAR_COMPLETION")
@@ -225,7 +457,7 @@ fn runtime_activation_bash_completion_loads_and_keeps_dynamic_calls_bounded() {
 
 #[test]
 fn runtime_activation_bash_completion_kills_term_ignoring_helpers() {
-    let script = render_minimal_runtime_activation();
+    let script = render_minimal_runtime_stage();
     let (_, completion_and_rest) = script.split_once("<<'EOF_INTAR_COMPLETION'\n").unwrap();
     let (completion, _) = completion_and_rest
         .split_once("\nEOF_INTAR_COMPLETION")
@@ -375,8 +607,8 @@ fn hidden_step_failure_output_remains_suppressed() {
 }
 
 #[test]
-fn provision_reasserts_acpi_poweroff_handler_before_machine_id_cleanup() {
-    let script = render_minimal_provision_script();
+fn cleanup_stage_reasserts_acpi_poweroff_handler_before_machine_id_cleanup() {
+    let script = render_minimal_cleanup_stage();
 
     let image_finalize_end = script.find("log_phase image_finalize end").unwrap();
     let handler_start = script
@@ -435,14 +667,14 @@ fn provision_reasserts_acpi_poweroff_handler_before_machine_id_cleanup() {
     let syntax = run_bash(&script, true);
     assert!(
         syntax.status.success(),
-        "bash -n rejected the rendered provision script: {}",
+        "bash -n rejected the cleanup stage: {}",
         String::from_utf8_lossy(&syntax.stderr)
     );
 }
 
 #[test]
 fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
-    let script = render_minimal_provision_script();
+    let script = render_minimal_runtime_stage();
     assert!(script.contains("ssh_ready_timeout_seconds=120"));
     assert!(script.contains("read -r uptime _ </proc/uptime"));
 
@@ -520,7 +752,7 @@ fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
 
 #[test]
 fn scenario_supervisor_retains_bounded_async_ssh_start_for_fractional_cpu() {
-    let script = render_minimal_provision_script_with_cpu("0.125");
+    let script = render_minimal_runtime_stage_with_cpu("0.125");
     assert!(script.contains("vm_cpu_millis=125"));
 
     let (_, start_sshd_and_rest) = script.split_once("start_sshd() {\n").unwrap();
@@ -549,7 +781,7 @@ fn scenario_supervisor_retains_bounded_async_ssh_start_for_fractional_cpu() {
 
 #[test]
 fn scenario_supervisor_waits_for_guest_network_and_reports_command_failures() {
-    let script = render_minimal_provision_script();
+    let script = render_minimal_runtime_stage();
 
     assert!(script.contains("network_ready_timeout_seconds=30"));
     assert!(script.contains("set -Eeuo pipefail"));
@@ -817,7 +1049,7 @@ wait_for_guest_network
 }
 
 #[test]
-fn provision_script_contains_runtime_assets() {
+fn build_stages_contain_runtime_assets() {
     let scenario = Scenario::parse_course(
         r#"
 scenario "broken-nginx" {
@@ -864,129 +1096,119 @@ packages = ["nginx"]
     let Some(vm) = scenario.vm_by_name("web") else {
         panic!("vm should exist");
     };
-    let script = render_scenario_provision_script(&scenario, vm);
-    match script {
-        Ok(script) => {
-            assert!(script.contains("/etc/kino/kino.hcl.tpl"));
-            assert!(script.contains("INTAR_GUEST_IP_CIDR is required"));
-            assert!(script.contains("FailureAction=poweroff-force"));
-            assert!(script.contains("wait_for_vsock_ready"));
-            assert!(script.contains("if mountpoint -q \"$recording_mount_path\"; then umount \"$recording_mount_path\"; fi"));
-            assert!(script.contains("if mountpoint -q \"$runtime_mount_path\"; then umount \"$runtime_mount_path\" >/dev/null 2>&1 || true; fi"));
-            assert!(script.contains("log_phase recording_canary start"));
-            assert!(script.contains("/usr/bin/setpriv --reuid=\"$recording_uid\" --regid=\"$recording_gid\" --clear-groups /bin/sh -c"));
-            assert!(script.contains("StandardOutput=journal+console"));
-            assert!(script.contains("systemctl enable intar-scenario.service"));
-            assert!(script.contains(
-                "systemd-networkd-wait-online.service NetworkManager-wait-online.service"
-            ));
-            assert!(script.contains("systemctl set-default multi-user.target"));
-            assert!(script.contains("cat >/etc/motd <<'EOF_MOTD'"));
-            assert!(!script.contains("Broken Nginx"));
-            assert!(!script.contains("Fix nginx"));
-            assert!(script.contains("- Nginx should be running"));
-            assert!(!script.contains("Briefing should stay on the website only."));
-            assert!(!script.contains("Hint should not be baked into the VM."));
-            assert!(!script.contains("Solution should stay gated on the server."));
-            assert!(!script.contains("Start nginx"));
-            assert!(!script.contains("Probe body should remain website-only."));
-            assert!(!script.contains("Probe hint should not be in the VM."));
-            assert!(script.contains("find /etc/update-motd.d -maxdepth 1 -type f -exec chmod -x"));
-            assert!(script.contains("rm -f /run/motd.dynamic /var/run/motd.dynamic"));
-            assert!(script.contains("sed -i '/pam_motd\\.so/d' \"$pam_file\""));
-            assert!(script.contains("session optional pam_motd.so motd=/etc/motd"));
-            assert!(!script.contains("show_motd() {"));
-            assert!(!script.contains("cat /etc/motd"));
-            assert!(script.contains("cat >/etc/hosts <<EOF_HOSTS"));
-            assert!(script.contains("${INTAR_GUEST_IP_CIDR%%/*} $INTAR_VM_HOSTNAME"));
-            assert!(!script.contains("127.0.1.1"));
-            assert!(
-                script.contains("printf '%s' \"$INTAR_PEER_HOSTS_B64\" | base64 -d >>/etc/hosts")
-            );
-            assert!(script.contains("grep -qxF '/usr/local/bin/kino-shell' /etc/shells"));
-            assert!(script.contains("usermod -s '/usr/local/bin/kino-shell' 'ubuntu'"));
-            assert!(script.contains("wait_for_labeled_device INTARTOOLS"));
-            assert!(script.contains("Kino guest tool SHA-256 mismatch"));
-            assert!(!script.contains("curl -fsSL"));
-            assert!(
-                script.contains(
-                    "kino record-ssh --config \"$config_path\" --shell-startup interactive"
-                )
-            );
-            assert!(script.contains("configure_ssh_access() {"));
-            assert!(
-                script.contains(
-                    "runtime_authorized_keys_path=\"$runtime_mount_path/authorized_keys\""
-                )
-            );
-            assert!(script.contains("mv -f \"$tmp_path\" \"$authorized_keys\""));
-            assert!(!script.contains("INTAR_SSH_AUTHORIZED_KEYS_B64 is required"));
-            assert!(script.contains("KINO_HOST_READY_PORT is required"));
-            assert!(script.contains("root_device=\"/dev/vda\""));
-            assert!(script.contains("wait_for_labeled_device INTARRUN"));
-            assert!(script.contains("wait_for_labeled_device INTARREC"));
-            assert!(script.contains("device=\"$(blkid -L \"$label\""));
-            assert!(script.contains("grow_root_filesystem() {"));
-            assert!(script.contains("resize2fs \"$root_device\""));
-            assert!(script.contains("${INTAR_ROOT_RESIZE_REQUIRED:-1}"));
-            assert!(script.contains("0|false)"));
-            assert!(script.contains("log_phase root_resize skipped"));
-            assert!(script.contains("missing block device with label $label"));
-            assert!(script.contains("compgen -v INTAR_PEER_"));
-            assert!(script.contains("> /etc/profile.d/intar-peers.sh"));
-            assert!(script.contains("rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub"));
-            assert!(script.contains("generate_ssh_host_keys() {"));
-            assert!(
-                script.contains("ssh-keygen -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key")
-            );
-            assert!(!script.contains("ssh-keygen -A"));
-            assert!(!script.contains("modprobe vsock"));
-            assert!(script.contains("After=local-fs.target"));
-            assert!(!script.contains("systemd-udev-trigger.service"));
-            let (_, modules_and_rest) = script.split_once("<<'EOF_RUNTIME_MODULES'\n").unwrap();
-            let (modules, _) = modules_and_rest
-                .split_once("\nEOF_RUNTIME_MODULES")
-                .unwrap();
-            assert_eq!(modules, "nf_tables");
-            assert!(!script.contains("INTAR_STARGATE_TARGET_PUBLIC_KEY_OPENSSH"));
-            assert!(script.contains("wait -n \"$KINO_PID\" || true"));
-            assert!(script.contains("start_sshd"));
-            assert!(script.contains("initial_boot_files=\"$(find /boot"));
-            assert!(script.contains("systemctl disable intar-build.service"));
-            assert!(script.contains(
+    let stages = render_scenario_build_stages(&scenario, vm).unwrap();
+    let script = stage_text(&stages);
+    assert!(script.contains("/etc/kino/kino.hcl.tpl"));
+    assert!(script.contains("INTAR_GUEST_IP_CIDR is required"));
+    assert!(script.contains("FailureAction=poweroff-force"));
+    assert!(script.contains("wait_for_vsock_ready"));
+    assert!(script.contains(
+        "if mountpoint -q \"$recording_mount_path\"; then umount \"$recording_mount_path\"; fi"
+    ));
+    assert!(script.contains("if mountpoint -q \"$runtime_mount_path\"; then umount \"$runtime_mount_path\" >/dev/null 2>&1 || true; fi"));
+    assert!(script.contains("log_phase recording_canary start"));
+    assert!(script.contains("/usr/bin/setpriv --reuid=\"$recording_uid\" --regid=\"$recording_gid\" --clear-groups /bin/sh -c"));
+    assert!(script.contains("StandardOutput=journal+console"));
+    assert!(script.contains("systemctl enable intar-scenario.service"));
+    assert!(
+        script.contains("systemd-networkd-wait-online.service NetworkManager-wait-online.service")
+    );
+    assert!(script.contains("systemctl set-default multi-user.target"));
+    assert!(script.contains("cat >/etc/motd <<'EOF_MOTD'"));
+    assert!(!script.contains("Broken Nginx"));
+    assert!(!script.contains("Fix nginx"));
+    assert!(script.contains("- Nginx should be running"));
+    assert!(!script.contains("Briefing should stay on the website only."));
+    assert!(!script.contains("Hint should not be baked into the VM."));
+    assert!(!script.contains("Solution should stay gated on the server."));
+    assert!(!script.contains("Start nginx"));
+    assert!(!script.contains("Probe body should remain website-only."));
+    assert!(!script.contains("Probe hint should not be in the VM."));
+    assert!(script.contains("find /etc/update-motd.d -maxdepth 1 -type f -exec chmod -x"));
+    assert!(script.contains("rm -f /run/motd.dynamic /var/run/motd.dynamic"));
+    assert!(script.contains("sed -i '/pam_motd\\.so/d' \"$pam_file\""));
+    assert!(script.contains("session optional pam_motd.so motd=/etc/motd"));
+    assert!(!script.contains("show_motd() {"));
+    assert!(!script.contains("cat /etc/motd"));
+    assert!(script.contains("cat >/etc/hosts <<EOF_HOSTS"));
+    assert!(script.contains("${INTAR_GUEST_IP_CIDR%%/*} $INTAR_VM_HOSTNAME"));
+    assert!(!script.contains("127.0.1.1"));
+    assert!(script.contains("printf '%s' \"$INTAR_PEER_HOSTS_B64\" | base64 -d >>/etc/hosts"));
+    assert!(script.contains("grep -qxF '/usr/local/bin/kino-shell' /etc/shells"));
+    assert!(script.contains("usermod -s '/usr/local/bin/kino-shell' 'ubuntu'"));
+    assert!(script.contains("wait_for_labeled_device INTARTOOLS"));
+    assert!(script.contains("Kino guest tool SHA-256 mismatch"));
+    assert!(!script.contains("curl -fsSL"));
+    assert!(
+        script.contains("kino record-ssh --config \"$config_path\" --shell-startup interactive")
+    );
+    assert!(script.contains("configure_ssh_access() {"));
+    assert!(
+        script.contains("runtime_authorized_keys_path=\"$runtime_mount_path/authorized_keys\"")
+    );
+    assert!(script.contains("mv -f \"$tmp_path\" \"$authorized_keys\""));
+    assert!(!script.contains("INTAR_SSH_AUTHORIZED_KEYS_B64 is required"));
+    assert!(script.contains("KINO_HOST_READY_PORT is required"));
+    assert!(script.contains("root_device=\"/dev/vda\""));
+    assert!(script.contains("wait_for_labeled_device INTARRUN"));
+    assert!(script.contains("wait_for_labeled_device INTARREC"));
+    assert!(script.contains("device=\"$(blkid -L \"$label\""));
+    assert!(script.contains("grow_root_filesystem() {"));
+    assert!(script.contains("resize2fs \"$root_device\""));
+    assert!(script.contains("${INTAR_ROOT_RESIZE_REQUIRED:-1}"));
+    assert!(script.contains("0|false)"));
+    assert!(script.contains("log_phase root_resize skipped"));
+    assert!(script.contains("missing block device with label $label"));
+    assert!(script.contains("compgen -v INTAR_PEER_"));
+    assert!(script.contains("> /etc/profile.d/intar-peers.sh"));
+    assert!(script.contains("rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub"));
+    assert!(script.contains("generate_ssh_host_keys() {"));
+    assert!(script.contains("ssh-keygen -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key"));
+    assert!(!script.contains("ssh-keygen -A"));
+    assert!(!script.contains("modprobe vsock"));
+    assert!(script.contains("After=local-fs.target"));
+    assert!(!script.contains("systemd-udev-trigger.service"));
+    let (_, modules_and_rest) = script.split_once("<<'EOF_RUNTIME_MODULES'\n").unwrap();
+    let (modules, _) = modules_and_rest
+        .split_once("\nEOF_RUNTIME_MODULES")
+        .unwrap();
+    assert_eq!(modules, "nf_tables");
+    assert!(!script.contains("INTAR_STARGATE_TARGET_PUBLIC_KEY_OPENSSH"));
+    assert!(script.contains("wait -n \"$KINO_PID\" || true"));
+    assert!(script.contains("start_sshd"));
+    assert!(script.contains("/run/intar-build-state/initial-boot-files"));
+    assert!(script.contains("systemctl disable intar-build.service"));
+    assert!(script.contains(
                 "rm -f /etc/systemd/system/intar-build.service /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
             ));
-            assert!(script.contains("rm -f /home/${bootstrap_username}/.ssh/authorized_keys"));
-            assert!(script.contains("final_boot_files=\"$(find /boot"));
-            assert!(script.contains(
-                "scenario provisioning changed /boot; installing kernels in scenarios is not supported"
-            ));
-            assert!(script.contains("fstrim -v / || true"));
-            assert!(!script.contains("touch /etc/cloud/cloud-init.disabled"));
-            assert!(!script.contains("rm -f /etc/netplan/50-cloud-init.yaml"));
-            assert!(!script.contains("cloud-init clean --logs --seed"));
-            assert!(!script.contains("dist_upgrade"));
-            assert!(script.contains("ensure_package_lists_updated"));
-            assert!(script.contains("apt-get update"));
-            assert!(script.contains("apt-get clean"));
-            assert!(script.contains("/var/lib/apt/lists/*"));
-            assert!(!script.contains("dd if=/dev/zero of=/EMPTY"));
-            assert!(!script.contains("/etc/intar/runtime.env"));
-            assert!(!script.contains("INTAR_VM_MAC"));
-            assert!(!script.contains("network_env"));
-            assert!(!script.contains("systemctl enable intar-runtime-configure.service"));
-            assert!(!script.contains("purge_installed_packages"));
-            assert!(!script.contains("systemctl start kino.service"));
-            assert!(!script.contains("setup-key"));
-            assert!(!script.contains("ForceCommand /usr/local/bin/kino-shell"));
-            assert!(!script.contains("exec /usr/sbin/sshd -D -e"));
-        }
-        Err(error) => panic!("script should render: {error}"),
-    }
+    assert!(script.contains("rm -f /home/${bootstrap_username}/.ssh/authorized_keys"));
+    assert!(script.contains("final_boot_files=\"$(find /boot"));
+    assert!(script.contains(
+        "scenario provisioning changed /boot; installing kernels in scenarios is not supported"
+    ));
+    assert!(script.contains("fstrim -v / || true"));
+    assert!(!script.contains("touch /etc/cloud/cloud-init.disabled"));
+    assert!(!script.contains("rm -f /etc/netplan/50-cloud-init.yaml"));
+    assert!(!script.contains("cloud-init clean --logs --seed"));
+    assert!(!script.contains("dist_upgrade"));
+    assert!(script.contains("ensure_package_lists_updated"));
+    assert!(script.contains("apt-get update"));
+    assert!(script.contains("apt-get clean"));
+    assert!(script.contains("/var/lib/apt/lists/*"));
+    assert!(!script.contains("dd if=/dev/zero of=/EMPTY"));
+    assert!(!script.contains("/etc/intar/runtime.env"));
+    assert!(!script.contains("INTAR_VM_MAC"));
+    assert!(!script.contains("network_env"));
+    assert!(!script.contains("systemctl enable intar-runtime-configure.service"));
+    assert!(!script.contains("purge_installed_packages"));
+    assert!(!script.contains("systemctl start kino.service"));
+    assert!(!script.contains("setup-key"));
+    assert!(!script.contains("ForceCommand /usr/local/bin/kino-shell"));
+    assert!(!script.contains("exec /usr/sbin/sshd -D -e"));
 }
 
 #[test]
-fn provision_script_renders_k8s_scale_deployment_action() {
+fn build_stages_render_k8s_scale_deployment_action() {
     let scenario = Scenario::parse_course(
         r#"
 scenario "sandbox-cluster" {
@@ -1020,13 +1242,29 @@ step "break-workload" {
     )
     .unwrap();
     let vm = scenario.vm_by_name("control-plane").unwrap();
-    let script = render_scenario_provision_script(&scenario, vm).unwrap();
-    assert!(script.contains("export KUBECONFIG=/etc/rancher/k3s/k3s.yaml"));
+    let stages = render_scenario_build_stages(&scenario, vm).unwrap();
+    let action = stages
+        .iter()
+        .find(|stage| matches!(&stage.kind, ProvisionStageKind::AuthoredStep { index: 0 }))
+        .unwrap();
     assert!(
-        script
+        action
+            .script
+            .contains("export KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+    );
+    assert!(
+        action
+            .script
             .contains("kubectl scale 'deployment/hello-web' --replicas=0 --namespace 'checkpoint'")
     );
-    let (_, modules_and_rest) = script.split_once("<<'EOF_RUNTIME_MODULES'\n").unwrap();
+    let runtime = stages
+        .iter()
+        .find(|stage| stage.kind == ProvisionStageKind::Runtime)
+        .unwrap();
+    let (_, modules_and_rest) = runtime
+        .script
+        .split_once("<<'EOF_RUNTIME_MODULES'\n")
+        .unwrap();
     let (modules, _) = modules_and_rest
         .split_once("\nEOF_RUNTIME_MODULES")
         .unwrap();

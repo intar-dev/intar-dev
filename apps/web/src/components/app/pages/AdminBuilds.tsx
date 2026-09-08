@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import {
   ExternalLink,
   Hammer,
   Info,
   PackageOpen,
+  Play,
   RefreshCcw,
 } from "lucide-react";
 import { useState } from "react";
@@ -25,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import type { BuildPhase } from "@/generated/bridge";
 import { isActiveImageBuild } from "@/lib/build-scheduler-core";
 import { cn } from "@/lib/utils";
+import { requestScenarioStartWithCapacityWait } from "@/components/app/lib/scenario-start";
 
 interface ImageBuildTimings {
   queuedAt?: number | null;
@@ -58,6 +61,12 @@ interface ImageBuildListResponse {
 }
 
 interface ImageBuildDetailRecord extends ImageBuildRecord {
+  organizationId: string | null;
+  candidateAvailable: boolean;
+  candidateProof: {
+    revision: string;
+    buildId: string;
+  } | null;
   host: {
     id: string;
     name: string | null;
@@ -78,6 +87,7 @@ interface ImageBuildDetailResponse {
 
 export function AdminBuilds() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [selectedBuildId, setSelectedBuildId] = useState<string | null>(null);
   const builds = useQuery({
     queryKey: ["admin-builds"],
@@ -120,6 +130,28 @@ export function AdminBuilds() {
       ]);
     },
   });
+  const runCandidate = useMutation({
+    mutationFn: async (input: {
+      buildId: string;
+      scenarioId: string;
+      candidateRevision: string;
+      candidateBuildId: string;
+      organizationId: string | null;
+    }) =>
+      requestScenarioStartWithCapacityWait(input.scenarioId, {
+        signal: new AbortController().signal,
+        onCapacityWait: () => undefined,
+        candidateRevision: input.candidateRevision,
+        candidateBuildId: input.candidateBuildId,
+        organizationId: input.organizationId,
+      }),
+    onSuccess: async ({ runId }) => {
+      await navigate({
+        to: "/runs/$runId",
+        params: { runId },
+      });
+    },
+  });
 
   const records = builds.data?.builds ?? [];
   const activeCount = records.filter((build) =>
@@ -153,6 +185,14 @@ export function AdminBuilds() {
           {retryBuild.error instanceof Error
             ? retryBuild.error.message
             : "Failed to retry build"}
+        </InlineFeedback>
+      ) : null}
+
+      {runCandidate.error ? (
+        <InlineFeedback tone="error">
+          {runCandidate.error instanceof Error
+            ? runCandidate.error.message
+            : "Failed to start candidate run"}
         </InlineFeedback>
       ) : null}
 
@@ -195,6 +235,10 @@ export function AdminBuilds() {
                       retryBuild.isPending && retryBuild.variables === build.id
                     }
                     retryDisabled={retryBuild.isPending || !build.canRetry}
+                    runCandidatePending={
+                      runCandidate.isPending &&
+                      runCandidate.variables?.buildId === build.id
+                    }
                     detail={
                       selectedBuildId === build.id
                         ? buildDetail.data?.build
@@ -213,6 +257,16 @@ export function AdminBuilds() {
                       )
                     }
                     onRetry={() => retryBuild.mutate(build.id)}
+                    onRunCandidate={(detail) => {
+                      if (!detail.candidateProof) return;
+                      runCandidate.mutate({
+                        buildId: detail.id,
+                        scenarioId: detail.scenarioId,
+                        candidateRevision: detail.candidateProof.revision,
+                        candidateBuildId: detail.candidateProof.buildId,
+                        organizationId: detail.organizationId,
+                      });
+                    }}
                   />
                 ))}
               </div>
@@ -228,12 +282,14 @@ function BuildRow(props: {
   build: ImageBuildRecord;
   retryPending: boolean;
   retryDisabled: boolean;
+  runCandidatePending: boolean;
   detail: ImageBuildDetailRecord | null | undefined;
   detailLoading: boolean;
   detailError: unknown;
   detailOpen: boolean;
   onToggleDetails: () => void;
   onRetry: () => void;
+  onRunCandidate: (detail: ImageBuildDetailRecord) => void;
 }) {
   const { build } = props;
   const detailId = `build-details-${build.id}`;
@@ -300,6 +356,8 @@ function BuildRow(props: {
             detail={props.detail}
             loading={props.detailLoading}
             error={props.detailError}
+            runCandidatePending={props.runCandidatePending}
+            onRunCandidate={props.onRunCandidate}
           />
         ) : null}
       </div>
@@ -404,6 +462,8 @@ function BuildDetails(props: {
   detail: ImageBuildDetailRecord | null | undefined;
   loading: boolean;
   error: unknown;
+  runCandidatePending: boolean;
+  onRunCandidate: (detail: ImageBuildDetailRecord) => void;
 }) {
   if (props.loading) {
     return (
@@ -456,6 +516,19 @@ function BuildDetails(props: {
           value={formatTimestamp(detail.host?.lastHeartbeatAt)}
         />
       </dl>
+      {detail.candidateAvailable ? (
+        <div className="mt-3">
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => props.onRunCandidate(detail)}
+            disabled={props.runCandidatePending}
+          >
+            <Play className="size-4" />
+            Run candidate
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

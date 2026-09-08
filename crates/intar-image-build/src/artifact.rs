@@ -1,16 +1,13 @@
 use std::fs;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
-use sha2::{Digest, Sha256};
+
+use crate::sha256::sha256_reader_hex;
 
 #[derive(Debug, Clone)]
 pub struct RawZstdArtifact {
-    pub raw_path: PathBuf,
     pub compressed_path: PathBuf,
-    pub sha256_path: PathBuf,
-    pub sha256_hex: String,
     pub virtual_size_bytes: u64,
 }
 
@@ -80,20 +77,14 @@ pub fn write_raw_zstd_artifact(
         .with_context(|| format!("failed to write checksum '{}'", sha256_path.display()))?;
         Ok(sha256_hex)
     })();
-    let sha256_hex = match result {
-        Ok(sha256_hex) => sha256_hex,
-        Err(error) => {
-            let _ = fs::remove_file(compressed_path);
-            let _ = fs::remove_file(sha256_path);
-            return Err(error);
-        }
-    };
+    if let Err(error) = result {
+        let _ = fs::remove_file(compressed_path);
+        let _ = fs::remove_file(sha256_path);
+        return Err(error);
+    }
 
     Ok(RawZstdArtifact {
-        raw_path: raw_path.to_path_buf(),
         compressed_path: compressed_path.to_path_buf(),
-        sha256_path: sha256_path.to_path_buf(),
-        sha256_hex,
         virtual_size_bytes,
     })
 }
@@ -105,22 +96,7 @@ pub fn write_raw_zstd_artifact(
 pub fn sha256_file_hex(path: &Path) -> Result<String> {
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to open '{}'", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read '{}'", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    sha256_reader_hex(&mut file).with_context(|| format!("failed to read '{}'", path.display()))
 }
 
 #[cfg(test)]
@@ -129,7 +105,19 @@ mod tests {
 
     use std::io::Read as _;
 
-    use super::write_raw_zstd_artifact;
+    use super::{sha256_file_hex, write_raw_zstd_artifact};
+
+    #[test]
+    fn file_digest_remains_sha256() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload");
+        std::fs::write(&path, b"abc").unwrap();
+
+        assert_eq!(
+            sha256_file_hex(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn raw_zstd_artifact_round_trips_and_hashes_compressed_bytes() {
@@ -144,14 +132,11 @@ mod tests {
         let artifact =
             write_raw_zstd_artifact(&raw_path, &compressed_path, &checksum_path).unwrap();
 
-        assert_eq!(artifact.raw_path, raw_path);
         assert_eq!(artifact.compressed_path, compressed_path);
-        assert_eq!(artifact.sha256_path, checksum_path);
-        assert_eq!(artifact.sha256_hex.len(), 64);
         assert_eq!(artifact.virtual_size_bytes, raw_bytes.len() as u64);
-        let checksum = std::fs::read_to_string(&artifact.sha256_path).unwrap();
+        let checksum = std::fs::read_to_string(&checksum_path).unwrap();
         assert!(checksum.contains("root.raw.zst"));
-        assert!(checksum.starts_with(&artifact.sha256_hex));
+        assert!(checksum.starts_with(&sha256_file_hex(&compressed_path).unwrap()));
 
         let mut decoder =
             zstd::stream::Decoder::new(std::fs::File::open(&artifact.compressed_path).unwrap())

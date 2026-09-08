@@ -2,14 +2,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
-use fs2::FileExt as _;
 use intar_image_scenario::BaseImageSpec;
 
 use crate::config::QemuBuildConfig;
-use crate::content_hash::sha256_bytes_hex;
 
 const INITRAMFS_MODULES: &[&str] = &[
     "virtio_blk",
@@ -21,7 +19,7 @@ const INITRAMFS_MODULES: &[&str] = &[
     "crc32c",
 ];
 
-static BASE_ROOTFS_BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub(crate) const BASE_EXT4_LABEL: &str = "INTARROOT";
 
 pub(crate) const BASE_RUNTIME_MODULES: &[&str] = &["nf_tables"];
 pub(crate) const KUBERNETES_RUNTIME_MODULES: &[&str] = &["overlay", "br_netfilter", "vxlan"];
@@ -58,22 +56,23 @@ const MASKED_UNITS: &[&str] = &[
 pub struct RootfsBuildPlan {
     pub definition_hash: String,
     pub paths: RootfsBuildPaths,
-    pub mmdebstrap_args: Vec<String>,
     pub essential_hook: String,
     pub customize_hook: String,
-    pub build_service: String,
-    pub build_start_script: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct RootfsBuildPaths {
     pub work_root: PathBuf,
     pub rootfs_dir: PathBuf,
-    pub essential_hook_path: PathBuf,
-    pub customize_hook_path: PathBuf,
     pub base_ext4_path: PathBuf,
     pub kernel_path: PathBuf,
     pub initrd_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) enum BaseRootfsLease {
+    Cache { _lock: fs::File },
+    Private { _directory: tempfile::TempDir },
 }
 
 #[derive(Debug, Clone)]
@@ -82,9 +81,10 @@ pub struct BaseRootfsArtifact {
     pub kernel_path: PathBuf,
     pub initrd_path: PathBuf,
     pub definition_hash: String,
+    pub(crate) lease: Arc<BaseRootfsLease>,
 }
 
-/// Reuse an existing mmdebstrap base rootfs artifact or build it locally.
+/// Reuse or build an OCI-imported base rootfs artifact.
 ///
 /// # Errors
 /// Returns an error if the base rootfs cannot be generated or required boot artifacts are missing.
@@ -93,174 +93,42 @@ pub fn ensure_base_rootfs(
     config: &QemuBuildConfig,
 ) -> Result<BaseRootfsArtifact> {
     let plan = render_rootfs_build_plan(base, config);
-    if base_rootfs_artifact_exists(&plan) {
-        return Ok(base_rootfs_artifact_from_plan(&plan));
-    }
-
-    let artifact_dir = plan
-        .paths
-        .base_ext4_path
-        .parent()
-        .context("base rootfs artifact path has no parent")?;
-    let artifact_parent = artifact_dir
-        .parent()
-        .context("base rootfs artifact directory has no parent")?;
-    fs::create_dir_all(artifact_parent).with_context(|| {
-        format!(
-            "failed to create base rootfs cache '{}'",
-            artifact_parent.display()
-        )
-    })?;
-    let artifact_name = artifact_dir
-        .file_name()
-        .and_then(|value| value.to_str())
-        .context("base rootfs artifact directory has no UTF-8 name")?;
-    let lock_path = artifact_parent.join(format!(".{artifact_name}.lock"));
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("failed to open base rootfs lock '{}'", lock_path.display()))?;
-    lock.lock_exclusive()
-        .with_context(|| format!("failed to lock base rootfs '{}'", lock_path.display()))?;
-    if base_rootfs_artifact_exists(&plan) {
-        return Ok(base_rootfs_artifact_from_plan(&plan));
-    }
-    if artifact_dir.exists() {
-        fs::remove_dir_all(artifact_dir).with_context(|| {
-            format!(
-                "failed to remove incomplete base rootfs '{}'",
-                artifact_dir.display()
-            )
-        })?;
-    }
-
-    let sequence = BASE_ROOTFS_BUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let staging_name = format!(".{artifact_name}.build-{}-{sequence}", std::process::id());
-    let staging_artifact_dir = artifact_parent.join(&staging_name);
-    let staging_work_root = plan
-        .paths
-        .work_root
-        .parent()
-        .context("base rootfs work path has no parent")?
-        .join(staging_name);
-    let mut staging = plan.clone();
-    staging.paths.work_root = staging_work_root.clone();
-    staging.paths.rootfs_dir = staging_work_root.join("rootfs");
-    staging.paths.essential_hook_path = staging_work_root.join("essential-hook.sh");
-    staging.paths.customize_hook_path = staging_work_root.join("customize-hook.sh");
-    staging.paths.base_ext4_path = staging_artifact_dir.join("root.ext4");
-    staging.paths.kernel_path = staging_artifact_dir.join("vmlinuz");
-    staging.paths.initrd_path = staging_artifact_dir.join("initrd.img");
-    staging.mmdebstrap_args = render_mmdebstrap_args(base, &staging.paths);
-
-    let build_result = (|| -> Result<()> {
-        prepare_rootfs_workspace(&staging)?;
-        run_command(&config.mmdebstrap_binary, &staging.mmdebstrap_args, None)
-            .context("mmdebstrap base rootfs build failed")?;
-        extract_boot_artifacts(&staging)?;
-        create_base_ext4(&staging, config)?;
-        if !base_rootfs_artifact_exists(&staging) {
-            bail!("staged base rootfs artifact is incomplete");
-        }
-        fs::rename(&staging_artifact_dir, artifact_dir).with_context(|| {
-            format!("failed to publish base rootfs '{}'", artifact_dir.display())
-        })?;
-        Ok(())
-    })();
-    let _ = fs::remove_dir_all(&staging_work_root);
-    if build_result.is_err() {
-        let _ = fs::remove_dir_all(&staging_artifact_dir);
-    }
-    build_result?;
-    Ok(base_rootfs_artifact_from_plan(&plan))
+    crate::oci::ensure_oci_base_rootfs(base, config, &plan)
 }
 
-/// Render the mmdebstrap rootfs build plan for a base image definition.
+/// Render the OCI rootfs build plan for a base image definition.
 #[must_use]
 pub fn render_rootfs_build_plan(base: &BaseImageSpec, config: &QemuBuildConfig) -> RootfsBuildPlan {
     let essential_hook = render_essential_hook();
     let build_service = render_intar_build_service();
     let build_start_script = render_intar_build_start_script();
     let customize_hook = render_customize_hook(&build_service, &build_start_script);
-    let definition_hash = base_definition_hash(base, &essential_hook, &customize_hook);
+    let definition_hash =
+        crate::oci::layered_definition_hash(base, &essential_hook, &customize_hook, config);
     let paths = rootfs_build_paths(base, config, &definition_hash);
-    let mmdebstrap_args = render_mmdebstrap_args(base, &paths);
 
     RootfsBuildPlan {
         definition_hash,
         paths,
-        mmdebstrap_args,
         essential_hook,
         customize_hook,
-        build_service,
-        build_start_script,
     }
 }
 
-/// Cache key for the mmdebstrap base rootfs. Covers the generated hook
-/// scripts in addition to the base image definition: the hooks bake network
-/// and dpkg policy into the rootfs, so a cached artifact from an older hook
-/// version is not equivalent even when the package set is unchanged.
-#[must_use]
-pub fn base_definition_hash(
-    base: &BaseImageSpec,
-    essential_hook: &str,
-    customize_hook: &str,
-) -> String {
-    let identity = format!(
-        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}",
-        base.content_identity()
-    );
-    sha256_bytes_hex(identity.as_bytes())
-}
-
-fn base_rootfs_artifact_exists(plan: &RootfsBuildPlan) -> bool {
-    plan.paths.base_ext4_path.is_file()
-        && plan.paths.kernel_path.is_file()
-        && plan.paths.initrd_path.is_file()
-}
-
-fn base_rootfs_artifact_from_plan(plan: &RootfsBuildPlan) -> BaseRootfsArtifact {
+pub(crate) fn base_rootfs_artifact_from_plan(
+    plan: &RootfsBuildPlan,
+    lease: Arc<BaseRootfsLease>,
+) -> BaseRootfsArtifact {
     BaseRootfsArtifact {
         base_ext4_path: plan.paths.base_ext4_path.clone(),
         kernel_path: plan.paths.kernel_path.clone(),
         initrd_path: plan.paths.initrd_path.clone(),
         definition_hash: plan.definition_hash.clone(),
+        lease,
     }
 }
 
-fn prepare_rootfs_workspace(plan: &RootfsBuildPlan) -> Result<()> {
-    fs::create_dir_all(&plan.paths.work_root)
-        .with_context(|| format!("failed to create '{}'", plan.paths.work_root.display()))?;
-    if plan.paths.rootfs_dir.exists() {
-        fs::remove_dir_all(&plan.paths.rootfs_dir)
-            .with_context(|| format!("failed to remove '{}'", plan.paths.rootfs_dir.display()))?;
-    }
-    if let Some(parent) = plan.paths.base_ext4_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create '{}'", parent.display()))?;
-    }
-    fs::write(&plan.paths.essential_hook_path, &plan.essential_hook).with_context(|| {
-        format!(
-            "failed to write '{}'",
-            plan.paths.essential_hook_path.display()
-        )
-    })?;
-    fs::write(&plan.paths.customize_hook_path, &plan.customize_hook).with_context(|| {
-        format!(
-            "failed to write '{}'",
-            plan.paths.customize_hook_path.display()
-        )
-    })?;
-    make_executable(&plan.paths.essential_hook_path)?;
-    make_executable(&plan.paths.customize_hook_path)?;
-    Ok(())
-}
-
-fn extract_boot_artifacts(plan: &RootfsBuildPlan) -> Result<()> {
+pub(crate) fn extract_boot_artifacts(plan: &RootfsBuildPlan) -> Result<()> {
     let boot_dir = plan.paths.rootfs_dir.join("boot");
     let artifacts = find_boot_artifact_pair(&boot_dir)?;
     fs::copy(&artifacts.kernel_path, &plan.paths.kernel_path).with_context(|| {
@@ -336,7 +204,7 @@ fn boot_artifacts_by_version(boot_dir: &Path, prefix: &str) -> Result<BTreeMap<S
     Ok(matches)
 }
 
-fn create_base_ext4(plan: &RootfsBuildPlan, config: &QemuBuildConfig) -> Result<()> {
+pub(crate) fn create_base_ext4(plan: &RootfsBuildPlan, config: &QemuBuildConfig) -> Result<()> {
     let size_bytes = ext4_image_size_bytes(&plan.paths.rootfs_dir)?;
     let image = fs::OpenOptions::new()
         .create(true)
@@ -356,7 +224,7 @@ fn create_base_ext4(plan: &RootfsBuildPlan, config: &QemuBuildConfig) -> Result<
             "-t".to_string(),
             "ext4".to_string(),
             "-L".to_string(),
-            "INTARROOT".to_string(),
+            BASE_EXT4_LABEL.to_string(),
             "-d".to_string(),
             plan.paths.rootfs_dir.display().to_string(),
             plan.paths.base_ext4_path.display().to_string(),
@@ -366,7 +234,7 @@ fn create_base_ext4(plan: &RootfsBuildPlan, config: &QemuBuildConfig) -> Result<
     .context("mke2fs base ext4 creation failed")
 }
 
-fn ext4_image_size_bytes(rootfs_dir: &Path) -> Result<u64> {
+pub(crate) fn ext4_image_size_bytes(rootfs_dir: &Path) -> Result<u64> {
     let apparent_size = directory_apparent_size(rootfs_dir)?;
     let with_headroom = apparent_size
         .saturating_mul(13)
@@ -420,22 +288,6 @@ fn run_command(binary: &Path, args: &[String], current_dir: Option<&Path>) -> Re
     bail!("command '{}' failed with status {status}", binary.display())
 }
 
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)
-        .with_context(|| format!("failed to chmod '{}'", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(path: &Path) -> Result<()> {
-    let _ = path;
-    Ok(())
-}
-
 fn rootfs_build_paths(
     base: &BaseImageSpec,
     config: &QemuBuildConfig,
@@ -443,54 +295,16 @@ fn rootfs_build_paths(
 ) -> RootfsBuildPaths {
     let cache_key = &definition_hash[..16];
     let name = format!("{}-{}-{cache_key}", base.name, base.arch);
-    let (work_root, output_root) = config.base_cache_root.as_ref().map_or_else(
-        || {
-            (
-                config.work_root.join("rootfs").join(&name),
-                config.output_root.join("base-images").join(&name),
-            )
-        },
-        |cache_root| {
-            (
-                cache_root.join("work").join(&name),
-                cache_root.join("artifacts").join(&name),
-            )
-        },
-    );
+    let work_root = config.work_root.join("rootfs").join(&name);
+    let output_root = config.output_root.join("base-images").join(&name);
 
     RootfsBuildPaths {
         rootfs_dir: work_root.join("rootfs"),
-        essential_hook_path: work_root.join("essential-hook.sh"),
-        customize_hook_path: work_root.join("customize-hook.sh"),
         work_root,
         base_ext4_path: output_root.join("root.ext4"),
         kernel_path: output_root.join("vmlinuz"),
         initrd_path: output_root.join("initrd.img"),
     }
-}
-
-fn render_mmdebstrap_args(base: &BaseImageSpec, paths: &RootfsBuildPaths) -> Vec<String> {
-    let include = std::iter::once(base.kernel_package.as_str())
-        .chain(base.packages.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    vec![
-        "--variant=apt".to_string(),
-        format!("--architectures={}", base.arch),
-        format!("--include={include}"),
-        format!(
-            "--essential-hook=sh {} \"$1\"",
-            shell_path(&paths.essential_hook_path)
-        ),
-        format!(
-            "--customize-hook=sh {} \"$1\"",
-            shell_path(&paths.customize_hook_path)
-        ),
-        base.suite.clone(),
-        paths.rootfs_dir.display().to_string(),
-        base.mirror.clone(),
-    ]
 }
 
 fn render_essential_hook() -> String {
@@ -499,7 +313,9 @@ fn render_essential_hook() -> String {
         r#"#!/bin/sh
 set -eu
 root="$1"
-mkdir -p "$root/etc/dpkg/dpkg.cfg.d" "$root/etc/initramfs-tools"
+# BuildKit binds /etc/hostname and /etc/hosts read-only while this hook runs.
+# The OCI importer writes the neutral VM files after umoci unpack.
+mkdir -p "$root/etc/dpkg/dpkg.cfg.d" "$root/etc/initramfs-tools/conf.d"
 cat > "$root/etc/dpkg/dpkg.cfg.d/01intar-path-excludes" <<'EOF'
 path-exclude=/usr/share/doc/*
 path-exclude=/usr/share/man/*
@@ -512,13 +328,12 @@ EOF
 cat > "$root/etc/dpkg/dpkg.cfg.d/02intar-conffile-policy" <<'EOF'
 force-confold
 EOF
-# mmdebstrap seeds the chroot with the build host's hostname; pin a neutral
-# one so in-guest sudo does not warn about an unresolvable host on every call.
-echo intar-build > "$root/etc/hostname"
-echo "127.0.1.1 intar-build" >> "$root/etc/hosts"
 cat > "$root/etc/initramfs-tools/initramfs.conf" <<'EOF'
 MODULES=list
 COMPRESS=zstd
+EOF
+cat > "$root/etc/initramfs-tools/conf.d/resume" <<'EOF'
+RESUME=none
 EOF
 cat > "$root/etc/initramfs-tools/modules" <<'EOF'
 {module_lines}
@@ -547,7 +362,6 @@ fn render_customize_hook(build_service: &str, build_start_script: &str) -> Strin
         .map(|unit| format!("systemctl --root=\"$root\" mask {unit} >/dev/null 2>&1 || true"))
         .collect::<Vec<_>>()
         .join("\n");
-
     format!(
         r#"#!/bin/sh
 set -eu
@@ -715,7 +529,7 @@ configure_network() {
   return 1
 }
 
-# The mmdebstrap rootfs ships without resolv.conf; without a nameserver every
+# The base rootfs has no resolver configuration. Without a nameserver every
 # apt/curl step in the build provisioning fails on DNS resolution.
 rm -f /etc/resolv.conf
 for dns_server in ${INTAR_BUILD_DNS:-10.0.2.3}; do
@@ -749,10 +563,6 @@ exec /usr/sbin/sshd -D -e "$@"
     .to_string()
 }
 
-fn shell_path(path: &Path) -> String {
-    path.display().to_string().replace('\'', "'\\''")
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -760,7 +570,8 @@ mod tests {
     use intar_image_scenario::BaseImageCatalog;
 
     use super::{
-        BASE_RUNTIME_MODULES, KUBERNETES_RUNTIME_MODULES, MASKED_UNITS, render_rootfs_build_plan,
+        BASE_RUNTIME_MODULES, KUBERNETES_RUNTIME_MODULES, MASKED_UNITS, render_intar_build_service,
+        render_intar_build_start_script, render_rootfs_build_plan,
     };
     use crate::config::QemuBuildConfig;
 
@@ -781,7 +592,7 @@ base_image "trixie" {
     }
 
     #[test]
-    fn rootfs_plan_contains_mmdebstrap_inputs_and_stable_paths() {
+    fn rootfs_plan_contains_oci_inputs_and_stable_paths() {
         let config = QemuBuildConfig::default();
         let base = base_image();
         let plan = render_rootfs_build_plan(&base, &config);
@@ -794,29 +605,42 @@ base_image "trixie" {
                 .to_string()
                 .contains("trixie-amd64-")
         );
-        assert!(plan.mmdebstrap_args.contains(&"--variant=apt".to_string()));
-        assert!(
-            plan.mmdebstrap_args
-                .contains(&"--architectures=amd64".to_string())
-        );
-        assert!(plan.mmdebstrap_args.iter().any(|arg| {
-            arg == "--include=linux-image-cloud-amd64,acpid,openssh-server,ca-certificates,curl,iproute2,e2fsprogs,kmod,systemd-sysv,udev,sudo"
-        }));
-        assert!(
-            plan.mmdebstrap_args
-                .iter()
-                .any(|arg| arg.contains("essential-hook.sh"))
-        );
-        assert!(
-            plan.mmdebstrap_args
-                .iter()
-                .any(|arg| arg.contains("customize-hook.sh"))
-        );
+        assert!(plan.essential_hook.contains("BuildKit binds /etc/hostname"));
+        assert!(plan.customize_hook.contains("intar-build.service"));
+    }
+
+    #[test]
+    fn hooks_defer_buildkit_protected_host_files_until_oci_unpack() {
+        let plan = render_rootfs_build_plan(&base_image(), &QemuBuildConfig::default());
+
+        assert!(!plan.essential_hook.contains("> \"$root/etc/hostname\""));
+        assert!(!plan.essential_hook.contains(">> \"$root/etc/hosts\""));
+
+        let directory = tempfile::tempdir().unwrap();
+        for (name, script) in [
+            ("essential-hook", &plan.essential_hook),
+            ("customize-hook", &plan.customize_hook),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, script).unwrap();
+            let output = std::process::Command::new("sh")
+                .arg("-n")
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
     fn rootfs_hooks_install_fast_boot_build_environment() {
         let plan = render_rootfs_build_plan(&base_image(), &QemuBuildConfig::default());
+        let build_service = render_intar_build_service();
+        let build_start_script = render_intar_build_start_script();
 
         assert!(
             plan.essential_hook
@@ -826,6 +650,14 @@ base_image "trixie" {
         assert!(plan.essential_hook.contains("COMPRESS=zstd"));
         assert!(plan.essential_hook.contains("force-confold"));
         assert!(plan.essential_hook.contains("vmw_vsock_virtio_transport"));
+        assert!(
+            plan.essential_hook
+                .contains("/etc/initramfs-tools/conf.d/resume")
+        );
+        assert!(plan.essential_hook.contains("RESUME=none"));
+        assert!(!plan.essential_hook.contains("RESUME=/dev/"));
+        assert!(!plan.essential_hook.contains("$root/etc/hostname"));
+        assert!(!plan.essential_hook.contains("$root/etc/hosts"));
         assert!(plan.customize_hook.contains(
             "cat > \"$root/etc/acpi/events/90-intar-power-button\" <<'EOF_INTAR_ACPI_EVENT'"
         ));
@@ -874,12 +706,14 @@ base_image "trixie" {
             plan.customize_hook
                 .contains("HostKey /etc/ssh/ssh_host_ed25519_key")
         );
-        assert!(plan.build_service.contains("After=local-fs.target"));
-        assert!(!plan.build_service.contains("systemd-udev-trigger.service"));
-        assert!(plan.build_service.contains("Before=multi-user.target"));
-        assert!(plan.build_service.contains("RuntimeDirectory=sshd"));
-        assert!(plan.build_service.contains("RuntimeDirectoryMode=0755"));
-        assert!(plan.build_service.contains("StandardError=journal+console"));
+        assert!(plan.customize_hook.contains(&build_service));
+        assert!(plan.customize_hook.contains(&build_start_script));
+        assert!(build_service.contains("After=local-fs.target"));
+        assert!(!build_service.contains("systemd-udev-trigger.service"));
+        assert!(build_service.contains("Before=multi-user.target"));
+        assert!(build_service.contains("RuntimeDirectory=sshd"));
+        assert!(build_service.contains("RuntimeDirectoryMode=0755"));
+        assert!(build_service.contains("StandardError=journal+console"));
         assert!(
             plan.customize_hook
                 .contains("ConditionPathExists=/run/intar/ssh-ready")
@@ -898,37 +732,16 @@ base_image "trixie" {
         );
         assert!(!plan.customize_hook.contains("mask ssh.service"));
         assert!(!plan.customize_hook.contains("mask sshd.service"));
-        assert!(plan.build_start_script.contains("blkid -L INTARBUILD"));
-        assert!(
-            plan.build_start_script
-                .contains("mountpoint -q /run/intar-build")
-        );
-        assert!(
-            plan.build_start_script
-                .contains("findmnt -n -o SOURCE --target /run/intar-build")
-        );
-        assert!(
-            plan.build_start_script
-                .contains("INTAR_BUILD_IP:-10.0.2.15/24")
-        );
-        assert!(plan.build_start_script.contains("/sys/class/net/*"));
-        assert!(
-            plan.build_start_script
-                .contains("no non-loopback network interface found")
-        );
-        assert!(
-            plan.build_start_script
-                .contains("ip link set \"$iface\" up 2>&1")
-        );
-        assert!(plan.build_start_script.contains("ip addr replace"));
-        assert!(
-            plan.build_start_script
-                .contains("timed out configuring build network")
-        );
-        assert!(
-            plan.build_start_script
-                .contains("install -d -o root -g root -m 0755 /run/sshd")
-        );
+        assert!(build_start_script.contains("blkid -L INTARBUILD"));
+        assert!(build_start_script.contains("mountpoint -q /run/intar-build"));
+        assert!(build_start_script.contains("findmnt -n -o SOURCE --target /run/intar-build"));
+        assert!(build_start_script.contains("INTAR_BUILD_IP:-10.0.2.15/24"));
+        assert!(build_start_script.contains("/sys/class/net/*"));
+        assert!(build_start_script.contains("no non-loopback network interface found"));
+        assert!(build_start_script.contains("ip link set \"$iface\" up 2>&1"));
+        assert!(build_start_script.contains("ip addr replace"));
+        assert!(build_start_script.contains("timed out configuring build network"));
+        assert!(build_start_script.contains("install -d -o root -g root -m 0755 /run/sshd"));
         assert!(
             plan.customize_hook
                 .contains("cat > \"$root/etc/pam.d/intar-build\"")
@@ -950,36 +763,19 @@ base_image "trixie" {
             plan.customize_hook
                 .contains("chmod 0644 \"$root/etc/pam.d/intar-build\"")
         );
-        assert!(plan.build_start_script.contains("/usr/sbin/sshd -t \"$@\""));
-        assert!(plan.build_start_script.contains("-o UsePAM=yes"));
-        assert!(
-            plan.build_start_script
-                .contains("-o PAMServiceName=intar-build")
-        );
-        assert!(
-            plan.build_start_script
-                .contains("-o AuthenticationMethods=publickey")
-        );
-        assert!(!plan.build_start_script.contains("-o UsePAM=no"));
-        assert!(plan.build_start_script.contains("-o PerSourcePenalties=no"));
-        assert!(
-            plan.build_start_script
-                .contains("-o MaxStartups=100:30:200")
-        );
-        assert!(
-            plan.build_start_script
-                .contains("ssh-keygen -q -N '' -t ed25519")
-        );
-        let install_key = plan
-            .build_start_script
+        assert!(build_start_script.contains("/usr/sbin/sshd -t \"$@\""));
+        assert!(build_start_script.contains("-o UsePAM=yes"));
+        assert!(build_start_script.contains("-o PAMServiceName=intar-build"));
+        assert!(build_start_script.contains("-o AuthenticationMethods=publickey"));
+        assert!(!build_start_script.contains("-o UsePAM=no"));
+        assert!(build_start_script.contains("-o PerSourcePenalties=no"));
+        assert!(build_start_script.contains("-o MaxStartups=100:30:200"));
+        assert!(build_start_script.contains("ssh-keygen -q -N '' -t ed25519"));
+        let install_key = build_start_script
             .find("/run/intar-build/authorized_keys")
             .unwrap();
-        let configure_network = plan
-            .build_start_script
-            .rfind("\nconfigure_network\n")
-            .unwrap();
-        let start_sshd = plan
-            .build_start_script
+        let configure_network = build_start_script.rfind("\nconfigure_network\n").unwrap();
+        let start_sshd = build_start_script
             .find("exec /usr/sbin/sshd -D -e")
             .unwrap();
         assert!(install_key < configure_network);
@@ -987,7 +783,7 @@ base_image "trixie" {
 
         let directory = tempfile::tempdir().unwrap();
         let script_path = directory.path().join("intar-build-start");
-        std::fs::write(&script_path, &plan.build_start_script).unwrap();
+        std::fs::write(&script_path, &build_start_script).unwrap();
         let syntax = std::process::Command::new("sh")
             .arg("-n")
             .arg(&script_path)

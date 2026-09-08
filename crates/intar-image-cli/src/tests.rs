@@ -43,6 +43,21 @@ fn uses_a_markdown_courses_root_for_all_course_commands() {
 }
 
 #[test]
+fn local_build_commands_accept_no_cache() {
+    let command = Cli::try_parse_from(["intar-image-cli", "build", "--no-cache"]).unwrap();
+    let Command::Build(args) = command.command else {
+        panic!("expected build command");
+    };
+    assert!(args.no_cache);
+
+    let command = Cli::try_parse_from(["intar-image-cli", "build-all", "--no-cache"]).unwrap();
+    let Command::BuildAll(args) = command.command else {
+        panic!("expected build-all command");
+    };
+    assert!(args.no_cache);
+}
+
+#[test]
 fn content_only_bundle_archives_the_compiled_curriculum() {
     let temp = tempfile::tempdir().unwrap();
     write_course(temp.path(), "linux", "01-theory", None);

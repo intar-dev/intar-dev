@@ -9,10 +9,9 @@ use intar_contracts::catalog::{
     IMAGE_CHUNK_ENCODING, IMAGE_CHUNK_MANIFEST_SCHEMA_VERSION, IMAGE_CHUNK_SIZE_BYTES,
     ImageChunkManifestV1, ImageChunkV1, MAX_CHUNKED_IMAGE_BYTES,
 };
-use sha2::{Digest as _, Sha256};
 
 use crate::artifact::sha256_file_hex;
-use crate::content_hash::sha256_bytes_hex;
+use crate::sha256::sha256_bytes_hex;
 
 const CHUNK_COMPRESSION_LEVEL: i32 = 6;
 const CHUNK_COMPRESSION_WORKERS: usize = 4;
@@ -27,7 +26,6 @@ pub struct EncodedImageChunkArtifact {
 
 #[derive(Clone, Debug)]
 pub struct ChunkedImageArtifact {
-    pub raw_path: PathBuf,
     pub manifest_path: PathBuf,
     pub manifest_sha256: String,
     pub manifest: ImageChunkManifestV1,
@@ -84,6 +82,7 @@ pub fn write_chunked_image_artifact(
 /// Returns an error if the raw image is not a bounded regular file or cannot
 /// be read completely.
 pub fn scan_raw_image_chunks(raw_path: &Path) -> Result<ScannedChunkedImage> {
+    let started = std::time::Instant::now();
     let metadata = fs::symlink_metadata(raw_path)
         .with_context(|| format!("failed to stat raw image '{}'", raw_path.display()))?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CHUNKED_IMAGE_BYTES {
@@ -135,6 +134,13 @@ pub fn scan_raw_image_chunks(raw_path: &Path) -> Result<ScannedChunkedImage> {
         }
     }
 
+    eprintln!(
+        "[intar-build-metric] phase=chunk_scan elapsed_ms={} raw_bytes={} non_zero_chunks={} path={}",
+        started.elapsed().as_millis(),
+        metadata.len(),
+        chunks.len(),
+        raw_path.display()
+    );
     Ok(ScannedChunkedImage {
         raw_path: raw_path.to_path_buf(),
         virtual_size_bytes: metadata.len(),
@@ -195,6 +201,7 @@ pub fn write_scanned_chunked_image_artifact(
     manifest_path: &Path,
     reused: &BTreeMap<String, ReusedEncodedImageChunk>,
 ) -> Result<ChunkedImageArtifact> {
+    let _compute = crate::compute::acquire();
     let metadata = fs::symlink_metadata(&scan.raw_path)?;
     ensure_scan_is_valid(scan, &metadata)?;
     fs::create_dir_all(chunks_dir).with_context(|| {
@@ -286,7 +293,6 @@ pub fn write_scanned_chunked_image_artifact(
     })?;
 
     Ok(ChunkedImageArtifact {
-        raw_path: scan.raw_path.clone(),
         manifest_path: manifest_path.to_path_buf(),
         manifest_sha256,
         manifest,
@@ -496,7 +502,7 @@ pub fn reconstruct_chunked_image(
 
 struct HashingWriter<W> {
     inner: W,
-    hasher: Sha256,
+    hasher: ring::digest::Context,
     bytes: u64,
 }
 
@@ -504,13 +510,17 @@ impl<W> HashingWriter<W> {
     fn new(inner: W) -> Self {
         Self {
             inner,
-            hasher: Sha256::new(),
+            hasher: ring::digest::Context::new(&ring::digest::SHA256),
             bytes: 0,
         }
     }
 
     fn finish(self) -> (W, String, u64) {
-        (self.inner, hex_digest(self.hasher.finalize()), self.bytes)
+        (
+            self.inner,
+            intar_image_scenario::hex_digest(self.hasher.finish()),
+            self.bytes,
+        )
     }
 }
 
@@ -525,14 +535,6 @@ impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
-}
-
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 #[cfg(test)]
@@ -567,7 +569,21 @@ mod tests {
         assert_eq!(artifact.manifest.chunks[0].index, 1);
         assert_eq!(artifact.manifest.chunks[1].index, 2);
         assert_eq!(artifact.manifest.chunks[1].raw_size_bytes, 7);
-        assert_eq!(artifact.manifest_sha256.len(), 64);
+        assert_eq!(
+            fs::read_to_string(&manifest_path).unwrap(),
+            concat!(
+                "{\"schema_version\":1,\"image_id\":\"3ae0e8bd5ec864376ef15abe470777f14cb23f2db6dfd4bf16cf622d1dce4f5f\",",
+                "\"virtual_size_bytes\":8388615,\"chunk_size_bytes\":4194304,\"encoding\":\"zstd-v1-level-6\",",
+                "\"chunks\":[{\"index\":1,\"raw_size_bytes\":4194304,\"raw_sha256\":\"67d2c808e32117cebe56c7ed5c5ad0e92ffd0ab1099e6c19f6635d6f67b71633\",",
+                "\"encoded_size_bytes\":161,\"encoded_sha256\":\"d06e9beb15f1f6d5e7c655ab043cddb43d25415151a78208465f5fa3db7efa65\"},",
+                "{\"index\":2,\"raw_size_bytes\":7,\"raw_sha256\":\"9c6b05ffd41a215e1d774b1c999b7770f1b054d080670b81fa2959e3e7e2a18c\",",
+                "\"encoded_size_bytes\":20,\"encoded_sha256\":\"6b30afc041019684127fc80883c345aaf5784e7c877b934bde41518484593fb4\"}]}"
+            )
+        );
+        assert_eq!(
+            artifact.manifest_sha256,
+            "ef3f8eb00ad2ef21748195a70459bb112894d4786b13a728f64e7536c4ecb982"
+        );
 
         reconstruct_chunked_image(&artifact.manifest, &rebuilt, |chunk| {
             artifact

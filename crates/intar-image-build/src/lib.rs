@@ -1,15 +1,19 @@
 mod artifact;
+mod checkpoint;
 mod chunked;
+mod compute;
 mod config;
 mod content_hash;
 mod direct;
 mod disk;
 mod guest_tools;
 mod manifest;
+mod oci;
 mod provision;
 mod qemu;
 mod rootfs;
 mod seed;
+mod sha256;
 mod ssh;
 
 pub use artifact::{RawZstdArtifact, sha256_file_hex, write_raw_zstd_artifact};
@@ -18,7 +22,7 @@ pub use chunked::{
     ScannedImageChunk, reconstruct_chunked_image, scan_raw_image_chunks,
     write_chunked_image_artifact, write_scanned_chunked_image_artifact,
 };
-pub use config::{BuildConfig, ConfigError, QemuBuildConfig, RawUploadConfig};
+pub use config::{BuildConfig, ConfigError, LayeredBuildConfig, QemuBuildConfig, RawUploadConfig};
 pub use content_hash::{
     BUILD_FORMAT_VERSION, ScenarioContentHashInput, scenario_content_hash, sha256_bytes_hex,
 };
@@ -41,8 +45,8 @@ pub use qemu::{
     render_direct_boot_qemu_command,
 };
 pub use rootfs::{
-    BaseRootfsArtifact, RootfsBuildPaths, RootfsBuildPlan, base_definition_hash,
-    ensure_base_rootfs, render_rootfs_build_plan,
+    BaseRootfsArtifact, RootfsBuildPaths, RootfsBuildPlan, ensure_base_rootfs,
+    render_rootfs_build_plan,
 };
 pub use seed::{
     AUTHORIZED_KEYS_FILENAME, BUILD_ENV_FILENAME, BuildSeedInput, INTAR_BUILD_SEED_LABEL,

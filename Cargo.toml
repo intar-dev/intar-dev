@@ -30,6 +30,7 @@ rust-version = "1.97"
 anyhow = "=1.0.103"
 avt = "=0.18.0"
 axum = { version = "=0.8.9", default-features = false }
+blake3 = "=1.8.7"
 base16ct = { version = "=1.0.0", features = ["alloc"] }
 base64 = "=0.22.1"
 bytes = "=1.12.1"
@@ -58,6 +59,7 @@ protoc-bin-vendored = "=3.2.0"
 pty-process = "=0.5.3"
 regex = "=1.13.0"
 reqwest = { version = "=0.13.4", default-features = false }
+ring = "=0.17.14"
 rustix = { version = "=1.1.4", features = ["event", "fs", "mount", "net", "pipe", "process", "system", "thread"] }
 reflink-copy = "=0.1.30"
 rustls = { version = "=0.23.41", default-features = false }

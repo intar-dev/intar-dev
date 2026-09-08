@@ -57,6 +57,8 @@ export async function startScenarioRunForUser(params: {
   betaAdmission: BetaAdmissionEpoch;
   organizationId?: string | null;
   hostId?: string;
+  candidateRevision?: string;
+  candidateBuildId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
 }): Promise<{

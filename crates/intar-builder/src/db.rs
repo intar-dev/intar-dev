@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use intar_contracts::bridge::DesiredBuildV1;
 use intar_contracts::catalog::ImageArchitecture;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 #[derive(Debug)]
 pub struct BuilderDb {
@@ -36,6 +36,12 @@ pub struct BuildJobRow {
     pub finished_at_ms: Option<i64>,
     pub next_attempt_at_ms: Option<i64>,
     pub updated_at_ms: i64,
+    /// Local-only metadata for completed image files. The bridge keeps its
+    /// existing public phases while a publish retry reuses these bytes.
+    pub completed_outputs_json: Option<String>,
+    pub publish_state: String,
+    pub publish_attempt: u32,
+    pub publish_next_attempt_at_ms: Option<i64>,
 }
 
 impl BuildJobRow {
@@ -134,6 +140,10 @@ ON CONFLICT(build_id) DO UPDATE SET
   attempt = excluded.attempt,
   error = excluded.error,
   next_attempt_at_ms = excluded.next_attempt_at_ms,
+  completed_outputs_json = NULL,
+  publish_state = 'none',
+  publish_attempt = 0,
+  publish_next_attempt_at_ms = NULL,
   updated_at_ms = excluded.updated_at_ms
 "#,
                 params![
@@ -160,7 +170,8 @@ ON CONFLICT(build_id) DO UPDATE SET
                 r#"
 SELECT build_id, scenario_id, arch, rev, content_hash, bundle_ref,
        phase, current_vm, attempt, error, started_at_ms, finished_at_ms,
-       next_attempt_at_ms, updated_at_ms
+       next_attempt_at_ms, updated_at_ms, completed_outputs_json,
+       publish_state, publish_attempt, publish_next_attempt_at_ms
 FROM build_jobs
 ORDER BY COALESCE(next_attempt_at_ms, updated_at_ms), updated_at_ms, build_id
 "#,
@@ -183,6 +194,10 @@ ORDER BY COALESCE(next_attempt_at_ms, updated_at_ms), updated_at_ms, build_id
                     finished_at_ms: row.get(11)?,
                     next_attempt_at_ms: row.get(12)?,
                     updated_at_ms: row.get(13)?,
+                    completed_outputs_json: row.get(14)?,
+                    publish_state: row.get(15)?,
+                    publish_attempt: row.get::<_, i64>(16)? as u32,
+                    publish_next_attempt_at_ms: row.get(17)?,
                 })
             })
             .context("failed to query build jobs")?;
@@ -197,7 +212,8 @@ ORDER BY COALESCE(next_attempt_at_ms, updated_at_ms), updated_at_ms, build_id
                 r#"
 SELECT build_id, scenario_id, arch, rev, content_hash, bundle_ref,
        phase, current_vm, attempt, error, started_at_ms, finished_at_ms,
-       next_attempt_at_ms, updated_at_ms
+       next_attempt_at_ms, updated_at_ms, completed_outputs_json,
+       publish_state, publish_attempt, publish_next_attempt_at_ms
 FROM build_jobs
 WHERE build_id = ?1
 "#,
@@ -218,6 +234,10 @@ WHERE build_id = ?1
                         finished_at_ms: row.get(11)?,
                         next_attempt_at_ms: row.get(12)?,
                         updated_at_ms: row.get(13)?,
+                        completed_outputs_json: row.get(14)?,
+                        publish_state: row.get(15)?,
+                        publish_attempt: row.get::<_, i64>(16)? as u32,
+                        publish_next_attempt_at_ms: row.get(17)?,
                     })
                 },
             )
@@ -283,6 +303,192 @@ WHERE build_id = ?1 AND phase = 'queued'
         self.load_build_job(&build_id)
     }
 
+    /// Save finished local image metadata before publication. A build worker
+    /// keeps ownership while `publish_state` is `waiting`, so two queued or
+    /// active publications cannot grow into an unbounded output queue.
+    pub fn save_completed_build_outputs(
+        &self,
+        build_id: &str,
+        completed_outputs_json: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                r#"
+UPDATE build_jobs
+SET current_vm = NULL,
+    completed_outputs_json = ?2,
+    publish_state = 'waiting',
+    publish_attempt = 0,
+    publish_next_attempt_at_ms = NULL,
+    error = NULL,
+    updated_at_ms = ?3
+WHERE build_id = ?1 AND phase = 'building'
+"#,
+                params![build_id, completed_outputs_json, now_ms],
+            )
+            .with_context(|| format!("failed to save completed outputs for build '{build_id}'"))?;
+        if changed == 0 {
+            anyhow::bail!("build '{build_id}' is no longer waiting for publication");
+        }
+        Ok(())
+    }
+
+    /// Atomically reserve one of the two publication slots. A retry that is
+    /// already in a slot takes priority over a newly completed build.
+    pub fn claim_next_publication_build(&self, now_ms: i64) -> Result<Option<BuildJobRow>> {
+        let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("failed to begin publication claim transaction")?;
+
+        let ready_build_id = transaction
+            .query_row(
+                r#"
+SELECT build_id
+FROM build_jobs
+WHERE phase = 'publishing'
+  AND completed_outputs_json IS NOT NULL
+  AND publish_state = 'ready'
+  AND COALESCE(publish_next_attempt_at_ms, 0) <= ?1
+ORDER BY COALESCE(publish_next_attempt_at_ms, updated_at_ms), updated_at_ms, build_id
+LIMIT 1
+"#,
+                params![now_ms],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to load pending publication retry")?;
+
+        let build_id = if let Some(build_id) = ready_build_id {
+            transaction
+                .execute(
+                    r#"
+UPDATE build_jobs
+SET publish_state = 'running',
+    publish_attempt = publish_attempt + 1,
+    publish_next_attempt_at_ms = NULL,
+    error = NULL,
+    updated_at_ms = ?2
+WHERE build_id = ?1 AND phase = 'publishing' AND publish_state = 'ready'
+"#,
+                    params![build_id, now_ms],
+                )
+                .context("failed to claim publication retry")?;
+            Some(build_id)
+        } else {
+            let occupied_slots: i64 = transaction
+                .query_row(
+                    r#"
+SELECT COUNT(*)
+FROM build_jobs
+WHERE phase = 'publishing'
+  AND completed_outputs_json IS NOT NULL
+  AND publish_state IN ('ready', 'running')
+"#,
+                    [],
+                    |row| row.get(0),
+                )
+                .context("failed to count publication slots")?;
+            if occupied_slots >= 2 {
+                None
+            } else {
+                let waiting_build_id = transaction
+                    .query_row(
+                        r#"
+SELECT build_id
+FROM build_jobs
+WHERE phase = 'building'
+  AND completed_outputs_json IS NOT NULL
+  AND publish_state = 'waiting'
+ORDER BY updated_at_ms, build_id
+LIMIT 1
+"#,
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .context("failed to load completed build awaiting publication")?;
+                if let Some(build_id) = waiting_build_id {
+                    transaction
+                        .execute(
+                            r#"
+UPDATE build_jobs
+SET phase = 'publishing',
+    current_vm = NULL,
+    publish_state = 'running',
+    publish_attempt = 1,
+    publish_next_attempt_at_ms = NULL,
+    error = NULL,
+    updated_at_ms = ?2
+WHERE build_id = ?1
+  AND phase = 'building'
+  AND publish_state = 'waiting'
+  AND completed_outputs_json IS NOT NULL
+"#,
+                            params![build_id, now_ms],
+                        )
+                        .context("failed to claim completed build for publication")?;
+                    Some(build_id)
+                } else {
+                    None
+                }
+            }
+        };
+
+        transaction
+            .commit()
+            .context("failed to commit publication claim transaction")?;
+        match build_id {
+            Some(build_id) => self.load_build_job(&build_id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn schedule_publication_retry(
+        &self,
+        build_id: &str,
+        error: &str,
+        next_attempt_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                r#"
+UPDATE build_jobs
+SET phase = 'publishing',
+    current_vm = NULL,
+    publish_state = 'ready',
+    error = ?2,
+    finished_at_ms = NULL,
+    publish_next_attempt_at_ms = ?3,
+    updated_at_ms = ?4
+WHERE build_id = ?1 AND completed_outputs_json IS NOT NULL
+"#,
+                params![build_id, error, next_attempt_at_ms, now_ms],
+            )
+            .with_context(|| {
+                format!("failed to schedule publication retry for build '{build_id}'")
+            })?;
+        Ok(())
+    }
+
+    pub fn clear_completed_build_outputs(&self, build_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                r#"
+UPDATE build_jobs
+SET completed_outputs_json = NULL,
+    publish_state = 'none',
+    publish_attempt = 0,
+    publish_next_attempt_at_ms = NULL
+WHERE build_id = ?1
+"#,
+                params![build_id],
+            )
+            .with_context(|| format!("failed to clear completed outputs for build '{build_id}'"))?;
+        Ok(())
+    }
+
     pub fn schedule_build_job_retry(
         &self,
         build_id: &str,
@@ -301,6 +507,10 @@ SET phase = 'queued',
     error = ?3,
     finished_at_ms = NULL,
     next_attempt_at_ms = ?4,
+    completed_outputs_json = NULL,
+    publish_state = 'none',
+    publish_attempt = 0,
+    publish_next_attempt_at_ms = NULL,
     updated_at_ms = ?5
 WHERE build_id = ?1
 "#,
@@ -362,7 +572,8 @@ WHERE build_id = ?1
     }
 
     pub fn reset_active_build_jobs(&self, now_ms: i64) -> Result<usize> {
-        self.conn
+        let reset_incomplete = self
+            .conn
             .execute(
                 r#"
 UPDATE build_jobs
@@ -371,6 +582,10 @@ SET phase = 'queued',
     error = 'builder daemon restarted while build was ' || phase,
     finished_at_ms = NULL,
     next_attempt_at_ms = ?1,
+    completed_outputs_json = NULL,
+    publish_state = 'none',
+    publish_attempt = 0,
+    publish_next_attempt_at_ms = NULL,
     updated_at_ms = ?1
 WHERE phase IN (
   'fetching_sources',
@@ -379,10 +594,47 @@ WHERE phase IN (
   'publishing',
   'uploading_logs'
 )
+  AND completed_outputs_json IS NULL
 "#,
                 params![now_ms],
             )
-            .context("failed to reset active build jobs after restart")
+            .context("failed to reset incomplete build jobs after restart")?;
+        let reset_publication = self
+            .conn
+            .execute(
+                r#"
+UPDATE build_jobs
+SET current_vm = NULL,
+    publish_state = 'ready',
+    error = 'builder daemon restarted while publication was running',
+    finished_at_ms = NULL,
+    publish_next_attempt_at_ms = ?1,
+    updated_at_ms = ?1
+WHERE phase = 'publishing'
+  AND completed_outputs_json IS NOT NULL
+"#,
+                params![now_ms],
+            )
+            .context("failed to reset publication jobs after restart")?;
+        let reset_log_upload = self
+            .conn
+            .execute(
+                r#"
+UPDATE build_jobs
+SET phase = 'publishing',
+    current_vm = NULL,
+    error = 'builder daemon restarted before build log upload; retrying publication',
+    finished_at_ms = NULL,
+    publish_state = 'ready',
+    publish_next_attempt_at_ms = ?1,
+    updated_at_ms = ?1
+WHERE phase = 'uploading_logs'
+  AND completed_outputs_json IS NOT NULL
+"#,
+                params![now_ms],
+            )
+            .context("failed to reset published job after restart")?;
+        Ok(reset_incomplete + reset_publication + reset_log_upload)
     }
 }
 
@@ -410,7 +662,11 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   started_at_ms INTEGER,
   finished_at_ms INTEGER,
   next_attempt_at_ms INTEGER,
-  updated_at_ms INTEGER NOT NULL
+  updated_at_ms INTEGER NOT NULL,
+  completed_outputs_json TEXT,
+  publish_state TEXT NOT NULL DEFAULT 'none',
+  publish_attempt INTEGER NOT NULL DEFAULT 0,
+  publish_next_attempt_at_ms INTEGER
 );
 "#,
     )
@@ -420,6 +676,20 @@ CREATE TABLE IF NOT EXISTS build_jobs (
     ensure_column(conn, "build_jobs", "started_at_ms", "INTEGER")?;
     ensure_column(conn, "build_jobs", "finished_at_ms", "INTEGER")?;
     ensure_column(conn, "build_jobs", "next_attempt_at_ms", "INTEGER")?;
+    ensure_column(conn, "build_jobs", "completed_outputs_json", "TEXT")?;
+    ensure_column(
+        conn,
+        "build_jobs",
+        "publish_state",
+        "TEXT NOT NULL DEFAULT 'none'",
+    )?;
+    ensure_column(
+        conn,
+        "build_jobs",
+        "publish_attempt",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(conn, "build_jobs", "publish_next_attempt_at_ms", "INTEGER")?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_build_jobs_phase_updated ON build_jobs(phase, updated_at_ms);",
     )
@@ -579,6 +849,71 @@ mod tests {
         assert_eq!(claimed.started_at_ms, Some(2500));
         assert_eq!(claimed.next_attempt_at_ms, None);
         assert!(db.claim_next_queued_build(3000).unwrap().is_none());
+    }
+
+    #[test]
+    fn limits_publication_to_two_completed_or_running_outputs() {
+        let db = BuilderDb::open_in_memory().unwrap();
+        for build_id in ["build-a", "build-b", "build-c"] {
+            let build = build(build_id);
+            db.upsert_build_job(&build, "building", 1, None, 1000)
+                .unwrap();
+            db.save_completed_build_outputs(build_id, "[]", 1000)
+                .unwrap();
+        }
+
+        let first = db.claim_next_publication_build(1000).unwrap().unwrap();
+        let second = db.claim_next_publication_build(1000).unwrap().unwrap();
+
+        assert_eq!(first.phase, "publishing");
+        assert_eq!(first.publish_state, "running");
+        assert_eq!(first.publish_attempt, 1);
+        assert_eq!(second.phase, "publishing");
+        assert_eq!(second.publish_state, "running");
+        assert!(db.claim_next_publication_build(1000).unwrap().is_none());
+        let third = db.load_build_job("build-c").unwrap().unwrap();
+        assert_eq!(third.phase, "building");
+        assert_eq!(third.publish_state, "waiting");
+    }
+
+    #[test]
+    fn restart_preserves_completed_outputs_for_publication_retry() {
+        let db = BuilderDb::open_in_memory().unwrap();
+        let build = build("build-1");
+        db.upsert_build_job(&build, "building", 1, None, 1000)
+            .unwrap();
+        db.save_completed_build_outputs("build-1", "[]", 1000)
+            .unwrap();
+
+        assert_eq!(db.reset_active_build_jobs(2000).unwrap(), 0);
+        let waiting = db.load_build_job("build-1").unwrap().unwrap();
+        assert_eq!(waiting.phase, "building");
+        assert_eq!(waiting.publish_state, "waiting");
+        assert_eq!(waiting.completed_outputs_json.as_deref(), Some("[]"));
+
+        let running = db.claim_next_publication_build(2000).unwrap().unwrap();
+        assert_eq!(running.phase, "publishing");
+        assert_eq!(running.publish_attempt, 1);
+        db.schedule_publication_retry("build-1", "registry unavailable", 2500, 2100)
+            .unwrap();
+
+        assert_eq!(db.reset_active_build_jobs(2200).unwrap(), 1);
+        let retry = db.load_build_job("build-1").unwrap().unwrap();
+        assert_eq!(retry.phase, "publishing");
+        assert_eq!(retry.publish_state, "ready");
+        assert_eq!(retry.completed_outputs_json.as_deref(), Some("[]"));
+        assert_eq!(retry.publish_next_attempt_at_ms, Some(2200));
+
+        db.update_build_job_phase("build-1", "uploading_logs", None, 1, None, 2300)
+            .unwrap();
+        assert_eq!(db.reset_active_build_jobs(2400).unwrap(), 1);
+        let resumed_after_logs = db.load_build_job("build-1").unwrap().unwrap();
+        assert_eq!(resumed_after_logs.phase, "publishing");
+        assert_eq!(resumed_after_logs.publish_state, "ready");
+        assert_eq!(
+            resumed_after_logs.completed_outputs_json.as_deref(),
+            Some("[]")
+        );
     }
 
     #[test]

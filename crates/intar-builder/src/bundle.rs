@@ -1,13 +1,14 @@
 #![allow(clippy::missing_errors_doc)]
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
+use fs2::FileExt as _;
 use intar_contracts::bridge::DesiredBuildV1;
 use intar_contracts::catalog::{
     CourseCatalogLectureV2, CourseCatalogSnapshotV2, ImageArchitecture,
@@ -16,16 +17,15 @@ use intar_image_build::{ScenarioContentHashInput, scenario_content_hash};
 use intar_image_scenario::{BaseImageCatalog, Scenario};
 
 const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
+const BUNDLE_UNPACK_MARKER: &str = ".intar-bundle-v1.complete";
+static BUNDLE_UNPACK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct BundleBuildInput {
     pub build: DesiredBuildV1,
-    pub scenario_path: PathBuf,
-    pub scenario_dir: PathBuf,
     pub scenario: Scenario,
     pub lecture: CourseCatalogLectureV2,
     pub base_catalog: BaseImageCatalog,
-    pub target_arch: String,
 }
 
 pub async fn download_bundle_archive(
@@ -192,8 +192,196 @@ pub fn bundle_archive_path(cache_root: &Path, rev: &str) -> Result<PathBuf> {
 }
 
 pub fn unpack_bundle_archive(archive_path: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .with_context(|| format!("failed to create '{}'", destination.display()))?;
+    let archive_sha256 = intar_image_build::sha256_file_hex(archive_path).with_context(|| {
+        format!(
+            "failed to hash bundle archive '{}' before unpacking",
+            archive_path.display()
+        )
+    })?;
+    let parent = destination
+        .parent()
+        .context("bundle destination has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    let destination_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("bundle destination has no UTF-8 name")?;
+    let lock_path = parent.join(format!(".{destination_name}.lock"));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "failed to open bundle unpack lock '{}'",
+                lock_path.display()
+            )
+        })?;
+    lock.lock_exclusive()
+        .with_context(|| format!("failed to lock bundle unpack '{}'", lock_path.display()))?;
+
+    if destination.exists() {
+        if bundle_unpack_is_current(destination, &archive_sha256)? {
+            return Ok(());
+        }
+        bail!(
+            "bundle destination '{}' is stale or incomplete; refusing to replace an immutable revision",
+            destination.display()
+        );
+    }
+
+    let staging = create_bundle_unpack_staging(parent, destination_name)?;
+    let result = unpack_bundle_archive_into(archive_path, &staging);
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let unpacked_archive_sha256 = match intar_image_build::sha256_file_hex(archive_path)
+        .with_context(|| {
+            format!(
+                "failed to rehash bundle archive '{}' after unpacking",
+                archive_path.display()
+            )
+        }) {
+        Ok(sha256) => sha256,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    if unpacked_archive_sha256 != archive_sha256 {
+        let _ = fs::remove_dir_all(&staging);
+        bail!(
+            "bundle archive '{}' changed while it was unpacked",
+            archive_path.display()
+        );
+    }
+    if let Err(error) = sync_bundle_tree(&staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if let Err(error) = write_bundle_unpack_marker(&staging, &archive_sha256) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if destination.exists() {
+        let _ = fs::remove_dir_all(&staging);
+        if bundle_unpack_is_current(destination, &archive_sha256)? {
+            return Ok(());
+        }
+        bail!(
+            "bundle destination '{}' is stale or incomplete; refusing to replace an immutable revision",
+            destination.display()
+        );
+    }
+    fs::rename(&staging, destination).with_context(|| {
+        format!(
+            "failed to publish unpacked bundle '{}'",
+            destination.display()
+        )
+    })?;
+    sync_bundle_directory(parent)?;
+    Ok(())
+}
+
+fn bundle_unpack_is_current(destination: &Path, archive_sha256: &str) -> Result<bool> {
+    if !destination.is_dir() {
+        return Ok(false);
+    }
+    let marker_path = destination.join(BUNDLE_UNPACK_MARKER);
+    match fs::read(&marker_path) {
+        Ok(marker) => Ok(marker == format!("{archive_sha256}\n").as_bytes()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to read bundle unpack marker '{}'",
+                marker_path.display()
+            )
+        }),
+    }
+}
+
+fn create_bundle_unpack_staging(parent: &Path, destination_name: &str) -> Result<PathBuf> {
+    for _ in 0..1_024 {
+        let sequence = BUNDLE_UNPACK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staging = parent.join(format!(
+            ".{destination_name}.unpack-{}-{sequence}",
+            std::process::id()
+        ));
+        match fs::create_dir(&staging) {
+            Ok(()) => return Ok(staging),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create bundle staging directory '{}'",
+                        staging.display()
+                    )
+                });
+            }
+        }
+    }
+    bail!(
+        "failed to allocate a unique staging directory for bundle '{}'",
+        destination_name
+    )
+}
+
+fn write_bundle_unpack_marker(destination: &Path, archive_sha256: &str) -> Result<()> {
+    let marker_path = destination.join(BUNDLE_UNPACK_MARKER);
+    let mut marker = fs::File::create(&marker_path)
+        .with_context(|| format!("failed to create bundle marker '{}'", marker_path.display()))?;
+    marker
+        .write_all(format!("{archive_sha256}\n").as_bytes())
+        .with_context(|| format!("failed to write bundle marker '{}'", marker_path.display()))?;
+    marker
+        .sync_all()
+        .with_context(|| format!("failed to sync bundle marker '{}'", marker_path.display()))?;
+    sync_bundle_directory(destination)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sync_bundle_tree(directory: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("failed to read bundle directory '{}'", directory.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read bundle directory entry in '{}'",
+                directory.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            sync_bundle_tree(&path)?;
+        }
+    }
+    sync_bundle_directory(directory)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_bundle_tree(_directory: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sync_bundle_directory(directory: &Path) -> Result<()> {
+    fs::File::open(directory)
+        .with_context(|| format!("failed to open bundle directory '{}'", directory.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync bundle directory '{}'", directory.display()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_bundle_directory(_directory: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn unpack_bundle_archive_into(archive_path: &Path, destination: &Path) -> Result<()> {
     let archive_file = fs::File::open(archive_path)
         .with_context(|| format!("failed to open bundle '{}'", archive_path.display()))?;
     let decoder = LimitedBundleReader::new(GzDecoder::new(archive_file), MAX_BUNDLE_TAR_BYTES);
@@ -231,6 +419,10 @@ pub fn unpack_bundle_archive(archive_path: &Path, destination: &Path) -> Result<
         entry
             .unpack(&output_path)
             .with_context(|| format!("failed to unpack '{}'", output_path.display()))?;
+        fs::File::open(&output_path)
+            .with_context(|| format!("failed to open unpacked file '{}'", output_path.display()))?
+            .sync_all()
+            .with_context(|| format!("failed to sync unpacked file '{}'", output_path.display()))?;
     }
     Ok(())
 }
@@ -340,12 +532,9 @@ pub fn inspect_bundle_build_input(
 
     Ok(BundleBuildInput {
         build,
-        scenario_path,
-        scenario_dir,
         scenario,
         lecture,
         base_catalog,
-        target_arch: target_arch.to_owned(),
     })
 }
 
@@ -460,7 +649,7 @@ fn scenario_base_definition_identity(
             .definition_for_arch(target_arch)
             .with_context(|| {
                 format!(
-                    "base image '{}' has no {target_arch} mmdebstrap definition",
+                    "base image '{}' has no {target_arch} OCI rootfs definition",
                     image.base
                 )
             })?;
@@ -653,6 +842,60 @@ mod tests {
     }
 
     #[test]
+    fn keeps_published_bundle_immutable_across_repeat_unpack() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_archive = temp.path().join("first.tar.gz");
+        let destination = temp.path().join("bundles/revision-1");
+        write_archive(&first_archive, &[("marker", b"first".as_slice())]);
+
+        unpack_bundle_archive(&first_archive, &destination).unwrap();
+        unpack_bundle_archive(&first_archive, &destination).unwrap();
+
+        assert_eq!(std::fs::read(destination.join("marker")).unwrap(), b"first");
+        assert_eq!(
+            std::fs::read_to_string(destination.join(super::BUNDLE_UNPACK_MARKER)).unwrap(),
+            format!(
+                "{}\n",
+                intar_image_build::sha256_file_hex(&first_archive).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_stale_or_different_bundle_unpack() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_archive = temp.path().join("first.tar.gz");
+        let second_archive = temp.path().join("second.tar.gz");
+        let destination = temp.path().join("bundles/revision-1");
+        write_archive(&first_archive, &[("marker", b"first".as_slice())]);
+        write_archive(&second_archive, &[("marker", b"second".as_slice())]);
+
+        unpack_bundle_archive(&first_archive, &destination).unwrap();
+        let error = unpack_bundle_archive(&second_archive, &destination).unwrap_err();
+
+        assert!(format!("{error:#}").contains("stale or incomplete"));
+        assert_eq!(std::fs::read(destination.join("marker")).unwrap(), b"first");
+    }
+
+    #[test]
+    fn refuses_unmarked_bundle_directory_after_interrupted_unpack() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("bundle.tar.gz");
+        let destination = temp.path().join("bundles/revision-1");
+        write_archive(&archive, &[("marker", b"complete".as_slice())]);
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("partial"), b"partial").unwrap();
+
+        let error = unpack_bundle_archive(&archive, &destination).unwrap_err();
+
+        assert!(format!("{error:#}").contains("stale or incomplete"));
+        assert_eq!(
+            std::fs::read(destination.join("partial")).unwrap(),
+            b"partial"
+        );
+    }
+
+    #[test]
     fn verifies_bundle_content_hash() {
         let temp = tempfile::tempdir().unwrap();
         write_bundle_fixture(temp.path());
@@ -730,7 +973,6 @@ mod tests {
         assert_eq!(input.build.bundle_ref, "builds/bundles/abc123.tar.gz");
         assert_eq!(input.build.content_hash.len(), 64);
         assert!(input.build.build_id.starts_with("broken-nginx-amd64-"));
-        assert_eq!(input.target_arch, "amd64");
         assert_eq!(input.lecture.title, "Broken Nginx");
         assert_eq!(
             input.lecture.body_markdown,

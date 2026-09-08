@@ -10,11 +10,12 @@ agent hosts; they do not run user scenarios.
 
 - Ubuntu 24.04 or Debian 12/13 on x86_64.
 - KVM enabled and visible as `/dev/kvm`.
+- QEMU 10 or later.
 - 8 vCPU, 16 GiB RAM, and at least 100 GiB disk for working directories and caches.
 - Outbound HTTPS access to `intar.dev`, GitHub release downloads, and Debian package
   mirrors.
 
-Install the runtime packages:
+Install the common runtime packages:
 
 ```bash
 sudo apt-get update
@@ -23,11 +24,15 @@ sudo apt-get install -y \
   curl \
   e2fsprogs \
   kmod \
-  mmdebstrap \
   openssh-client \
   qemu-system-x86 \
+  qemu-utils \
   zstd
 ```
+
+Install `buildctl`, `buildkitd`, and `umoci` from your approved package source.
+The builder uses the OCI rootfs and QEMU VM stages for every image.
+Use a package source that supplies QEMU 10 or later.
 
 Verify KVM before installing the daemon:
 
@@ -72,7 +77,6 @@ state_db = "/var/lib/intar-builder/state.sqlite3"
 
 [qemu]
 qemu_binary = "qemu-system-x86_64"
-mmdebstrap_binary = "mmdebstrap"
 mke2fs_binary = "mke2fs"
 e2fsck_binary = "e2fsck"
 resize2fs_binary = "resize2fs"
@@ -83,6 +87,18 @@ accelerator = "kvm"
 build_cpus = 4
 build_memory_mb = 4096
 
+[qemu.layered]
+qemu_img_binary = "qemu-img"
+buildctl_binary = "buildctl"
+umoci_binary = "umoci"
+debian_image = "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f"
+oci_cache_root = "/var/cache/intar-builder/oci"
+checkpoint_cache_root = "/var/cache/intar-builder/checkpoints"
+use_cache = true
+oci_cache_bytes = 8589934592
+checkpoint_cache_bytes = 42949672960
+minimum_free_bytes = 21474836480
+
 [jobs]
 max_attempts = 3
 max_concurrent_builds = 2
@@ -90,6 +106,111 @@ max_concurrent_builds = 2
 
 The same template is checked into
 `crates/intar-builder/deploy/config.example.toml`.
+
+## OCI VM Build
+
+Every build uses the OCI rootfs and QEMU VM stages. QEMU 10 or later is
+required for its QMP structured exec channels. `intar-builder doctor` rejects
+an older or malformed QEMU version. The checkpoint proof uses QEMU 10.0.11.
+Repeat that proof before changing the QEMU version or device configuration.
+
+The defaults set an 8 GiB OCI cache, a 40 GiB checkpoint cache, and a 20 GiB
+free-disk floor. Set `use_cache = false` to make a cold service build. For one
+local build, use `intar-image-cli build --no-cache` or
+`intar-image-cli build-all --no-cache`. The clean-base proof also makes a cold
+OCI build.
+
+### BuildKit daemon
+
+BuildKit must listen at `<oci_cache_root>/buildkitd.sock`. With the default
+cache root and OCI budget, create this systemd unit:
+
+```ini
+[Unit]
+Description=Intar layered-build BuildKit daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=buildkitd --addr unix:///var/cache/intar-builder/oci/buildkitd.sock --root /var/cache/intar-builder/oci/buildkitd --oci-worker-gc --oci-worker-gc-keepstorage 0,21475,6442 --oci-max-parallelism 2
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save it as `/etc/systemd/system/intar-buildkitd.service`, then run:
+
+```bash
+sudo install -d -m 0755 /var/cache/intar-builder/oci
+sudo systemctl daemon-reload
+sudo systemctl enable --now intar-buildkitd
+```
+
+`--oci-worker-gc-keepstorage` uses decimal MB in this order:
+reserved space, free-space target, maximum worker use. `0,21475,6442` keeps
+the free-space target above 20 GiB and caps the daemon below 6 GiB. The
+remaining 2 GiB of the 8 GiB OCI budget holds converted ext4 artifacts.
+The decimal 6,442 MB cap plus 2 GiB stays below the 8 GiB total budget.
+`--oci-max-parallelism 2` matches the two permitted OCI build steps. Change
+all three values together when `oci_cache_bytes` changes.
+
+Keep the installed builder binary as a measurement reference. Do not use it
+alone for rollback: an older builder recomputes the v11 content hash and rejects
+a v12 desired hash. A rollback requires matched previous builder, image CLI, and
+control-plane releases. The source has one build backend and no backend selector.
+Published image contracts do not change.
+
+## Cache, Publication, and Proof
+
+Checkpoint cache v3 is private to the builder root account. Cache payloads use
+BLAKE3 integrity checks. A private per-scenario role index retains the
+before-last and expensive-prefix checkpoints without changing payload files.
+Older checkpoint entries are rebuilt. Public image hashes and manifests still
+use SHA-256. Keep cache entries and their leases private. Do not upload cache
+files.
+
+Keep the checkpoint before the last authored step. Keep a checkpoint after the
+last authored step only when that step takes at least 30 seconds. Do not keep
+earlier intermediate checkpoints.
+
+Publication output is durable across retries. Keep the state database, work
+directory, and cache directory until publication succeeds. Do not remove a
+completed output after a retryable publication failure.
+
+Before installing a new builder, drain the host and stop the builder. Remove
+only old directories in `bundles-unpacked` that lack
+`.intar-bundle-v1.complete`. Keep marked bundle revisions. The builder has no
+backend selector. Remove old configuration keys such as `mmdebstrap_binary`,
+`backend`, `qemuargs`, and `base_cache_root` before restart.
+
+### Benchmark gate
+
+The warm full-catalog median must be at least 2x faster. A cold run must not
+exceed the baseline by more than 20%. Neither gate is measured yet. Do not
+report either gate as passed.
+
+Run the deployed private workflow
+`intar-dev/scenarios/.github/workflows/image-build-benchmark.yml` with these
+cases:
+
+- `no-cache-prepared` and `unchanged`: an externally prepared empty cache.
+- `warm` and `runtime`: a forced full rebuild.
+- `warm` and `late-step`: one fault edit.
+
+For every case, record three baseline samples and three candidate samples. Use
+the same exact scenario SHA and build resource profile. Pause normal builder
+work. Include host preparation in each measured duration. The baseline is a
+benchmark reference only; it is not a runtime backend.
+
+Keep the JSON records from the workflow. Compare them with
+`tools/image-build/benchmark-release.py compare`, with exactly three
+`--baseline` records and three `--candidate` records, then retain its JSON
+report. An observer run that resumes after recovery is preliminary. It has
+observer provenance and cannot satisfy the benchmark gate.
 
 Two isolated workers share an eight-slot CPU gate. Each QEMU provision or chunk
 compression stage takes four slots. Upload work takes no CPU slots, so one build
@@ -110,7 +231,8 @@ Create `/etc/systemd/system/intar-builder.service`:
 ```ini
 [Unit]
 Description=Intar image builder
-After=network-online.target
+Requires=intar-buildkitd.service
+After=network-online.target intar-buildkitd.service
 Wants=network-online.target
 
 [Service]
@@ -141,9 +263,10 @@ sudo intar-builder doctor --config /etc/intar-builder/config.toml
 ```
 
 The command exits nonzero if required image-build prerequisites are missing:
-`/dev/kvm`, `accelerator = "kvm"`, the configured QEMU/mmdebstrap/e2fsprogs
-binaries, required work/cache/state directories, or bridge credentials. Builder
-doctor covers the QEMU/SSH image-build path only;
+`/dev/kvm`, `accelerator = "kvm"`, the configured QEMU/e2fsprogs binaries,
+QEMU 10 or later, `qemu-img`, `buildctl`, `umoci`, `zstd`, an immutable Debian
+digest, the BuildKit socket, required work/cache/state directories, or bridge
+credentials. Builder doctor covers the QEMU/SSH image-build path only;
 it is not a substitute for agent doctor or the privileged jailerd self-test on
 a scenario host.
 
@@ -162,7 +285,11 @@ Useful checks when builds do not start:
 ```bash
 test -c /dev/kvm
 qemu-system-x86_64 --version
-mmdebstrap --version
+qemu-img --version
+buildctl --version
+umoci --version
+zstd --version
+sudo systemctl status intar-buildkitd
 mke2fs -V
 modprobe --version
 ssh -V

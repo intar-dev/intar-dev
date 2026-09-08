@@ -1,5 +1,5 @@
-name: Image v11 run gate
-run-name: "Image v11 gate ${{ inputs.state }}"
+name: Image run gate
+run-name: "Image gate ${{ inputs.state }}"
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
           - drained
           - open
       confirmation:
-        description: Type SET IMAGE V11 GATE DRAINED or SET IMAGE V11 GATE OPEN
+        description: Type SET IMAGE GATE DRAINED or SET IMAGE GATE OPEN
         required: true
         type: string
 
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: intar-image-v11-production-cutover
+  group: intar-image-catalog-promotion
   cancel-in-progress: false
 
 jobs:
@@ -40,8 +40,8 @@ jobs:
           test "${GITHUB_REF}" = "refs/heads/main"
           test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
           case "${STATE}" in
-            drained) expected="SET IMAGE V11 GATE DRAINED" ;;
-            open) expected="SET IMAGE V11 GATE OPEN" ;;
+            drained) expected="SET IMAGE GATE DRAINED" ;;
+            open) expected="SET IMAGE GATE OPEN" ;;
             *) echo "Unsupported run gate state." >&2; exit 1 ;;
           esac
           test "${CONFIRMATION}" = "${expected}"
@@ -61,7 +61,7 @@ jobs:
         if: inputs.state == 'drained'
         run: |
           set -euo pipefail
-          status="${RUNNER_TEMP}/image-v11-gate.json"
+          status="${RUNNER_TEMP}/image-gate.json"
           for _ in $(seq 1 120); do
             curl --fail --silent --show-error --retry 2 \
               --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \

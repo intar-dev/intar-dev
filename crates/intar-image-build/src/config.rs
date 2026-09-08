@@ -38,13 +38,12 @@ impl BuildConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QemuBuildConfig {
     #[serde(default = "default_target_arch")]
     pub target_arch: String,
     #[serde(default = "default_qemu_binary")]
     pub qemu_binary: PathBuf,
-    #[serde(default = "default_mmdebstrap_binary")]
-    pub mmdebstrap_binary: PathBuf,
     #[serde(default = "default_mke2fs_binary")]
     pub mke2fs_binary: PathBuf,
     #[serde(default = "default_e2fsck_binary")]
@@ -59,8 +58,6 @@ pub struct QemuBuildConfig {
     pub qemu_exit_timeout_seconds: u64,
     #[serde(default = "default_accelerator")]
     pub accelerator: String,
-    #[serde(default)]
-    pub qemuargs: Vec<Vec<String>>,
     #[serde(default = "default_build_cpus")]
     pub build_cpus: u32,
     #[serde(default = "default_build_memory_mb")]
@@ -70,7 +67,7 @@ pub struct QemuBuildConfig {
     #[serde(default = "default_work_root")]
     pub work_root: PathBuf,
     #[serde(default)]
-    pub base_cache_root: Option<PathBuf>,
+    pub layered: LayeredBuildConfig,
 }
 
 impl Default for QemuBuildConfig {
@@ -78,7 +75,6 @@ impl Default for QemuBuildConfig {
         Self {
             target_arch: default_target_arch(),
             qemu_binary: default_qemu_binary(),
-            mmdebstrap_binary: default_mmdebstrap_binary(),
             mke2fs_binary: default_mke2fs_binary(),
             e2fsck_binary: default_e2fsck_binary(),
             resize2fs_binary: default_resize2fs_binary(),
@@ -86,12 +82,53 @@ impl Default for QemuBuildConfig {
             provision_timeout_seconds: default_provision_timeout_seconds(),
             qemu_exit_timeout_seconds: default_qemu_exit_timeout_seconds(),
             accelerator: default_accelerator(),
-            qemuargs: Vec::new(),
             build_cpus: default_build_cpus(),
             build_memory_mb: default_build_memory_mb(),
             output_root: default_output_root(),
             work_root: default_work_root(),
-            base_cache_root: None,
+            layered: LayeredBuildConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LayeredBuildConfig {
+    #[serde(default = "default_qemu_img_binary")]
+    pub qemu_img_binary: PathBuf,
+    #[serde(default = "default_buildctl_binary")]
+    pub buildctl_binary: PathBuf,
+    #[serde(default = "default_umoci_binary")]
+    pub umoci_binary: PathBuf,
+    #[serde(default = "default_debian_image")]
+    pub debian_image: String,
+    #[serde(default)]
+    pub oci_cache_root: Option<PathBuf>,
+    #[serde(default)]
+    pub checkpoint_cache_root: Option<PathBuf>,
+    #[serde(default = "default_layered_use_cache")]
+    pub use_cache: bool,
+    #[serde(default = "default_oci_cache_bytes")]
+    pub oci_cache_bytes: u64,
+    #[serde(default = "default_checkpoint_cache_bytes")]
+    pub checkpoint_cache_bytes: u64,
+    #[serde(default = "default_minimum_free_bytes")]
+    pub minimum_free_bytes: u64,
+}
+
+impl Default for LayeredBuildConfig {
+    fn default() -> Self {
+        Self {
+            qemu_img_binary: default_qemu_img_binary(),
+            buildctl_binary: default_buildctl_binary(),
+            umoci_binary: default_umoci_binary(),
+            debian_image: default_debian_image(),
+            oci_cache_root: None,
+            checkpoint_cache_root: None,
+            use_cache: default_layered_use_cache(),
+            oci_cache_bytes: default_oci_cache_bytes(),
+            checkpoint_cache_bytes: default_checkpoint_cache_bytes(),
+            minimum_free_bytes: default_minimum_free_bytes(),
         }
     }
 }
@@ -113,8 +150,22 @@ fn default_qemu_binary() -> PathBuf {
     PathBuf::from("qemu-system-x86_64")
 }
 
-fn default_mmdebstrap_binary() -> PathBuf {
-    PathBuf::from("mmdebstrap")
+fn default_qemu_img_binary() -> PathBuf {
+    PathBuf::from("qemu-img")
+}
+
+fn default_buildctl_binary() -> PathBuf {
+    PathBuf::from("buildctl")
+}
+
+fn default_umoci_binary() -> PathBuf {
+    PathBuf::from("umoci")
+}
+
+fn default_debian_image() -> String {
+    String::from(
+        "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f",
+    )
 }
 
 fn default_mke2fs_binary() -> PathBuf {
@@ -142,7 +193,7 @@ fn default_qemu_exit_timeout_seconds() -> u64 {
 }
 
 fn default_accelerator() -> String {
-    String::from("none")
+    String::from("kvm")
 }
 
 fn default_output_root() -> PathBuf {
@@ -165,6 +216,22 @@ fn default_upload_enabled() -> bool {
     true
 }
 
+fn default_layered_use_cache() -> bool {
+    true
+}
+
+fn default_oci_cache_bytes() -> u64 {
+    8 * 1024 * 1024 * 1024
+}
+
+fn default_checkpoint_cache_bytes() -> u64 {
+    40 * 1024 * 1024 * 1024
+}
+
+fn default_minimum_free_bytes() -> u64 {
+    20 * 1024 * 1024 * 1024
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -178,19 +245,29 @@ mod tests {
 qemu {
   target_arch = "amd64"
   qemu_binary = "/usr/local/bin/qemu-system-x86_64"
-  mmdebstrap_binary = "/usr/bin/mmdebstrap"
   mke2fs_binary = "/usr/sbin/mke2fs"
   e2fsck_binary = "/usr/sbin/e2fsck"
   resize2fs_binary = "/usr/sbin/resize2fs"
   ssh_wait_timeout_seconds = 120
   provision_timeout_seconds = 240
   qemu_exit_timeout_seconds = 30
-  accelerator = "none"
-  qemuargs = [["-machine", "q35"]]
+  accelerator = "kvm"
   build_cpus = 4
   build_memory_mb = 4096
   output_root = "dist"
   work_root = ".work"
+  layered {
+    qemu_img_binary = "/usr/bin/qemu-img"
+    buildctl_binary = "/usr/local/bin/buildctl"
+    umoci_binary = "/usr/bin/umoci"
+    debian_image = "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f"
+    oci_cache_root = ".cache/oci"
+    checkpoint_cache_root = ".cache/checkpoints"
+    use_cache = false
+    oci_cache_bytes = 8589934592
+    checkpoint_cache_bytes = 42949672960
+    minimum_free_bytes = 21474836480
+  }
 }
 
 upload {
@@ -203,18 +280,31 @@ upload {
 
         match parsed {
             Ok(config) => {
-                assert_eq!(config.qemu.accelerator, "none");
+                assert_eq!(config.qemu.accelerator, "kvm");
                 assert_eq!(config.qemu.target_arch, "amd64");
-                assert_eq!(
-                    config.qemu.mmdebstrap_binary,
-                    PathBuf::from("/usr/bin/mmdebstrap")
-                );
                 assert_eq!(config.qemu.ssh_wait_timeout_seconds, 120);
                 assert_eq!(config.qemu.provision_timeout_seconds, 240);
                 assert_eq!(config.qemu.qemu_exit_timeout_seconds, 30);
-                assert_eq!(config.qemu.qemuargs.len(), 1);
                 assert_eq!(config.qemu.build_cpus, 4);
                 assert_eq!(config.qemu.build_memory_mb, 4096);
+                assert_eq!(
+                    config.qemu.layered.qemu_img_binary,
+                    PathBuf::from("/usr/bin/qemu-img")
+                );
+                assert_eq!(
+                    config.qemu.layered.oci_cache_root,
+                    Some(PathBuf::from(".cache/oci"))
+                );
+                assert!(!config.qemu.layered.use_cache);
+                assert_eq!(config.qemu.layered.oci_cache_bytes, 8 * 1024 * 1024 * 1024);
+                assert_eq!(
+                    config.qemu.layered.checkpoint_cache_bytes,
+                    40 * 1024 * 1024 * 1024
+                );
+                assert_eq!(
+                    config.qemu.layered.minimum_free_bytes,
+                    20 * 1024 * 1024 * 1024
+                );
                 let upload = config.upload.expect("upload config should be present");
                 assert_eq!(upload.url, "https://intar.dev/registry/v1/publish");
                 assert_eq!(upload.token, "registry-publish-token");
@@ -238,5 +328,34 @@ upload {
         let upload = parsed.upload.expect("upload config should be present");
         assert!(!upload.enabled);
         assert_eq!(upload.token, "");
+    }
+
+    #[test]
+    fn defaults_to_oci_cache_settings() {
+        let config = hcl::from_str::<BuildConfig>("").expect("config should parse");
+
+        assert!(config.qemu.layered.use_cache);
+        assert_eq!(config.qemu.layered.oci_cache_bytes, 8 * 1024 * 1024 * 1024);
+        assert_eq!(
+            config.qemu.layered.checkpoint_cache_bytes,
+            40 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            config.qemu.layered.minimum_free_bytes,
+            20 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn rejects_removed_qemu_fields() {
+        for field in [
+            "backend = \"legacy\"",
+            "mmdebstrap_binary = \"mmdebstrap\"",
+            "qemuargs = []",
+            "base_cache_root = \".cache/base\"",
+        ] {
+            let source = format!("qemu {{\n  {field}\n}}");
+            assert!(hcl::from_str::<BuildConfig>(&source).is_err(), "{field}");
+        }
     }
 }

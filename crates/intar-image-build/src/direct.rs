@@ -1,16 +1,19 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 #[cfg(unix)]
-use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Error, Result, anyhow, bail, ensure};
+use fs2::FileExt;
 use intar_contracts::catalog::{CourseCatalogLectureV2, ScenarioManifestV4};
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
@@ -23,15 +26,16 @@ use crate::chunked::{
 use crate::config::QemuBuildConfig;
 use crate::disk::{ScenarioDiskPlan, prepare_scenario_disk, render_scenario_disk_plan};
 use crate::manifest::build_direct_manifest_json;
-use crate::provision::render_scenario_provision_script;
-use crate::qemu::{DirectBootQemuInput, render_direct_boot_qemu_command, uses_tcg_accelerator};
+use crate::provision::render_scenario_build_stages;
 use crate::rootfs::{RootfsBuildPlan, ensure_base_rootfs, render_rootfs_build_plan};
 use crate::seed::{BuildSeedInput, write_build_seed};
 use crate::ssh::{BuildSshSession, generate_build_ssh_key};
 
+#[cfg(unix)]
+mod layered;
+
 const SSH_USERNAME: &str = "ubuntu";
 const SSH_HOST: &str = "127.0.0.1";
-const DIRECT_PROVISION_COMMAND: &str = "sudo bash /tmp/intar-provision.sh";
 const QMP_SOCKET_FILE_NAME: &str = "qmp.sock";
 // A build guest can briefly expose port 22 before its ephemeral key and
 // network setup have settled. Avoid hammering OpenSSH's unauthenticated
@@ -42,10 +46,10 @@ const QEMU_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const QMP_IO_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const QMP_READ_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const WORK_LOCK_FILENAME: &str = ".intar-build.lock";
 
 #[derive(Debug, Clone)]
 pub struct DirectBuildRequest {
-    pub scenario_path: PathBuf,
     pub scenario: Scenario,
     pub lecture: CourseCatalogLectureV2,
     pub vm_name: String,
@@ -61,7 +65,6 @@ pub struct DirectBuildPaths {
     pub work_root: PathBuf,
     pub root_disk_path: PathBuf,
     pub seed_disk_path: PathBuf,
-    pub provision_script_path: PathBuf,
     pub disk_commands_path: PathBuf,
     pub qemu_args_path: PathBuf,
     pub build_log_path: PathBuf,
@@ -76,14 +79,28 @@ pub struct RenderedDirectBuild {
     pub lecture: CourseCatalogLectureV2,
     pub target_arch: String,
     pub config: QemuBuildConfig,
-    pub effective_vm_name: String,
     pub ssh_host_port: u16,
     pub paths: DirectBuildPaths,
     pub vm: VmDefinition,
     pub base_image: BaseImageSpec,
     pub base_rootfs: RootfsBuildPlan,
     pub disk: ScenarioDiskPlan,
-    pub qemu_args: Vec<String>,
+    _lease: Arc<DirectBuildLease>,
+}
+
+#[derive(Debug)]
+struct DirectBuildLease {
+    work_lock: fs::File,
+    output_lock: fs::File,
+}
+
+impl Drop for DirectBuildLease {
+    fn drop(&mut self) {
+        // Explicit unlock makes a just-dropped render lease immediately
+        // visible to another local CLI invocation on macOS and Linux.
+        let _ = FileExt::unlock(&self.output_lock);
+        let _ = FileExt::unlock(&self.work_lock);
+    }
 }
 
 pub struct DirectBuildPrepareInput<'a> {
@@ -99,11 +116,9 @@ pub struct DirectBuildOutput {
 
 #[derive(Debug, Clone)]
 pub struct DirectBuildArtifact {
-    pub raw_path: PathBuf,
     pub chunk_manifest_path: PathBuf,
     pub chunk_manifest_sha256: String,
     pub chunks: Vec<EncodedImageChunkArtifact>,
-    pub metadata_path: PathBuf,
     pub image_id: String,
     pub kernel_sha256_hex: String,
     pub initrd_sha256_hex: String,
@@ -136,6 +151,7 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         .with_context(|| format!("vm '{}' not found", request.vm_name))?;
 
     let paths = direct_build_paths(request, &vm);
+    let lease = acquire_direct_build_lease(&paths)?;
     let base_rootfs = render_rootfs_build_plan(&request.base_image, &request.config);
     let disk = render_scenario_disk_plan(
         &base_rootfs.paths.base_ext4_path,
@@ -143,8 +159,8 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         vm.disk,
         &request.config,
     );
-    let provision_script = render_scenario_provision_script(&request.scenario, &vm)
-        .context("failed to render direct provision script")?;
+    let stages = render_scenario_build_stages(&request.scenario, &vm)
+        .context("failed to render VM build stages")?;
 
     fs::create_dir_all(&paths.work_root)
         .with_context(|| format!("failed to create '{}'", paths.work_root.display()))?;
@@ -152,12 +168,13 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create '{}'", parent.display()))?;
     }
-    fs::write(&paths.provision_script_path, provision_script).with_context(|| {
-        format!(
-            "failed to write provision script '{}'",
-            paths.provision_script_path.display()
+    for stage in stages {
+        fs::write(
+            paths.work_root.join(format!("stage-{}.sh", stage.id)),
+            stage.script,
         )
-    })?;
+        .context("failed to write rendered build stage")?;
+    }
     fs::write(&paths.disk_commands_path, render_disk_commands(&disk)).with_context(|| {
         format!(
             "failed to write disk commands '{}'",
@@ -165,47 +182,19 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         )
     })?;
 
-    let ssh_host_port = allocate_ssh_host_port()?;
-    let qemu_command = render_direct_boot_qemu_command(&DirectBootQemuInput {
-        config: &request.config,
-        root_disk_path: &paths.root_disk_path,
-        seed_disk_path: &paths.seed_disk_path,
-        kernel_path: &base_rootfs.paths.kernel_path,
-        initrd_path: &base_rootfs.paths.initrd_path,
-        serial_log_path: &paths.serial_log_path,
-        // QEMU's Unix socket path is limited to 108 bytes on Linux. Run QEMU
-        // from the build work directory and keep this process argument short.
-        // Host-side cleanup keeps the absolute path, while QMP clients connect
-        // through a short, private symlink created below.
-        qmp_socket_path: Path::new(QMP_SOCKET_FILE_NAME),
-        ssh_host_port,
-        memory_mib: request.config.build_memory_mb,
-        cpu_count: request.config.build_cpus,
-        boot_cmdline: crate::qemu::BUILD_BOOT_CMDLINE,
-    });
-    let qemu_args = qemu_command.args;
-    fs::write(&paths.qemu_args_path, qemu_args.join("\n")).with_context(|| {
-        format!(
-            "failed to write qemu args '{}'",
-            paths.qemu_args_path.display()
-        )
-    })?;
-
-    let effective_vm_name = effective_vm_name(&vm.name, &request.config.target_arch);
     Ok(RenderedDirectBuild {
         scenario: request.scenario.clone(),
         scenario_name: request.scenario.name.clone(),
         lecture: request.lecture.clone(),
         target_arch: request.config.target_arch.clone(),
         config: request.config.clone(),
-        effective_vm_name,
-        ssh_host_port,
+        ssh_host_port: allocate_ssh_host_port()?,
         paths,
         vm,
         base_image: request.base_image.clone(),
         base_rootfs,
         disk,
-        qemu_args,
+        _lease: lease,
     })
 }
 
@@ -271,32 +260,62 @@ pub fn run_direct_build(request: &DirectBuildRequest) -> Result<DirectBuildOutpu
 /// Returns an error if rendering, rootfs preparation, QEMU, or guest
 /// provisioning fails.
 pub fn run_direct_build_to_raw(request: &DirectBuildRequest) -> Result<RenderedDirectBuild> {
-    let rendered = render_direct_build(request).with_context(|| {
+    ensure!(
+        cfg!(target_os = "linux"),
+        "VM image builds require Linux/KVM"
+    );
+    ensure!(
+        request.config.accelerator == "kvm",
+        "VM image builds require KVM acceleration"
+    );
+    let mut rendered = render_direct_build(request).with_context(|| {
         format!(
             "failed to render direct build {}:{}",
             request.scenario.name, request.vm_name
         )
     })?;
-    ensure_base_rootfs(&rendered.base_image, &rendered.config).with_context(|| {
+    let base_started = Instant::now();
+    let base = ensure_base_rootfs(&rendered.base_image, &rendered.config).with_context(|| {
         format!(
             "failed to prepare base rootfs '{}' for {}",
             rendered.base_image.name, rendered.target_arch
         )
     })?;
-
-    let ssh_key = generate_build_ssh_key().context("failed to generate direct build SSH key")?;
-    prepare_direct_build_inputs(&DirectBuildPrepareInput {
-        rendered: &rendered,
-        build_public_key_openssh: &ssh_key.public_key_openssh,
-    })?;
-
-    let mut qemu = spawn_qemu(&rendered)?;
-    if let Err(error) = provision_guest(&rendered, &mut qemu, &ssh_key.private_key) {
-        return Err(qemu_failure_after_cleanup(&mut qemu, error));
+    eprintln!(
+        "[intar-build-metric] scenario={} vm={} phase=base_prepare elapsed_ms={}",
+        rendered.scenario_name,
+        rendered.vm.name,
+        base_started.elapsed().as_millis()
+    );
+    let _base_lease = base.lease.clone();
+    rendered.base_rootfs.paths.base_ext4_path = base.base_ext4_path.clone();
+    rendered.base_rootfs.paths.kernel_path = base.kernel_path;
+    rendered.base_rootfs.paths.initrd_path = base.initrd_path;
+    rendered.base_rootfs.definition_hash = base.definition_hash;
+    rendered.disk.base_ext4_path = base.base_ext4_path;
+    // Publication can outlive compute and an OCI cache lease. Keep the boot
+    // artifacts with this job's durable output rather than a prunable cache.
+    for (source, destination) in [
+        (
+            &mut rendered.base_rootfs.paths.kernel_path,
+            rendered.paths.output_chunks_dir.with_extension("kernel"),
+        ),
+        (
+            &mut rendered.base_rootfs.paths.initrd_path,
+            rendered.paths.output_chunks_dir.with_extension("initrd"),
+        ),
+    ] {
+        fs::copy(&*source, &destination).context("failed to retain build boot artifact")?;
+        fs::File::open(&destination)?.sync_all()?;
+        *source = destination;
     }
-    wait_for_qemu_shutdown(&mut qemu, &rendered)?;
-
-    Ok(rendered)
+    let _compute = crate::compute::acquire();
+    #[cfg(unix)]
+    {
+        layered::build(rendered)
+    }
+    #[cfg(not(unix))]
+    bail!("VM image builds require Linux/KVM")
 }
 
 /// Finish a provisioned raw image from its stable logical scan, using encoded
@@ -310,6 +329,7 @@ pub fn finish_direct_build_from_scan(
     scan: &ScannedChunkedImage,
     reused: &BTreeMap<String, ReusedEncodedImageChunk>,
 ) -> Result<DirectBuildOutput> {
+    let started = Instant::now();
     let chunked_artifact = write_scanned_chunked_image_artifact(
         scan,
         &rendered.paths.output_chunks_dir,
@@ -317,6 +337,13 @@ pub fn finish_direct_build_from_scan(
         reused,
     )?;
     let artifact = direct_artifact_from_chunked(&rendered, chunked_artifact)?;
+    eprintln!(
+        "[intar-build-metric] scenario={} vm={} phase=chunk_encoding elapsed_ms={} reused_chunks={}",
+        rendered.scenario_name,
+        rendered.vm.name,
+        started.elapsed().as_millis(),
+        reused.len()
+    );
     Ok(DirectBuildOutput { rendered, artifact })
 }
 
@@ -346,13 +373,76 @@ fn direct_build_paths(request: &DirectBuildRequest, vm: &VmDefinition) -> Direct
             .join(format!("{output_stem}.manifest.json")),
         root_disk_path: work_root.join("root.raw"),
         seed_disk_path: work_root.join("intarbuild.img"),
-        provision_script_path: work_root.join("provision.sh"),
         disk_commands_path: work_root.join("disk.commands"),
         qemu_args_path: work_root.join("qemu.args"),
         build_log_path: work_root.join("build.log"),
         serial_log_path: work_root.join("serial.log"),
         qmp_socket_path: work_root.join(QMP_SOCKET_FILE_NAME),
         work_root,
+    }
+}
+
+fn acquire_direct_build_lease(paths: &DirectBuildPaths) -> Result<Arc<DirectBuildLease>> {
+    let work_lock_path = paths.work_root.join(WORK_LOCK_FILENAME);
+    let output_lock_path = paths.output_chunks_dir.with_extension("lock");
+    let work_lock = open_direct_build_lock(&work_lock_path)?;
+    lock_direct_build_path(&work_lock, &work_lock_path, "work directory")?;
+
+    let output_lock = match open_direct_build_lock(&output_lock_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let _ = FileExt::unlock(&work_lock);
+            return Err(error);
+        }
+    };
+    if let Err(error) = lock_direct_build_path(&output_lock, &output_lock_path, "output stem") {
+        let _ = FileExt::unlock(&work_lock);
+        return Err(error);
+    }
+
+    Ok(Arc::new(DirectBuildLease {
+        work_lock,
+        output_lock,
+    }))
+}
+
+fn open_direct_build_lock(path: &Path) -> Result<fs::File> {
+    let parent = path
+        .parent()
+        .context("direct build lock path has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create direct build lock directory '{}'",
+            parent.display()
+        )
+    })?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .with_context(|| format!("failed to open direct build lock '{}'", path.display()))
+}
+
+fn lock_direct_build_path(lock: &fs::File, path: &Path, resource: &str) -> Result<()> {
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            bail!(
+                "direct build is busy: {resource} '{}' is already in use",
+                path.display()
+            );
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to lock direct build {resource} '{}'",
+                path.display()
+            )
+        }),
     }
 }
 
@@ -365,101 +455,6 @@ fn allocate_ssh_host_port() -> Result<u16> {
         .port();
     drop(listener);
     Ok(port)
-}
-
-fn spawn_qemu(rendered: &RenderedDirectBuild) -> Result<Child> {
-    if uses_tcg_accelerator(&rendered.config.accelerator) {
-        eprintln!(
-            "WARNING: direct image build is using QEMU TCG acceleration; Linux/KVM proof requires accelerator = \"kvm\" and /dev/kvm access"
-        );
-    }
-
-    if let Some(parent) = rendered.paths.serial_log_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create '{}'", parent.display()))?;
-    }
-    if rendered.paths.qmp_socket_path.exists() {
-        fs::remove_file(&rendered.paths.qmp_socket_path).with_context(|| {
-            format!(
-                "failed to remove stale QMP socket '{}'",
-                rendered.paths.qmp_socket_path.display()
-            )
-        })?;
-    }
-
-    Command::new(&rendered.config.qemu_binary)
-        .args(&rendered.qemu_args)
-        .current_dir(&rendered.paths.work_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to start QEMU '{}'",
-                rendered.config.qemu_binary.display()
-            )
-        })
-}
-
-fn provision_guest(
-    rendered: &RenderedDirectBuild,
-    qemu: &mut Child,
-    private_key: &PrivateKey,
-) -> Result<()> {
-    if let Some(parent) = rendered.paths.build_log_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create '{}'", parent.display()))?;
-    }
-    fs::write(
-        &rendered.paths.build_log_path,
-        format!(
-            "== {}:{} provision log ==\n",
-            rendered.scenario_name, rendered.vm.name
-        ),
-    )
-    .with_context(|| {
-        format!(
-            "failed to initialize build log '{}'",
-            rendered.paths.build_log_path.display()
-        )
-    })?;
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create build SSH runtime")?;
-    let mut ssh = wait_for_ssh(rendered, qemu, private_key, &runtime)?;
-    let provision_timeout_seconds = rendered.config.provision_timeout_seconds.max(1);
-    let provision_result = runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(provision_timeout_seconds), async {
-            ssh.upload_file(
-                &rendered.paths.provision_script_path,
-                "/tmp/intar-provision.sh",
-                0o755,
-            )
-            .await
-            .context("failed to upload provision script")?;
-            // Provisioning must report success independently. The host requests
-            // poweroff over QMP only after this command returns status zero.
-            ssh.run_logged(
-                DIRECT_PROVISION_COMMAND,
-                true,
-                &rendered.paths.build_log_path,
-            )
-            .await
-            .context("direct scenario provisioning failed")
-        })
-        .await
-    });
-    match provision_result {
-        Ok(result) => result,
-        Err(_) => bail!(
-            "direct scenario provisioning timed out after {provision_timeout_seconds}s; build log: {}; serial log: {}",
-            rendered.paths.build_log_path.display(),
-            rendered.paths.serial_log_path.display()
-        ),
-    }
 }
 
 fn wait_for_ssh(
@@ -922,11 +917,9 @@ fn direct_artifact_from_chunked(
     })?;
 
     Ok(DirectBuildArtifact {
-        raw_path: chunked_artifact.raw_path,
         chunk_manifest_path: chunked_artifact.manifest_path,
         chunk_manifest_sha256: chunked_artifact.manifest_sha256,
         chunks: chunked_artifact.chunks,
-        metadata_path: rendered.paths.output_metadata_path.clone(),
         image_id: chunked_artifact.manifest.image_id,
         kernel_sha256_hex,
         initrd_sha256_hex,

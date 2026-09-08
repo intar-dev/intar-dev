@@ -41,6 +41,17 @@ pub struct BuildSshSession {
 }
 
 impl BuildSshSession {
+    /// Close the build connection before saving guest network state.
+    pub async fn disconnect(self) -> Result<()> {
+        self.session
+            .disconnect(
+                russh::Disconnect::ByApplication,
+                "build stage complete",
+                "en",
+            )
+            .await
+            .context("failed to disconnect build SSH")
+    }
     pub async fn connect(
         host: &str,
         port: u16,

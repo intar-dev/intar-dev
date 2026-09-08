@@ -25,6 +25,7 @@ import {
   withImageBuildCoordinationLock,
   withImageBuildCoordinationLocks,
 } from "@/lib/image-build-lock";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { resetD1Database } from "@/test/d1-migrations";
 
 type SchedulerDb = Parameters<typeof queueImageBuildsFromBundle>[0];
@@ -85,7 +86,7 @@ describe("build scheduler bundle supersession", () => {
         rev: "bundle-new",
         r2Key: "builds/bundles/bundle-new.tar.gz",
         meta: {
-          buildFormatVersion: "intar-image-build-v11",
+          buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -152,7 +153,7 @@ describe("build scheduler bundle supersession", () => {
         rev: "bundle-same-hash",
         r2Key: "builds/bundles/bundle-same-hash.tar.gz",
         meta: {
-          buildFormatVersion: "intar-image-build-v11",
+          buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -539,7 +540,7 @@ async function queueBundle(
     rev,
     r2Key: `builds/bundles/${rev}.tar.gz`,
     meta: {
-      buildFormatVersion: "intar-image-build-v11",
+      buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
       scenarios: [
         {
           scenarioId: "broken-nginx",

@@ -4,7 +4,6 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
@@ -17,9 +16,9 @@ use std::time::Instant;
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    DIRECT_PROVISION_COMMAND, DirectBuildPrepareInput, DirectBuildRequest, DirectQemuShutdownInput,
-    QEMU_EXIT_POLL_INTERVAL, QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL, RenderedDirectBuild,
-    SSH_POLL_INTERVAL, acknowledged_qmp_shutdown_with_cancel, connect_qmp_socket,
+    DirectBuildPrepareInput, DirectBuildRequest, DirectQemuShutdownInput, QEMU_EXIT_POLL_INTERVAL,
+    QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL, RenderedDirectBuild, SSH_POLL_INTERVAL,
+    WORK_LOCK_FILENAME, acknowledged_qmp_shutdown_with_cancel, connect_qmp_socket,
     prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
 };
 use crate::config::QemuBuildConfig;
@@ -44,12 +43,28 @@ fn render_test_direct_build(directory: &TempDir, config: QemuBuildConfig) -> Ren
 
 fn render_test_direct_build_in_work_root(
     directory: &TempDir,
-    mut config: QemuBuildConfig,
+    config: QemuBuildConfig,
     work_root: PathBuf,
 ) -> RenderedDirectBuild {
-    let scenario = intar_image_scenario::Scenario::parse_course(
-        r#"
-scenario "broken-nginx" {
+    render_direct_build(&test_direct_build_request(
+        config,
+        work_root,
+        directory.path().join("dist"),
+        "broken-nginx",
+        "web",
+    ))
+    .unwrap()
+}
+
+fn test_direct_build_request(
+    mut config: QemuBuildConfig,
+    work_root: PathBuf,
+    output_root: PathBuf,
+    scenario_name: &str,
+    vm_name: &str,
+) -> DirectBuildRequest {
+    let source = r#"
+scenario "__SCENARIO_NAME__" {
   solution { body = "Start nginx." }
 
   image "debian-13-minimal" {
@@ -65,14 +80,15 @@ probe "svc" {
 }
   }
 
-  vm "web" {
+  vm "__VM_NAME__" {
 image = "debian-13-minimal"
 probes = ["svc"]
   }
 }
-"#,
-    )
-    .unwrap();
+"#
+    .replace("__SCENARIO_NAME__", scenario_name)
+    .replace("__VM_NAME__", vm_name);
+    let scenario = intar_image_scenario::Scenario::parse_course(&source).unwrap();
     let catalog = intar_image_scenario::BaseImageCatalog::parse(
         r#"
 base_image "trixie" {
@@ -85,33 +101,23 @@ base_image "trixie" {
 "#,
     )
     .unwrap();
-    config.output_root = directory.path().join("dist");
+    let mut lecture = test_lecture();
+    lecture.scenario_id = Some(scenario_name.to_string());
+    config.output_root = output_root;
     config.work_root = work_root;
 
-    render_direct_build(&DirectBuildRequest {
-        scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
+    DirectBuildRequest {
         scenario,
-        lecture: test_lecture(),
-        vm_name: "web".to_string(),
+        lecture,
+        vm_name: vm_name.to_string(),
         config,
         base_image: catalog.base_image_by_name("trixie").unwrap().clone(),
-    })
-    .unwrap()
+    }
 }
 
 #[test]
 fn ssh_readiness_poll_does_not_hammer_guest_limits() {
     assert_eq!(SSH_POLL_INTERVAL, std::time::Duration::from_secs(2));
-}
-
-#[test]
-fn direct_provisioning_requires_success_before_host_poweroff() {
-    assert_eq!(
-        DIRECT_PROVISION_COMMAND,
-        "sudo bash /tmp/intar-provision.sh"
-    );
-    assert!(!DIRECT_PROVISION_COMMAND.contains("shutdown"));
-    assert!(!DIRECT_PROVISION_COMMAND.contains("&&"));
 }
 
 #[test]

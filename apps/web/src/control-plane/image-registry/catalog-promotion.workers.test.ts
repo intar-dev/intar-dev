@@ -14,6 +14,7 @@ import {
   vmScenarios,
 } from "@/db/schema";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -28,7 +29,7 @@ describe("candidate scenario catalog promotion", () => {
       rev: "revision-1",
       r2Key: "builds/bundles/revision-1.tar.gz",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v11",
+        buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
         catalogChannel: "candidate",
         scenarios: [
           {
@@ -168,6 +169,44 @@ describe("candidate scenario catalog promotion", () => {
       .where(eq(vmScenarioVms.scenarioId, "broken-nginx"));
     expect(restoredScenario[0]).toMatchObject({ title: "Old catalog" });
     expect(restoredVms[0]).toMatchObject({ imageFormat: "raw_zstd" });
+  });
+
+  it("rejects a candidate from an earlier image build format", async () => {
+    await drizzle(env.DB)
+      .update(imageBuildBundles)
+      .set({
+        metaJson: {
+          buildFormatVersion: "intar-image-build-v11",
+          catalogChannel: "candidate",
+          scenarios: [
+            {
+              scenarioId: "broken-nginx",
+              arch: "x86_64",
+              contentHash: CONTENT_HASH,
+            },
+          ],
+        },
+      })
+      .where(eq(imageBuildBundles.rev, "revision-1"));
+
+    const response = await handleImageRegistryRequest(
+      new Request(
+        "https://intar.test/registry/v1/catalog/promote/revision-1",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-publish-token",
+            "x-intar-drained": "true",
+          },
+        },
+      ),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    await expect(response?.json()).resolves.toEqual({
+      error: "candidate bundle uses an unsupported image build format",
+    });
   });
 });
 

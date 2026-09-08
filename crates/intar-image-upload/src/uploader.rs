@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex};
 
 use intar_contracts::catalog::{
     ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ScenarioManifestV4,
@@ -292,6 +293,7 @@ impl ImageUploader {
     }
 
     fn upload_image_chunk(&self, chunk: &PublishImageChunkFile) -> Result<()> {
+        let _permit = CHUNK_UPLOAD_GATE.acquire();
         let mut url = sibling_endpoint(&self.endpoint, "image-chunks")?;
         url.path_segments_mut()
             .map_err(|()| Error::InvalidConfig("publish url cannot be a base URL"))?
@@ -522,6 +524,51 @@ const fn architecture_name(architecture: &ImageArchitecture) -> &'static str {
 const UPLOAD_PART_BYTES: u64 = 64 * 1024 * 1024;
 const CHUNK_EXISTS_BATCH_SIZE: usize = 512;
 const CHUNK_UPLOAD_CONCURRENCY: usize = 8;
+static CHUNK_UPLOAD_GATE: ChunkUploadGate = ChunkUploadGate::new(CHUNK_UPLOAD_CONCURRENCY);
+
+struct ChunkUploadGate {
+    available: Mutex<usize>,
+    changed: Condvar,
+}
+
+impl ChunkUploadGate {
+    const fn new(limit: usize) -> Self {
+        Self {
+            available: Mutex::new(limit),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> ChunkUploadPermit<'_> {
+        let mut available = self
+            .available
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *available == 0 {
+            available = self
+                .changed
+                .wait(available)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        *available -= 1;
+        ChunkUploadPermit { gate: self }
+    }
+}
+
+struct ChunkUploadPermit<'a> {
+    gate: &'a ChunkUploadGate,
+}
+
+impl Drop for ChunkUploadPermit<'_> {
+    fn drop(&mut self) {
+        *self
+            .gate
+            .available
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) += 1;
+        self.gate.changed.notify_one();
+    }
+}
 
 #[derive(Debug, serde::Deserialize)]
 struct ExistingChunksResponse {
@@ -652,6 +699,9 @@ fn require_success(response: reqwest::blocking::Response) -> Result<()> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
     use intar_contracts::catalog::ImageArchitecture;
 
     use super::{PublishArtifactFile, PublishBuildIdentity, architecture_name, normalize_sha256};
@@ -738,5 +788,27 @@ mod tests {
         assert_eq!(super::read_chunk(&mut reader, 4).unwrap().len(), 4);
         assert_eq!(super::read_chunk(&mut reader, 4).unwrap().len(), 2);
         assert!(super::read_chunk(&mut reader, 4).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chunk_upload_gate_limits_parallel_uploads() {
+        let gate = Arc::new(super::ChunkUploadGate::new(1));
+        let first = gate.acquire();
+        let (events_tx, events_rx) = mpsc::channel();
+        let waiting_gate = Arc::clone(&gate);
+        let waiter = std::thread::spawn(move || {
+            events_tx.send("waiting").unwrap();
+            let _second = waiting_gate.acquire();
+            events_tx.send("acquired").unwrap();
+        });
+
+        assert_eq!(events_rx.recv().unwrap(), "waiting");
+        assert!(events_rx.recv_timeout(Duration::from_millis(25)).is_err());
+        drop(first);
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "acquired"
+        );
+        waiter.join().unwrap();
     }
 }

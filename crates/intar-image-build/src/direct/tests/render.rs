@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn direct_render_uses_raw_chunk_outputs_and_direct_boot_args() {
+fn direct_render_writes_build_inputs() {
     let directory = tempdir().unwrap();
     let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
 
@@ -35,9 +35,8 @@ fn direct_render_uses_raw_chunk_outputs_and_direct_boot_args() {
             .seed_disk_path
             .ends_with(".work/qemu/broken-nginx/web/intarbuild.img")
     );
-    assert!(rendered.paths.provision_script_path.is_file());
+    assert!(rendered.paths.work_root.join("stage-packages.sh").is_file());
     assert!(rendered.paths.disk_commands_path.is_file());
-    assert!(rendered.paths.qemu_args_path.is_file());
     assert_eq!(rendered.disk.root_disk_path, rendered.paths.root_disk_path);
     assert_eq!(
         rendered.disk.base_ext4_path,
@@ -45,43 +44,89 @@ fn direct_render_uses_raw_chunk_outputs_and_direct_boot_args() {
     );
     assert_eq!(rendered.disk.virtual_size_bytes, 10 * 1024 * 1024 * 1024);
     assert!(rendered.ssh_host_port > 0);
-    assert!(rendered.qemu_args.iter().any(|arg| arg == "-kernel"));
-    assert!(
-        rendered
-            .qemu_args
-            .iter()
-            .any(|arg| arg.contains("if=virtio,format=raw"))
-    );
-    assert!(rendered.qemu_args.iter().any(|arg| {
-        arg == &format!(
-            "user,id=net0,hostfwd=tcp:127.0.0.1:{}-:22",
-            rendered.ssh_host_port
-        )
-    }));
     assert!(!rendered.paths.work_root.join("build.pkr.hcl").exists());
 }
 
-#[cfg(unix)]
 #[test]
-fn direct_render_keeps_qmp_argument_short_for_long_work_paths() {
+fn direct_render_blocks_colliding_work_and_output_paths() {
     let directory = tempdir().unwrap();
-    let long_work_root = directory.path().join("w".repeat(120));
-    let rendered = render_test_direct_build_in_work_root(
-        &directory,
-        QemuBuildConfig::default(),
-        long_work_root.clone(),
+    let config = QemuBuildConfig::default();
+    let request = test_direct_build_request(
+        config.clone(),
+        directory.path().join("work-a"),
+        directory.path().join("dist"),
+        "broken-nginx",
+        "web",
+    );
+    let rendered = render_direct_build(&request).unwrap();
+    let stage_path = rendered.paths.work_root.join("stage-packages.sh");
+    std::fs::write(&stage_path, "held by first render\n").unwrap();
+
+    let work_error = render_direct_build(&request).unwrap_err();
+    assert!(format!("{work_error:#}").contains("direct build is busy: work directory"));
+    assert_eq!(
+        std::fs::read_to_string(&stage_path).unwrap(),
+        "held by first render\n"
     );
 
-    let expected_host_path = long_work_root.join("qemu/broken-nginx/web/qmp.sock");
-    assert!(expected_host_path.is_absolute());
-    assert!(expected_host_path.as_os_str().as_encoded_bytes().len() > 108);
-    assert_eq!(rendered.paths.qmp_socket_path, expected_host_path);
-    assert!(
-        rendered
-            .qemu_args
-            .windows(2)
-            .any(|pair| pair == ["-qmp", "unix:qmp.sock,server=on,wait=off"])
+    let same_output_different_work = test_direct_build_request(
+        config,
+        directory.path().join("work-b"),
+        directory.path().join("dist"),
+        "broken-nginx",
+        "web",
     );
+    let output_error = render_direct_build(&same_output_different_work).unwrap_err();
+    assert!(format!("{output_error:#}").contains("direct build is busy: output stem"));
+}
+
+#[test]
+fn direct_render_allows_distinct_vm_paths() {
+    let directory = tempdir().unwrap();
+    let config = QemuBuildConfig::default();
+    let web = test_direct_build_request(
+        config.clone(),
+        directory.path().join("work"),
+        directory.path().join("dist"),
+        "broken-nginx",
+        "web",
+    );
+    let worker = test_direct_build_request(
+        config,
+        directory.path().join("work"),
+        directory.path().join("dist"),
+        "broken-nginx",
+        "worker",
+    );
+
+    let web = render_direct_build(&web).unwrap();
+    let worker = render_direct_build(&worker).unwrap();
+    assert_ne!(web.paths.work_root, worker.paths.work_root);
+    assert_ne!(web.paths.output_chunks_dir, worker.paths.output_chunks_dir);
+}
+
+#[test]
+fn direct_render_releases_locks_after_the_last_clone_drops() {
+    let directory = tempdir().unwrap();
+    let request = test_direct_build_request(
+        QemuBuildConfig::default(),
+        directory.path().join("work"),
+        directory.path().join("dist"),
+        "broken-nginx",
+        "web",
+    );
+    let rendered = render_direct_build(&request).unwrap();
+    let clone = rendered.clone();
+    let work_lock = rendered.paths.work_root.join(WORK_LOCK_FILENAME);
+    let output_lock = rendered.paths.output_chunks_dir.with_extension("lock");
+
+    drop(rendered);
+    assert!(render_direct_build(&request).is_err());
+    drop(clone);
+
+    assert!(work_lock.is_file());
+    assert!(output_lock.is_file());
+    render_direct_build(&request).unwrap();
 }
 
 #[test]
@@ -128,7 +173,6 @@ base_image "trixie" {
     )
     .unwrap();
     let rendered = render_direct_build(&DirectBuildRequest {
-        scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
         scenario,
         lecture: test_lecture(),
         vm_name: "web".to_string(),

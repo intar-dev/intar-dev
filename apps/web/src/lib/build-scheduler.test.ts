@@ -6,6 +6,7 @@ import {
   recordImageBuildReport,
 } from "@/lib/build-scheduler";
 import type { BuildReportV1, HostDesiredStateV2 } from "@/generated/bridge";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 
 const desiredStateStoreMock = vi.hoisted(() => ({
   mutateStoredHostDesiredState: vi.fn(),
@@ -220,7 +221,7 @@ describe("build scheduler", () => {
       rev: "abc123",
       r2Key: "builds/bundles/abc123.tar.gz",
       meta: {
-        buildFormatVersion: "intar-image-build-v11",
+        buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -256,7 +257,7 @@ describe("build scheduler", () => {
         rev: "bundle-new",
         r2Key: "builds/bundles/bundle-new.tar.gz",
         meta: {
-          buildFormatVersion: "intar-image-build-v11",
+          buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
           scenarios: [
             {
               scenarioId: "broken-nginx",

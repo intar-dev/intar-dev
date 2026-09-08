@@ -144,11 +144,99 @@ describe("scenario start route", () => {
     });
   });
 
+  it("allows an administrator to select an exact candidate revision", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+    });
+
+    const response = await startRequest({
+      hostId: "agent-01",
+      candidateRevision: "image-build-v12-proof",
+      candidateBuildId: "candidate-build-1",
+    });
+
+    expect(response.status).toBe(202);
+    expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
+      scenarioId: "pair-ping",
+      userId: "admin-1",
+      betaAdmission,
+      hostId: "agent-01",
+      candidateRevision: "image-build-v12-proof",
+      candidateBuildId: "candidate-build-1",
+      allowDrainedAdminProof: true,
+      allowSequenceBypass: true,
+    });
+  });
+
   it("rejects a host override from a non-admin user", async () => {
     const response = await startRequest({ hostId: "agent-01" });
 
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: "admin required" });
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects candidate revisions from non-admin users", async () => {
+    const response = await startRequest({
+      candidateRevision: "image-build-v12-proof",
+      candidateBuildId: "candidate-build-1",
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "admin required" });
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed candidate revisions", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+    });
+
+    const response = await startRequest({
+      candidateRevision: "../candidate",
+      candidateBuildId: "candidate-build-1",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "candidateRevision or candidateBuildId is invalid",
+    });
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("requires both candidate proof identifiers", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+    });
+
+    const response = await startRequest({
+      candidateRevision: "image-build-v12-proof",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "candidateRevision and candidateBuildId are required",
+    });
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects a candidate build id without its revision", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+    });
+
+    const response = await startRequest({
+      candidateBuildId: "candidate-build-1",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "candidateRevision and candidateBuildId are required",
+    });
     expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
   });
 

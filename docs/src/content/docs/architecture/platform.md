@@ -88,11 +88,11 @@ per-scenario/architecture D1 lease used by supersession, so an old build cannot
 seed the catalog after its replacement wins. The static registry token remains
 the explicit privileged path for release tooling and manual `run-once` publishes.
 
-The flag-day workflow closes the D1 run-admission gate and waits for zero
-running desired VMs. It then switches every candidate catalog row in one D1
-batch, promotes the verified candidate tools pin, requires exact host cache
-reports, and reopens starts. The batch also stores the previous catalog as a
-rollback snapshot.
+The catalog-promotion workflow closes the D1 run-admission gate and waits for
+zero running desired VMs. It requires exact host image and stable guest-tool
+cache reports before it switches every candidate catalog row in one D1 batch.
+It does not change the guest-tool pin. The batch also stores the previous
+catalog as a rollback snapshot.
 
 Agents list and download images through the Worker registry endpoint. The agent
 caches only compressed chunks, manifests, boot artifacts, and the pinned tools
@@ -193,7 +193,7 @@ gates `ssh.service` on `/run/intar/ssh-ready` before removing baked host keys. O
 first boot the supervisor configures networking and access, generates and
 validates the keys, creates the root-only gate, and then explicitly starts
 `ssh.service`. Image content hashes use build format
-`intar-image-build-v11`, ensuring images with the stable guest bootstrap ABI,
+`intar-image-build-v12`, ensuring images with the stable guest bootstrap ABI,
 conditional root resizing, scenario-specific module preload, and faster normal-
 capacity SSH startup are rebuilt rather than reused. Lecture Markdown is not a
 technical hash input, so a Markdown-only update does not rebuild an image. When
