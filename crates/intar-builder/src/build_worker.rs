@@ -142,6 +142,7 @@ pub(super) async fn process_next_queued_build(
                         build_id = %job.build_id,
                         attempt = job.attempt,
                         next_attempt_at_ms,
+                        error = %error_message,
                         "scheduled builder job retry"
                     );
                 } else {
@@ -584,6 +585,7 @@ async fn process_next_publication(
                     build_id = %job.build_id,
                     publish_attempt = job.publish_attempt,
                     next_attempt_at_ms,
+                    error = %error_message,
                     "scheduled builder publication retry"
                 );
                 false

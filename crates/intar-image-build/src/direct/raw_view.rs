@@ -179,7 +179,7 @@ impl RawViewGuard {
         // method cannot overlap this close, and every pread task drains its
         // buffer before it returns.
         if let Some(mut reader) = self.reader.take()
-            && let Err(error) = reader.close()
+            && let Err(error) = reader.disconnect()
         {
             errors.push(format!("failed to close NBD client: {error:#}"));
         }
@@ -370,6 +370,9 @@ impl RawViewGuard {
 
 impl Drop for RawViewGuard {
     fn drop(&mut self) {
+        // A destructor can run inside a Tokio task. Release the client before
+        // shared QSD cleanup, but do not nest its current-thread runtime.
+        self.reader = None;
         if let Err(error) = self.close() {
             eprintln!("[intar-nbd-view] cleanup_failed error={error:#}");
         }
@@ -460,28 +463,26 @@ impl NbdChunkReader {
         })
     }
 
-    fn close(&mut self) -> Result<()> {
+    fn disconnect(&mut self) -> Result<()> {
         let Some(handle) = self.handle.take() else {
             if let Some(runtime) = self.runtime.take() {
                 runtime.shutdown_background();
             }
             return Ok(());
         };
-        let result = if tokio::runtime::Handle::try_current().is_ok() {
-            // A late RawDirectBuild drop can run inside the builder runtime.
-            // No read can be active because reader methods borrow `&mut self`.
-            Ok(())
-        } else {
-            self.runtime
-                .as_ref()
-                .context("NBD client runtime was already closed")?
-                .block_on(async {
-                    tokio::time::timeout(RAW_VIEW_CLEANUP_TIMEOUT, handle.disconnect(None))
-                        .await
-                        .context("NBD client disconnect timed out")?
-                        .map_err(|error| anyhow!("failed to disconnect NBD client: {error}"))
-                })
-        };
+        // Builder finalization runs in Tokio's blocking pool. That pool has a
+        // current handle but is not driving this private current-thread
+        // runtime, so it can wait for the NBD disconnect safely.
+        let result = self
+            .runtime
+            .as_ref()
+            .context("NBD client runtime was already closed")?
+            .block_on(async {
+                tokio::time::timeout(RAW_VIEW_CLEANUP_TIMEOUT, handle.disconnect(None))
+                    .await
+                    .context("NBD client disconnect timed out")?
+                    .map_err(|error| anyhow!("failed to disconnect NBD client: {error}"))
+            });
         drop(handle);
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
@@ -493,9 +494,7 @@ impl NbdChunkReader {
 #[cfg(target_os = "linux")]
 impl Drop for NbdChunkReader {
     fn drop(&mut self) {
-        if let Err(error) = self.close() {
-            eprintln!("[intar-nbd-view] client_cleanup_failed error={error:#}");
-        }
+        drop(self.handle.take());
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
@@ -677,7 +676,7 @@ struct NbdChunkReader;
 
 #[cfg(not(target_os = "linux"))]
 impl NbdChunkReader {
-    fn close(&mut self) -> Result<()> {
+    fn disconnect(&mut self) -> Result<()> {
         Ok(())
     }
 }
@@ -1146,6 +1145,8 @@ mod tests {
 
     use crate::config::QemuBuildConfig;
     #[cfg(target_os = "linux")]
+    use libnbd::AsyncHandle;
+    #[cfg(target_os = "linux")]
     use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
     use super::{
@@ -1154,7 +1155,66 @@ mod tests {
         recover_stale_raw_view, test_guard,
     };
     #[cfg(target_os = "linux")]
-    use super::{nbd_socket_client_path, qsd_command_arguments_match};
+    use super::{NbdChunkReader, nbd_socket_client_path, qsd_command_arguments_match};
+
+    #[cfg(target_os = "linux")]
+    fn disconnected_reader(socket_directory: std::fs::File) -> NbdChunkReader {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap();
+        NbdChunkReader {
+            handle: Some(runtime.block_on(async { Arc::new(AsyncHandle::new().unwrap()) })),
+            runtime: Some(runtime),
+            virtual_size_bytes: 1,
+            zero_ranges: Vec::new(),
+            deadline: Instant::now() + Duration::from_secs(60),
+            timed_out: Arc::new(AtomicBool::new(false)),
+            _socket_directory: socket_directory,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nbd_disconnect_is_not_skipped_in_tokio_blocking_pool() {
+        let directory = tempdir().unwrap();
+        let mut reader = disconnected_reader(std::fs::File::open(directory.path()).unwrap());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let result = runtime.block_on(async move {
+            tokio::task::spawn_blocking(move || {
+                assert!(tokio::runtime::Handle::try_current().is_ok());
+                reader.disconnect()
+            })
+            .await
+            .unwrap()
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn raw_view_drop_inside_tokio_releases_its_reader_without_nested_runtime() {
+        let directory = tempdir().unwrap();
+        let guard = RawViewGuard {
+            reader: Some(disconnected_reader(
+                std::fs::File::open(directory.path()).unwrap(),
+            )),
+            test_reader: None,
+            state: None,
+            watchdog: None,
+            deadline: Instant::now() + Duration::from_secs(60),
+            read_timed_out: Arc::new(AtomicBool::new(false)),
+            watchdog_error: Arc::new(Mutex::new(None)),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async move {
+            drop(guard);
+        });
+    }
 
     #[test]
     fn qsd_arguments_keep_both_nodes_readonly_and_use_one_private_nbd_socket() {
