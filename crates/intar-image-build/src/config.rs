@@ -44,6 +44,10 @@ pub struct QemuBuildConfig {
     pub target_arch: String,
     #[serde(default = "default_qemu_binary")]
     pub qemu_binary: PathBuf,
+    #[serde(default = "default_qemu_storage_daemon_binary")]
+    pub qemu_storage_daemon_binary: PathBuf,
+    #[serde(default = "default_umount_binary")]
+    pub umount_binary: PathBuf,
     #[serde(default = "default_mke2fs_binary")]
     pub mke2fs_binary: PathBuf,
     #[serde(default = "default_e2fsck_binary")]
@@ -56,6 +60,8 @@ pub struct QemuBuildConfig {
     pub provision_timeout_seconds: u64,
     #[serde(default = "default_qemu_exit_timeout_seconds")]
     pub qemu_exit_timeout_seconds: u64,
+    #[serde(default = "default_raw_view_read_timeout_seconds")]
+    pub raw_view_read_timeout_seconds: u64,
     #[serde(default = "default_accelerator")]
     pub accelerator: String,
     #[serde(default = "default_build_cpus")]
@@ -75,12 +81,15 @@ impl Default for QemuBuildConfig {
         Self {
             target_arch: default_target_arch(),
             qemu_binary: default_qemu_binary(),
+            qemu_storage_daemon_binary: default_qemu_storage_daemon_binary(),
+            umount_binary: default_umount_binary(),
             mke2fs_binary: default_mke2fs_binary(),
             e2fsck_binary: default_e2fsck_binary(),
             resize2fs_binary: default_resize2fs_binary(),
             ssh_wait_timeout_seconds: default_ssh_wait_timeout_seconds(),
             provision_timeout_seconds: default_provision_timeout_seconds(),
             qemu_exit_timeout_seconds: default_qemu_exit_timeout_seconds(),
+            raw_view_read_timeout_seconds: default_raw_view_read_timeout_seconds(),
             accelerator: default_accelerator(),
             build_cpus: default_build_cpus(),
             build_memory_mb: default_build_memory_mb(),
@@ -150,6 +159,14 @@ fn default_qemu_binary() -> PathBuf {
     PathBuf::from("qemu-system-x86_64")
 }
 
+fn default_qemu_storage_daemon_binary() -> PathBuf {
+    PathBuf::from("qemu-storage-daemon")
+}
+
+fn default_umount_binary() -> PathBuf {
+    PathBuf::from("umount")
+}
+
 fn default_qemu_img_binary() -> PathBuf {
     PathBuf::from("qemu-img")
 }
@@ -190,6 +207,10 @@ fn default_provision_timeout_seconds() -> u64 {
 
 fn default_qemu_exit_timeout_seconds() -> u64 {
     5 * 60
+}
+
+fn default_raw_view_read_timeout_seconds() -> u64 {
+    20 * 60
 }
 
 fn default_accelerator() -> String {
@@ -245,12 +266,15 @@ mod tests {
 qemu {
   target_arch = "amd64"
   qemu_binary = "/usr/local/bin/qemu-system-x86_64"
+  qemu_storage_daemon_binary = "/usr/local/bin/qemu-storage-daemon"
+  umount_binary = "/usr/bin/umount"
   mke2fs_binary = "/usr/sbin/mke2fs"
   e2fsck_binary = "/usr/sbin/e2fsck"
   resize2fs_binary = "/usr/sbin/resize2fs"
   ssh_wait_timeout_seconds = 120
   provision_timeout_seconds = 240
   qemu_exit_timeout_seconds = 30
+  raw_view_read_timeout_seconds = 600
   accelerator = "kvm"
   build_cpus = 4
   build_memory_mb = 4096
@@ -282,9 +306,15 @@ upload {
             Ok(config) => {
                 assert_eq!(config.qemu.accelerator, "kvm");
                 assert_eq!(config.qemu.target_arch, "amd64");
+                assert_eq!(
+                    config.qemu.qemu_storage_daemon_binary,
+                    PathBuf::from("/usr/local/bin/qemu-storage-daemon")
+                );
+                assert_eq!(config.qemu.umount_binary, PathBuf::from("/usr/bin/umount"));
                 assert_eq!(config.qemu.ssh_wait_timeout_seconds, 120);
                 assert_eq!(config.qemu.provision_timeout_seconds, 240);
                 assert_eq!(config.qemu.qemu_exit_timeout_seconds, 30);
+                assert_eq!(config.qemu.raw_view_read_timeout_seconds, 600);
                 assert_eq!(config.qemu.build_cpus, 4);
                 assert_eq!(config.qemu.build_memory_mb, 4096);
                 assert_eq!(

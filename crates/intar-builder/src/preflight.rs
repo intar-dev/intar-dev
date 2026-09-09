@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::{env, fs, process::Command};
+use std::{
+    env, fs,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::config::BuilderConfig;
 use intar_contracts::catalog::ImageArchitecture;
@@ -10,6 +15,9 @@ pub enum PreflightStatus {
     Warn,
     Fail,
 }
+
+const QSD_HELP_TIMEOUT: Duration = Duration::from_secs(5);
+const QSD_HELP_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreflightCheck {
@@ -44,6 +52,7 @@ pub struct PreflightEnvironment {
     pub path_entries: Vec<PathBuf>,
     pub kvm_path: PathBuf,
     pub vhost_vsock_path: PathBuf,
+    pub fuse_path: PathBuf,
 }
 
 impl PreflightEnvironment {
@@ -56,6 +65,7 @@ impl PreflightEnvironment {
                 .unwrap_or_default(),
             kvm_path: PathBuf::from("/dev/kvm"),
             vhost_vsock_path: PathBuf::from("/dev/vhost-vsock"),
+            fuse_path: PathBuf::from("/dev/fuse"),
         }
     }
 }
@@ -75,6 +85,7 @@ pub fn collect_preflight_with_environment(
     push_accelerator_check(&mut checks, &cfg.qemu.accelerator);
     push_char_device_check(&mut checks, "kvm device", &env.kvm_path);
     push_optional_char_device_check(&mut checks, "vhost-vsock device", &env.vhost_vsock_path);
+    push_char_device_check(&mut checks, "fuse device", &env.fuse_path);
     push_command_check(
         &mut checks,
         "qemu binary",
@@ -82,6 +93,17 @@ pub fn collect_preflight_with_environment(
         &env.path_entries,
     );
     push_qemu_version_check(&mut checks, &cfg.qemu.qemu_binary, &env.path_entries);
+    push_command_check(
+        &mut checks,
+        "qemu-storage-daemon binary",
+        cfg.qemu.qemu_storage_daemon_binary.as_str(),
+        &env.path_entries,
+    );
+    push_qsd_fuse_export_check(
+        &mut checks,
+        cfg.qemu.qemu_storage_daemon_binary.as_str(),
+        &env.path_entries,
+    );
     push_command_check(
         &mut checks,
         "qemu-img binary",
@@ -103,6 +125,12 @@ pub fn collect_preflight_with_environment(
         &env.path_entries,
     );
     push_command_check(&mut checks, "zstd binary", "zstd", &env.path_entries);
+    push_command_check(
+        &mut checks,
+        "umount binary",
+        cfg.qemu.umount_binary.as_str(),
+        &env.path_entries,
+    );
     push_pinned_image_check(&mut checks, &cfg.qemu.layered.debian_image);
     push_command_check(
         &mut checks,
@@ -135,6 +163,20 @@ pub fn collect_preflight_with_environment(
         )),
     }
     push_job_check(&mut checks, cfg);
+    if cfg.qemu.raw_view_read_timeout_seconds == 0 {
+        checks.push(fail(
+            "raw view read timeout",
+            "qemu.raw_view_read_timeout_seconds must be greater than zero",
+        ));
+    } else {
+        checks.push(pass(
+            "raw view read timeout",
+            format!(
+                "qemu.raw_view_read_timeout_seconds = {}",
+                cfg.qemu.raw_view_read_timeout_seconds
+            ),
+        ));
+    }
     push_bridge_check(&mut checks, cfg);
 
     PreflightReport { checks }
@@ -179,6 +221,114 @@ fn push_command_check(
             name,
             format!("'{}' was not found or is not executable", command),
         )),
+    }
+}
+
+fn push_qsd_fuse_export_check(
+    checks: &mut Vec<PreflightCheck>,
+    command: &str,
+    path_entries: &[PathBuf],
+) {
+    let Some(path) = resolve_command(command, path_entries) else {
+        checks.push(fail(
+            "qemu-storage-daemon FUSE export",
+            "cannot read QEMU storage daemon help because the configured binary is unavailable",
+        ));
+        return;
+    };
+    let mut child = match Command::new(&path)
+        .arg("--help")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            checks.push(fail(
+                "qemu-storage-daemon FUSE export",
+                format!("failed to run '{} --help': {error}", path.display()),
+            ));
+            return;
+        }
+    };
+    let deadline = Instant::now() + QSD_HELP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                checks.push(fail(
+                    "qemu-storage-daemon FUSE export",
+                    format!(
+                        "'{} --help' did not finish within five seconds",
+                        path.display()
+                    ),
+                ));
+                return;
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                checks.push(fail(
+                    "qemu-storage-daemon FUSE export",
+                    format!(
+                        "failed while waiting for '{} --help': {error}",
+                        path.display()
+                    ),
+                ));
+                return;
+            }
+        }
+    }
+    let output = match child.wait_with_output() {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            checks.push(fail(
+                "qemu-storage-daemon FUSE export",
+                format!("'{} --help' exited with {}", path.display(), output.status),
+            ));
+            return;
+        }
+        Err(error) => {
+            checks.push(fail(
+                "qemu-storage-daemon FUSE export",
+                format!("failed to collect '{} --help': {error}", path.display()),
+            ));
+            return;
+        }
+    };
+    let output_len = output.stdout.len().saturating_add(output.stderr.len());
+    if output_len > QSD_HELP_MAX_BYTES {
+        checks.push(fail(
+            "qemu-storage-daemon FUSE export",
+            "QEMU storage daemon help exceeds the 64 KiB preflight limit",
+        ));
+        return;
+    }
+    let mut bytes = output.stdout;
+    bytes.extend(output.stderr);
+    let output = match String::from_utf8(bytes) {
+        Ok(output) => output,
+        Err(_) => {
+            checks.push(fail(
+                "qemu-storage-daemon FUSE export",
+                "QEMU storage daemon help is not UTF-8",
+            ));
+            return;
+        }
+    };
+    if output.contains("--export [type=]fuse") && output.contains("over FUSE") {
+        checks.push(pass(
+            "qemu-storage-daemon FUSE export",
+            "configured daemon supports the read-only FUSE export form",
+        ));
+    } else {
+        checks.push(fail(
+            "qemu-storage-daemon FUSE export",
+            "configured daemon does not advertise the required --export [type=]fuse form",
+        ));
     }
 }
 
@@ -570,6 +720,17 @@ mod tests {
         make_executable(&path);
     }
 
+    #[cfg(unix)]
+    fn fake_qemu_storage_daemon(dir: &std::path::Path, help_output: &str) {
+        let path = dir.join("qemu-storage-daemon");
+        fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' '{help_output}'\n"),
+        )
+        .unwrap();
+        make_executable(&path);
+    }
+
     #[test]
     fn parses_qemu_major_version() {
         assert_eq!(
@@ -616,11 +777,16 @@ mod tests {
         fs::create_dir_all(&oci_cache).unwrap();
         let _buildkit_socket = UnixListener::bind(oci_cache.join("buildkitd.sock")).unwrap();
         fake_qemu(&bin, "QEMU emulator version 10.0.11");
+        fake_qemu_storage_daemon(
+            &bin,
+            "--export [type=]fuse,id=raw,node-name=root,mountpoint=root.raw export over FUSE",
+        );
         for tool in [
             "qemu-img",
             "buildctl",
             "umoci",
             "zstd",
+            "umount",
             "mke2fs",
             "e2fsck",
             "resize2fs",
@@ -639,6 +805,7 @@ mod tests {
             path_entries: vec![bin.clone()],
             kvm_path: PathBuf::from("/dev/null"),
             vhost_vsock_path: PathBuf::from("/dev/null"),
+            fuse_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -667,6 +834,7 @@ mod tests {
             path_entries: Vec::new(),
             kvm_path: fake_kvm,
             vhost_vsock_path: temp.path().join("missing-vsock"),
+            fuse_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -684,6 +852,7 @@ mod tests {
         let mut cfg = BuilderConfig::default();
         cfg.bridge.enabled = false;
         cfg.jobs.max_concurrent_builds = 3;
+        cfg.qemu.raw_view_read_timeout_seconds = 0;
         cfg.qemu.accelerator = "tcg".to_string();
         cfg.builder.work_root = temp.path().join("missing-work");
         cfg.builder.cache_root = temp.path().join("missing-cache");
@@ -693,6 +862,7 @@ mod tests {
             path_entries: Vec::new(),
             kvm_path: temp.path().join("missing-kvm"),
             vhost_vsock_path: temp.path().join("missing-vsock"),
+            fuse_path: temp.path().join("missing-fuse"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -707,6 +877,14 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.name == "job concurrency" && check.status == PreflightStatus::Fail
         }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "raw view read timeout" && check.status == PreflightStatus::Fail
+        }));
+        assert!(
+            report.checks.iter().any(|check| {
+                check.name == "fuse device" && check.status == PreflightStatus::Fail
+            })
+        );
         assert!(report.checks.iter().any(|check| {
             check.name == "bridge configuration" && check.status == PreflightStatus::Warn
         }));
@@ -728,11 +906,16 @@ mod tests {
         fs::create_dir_all(&oci_cache).unwrap();
         let buildkit_socket = UnixListener::bind(oci_cache.join("buildkitd.sock")).unwrap();
         fake_qemu(&bin, "QEMU emulator version 10.0.11");
+        fake_qemu_storage_daemon(
+            &bin,
+            "--export [type=]fuse,id=raw,node-name=root,mountpoint=root.raw export over FUSE",
+        );
         for tool in [
             "qemu-img",
             "buildctl",
             "umoci",
             "zstd",
+            "umount",
             "mke2fs",
             "e2fsck",
             "resize2fs",
@@ -749,6 +932,7 @@ mod tests {
             path_entries: vec![bin.clone()],
             kvm_path: PathBuf::from("/dev/null"),
             vhost_vsock_path: PathBuf::from("/dev/null"),
+            fuse_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -763,6 +947,33 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.name == "qemu version" && check.status == PreflightStatus::Pass
         }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "qemu-storage-daemon binary" && check.status == PreflightStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "qemu-storage-daemon FUSE export" && check.status == PreflightStatus::Pass
+        }));
+        assert!(
+            report.checks.iter().any(|check| {
+                check.name == "fuse device" && check.status == PreflightStatus::Pass
+            })
+        );
+
+        fake_qemu_storage_daemon(&bin, "--export [type=]nbd,id=raw,node-name=root");
+        let report = collect_preflight_with_environment(&cfg, &env);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "qemu-storage-daemon FUSE export" && check.status == PreflightStatus::Fail
+        }));
+
+        fs::remove_file(bin.join("qemu-storage-daemon")).unwrap();
+        let report = collect_preflight_with_environment(&cfg, &env);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "qemu-storage-daemon binary" && check.status == PreflightStatus::Fail
+        }));
+        fake_qemu_storage_daemon(
+            &bin,
+            "--export [type=]fuse,id=raw,node-name=root,mountpoint=root.raw export over FUSE",
+        );
 
         drop(buildkit_socket);
         fs::remove_file(oci_cache.join("buildkitd.sock")).unwrap();

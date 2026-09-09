@@ -275,13 +275,13 @@ async fn run_claimed_build_job_inner(
             base_image: base_image.clone(),
         };
         let raw_result = tokio::task::spawn_blocking(move || {
-            let rendered = run_direct_build_to_raw(&request)?;
-            let scan = scan_raw_image_chunks(&rendered.paths.root_disk_path)?;
-            Ok::<_, anyhow::Error>((rendered, scan))
+            let raw_build = run_direct_build_to_raw(&request)?;
+            let scan = scan_raw_image_chunks(&raw_build.rendered.paths.root_disk_path)?;
+            Ok::<_, anyhow::Error>((raw_build, scan))
         })
         .await
         .context("direct QEMU build worker panicked")?;
-        let (rendered, scan) = match raw_result {
+        let (raw_build, scan) = match raw_result {
             Ok(output) => output,
             Err(error) => return Err(error),
         };
@@ -303,7 +303,7 @@ async fn run_claimed_build_job_inner(
         ensure_build_still_desired(cfg, &job.build_id)?;
 
         let output_result = tokio::task::spawn_blocking(move || {
-            finish_direct_build_from_scan(rendered, &scan, &reused)
+            finish_direct_build_from_scan(raw_build, &scan, &reused)
         })
         .await
         .context("image chunk compression worker panicked")?;
@@ -334,7 +334,6 @@ async fn run_claimed_build_job_inner(
         let db = db::BuilderDb::open(&cfg.builder.state_db)?;
         db.save_completed_build_outputs(&job.build_id, &completed_outputs_json, now_unix_ms())?;
     }
-    cleanup_completed_compute_disks(&outputs).await;
     emit_build_report(cfg, report_tx, &job.build_id).await?;
     wait_for_publication_claim(cfg, &job.build_id).await?;
     Ok(())
@@ -386,37 +385,6 @@ fn reused_chunks_or_empty(
                 "image chunk reuse lookup failed; encoding all chunks locally"
             );
             BTreeMap::new()
-        }
-    }
-}
-
-// This runs only after SQLite has committed the publication DTO. The CLI keeps
-// its raw proof disk because it never calls this daemon-only cleanup path.
-async fn cleanup_completed_compute_disks(outputs: &[DirectBuildOutput]) {
-    let paths = outputs
-        .iter()
-        .flat_map(completed_compute_disk_paths)
-        .collect::<Vec<_>>();
-    remove_completed_compute_disk_files(&paths).await;
-}
-
-fn completed_compute_disk_paths(output: &DirectBuildOutput) -> [PathBuf; 2] {
-    [
-        output.rendered.paths.root_disk_path.clone(),
-        output.rendered.paths.work_root.join("active.qcow2"),
-    ]
-}
-
-async fn remove_completed_compute_disk_files(paths: &[PathBuf]) {
-    for path in paths {
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => info!(path = %path.display(), "removed completed build compute disk"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to remove completed build compute disk"
-            ),
         }
     }
 }
@@ -1083,10 +1051,7 @@ mod tests {
         ScenarioVmManifestV4,
     };
 
-    use super::{
-        PersistedBuildOutput, PersistedEncodedImageChunk, remove_completed_compute_disk_files,
-        reused_chunks_or_empty,
-    };
+    use super::{PersistedBuildOutput, PersistedEncodedImageChunk, reused_chunks_or_empty};
 
     #[test]
     fn reuse_lookup_failure_encodes_every_chunk_locally() {
@@ -1113,23 +1078,6 @@ mod tests {
             reused_chunks_or_empty(Ok(expected.clone()), "build-1", "web"),
             expected
         );
-    }
-
-    #[tokio::test]
-    async fn removes_only_completed_compute_disks() {
-        let temp = tempfile::tempdir().unwrap();
-        let root_disk = temp.path().join("root.raw");
-        let active_disk = temp.path().join("active.qcow2");
-        let retained_log = temp.path().join("build.log");
-        for path in [&root_disk, &active_disk, &retained_log] {
-            std::fs::write(path, b"data").unwrap();
-        }
-
-        remove_completed_compute_disk_files(&[root_disk.clone(), active_disk.clone()]).await;
-
-        assert!(!root_disk.exists());
-        assert!(!active_disk.exists());
-        assert!(retained_log.exists());
     }
 
     #[test]

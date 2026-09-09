@@ -17,6 +17,7 @@ use crate::qemu::{DirectBootQemuInput, render_direct_boot_qemu_command};
 use crate::ssh::{BuildSshKey, private_key_to_openssh};
 
 mod qmp;
+use super::raw_view::RawViewGuard;
 use qmp::Qmp;
 
 const PROVISIONING_ABI: &str = "intar-qemu-stages-v1";
@@ -68,7 +69,7 @@ struct ResumeMetadata {
     memory_encoding: String,
 }
 
-pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RenderedDirectBuild> {
+pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
     ensure!(
         cfg!(target_os = "linux"),
         "layered VM builds require Linux/KVM"
@@ -368,29 +369,53 @@ pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RenderedDirectBuild
         ),
     )?;
     guest.finished = true;
-    let raw_started = Instant::now();
-    run_img_until(
-        &rendered,
-        &["convert", "-f", "qcow2", "-O", "raw", "-S", "4k"],
-        &[&guest.disk, &rendered.paths.root_disk_path],
-        deadline_after(rendered.config.qemu_exit_timeout_seconds),
-    )?;
-    fs::File::open(&rendered.paths.root_disk_path)?.sync_all()?;
+    let raw_sync_started = Instant::now();
+    if let Err(error) = fs::File::open(&guest.disk).and_then(|disk| disk.sync_all()) {
+        let cleanup = remove_work_file(&guest.disk);
+        return match cleanup {
+            Ok(()) => Err(error).context("failed to flush final raw view source"),
+            Err(cleanup_error) => Err(error).context(format!(
+                "failed to flush final raw view source; also failed to remove '{}': {cleanup_error:#}",
+                guest.disk.display()
+            )),
+        };
+    }
     log(
         &rendered,
         &format!(
-            "raw_conversion elapsed_ms={}",
-            raw_started.elapsed().as_millis()
+            "raw_view_source_sync elapsed_ms={}",
+            raw_sync_started.elapsed().as_millis()
         ),
     )?;
-    log(&rendered, "layered_raw_complete")?;
-    Ok(rendered)
+    let raw_view_started = Instant::now();
+    let temporary_snapshot = guest
+        ._temporary_snapshot
+        .take()
+        .map(|snapshot| snapshot._directory);
+    let raw_view = RawViewGuard::start(
+        &rendered.config,
+        &rendered.paths.work_root,
+        guest.disk.clone(),
+        rendered.paths.root_disk_path.clone(),
+        guest._lease.take(),
+        temporary_snapshot,
+        Duration::from_secs(rendered.config.raw_view_read_timeout_seconds.max(1)),
+    )?;
+    log(
+        &rendered,
+        &format!(
+            "raw_view_setup elapsed_ms={}",
+            raw_view_started.elapsed().as_millis()
+        ),
+    )?;
+    log(&rendered, "layered_raw_view_ready")?;
+    Ok(RawDirectBuild { raw_view, rendered })
 }
 
 fn rebuild_without_cache(
     mut rendered: RenderedDirectBuild,
     restore_error: anyhow::Error,
-) -> Result<RenderedDirectBuild> {
+) -> Result<RawDirectBuild> {
     let reason = format!("{restore_error:#}");
     eprintln!(
         "[intar-layered] scenario={} vm={} retrying cold build after fresh checkpoint restore failure: {reason}",

@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use std::{fs, process::Command as ProcessCommand};
 
 mod clean_base_command;
+mod reconstruct_command;
 
 const BASE_IMAGES_PATH: &str = "content/scenarios/base-images.hcl";
 const BUNDLE_BASE_IMAGES_PATH: &str = "base-images.hcl";
@@ -76,6 +77,8 @@ enum Command {
     BuildAll(BuildAllCommand),
     BuildBase(clean_base_command::BuildBaseCommand),
     BuildGuestTools(BuildGuestToolsCommand),
+    /// Reconstruct a sparse raw disk from verified local image chunks.
+    Reconstruct(reconstruct_command::ReconstructCommand),
     Hash(HashCommand),
     Bundle(BundleCommand),
 }
@@ -180,6 +183,7 @@ fn main() -> Result<()> {
         Command::BuildAll(args) => build_all_command(&args),
         Command::BuildBase(args) => clean_base_command::build_base_command(&args),
         Command::BuildGuestTools(args) => build_guest_tools_command(&args),
+        Command::Reconstruct(args) => reconstruct_command::reconstruct(&args),
         Command::Hash(args) => hash_command(&args),
         Command::Bundle(args) => bundle_command(&args),
     }

@@ -30,12 +30,15 @@ impl BuilderConfig {
         QemuBuildConfig {
             target_arch: builder_arch(crate::bridge::host_architecture()).to_string(),
             qemu_binary: PathBuf::from(&self.qemu.qemu_binary),
+            qemu_storage_daemon_binary: PathBuf::from(&self.qemu.qemu_storage_daemon_binary),
+            umount_binary: PathBuf::from(&self.qemu.umount_binary),
             mke2fs_binary: PathBuf::from(&self.qemu.mke2fs_binary),
             e2fsck_binary: PathBuf::from(&self.qemu.e2fsck_binary),
             resize2fs_binary: PathBuf::from(&self.qemu.resize2fs_binary),
             ssh_wait_timeout_seconds: self.qemu.ssh_wait_timeout_seconds,
             provision_timeout_seconds: self.qemu.provision_timeout_seconds,
             qemu_exit_timeout_seconds: self.qemu.qemu_exit_timeout_seconds,
+            raw_view_read_timeout_seconds: self.qemu.raw_view_read_timeout_seconds,
             accelerator: self.qemu.accelerator.clone(),
             build_cpus: self.qemu.build_cpus,
             build_memory_mb: self.qemu.build_memory_mb,
@@ -97,12 +100,15 @@ impl Default for BuilderRuntimeConfig {
 #[serde(deny_unknown_fields, default)]
 pub struct QemuConfig {
     pub qemu_binary: String,
+    pub qemu_storage_daemon_binary: String,
+    pub umount_binary: String,
     pub mke2fs_binary: String,
     pub e2fsck_binary: String,
     pub resize2fs_binary: String,
     pub ssh_wait_timeout_seconds: u64,
     pub provision_timeout_seconds: u64,
     pub qemu_exit_timeout_seconds: u64,
+    pub raw_view_read_timeout_seconds: u64,
     pub accelerator: String,
     pub build_cpus: u32,
     pub build_memory_mb: u32,
@@ -113,12 +119,15 @@ impl Default for QemuConfig {
     fn default() -> Self {
         Self {
             qemu_binary: "qemu-system-x86_64".to_string(),
+            qemu_storage_daemon_binary: "qemu-storage-daemon".to_string(),
+            umount_binary: "umount".to_string(),
             mke2fs_binary: "mke2fs".to_string(),
             e2fsck_binary: "e2fsck".to_string(),
             resize2fs_binary: "resize2fs".to_string(),
             ssh_wait_timeout_seconds: 20 * 60,
             provision_timeout_seconds: 40 * 60,
             qemu_exit_timeout_seconds: 5 * 60,
+            raw_view_read_timeout_seconds: 20 * 60,
             accelerator: "kvm".to_string(),
             build_cpus: 4,
             build_memory_mb: 4096,
@@ -182,6 +191,7 @@ resize2fs_binary = "/usr/sbin/resize2fs"
 ssh_wait_timeout_seconds = 120
 provision_timeout_seconds = 240
 qemu_exit_timeout_seconds = 30
+raw_view_read_timeout_seconds = 900
 accelerator = "kvm"
 build_cpus = 6
 build_memory_mb = 6144
@@ -208,6 +218,7 @@ minimum_free_bytes = 21474836480
         assert_eq!(config.qemu.ssh_wait_timeout_seconds, 120);
         assert_eq!(config.qemu.provision_timeout_seconds, 240);
         assert_eq!(config.qemu.qemu_exit_timeout_seconds, 30);
+        assert_eq!(config.qemu.raw_view_read_timeout_seconds, 900);
         assert_eq!(config.qemu.accelerator, "kvm");
         assert_eq!(config.qemu.build_memory_mb, 6144);
         assert!(!config.qemu.layered.use_cache);
@@ -222,6 +233,7 @@ minimum_free_bytes = 21474836480
             PathBuf::from("/usr/bin/qemu-system-x86_64")
         );
         assert_eq!(build_config.build_cpus, 6);
+        assert_eq!(build_config.raw_view_read_timeout_seconds, 900);
         assert_eq!(
             build_config.layered.oci_cache_root,
             Some(PathBuf::from("/tmp/intar-builder/oci"))
