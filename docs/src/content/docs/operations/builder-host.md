@@ -10,6 +10,7 @@ agent hosts; they do not run user scenarios.
 
 - Ubuntu 24.04 or Debian 12/13 on x86_64.
 - KVM enabled and visible as `/dev/kvm`.
+- FUSE enabled and visible as `/dev/fuse`.
 - QEMU 10 or later.
 - 8 vCPU, 16 GiB RAM, and at least 100 GiB disk for working directories and caches.
 - Outbound HTTPS access to `intar.dev`, GitHub release downloads, and Debian package
@@ -33,11 +34,18 @@ sudo apt-get install -y \
 Install `buildctl`, `buildkitd`, and `umoci` from your approved package source.
 The builder uses the OCI rootfs and QEMU VM stages for every image.
 Use a package source that supplies QEMU 10 or later.
+The current builder uses `/usr/bin/qemu-storage-daemon` version 10.0.11, linked
+with libfuse3, and `/usr/bin/umount`. It does not use `fusermount`.
+Before a build starts, builder doctor requires the configured storage daemon to
+show the `--export [type=]fuse` form in its `--help` output.
 
 Verify KVM before installing the daemon:
 
 ```bash
 test -c /dev/kvm
+test -c /dev/fuse
+test -x /usr/bin/qemu-storage-daemon
+test -x /usr/bin/umount
 groups
 ```
 
@@ -77,12 +85,15 @@ state_db = "/var/lib/intar-builder/state.sqlite3"
 
 [qemu]
 qemu_binary = "qemu-system-x86_64"
+qemu_storage_daemon_binary = "/usr/bin/qemu-storage-daemon"
+umount_binary = "/usr/bin/umount"
 mke2fs_binary = "mke2fs"
 e2fsck_binary = "e2fsck"
 resize2fs_binary = "resize2fs"
 ssh_wait_timeout_seconds = 1200
 provision_timeout_seconds = 2400
 qemu_exit_timeout_seconds = 300
+raw_view_read_timeout_seconds = 1200
 accelerator = "kvm"
 build_cpus = 4
 build_memory_mb = 4096
@@ -119,6 +130,37 @@ free-disk floor. Set `use_cache = false` to make a cold service build. For one
 local build, use `intar-image-cli build --no-cache` or
 `intar-image-cli build-all --no-cache`. The clean-base proof also makes a cold
 OCI build.
+
+### Read-only raw view
+
+During chunk scanning, QEMU storage daemon exports a transient, read-only FUSE
+raw view of the QCOW2 work disk. The builder unmounts it with `umount` after the
+scan. It does not use `fusermount`. This view does not change `RawChunksV1`.
+Do not rely on a physical `work/root.raw` after a build; that file is not a
+compatibility contract.
+
+`raw_view_read_timeout_seconds` is a 1,200-second watchdog for the FUSE scan,
+chunk lookup, and encoding. It does not change guest-step or provisioning
+timeouts.
+
+For a local `build --no-upload` proof, reconstruct the final local chunks into
+a new temporary raw disk before running the published-image check. For example:
+
+```bash
+readonly OUTPUT_ROOT=dist
+readonly STEM=broken-nginx-webserver-amd64
+readonly RAW_VIEW="/tmp/${STEM}.raw"
+
+intar-image-cli reconstruct \
+  --chunk-manifest "${OUTPUT_ROOT}/${STEM}.chunks.json" \
+  --chunks-dir "${OUTPUT_ROOT}/${STEM}.chunks" \
+  --output "${RAW_VIEW}"
+sudo python3 tools/image-build/verify-published-image.py \
+  --disk "${RAW_VIEW}" \
+  --initrd "${OUTPUT_ROOT}/${STEM}.chunks.initrd" \
+  --manifest "${OUTPUT_ROOT}/${STEM}.manifest.json" \
+  --source-dir .work/qemu/broken-nginx/webserver
+```
 
 ### BuildKit daemon
 
@@ -193,6 +235,10 @@ The warm full-catalog median must be at least 2x faster. A cold run must not
 exceed the baseline by more than 20%. Neither gate is measured yet. Do not
 report either gate as passed.
 
+The 0.9.1 cold median was `1,804,927 ms`, compared with a `1,265,784 ms`
+baseline. It failed the cold limit. Measure a new final candidate before any
+performance claim.
+
 Run the deployed private workflow
 `intar-dev/scenarios/.github/workflows/image-build-benchmark.yml` with these
 cases:
@@ -264,9 +310,10 @@ sudo intar-builder doctor --config /etc/intar-builder/config.toml
 
 The command exits nonzero if required image-build prerequisites are missing:
 `/dev/kvm`, `accelerator = "kvm"`, the configured QEMU/e2fsprogs binaries,
-QEMU 10 or later, `qemu-img`, `buildctl`, `umoci`, `zstd`, an immutable Debian
-digest, the BuildKit socket, required work/cache/state directories, or bridge
-credentials. Builder doctor covers the QEMU/SSH image-build path only;
+QEMU 10 or later, `qemu-img`, `qemu-storage-daemon`, `/dev/fuse`, `umount`,
+`buildctl`, `umoci`, `zstd`, an immutable Debian digest, the BuildKit socket,
+required work/cache/state directories, a nonzero raw-view read timeout, or
+bridge credentials. Builder doctor covers the QEMU/SSH image-build path only;
 it is not a substitute for agent doctor or the privileged jailerd self-test on
 a scenario host.
 
@@ -284,8 +331,11 @@ Useful checks when builds do not start:
 
 ```bash
 test -c /dev/kvm
+test -c /dev/fuse
 qemu-system-x86_64 --version
 qemu-img --version
+/usr/bin/qemu-storage-daemon --version
+/usr/bin/umount --version
 buildctl --version
 umoci --version
 zstd --version

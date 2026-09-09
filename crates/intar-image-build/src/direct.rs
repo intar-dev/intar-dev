@@ -33,6 +33,19 @@ use crate::ssh::{BuildSshSession, generate_build_ssh_key};
 
 #[cfg(unix)]
 mod layered;
+#[cfg(unix)]
+mod raw_view;
+#[cfg(not(unix))]
+mod raw_view {
+    #[derive(Debug)]
+    pub(super) struct RawViewGuard;
+
+    impl RawViewGuard {
+        pub(super) fn close(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+}
 
 const SSH_USERNAME: &str = "ubuntu";
 const SSH_HOST: &str = "127.0.0.1";
@@ -86,6 +99,13 @@ pub struct RenderedDirectBuild {
     pub base_rootfs: RootfsBuildPlan,
     pub disk: ScenarioDiskPlan,
     _lease: Arc<DirectBuildLease>,
+}
+
+/// A rendered build whose final raw bytes are available through one owned
+/// readonly FUSE view until chunk encoding completes.
+pub struct RawDirectBuild {
+    raw_view: raw_view::RawViewGuard,
+    pub rendered: RenderedDirectBuild,
 }
 
 #[derive(Debug)]
@@ -247,19 +267,19 @@ pub fn prepare_direct_build_inputs(input: &DirectBuildPrepareInput<'_>) -> Resul
 /// Returns an error if base rootfs generation, QEMU startup, SSH provisioning,
 /// artifact compression, or manifest generation fails.
 pub fn run_direct_build(request: &DirectBuildRequest) -> Result<DirectBuildOutput> {
-    let rendered = run_direct_build_to_raw(request)?;
-    let scan = scan_raw_image_chunks(&rendered.paths.root_disk_path)?;
-    finish_direct_build_from_scan(rendered, &scan, &BTreeMap::new())
+    let raw_build = run_direct_build_to_raw(request)?;
+    let scan = scan_raw_image_chunks(&raw_build.rendered.paths.root_disk_path)?;
+    finish_direct_build_from_scan(raw_build, &scan, &BTreeMap::new())
 }
 
-/// Provision one final raw disk without spending time compressing chunks.
-/// The caller can scan it, resolve registry reuse, and then finish only the
-/// missing chunks.
+/// Provision one final readonly raw view without spending time compressing
+/// chunks. The caller can scan it, resolve registry reuse, and then finish
+/// only the missing chunks.
 ///
 /// # Errors
 /// Returns an error if rendering, rootfs preparation, QEMU, or guest
 /// provisioning fails.
-pub fn run_direct_build_to_raw(request: &DirectBuildRequest) -> Result<RenderedDirectBuild> {
+pub fn run_direct_build_to_raw(request: &DirectBuildRequest) -> Result<RawDirectBuild> {
     ensure!(
         cfg!(target_os = "linux"),
         "VM image builds require Linux/KVM"
@@ -274,6 +294,13 @@ pub fn run_direct_build_to_raw(request: &DirectBuildRequest) -> Result<RenderedD
             request.scenario.name, request.vm_name
         )
     })?;
+    #[cfg(unix)]
+    raw_view::recover_interrupted_raw_view(
+        &rendered.config,
+        &rendered.paths.work_root,
+        &rendered.paths.root_disk_path,
+        &rendered.paths.work_root.join("active.qcow2"),
+    )?;
     let base_started = Instant::now();
     let base = ensure_base_rootfs(&rendered.base_image, &rendered.config).with_context(|| {
         format!(
@@ -318,33 +345,51 @@ pub fn run_direct_build_to_raw(request: &DirectBuildRequest) -> Result<RenderedD
     bail!("VM image builds require Linux/KVM")
 }
 
-/// Finish a provisioned raw image from its stable logical scan, using encoded
+/// Finish a provisioned raw view from its stable logical scan, using encoded
 /// metadata for chunks already present in the registry.
 ///
 /// # Errors
 /// Returns an error if the raw image changed, chunk encoding fails, or the
 /// scenario manifest cannot be written.
 pub fn finish_direct_build_from_scan(
-    rendered: RenderedDirectBuild,
+    mut raw_build: RawDirectBuild,
     scan: &ScannedChunkedImage,
     reused: &BTreeMap<String, ReusedEncodedImageChunk>,
 ) -> Result<DirectBuildOutput> {
+    let rendered = &mut raw_build.rendered;
     let started = Instant::now();
-    let chunked_artifact = write_scanned_chunked_image_artifact(
-        scan,
-        &rendered.paths.output_chunks_dir,
-        &rendered.paths.output_chunk_manifest_path,
-        reused,
-    )?;
-    let artifact = direct_artifact_from_chunked(&rendered, chunked_artifact)?;
-    eprintln!(
-        "[intar-build-metric] scenario={} vm={} phase=chunk_encoding elapsed_ms={} reused_chunks={}",
-        rendered.scenario_name,
-        rendered.vm.name,
-        started.elapsed().as_millis(),
-        reused.len()
-    );
-    Ok(DirectBuildOutput { rendered, artifact })
+    let result = (|| {
+        let chunked_artifact = write_scanned_chunked_image_artifact(
+            scan,
+            &rendered.paths.output_chunks_dir,
+            &rendered.paths.output_chunk_manifest_path,
+            reused,
+        )?;
+        let artifact = direct_artifact_from_chunked(rendered, chunked_artifact)?;
+        eprintln!(
+            "[intar-build-metric] scenario={} vm={} phase=chunk_encoding elapsed_ms={} reused_chunks={}",
+            rendered.scenario_name,
+            rendered.vm.name,
+            started.elapsed().as_millis(),
+            reused.len()
+        );
+        Ok::<_, anyhow::Error>(artifact)
+    })();
+    let close_result = raw_build.raw_view.close();
+    match (result, close_result) {
+        (Ok(artifact), Ok(())) => {
+            let RawDirectBuild { raw_view, rendered } = raw_build;
+            drop(raw_view);
+            Ok(DirectBuildOutput { rendered, artifact })
+        }
+        (Ok(_), Err(error)) => {
+            Err(error.context("failed to close raw FUSE view after chunk encoding"))
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(close_error)) => Err(error.context(format!(
+            "also failed to close raw FUSE view after chunk encoding: {close_error:#}"
+        ))),
+    }
 }
 
 fn direct_build_paths(request: &DirectBuildRequest, vm: &VmDefinition) -> DirectBuildPaths {

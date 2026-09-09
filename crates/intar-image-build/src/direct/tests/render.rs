@@ -1,4 +1,5 @@
 use super::*;
+use crate::{RawDirectBuild, ReusedEncodedImageChunk, finish_direct_build_from_scan};
 
 #[test]
 fn direct_render_writes_build_inputs() {
@@ -203,4 +204,52 @@ base_image "trixie" {
         1024 * 1024 * 1024
     );
     assert!(rendered.paths.seed_disk_path.is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn finalization_rejects_a_timed_out_raw_view_after_reuse_only_encoding() {
+    let directory = tempdir().unwrap();
+    let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+    let source = rendered.paths.work_root.join("active.qcow2");
+    let root_disk = rendered.paths.root_disk_path.clone();
+    std::fs::write(&source, b"private qcow source").unwrap();
+    std::fs::write(&root_disk, b"raw image bytes").unwrap();
+    for path in [
+        &rendered.base_rootfs.paths.kernel_path,
+        &rendered.base_rootfs.paths.initrd_path,
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"boot artifact").unwrap();
+    }
+    let scan = crate::scan_raw_image_chunks(&root_disk).unwrap();
+    let raw_build = RawDirectBuild {
+        raw_view: crate::direct::raw_view::test_guard(
+            source.clone(),
+            rendered.paths.root_disk_path.clone(),
+            true,
+        ),
+        rendered,
+    };
+
+    let reused = scan
+        .chunks
+        .iter()
+        .map(|chunk| {
+            (
+                chunk.raw_sha256.clone(),
+                ReusedEncodedImageChunk {
+                    raw_sha256: chunk.raw_sha256.clone(),
+                    raw_size_bytes: chunk.raw_size_bytes,
+                    encoded_sha256: "a".repeat(64),
+                    encoded_size_bytes: 1,
+                },
+            )
+        })
+        .collect();
+    let error = finish_direct_build_from_scan(raw_build, &scan, &reused).unwrap_err();
+
+    assert!(format!("{error:#}").contains("image-read deadline expired"));
+    assert!(!source.exists());
+    assert!(!root_disk.exists());
 }

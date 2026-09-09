@@ -28,9 +28,10 @@ pub use content_hash::{
 };
 pub use direct::{
     DirectBuildArtifact, DirectBuildOutput, DirectBuildPaths, DirectBuildPrepareInput,
-    DirectBuildRequest, DirectQemuShutdownInput, RenderedDirectBuild, acknowledged_qmp_shutdown,
-    acknowledged_qmp_shutdown_with_cancel, finish_direct_build_from_scan,
-    prepare_direct_build_inputs, render_direct_build, run_direct_build, run_direct_build_to_raw,
+    DirectBuildRequest, DirectQemuShutdownInput, RawDirectBuild, RenderedDirectBuild,
+    acknowledged_qmp_shutdown, acknowledged_qmp_shutdown_with_cancel,
+    finish_direct_build_from_scan, prepare_direct_build_inputs, render_direct_build,
+    run_direct_build, run_direct_build_to_raw,
 };
 pub use disk::{
     ScenarioDiskCommand, ScenarioDiskPlan, prepare_scenario_disk, render_scenario_disk_plan,
