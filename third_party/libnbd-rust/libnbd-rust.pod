@@ -1,0 +1,53 @@
+=head1 NAME
+
+libnbd-rust - how to use libnbd from Rust
+
+=head1 SYNOPSIS
+
+ let nbd = libnbd::Handle::new().unwrap();
+ nbd.connect_uri("nbd://localhost").unwrap();
+ let size = nbd.get_size().unwrap();
+ println!("{size} bytes");
+
+In C<Cargo.toml> add:
+
+ [dependencies]
+ libnbd = VERSION | { path = "libnbd/rust" }
+
+=head1 DESCRIPTION
+
+This manual page documents how to use libnbd to access Network Block
+Device (NBD) servers from the Rust programming language.
+
+The Rust bindings work very similarly to the C bindings so you should
+start by reading L<libnbd(3)>.
+
+There is also a higher level asynchronous API using Tokio.
+
+If you build libnbd from source, the main documentation can be found
+in F<libnbd/rust/target/doc/libnbd/index.html>
+
+For the ordinary interface, start by reading the documentation for
+C<Handle>.  For the higher level asynchronous API, start by reading
+C<AsyncHandle>.
+
+C<libnbd-sys> is a very low level wrapper around the libnbd API which
+should not be used directly.
+
+=head1 EXAMPLES
+
+This directory contains examples written in Rust:
+
+L<https://gitlab.com/nbdkit/libnbd/tree/master/rust/examples>
+
+=head1 SEE ALSO
+
+L<libnbd(3)>.
+
+=head1 AUTHORS
+
+Tage Johansson
+
+=head1 COPYRIGHT
+
+Copyright Tage Johansson

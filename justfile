@@ -5,10 +5,10 @@ install-js:
     bun install --frozen-lockfile
 
 fmt:
-    cargo fmt --all
+    cargo fmt
 
 check-rust:
-    cargo check --workspace
+    tools/image-build/with-libnbd-env.sh -- cargo check --workspace
 
 check-js:
     bun run check:imports
@@ -20,10 +20,10 @@ check-js:
 check: check-rust check-js
 
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    tools/image-build/with-libnbd-env.sh -- cargo clippy --workspace --all-targets -- -D warnings
 
 test-rust:
-    cargo test --workspace
+    tools/image-build/with-libnbd-env.sh -- cargo test --workspace
 
 test-js:
     bun run test
@@ -31,7 +31,7 @@ test-js:
 test: test-rust test-js
 
 build-rust:
-    cargo build --workspace
+    tools/image-build/with-libnbd-env.sh -- cargo build --workspace
 
 build-js:
     bun run build
@@ -40,9 +40,9 @@ build: build-rust build-js
 
 verify:
     sh crates/intar-jailerd/tests/install-process-audit.sh crates/intar-jailerd/deploy/install.sh
-    cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo nextest run --workspace
+    cargo fmt -- --check
+    tools/image-build/with-libnbd-env.sh -- cargo clippy --workspace --all-targets -- -D warnings
+    tools/image-build/with-libnbd-env.sh -- cargo nextest run --workspace
 
 security:
     bun audit --audit-level=moderate
@@ -67,16 +67,16 @@ build-kino-guest:
     cargo zigbuild --profile guest -p kino --target x86_64-unknown-linux-musl
 
 validate-images:
-    cargo run -p intar-image-cli -- validate
+    tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- validate
 
 render-images scenario="" config="builder.sample.amd64.hcl":
     #!/usr/bin/env bash
     set -euo pipefail
 
     if [[ -n "{{scenario}}" ]]; then
-      cargo run -p intar-image-cli -- render "{{scenario}}" --config "{{config}}"
+      tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- render "{{scenario}}" --config "{{config}}"
     else
-      cargo run -p intar-image-cli -- render --config "{{config}}"
+      tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- render --config "{{config}}"
     fi
 
 build-images scenario="" config="builder.sample.amd64.hcl" no_upload="false":
@@ -93,7 +93,7 @@ build-images scenario="" config="builder.sample.amd64.hcl" no_upload="false":
       args+=(--no-upload)
     fi
 
-    cargo run -p intar-image-cli -- "${args[@]}"
+    tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- "${args[@]}"
 
 bundle-images scenario="" config="builder.sample.amd64.hcl" rev="" no_upload="false" url="":
     #!/usr/bin/env bash
@@ -114,4 +114,4 @@ bundle-images scenario="" config="builder.sample.amd64.hcl" rev="" no_upload="fa
       args+=(--no-upload)
     fi
 
-    cargo run -p intar-image-cli -- "${args[@]}"
+    tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- "${args[@]}"

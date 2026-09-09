@@ -13,7 +13,6 @@ state_db = "/var/lib/intar-builder/state.sqlite3"
 [qemu]
 qemu_binary = "qemu-system-x86_64"
 qemu_storage_daemon_binary = "/usr/bin/qemu-storage-daemon"
-umount_binary = "/usr/bin/umount"
 mke2fs_binary = "mke2fs"
 e2fsck_binary = "e2fsck"
 resize2fs_binary = "resize2fs"

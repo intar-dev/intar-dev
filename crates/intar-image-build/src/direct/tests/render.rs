@@ -249,7 +249,9 @@ fn finalization_rejects_a_timed_out_raw_view_after_reuse_only_encoding() {
         .collect();
     let error = finish_direct_build_from_scan(raw_build, &scan, &reused).unwrap_err();
 
-    assert!(format!("{error:#}").contains("image-read deadline expired"));
+    let error = format!("{error:#}");
+    assert!(error.contains("image-read deadline expired"));
+    assert!(!error.contains("must not read"));
     assert!(!source.exists());
     assert!(!root_disk.exists());
 }

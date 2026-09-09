@@ -21,7 +21,6 @@ use russh::keys::PrivateKey;
 use crate::artifact::sha256_file_hex;
 use crate::chunked::{
     ChunkedImageArtifact, EncodedImageChunkArtifact, ReusedEncodedImageChunk, ScannedChunkedImage,
-    scan_raw_image_chunks, write_scanned_chunked_image_artifact,
 };
 use crate::config::QemuBuildConfig;
 use crate::disk::{ScenarioDiskPlan, prepare_scenario_disk, render_scenario_disk_plan};
@@ -102,10 +101,17 @@ pub struct RenderedDirectBuild {
 }
 
 /// A rendered build whose final raw bytes are available through one owned
-/// readonly FUSE view until chunk encoding completes.
+/// readonly NBD reader until chunk encoding completes.
 pub struct RawDirectBuild {
     raw_view: raw_view::RawViewGuard,
     pub rendered: RenderedDirectBuild,
+}
+
+impl RawDirectBuild {
+    /// Scan the final immutable image through its owned NBD reader.
+    pub fn scan(&mut self) -> Result<ScannedChunkedImage> {
+        self.raw_view.scan()
+    }
 }
 
 #[derive(Debug)]
@@ -267,8 +273,8 @@ pub fn prepare_direct_build_inputs(input: &DirectBuildPrepareInput<'_>) -> Resul
 /// Returns an error if base rootfs generation, QEMU startup, SSH provisioning,
 /// artifact compression, or manifest generation fails.
 pub fn run_direct_build(request: &DirectBuildRequest) -> Result<DirectBuildOutput> {
-    let raw_build = run_direct_build_to_raw(request)?;
-    let scan = scan_raw_image_chunks(&raw_build.rendered.paths.root_disk_path)?;
+    let mut raw_build = run_direct_build_to_raw(request)?;
+    let scan = raw_build.scan()?;
     finish_direct_build_from_scan(raw_build, &scan, &BTreeMap::new())
 }
 
@@ -358,36 +364,36 @@ pub fn finish_direct_build_from_scan(
 ) -> Result<DirectBuildOutput> {
     let rendered = &mut raw_build.rendered;
     let started = Instant::now();
-    let result = (|| {
-        let chunked_artifact = write_scanned_chunked_image_artifact(
-            scan,
-            &rendered.paths.output_chunks_dir,
-            &rendered.paths.output_chunk_manifest_path,
-            reused,
-        )?;
-        let artifact = direct_artifact_from_chunked(rendered, chunked_artifact)?;
-        eprintln!(
-            "[intar-build-metric] scenario={} vm={} phase=chunk_encoding elapsed_ms={} reused_chunks={}",
-            rendered.scenario_name,
-            rendered.vm.name,
-            started.elapsed().as_millis(),
-            reused.len()
-        );
-        Ok::<_, anyhow::Error>(artifact)
-    })();
+    let chunked_result = raw_build.raw_view.write_scanned(
+        scan,
+        &rendered.paths.output_chunks_dir,
+        &rendered.paths.output_chunk_manifest_path,
+        reused,
+    );
+    // Close the NBD connection and QSD before metadata becomes a completed
+    // build output. This keeps source disks and cache leases alive through
+    // every reader buffer, but not through later publication retries.
     let close_result = raw_build.raw_view.close();
-    match (result, close_result) {
-        (Ok(artifact), Ok(())) => {
+    match (chunked_result, close_result) {
+        (Ok(chunked_artifact), Ok(())) => {
+            let artifact = direct_artifact_from_chunked(rendered, chunked_artifact)?;
+            eprintln!(
+                "[intar-build-metric] scenario={} vm={} phase=chunk_encoding elapsed_ms={} reused_chunks={}",
+                rendered.scenario_name,
+                rendered.vm.name,
+                started.elapsed().as_millis(),
+                reused.len()
+            );
             let RawDirectBuild { raw_view, rendered } = raw_build;
             drop(raw_view);
             Ok(DirectBuildOutput { rendered, artifact })
         }
         (Ok(_), Err(error)) => {
-            Err(error.context("failed to close raw FUSE view after chunk encoding"))
+            Err(error.context("failed to close raw NBD view after chunk encoding"))
         }
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(close_error)) => Err(error.context(format!(
-            "also failed to close raw FUSE view after chunk encoding: {close_error:#}"
+            "also failed to close raw NBD view after chunk encoding: {close_error:#}"
         ))),
     }
 }

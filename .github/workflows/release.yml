@@ -429,11 +429,31 @@ jobs:
             local target_dir="${PWD}/target/${target}"
             local binary="${target_dir}/${target}/release/${BINARY}"
             local workdir
-            CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
+            if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-image-cli" ]; then
+              CARGO_TARGET_DIR="${target_dir}" LIBNBD_BUILD_ROOT="${target_dir}/libnbd" \
+                tools/image-build/with-libnbd-env.sh --target "${target}" \
+                  cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
+            else
+              CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
+            fi
             file "${binary}"
             workdir="$(mktemp -d)"
             cp "${binary}" "${workdir}/${BINARY}"
             chmod +x "${workdir}/${BINARY}"
+            if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-image-cli" ]; then
+              tools/image-build/package-libnbd-static-artifacts.sh \
+                --prefix "${target_dir}/libnbd/${target}/prefix" \
+                --destination "${workdir}/third-party/libnbd"
+              (
+                cd "${workdir}/third-party/libnbd"
+                sha256sum --check --strict SHA256SUMS
+              )
+              dynamic_section="$(readelf -d "${binary}" 2>/dev/null)"
+              if grep -Fq '(NEEDED)' <<<"${dynamic_section}"; then
+                echo "${binary} retained a dynamic shared-library dependency" >&2
+                exit 1
+              fi
+            fi
             if [ "${PACKAGE}" = "intar-image-cli" ]; then
               cp content/scenarios/base-images.hcl "${workdir}/"
             fi
@@ -529,7 +549,7 @@ jobs:
             while IFS= read -r entry; do
               entry="${entry#./}"
               case "${entry}" in
-                ""|intar-image-cli|base-images.hcl) ;;
+                ""|intar-image-cli|base-images.hcl|third-party/|third-party/libnbd/|third-party/libnbd/*) ;;
                 *)
                   echo "unexpected path in ${archive}: ${entry}" >&2
                   exit 1
@@ -540,6 +560,14 @@ jobs:
             tar -xzf "${archive}" -C "${extract_dir}"
             test -x "${extract_dir}/intar-image-cli"
             cmp content/scenarios/base-images.hcl "${extract_dir}/base-images.hcl"
+            test -f "${extract_dir}/third-party/libnbd/source/PROVENANCE"
+            test -x "${extract_dir}/third-party/libnbd/source/build-libnbd-static.sh"
+            test -f "${extract_dir}/third-party/libnbd/rust-bindings/PROVENANCE.md"
+            test -f "${extract_dir}/third-party/libnbd/relink/libnbd.a"
+            (
+              cd "${extract_dir}/third-party/libnbd"
+              sha256sum --check --strict SHA256SUMS
+            )
             mapfile -t packaged_files < <(
               find "${extract_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' \
                 | LC_ALL=C sort

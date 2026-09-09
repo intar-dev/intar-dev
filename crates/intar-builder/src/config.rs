@@ -31,7 +31,6 @@ impl BuilderConfig {
             target_arch: builder_arch(crate::bridge::host_architecture()).to_string(),
             qemu_binary: PathBuf::from(&self.qemu.qemu_binary),
             qemu_storage_daemon_binary: PathBuf::from(&self.qemu.qemu_storage_daemon_binary),
-            umount_binary: PathBuf::from(&self.qemu.umount_binary),
             mke2fs_binary: PathBuf::from(&self.qemu.mke2fs_binary),
             e2fsck_binary: PathBuf::from(&self.qemu.e2fsck_binary),
             resize2fs_binary: PathBuf::from(&self.qemu.resize2fs_binary),
@@ -101,7 +100,6 @@ impl Default for BuilderRuntimeConfig {
 pub struct QemuConfig {
     pub qemu_binary: String,
     pub qemu_storage_daemon_binary: String,
-    pub umount_binary: String,
     pub mke2fs_binary: String,
     pub e2fsck_binary: String,
     pub resize2fs_binary: String,
@@ -120,7 +118,6 @@ impl Default for QemuConfig {
         Self {
             qemu_binary: "qemu-system-x86_64".to_string(),
             qemu_storage_daemon_binary: "qemu-storage-daemon".to_string(),
-            umount_binary: "umount".to_string(),
             mke2fs_binary: "mke2fs".to_string(),
             e2fsck_binary: "e2fsck".to_string(),
             resize2fs_binary: "resize2fs".to_string(),
@@ -268,6 +265,7 @@ unknown = true
             "mmdebstrap_binary = \"mmdebstrap\"",
             "qemuargs = []",
             "base_cache_root = \"/var/cache/intar-builder/base\"",
+            "umount_binary = \"umount\"",
         ] {
             let error = parse(&format!("[qemu]\n{field}\n")).unwrap_err();
             assert!(format!("{error:#}").contains("unknown field"), "{field}");

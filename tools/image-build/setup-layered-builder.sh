@@ -39,7 +39,6 @@ readonly BUILDCTL="$BIN_DIR/buildctl"
 readonly BUILDKIT_RUNC="$BIN_DIR/buildkit-runc"
 readonly UMOCI="$BIN_DIR/umoci"
 readonly QEMU_STORAGE_DAEMON="/usr/bin/qemu-storage-daemon"
-readonly UMOUNT="/usr/bin/umount"
 
 die() {
     printf 'error: %s\n' "$*" >&2
@@ -66,15 +65,16 @@ require_root() {
 
 require_host() {
     [ "$(uname -m)" = "x86_64" ] || die "the pinned tool assets require x86_64"
-    for tool in curl sha256sum tar install mktemp nohup ldd; do
+    for tool in curl sha256sum tar install mktemp nohup grep; do
         command -v "$tool" >/dev/null || die "missing required host tool '$tool'"
     done
     [ -x "$QEMU_STORAGE_DAEMON" ] || die "missing QEMU storage daemon '$QEMU_STORAGE_DAEMON'"
-    [ -x "$UMOUNT" ] || die "missing unmount tool '$UMOUNT'"
-    [ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ] \
-        || die "missing or inaccessible FUSE device '/dev/fuse'"
-    ldd "$QEMU_STORAGE_DAEMON" | grep -Eq "libfuse3\.so\.[0-9]+" \
-        || die "QEMU storage daemon must link libfuse3"
+    qsd_help="$("$QEMU_STORAGE_DAEMON" --help 2>&1)" \
+        || die "failed to read QEMU storage daemon help"
+    grep -Fq -- '--nbd-server' <<<"$qsd_help" \
+        || die "QEMU storage daemon must support Unix NBD export"
+    grep -Fq -- '--export [type=]nbd' <<<"$qsd_help" \
+        || die "QEMU storage daemon must support NBD export"
 }
 
 release_is_installed() {

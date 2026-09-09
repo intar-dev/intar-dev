@@ -11,6 +11,8 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "justfile"
+      - "third_party/**"
+      - "tools/image-build/**"
       - "package.json"
       - "bun.lock"
       - "content/scenarios/base-images.hcl"
@@ -27,6 +29,8 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "justfile"
+      - "third_party/**"
+      - "tools/image-build/**"
       - "package.json"
       - "bun.lock"
       - "content/scenarios/base-images.hcl"
@@ -58,10 +62,15 @@ jobs:
         with:
           cache: rust
 
-      - name: Install just and cargo-nextest
+      - name: Install just, cargo-nextest, and cargo-zigbuild
         uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
         with:
-          tool: just@1.58.0,cargo-nextest@0.9.143
+          tool: just@1.58.0,cargo-nextest@0.9.143,cargo-zigbuild@0.23.0
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
 
       - name: Run workspace checks
         run: just verify
@@ -76,16 +85,6 @@ jobs:
 
       - name: Audit dependencies
         run: cargo audit --deny warnings
-
-      - name: Install Zig and cargo-zigbuild
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
-        with:
-          tool: cargo-zigbuild@0.23.0
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
 
       - name: Compile kino guest
         run: just build-kino-guest
