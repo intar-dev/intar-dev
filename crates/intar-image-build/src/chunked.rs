@@ -15,6 +15,88 @@ use crate::sha256::sha256_bytes_hex;
 
 const CHUNK_COMPRESSION_LEVEL: i32 = 6;
 const CHUNK_COMPRESSION_WORKERS: usize = 4;
+pub(crate) const MAX_CHUNK_READS_IN_FLIGHT: usize = 8;
+
+#[derive(Clone, Debug)]
+pub(crate) struct ImageChunkRead {
+    pub(crate) offset: u64,
+    pub(crate) length: usize,
+}
+
+/// Reads logical raw-image chunks from one immutable source.
+///
+/// A reader can return only byte ranges that it knows are all zero. Ranges
+/// with incomplete or unavailable allocation information stay unreadable by
+/// this interface and are read normally by the scanner.
+pub(crate) trait ImageChunkReader {
+    fn virtual_size_bytes(&mut self) -> Result<u64>;
+
+    fn known_zero_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>>;
+
+    /// Reads the supplied chunks in request order.
+    ///
+    /// Implementations must reject a short or failed read. The caller limits
+    /// each request to one image chunk and each batch to eight requests.
+    fn read_chunks(&mut self, reads: &[ImageChunkRead]) -> Result<Vec<Vec<u8>>>;
+}
+
+struct FileImageChunkReader {
+    raw_path: PathBuf,
+    raw: fs::File,
+    virtual_size_bytes: u64,
+    data_extents: Option<Vec<Range<u64>>>,
+}
+
+impl FileImageChunkReader {
+    fn open(raw_path: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(raw_path)
+            .with_context(|| format!("failed to stat raw image '{}'", raw_path.display()))?;
+        validate_virtual_size(raw_path, &metadata)?;
+        let raw = fs::File::open(raw_path)
+            .with_context(|| format!("failed to open raw image '{}'", raw_path.display()))?;
+        let data_extents = discover_data_extents(&raw, metadata.len())?;
+        Ok(Self {
+            raw_path: raw_path.to_path_buf(),
+            raw,
+            virtual_size_bytes: metadata.len(),
+            data_extents,
+        })
+    }
+}
+
+impl ImageChunkReader for FileImageChunkReader {
+    fn virtual_size_bytes(&mut self) -> Result<u64> {
+        Ok(self.virtual_size_bytes)
+    }
+
+    fn known_zero_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
+        Ok(self.data_extents.as_ref().map(|data_extents| {
+            zero_ranges_from_data_extents(data_extents, self.virtual_size_bytes)
+        }))
+    }
+
+    fn read_chunks(&mut self, reads: &[ImageChunkRead]) -> Result<Vec<Vec<u8>>> {
+        ensure!(
+            reads.len() <= MAX_CHUNK_READS_IN_FLIGHT,
+            "too many raw image reads in one batch"
+        );
+        reads
+            .iter()
+            .map(|read| {
+                let mut bytes = vec![0_u8; read.length];
+                self.raw
+                    .seek(SeekFrom::Start(read.offset))
+                    .with_context(|| {
+                        format!("failed to seek raw image '{}'", self.raw_path.display())
+                    })?;
+                self.raw.read_exact(&mut bytes).with_context(|| {
+                    format!("failed to read raw image '{}'", self.raw_path.display())
+                })?;
+                Ok(bytes)
+            })
+            .collect()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct EncodedImageChunkArtifact {
@@ -82,70 +164,154 @@ pub fn write_chunked_image_artifact(
 /// Returns an error if the raw image is not a bounded regular file or cannot
 /// be read completely.
 pub fn scan_raw_image_chunks(raw_path: &Path) -> Result<ScannedChunkedImage> {
+    let mut raw = FileImageChunkReader::open(raw_path)?;
+    scan_image_chunks(&mut raw, raw_path.to_path_buf())
+}
+
+pub(crate) fn scan_image_chunks(
+    reader: &mut impl ImageChunkReader,
+    source_label: PathBuf,
+) -> Result<ScannedChunkedImage> {
     let started = std::time::Instant::now();
-    let metadata = fs::symlink_metadata(raw_path)
-        .with_context(|| format!("failed to stat raw image '{}'", raw_path.display()))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CHUNKED_IMAGE_BYTES {
-        bail!(
-            "raw image '{}' is not a non-empty bounded regular file",
-            raw_path.display()
-        );
-    }
-    let mut raw = fs::File::open(raw_path)
-        .with_context(|| format!("failed to open raw image '{}'", raw_path.display()))?;
-    let data_extents = discover_data_extents(&raw, metadata.len())?;
+    let virtual_size_bytes = reader.virtual_size_bytes()?;
+    ensure!(
+        (1..=MAX_CHUNKED_IMAGE_BYTES).contains(&virtual_size_bytes),
+        "raw image '{}' is not non-empty and bounded",
+        source_label.display()
+    );
+    let mut zero_ranges = reader.known_zero_ranges()?.unwrap_or_default();
+    normalize_ranges(&mut zero_ranges, virtual_size_bytes)?;
     let mut chunks = Vec::new();
     let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
-    let chunk_count = metadata.len().div_ceil(chunk_size);
-    let mut extent_cursor = 0_usize;
+    let chunk_count = virtual_size_bytes.div_ceil(chunk_size);
+    let mut reads = Vec::with_capacity(MAX_CHUNK_READS_IN_FLIGHT);
     for raw_index in 0..chunk_count {
         let chunk_start = raw_index
             .checked_mul(chunk_size)
             .context("image chunk offset overflow")?;
-        let chunk_end = chunk_start.saturating_add(chunk_size).min(metadata.len());
+        let chunk_end = chunk_start
+            .saturating_add(chunk_size)
+            .min(virtual_size_bytes);
         let length = usize::try_from(chunk_end - chunk_start)
             .context("image chunk size does not fit memory")?;
-        if let Some(extents) = data_extents.as_ref() {
-            while extents
-                .get(extent_cursor)
-                .is_some_and(|extent| extent.end <= chunk_start)
-            {
-                extent_cursor = extent_cursor.saturating_add(1);
-            }
-            if !extents
-                .get(extent_cursor)
-                .is_some_and(|extent| extent.start < chunk_end)
-            {
-                continue;
-            }
+        if range_is_covered(&zero_ranges, chunk_start, chunk_end) {
+            continue;
         }
-
-        raw.seek(SeekFrom::Start(chunk_start))
-            .with_context(|| format!("failed to seek raw image '{}'", raw_path.display()))?;
-        let mut bytes = vec![0_u8; length];
-        raw.read_exact(&mut bytes)
-            .with_context(|| format!("failed to read raw image '{}'", raw_path.display()))?;
-        if bytes.iter().any(|byte| *byte != 0) {
-            chunks.push(ScannedImageChunk {
+        reads.push((
+            ScannedImageChunk {
                 index: u32::try_from(raw_index).context("image chunk index overflow")?,
                 raw_size_bytes: u32::try_from(length).context("image chunk size overflow")?,
-                raw_sha256: sha256_bytes_hex(&bytes),
-            });
+                raw_sha256: String::new(),
+            },
+            ImageChunkRead {
+                offset: chunk_start,
+                length,
+            },
+        ));
+        if reads.len() == MAX_CHUNK_READS_IN_FLIGHT {
+            hash_read_batch(reader, &mut chunks, std::mem::take(&mut reads))?;
         }
     }
+    if !reads.is_empty() {
+        hash_read_batch(reader, &mut chunks, reads)?;
+    }
+    chunks.sort_by_key(|chunk| chunk.index);
 
     eprintln!(
         "[intar-build-metric] phase=chunk_scan elapsed_ms={} raw_bytes={} non_zero_chunks={} path={}",
         started.elapsed().as_millis(),
-        metadata.len(),
+        virtual_size_bytes,
         chunks.len(),
-        raw_path.display()
+        source_label.display()
     );
     Ok(ScannedChunkedImage {
-        raw_path: raw_path.to_path_buf(),
-        virtual_size_bytes: metadata.len(),
+        raw_path: source_label,
+        virtual_size_bytes,
         chunks,
     })
+}
+
+fn hash_read_batch(
+    reader: &mut impl ImageChunkReader,
+    chunks: &mut Vec<ScannedImageChunk>,
+    reads: Vec<(ScannedImageChunk, ImageChunkRead)>,
+) -> Result<()> {
+    let requests = reads
+        .iter()
+        .map(|(_, read)| read.clone())
+        .collect::<Vec<_>>();
+    let bytes = reader.read_chunks(&requests)?;
+    ensure!(
+        bytes.len() == reads.len(),
+        "raw image reader returned an incomplete batch"
+    );
+    for ((mut chunk, read), bytes) in reads.into_iter().zip(bytes) {
+        ensure!(
+            bytes.len() == read.length,
+            "raw image reader returned a partial chunk at index {}",
+            chunk.index
+        );
+        if bytes.iter().any(|byte| *byte != 0) {
+            chunk.raw_sha256 = sha256_bytes_hex(&bytes);
+            chunks.push(chunk);
+        }
+    }
+    Ok(())
+}
+
+fn validate_virtual_size(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CHUNKED_IMAGE_BYTES {
+        bail!(
+            "raw image '{}' is not a non-empty bounded regular file",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn zero_ranges_from_data_extents(
+    data_extents: &[Range<u64>],
+    virtual_size_bytes: u64,
+) -> Vec<Range<u64>> {
+    let mut zero_ranges = Vec::new();
+    let mut cursor = 0_u64;
+    for extent in data_extents {
+        if cursor < extent.start {
+            zero_ranges.push(cursor..extent.start);
+        }
+        cursor = cursor.max(extent.end);
+    }
+    if cursor < virtual_size_bytes {
+        zero_ranges.push(cursor..virtual_size_bytes);
+    }
+    zero_ranges
+}
+
+fn normalize_ranges(ranges: &mut Vec<Range<u64>>, virtual_size_bytes: u64) -> Result<()> {
+    ranges.sort_by_key(|range| range.start);
+    let mut normalized: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges.drain(..) {
+        ensure!(
+            range.start < range.end && range.end <= virtual_size_bytes,
+            "raw image reader returned an invalid zero extent"
+        );
+        if let Some(previous) = normalized.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            normalized.push(range);
+        }
+    }
+    *ranges = normalized;
+    Ok(())
+}
+
+fn range_is_covered(ranges: &[Range<u64>], start: u64, end: u64) -> bool {
+    ranges
+        .iter()
+        .find(|range| range.end > start)
+        .is_some_and(|range| range.start <= start && range.end >= end)
 }
 
 fn discover_data_extents(raw: &fs::File, file_len: u64) -> Result<Option<Vec<Range<u64>>>> {
@@ -201,9 +367,25 @@ pub fn write_scanned_chunked_image_artifact(
     manifest_path: &Path,
     reused: &BTreeMap<String, ReusedEncodedImageChunk>,
 ) -> Result<ChunkedImageArtifact> {
+    let mut raw = FileImageChunkReader::open(&scan.raw_path)?;
+    write_scanned_chunked_image_artifact_from_reader(
+        scan,
+        &mut raw,
+        chunks_dir,
+        manifest_path,
+        reused,
+    )
+}
+
+pub(crate) fn write_scanned_chunked_image_artifact_from_reader(
+    scan: &ScannedChunkedImage,
+    reader: &mut impl ImageChunkReader,
+    chunks_dir: &Path,
+    manifest_path: &Path,
+    reused: &BTreeMap<String, ReusedEncodedImageChunk>,
+) -> Result<ChunkedImageArtifact> {
     let _compute = crate::compute::acquire();
-    let metadata = fs::symlink_metadata(&scan.raw_path)?;
-    ensure_scan_is_valid(scan, &metadata)?;
+    ensure_scan_is_valid(scan, reader.virtual_size_bytes()?)?;
     fs::create_dir_all(chunks_dir).with_context(|| {
         format!(
             "failed to create chunk directory '{}'",
@@ -240,9 +422,30 @@ pub fn write_scanned_chunked_image_artifact(
             missing.push(chunk);
         }
     }
-    for batch in missing.chunks(CHUNK_COMPRESSION_WORKERS) {
-        for chunk in encode_batch(batch.to_vec(), &scan.raw_path, chunks_dir)? {
-            encoded.insert(chunk.raw_sha256.clone(), chunk);
+    for batch in missing.chunks(MAX_CHUNK_READS_IN_FLIGHT) {
+        let reads = batch.iter().map(chunk_read).collect::<Result<Vec<_>>>()?;
+        let bytes = reader.read_chunks(&reads)?;
+        ensure!(
+            bytes.len() == batch.len(),
+            "raw image reader returned an incomplete batch"
+        );
+        let missing = batch
+            .iter()
+            .cloned()
+            .zip(bytes)
+            .map(|(chunk, bytes)| {
+                ensure!(
+                    bytes.len() == chunk.raw_size_bytes as usize,
+                    "raw image reader returned a partial chunk at index {}",
+                    chunk.index
+                );
+                Ok((chunk, bytes))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for compression_batch in missing.chunks(CHUNK_COMPRESSION_WORKERS) {
+            for chunk in encode_batch(compression_batch.to_vec(), chunks_dir)? {
+                encoded.insert(chunk.raw_sha256.clone(), chunk);
+            }
         }
     }
 
@@ -300,10 +503,9 @@ pub fn write_scanned_chunked_image_artifact(
     })
 }
 
-fn ensure_scan_is_valid(scan: &ScannedChunkedImage, metadata: &fs::Metadata) -> Result<()> {
+fn ensure_scan_is_valid(scan: &ScannedChunkedImage, virtual_size_bytes: u64) -> Result<()> {
     ensure!(
-        metadata.is_file()
-            && metadata.len() == scan.virtual_size_bytes
+        virtual_size_bytes == scan.virtual_size_bytes
             && (1..=MAX_CHUNKED_IMAGE_BYTES).contains(&scan.virtual_size_bytes),
         "raw image changed after chunk scan"
     );
@@ -348,18 +550,25 @@ fn validate_reused_chunk(
     Ok(())
 }
 
+fn chunk_read(chunk: &ScannedImageChunk) -> Result<ImageChunkRead> {
+    Ok(ImageChunkRead {
+        offset: u64::from(chunk.index)
+            .checked_mul(u64::from(IMAGE_CHUNK_SIZE_BYTES))
+            .context("image chunk offset overflow")?,
+        length: chunk.raw_size_bytes as usize,
+    })
+}
+
 fn encode_batch(
-    batch: Vec<ScannedImageChunk>,
-    raw_path: &Path,
+    batch: Vec<(ScannedImageChunk, Vec<u8>)>,
     chunks_dir: &Path,
 ) -> Result<Vec<EncodedChunk>> {
     std::thread::scope(|scope| {
         let handles = batch
             .into_iter()
-            .map(|chunk| {
-                let raw_path = raw_path.to_path_buf();
+            .map(|(chunk, bytes)| {
                 let chunks_dir = chunks_dir.to_path_buf();
-                scope.spawn(move || encode_chunk(chunk, &raw_path, &chunks_dir))
+                scope.spawn(move || encode_chunk(chunk, bytes, &chunks_dir))
             })
             .collect::<Vec<_>>();
         handles
@@ -375,17 +584,12 @@ fn encode_batch(
 
 fn encode_chunk(
     chunk: ScannedImageChunk,
-    raw_path: &Path,
+    bytes: Vec<u8>,
     chunks_dir: &Path,
 ) -> Result<EncodedChunk> {
-    let mut raw = fs::File::open(raw_path)?;
-    raw.seek(SeekFrom::Start(
-        u64::from(chunk.index) * u64::from(IMAGE_CHUNK_SIZE_BYTES),
-    ))?;
-    let mut bytes = vec![0_u8; chunk.raw_size_bytes as usize];
-    raw.read_exact(&mut bytes)?;
     ensure!(
-        sha256_bytes_hex(&bytes) == chunk.raw_sha256,
+        bytes.len() == chunk.raw_size_bytes as usize
+            && sha256_bytes_hex(&bytes) == chunk.raw_sha256,
         "raw image changed after chunk scan"
     );
 
@@ -544,6 +748,154 @@ mod tests {
     use std::io::{Seek as _, SeekFrom, Write as _};
 
     use super::*;
+
+    struct MemoryChunkReader {
+        bytes: Vec<u8>,
+        zero_ranges: Option<Vec<Range<u64>>>,
+        reads: Vec<Vec<ImageChunkRead>>,
+        fail_reads: bool,
+        short_reads: bool,
+    }
+
+    impl MemoryChunkReader {
+        fn new(bytes: Vec<u8>, zero_ranges: Option<Vec<Range<u64>>>) -> Self {
+            Self {
+                bytes,
+                zero_ranges,
+                reads: Vec::new(),
+                fail_reads: false,
+                short_reads: false,
+            }
+        }
+    }
+
+    impl ImageChunkReader for MemoryChunkReader {
+        fn virtual_size_bytes(&mut self) -> Result<u64> {
+            Ok(self.bytes.len() as u64)
+        }
+
+        fn known_zero_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
+            Ok(self.zero_ranges.clone())
+        }
+
+        fn read_chunks(&mut self, reads: &[ImageChunkRead]) -> Result<Vec<Vec<u8>>> {
+            if self.fail_reads {
+                bail!("test reader failed")
+            }
+            self.reads.push(reads.to_vec());
+            reads
+                .iter()
+                .map(|read| {
+                    let start = usize::try_from(read.offset)?;
+                    let end = start
+                        .checked_add(read.length)
+                        .context("test read overflow")?;
+                    let mut bytes = self.bytes[start..end].to_vec();
+                    if self.short_reads {
+                        bytes.pop();
+                    }
+                    Ok(bytes)
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn generic_reader_skips_only_complete_known_zero_chunks_and_sorts_descriptors() {
+        let chunk_size = IMAGE_CHUNK_SIZE_BYTES as usize;
+        let mut bytes = vec![0_u8; chunk_size * 3];
+        bytes[chunk_size + 1] = 1;
+        bytes[chunk_size * 2 + 3] = 2;
+        let mut reader = MemoryChunkReader::new(
+            bytes,
+            Some(vec![
+                0..u64::from(IMAGE_CHUNK_SIZE_BYTES),
+                u64::from(IMAGE_CHUNK_SIZE_BYTES)
+                    ..u64::from(IMAGE_CHUNK_SIZE_BYTES).saturating_add(1),
+            ]),
+        );
+
+        let scan = scan_image_chunks(&mut reader, PathBuf::from("memory.raw")).unwrap();
+
+        assert_eq!(
+            scan.chunks
+                .iter()
+                .map(|chunk| chunk.index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(reader.reads.len(), 1);
+        assert_eq!(reader.reads[0].len(), 2);
+        assert_eq!(reader.reads[0][0].offset, u64::from(IMAGE_CHUNK_SIZE_BYTES));
+        assert_eq!(
+            reader.reads[0][1].offset,
+            u64::from(IMAGE_CHUNK_SIZE_BYTES) * 2
+        );
+    }
+
+    #[test]
+    fn generic_reader_rejects_partial_or_failed_reads() {
+        let mut partial = MemoryChunkReader::new(vec![7_u8; IMAGE_CHUNK_SIZE_BYTES as usize], None);
+        partial.short_reads = true;
+        let partial_error =
+            scan_image_chunks(&mut partial, PathBuf::from("partial.raw")).unwrap_err();
+        assert!(format!("{partial_error:#}").contains("partial chunk"));
+
+        let mut failed = MemoryChunkReader::new(vec![7_u8; IMAGE_CHUNK_SIZE_BYTES as usize], None);
+        failed.fail_reads = true;
+        let failed_error = scan_image_chunks(&mut failed, PathBuf::from("failed.raw")).unwrap_err();
+        assert!(format!("{failed_error:#}").contains("test reader failed"));
+    }
+
+    #[test]
+    fn generic_reader_rechecks_raw_bytes_before_encoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut reader = MemoryChunkReader::new(vec![9_u8; IMAGE_CHUNK_SIZE_BYTES as usize], None);
+        let scan = scan_image_chunks(&mut reader, PathBuf::from("memory.raw")).unwrap();
+        reader.bytes[0] = 8;
+
+        let error = write_scanned_chunked_image_artifact_from_reader(
+            &scan,
+            &mut reader,
+            &temp.path().join("chunks"),
+            &temp.path().join("manifest.json"),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("raw image changed after chunk scan"));
+    }
+
+    #[test]
+    fn generic_reader_does_not_read_again_when_every_chunk_is_reused() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut reader = MemoryChunkReader::new(vec![5_u8; IMAGE_CHUNK_SIZE_BYTES as usize], None);
+        let scan = scan_image_chunks(&mut reader, PathBuf::from("memory.raw")).unwrap();
+        let chunk = scan.chunks[0].clone();
+        let reads_after_scan = reader.reads.len();
+        reader.fail_reads = true;
+        let reused = BTreeMap::from([(
+            chunk.raw_sha256.clone(),
+            ReusedEncodedImageChunk {
+                raw_sha256: chunk.raw_sha256.clone(),
+                raw_size_bytes: chunk.raw_size_bytes,
+                encoded_sha256: "a".repeat(64),
+                encoded_size_bytes: 1,
+            },
+        )]);
+
+        let artifact = write_scanned_chunked_image_artifact_from_reader(
+            &scan,
+            &mut reader,
+            &temp.path().join("chunks"),
+            &temp.path().join("manifest.json"),
+            &reused,
+        )
+        .unwrap();
+
+        assert_eq!(reader.reads.len(), reads_after_scan);
+        assert!(artifact.chunks[0].path.is_none());
+    }
 
     #[test]
     fn chunked_artifact_round_trips_sparse_image_and_short_tail() {

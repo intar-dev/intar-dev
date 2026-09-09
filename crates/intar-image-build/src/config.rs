@@ -46,8 +46,6 @@ pub struct QemuBuildConfig {
     pub qemu_binary: PathBuf,
     #[serde(default = "default_qemu_storage_daemon_binary")]
     pub qemu_storage_daemon_binary: PathBuf,
-    #[serde(default = "default_umount_binary")]
-    pub umount_binary: PathBuf,
     #[serde(default = "default_mke2fs_binary")]
     pub mke2fs_binary: PathBuf,
     #[serde(default = "default_e2fsck_binary")]
@@ -82,7 +80,6 @@ impl Default for QemuBuildConfig {
             target_arch: default_target_arch(),
             qemu_binary: default_qemu_binary(),
             qemu_storage_daemon_binary: default_qemu_storage_daemon_binary(),
-            umount_binary: default_umount_binary(),
             mke2fs_binary: default_mke2fs_binary(),
             e2fsck_binary: default_e2fsck_binary(),
             resize2fs_binary: default_resize2fs_binary(),
@@ -161,10 +158,6 @@ fn default_qemu_binary() -> PathBuf {
 
 fn default_qemu_storage_daemon_binary() -> PathBuf {
     PathBuf::from("qemu-storage-daemon")
-}
-
-fn default_umount_binary() -> PathBuf {
-    PathBuf::from("umount")
 }
 
 fn default_qemu_img_binary() -> PathBuf {
@@ -267,7 +260,6 @@ qemu {
   target_arch = "amd64"
   qemu_binary = "/usr/local/bin/qemu-system-x86_64"
   qemu_storage_daemon_binary = "/usr/local/bin/qemu-storage-daemon"
-  umount_binary = "/usr/bin/umount"
   mke2fs_binary = "/usr/sbin/mke2fs"
   e2fsck_binary = "/usr/sbin/e2fsck"
   resize2fs_binary = "/usr/sbin/resize2fs"
@@ -310,7 +302,6 @@ upload {
                     config.qemu.qemu_storage_daemon_binary,
                     PathBuf::from("/usr/local/bin/qemu-storage-daemon")
                 );
-                assert_eq!(config.qemu.umount_binary, PathBuf::from("/usr/bin/umount"));
                 assert_eq!(config.qemu.ssh_wait_timeout_seconds, 120);
                 assert_eq!(config.qemu.provision_timeout_seconds, 240);
                 assert_eq!(config.qemu.qemu_exit_timeout_seconds, 30);
@@ -383,6 +374,7 @@ upload {
             "mmdebstrap_binary = \"mmdebstrap\"",
             "qemuargs = []",
             "base_cache_root = \".cache/base\"",
+            "umount_binary = \"umount\"",
         ] {
             let source = format!("qemu {{\n  {field}\n}}");
             assert!(hcl::from_str::<BuildConfig>(&source).is_err(), "{field}");

@@ -10,7 +10,6 @@ agent hosts; they do not run user scenarios.
 
 - Ubuntu 24.04 or Debian 12/13 on x86_64.
 - KVM enabled and visible as `/dev/kvm`.
-- FUSE enabled and visible as `/dev/fuse`.
 - QEMU 10 or later.
 - 8 vCPU, 16 GiB RAM, and at least 100 GiB disk for working directories and caches.
 - Outbound HTTPS access to `intar.dev`, GitHub release downloads, and Debian package
@@ -34,18 +33,18 @@ sudo apt-get install -y \
 Install `buildctl`, `buildkitd`, and `umoci` from your approved package source.
 The builder uses the OCI rootfs and QEMU VM stages for every image.
 Use a package source that supplies QEMU 10 or later.
-The current builder uses `/usr/bin/qemu-storage-daemon` version 10.0.11, linked
-with libfuse3, and `/usr/bin/umount`. It does not use `fusermount`.
+The current builder uses `/usr/bin/qemu-storage-daemon` version 10.0.11. It
+exports the finished disk through a private Unix NBD socket.
+The released builder links libnbd statically. The host does not need a libnbd
+package or shared library.
 Before a build starts, builder doctor requires the configured storage daemon to
-show the `--export [type=]fuse` form in its `--help` output.
+show `--nbd-server` and the `--export [type=]nbd` form in its `--help` output.
 
 Verify KVM before installing the daemon:
 
 ```bash
 test -c /dev/kvm
-test -c /dev/fuse
 test -x /usr/bin/qemu-storage-daemon
-test -x /usr/bin/umount
 groups
 ```
 
@@ -63,6 +62,9 @@ scheduling disabled.
 Download the `intar-builder_<version>_linux_amd64.tar.gz` release artifact for
 the target version, then install it. Guest tools are published separately and
 are not downloaded or baked by the image builder.
+Keep the artifact's `third-party/libnbd` directory with the release record. It
+contains the libnbd source, license, verification record, and relink material.
+It is not a host runtime dependency.
 
 ```bash
 sudo install -d /usr/local/bin /etc/intar-builder /var/lib/intar-builder/work /var/cache/intar-builder
@@ -86,7 +88,6 @@ state_db = "/var/lib/intar-builder/state.sqlite3"
 [qemu]
 qemu_binary = "qemu-system-x86_64"
 qemu_storage_daemon_binary = "/usr/bin/qemu-storage-daemon"
-umount_binary = "/usr/bin/umount"
 mke2fs_binary = "mke2fs"
 e2fsck_binary = "e2fsck"
 resize2fs_binary = "resize2fs"
@@ -131,15 +132,15 @@ local build, use `intar-image-cli build --no-cache` or
 `intar-image-cli build-all --no-cache`. The clean-base proof also makes a cold
 OCI build.
 
-### Read-only raw view
+### Direct NBD reader
 
-During chunk scanning, QEMU storage daemon exports a transient, read-only FUSE
-raw view of the QCOW2 work disk. The builder unmounts it with `umount` after the
-scan. It does not use `fusermount`. This view does not change `RawChunksV1`.
-Do not rely on a physical `work/root.raw` after a build; that file is not a
-compatibility contract.
+During chunk scanning, QEMU storage daemon exports the finished QCOW2 work disk
+through a transient, read-only NBD server on a private Unix socket. The builder
+reads it through libnbd, then closes the socket and storage daemon. This does
+not change `RawChunksV1`. Do not rely on a physical `work/root.raw` after a
+build; that file is not a compatibility contract.
 
-`raw_view_read_timeout_seconds` is a 1,200-second watchdog for the FUSE scan,
+`raw_view_read_timeout_seconds` is a 1,200-second watchdog for the NBD scan,
 chunk lookup, and encoding. It does not change guest-step or provisioning
 timeouts.
 
@@ -310,7 +311,7 @@ sudo intar-builder doctor --config /etc/intar-builder/config.toml
 
 The command exits nonzero if required image-build prerequisites are missing:
 `/dev/kvm`, `accelerator = "kvm"`, the configured QEMU/e2fsprogs binaries,
-QEMU 10 or later, `qemu-img`, `qemu-storage-daemon`, `/dev/fuse`, `umount`,
+QEMU 10 or later, `qemu-img`, `qemu-storage-daemon` with Unix NBD export,
 `buildctl`, `umoci`, `zstd`, an immutable Debian digest, the BuildKit socket,
 required work/cache/state directories, a nonzero raw-view read timeout, or
 bridge credentials. Builder doctor covers the QEMU/SSH image-build path only;
@@ -331,11 +332,9 @@ Useful checks when builds do not start:
 
 ```bash
 test -c /dev/kvm
-test -c /dev/fuse
 qemu-system-x86_64 --version
 qemu-img --version
 /usr/bin/qemu-storage-daemon --version
-/usr/bin/umount --version
 buildctl --version
 umoci --version
 zstd --version

@@ -1,0 +1,8 @@
+--- a/lib/libnbd.pc.in
++++ b/lib/libnbd.pc.in
+@@ -26,4 +26,4 @@
+ Description: NBD client library in userspace
+ Requires:
+ Cflags:
+-Libs: -lnbd
++Libs: -L${libdir} -lnbd

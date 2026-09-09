@@ -17,7 +17,6 @@ use clap::{Parser, Subcommand};
 use intar_image_build::{
     DirectBuildOutput, DirectBuildRequest, ReusedEncodedImageChunk, combine_scenario_manifests,
     ensure_base_rootfs, finish_direct_build_from_scan, run_direct_build, run_direct_build_to_raw,
-    scan_raw_image_chunks,
 };
 use intar_image_upload::{
     Error as ImageUploadError, ImageChunkLookup, ImageUploadConfig, ImageUploader,
@@ -232,7 +231,7 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
 
     let mut outputs = Vec::new();
     let mut log_files = Vec::new();
-    let build_result = (|| -> Result<()> {
+    let build_result = async {
         for vm in &bundle_input.scenario.vms {
             log_files.extend(direct_build_log_files(
                 &build_config,
@@ -250,13 +249,16 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
                 .ok_or_else(|| {
                     anyhow::anyhow!("base image '{}' not found in bundle", image.base)
                 })?;
-            let output = run_direct_build(&DirectBuildRequest {
+            let request = DirectBuildRequest {
                 scenario: bundle_input.scenario.clone(),
                 lecture: bundle_input.lecture.clone(),
                 vm_name: vm.name.clone(),
                 config: build_config.clone(),
                 base_image: base_image.clone(),
-            })?;
+            };
+            let output = tokio::task::spawn_blocking(move || run_direct_build(&request))
+                .await
+                .context("run-once direct QEMU build worker panicked")??;
             info!(
                 scenario = %output.rendered.scenario_name,
                 vm = %output.rendered.vm.name,
@@ -267,7 +269,8 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
             outputs.push(output);
         }
         Ok(())
-    })();
+    }
+    .await;
     if let Err(error) = build_result {
         let error_message = format!("{error:#}");
         db.upsert_build_job(

@@ -52,7 +52,6 @@ pub struct PreflightEnvironment {
     pub path_entries: Vec<PathBuf>,
     pub kvm_path: PathBuf,
     pub vhost_vsock_path: PathBuf,
-    pub fuse_path: PathBuf,
 }
 
 impl PreflightEnvironment {
@@ -65,7 +64,6 @@ impl PreflightEnvironment {
                 .unwrap_or_default(),
             kvm_path: PathBuf::from("/dev/kvm"),
             vhost_vsock_path: PathBuf::from("/dev/vhost-vsock"),
-            fuse_path: PathBuf::from("/dev/fuse"),
         }
     }
 }
@@ -85,7 +83,6 @@ pub fn collect_preflight_with_environment(
     push_accelerator_check(&mut checks, &cfg.qemu.accelerator);
     push_char_device_check(&mut checks, "kvm device", &env.kvm_path);
     push_optional_char_device_check(&mut checks, "vhost-vsock device", &env.vhost_vsock_path);
-    push_char_device_check(&mut checks, "fuse device", &env.fuse_path);
     push_command_check(
         &mut checks,
         "qemu binary",
@@ -99,7 +96,7 @@ pub fn collect_preflight_with_environment(
         cfg.qemu.qemu_storage_daemon_binary.as_str(),
         &env.path_entries,
     );
-    push_qsd_fuse_export_check(
+    push_qsd_nbd_export_check(
         &mut checks,
         cfg.qemu.qemu_storage_daemon_binary.as_str(),
         &env.path_entries,
@@ -125,12 +122,6 @@ pub fn collect_preflight_with_environment(
         &env.path_entries,
     );
     push_command_check(&mut checks, "zstd binary", "zstd", &env.path_entries);
-    push_command_check(
-        &mut checks,
-        "umount binary",
-        cfg.qemu.umount_binary.as_str(),
-        &env.path_entries,
-    );
     push_pinned_image_check(&mut checks, &cfg.qemu.layered.debian_image);
     push_command_check(
         &mut checks,
@@ -224,14 +215,14 @@ fn push_command_check(
     }
 }
 
-fn push_qsd_fuse_export_check(
+fn push_qsd_nbd_export_check(
     checks: &mut Vec<PreflightCheck>,
     command: &str,
     path_entries: &[PathBuf],
 ) {
     let Some(path) = resolve_command(command, path_entries) else {
         checks.push(fail(
-            "qemu-storage-daemon FUSE export",
+            "qemu-storage-daemon NBD export",
             "cannot read QEMU storage daemon help because the configured binary is unavailable",
         ));
         return;
@@ -245,7 +236,7 @@ fn push_qsd_fuse_export_check(
         Ok(child) => child,
         Err(error) => {
             checks.push(fail(
-                "qemu-storage-daemon FUSE export",
+                "qemu-storage-daemon NBD export",
                 format!("failed to run '{} --help': {error}", path.display()),
             ));
             return;
@@ -260,7 +251,7 @@ fn push_qsd_fuse_export_check(
                 let _ = child.kill();
                 let _ = child.wait();
                 checks.push(fail(
-                    "qemu-storage-daemon FUSE export",
+                    "qemu-storage-daemon NBD export",
                     format!(
                         "'{} --help' did not finish within five seconds",
                         path.display()
@@ -272,7 +263,7 @@ fn push_qsd_fuse_export_check(
                 let _ = child.kill();
                 let _ = child.wait();
                 checks.push(fail(
-                    "qemu-storage-daemon FUSE export",
+                    "qemu-storage-daemon NBD export",
                     format!(
                         "failed while waiting for '{} --help': {error}",
                         path.display()
@@ -286,14 +277,14 @@ fn push_qsd_fuse_export_check(
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             checks.push(fail(
-                "qemu-storage-daemon FUSE export",
+                "qemu-storage-daemon NBD export",
                 format!("'{} --help' exited with {}", path.display(), output.status),
             ));
             return;
         }
         Err(error) => {
             checks.push(fail(
-                "qemu-storage-daemon FUSE export",
+                "qemu-storage-daemon NBD export",
                 format!("failed to collect '{} --help': {error}", path.display()),
             ));
             return;
@@ -302,7 +293,7 @@ fn push_qsd_fuse_export_check(
     let output_len = output.stdout.len().saturating_add(output.stderr.len());
     if output_len > QSD_HELP_MAX_BYTES {
         checks.push(fail(
-            "qemu-storage-daemon FUSE export",
+            "qemu-storage-daemon NBD export",
             "QEMU storage daemon help exceeds the 64 KiB preflight limit",
         ));
         return;
@@ -313,21 +304,21 @@ fn push_qsd_fuse_export_check(
         Ok(output) => output,
         Err(_) => {
             checks.push(fail(
-                "qemu-storage-daemon FUSE export",
+                "qemu-storage-daemon NBD export",
                 "QEMU storage daemon help is not UTF-8",
             ));
             return;
         }
     };
-    if output.contains("--export [type=]fuse") && output.contains("over FUSE") {
+    if output.contains("--nbd-server") && output.contains("--export [type=]nbd") {
         checks.push(pass(
-            "qemu-storage-daemon FUSE export",
-            "configured daemon supports the read-only FUSE export form",
+            "qemu-storage-daemon NBD export",
+            "configured daemon supports Unix-socket NBD export",
         ));
     } else {
         checks.push(fail(
-            "qemu-storage-daemon FUSE export",
-            "configured daemon does not advertise the required --export [type=]fuse form",
+            "qemu-storage-daemon NBD export",
+            "configured daemon does not advertise --nbd-server and --export [type=]nbd",
         ));
     }
 }
@@ -779,14 +770,13 @@ mod tests {
         fake_qemu(&bin, "QEMU emulator version 10.0.11");
         fake_qemu_storage_daemon(
             &bin,
-            "--export [type=]fuse,id=raw,node-name=root,mountpoint=root.raw export over FUSE",
+            "--nbd-server addr.type=unix,addr.path=raw-view.sock --export [type=]nbd,id=raw,node-name=root",
         );
         for tool in [
             "qemu-img",
             "buildctl",
             "umoci",
             "zstd",
-            "umount",
             "mke2fs",
             "e2fsck",
             "resize2fs",
@@ -805,7 +795,6 @@ mod tests {
             path_entries: vec![bin.clone()],
             kvm_path: PathBuf::from("/dev/null"),
             vhost_vsock_path: PathBuf::from("/dev/null"),
-            fuse_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -834,7 +823,6 @@ mod tests {
             path_entries: Vec::new(),
             kvm_path: fake_kvm,
             vhost_vsock_path: temp.path().join("missing-vsock"),
-            fuse_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -862,7 +850,6 @@ mod tests {
             path_entries: Vec::new(),
             kvm_path: temp.path().join("missing-kvm"),
             vhost_vsock_path: temp.path().join("missing-vsock"),
-            fuse_path: temp.path().join("missing-fuse"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -880,11 +867,6 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.name == "raw view read timeout" && check.status == PreflightStatus::Fail
         }));
-        assert!(
-            report.checks.iter().any(|check| {
-                check.name == "fuse device" && check.status == PreflightStatus::Fail
-            })
-        );
         assert!(report.checks.iter().any(|check| {
             check.name == "bridge configuration" && check.status == PreflightStatus::Warn
         }));
@@ -908,14 +890,13 @@ mod tests {
         fake_qemu(&bin, "QEMU emulator version 10.0.11");
         fake_qemu_storage_daemon(
             &bin,
-            "--export [type=]fuse,id=raw,node-name=root,mountpoint=root.raw export over FUSE",
+            "--nbd-server addr.type=unix,addr.path=raw-view.sock --export [type=]nbd,id=raw,node-name=root",
         );
         for tool in [
             "qemu-img",
             "buildctl",
             "umoci",
             "zstd",
-            "umount",
             "mke2fs",
             "e2fsck",
             "resize2fs",
@@ -932,7 +913,6 @@ mod tests {
             path_entries: vec![bin.clone()],
             kvm_path: PathBuf::from("/dev/null"),
             vhost_vsock_path: PathBuf::from("/dev/null"),
-            fuse_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -951,18 +931,13 @@ mod tests {
             check.name == "qemu-storage-daemon binary" && check.status == PreflightStatus::Pass
         }));
         assert!(report.checks.iter().any(|check| {
-            check.name == "qemu-storage-daemon FUSE export" && check.status == PreflightStatus::Pass
+            check.name == "qemu-storage-daemon NBD export" && check.status == PreflightStatus::Pass
         }));
-        assert!(
-            report.checks.iter().any(|check| {
-                check.name == "fuse device" && check.status == PreflightStatus::Pass
-            })
-        );
 
-        fake_qemu_storage_daemon(&bin, "--export [type=]nbd,id=raw,node-name=root");
+        fake_qemu_storage_daemon(&bin, "--export [type=]vhost-user-blk,id=raw,node-name=root");
         let report = collect_preflight_with_environment(&cfg, &env);
         assert!(report.checks.iter().any(|check| {
-            check.name == "qemu-storage-daemon FUSE export" && check.status == PreflightStatus::Fail
+            check.name == "qemu-storage-daemon NBD export" && check.status == PreflightStatus::Fail
         }));
 
         fs::remove_file(bin.join("qemu-storage-daemon")).unwrap();
@@ -972,7 +947,7 @@ mod tests {
         }));
         fake_qemu_storage_daemon(
             &bin,
-            "--export [type=]fuse,id=raw,node-name=root,mountpoint=root.raw export over FUSE",
+            "--nbd-server addr.type=unix,addr.path=raw-view.sock --export [type=]nbd,id=raw,node-name=root",
         );
 
         drop(buildkit_socket);

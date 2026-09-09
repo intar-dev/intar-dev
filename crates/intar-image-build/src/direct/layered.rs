@@ -22,6 +22,7 @@ use qmp::Qmp;
 
 const PROVISIONING_ABI: &str = "intar-qemu-stages-v1";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+const ROOT_BLOCK_DEVICE: &str = "intar-root";
 const VIRTIO_BALLOON_DEVICE: &str = "virtio-balloon-pci,id=intar-balloon,free-page-reporting=on";
 const VIRTIO_BALLOON_VERIFY_COMMAND: &str = r#"set -eu
 modprobe virtio_balloon
@@ -244,18 +245,15 @@ pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
                     continue;
                 }
                 let checkpoint_started = Instant::now();
-                let snapshot = capture(&rendered, &runtime, &mut guest, deadline)?;
-                // The snapshot is self-contained and QEMU has exited. Release
-                // its old backing entry before replacing the retained slot.
-                drop(guest._lease.take());
+                let mut paused = capture(&rendered, &runtime, &mut guest, deadline, index)?;
                 let metadata = serde_json::to_value(ResumeMetadata {
                     bootstrap_private_key: private_key_to_openssh(&guest.key.private_key)?,
                     memory_encoding: "zstd".to_string(),
                 })?;
                 let publish_started = Instant::now();
                 let publication = writer.publish_moving(
-                    &snapshot.disk,
-                    &snapshot.memory,
+                    &paused.snapshot.disk,
+                    &paused.snapshot.memory,
                     &rendered.paths.seed_disk_path,
                     index,
                     metadata,
@@ -273,43 +271,24 @@ pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
                         }
                     ),
                 )?;
-                let cached_guest = match publication {
-                    Ok(CheckpointPublish::Stored(lease)) => match restore(
-                        &rendered,
-                        &runtime,
-                        lease,
-                        index,
-                        checkpoint_deadline(&rendered, deadline),
-                    ) {
-                        Ok(guest) => Some(guest),
-                        Err(error) => {
-                            log(
-                                &rendered,
-                                &format!(
-                                    "checkpoint_cache_restore_failed error={error:#}; rebuilding cold without cache"
-                                ),
-                            )?;
-                            if let Err(invalidation) = cache.invalidate(&identities[index]) {
-                                log(
-                                    &rendered,
-                                    &format!(
-                                        "checkpoint_cache_invalidation_failed error={invalidation:#}"
-                                    ),
-                                )?;
-                            }
-                            drop(snapshot);
-                            drop(guest);
-                            return rebuild_without_cache(rendered, error);
-                        }
-                    },
-                    Ok(CheckpointPublish::Skipped) => None,
+                let persisted = match publication {
+                    Ok(CheckpointPublish::Stored(lease)) => {
+                        // The source continuation still uses its prior backing
+                        // chain. The new self-contained cache entry is not a
+                        // parent of that chain, so its lease can be released.
+                        drop(lease);
+                        true
+                    }
+                    Ok(CheckpointPublish::Skipped) => false,
                     Ok(CheckpointPublish::RetentionUncertain) => {
-                        drop(snapshot);
-                        drop(guest);
-                        return rebuild_without_cache(
-                            rendered,
-                            anyhow!("checkpoint retention index is uncertain"),
-                        );
+                        // The source continuation uses its own overlay and the
+                        // pre-existing backing lease. An uncertain new index
+                        // can disable reuse without invalidating that source.
+                        log(
+                            &rendered,
+                            "checkpoint_retention_uncertain continuing source without cache",
+                        )?;
+                        false
                     }
                     Err(error) => {
                         log(
@@ -318,28 +297,10 @@ pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
                                 "checkpoint_cache_publish_failed error={error:#}; using local snapshot"
                             ),
                         )?;
-                        None
+                        false
                     }
                 };
-                let persisted = cached_guest.is_some();
-                if let Some(resumed) = cached_guest {
-                    guest = resumed;
-                } else {
-                    // Space can change after reservation. The captured state
-                    // still lets this build continue without storing a cache.
-                    let key = generate_key_copy(&guest.key);
-                    let mut resumed = restore_files(
-                        &rendered,
-                        &runtime,
-                        &snapshot.disk,
-                        &snapshot.memory,
-                        key,
-                        None,
-                        checkpoint_deadline(&rendered, deadline),
-                    )?;
-                    resumed._temporary_snapshot = Some(snapshot);
-                    guest = resumed;
-                }
+                resume_source_checkpoint(&rendered, &runtime, &mut guest, &mut paused, deadline)?;
                 log(
                     &rendered,
                     &format!(
@@ -371,7 +332,13 @@ pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
     guest.finished = true;
     let raw_sync_started = Instant::now();
     if let Err(error) = fs::File::open(&guest.disk).and_then(|disk| disk.sync_all()) {
-        let cleanup = remove_work_file(&guest.disk);
+        let cleanup = (|| {
+            remove_work_file(&guest.disk)?;
+            for disk in &guest.parent_disks {
+                remove_work_file(disk)?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })();
         return match cleanup {
             Ok(()) => Err(error).context("failed to flush final raw view source"),
             Err(cleanup_error) => Err(error).context(format!(
@@ -388,17 +355,13 @@ pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
         ),
     )?;
     let raw_view_started = Instant::now();
-    let temporary_snapshot = guest
-        ._temporary_snapshot
-        .take()
-        .map(|snapshot| snapshot._directory);
     let raw_view = RawViewGuard::start(
         &rendered.config,
         &rendered.paths.work_root,
         guest.disk.clone(),
+        std::mem::take(&mut guest.parent_disks),
         rendered.paths.root_disk_path.clone(),
         guest._lease.take(),
-        temporary_snapshot,
         Duration::from_secs(rendered.config.raw_view_read_timeout_seconds.max(1)),
     )?;
     log(
@@ -412,36 +375,24 @@ pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
     Ok(RawDirectBuild { raw_view, rendered })
 }
 
-fn rebuild_without_cache(
-    mut rendered: RenderedDirectBuild,
-    restore_error: anyhow::Error,
-) -> Result<RawDirectBuild> {
-    let reason = format!("{restore_error:#}");
-    eprintln!(
-        "[intar-layered] scenario={} vm={} retrying cold build after fresh checkpoint restore failure: {reason}",
-        rendered.scenario_name, rendered.vm.name
-    );
-    rendered.config.layered.use_cache = false;
-    build(rendered).with_context(|| {
-        format!("cold build after fresh checkpoint restore failure also failed: {reason}")
-    })
-}
-
 struct Guest {
     child: Child,
     disk: PathBuf,
+    parent_disks: Vec<PathBuf>,
     key: BuildSshKey,
     ssh: Option<BuildSshSession>,
     // The work disk has this checkpoint as its read-only backing file.
     _lease: Option<CheckpointLease>,
-    _temporary_snapshot: Option<Snapshot>,
     finished: bool,
 }
 
 impl Drop for Guest {
     fn drop(&mut self) {
-        if !self.finished {
-            let _ = terminate_qemu(&mut self.child);
+        if !self.finished && terminate_qemu(&mut self.child).is_ok() {
+            let _ = remove_work_file(&self.disk);
+            for disk in &self.parent_disks {
+                let _ = remove_work_file(disk);
+            }
         }
     }
 }
@@ -450,6 +401,12 @@ struct Snapshot {
     _directory: tempfile::TempDir,
     disk: PathBuf,
     memory: PathBuf,
+}
+
+struct PausedCheckpoint {
+    snapshot: Snapshot,
+    source_pid: u32,
+    qmp: Qmp,
 }
 
 fn cacheable_stage(stage: &ProvisionStage) -> bool {
@@ -480,10 +437,11 @@ fn checkpoint_reservation(guest: &Guest, memory_mib: u32) -> Result<u64> {
     let allocated =
         |path: &Path| -> Result<u64> { Ok(fs::metadata(path)?.blocks().saturating_mul(512)) };
     let mut disk_bytes = allocated(&guest.disk)?;
+    for disk in &guest.parent_disks {
+        disk_bytes = disk_bytes.saturating_add(allocated(disk)?);
+    }
     if let Some(lease) = &guest._lease {
         disk_bytes = disk_bytes.saturating_add(allocated(&lease.entry.qcow2_path)?);
-    } else if let Some(snapshot) = &guest._temporary_snapshot {
-        disk_bytes = disk_bytes.saturating_add(allocated(&snapshot.disk)?);
     }
     Ok(disk_bytes
         .saturating_add(u64::from(memory_mib) * 1024 * 1024)
@@ -509,10 +467,10 @@ fn cold_guest(rendered: &RenderedDirectBuild, runtime: &tokio::runtime::Runtime)
     let mut guest = Guest {
         child: spawn(rendered, &disk, false)?,
         disk,
+        parent_disks: Vec::new(),
         key,
         ssh: None,
         _lease: None,
-        _temporary_snapshot: None,
         finished: false,
     };
     guest.ssh = Some(wait_for_ssh(
@@ -575,16 +533,9 @@ fn restore(
         &checkpoint_disk,
         &state_path,
         key,
-        Some(lease),
+        lease,
         deadline,
     )
-}
-
-fn generate_key_copy(key: &BuildSshKey) -> BuildSshKey {
-    BuildSshKey {
-        private_key: key.private_key.clone(),
-        public_key_openssh: key.public_key_openssh.clone(),
-    }
 }
 
 fn restore_files(
@@ -593,7 +544,7 @@ fn restore_files(
     checkpoint_disk: &Path,
     state_path: &Path,
     key: BuildSshKey,
-    lease: Option<CheckpointLease>,
+    lease: CheckpointLease,
     deadline: Instant,
 ) -> Result<Guest> {
     let zstd = resolve_binary(Path::new("zstd"))?;
@@ -634,10 +585,10 @@ fn restore_files(
     let mut guest = Guest {
         child: spawn(rendered, &disk, true)?,
         disk,
+        parent_disks: Vec::new(),
         key,
         ssh: None,
-        _lease: lease,
-        _temporary_snapshot: None,
+        _lease: Some(lease),
         finished: false,
     };
     log(
@@ -883,7 +834,8 @@ fn capture(
     runtime: &tokio::runtime::Runtime,
     guest: &mut Guest,
     provision_deadline: Instant,
-) -> Result<Snapshot> {
+    stage_index: usize,
+) -> Result<PausedCheckpoint> {
     let zstd = resolve_binary(Path::new("zstd"))?;
     let mut ssh = guest.ssh.take().context("build guest has no SSH session")?;
     let sync_started = Instant::now();
@@ -919,7 +871,13 @@ fn capture(
         .prefix("checkpoint-")
         .tempdir_in(&rendered.paths.work_root)?;
     let memory = directory.path().join("memory.state.zst");
+    let memory_partial = directory.path().join("memory.state.zst.partial");
+    let memory_complete = directory.path().join("memory.state.complete");
     let disk = directory.path().join("checkpoint.qcow2");
+    let continuation_disk = fs::canonicalize(&rendered.paths.work_root)
+        .context("failed to canonicalize checkpoint work directory")?
+        .join(format!("active-checkpoint-{stage_index}.qcow2"));
+    remove_work_file(&continuation_disk)?;
     let deadline = (Instant::now()
         + Duration::from_secs(rendered.config.qemu_exit_timeout_seconds.max(1)))
     .min(provision_deadline);
@@ -932,8 +890,14 @@ fn capture(
         deadline,
     )?;
     let migration_started = Instant::now();
-    qmp.execute("migrate", json!({"channels": [{"channel-type": "main", "addr": {"transport": "exec", "args": [zstd, "-1", "-q", "-o", memory]}}]}), deadline)?;
+    qmp.execute(
+        "migrate",
+        json!({"channels": [{"channel-type": "main", "addr": {"transport": "exec", "args": ["/bin/sh", "-c", migration_writer_command(&zstd, &memory_partial, &memory, &memory_complete)?]}}]}),
+        deadline,
+    )?;
     qmp.wait_migration(deadline)?;
+    wait_for_checkpoint_output(&memory, &memory_complete, deadline)?;
+    fs::File::open(&memory)?.sync_all()?;
     log(
         rendered,
         &format!(
@@ -941,20 +905,19 @@ fn capture(
             migration_started.elapsed().as_millis()
         ),
     )?;
-    qmp.execute("quit", json!({}), deadline)?;
-    drop(qmp);
-    while Instant::now() < deadline {
-        if let Some(status) = guest.child.try_wait()? {
-            ensure!(status.success(), "checkpoint QEMU exited unsuccessfully");
-            guest.finished = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    let status = qmp.execute("query-status", json!({}), deadline)?;
     ensure!(
-        guest.finished,
-        "QEMU did not stop after checkpoint migration"
+        status.get("status").and_then(serde_json::Value::as_str) == Some("postmigrate"),
+        "QEMU did not enter postmigrate after checkpoint migration: {status}"
     );
+    qmp.execute(
+        "blockdev-snapshot-sync",
+        snapshot_sync_arguments(&continuation_disk)?,
+        deadline,
+    )?;
+    let frozen_disk = guest.disk.clone();
+    guest.parent_disks.push(frozen_disk.clone());
+    guest.disk = continuation_disk.clone();
     log(
         rendered,
         &format!(
@@ -962,8 +925,6 @@ fn capture(
             freeze_started.elapsed().as_millis()
         ),
     )?;
-    // Reaping QEMU also waits for its migration encoder. Flush only after
-    // that writer has closed the complete compressed stream.
     let flush_started = Instant::now();
     fs::File::open(&memory)?.sync_all()?;
     log(
@@ -973,42 +934,133 @@ fn capture(
             flush_started.elapsed().as_millis()
         ),
     )?;
-    // QEMU remained paused until it exited. Its closed disk and migration
-    // stream therefore describe the same guest state. Compact only offline.
+    // Snapshot-sync redirected all future writes into continuation_disk while
+    // the guest remained paused, so frozen_disk is now immutable.
     let disk_started = Instant::now();
     let info = run_img_output_until(
         rendered,
         &["info", "--output=json", "-f", "qcow2"],
-        &[&guest.disk],
+        &[&frozen_disk],
         deadline,
     )?;
     ensure!(info.status.success(), "failed to inspect frozen build disk");
     let info: serde_json::Value = serde_json::from_slice(&info.stdout)?;
     if info.get("backing-filename").is_none() {
-        // The first work disk is already self-contained. Moving it avoids
-        // rewriting the complete filesystem just to publish a checkpoint.
-        fs::rename(&guest.disk, &disk)?;
+        // The distinct hard link is what publication moves. Keep frozen_disk
+        // at its original path because continuation_disk uses it as backing.
+        link_frozen_checkpoint_scratch(&frozen_disk, &disk)?;
     } else {
         run_img_until(
             rendered,
             &["convert", "-f", "qcow2", "-O", "qcow2"],
-            &[&guest.disk, &disk],
+            &[&frozen_disk, &disk],
             deadline,
         )?;
     }
     fs::File::open(&disk)?.sync_all()?;
+    let check_started = Instant::now();
+    run_img_until(rendered, &["check", "-f", "qcow2"], &[&disk], deadline)?;
     log(
         rendered,
         &format!(
-            "checkpoint_capture_disk elapsed_ms={}",
-            disk_started.elapsed().as_millis()
+            "checkpoint_capture_disk elapsed_ms={} qcow_check_ms={}",
+            disk_started.elapsed().as_millis(),
+            check_started.elapsed().as_millis()
         ),
     )?;
-    Ok(Snapshot {
-        _directory: directory,
-        disk,
-        memory,
+    Ok(PausedCheckpoint {
+        snapshot: Snapshot {
+            _directory: directory,
+            disk,
+            memory,
+        },
+        source_pid: guest.child.id(),
+        qmp,
     })
+}
+
+fn migration_writer_command(
+    zstd: &Path,
+    partial: &Path,
+    output: &Path,
+    complete: &Path,
+) -> Result<String> {
+    let zstd = zstd.to_str().context("checkpoint zstd path is not UTF-8")?;
+    Ok(format!(
+        "set -eu\nrm -f {partial} {output} {complete}\n{zstd} -1 -q -o {partial}\nmv {partial} {output}\n: > {complete}\n",
+        partial = shell_quote(&partial.display().to_string()),
+        output = shell_quote(&output.display().to_string()),
+        complete = shell_quote(&complete.display().to_string()),
+        zstd = shell_quote(zstd),
+    ))
+}
+
+fn link_frozen_checkpoint_scratch(source: &Path, scratch: &Path) -> Result<()> {
+    ensure!(
+        source != scratch,
+        "checkpoint scratch must differ from source"
+    );
+    fs::hard_link(source, scratch).with_context(|| {
+        format!(
+            "failed to hard-link frozen checkpoint '{}' into scratch '{}'",
+            source.display(),
+            scratch.display()
+        )
+    })
+}
+
+fn wait_for_checkpoint_output(output: &Path, complete: &Path, deadline: Instant) -> Result<()> {
+    loop {
+        if output.is_file() && complete.is_file() {
+            return Ok(());
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .context("checkpoint migration writer did not finish")?;
+        thread::sleep(Duration::from_millis(50).min(remaining));
+    }
+}
+
+fn snapshot_sync_arguments(continuation_disk: &Path) -> Result<serde_json::Value> {
+    let snapshot_file = continuation_disk
+        .to_str()
+        .context("checkpoint continuation path is not UTF-8")?;
+    Ok(json!({
+        "device": ROOT_BLOCK_DEVICE,
+        "snapshot-file": snapshot_file,
+        "format": "qcow2",
+    }))
+}
+
+fn resume_source_checkpoint(
+    rendered: &RenderedDirectBuild,
+    runtime: &tokio::runtime::Runtime,
+    guest: &mut Guest,
+    paused: &mut PausedCheckpoint,
+    deadline: Instant,
+) -> Result<()> {
+    ensure!(
+        guest.child.id() == paused.source_pid,
+        "checkpoint source PID changed before continuation"
+    );
+    paused.qmp.execute("cont", json!({}), deadline)?;
+    let ssh_started = Instant::now();
+    guest.ssh = Some(wait_for_ssh_until(
+        rendered,
+        &mut guest.child,
+        &guest.key.private_key,
+        runtime,
+        deadline,
+    )?);
+    log(
+        rendered,
+        &format!(
+            "checkpoint_source_resume elapsed_ms={} continuation={}",
+            ssh_started.elapsed().as_millis(),
+            guest.disk.display()
+        ),
+    )
 }
 
 fn spawn(rendered: &RenderedDirectBuild, disk: &Path, incoming: bool) -> Result<Child> {
@@ -1293,10 +1345,6 @@ fn deadline_after(timeout_seconds: u64) -> Instant {
     Instant::now() + Duration::from_secs(timeout_seconds.max(1))
 }
 
-fn checkpoint_deadline(rendered: &RenderedDirectBuild, provision_deadline: Instant) -> Instant {
-    deadline_after(rendered.config.ssh_wait_timeout_seconds).min(provision_deadline)
-}
-
 fn timeout_in_runtime<T>(
     runtime: &tokio::runtime::Runtime,
     timeout: Duration,
@@ -1393,6 +1441,53 @@ mod tests {
         assert_eq!(
             checkpoint_slot(2, Some(1), Some(2), Some(CHECKPOINT_INTERVAL)),
             Some(CheckpointSlot::ExpensivePrefix)
+        );
+    }
+
+    #[test]
+    fn checkpoint_source_commands_freeze_then_continue_with_a_private_overlay() {
+        let output = Path::new("/work/memory.state.zst");
+        let partial = Path::new("/work/memory.state.zst.partial");
+        let marker = Path::new("/work/memory.state.complete");
+        let command =
+            migration_writer_command(Path::new("/usr/bin/zstd"), partial, output, marker).unwrap();
+        let snapshot =
+            snapshot_sync_arguments(Path::new("/work/active-checkpoint-2.qcow2")).unwrap();
+
+        assert!(command.contains("-o '/work/memory.state.zst.partial'"));
+        assert!(command.contains("mv '/work/memory.state.zst.partial' '/work/memory.state.zst'"));
+        assert!(command.contains(": > '/work/memory.state.complete'"));
+        assert_eq!(snapshot["device"], ROOT_BLOCK_DEVICE);
+        assert_eq!(snapshot["snapshot-file"], "/work/active-checkpoint-2.qcow2");
+        assert_eq!(snapshot["format"], "qcow2");
+    }
+
+    #[test]
+    fn checkpoint_output_wait_requires_the_writer_completion_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory.state.zst");
+        let marker = directory.path().join("memory.state.complete");
+        std::fs::write(&output, b"state").unwrap();
+
+        assert!(wait_for_checkpoint_output(&output, &marker, Instant::now()).is_err());
+        std::fs::write(&marker, b"").unwrap();
+        wait_for_checkpoint_output(&output, &marker, Instant::now() + Duration::from_secs(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn self_contained_checkpoint_uses_a_distinct_publish_scratch_hardlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("active.qcow2");
+        let scratch = directory.path().join("checkpoint.qcow2");
+        std::fs::write(&source, b"frozen checkpoint").unwrap();
+
+        link_frozen_checkpoint_scratch(&source, &scratch).unwrap();
+
+        assert_ne!(source, scratch);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().ino(),
+            std::fs::metadata(&scratch).unwrap().ino()
         );
     }
 

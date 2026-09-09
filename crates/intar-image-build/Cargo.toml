@@ -26,5 +26,8 @@ thiserror.workspace = true
 tokio.workspace = true
 zstd.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libnbd = { path = "../../third_party/libnbd-rust", default-features = false, features = ["tokio"] }
+
 [lints]
 workspace = true

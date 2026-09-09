@@ -2,7 +2,6 @@ qemu {
   target_arch       = "amd64"
   qemu_binary       = "qemu-system-x86_64"
   qemu_storage_daemon_binary = "qemu-storage-daemon"
-  umount_binary = "umount"
   mke2fs_binary     = "mke2fs"
   e2fsck_binary     = "e2fsck"
   resize2fs_binary  = "resize2fs"

@@ -275,8 +275,8 @@ async fn run_claimed_build_job_inner(
             base_image: base_image.clone(),
         };
         let raw_result = tokio::task::spawn_blocking(move || {
-            let raw_build = run_direct_build_to_raw(&request)?;
-            let scan = scan_raw_image_chunks(&raw_build.rendered.paths.root_disk_path)?;
+            let mut raw_build = run_direct_build_to_raw(&request)?;
+            let scan = raw_build.scan()?;
             Ok::<_, anyhow::Error>((raw_build, scan))
         })
         .await
