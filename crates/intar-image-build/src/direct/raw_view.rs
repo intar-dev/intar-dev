@@ -523,7 +523,7 @@ fn terminate_stale_pidfd(pidfd: rustix::fd::OwnedFd, label: &str) -> Result<()> 
 
 #[cfg(target_os = "linux")]
 fn force_kill_pidfd(pidfd: &rustix::fd::OwnedFd, label: &str) -> Result<()> {
-    match pidfd_send_signal(&pidfd, Signal::KILL) {
+    match pidfd_send_signal(pidfd, Signal::KILL) {
         Ok(()) => {}
         Err(error) if error == rustix::io::Errno::SRCH => return Ok(()),
         Err(error) => {
@@ -531,7 +531,7 @@ fn force_kill_pidfd(pidfd: &rustix::fd::OwnedFd, label: &str) -> Result<()> {
         }
     }
     ensure!(
-        wait_for_pidfd_exit(&pidfd, RAW_VIEW_CLEANUP_TIMEOUT, label)?,
+        wait_for_pidfd_exit(pidfd, RAW_VIEW_CLEANUP_TIMEOUT, label)?,
         "{label} did not exit after SIGKILL"
     );
     Ok(())
