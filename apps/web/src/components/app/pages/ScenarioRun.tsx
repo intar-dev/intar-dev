@@ -636,11 +636,17 @@ export function ScenarioRun() {
     attemptData?.activity === "foreground" &&
     attemptData.deleteRequestedAt !== null,
   );
+  const infrastructureTeardownPending = Boolean(
+    attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
+  );
   const showCancelAction =
     attemptData !== null &&
-    attemptData.activity === "foreground" &&
-    (attemptData.canDestroy || acceptanceRetryNeeded) &&
-    attemptData.phase !== "solved";
+    ((attemptData.activity === "foreground" &&
+      (attemptData.canDestroy || acceptanceRetryNeeded) &&
+      attemptData.phase !== "solved") ||
+      (attemptData.activity === "settled" &&
+        attemptData.phase === "failed" &&
+        infrastructureTeardownPending));
   const showFinishBar =
     attemptData !== null &&
     attemptData.phase === "solved" &&
@@ -653,9 +659,6 @@ export function ScenarioRun() {
         )
       : null;
   const selectedProbes = selectedVm?.scenarioProbes ?? [];
-  const infrastructureTeardownPending = Boolean(
-    attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
-  );
   const canDeleteRun =
     attemptData !== null &&
     (attemptData.phase === "completed" || attemptData.phase === "failed") &&
@@ -826,9 +829,19 @@ export function ScenarioRun() {
   const runUsesFocusedShell =
     attemptData?.activity === "foreground" ||
     attemptData?.activity === "background";
-  const deleteRunAction = useMemo(
+  const runAction = useMemo(
     () =>
-      canDeleteRun ? (
+      showEndRunAction ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="destructive"
+          className="hidden sm:inline-flex"
+          onClick={() => setCancelDialogOpen(true)}
+        >
+          End run…
+        </Button>
+      ) : canDeleteRun ? (
         <Button
           type="button"
           size="sm"
@@ -839,11 +852,19 @@ export function ScenarioRun() {
           Delete run…
         </Button>
       ) : undefined,
-    [canDeleteRun],
+    [canDeleteRun, showEndRunAction],
   );
-  const deleteRunMenu = useMemo(
+  const runMenu = useMemo(
     () =>
-      canDeleteRun ? (
+      showEndRunAction ? (
+        <DropdownMenuItem
+          variant="destructive"
+          className="sm:hidden"
+          onClick={() => setCancelDialogOpen(true)}
+        >
+          End run…
+        </DropdownMenuItem>
+      ) : canDeleteRun ? (
         <DropdownMenuItem
           variant="destructive"
           className="sm:hidden"
@@ -852,7 +873,7 @@ export function ScenarioRun() {
           Delete run…
         </DropdownMenuItem>
       ) : undefined,
-    [canDeleteRun],
+    [canDeleteRun, showEndRunAction],
   );
   const runBackTarget = attemptData
     ? getRunReturnTarget(attemptData.courseLocation)
@@ -880,8 +901,8 @@ export function ScenarioRun() {
     title: attemptData?.title ?? "Scenario run",
     status: runUsesFocusedShell ? undefined : runStatusDisplay,
     back: runBackNavigation,
-    action: runUsesFocusedShell ? undefined : deleteRunAction,
-    menu: runUsesFocusedShell ? undefined : deleteRunMenu,
+    action: runUsesFocusedShell ? undefined : runAction,
+    menu: runUsesFocusedShell ? undefined : runMenu,
     fullscreen: runUsesFocusedShell,
   });
 
