@@ -264,7 +264,6 @@ pub(super) fn ensure_root_directory_at(
     let fd = open_lifecycle_entry_at(parent, name, OFlags::RDONLY | OFlags::DIRECTORY)
         .context("open jail lifecycle directory after creation")?;
     validate_root_directory(&fd, "jail lifecycle directory")?;
-    rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR | Mode::XUSR)?;
     Ok(fd)
 }
 
