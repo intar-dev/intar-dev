@@ -48,6 +48,8 @@ export interface AgentHostRow {
 
 export interface UserContext {
   userId: string;
+  /** The current Better Auth session for short-lived DO listeners. */
+  sessionId: string;
   /** Exact active admission observed while authenticating this request. */
   betaAdmission: BetaAdmissionEpoch;
   role: string | null;
@@ -116,10 +118,25 @@ export async function requireUserContext(
     role?: string | null;
   } | null;
   const authSession = session?.session as
-    | { activeOrganizationId?: string | null }
+    | {
+        id?: unknown;
+        expiresAt?: unknown;
+        activeOrganizationId?: string | null;
+      }
     | null
     | undefined;
-  if (!session?.session || !sessionUser?.id) {
+  const sessionId =
+    typeof authSession?.id === "string" && authSession.id.trim()
+      ? authSession.id
+      : null;
+  const sessionExpiresAt = authSessionExpiryUnixMs(authSession?.expiresAt);
+  if (
+    !session?.session ||
+    !sessionUser?.id ||
+    !sessionId ||
+    sessionExpiresAt === null ||
+    sessionExpiresAt <= Date.now()
+  ) {
     return {
       ok: false,
       response: jsonResponse({ error: "unauthorized" }, { status: 401 }),
@@ -153,6 +170,7 @@ export async function requireUserContext(
     ok: true,
     context: {
       userId: sessionUser.id,
+      sessionId,
       betaAdmission: {
         sourceInviteId: betaAccess.sourceInviteId,
         sourceLeaseId: betaAccess.sourceLeaseId,
@@ -164,6 +182,18 @@ export async function requireUserContext(
       activeOrganizationId,
     },
   };
+}
+
+function authSessionExpiryUnixMs(value: unknown): number | null {
+  const timestamp =
+    value instanceof Date
+      ? value.getTime()
+      : typeof value === "number"
+        ? value
+        : typeof value === "string"
+          ? Date.parse(value)
+          : Number.NaN;
+  return Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : null;
 }
 
 export async function requireAdminUserContext(

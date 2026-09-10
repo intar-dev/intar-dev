@@ -216,12 +216,12 @@ export async function updateRunState(
     deleteRequestedAt?: number | null;
     releaseActiveSlot?: boolean;
   },
-): Promise<void> {
+): Promise<number | null> {
   const db = drizzle(env.DB);
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const row = await loadRunRow(runId);
     if (!row) {
-      return;
+      return null;
     }
     const current = recomputeRunState(row.state);
     const nextState = recomputeRunState(input.mutate(current));
@@ -293,7 +293,7 @@ export async function updateRunState(
           now,
         });
       }
-      return;
+      return now;
     }
   }
   throw new Error(`run state CAS did not converge for ${runId}`);

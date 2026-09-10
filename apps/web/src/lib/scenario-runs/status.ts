@@ -78,6 +78,32 @@ export interface ScenarioRunsSummary {
 }
 
 /**
+ * Resolves the durable object that owns a status listener without loading the
+ * full mutable status projection or its archive ledger.
+ */
+export async function getScenarioRunStatusStreamTargetForUser(input: {
+  runId: string;
+  userId: string;
+}): Promise<{ hostId: string }> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({ hostId: scenarioRuns.hostId })
+    .from(scenarioRuns)
+    .where(
+      and(
+        eq(scenarioRuns.runId, input.runId),
+        eq(scenarioRuns.userId, input.userId),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) {
+    throw appError(404, "scenario_run_not_found", "scenario run not found");
+  }
+  return { hostId: row.hostId };
+}
+
+/**
  * Loads only the fields that can change while the learner watches a run. It
  * intentionally omits authored copy, hints, provisioning detail, and replay
  * artifact metadata carried by the initial full view.

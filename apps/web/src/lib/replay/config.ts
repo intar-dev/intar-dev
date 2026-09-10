@@ -2,22 +2,38 @@ export const REPLAY_IDLE_TIME_LIMIT_SECONDS = 1.5;
 export const REPLAY_TERMINAL_THEME = "intar";
 export const REPLAY_TERMINAL_FONT_FAMILY =
   '"Recursive Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace';
+export const REPLAY_TERMINAL_FALLBACK_FONT_FAMILY =
+  '"SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace';
 export const REPLAY_TERMINAL_FONT_LOAD = '400 14px "Recursive Mono"';
 
-export async function loadReplayTerminalFont(timeoutMs = 3_000) {
-  if (typeof document === "undefined" || !document.fonts) return false;
+let replayTerminalFontLoad: Promise<boolean> | null = null;
+let replayTerminalFontLoaded = false;
 
-  const deadline = performance.now() + timeoutMs;
-  do {
-    const faces = await document.fonts.load(
-      REPLAY_TERMINAL_FONT_LOAD,
-      "Mi0W ",
-    );
-    if (faces.some((face) => face.status === "loaded")) return true;
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
-  } while (performance.now() < deadline);
+/** Starts one shared font request. Callers must not wait before opening SSH. */
+export function loadReplayTerminalFont(): Promise<boolean> {
+  if (replayTerminalFontLoaded) return Promise.resolve(true);
+  if (replayTerminalFontLoad) return replayTerminalFontLoad;
+  if (typeof document === "undefined" || !document.fonts) {
+    return Promise.resolve(false);
+  }
 
-  return false;
+  const fonts = document.fonts;
+  replayTerminalFontLoad = Promise.resolve()
+    .then(async () => {
+      if (fonts.check(REPLAY_TERMINAL_FONT_LOAD, "Mi0W ")) return true;
+      const faces = await fonts.load(REPLAY_TERMINAL_FONT_LOAD, "Mi0W ");
+      return faces.some((face) => face.status === "loaded");
+    })
+    .catch(() => false)
+    .then((loaded) => {
+      replayTerminalFontLoaded = loaded;
+      return loaded;
+    });
+  return replayTerminalFontLoad;
+}
+
+export function isReplayTerminalFontLoaded() {
+  return replayTerminalFontLoaded;
 }
 
 // Pre-fit constructor defaults for the live web terminal. The live grid

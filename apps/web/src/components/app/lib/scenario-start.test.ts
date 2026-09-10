@@ -9,6 +9,7 @@ describe("scenario capacity waiting", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("honors Retry-After before retrying a pending-capacity response", async () => {
@@ -56,13 +57,34 @@ describe("scenario capacity waiting", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("times out after 60 seconds of capacity responses", async () => {
+  it("retries allocation-lock contention with a short jittered delay", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(capacityPending("2", "runtime_allocation_busy"))
+      .mockResolvedValueOnce(accepted());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(result).resolves.toMatchObject({ runId: "run-1" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("times out at 60 seconds without another capacity request", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn<typeof fetch>().mockImplementation(async () => capacityPending("60")),
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => capacityPending("60"));
+    vi.stubGlobal("fetch", fetchMock);
 
     const result = requestScenarioStartWithCapacityWait("pair-ping", {
       signal: new AbortController().signal,
@@ -74,6 +96,7 @@ describe("scenario capacity waiting", () => {
     await vi.advanceTimersByTimeAsync(60_000);
 
     await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry non-capacity failures", async () => {
@@ -166,11 +189,14 @@ describe("parseRetryAfterMs", () => {
   });
 });
 
-function capacityPending(retryAfter: string) {
+function capacityPending(
+  retryAfter: string,
+  code = "boot_capacity_pending",
+) {
   return Response.json(
     {
       error: "scenario boot CPU capacity is pending; retry shortly",
-      code: "boot_capacity_pending",
+      code,
     },
     { status: 409, headers: { "Retry-After": retryAfter } },
   );

@@ -33,6 +33,10 @@ export async function installTerminalWebSocketMock(
   page: Page,
   server: MockApiServer,
 ) {
+  await page.routeWebSocket(/\/api\/scenarios\/runs\/[^/]+\/status\/stream$/, (ws) => {
+    const runId = decodeURIComponent(new URL(ws.url()).pathname.split("/")[4]!);
+    ws.send(JSON.stringify({ type: "subscribed", runId }));
+  });
   let connectionCount = 0;
   await page.routeWebSocket("ws://terminal.example.test/terminal/**", (ws) => {
     connectionCount += 1;

@@ -378,6 +378,102 @@ fn desired_state_versions_never_regress() {
 }
 
 #[test]
+fn cache_refresh_wakes_for_initial_state_and_new_pins() {
+    let current = empty_desired_state(1);
+    assert!(required_cache_pins_changed(None, &current));
+
+    let mut incoming = current.clone();
+    incoming.version = 2;
+    incoming.cached_images.push(DesiredCachedImageV1 {
+        image_key: desired_vm().image_key,
+        image_id: "a".repeat(64),
+    });
+
+    assert!(required_cache_pins_changed(Some(&current), &incoming));
+}
+
+#[test]
+fn cache_refresh_ignores_revision_pin_order_and_duplicates() {
+    let first = desired_vm();
+    let mut second = desired_vm();
+    second.vm_name = "worker".to_string();
+    second.image_key.vm = "worker".to_string();
+    second.image_id = "b".repeat(64);
+    second.guest_tools.tools_disk_sha256 = "3".repeat(64);
+    second.guest_tools.kino_sha256 = "4".repeat(64);
+
+    let mut current = empty_desired_state(1);
+    current.cached_images = vec![
+        DesiredCachedImageV1 {
+            image_key: first.image_key.clone(),
+            image_id: first.image_id.clone(),
+        },
+        DesiredCachedImageV1 {
+            image_key: second.image_key.clone(),
+            image_id: second.image_id.clone(),
+        },
+    ];
+    current.cached_guest_tools = vec![first.guest_tools.clone(), second.guest_tools.clone()];
+    current.vms = vec![first.clone(), second.clone()];
+
+    let mut incoming = current.clone();
+    incoming.version = 2;
+    incoming.cached_images.reverse();
+    incoming.cached_guest_tools.reverse();
+    incoming.vms.reverse();
+    incoming.cached_images.push(DesiredCachedImageV1 {
+        image_key: first.image_key,
+        image_id: first.image_id.to_ascii_uppercase(),
+    });
+    incoming.cached_guest_tools.push(second.guest_tools);
+
+    assert!(!required_cache_pins_changed(Some(&current), &incoming));
+}
+
+#[test]
+fn cache_refresh_keeps_hyphenated_image_key_components_distinct() {
+    let mut left = desired_vm();
+    left.image_key.scenario = "a-b".to_string();
+    left.image_key.vm = "c".to_string();
+
+    let mut right = desired_vm();
+    right.image_key.scenario = "a".to_string();
+    right.image_key.vm = "b-c".to_string();
+
+    assert_ne!(
+        image_cache_pin(&left.image_key, &left.image_id),
+        image_cache_pin(&right.image_key, &right.image_id)
+    );
+}
+
+#[test]
+fn cache_refresh_tracks_running_pins_and_ignores_stopped_ones() {
+    let mut stopped = desired_vm();
+    stopped.desired_phase = DesiredVmPhase::Absent;
+    let mut current = empty_desired_state(1);
+    current.vms = vec![stopped.clone()];
+
+    let mut changed_stopped_pin = current.clone();
+    changed_stopped_pin.version = 2;
+    changed_stopped_pin.vms[0].image_id = "b".repeat(64);
+    changed_stopped_pin.vms[0].guest_tools.tools_disk_sha256 = "3".repeat(64);
+    assert!(!required_cache_pins_changed(
+        Some(&current),
+        &changed_stopped_pin
+    ));
+
+    let mut running = changed_stopped_pin.clone();
+    running.version = 3;
+    running.vms[0].desired_phase = DesiredVmPhase::Running;
+    assert!(required_cache_pins_changed(Some(&current), &running));
+
+    let mut stopped_again = running.clone();
+    stopped_again.version = 4;
+    stopped_again.vms[0].desired_phase = DesiredVmPhase::Absent;
+    assert!(required_cache_pins_changed(Some(&running), &stopped_again));
+}
+
+#[test]
 fn image_cache_key_matches_committed_catalog_format() {
     assert_eq!(
         image_cache_key(&desired_vm().image_key),

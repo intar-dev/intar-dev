@@ -19,6 +19,9 @@ on:
       - "tools/database/**"
       - "tools/deploy/**"
       - "tools/flagship/**"
+      - "tools/vm-boot-benchmark/**"
+      - "tools/vm-boot-benchmark.py"
+      - "tools/test_vm_boot_benchmark.py"
       - "crates/intar-image-scenario/**"
       - "apps/web/**"
   pull_request:
@@ -36,6 +39,9 @@ on:
       - "tools/database/**"
       - "tools/deploy/**"
       - "tools/flagship/**"
+      - "tools/vm-boot-benchmark/**"
+      - "tools/vm-boot-benchmark.py"
+      - "tools/test_vm_boot_benchmark.py"
       - "crates/intar-image-scenario/**"
       - "apps/web/**"
 
@@ -86,6 +92,7 @@ jobs:
         run: |
           bun run check:imports
           bun run check:deploy
+          bun run check:vm-boot-benchmark
           bun run check:database-migrations
 
       - name: Test

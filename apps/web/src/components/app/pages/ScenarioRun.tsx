@@ -16,6 +16,13 @@ import {
   ScenarioStartCancelledError,
 } from "@/components/app/lib/scenario-start";
 import {
+  createScenarioStatusRefreshQueue,
+  createScenarioStatusTransport,
+  parseScenarioRunStatusStreamMessage,
+  preferNewerScenarioStatusResult,
+  scenarioStatusRevision,
+} from "@/components/app/lib/scenario-status-stream";
+import {
   HttpResponseError,
   isAccessResponseError,
   retryHttpResponseError,
@@ -69,6 +76,14 @@ import type {
   CourseLocation,
 } from "@/lib/scenario-runs";
 import { computeLeaseDeadline } from "@/lib/run-lease";
+import {
+  associateScenarioRunBootEvidence,
+  beginScenarioRunBootEvidence,
+  clearPendingScenarioRunBootEvidence,
+  markPendingScenarioRunBootStage,
+  markScenarioRunBootStage,
+} from "@/lib/scenario-run-performance";
+import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
 
 const LazyWebSshTerminal = lazy(() =>
@@ -159,6 +174,10 @@ export function ScenarioRunStart() {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    // Direct navigation has no learner click. The normal lecture action
+    // already recorded `start-click` before it navigated here.
+    beginScenarioRunBootEvidence(scenarioId, "start-route");
+    markPendingScenarioRunBootStage(scenarioId, "start-request");
     setStartState("requesting");
     setStartError(null);
 
@@ -168,6 +187,7 @@ export function ScenarioRunStart() {
       onCapacityWait: () => setStartState("waiting"),
     })
       .then(async ({ runId, run }) => {
+        associateScenarioRunBootEvidence({ runId, scenarioId });
         queryClient.setQueryData<ScenarioRunResponse>(
           ["scenarios", "run", runId],
           { run: presentScenarioRun(run) },
@@ -188,6 +208,7 @@ export function ScenarioRunStart() {
         ) {
           return;
         }
+        clearPendingScenarioRunBootEvidence(scenarioId);
         setStartState("failed");
         setStartError(
           error instanceof Error
@@ -360,13 +381,8 @@ export function ScenarioRun() {
     staleTime: Infinity,
   });
 
-  const runStatus = useQuery({
-    queryKey: runStatusQueryKey,
-    enabled:
-      Boolean(attempt.data?.run) &&
-      attempt.data?.run.activity !== "settled" &&
-      runMutationFenceRef.current === 0,
-    queryFn: async ({ signal }): Promise<ScenarioRunStatusPollResult> => {
+  const fetchRunStatus = useCallback(
+    async (): Promise<ScenarioRunStatusPollResult> => {
       const cached = queryClient.getQueryData<ScenarioRunResponse>(runQueryKey);
       if (!cached) {
         throw new Error("Scenario status requested before the run loaded");
@@ -380,11 +396,15 @@ export function ScenarioRun() {
         {
           method: "GET",
           credentials: "include",
-          signal,
         },
       );
       if (response.status === 204) {
-        return { status: null, version };
+        return preferNewerScenarioStatusResult(
+          queryClient.getQueryData<ScenarioRunStatusPollResult>(
+            runStatusQueryKey,
+          ),
+          { status: null, version },
+        );
       }
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as {
@@ -396,8 +416,31 @@ export function ScenarioRun() {
         );
       }
       const body = (await response.json()) as { status: ScenarioRunStatus };
-      return { status: body.status, version: body.status.version };
+      return preferNewerScenarioStatusResult(
+        queryClient.getQueryData<ScenarioRunStatusPollResult>(
+          runStatusQueryKey,
+        ),
+        { status: body.status, version: body.status.version },
+      );
     },
+    [queryClient, runId, runQueryKey, runStatusQueryKey],
+  );
+  const statusTransport = useMemo(
+    () => createScenarioStatusTransport(fetchRunStatus),
+    [fetchRunStatus],
+  );
+  const requestRunStatus = useCallback(
+    (fresh = false) => statusTransport.request(fresh),
+    [statusTransport],
+  );
+
+  const runStatus = useQuery({
+    queryKey: runStatusQueryKey,
+    enabled:
+      Boolean(attempt.data?.run) &&
+      attempt.data?.run.activity !== "settled" &&
+      runMutationFenceRef.current === 0,
+    queryFn: () => requestRunStatus(),
     refetchInterval: (query) => {
       const record = queryClient.getQueryData<ScenarioRunResponse>(runQueryKey)?.run;
       return scenarioRunStatusRefetchInterval(record, query.state.error);
@@ -408,6 +451,127 @@ export function ScenarioRun() {
     staleTime: 0,
     retry: retryHttpResponseError,
   });
+
+  const statusRefreshQueue = useMemo(
+    () =>
+      createScenarioStatusRefreshQueue({
+        currentRevision: () =>
+          Math.max(
+            scenarioStatusRevision(
+              queryClient.getQueryData<ScenarioRunStatusPollResult>(
+                runStatusQueryKey,
+              ),
+            ) ?? 0,
+            queryClient.getQueryData<ScenarioRunResponse>(runQueryKey)?.run
+              .updatedAt ?? 0,
+          ),
+        refresh: async () => {
+          const result = await requestRunStatus(true);
+          const revision = scenarioStatusRevision(result);
+          queryClient.setQueryData<ScenarioRunStatusPollResult>(
+            runStatusQueryKey,
+            (current) => {
+              return preferNewerScenarioStatusResult(current, result);
+            },
+          );
+          return revision;
+        },
+      }),
+    [queryClient, requestRunStatus, runQueryKey, runStatusQueryKey],
+  );
+  const requestStatusRefresh = useCallback(
+    (revision?: number) => {
+      void statusRefreshQueue.request(revision);
+    },
+    [statusRefreshQueue],
+  );
+
+  useEffect(
+    () => () => statusRefreshQueue.dispose(),
+    [statusRefreshQueue],
+  );
+
+  const [pageVisibility, setPageVisibility] = useState(() => ({
+    visible:
+      typeof document === "undefined" || document.visibilityState !== "hidden",
+    epoch: 0,
+  }));
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const updateVisibility = () => {
+      const visible = document.visibilityState !== "hidden";
+      setPageVisibility((current) =>
+        current.visible === visible
+          ? current
+          : {
+              visible,
+              epoch: visible ? current.epoch + 1 : current.epoch,
+            },
+      );
+    };
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+
+  const shouldSubscribeToStatusStream = Boolean(
+    pageVisibility.visible &&
+      attempt.data?.run &&
+      attempt.data.run.activity === "foreground" &&
+      attempt.data.run.terminalPhase === "pending" &&
+      attempt.data.run.phase !== "failed" &&
+      attempt.data.run.phase !== "completed",
+  );
+  const statusStreamAttemptedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      !shouldSubscribeToStatusStream ||
+      typeof window === "undefined" ||
+      typeof WebSocket === "undefined"
+    ) {
+      return;
+    }
+    const attemptKey = `${runId}:${pageVisibility.epoch}`;
+    if (statusStreamAttemptedRef.current === attemptKey) return;
+    statusStreamAttemptedRef.current = attemptKey;
+
+    let disposed = false;
+    let websocket: WebSocket;
+    try {
+      const target = new URL(
+        `/api/scenarios/runs/${encodeURIComponent(runId)}/status/stream`,
+        window.location.origin,
+      );
+      target.protocol =
+        window.location.protocol === "https:" ? "wss:" : "ws:";
+      websocket = new WebSocket(target);
+    } catch {
+      return;
+    }
+    const handleMessage = (event: MessageEvent) => {
+      if (disposed || typeof event.data !== "string") return;
+      const message = parseScenarioRunStatusStreamMessage(event.data, runId);
+      if (!message) return;
+      requestStatusRefresh(
+        message.type === "invalidate" ? message.revision : undefined,
+      );
+    };
+    websocket.addEventListener("message", handleMessage);
+
+    return () => {
+      disposed = true;
+      websocket.removeEventListener("message", handleMessage);
+      try {
+        websocket.close();
+      } catch {
+        // Polling remains available if the browser socket is already closed.
+      }
+    };
+  }, [
+    pageVisibility.epoch,
+    requestStatusRefresh,
+    runId,
+    shouldSubscribeToStatusStream,
+  ]);
 
   useEffect(() => {
     const status = runStatus.data?.status;
@@ -597,6 +761,13 @@ export function ScenarioRun() {
   });
 
   const attemptData = attempt.data?.run ?? null;
+  const bootEvidence = useMemo(
+    () =>
+      attemptData
+        ? { runId: attemptData.id, scenarioId: attemptData.scenarioId }
+        : null,
+    [attemptData?.id, attemptData?.scenarioId],
+  );
   const nextCourseLecture = useMemo(
     () =>
       attemptData && currentCourse.data
@@ -623,6 +794,35 @@ export function ScenarioRun() {
   const selectedVmShellReady = Boolean(
     selectedVm && hasUsableTerminalTarget(selectedVm),
   );
+
+  useEffect(() => {
+    if (!bootEvidence || attemptData?.activity !== "foreground") return;
+    let current = true;
+    void import("@/components/remote-access/WebSshTerminal")
+      .then(() => {
+        if (current) {
+          markScenarioRunBootStage({ ...bootEvidence, stage: "terminal-module" });
+        }
+      })
+      .catch(() => {
+        // The terminal lazy boundary reports a module failure when it is shown.
+      });
+    void loadReplayTerminalFont().then((loaded) => {
+      if (current && loaded) {
+        markScenarioRunBootStage({ ...bootEvidence, stage: "terminal-font" });
+      }
+    });
+    return () => {
+      current = false;
+    };
+  }, [attemptData?.activity, bootEvidence]);
+
+  useEffect(() => {
+    if (bootEvidence && selectedVmShellReady) {
+      markScenarioRunBootStage({ ...bootEvidence, stage: "status-ready" });
+    }
+  }, [bootEvidence, selectedVmShellReady]);
+
   const showSelectedVmPreparation = Boolean(
     attemptData &&
     !selectedVmShellReady &&
@@ -1161,7 +1361,10 @@ export function ScenarioRun() {
               />
 
               {selectedVm && selectedVmShellReady && terminalVisible ? (
-                <div className="relative min-h-0 min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200">
+                <div
+                  data-scenario-terminal-ready
+                  className="relative min-h-0 min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200"
+                >
                   <Suspense
                     fallback={
                       <div
@@ -1179,6 +1382,7 @@ export function ScenarioRun() {
                       title={`${selectedVm.scenarioVmName} shell`}
                       showCloseButton={false}
                       onClose={() => setTerminalVisible(false)}
+                      bootEvidence={bootEvidence}
                     />
                   </Suspense>
                 </div>

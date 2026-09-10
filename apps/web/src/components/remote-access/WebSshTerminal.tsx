@@ -19,12 +19,15 @@ import {
 } from "@/components/ui/dialog";
 import {
   REPLAY_TERMINAL_COLS,
+  REPLAY_TERMINAL_FALLBACK_FONT_FAMILY,
   REPLAY_TERMINAL_FONT_FAMILY,
   REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_ROWS,
   REPLAY_TERMINAL_XTERM_THEME,
+  isReplayTerminalFontLoaded,
   loadReplayTerminalFont,
 } from "@/lib/replay/config";
+import { markScenarioRunBootStage } from "@/lib/scenario-run-performance";
 
 interface WebSshTerminalProps {
   vmName: string;
@@ -36,6 +39,7 @@ interface WebSshTerminalProps {
   title?: string;
   onClose?: () => void;
   showCloseButton?: boolean;
+  bootEvidence?: { runId: string; scenarioId: string } | null;
 }
 
 interface VmBrowserTerminalSessionResponse {
@@ -106,6 +110,7 @@ export function WebSshTerminal({
   title: titleOverride,
   onClose,
   showCloseButton = true,
+  bootEvidence = null,
 }: WebSshTerminalProps) {
   const terminalContainerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -114,6 +119,8 @@ export function WebSshTerminal({
   const connectionGenerationRef = useRef(0);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const resizeSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markedStagesRef = useRef(new Set<string>());
+  const inputObservedRef = useRef(false);
 
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -124,6 +131,14 @@ export function WebSshTerminal({
     [titleOverride, vmName],
   );
   const needsRecovery = status === "disconnected" || status === "error";
+  const markTerminalStage = useCallback(
+    (stage: string) => {
+      if (!bootEvidence || markedStagesRef.current.has(stage)) return;
+      markedStagesRef.current.add(stage);
+      markScenarioRunBootStage({ ...bootEvidence, stage });
+    },
+    [bootEvidence],
+  );
   const sessionRequestUrl = sessionRequest?.url ?? null;
   const sessionRequestBodyJson = useMemo(() => {
     if (!sessionRequest?.body) {
@@ -175,7 +190,9 @@ export function WebSshTerminal({
       rows: REPLAY_TERMINAL_ROWS,
       convertEol: true,
       cursorBlink: true,
-      fontFamily: REPLAY_TERMINAL_FONT_FAMILY,
+      fontFamily: isReplayTerminalFontLoaded()
+        ? REPLAY_TERMINAL_FONT_FAMILY
+        : REPLAY_TERMINAL_FALLBACK_FONT_FAMILY,
       fontSize: 14,
       lineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
       theme: REPLAY_TERMINAL_XTERM_THEME,
@@ -194,6 +211,8 @@ export function WebSshTerminal({
       if (!websocket || websocket.readyState !== WebSocket.OPEN) {
         return;
       }
+      inputObservedRef.current = true;
+      markTerminalStage("terminal-input");
       websocket.send(textEncoder.encode(data));
     });
 
@@ -255,7 +274,7 @@ export function WebSshTerminal({
     terminalRef.current = terminal;
     fitGridRef.current = fitGrid;
     return terminal;
-  }, []);
+  }, [markTerminalStage]);
 
   const connect = useCallback(async () => {
     const connectionGeneration = connectionGenerationRef.current + 1;
@@ -264,13 +283,34 @@ export function WebSshTerminal({
     setStatus("connecting");
 
     try {
-      // xterm measures and rasterizes text onto a canvas at construction time.
-      // Wait for the self-hosted face so it never locks in fallback metrics.
-      await loadReplayTerminalFont();
-      if (connectionGenerationRef.current !== connectionGeneration) return;
+      const fontLoad = loadReplayTerminalFont();
 
       const connectedTerminal = ensureTerminal();
       connectedTerminal.clear();
+      void fontLoad
+        .then((loaded) => {
+          if (
+            !loaded ||
+            connectionGenerationRef.current !== connectionGeneration ||
+            terminalRef.current !== connectedTerminal
+          ) {
+            return;
+          }
+          markTerminalStage("terminal-font");
+          connectedTerminal.options.fontFamily = REPLAY_TERMINAL_FONT_FAMILY;
+          fitGridRef.current?.();
+          const websocket = websocketRef.current;
+          if (websocket?.readyState === WebSocket.OPEN) {
+            sendTerminalControl(websocket, {
+              type: "resize",
+              cols: connectedTerminal.cols,
+              rows: connectedTerminal.rows,
+            });
+          }
+        })
+        .catch(() => {
+          // Font loading is best effort and cannot affect the SSH session.
+        });
 
       // The generation was invalidated before the old socket is closed, so
       // its delayed close callback cannot overwrite this attempt.
@@ -283,6 +323,7 @@ export function WebSshTerminal({
         sessionRequestUrl,
       });
       if (connectionGenerationRef.current !== connectionGeneration) return;
+      markTerminalStage("terminal-session");
 
       const websocket = await connectBrowserTerminalWithRetries({
         session: sessionBundle,
@@ -300,6 +341,14 @@ export function WebSshTerminal({
           setError(message);
           setStatus("error");
         },
+        onOutput: () => {
+          markTerminalStage("terminal-first-output");
+          if (inputObservedRef.current) {
+            // This records visible byte responsiveness only. A benchmark must
+            // verify a unique remote command result before calling it success.
+            markTerminalStage("terminal-input-output");
+          }
+        },
       });
       if (connectionGenerationRef.current !== connectionGeneration) {
         websocket.close();
@@ -316,6 +365,7 @@ export function WebSshTerminal({
         rows: connectedTerminal.rows,
       });
       setStatus("connected");
+      markTerminalStage("terminal-connected");
     } catch (connectError) {
       if (connectionGenerationRef.current !== connectionGeneration) return;
       closeCurrentSocket();
@@ -329,6 +379,7 @@ export function WebSshTerminal({
   }, [
     closeCurrentSocket,
     ensureTerminal,
+    markTerminalStage,
     sessionRequestBodyJson,
     sessionRequestUrl,
   ]);
@@ -355,7 +406,10 @@ export function WebSshTerminal({
 
   if (variant === "embedded") {
     return (
-      <div className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
+      <div
+        data-terminal-status={status}
+        className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm"
+      >
         <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{title}</p>
@@ -412,6 +466,7 @@ export function WebSshTerminal({
     >
       <DialogContent
         showCloseButton={false}
+        data-terminal-status={status}
         className="flex h-[min(52rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden rounded-lg bg-card p-0 sm:max-w-7xl"
       >
         <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -578,6 +633,7 @@ async function connectBrowserTerminalWithRetries(input: {
   isCurrent: () => boolean;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
+  onOutput: () => void;
 }): Promise<WebSocket> {
   let lastError = "unknown error";
 
@@ -607,6 +663,7 @@ async function connectBrowserTerminal(input: {
   isCurrent: () => boolean;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
+  onOutput: () => void;
 }): Promise<WebSocket> {
   const websocket = new WebSocket(input.session.browser.websocketUrl);
   websocket.binaryType = "arraybuffer";
@@ -657,6 +714,7 @@ async function connectBrowserTerminal(input: {
         }
 
         if (event.data instanceof ArrayBuffer && input.isCurrent()) {
+          input.onOutput();
           input.terminal.write(decodeTerminalOutput(event.data));
         }
       };

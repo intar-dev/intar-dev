@@ -19,11 +19,12 @@
   "scripts": {
     "check:imports": "bun tools/check-import-boundaries.ts",
     "check:deploy": "vitest run tools/deploy",
+    "check:vm-boot-benchmark": "python3 -m unittest discover -s tools -p test_vm_boot_benchmark.py && bun test tools/vm-boot-benchmark",
     "check:database-migrations": "bun run --cwd apps/web db:check && bun test tools/database",
     "clean:generated": "bun tools/cleanup-generated.ts",
     "test:web": "bun run --cwd apps/web test",
     "build:web": "bun run --cwd apps/web build",
-    "check": "bun run check:imports && bun run check:deploy && bun run check:database-migrations && bun run --cwd apps/web db:schema:check",
+    "check": "bun run check:imports && bun run check:deploy && bun run check:vm-boot-benchmark && bun run check:database-migrations && bun run --cwd apps/web db:schema:check",
     "test": "bun run check && bun run test:web",
     "build": "bun run build:web"
   },

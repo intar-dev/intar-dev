@@ -11,6 +11,8 @@ export interface ScenarioStartAcceptedResponse {
 
 const CAPACITY_WAIT_TIMEOUT_MS = 60_000;
 const DEFAULT_CAPACITY_RETRY_MS = 2_000;
+const ALLOCATION_BUSY_RETRY_MIN_MS = 250;
+const ALLOCATION_BUSY_RETRY_MAX_MS = 350;
 
 class ScenarioStartRequestError extends Error {
   readonly code: string | null;
@@ -42,11 +44,18 @@ export async function requestScenarioStartWithCapacityWait(
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   const startedAt = Date.now();
+  let requested = false;
   while (true) {
     if (options.signal.aborted) {
       throw new ScenarioStartCancelledError();
     }
+    if (requested && Date.now() - startedAt >= CAPACITY_WAIT_TIMEOUT_MS) {
+      throw new Error(
+        "VM capacity did not become available within 60 seconds. Try again shortly or choose another scenario.",
+      );
+    }
     try {
+      requested = true;
       return await requestScenarioStart(
         scenarioId,
         options.signal,
@@ -66,7 +75,8 @@ export async function requestScenarioStartWithCapacityWait(
       }
       if (
         !(error instanceof ScenarioStartRequestError) ||
-        error.code !== "boot_capacity_pending"
+        (error.code !== "boot_capacity_pending" &&
+          error.code !== "runtime_allocation_busy")
       ) {
         throw error;
       }
@@ -80,11 +90,24 @@ export async function requestScenarioStartWithCapacityWait(
       }
       options.onCapacityWait();
       await waitForCapacityRetry(
-        Math.min(error.retryAfterMs, remainingMs),
+        Math.min(
+          error.code === "runtime_allocation_busy"
+            ? allocationBusyRetryMs()
+            : error.retryAfterMs,
+          remainingMs,
+        ),
         options.signal,
       );
     }
   }
+}
+
+function allocationBusyRetryMs() {
+  return Math.floor(
+    ALLOCATION_BUSY_RETRY_MIN_MS +
+      Math.random() *
+        (ALLOCATION_BUSY_RETRY_MAX_MS - ALLOCATION_BUSY_RETRY_MIN_MS + 1),
+  );
 }
 
 async function requestScenarioStart(

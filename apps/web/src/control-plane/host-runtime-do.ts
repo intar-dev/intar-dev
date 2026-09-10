@@ -2,6 +2,7 @@ import {
   DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
   HostRuntimeBase,
   type RunProjectionOutcome,
+  type RunStatusSocketAttachment,
   type SocketAttachment,
 } from "./host-runtime-do/base";
 import { and, eq, exists, isNull, sql } from "drizzle-orm";
@@ -90,6 +91,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return this.handleConnect(request);
     }
 
+    if (url.pathname === "/_internal/run-status") {
+      return this.handleRunStatusStream(request);
+    }
+
     if (url.pathname === "/_internal/wake") {
       return this.handleWake(request);
     }
@@ -131,6 +136,16 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
       return;
     }
+    const statusAttachment = this.readRunStatusSocketAttachment(ws);
+    if (statusAttachment) {
+      try {
+        ws.close(1003, "run status stream is server-only");
+      } catch {
+        // ignore an already-closed hibernatable socket
+      }
+      return;
+    }
+
     const attachment = this.readSocketAttachment(ws);
     if (!attachment) {
       try {
@@ -161,11 +176,13 @@ export class HostRuntimeDO extends HostRuntimeBase {
     _wasClean: boolean,
   ): Promise<void> {
     if (controlPlaneMaintenanceEnabled(this.env)) return;
+    if (this.readRunStatusSocketAttachment(ws)) return;
     await this.handleSocketClosed(ws);
   }
 
   override async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
     if (controlPlaneMaintenanceEnabled(this.env)) return;
+    if (this.readRunStatusSocketAttachment(ws)) return;
     await this.handleSocketClosed(ws);
   }
 
@@ -221,6 +238,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     this.ctx.acceptWebSocket(server, ["host", `host:${hostId}`]);
 
     server.serializeAttachment({
+      kind: "agent",
       hostId,
       sessionId: null,
       betaSourceInviteId: betaAdmission?.sourceInviteId ?? null,
@@ -239,6 +257,154 @@ export class HostRuntimeDO extends HostRuntimeBase {
       status: 101,
       webSocket: client,
     });
+  }
+
+  private async handleRunStatusStream(request: Request): Promise<Response> {
+    if (request.method !== "GET") {
+      return jsonResponse({ error: "method not allowed" }, 405);
+    }
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return jsonResponse({ error: "expected websocket upgrade" }, 426);
+    }
+
+    const attachment = parseRunStatusStreamAttachment(request.headers);
+    if (!attachment) {
+      return jsonResponse({ error: "invalid run status subscription" }, 400);
+    }
+    const knownHostId = await this.loadKnownHostId();
+    if (knownHostId && knownHostId !== attachment.hostId) {
+      return jsonResponse(
+        { error: "host id does not match durable object" },
+        409,
+      );
+    }
+    if (!(await this.isRunStatusSubscriberCurrent(attachment))) {
+      return jsonResponse({ error: "run status access is no longer active" }, 403);
+    }
+
+    await this.persistKnownHostId(attachment.hostId);
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    this.ctx.acceptWebSocket(server, [
+      "run-status",
+      `run-status:${attachment.runId}`,
+      `run-status-host:${attachment.hostId}`,
+    ]);
+    server.serializeAttachment(attachment);
+    try {
+      server.send(
+        JSON.stringify({ type: "subscribed", runId: attachment.runId }),
+      );
+    } catch {
+      try {
+        server.close(1011, "run status subscription failed");
+      } catch {
+        // ignore an already-closed hibernatable socket
+      }
+      return jsonResponse({ error: "run status subscription failed" }, 500);
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private scheduleRunStatusInvalidation(input: {
+    runId: string;
+    hostId: string;
+    revision: number;
+  }): void {
+    this.ctx.waitUntil(
+      this.notifyRunStatusInvalidation(input).catch((error) => {
+        console.error(
+          JSON.stringify({
+            message: "failed to notify scenario status subscribers",
+            runId: input.runId,
+            hostId: input.hostId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }),
+    );
+  }
+
+  private async notifyRunStatusInvalidation(input: {
+    runId: string;
+    hostId: string;
+    revision: number;
+  }): Promise<void> {
+    const listeners = this.ctx.getWebSockets(`run-status:${input.runId}`);
+    await Promise.all(
+      listeners.map(async (ws) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const attachment = this.readRunStatusSocketAttachment(ws);
+        if (
+          !attachment ||
+          attachment.runId !== input.runId ||
+          attachment.hostId !== input.hostId
+        ) {
+          closeRunStatusSocket(ws, 1008, "invalid run status subscription");
+          return;
+        }
+        let current = false;
+        try {
+          current = await this.isRunStatusSubscriberCurrent(attachment);
+        } catch {
+          closeRunStatusSocket(ws, 1011, "run status authorization failed");
+          return;
+        }
+        if (!current) {
+          closeRunStatusSocket(ws, 1008, "run status access is no longer active");
+          return;
+        }
+        if (ws.readyState !== WebSocket.OPEN) return;
+        try {
+          ws.send(
+            JSON.stringify({
+              type: "invalidate",
+              runId: input.runId,
+              revision: input.revision,
+            }),
+          );
+        } catch {
+          closeRunStatusSocket(ws, 1011, "run status notification failed");
+        }
+      }),
+    );
+  }
+
+  private async isRunStatusSubscriberCurrent(
+    attachment: RunStatusSocketAttachment,
+  ): Promise<boolean> {
+    const row = await this.env.DB.prepare(
+      `SELECT run.run_id
+       FROM scenario_runs run
+       INNER JOIN session auth_session
+         ON auth_session.id = ?1
+        AND auth_session.user_id = run.user_id
+        AND auth_session.expires_at > ?2
+       INNER JOIN access_allowlist access
+         ON access.user_id = run.user_id
+        AND access.state = 'active'
+        AND access.source_invite_id = ?3
+        AND access.source_lease_id = ?4
+        AND access.granted_at = ?5
+       WHERE run.run_id = ?6
+         AND run.user_id = ?7
+         AND run.host_id = ?8
+       LIMIT 1`,
+    )
+      .bind(
+        attachment.sessionId,
+        Date.now(),
+        attachment.betaSourceInviteId,
+        attachment.betaSourceLeaseId,
+        attachment.betaAdmissionGrantedAt,
+        attachment.runId,
+        attachment.userId,
+        attachment.hostId,
+      )
+      .first<{ run_id: string }>();
+    return row !== null;
   }
 
   private async handleWake(request: Request): Promise<Response> {
@@ -856,32 +1022,42 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
     const runs = await this.listOpenRunsForHost(hostId);
     for (const run of runs) {
-      await this.withRunProjectionLock(run.runId, async () => {
-        // A direct VM report can arrive while an inventory report is awaiting
-        // D1. Reload only after entering the per-run ordering domain so this
-        // projection is always derived from the latest durable evidence.
-        const current = await this.loadRun(run.runId);
-        if (!current || current.hostId !== hostId) {
-          return;
-        }
-        await this.persistRunState(
-          run.runId,
-          (latest) =>
-            applyHostReportToRunState({
-              runId: run.runId,
-              current: latest,
-              report,
-            }),
-          {
-            keepDeleteRequestedAt: true,
-            initialRow: current,
-            expectedHostSession: {
-              hostId,
-              activeSessionId: expectedSessionId,
+      const projectionOutcome = await this.withRunProjectionLock(
+        run.runId,
+        async () => {
+          // A direct VM report can arrive while an inventory report is awaiting
+          // D1. Reload only after entering the per-run ordering domain so this
+          // projection is always derived from the latest durable evidence.
+          const current = await this.loadRun(run.runId);
+          if (!current || current.hostId !== hostId) {
+            return { kind: "unchanged" } satisfies RunProjectionOutcome;
+          }
+          return this.persistRunState(
+            run.runId,
+            (latest) =>
+              applyHostReportToRunState({
+                runId: run.runId,
+                current: latest,
+                report,
+              }),
+            {
+              keepDeleteRequestedAt: true,
+              initialRow: current,
+              expectedHostSession: {
+                hostId,
+                activeSessionId: expectedSessionId,
+              },
             },
-          },
-        );
-      });
+          );
+        },
+      );
+      if (projectionOutcome.kind === "updated") {
+        this.scheduleRunStatusInvalidation({
+          runId: run.runId,
+          hostId,
+          revision: projectionOutcome.revision,
+        });
+      }
     }
     await this.withCpuReservationLock(async () => {
       await reconcileHostCpuReservations(db, hostId, now);
@@ -914,56 +1090,71 @@ export class HostRuntimeDO extends HostRuntimeBase {
     report: Extract<BridgeMessageV7, { type: "vm_report" }>["report"],
     expectedSessionId: string,
   ): Promise<void> {
-    let projectionOutcome: RunProjectionOutcome | null = null;
-    await this.withRunProjectionLock(report.run_id, async () => {
-      const run = await this.loadRun(report.run_id);
-      if (run?.hostId === hostId) {
-        projectionOutcome = await this.persistRunState(
-          report.run_id,
-          (latest) =>
-            applyVmReportToRunState({
-              runId: report.run_id,
-              current: latest,
-              report,
-            }),
-          {
-            keepDeleteRequestedAt: true,
-            initialRow: run,
-            expectedHostSession: {
-              hostId,
-              activeSessionId: expectedSessionId,
-            },
-          },
-        );
-      }
+    const projectionOutcome = await this.withRunProjectionLock(
+      report.run_id,
+      async (): Promise<RunProjectionOutcome> => {
+        const run = await this.loadRun(report.run_id);
+        const outcome =
+          run?.hostId === hostId
+            ? await this.persistRunState(
+                report.run_id,
+                (latest) =>
+                  applyVmReportToRunState({
+                    runId: report.run_id,
+                    current: latest,
+                    report,
+                  }),
+                {
+                  keepDeleteRequestedAt: true,
+                  initialRow: run,
+                  expectedHostSession: {
+                    hostId,
+                    activeSessionId: expectedSessionId,
+                  },
+                },
+              )
+            : ({ kind: "unchanged" } satisfies RunProjectionOutcome);
 
-      if (projectionOutcome !== "stale_session") {
-        try {
-          await this.applyRuntimeVmActualState(
+        if (outcome.kind === "updated") {
+          // The status route reads the durable projection. Begin this
+          // best-effort notification only after that write, without awaiting it
+          // under the ordering lock for the runtime mirror.
+          this.scheduleRunStatusInvalidation({
+            runId: report.run_id,
             hostId,
-            runtimeActualStateFromReport(report),
-            report.observed_at_unix_ms,
-            expectedSessionId,
-          );
-        } catch (error) {
-          // Scenario projection remains authoritative during the shared-runtime
-          // migration. A missing mirror credential must not regress its
-          // established lifecycle. Mirror errors are retried by the agent's
-          // next report.
-          console.error(
-            JSON.stringify({
-              message: "runtime VM report projection failed",
-              hostId,
-              executionId: report.run_id,
-              runtimeVmName: report.vm_name,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          );
+            revision: outcome.revision,
+          });
         }
-      }
-    });
 
-    if (projectionOutcome === "stale_session") {
+        if (outcome.kind !== "stale_session") {
+          try {
+            await this.applyRuntimeVmActualState(
+              hostId,
+              runtimeActualStateFromReport(report),
+              report.observed_at_unix_ms,
+              expectedSessionId,
+            );
+          } catch (error) {
+            // Scenario projection remains authoritative during the shared-runtime
+            // migration. A missing mirror credential must not regress its
+            // established lifecycle. Mirror errors are retried by the agent's next
+            // report.
+            console.error(
+              JSON.stringify({
+                message: "runtime VM report projection failed",
+                hostId,
+                executionId: report.run_id,
+                runtimeVmName: report.vm_name,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            );
+          }
+        }
+        return outcome;
+      },
+    );
+
+    if (projectionOutcome.kind === "stale_session") {
       return;
     }
 
@@ -1134,10 +1325,17 @@ export class HostRuntimeDO extends HostRuntimeBase {
     const now = Date.now();
     const db = drizzle(this.env.DB);
     await maintainHostBuildAssignments(db, hostId, now);
-    await expireOverdueRunLeases(hostId, now, {
+    const expiredLeases = await expireOverdueRunLeases(hostId, now, {
       db,
       wakeHostRuntime: false,
     });
+    for (const expired of expiredLeases.updatedRunRevisions) {
+      this.scheduleRunStatusInvalidation({
+        runId: expired.runId,
+        hostId,
+        revision: expired.revision,
+      });
+    }
     await expireOverdueRuntimeExecutions(hostId, now);
     if (options?.reconcileCpuReservations !== false) {
       await this.withCpuReservationLock(async () => {
@@ -1406,7 +1604,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
     closeCode = 1008,
   ): Promise<void> {
     const sockets = hostId
-      ? this.ctx.getWebSockets(`host:${hostId}`)
+      ? [
+          ...this.ctx.getWebSockets(`host:${hostId}`),
+          ...this.ctx.getWebSockets(`run-status-host:${hostId}`),
+        ]
       : this.ctx.getWebSockets();
     for (const socket of sockets) {
       try {
@@ -1464,6 +1665,80 @@ export class HostRuntimeDO extends HostRuntimeBase {
       );
       this.nextScenarioImageCacheReconciliationAtMs = nextAt;
     }
+  }
+}
+
+function parseRunStatusStreamAttachment(
+  headers: Headers,
+): RunStatusSocketAttachment | null {
+  const runId = requiredRunStatusHeader(headers, "x-run-status-run-id", 240);
+  const userId = requiredRunStatusHeader(headers, "x-run-status-user-id");
+  const hostId = requiredRunStatusHeader(
+    headers,
+    "x-run-status-host-id",
+    240,
+  );
+  const sessionId = requiredRunStatusHeader(
+    headers,
+    "x-run-status-session-id",
+  );
+  const betaSourceInviteId = headers.get(
+    "x-run-status-beta-source-invite-id",
+  );
+  const betaSourceLeaseId = headers.get(
+    "x-run-status-beta-source-lease-id",
+  );
+  const betaAdmissionGrantedAt = parseRunStatusTimestamp(
+    headers.get("x-run-status-beta-admission-granted-at"),
+  );
+  if (
+    !runId ||
+    !userId ||
+    !hostId ||
+    !sessionId ||
+    !validAdmissionId(betaSourceInviteId) ||
+    !validAdmissionId(betaSourceLeaseId) ||
+    betaAdmissionGrantedAt === null
+  ) {
+    return null;
+  }
+  return {
+    kind: "run-status",
+    runId,
+    userId,
+    hostId,
+    sessionId,
+    betaSourceInviteId,
+    betaSourceLeaseId,
+    betaAdmissionGrantedAt,
+  };
+}
+
+function requiredRunStatusHeader(
+  headers: Headers,
+  name: string,
+  maxLength = 256,
+): string | null {
+  const value = headers.get(name);
+  return value !== null &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    value === value.trim()
+    ? value
+    : null;
+}
+
+function parseRunStatusTimestamp(value: string | null): number | null {
+  if (!value || !/^\d{1,16}$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function closeRunStatusSocket(ws: WebSocket, code: number, reason: string): void {
+  try {
+    ws.close(code, reason);
+  } catch {
+    // The client may have closed while authorization was in flight.
   }
 }
 

@@ -1,12 +1,20 @@
 #[cfg(target_os = "linux")]
 use crate::host_keys::collect_ssh_host_keys_openssh;
-use crate::state::ProbeStore;
+#[cfg(any(target_os = "linux", test))]
+use crate::proto::kino_v1;
+use crate::state::{ProbeStore, duration_millis_u64};
 #[cfg(target_os = "linux")]
 use prost::Message as _;
-use std::env;
 #[cfg(target_os = "linux")]
+use rustix::time::{ClockId, clock_gettime};
+use std::env;
+#[cfg(any(target_os = "linux", test))]
 use std::time::Duration;
+use std::time::Instant;
 use tokio::task::JoinHandle;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ENV_KINO_HOST_READY_PORT: &str = "KINO_HOST_READY_PORT";
 #[cfg(target_os = "linux")]
@@ -22,12 +30,71 @@ const READY_PUSH_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
 const MAX_READY_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
-pub(crate) fn spawn_ready_push_task(store: &ProbeStore) -> Option<JoinHandle<()>> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeReadyTimings {
+    kino_ms: u64,
+    ready_uptime_ms: u64,
+}
+
+impl NativeReadyTimings {
+    pub(crate) fn capture(kino_started_at: Instant) -> Self {
+        let kino_ms = duration_millis_u64(kino_started_at.elapsed());
+
+        #[cfg(target_os = "linux")]
+        let ready_uptime_ms = duration_millis_u64(
+            Duration::try_from(clock_gettime(ClockId::Boottime))
+                .unwrap_or_else(|_| unreachable!("CLOCK_BOOTTIME cannot be negative")),
+        );
+        #[cfg(not(target_os = "linux"))]
+        let ready_uptime_ms = 0;
+
+        Self {
+            kino_ms,
+            ready_uptime_ms,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_elapsed(kino_elapsed: Duration, ready_uptime_ms: u64) -> Self {
+        Self {
+            kino_ms: duration_millis_u64(kino_elapsed),
+            ready_uptime_ms,
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn overlay(self, mut timings: kino_v1::GuestPhaseTimingsV1) -> kino_v1::GuestPhaseTimingsV1 {
+        timings.kino_ms = self.kino_ms;
+        timings.ready_uptime_ms = self.ready_uptime_ms;
+        timings
+    }
+}
+
+#[cfg(test)]
+static READY_PUSH_START_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_ready_push_start_count() {
+    READY_PUSH_START_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn ready_push_start_count() -> usize {
+    READY_PUSH_START_COUNT.load(Ordering::Relaxed)
+}
+
+pub(crate) fn spawn_ready_push_task(
+    store: &ProbeStore,
+    native_timings: NativeReadyTimings,
+) -> Option<JoinHandle<()>> {
+    #[cfg(test)]
+    READY_PUSH_START_COUNT.fetch_add(1, Ordering::Relaxed);
+
     let port = read_ready_port()?;
     let store = store.clone();
 
     Some(tokio::spawn(async move {
-        run_ready_push_loop(store, port).await;
+        run_ready_push_loop(store, port, native_timings).await;
     }))
 }
 
@@ -43,7 +110,7 @@ fn read_ready_port() -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-async fn run_ready_push_loop(store: ProbeStore, port: u32) {
+async fn run_ready_push_loop(store: ProbeStore, port: u32, native_timings: NativeReadyTimings) {
     use tokio_vsock::{VMADDR_CID_HOST, VsockAddr, VsockStream};
 
     loop {
@@ -55,7 +122,7 @@ async fn run_ready_push_loop(store: ProbeStore, port: u32) {
                 let mut force_send = true;
 
                 loop {
-                    match encode_ready_frame(&store).await {
+                    match encode_ready_frame(&store, native_timings).await {
                         Ok(frame) => {
                             if force_send || frame != last_frame {
                                 if let Err(error) = write_ready_frame(&mut stream, &frame).await {
@@ -98,12 +165,15 @@ async fn run_ready_push_loop(store: ProbeStore, port: u32) {
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn run_ready_push_loop(_store: ProbeStore, port: u32) {
+async fn run_ready_push_loop(_store: ProbeStore, port: u32, _native_timings: NativeReadyTimings) {
     eprintln!("kino readiness push is only supported on Linux; requested port {port}");
 }
 
 #[cfg(target_os = "linux")]
-async fn encode_ready_frame(store: &ProbeStore) -> anyhow::Result<Vec<u8>> {
+async fn encode_ready_frame(
+    store: &ProbeStore,
+    native_timings: NativeReadyTimings,
+) -> anyhow::Result<Vec<u8>> {
     let mut snapshot = store
         .snapshot_proto_with_host_keys(collect_ssh_host_keys_openssh())
         .await;
@@ -121,12 +191,7 @@ async fn encode_ready_frame(store: &ProbeStore) -> anyhow::Result<Vec<u8>> {
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|value| *value == 1)
         .ok_or_else(|| anyhow::anyhow!("{ENV_GUEST_BOOTSTRAP_ABI} is missing or invalid"))?;
-    let timings = read_guest_phase_timings();
-    anyhow::ensure!(
-        timings.ready_uptime_ms > 0 && timings.kino_ms > 0,
-        "guest phase timings are not ready"
-    );
-    snapshot.guest_phase_timings = Some(timings);
+    snapshot.guest_phase_timings = Some(native_timings.overlay(read_guest_phase_timings()));
     let len = snapshot.encoded_len();
     anyhow::ensure!(
         len <= MAX_READY_FRAME_BYTES,
@@ -169,4 +234,54 @@ async fn write_ready_frame(
     stream.write_all(frame).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeReadyTimings;
+    use crate::proto::kino_v1::{GuestPhaseTimingsV1, ProbesSnapshotV1};
+    use prost::Message as _;
+    use std::time::Duration;
+
+    #[test]
+    fn encodes_native_timings_before_shell_markers_with_zero_kino_duration() {
+        let native = NativeReadyTimings::from_elapsed(Duration::ZERO, 12_345);
+        let snapshot = ProbesSnapshotV1 {
+            kino_sha256: "a".repeat(64),
+            guest_bootstrap_abi: 1,
+            guest_phase_timings: Some(native.overlay(GuestPhaseTimingsV1::default())),
+            ..ProbesSnapshotV1::default()
+        };
+        let mut frame = Vec::new();
+        snapshot
+            .encode(&mut frame)
+            .expect("encode native ready frame");
+        let snapshot = ProbesSnapshotV1::decode(frame.as_slice()).expect("decode ready frame");
+        let timings = snapshot.guest_phase_timings.expect("guest timings");
+
+        assert_eq!(timings.kino_ms, 0);
+        assert_eq!(timings.ready_uptime_ms, 12_345);
+    }
+
+    #[test]
+    fn native_timings_keep_legacy_phase_values_but_replace_shell_ready_markers() {
+        let native = NativeReadyTimings::from_elapsed(Duration::from_millis(7), 12_345);
+        let timings = native.overlay(GuestPhaseTimingsV1 {
+            runtime_disk_ms: 1,
+            tools_disk_ms: 2,
+            network_ms: 3,
+            ssh_keys_ms: 4,
+            ssh_service_ms: 5,
+            kino_ms: 999,
+            ready_uptime_ms: 998,
+        });
+
+        assert_eq!(timings.runtime_disk_ms, 1);
+        assert_eq!(timings.tools_disk_ms, 2);
+        assert_eq!(timings.network_ms, 3);
+        assert_eq!(timings.ssh_keys_ms, 4);
+        assert_eq!(timings.ssh_service_ms, 5);
+        assert_eq!(timings.kino_ms, 7);
+        assert_eq!(timings.ready_uptime_ms, 12_345);
+    }
 }

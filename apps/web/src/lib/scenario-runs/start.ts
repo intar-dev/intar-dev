@@ -513,9 +513,6 @@ export async function startScenarioRunInternal(params: {
     if (isActiveKeyUniqueViolation(error)) {
       throw activeRunConflictError();
     }
-    if (error instanceof AppError && error.code === "runtime_allocation_busy") {
-      throw bootCapacityPendingError({ scenarioId: scenario.scenarioId });
-    }
     throw error;
   }
 

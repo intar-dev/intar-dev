@@ -29,6 +29,8 @@ export const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
 export const RUNTIME_LEASE_CLEANUP_RETRY_MS = 10_000;
 
 export interface SocketAttachment {
+  /** Missing on sockets created before run-status subscriptions existed. */
+  kind?: "agent";
   hostId: string;
   sessionId: string | null;
   /** Exact beta grant carried by a personal-host JWT; null for org hosts. */
@@ -40,6 +42,22 @@ export interface SocketAttachment {
   bridgeProtocol: "v6" | null;
   lastDesiredVersionSent: number | null;
   lastDesiredDispatchAtMs: number | null;
+}
+
+/**
+ * Browser status listeners deliberately use a different attachment shape from
+ * agent bridge sockets. This prevents their close events from changing host
+ * connection state.
+ */
+export interface RunStatusSocketAttachment {
+  kind: "run-status";
+  runId: string;
+  userId: string;
+  hostId: string;
+  sessionId: string;
+  betaSourceInviteId: string;
+  betaSourceLeaseId: string;
+  betaAdmissionGrantedAt: number;
 }
 
 interface RunProjectionRow {
@@ -55,7 +73,10 @@ interface RunProjectionRow {
   state: RunStateDocument;
 }
 
-export type RunProjectionOutcome = "updated" | "unchanged" | "stale_session";
+export type RunProjectionOutcome =
+  | { kind: "updated"; revision: number }
+  | { kind: "unchanged" }
+  | { kind: "stale_session" };
 
 export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected readonly runProjectionQueues = new Map<string, Promise<void>>();
@@ -113,7 +134,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           ? options.initialRow
           : await this.loadRun(runId);
       if (!row) {
-        return "unchanged";
+        return { kind: "unchanged" };
       }
 
       const current = recomputeRunState(row.state);
@@ -166,7 +187,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
             nowUnixMs: now,
           });
         }
-        return "unchanged";
+        return { kind: "unchanged" };
       }
 
       const expectedHostSession = options?.expectedHostSession;
@@ -225,7 +246,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           expectedHostSession &&
           !(await this.isActiveHostSession(expectedHostSession))
         ) {
-          return "stale_session";
+          return { kind: "stale_session" };
         }
         continue;
       }
@@ -263,7 +284,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           completedAt: latestVmAbsenceAt(merged) ?? now,
         });
       }
-      return "updated";
+      return { kind: "updated", revision: now };
     }
     throw new Error(`run projection CAS did not converge for ${runId}`);
   }
@@ -509,10 +530,15 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected readSocketAttachment(ws: WebSocket): SocketAttachment | null {
     try {
       const parsed = ws.deserializeAttachment() as SocketAttachment | null;
-      if (!parsed || typeof parsed.hostId !== "string") {
+      if (
+        !parsed ||
+        (parsed.kind !== undefined && parsed.kind !== "agent") ||
+        typeof parsed.hostId !== "string"
+      ) {
         return null;
       }
       return {
+        ...(parsed.kind === "agent" ? { kind: "agent" as const } : {}),
         hostId: parsed.hostId,
         sessionId:
           typeof parsed.sessionId === "string" && parsed.sessionId
@@ -555,6 +581,53 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           parsed.lastDesiredDispatchAtMs >= 0
             ? Math.floor(parsed.lastDesiredDispatchAtMs)
             : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  protected readRunStatusSocketAttachment(
+    ws: WebSocket,
+  ): RunStatusSocketAttachment | null {
+    try {
+      const parsed = ws.deserializeAttachment() as
+        | RunStatusSocketAttachment
+        | null;
+      if (!parsed || parsed.kind !== "run-status") return null;
+
+      const runId = requiredAttachmentId(parsed.runId);
+      const userId = requiredAttachmentId(parsed.userId);
+      const hostId = requiredAttachmentId(parsed.hostId);
+      const sessionId = requiredAttachmentId(parsed.sessionId);
+      const betaSourceInviteId = requiredAttachmentId(
+        parsed.betaSourceInviteId,
+      );
+      const betaSourceLeaseId = requiredAttachmentId(parsed.betaSourceLeaseId);
+      const betaAdmissionGrantedAt = requiredAttachmentTimestamp(
+        parsed.betaAdmissionGrantedAt,
+      );
+      if (
+        !runId ||
+        !userId ||
+        !hostId ||
+        !sessionId ||
+        !betaSourceInviteId ||
+        !betaSourceLeaseId ||
+        betaAdmissionGrantedAt === null
+      ) {
+        return null;
+      }
+
+      return {
+        kind: "run-status",
+        runId,
+        userId,
+        hostId,
+        sessionId,
+        betaSourceInviteId,
+        betaSourceLeaseId,
+        betaAdmissionGrantedAt,
       };
     } catch {
       return null;
@@ -730,6 +803,23 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       deleteRequestedAt: row.deleteRequestedAt,
     }));
   }
+}
+
+function requiredAttachmentId(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    value === value.trim()
+    ? value
+    : null;
+}
+
+function requiredAttachmentTimestamp(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+    ? value
+    : null;
 }
 
 function allVmsReportedAbsent(state: RunStateDocument): boolean {

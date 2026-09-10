@@ -18,6 +18,7 @@ use std::future::IntoFuture;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Parser)]
 #[command(name = "kino")]
@@ -64,6 +65,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let kino_started_at = Instant::now();
+
     if std::env::args_os()
         .next()
         .is_some_and(|argv0| run_cli::invoked_as_intar(&argv0))
@@ -109,12 +112,15 @@ async fn main() -> anyhow::Result<()> {
                 .context("--config is required when running the probe service")?;
             let app_config = config::load_from_file(config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            run_probe_service(app_config).await
+            run_probe_service(app_config, kino_started_at).await
         }
     }
 }
 
-async fn run_probe_service(app_config: config::AppConfig) -> anyhow::Result<()> {
+async fn run_probe_service(
+    app_config: config::AppConfig,
+    kino_started_at: Instant,
+) -> anyhow::Result<()> {
     let built_probes = probe::build_probes(&app_config.probes)
         .await
         .context("failed to build probes")?;
@@ -126,13 +132,11 @@ async fn run_probe_service(app_config: config::AppConfig) -> anyhow::Result<()> 
 
     let store = state::ProbeStore::new(&shared_probes);
     let probe_executor = scheduler::ProbeExecutor::new(&shared_probes);
-    let probe_tasks = scheduler::spawn_probe_tasks(shared_probes, &store, probe_executor.clone());
-    let control_socket = run_cli_control::start(probe_executor, store.clone())
-        .await
-        .context("failed to start the Kino run CLI control socket")?;
-    let ready_push_task = ready_push::spawn_ready_push_task(&store);
-
-    let router = http::build_router(store);
+    let router = http::build_router(store.clone());
+    let service_socket_path = match &app_config.server_bind {
+        config::ServerBind::Unix(path) => Some(path.clone()),
+        config::ServerBind::Tcp(_) | config::ServerBind::Vsock { .. } => None,
+    };
     let server = match app_config.server_bind {
         config::ServerBind::Tcp(addr) => {
             let listener = tokio::net::TcpListener::bind(addr)
@@ -197,6 +201,21 @@ async fn run_probe_service(app_config: config::AppConfig) -> anyhow::Result<()> 
         }
     };
 
+    let control_socket = match run_cli_control::start(probe_executor.clone(), store.clone()).await {
+        Ok(socket) => socket,
+        Err(error) => {
+            if let Some(path) = service_socket_path {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            return Err(error).context("failed to start the Kino run CLI control socket");
+        }
+    };
+    let ready_push_task = ready_push::spawn_ready_push_task(
+        &store,
+        ready_push::NativeReadyTimings::capture(kino_started_at),
+    );
+    let probe_tasks = scheduler::spawn_probe_tasks(shared_probes, &store, probe_executor);
+
     tokio::pin!(server);
 
     let server_result = tokio::select! {
@@ -241,5 +260,28 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_probe_service;
+    use crate::config::{AppConfig, ServerBind};
+    use crate::ready_push::{ready_push_start_count, reset_ready_push_start_count};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn service_bind_failure_does_not_start_readiness_push() {
+        let occupied = TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
+        let app_config = AppConfig {
+            server_bind: ServerBind::Tcp(occupied.local_addr().expect("TCP address")),
+            recording: None,
+            probes: Vec::new(),
+        };
+        reset_ready_push_start_count();
+
+        assert!(run_probe_service(app_config, Instant::now()).await.is_err());
+        assert_eq!(ready_push_start_count(), 0);
     }
 }

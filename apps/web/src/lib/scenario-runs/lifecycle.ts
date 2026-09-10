@@ -373,7 +373,10 @@ export async function expireOverdueRunLeases(
     db?: DrizzleD1Database;
     wakeHostRuntime?: boolean;
   },
-): Promise<{ expiredRunIds: string[] }> {
+): Promise<{
+  expiredRunIds: string[];
+  updatedRunRevisions: Array<{ runId: string; revision: number }>;
+}> {
   const db = options?.db ?? drizzle(env.DB);
   const desiredState = await loadOrCreateHostDesiredState(
     db,
@@ -382,6 +385,7 @@ export async function expireOverdueRunLeases(
   );
   const overdue = selectOverdueRunLeases(desiredState, nowUnixMs);
   const expiredRunIds: string[] = [];
+  const updatedRunRevisions: Array<{ runId: string; revision: number }> = [];
 
   for (const lease of overdue) {
     const row = await loadRunRow(lease.runId);
@@ -393,7 +397,7 @@ export async function expireOverdueRunLeases(
       row.failedAt === null &&
       row.state.vms.some((vm) => expiredVmNames.has(vm.runtimeVmName))
     ) {
-      await updateRunState(row.runId, {
+      const revision = await updateRunState(row.runId, {
         mutate: (current) =>
           recomputeRunState({
             ...current,
@@ -413,6 +417,9 @@ export async function expireOverdueRunLeases(
           }),
         deleteRequestedAt: row.deleteRequestedAt,
       });
+      if (revision !== null) {
+        updatedRunRevisions.push({ runId: row.runId, revision });
+      }
     }
 
     // Clear the expired VMs from the desired doc even when the run row is
@@ -430,7 +437,7 @@ export async function expireOverdueRunLeases(
     await tryWakeHostRuntime(hostId);
   }
 
-  return { expiredRunIds };
+  return { expiredRunIds, updatedRunRevisions };
 }
 
 export async function createScenarioSshSessionForUser(params: {

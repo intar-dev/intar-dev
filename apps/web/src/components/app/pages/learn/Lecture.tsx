@@ -18,6 +18,12 @@ import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  beginScenarioRunBootEvidence,
+  clearPendingScenarioRunBootEvidence,
+  markPendingScenarioRunBootStage,
+} from "@/lib/scenario-run-performance";
+import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
 import { CourseOutlineMobile, CourseOutlineRail } from "./CourseOutline";
@@ -451,6 +457,19 @@ function LinkedLectureAction({
             courseId: route.courseId,
             lectureId: lecture.lectureId,
           }}
+          onClick={(event) => {
+            if (
+              event.defaultPrevented ||
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey
+            ) {
+              return;
+            }
+            prepareScenarioRunStart(lecture.scenarioId!);
+          }}
         />
       }
     >
@@ -458,6 +477,28 @@ function LinkedLectureAction({
       {rerun ? <RotateCcw className="size-4" /> : <ArrowRight className="size-4" />}
     </Button>
   );
+}
+
+/** Starts timing and terminal asset work at the learner action. */
+function prepareScenarioRunStart(scenarioId: string) {
+  clearPendingScenarioRunBootEvidence(scenarioId);
+  beginScenarioRunBootEvidence(scenarioId);
+  void import("@/components/remote-access/WebSshTerminal")
+    .then(() => {
+      markPendingScenarioRunBootStage(scenarioId, "terminal-module");
+    })
+    .catch(() => {
+      // The lazy boundary reports a module failure when the terminal is shown.
+    });
+  void loadReplayTerminalFont()
+    .then((loaded) => {
+      if (loaded) {
+        markPendingScenarioRunBootStage(scenarioId, "terminal-font");
+      }
+    })
+    .catch(() => {
+      // Font loading is best effort and must not delay navigation.
+    });
 }
 
 function lectureBreadcrumbLabels(route: CourseRouteRef, courseTitle: string) {

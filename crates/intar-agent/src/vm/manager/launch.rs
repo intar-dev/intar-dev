@@ -783,8 +783,8 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         ensure_jailed_run_network(&network_inner, &network_run_id, &network_config).await
     });
     let _network_abort = AbortTaskOnDrop(network_task.abort_handle());
-    image_cache::wake_cache_refresh();
     let image_prepare_deadline = Instant::now() + Duration::from_secs(60);
+    let mut descriptor_refresh_requested = false;
     let ready_image = loop {
         match image_cache::require_ready_image_launch(
             &cache_root,
@@ -795,6 +795,13 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         {
             Ok(ready) => break ready,
             Err(error) if Instant::now() < image_prepare_deadline => {
+                if !std::mem::replace(&mut descriptor_refresh_requested, true) {
+                    image_cache::wake_cache_refresh();
+                    debug!(
+                        vm = req.name,
+                        "requested image preparation for an unready launch descriptor"
+                    );
+                }
                 debug!(vm = req.name, error = %error, "waiting for event-driven image preparation");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -1038,12 +1045,21 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         .await
         .context("failed to start vm terminal worker")?;
     info!(
+        vm = req.name,
+        run_id = req.run_id,
         image_cache_ms = image_ready_at.duration_since(create_started_at).as_millis(),
         disk_stage_ms = disks_ready_at.duration_since(image_ready_at).as_millis(),
         jail_launch_ms = jail_ready_at.duration_since(disks_ready_at).as_millis(),
         vmm_start_ms = vmm_ready_at.duration_since(jail_ready_at).as_millis(),
         vm_api_ms = boot_accepted_at.duration_since(vmm_ready_at).as_millis(),
         guest_ready_ms = guest_ready_at.duration_since(boot_accepted_at).as_millis(),
+        guest_runtime_disk_ms = ready.guest_phase_timings.runtime_disk_ms,
+        guest_tools_disk_ms = ready.guest_phase_timings.tools_disk_ms,
+        guest_network_ms = ready.guest_phase_timings.network_ms,
+        guest_ssh_keys_ms = ready.guest_phase_timings.ssh_keys_ms,
+        guest_ssh_service_ms = ready.guest_phase_timings.ssh_service_ms,
+        guest_kino_ms = ready.guest_phase_timings.kino_ms,
+        guest_ready_uptime_ms = ready.guest_phase_timings.ready_uptime_ms,
         quota_seal_ms = quota_sealed_at.duration_since(guest_ready_at).as_millis(),
         ssh_verify_ms = ssh_verified_at.duration_since(quota_sealed_at).as_millis(),
         terminal_publish_ms = terminal_ready_at

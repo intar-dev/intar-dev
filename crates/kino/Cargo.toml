@@ -33,7 +33,7 @@ tower = { workspace = true, features = ["util"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 crossterm.workspace = true
 pty-process.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["time"] }
 signal-hook.workspace = true
 tokio-vsock.workspace = true
 

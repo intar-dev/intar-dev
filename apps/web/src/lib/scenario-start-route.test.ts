@@ -288,6 +288,24 @@ describe("scenario start route", () => {
     });
   });
 
+  it("preserves lock contention without imposing the capacity retry delay", async () => {
+    scenarioRunsMock.startScenarioRunForUser.mockRejectedValueOnce(
+      appError(
+        409,
+        "runtime_allocation_busy",
+        "runtime capacity is being allocated concurrently; retry shortly",
+      ),
+    );
+
+    const response = await startRequest();
+
+    expect(response.status).toBe(409);
+    expect(response.headers.get("retry-after")).toBeNull();
+    await expect(response.json()).resolves.toMatchObject({
+      code: "runtime_allocation_busy",
+    });
+  });
+
 });
 
 async function startRequest(

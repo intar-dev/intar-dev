@@ -35,7 +35,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
 
-use crate::config::BridgeConfig;
+use crate::config::{BridgeConfig, normalize_sha256};
 use crate::db::{Db, DesiredStateRow, VmProbeStateRow};
 use crate::host_profile;
 use crate::kino_probe::{ProbeUpdateEnvelope, ProbeView};
@@ -129,10 +129,14 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
 
     let mut retry_ms = RETRY_MIN_MS;
     let mut current_desired_state = load_cached_desired_state(&cfg, &db).await;
-    if let Some(desired_state) = current_desired_state.clone()
-        && let Err(error) = apply_cached_desired_state(&cfg, &vm, desired_state).await
-    {
-        warn!(error = %error, "failed to apply cached desired state");
+    if let Some(desired_state) = current_desired_state.clone() {
+        // There is no preceding desired state after an agent restart. Wake the
+        // worker once so its MissingOnly pass observes persisted pins even if
+        // the startup repair pass began before this state was loaded.
+        crate::image_cache::wake_cache_refresh();
+        if let Err(error) = apply_cached_desired_state(&cfg, &vm, desired_state).await {
+            warn!(error = %error, "failed to apply cached desired state");
+        }
     }
     let mut reconnect = false;
 
@@ -468,10 +472,14 @@ async fn handle_server_message(
                 send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
                 return Ok(());
             }
+            let refresh_cache =
+                required_cache_pins_changed(current_desired_state.as_ref(), &desired_state);
             cache_desired_state(db, &desired_state)
                 .await
                 .context("failed to cache desired state")?;
-            crate::image_cache::wake_cache_refresh();
+            if refresh_cache {
+                crate::image_cache::wake_cache_refresh();
+            }
             let failure_reports = apply_desired_state(cfg, vm, &message).await?;
             *current_desired_state = Some(desired_state);
             desired_state_tx.send_replace(current_desired_state.clone());
@@ -501,6 +509,68 @@ fn desired_state_is_stale(
     incoming: &HostDesiredStateV2,
 ) -> bool {
     current.is_some_and(|current| incoming.version < current.version)
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct RequiredCachePins {
+    images: BTreeSet<(String, String, String, String)>,
+    guest_tools: BTreeSet<(String, u64, String, u16)>,
+}
+
+fn required_cache_pins(desired: &HostDesiredStateV2) -> RequiredCachePins {
+    let mut pins = RequiredCachePins::default();
+    for image in &desired.cached_images {
+        pins.images
+            .insert(image_cache_pin(&image.image_key, &image.image_id));
+    }
+    for tools in &desired.cached_guest_tools {
+        pins.guest_tools.insert(guest_tools_cache_pin(tools));
+    }
+    for vm in desired
+        .vms
+        .iter()
+        .filter(|vm| vm.desired_phase == DesiredVmPhase::Running)
+    {
+        pins.images
+            .insert(image_cache_pin(&vm.image_key, &vm.image_id));
+        pins.guest_tools
+            .insert(guest_tools_cache_pin(&vm.guest_tools));
+    }
+    pins
+}
+
+fn image_cache_pin(
+    image_key: &intar_contracts::catalog::ImageKey,
+    image_id: &str,
+) -> (String, String, String, String) {
+    (
+        image_key.scenario.clone(),
+        image_key.vm.clone(),
+        image_architecture_slug(&image_key.arch).to_string(),
+        normalized_cache_pin_digest(image_id),
+    )
+}
+
+fn required_cache_pins_changed(
+    current: Option<&HostDesiredStateV2>,
+    incoming: &HostDesiredStateV2,
+) -> bool {
+    current.is_none_or(|current| required_cache_pins(current) != required_cache_pins(incoming))
+}
+
+fn guest_tools_cache_pin(
+    tools: &intar_contracts::bridge::DesiredGuestToolsV1,
+) -> (String, u64, String, u16) {
+    (
+        normalized_cache_pin_digest(&tools.tools_disk_sha256),
+        tools.tools_disk_size_bytes,
+        normalized_cache_pin_digest(&tools.kino_sha256),
+        tools.bootstrap_abi,
+    )
+}
+
+fn normalized_cache_pin_digest(value: &str) -> String {
+    normalize_sha256(value).unwrap_or_else(|| value.trim().to_ascii_lowercase())
 }
 
 async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDesiredStateV2> {
