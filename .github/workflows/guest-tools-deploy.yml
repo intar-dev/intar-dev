@@ -102,7 +102,8 @@ jobs:
             --target-dir "${RUNNER_TEMP}/kino-target" \
             -p kino --profile guest --target x86_64-unknown-linux-musl
           cp "${RUNNER_TEMP}/kino-target/x86_64-unknown-linux-musl/guest/kino" "${TOOLS_DIR}/kino"
-          cargo run --locked -p intar-image-cli -- build-guest-tools \
+          tools/image-build/with-libnbd-env.sh -- cargo build --locked -p intar-image-cli
+          target/debug/intar-image-cli build-guest-tools \
             --kino-binary "${TOOLS_DIR}/kino" --output-root "${TOOLS_DIR}" \
             --mke2fs-binary /usr/sbin/mke2fs > "${TOOLS_DIR}/build.json"
           jq 'del(.compressed_disk_path)' "${TOOLS_DIR}/build.json" > "${TOOLS_DIR}/candidate.json"
