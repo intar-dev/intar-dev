@@ -101,11 +101,11 @@ build_memory_mb = 4096
 
 [qemu.layered]
 qemu_img_binary = "qemu-img"
-buildctl_binary = "buildctl"
-umoci_binary = "umoci"
+buildctl_binary = "/var/lib/intar-builder/layered-tools/bin/buildctl"
+umoci_binary = "/var/lib/intar-builder/layered-tools/bin/umoci"
 debian_image = "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f"
-oci_cache_root = "/var/cache/intar-builder/oci"
-checkpoint_cache_root = "/var/cache/intar-builder/checkpoints"
+oci_cache_root = "/var/cache/intar-builder/candidate/oci"
+checkpoint_cache_root = "/var/cache/intar-builder/candidate/checkpoints"
 use_cache = true
 oci_cache_bytes = 8589934592
 checkpoint_cache_bytes = 42949672960
@@ -116,8 +116,8 @@ max_attempts = 3
 max_concurrent_builds = 2
 ```
 
-The same template is checked into
-`crates/intar-builder/deploy/config.example.toml`.
+Default settings are in `crates/intar-builder/deploy/config.example.toml`.
+The paths above use the existing builder host's tools and cache.
 
 ## OCI VM Build
 
@@ -131,6 +131,9 @@ free-disk floor. Set `use_cache = false` to make a cold service build. For one
 local build, use `intar-image-cli build --no-cache` or
 `intar-image-cli build-all --no-cache`. The clean-base proof also makes a cold
 OCI build.
+
+The OCI unpack and ext4 proof passed 44 checks for ownership, permissions,
+capabilities, links, and layer deletions.
 
 ### Direct NBD reader
 
@@ -165,41 +168,83 @@ sudo python3 tools/image-build/verify-published-image.py \
 
 ### BuildKit daemon
 
-BuildKit must listen at `<oci_cache_root>/buildkitd.sock`. With the default
-cache root and OCI budget, create this systemd unit:
+BuildKit uses the root-only TOML file
+`/etc/intar-builder/buildkitd.toml`. Copy the verified file there with owner
+`root`, group `root`, and mode `0600` before enabling the service. The installed
+service must not depend on a benchmark directory after a reboot. Use this
+configuration:
+
+```toml
+[worker.oci]
+  enabled = true
+  gc = true
+  binary = "/var/lib/intar-builder/layered-tools/bin/buildkit-runc"
+  max-parallelism = 2
+  maxUsedSpace = 6442450944
+  minFreeSpace = 21474836480
+
+[worker.containerd]
+  enabled = false
+```
+
+The TOML sets garbage collection, two parallel tasks, a 6 GiB worker limit,
+and a 20 GiB free-space floor. The remaining 2 GiB of the OCI budget holds
+converted ext4 disks. Do not add `--oci-worker-gc`,
+`--oci-worker-gc-keepstorage`, or `--oci-max-parallelism` to `ExecStart`.
+
+Use absolute paths for `buildkitd`, `buildkit-runc`, and `buildctl`. The OCI
+cache root is `/var/cache/intar-builder/candidate/oci`. Keep its root and
+socket paired as `<oci_cache_root>/buildkitd` and
+`unix://<oci_cache_root>/buildkitd.sock`. Do not create another daemon root or
+socket.
+
+Create this systemd unit:
 
 ```ini
 [Unit]
-Description=Intar layered-build BuildKit daemon
+Description=Intar image build OCI cache
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=buildkitd --addr unix:///var/cache/intar-builder/oci/buildkitd.sock --root /var/cache/intar-builder/oci/buildkitd --oci-worker-gc --oci-worker-gc-keepstorage 0,21475,6442 --oci-max-parallelism 2
-Restart=always
-RestartSec=5
 User=root
+UMask=0077
+ExecStart=/var/lib/intar-builder/layered-tools/bin/buildkitd --config /etc/intar-builder/buildkitd.toml --root /var/cache/intar-builder/candidate/oci/buildkitd --addr unix:///var/cache/intar-builder/candidate/oci/buildkitd.sock
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Save it as `/etc/systemd/system/intar-buildkitd.service`, then run:
+If a native BuildKit process already uses this socket, wait for all build tasks
+to finish, verify its process identity and configuration, then stop it before
+starting the service. Reuse its cache root.
+
+Save the unit as `/etc/systemd/system/intar-buildkitd.service`, then run:
 
 ```bash
-sudo install -d -m 0755 /var/cache/intar-builder/oci
+sudo install -d -m 0755 /var/cache/intar-builder/candidate/oci
 sudo systemctl daemon-reload
 sudo systemctl enable --now intar-buildkitd
+sudo timeout -s KILL 30s bash -c '
+  buildctl=$1
+  socket=$2
+  while :; do
+    if systemctl is-active --quiet intar-buildkitd >/dev/null 2>&1 \
+      && "$buildctl" --addr "unix://${socket}" debug workers >/dev/null 2>&1; then
+      exit 0
+    fi
+    sleep 1
+  done
+' _ \
+  /var/lib/intar-builder/layered-tools/bin/buildctl \
+  /var/cache/intar-builder/candidate/oci/buildkitd.sock
 ```
 
-`--oci-worker-gc-keepstorage` uses decimal MB in this order:
-reserved space, free-space target, maximum worker use. `0,21475,6442` keeps
-the free-space target above 20 GiB and caps the daemon below 6 GiB. The
-remaining 2 GiB of the 8 GiB OCI budget holds converted ext4 artifacts.
-The decimal 6,442 MB cap plus 2 GiB stays below the 8 GiB total budget.
-`--oci-max-parallelism 2` matches the two permitted OCI build steps. Change
-all three values together when `oci_cache_bytes` changes.
+The GNU `timeout` limits the complete wait, including a blocked workers query.
+If it expires, do not start `intar-builder`.
 
 Keep the installed builder binary as a measurement reference. Do not use it
 alone for rollback: an older builder recomputes the v11 content hash and rejects
@@ -228,17 +273,87 @@ Before installing a new builder, drain the host and stop the builder. Remove
 only old directories in `bundles-unpacked` that lack
 `.intar-bundle-v1.complete`. Keep marked bundle revisions. The builder has no
 backend selector. Remove old configuration keys such as `mmdebstrap_binary`,
-`backend`, `qemuargs`, and `base_cache_root` before restart.
+`backend`, `qemuargs`, `base_cache_root`, and `umount_binary` before restart.
+`umount_binary` is obsolete because the builder reads the finished disk through
+NBD.
 
 ### Benchmark gate
 
-The warm full-catalog median must be at least 2x faster. A cold run must not
-exceed the baseline by more than 20%. Neither gate is measured yet. Do not
-report either gate as passed.
+The warm full-catalog median must be at least 2 times as fast. A cold run must
+not exceed the baseline by more than 20%.
 
-The 0.9.1 cold median was `1,804,927 ms`, compared with a `1,265,784 ms`
-baseline. It failed the cold limit. Measure a new final candidate before any
-performance claim.
+The cold numerical gate passed: the median was `1,491,536 ms`, compared with
+the `1,265,784 ms` baseline. It is 17.8% slower and stays within the 20%
+limit.
+
+The cold samples used builder `0.10.1`, image CLI `0.6.1`, frozen source
+`64d4f6932b75790681c1d6f8d7f412906e5d8e66`, and resource profile
+`candidate-v0101-4cpu`: [cold 1](https://github.com/intar-dev/scenarios/actions/runs/34413598335),
+[cold 2](https://github.com/intar-dev/scenarios/actions/runs/34416248124), and
+[cold 3](https://github.com/intar-dev/scenarios/actions/runs/34418475024).
+
+The warm numerical gate passed: the median was `449,299 ms`, compared with the
+`1,191,256 ms` baseline. It is 2.65 times as fast and exceeds the 2
+times target.
+
+The warm samples used the same releases, source, and resource profile:
+[warm 1](https://github.com/intar-dev/scenarios/actions/runs/34420429855),
+[warm 2](https://github.com/intar-dev/scenarios/actions/runs/34421121711), and
+[warm 3](https://github.com/intar-dev/scenarios/actions/runs/34421854845).
+
+The raw full-fingerprint comparison remains `passed=false` and is classified as
+cross-harness. The only verified change is archive extraction before the timer.
+The timing workflow and helper are frozen and unchanged. Do not describe the
+raw cross-harness result as passed.
+
+The old one-fault-edit series has `l1 = 249,312 ms`. The old
+[late 2](https://github.com/intar-dev/scenarios/actions/runs/34458106719) run
+was cancelled as an infrastructure failure at `2026-09-10T09:30:32Z`. Its
+artifact is retained, but it has no complete measurement. `l3` was not
+dispatched. Do not calculate a median for this old series.
+
+The request-local positive R2 HEAD memo and four-worker dynamic index patch
+merged in [PR 158](https://github.com/intar-dev/intar-dev/pull/158) at
+`042e2125282ade8982764ce7d1ecf087c728ccad`. The
+[website deployment](https://github.com/intar-dev/intar-dev/actions/runs/34462582925)
+succeeded. Worker `2d8b3dbf-e653-4a0a-bb8e-60056ccef993` returned HTTP 200
+from `/api/health`.
+
+A normal learner `MissingOnly` refresh started at `09:50:55 UTC`, listed 382
+images, reused 381, prepared the missing image, and finished at `09:51:07 UTC`.
+This is recovery evidence only. It is not a new authenticated probe and does
+not provide an index-latency measurement.
+
+The separate `candidate-v12n4-registry-late` cohort completed. It has a changed
+web identity and uses a new controller root, but it keeps the existing v12n3
+BuildKit process, configuration, and shared cache. Do not mix it with the
+frozen cold and warm results.
+
+| Sample | Workflow                                                                       | Full duration | Host preparation | Artifact SHA-256                                                   |
+| ------ | ------------------------------------------------------------------------------ | ------------: | ---------------: | ------------------------------------------------------------------ |
+| `lr1`  | [34464270821](https://github.com/intar-dev/scenarios/actions/runs/34464270821) |    236,361 ms |        16,178 ms | `991c6936b6f03977b266df72278a8a65b2c4b5e3e73611960433b766aad710ec` |
+| `lr2`  | [34464951777](https://github.com/intar-dev/scenarios/actions/runs/34464951777) |    238,939 ms |        16,995 ms | `36198ee995470223dcf19a239a7e86af488628b2f1c81badd6f75e1eb486959b` |
+| `lr3`  | [34465521327](https://github.com/intar-dev/scenarios/actions/runs/34465521327) |    245,946 ms |        32,444 ms | `c79273f7d36df0e3814439e460608b32fbc9e56756744907237409a776983c0b` |
+
+The separate late-step median is `238,939 ms`, compared with the `314,852 ms`
+baseline. It uses 24.1107% less time, or is 1.3177 times as fast. It is not a
+cold or warm full-catalog gate. Final 13-scenario proofs and production
+activation remain pending.
+
+No comparable before-and-after boot measurement exists for this cohort. Do not
+claim faster boots.
+
+The late-step window ended at `2026-09-10T10:24:37.033Z`. The candidate builder
+is off with zero jobs. The production builder is inactive and disabled, as
+confirmed at `2026-09-10T10:26:17Z`. The remaining c3 and final 13-scenario
+live proof is blocked only because the browser panel is unavailable. The exact
+13 c3 build IDs are verified against its build window. Live candidate
+availability and scenario behavior still require verification. Do not activate
+production.
+
+The final scenario proof must verify that all seven build credential paths are
+absent. The check must reject symbolic links and must not read credential
+contents.
 
 Run the deployed private workflow
 `intar-dev/scenarios/.github/workflows/image-build-benchmark.yml` with these
@@ -248,10 +363,11 @@ cases:
 - `warm` and `runtime`: a forced full rebuild.
 - `warm` and `late-step`: one fault edit.
 
-For every case, record three baseline samples and three candidate samples. Use
-the same exact scenario SHA and build resource profile. Pause normal builder
-work. Include host preparation in each measured duration. The baseline is a
-benchmark reference only; it is not a runtime backend.
+For each comparable cohort, record three baseline samples and three candidate
+samples. Keep the same scenario SHA and build resource profile within that
+cohort. Do not combine results after a web identity change with older results.
+Pause normal builder work. Include host preparation in each measured duration.
+The baseline is a benchmark reference only; it is not a runtime backend.
 
 Keep the JSON records from the workflow. Compare them with
 `tools/image-build/benchmark-release.py compare`, with exactly three
