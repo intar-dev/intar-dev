@@ -42,6 +42,10 @@ update as proof that the check did not run.
 The CLI prints safe check labels and states only. It does not print probe IDs,
 commands, raw values, command output, or secrets.
 
+After a VM start fails, **End run** stays available while VM teardown is
+pending. It requests cleanup and does not mark the run as solved. When cleanup
+and archival finish, **Delete run** replaces **End run**.
+
 ## Hints and solutions
 
 `intar hints` never shows a sealed hint body or title. `intar hint <alias>`
