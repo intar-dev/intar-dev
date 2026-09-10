@@ -47,7 +47,7 @@
     "picomatch": "2.3.2",
     "rollup": "4.59.0",
     "sharp": "0.35.4",
-    "smol-toml": "1.6.1",
+    "smol-toml": "1.7.1",
     "svgo": "4.1.0",
     "vitest": "4.1.11",
     "yaml": "2.8.3"
