@@ -230,6 +230,103 @@ fn trusted_source_rejects_lexical_escape() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn existing_lifecycle_directory_preserves_agent_traversal_acl() {
+    use std::os::unix::{fs::MetadataExt as _, process::CommandExt as _};
+    use std::process::{Command, Stdio};
+
+    if !rustix::process::geteuid().is_root() || trusted_setfacl_binary().is_err() {
+        return;
+    }
+
+    const AGENT_UID: u32 = 65_534;
+    const VM_UID: u32 = 65_533;
+    let jail = tempfile::tempdir_in("/tmp").expect("jail root");
+    let mut config = lifecycle_test_config(jail.path());
+    config.agent_uid = AGENT_UID;
+    config.agent_gid = AGENT_UID;
+    let generation = ValidatedId::parse("acl-generation").expect("generation ID");
+    let jail_root = trusted_jail_root_fd(&config).expect("pin jail root");
+    ensure_root_directory_at(&jail_root, c"cloud-hypervisor").expect("create generation parent");
+
+    let generation_root = jail
+        .path()
+        .join("cloud-hypervisor")
+        .join(generation.as_str())
+        .join("root");
+    let run = generation_root.join("run");
+    let logs = generation_root.join("logs");
+    std::fs::create_dir_all(&run).expect("create runtime directory");
+    std::fs::create_dir(&logs).expect("create log directory");
+    for directory in [
+        jail.path()
+            .join("cloud-hypervisor")
+            .join(generation.as_str()),
+        generation_root.clone(),
+    ] {
+        set_mode(&directory, 0o700).expect("lock root-owned lifecycle directory");
+    }
+    for directory in [&run, &logs] {
+        set_owner(directory, VM_UID, VM_UID).expect("set VM directory owner");
+        set_mode(directory, 0o700).expect("lock VM directory");
+    }
+    for name in ["serial.log", "console.log", "cloud-hypervisor.stderr.log"] {
+        let path = logs.join(name);
+        File::create(&path).expect("create VM log");
+        set_owner(&path, VM_UID, VM_UID).expect("set VM log owner");
+        set_mode(&path, 0o600).expect("lock VM log");
+    }
+
+    apply_agent_acls(&config, &generation, VM_UID, VM_UID).expect("grant agent traversal");
+    let parent = jail.path().join("cloud-hypervisor");
+    assert_eq!(
+        std::fs::metadata(&parent).expect("stat ACL parent").mode() & 0o777,
+        0o710
+    );
+
+    ensure_root_directory_at(&jail_root, c"cloud-hypervisor")
+        .expect("validate existing ACL-bearing generation parent");
+    assert_eq!(
+        std::fs::metadata(&parent)
+            .expect("restat ACL parent")
+            .mode()
+            & 0o777,
+        0o710
+    );
+    let output = Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            "import os, sys; os.open(sys.argv[1], os.O_PATH | os.O_DIRECTORY)",
+        ])
+        .arg(&run)
+        .uid(AGENT_UID)
+        .gid(AGENT_UID)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run agent traversal probe");
+    assert!(
+        output.status.success(),
+        "agent lost traversal after existing-directory validation: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+
+    let bad = jail.path().join("writable");
+    std::fs::create_dir(&bad).expect("create bad lifecycle directory");
+    set_mode(&bad, 0o720).expect("make bad lifecycle directory writable");
+    assert!(ensure_root_directory_at(&jail_root, c"writable").is_err());
+    assert_eq!(
+        std::fs::metadata(&bad)
+            .expect("restat rejected lifecycle directory")
+            .mode()
+            & 0o777,
+        0o720
+    );
+}
+
 #[test]
 fn fd_relative_cleanup_rejects_symlinks_without_touching_targets() {
     use std::os::unix::fs::symlink;
