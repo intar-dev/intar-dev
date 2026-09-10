@@ -1,0 +1,225 @@
+name: Guest tools deployment
+run-name: "Deploy guest tools ${{ inputs.kino_tag }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      kino_tag:
+        description: Published Kino release tag (kino/vX.Y.Z)
+        required: true
+        type: string
+      revision:
+        description: Current published scenario bundle revision for host cache checks
+        required: true
+        type: string
+      confirmation:
+        description: Type DEPLOY GUEST TOOLS
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intar-image-catalog-promotion
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, verify, and promote tools
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    timeout-minutes: 30
+    env:
+      KINO_TAG: ${{ inputs.kino_tag }}
+      REVISION: ${{ inputs.revision }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      BUCKET: intar-dev-vm-image-registry-20260709
+
+    steps:
+      - name: Validate deployment inputs
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main
+          test "${CONFIRMATION}" = 'DEPLOY GUEST TOOLS'
+          [[ "${KINO_TAG}" =~ ^kino/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
+          mkdir -p "${RUNNER_TEMP}/guest-tools"
+          printf 'TOOLS_DIR=%s/guest-tools\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+
+      - name: Checkout deployment revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify published Kino source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "${KINO_TAG}" --json isDraft,isPrerelease \
+            | jq -e '.isDraft == false and .isPrerelease == false' >/dev/null
+          test "$(git cat-file -t "refs/tags/${KINO_TAG}")" = tag
+          source_sha="$(git rev-parse "refs/tags/${KINO_TAG}^{commit}")"
+          git merge-base --is-ancestor "${source_sha}" "${GITHUB_SHA}"
+          git worktree add --detach "${RUNNER_TEMP}/kino-source" "${source_sha}"
+          jq -n --arg tag "${KINO_TAG}" --arg source "${source_sha}" \
+            --arg workflow "${GITHUB_SHA}" \
+            '{tag: $tag, source_sha: $source, workflow_sha: $workflow, profile: "guest", target: "x86_64-unknown-linux-musl"}' \
+            > "${TOOLS_DIR}/provenance.json"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
+
+      - name: Set up Rust cache
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
+        with:
+          cache: rust
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
+        with:
+          tool: cargo-zigbuild@0.23.0
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      - name: Verify runner disk tools
+        run: |
+          test -x /usr/sbin/mke2fs
+          command -v zstd
+
+      - name: Build guest Kino and tools disk
+        run: |
+          set -euo pipefail
+          cargo zigbuild --locked --manifest-path "${RUNNER_TEMP}/kino-source/Cargo.toml" \
+            --target-dir "${RUNNER_TEMP}/kino-target" \
+            -p kino --profile guest --target x86_64-unknown-linux-musl
+          cp "${RUNNER_TEMP}/kino-target/x86_64-unknown-linux-musl/guest/kino" "${TOOLS_DIR}/kino"
+          cargo run --locked -p intar-image-cli -- build-guest-tools \
+            --kino-binary "${TOOLS_DIR}/kino" --output-root "${TOOLS_DIR}" \
+            --mke2fs-binary /usr/sbin/mke2fs > "${TOOLS_DIR}/build.json"
+          jq 'del(.compressed_disk_path)' "${TOOLS_DIR}/build.json" > "${TOOLS_DIR}/candidate.json"
+          jq -e '.schema_version == 1 and .bootstrap_abi == 1' "${TOOLS_DIR}/candidate.json" >/dev/null
+          cd "${TOOLS_DIR}"
+          disk="$(jq -r .tools_disk_sha256 candidate.json)"
+          jq -r '"\(.kino_sha256)  kino", "\(.tools_disk_sha256)  \(.tools_disk_sha256).ext4", "\(.compressed_disk_sha256)  \(.tools_disk_sha256).ext4.zst"' \
+            candidate.json > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          zstd --decompress --stdout "${disk}.ext4.zst" | sha256sum | cut -d ' ' -f 1 | diff - <(printf '%s\n' "${disk}")
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: apps/web/.node-version
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install pinned Wrangler
+        run: bun install --frozen-lockfile
+
+      - name: Require drained host and retain previous stable pin
+        working-directory: apps/web
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 30 \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            https://intar.dev/registry/v1/cutover/gate \
+            | jq -e '.state == "drained" and .active_desired_vms == 0' >/dev/null
+          bunx wrangler r2 object get "${BUCKET}/guest-tools/scenario/stable.json" \
+            --remote --jurisdiction eu --file "${TOOLS_DIR}/previous-stable.json"
+
+      - name: Retain rollback pin before publication
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: guest-tools-rollback-${{ github.run_id }}
+          path: ${{ runner.temp }}/guest-tools/previous-stable.json
+          if-no-files-found: error
+
+      - name: Upload candidate objects
+        working-directory: apps/web
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
+          kino="$(jq -r .kino_sha256 "${TOOLS_DIR}/candidate.json")"
+          bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/disks/${disk}.ext4.zst" \
+            --remote --jurisdiction eu --file "${TOOLS_DIR}/${disk}.ext4.zst"
+          bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/kino/${kino}/kino" \
+            --remote --jurisdiction eu --file "${TOOLS_DIR}/kino"
+          bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/candidate.json" \
+            --remote --jurisdiction eu --file "${TOOLS_DIR}/candidate.json" --content-type application/json
+
+      - name: Verify uploaded content and prepare host cache
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          candidate_sha="$(sha256sum "${TOOLS_DIR}/candidate.json" | cut -d ' ' -f 1)"
+          curl --fail --silent --show-error --max-time 60 --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "x-intar-candidate-sha256: ${candidate_sha}" \
+            https://intar.dev/registry/v1/guest-tools/warm > "${TOOLS_DIR}/warm.json"
+          disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
+          jq -e --arg disk "${disk}" '.ok == true and .candidate.tools_disk_sha256 == $disk and (.warmed_host_ids | length > 0)' \
+            "${TOOLS_DIR}/warm.json" >/dev/null
+          for _ in $(seq 1 24); do
+            curl --fail --silent --show-error --max-time 30 \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=candidate" > "${TOOLS_DIR}/cache.json"
+            if jq -e --arg disk "${disk}" '
+              .ok == true and .guest_tools.tools_disk_sha256 == $disk and (.hosts | length > 0) and
+              all(.hosts[]; .ready == true and .desired_guest_tools_ready == true and .actual_guest_tools_ready == true)
+            ' "${TOOLS_DIR}/cache.json" >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Candidate host cache did not become ready.' >&2
+          exit 1
+
+      - name: Promote exact candidate while drained
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          candidate_sha="$(sha256sum "${TOOLS_DIR}/candidate.json" | cut -d ' ' -f 1)"
+          curl --fail --silent --show-error --max-time 30 \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            https://intar.dev/registry/v1/cutover/gate \
+            | jq -e '.state == "drained" and .active_desired_vms == 0' >/dev/null
+          curl --fail --silent --show-error --max-time 60 --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "x-intar-candidate-sha256: ${candidate_sha}" \
+            https://intar.dev/registry/v1/guest-tools/promote > "${TOOLS_DIR}/promotion.json"
+          disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
+          jq -e --arg disk "${disk}" '.ok == true and .stable.tools_disk_sha256 == $disk' \
+            "${TOOLS_DIR}/promotion.json" >/dev/null
+          curl --fail --silent --show-error --max-time 30 \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" > "${TOOLS_DIR}/stable.json"
+          jq -e --arg disk "${disk}" '.ok == true and .tools_channel == "stable" and .guest_tools.tools_disk_sha256 == $disk' \
+            "${TOOLS_DIR}/stable.json" >/dev/null
+
+      - name: Retain build and deployment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: guest-tools-deployment-${{ github.run_id }}
+          path: ${{ runner.temp }}/guest-tools/
+          if-no-files-found: error
