@@ -59,6 +59,7 @@ interface AgentImageIndexEntry {
 }
 
 const IMAGE_INDEX_CONCURRENCY = 4;
+type RegistryHeadCache = Map<string, Promise<R2Object | null>>;
 
 export async function handleAgentBundleDownload(
   request: Request,
@@ -236,7 +237,8 @@ export async function handleAgentImageIndex(
     })),
   ];
   const byKey = new Map<string, AgentImageIndexEntry>();
-  await addChunkedImageIndexEntries(byKey, env, sources);
+  const headCache: RegistryHeadCache = new Map();
+  await addChunkedImageIndexEntries(byKey, env, sources, headCache);
 
   return jsonResponse({
     images: [...byKey.values()].sort((a, b) =>
@@ -249,12 +251,11 @@ async function addChunkedImageIndexEntry(
   byKey: Map<string, AgentImageIndexEntry>,
   env: Cloudflare.Env,
   source: AgentChunkedImageIndexSource,
+  headCache: RegistryHeadCache,
 ): Promise<void> {
   if (!isImageKey(source.imageKey)) return;
   const imageId = normalizeSha256(source.imageId ?? "");
-  const chunkManifestSha256 = normalizeSha256(
-    source.chunkManifestSha256 ?? "",
-  );
+  const chunkManifestSha256 = normalizeSha256(source.chunkManifestSha256 ?? "");
   const kernelSha256 = normalizeSha256(source.kernelSha256 ?? "");
   const initrdSha256 = normalizeSha256(source.initrdSha256 ?? "");
   const bootCmdline = source.bootCmdline?.trim() ?? "";
@@ -286,14 +287,16 @@ async function addChunkedImageIndexEntry(
   ) {
     return;
   }
-  const object = await env.VM_IMAGE_REGISTRY_BUCKET.head(
+  const object = await registryObjectHead(
+    env,
+    headCache,
     imageManifestObjectKey(chunkManifestSha256),
   );
   if (
     !object ||
     object.customMetadata?.manifest_sha256 !== chunkManifestSha256 ||
     object.customMetadata?.image_id !== imageId ||
-    !(await bootArtifactsExist(env, [kernelSha256, initrdSha256]))
+    !(await bootArtifactsExist(env, [kernelSha256, initrdSha256], headCache))
   ) {
     return;
   }
@@ -320,26 +323,38 @@ async function addChunkedImageIndexEntries(
   byKey: Map<string, AgentImageIndexEntry>,
   env: Cloudflare.Env,
   sources: AgentChunkedImageIndexSource[],
+  headCache: RegistryHeadCache,
 ): Promise<void> {
   const groups = groupChunkedImageIndexSources(sources);
-  for (
-    let offset = 0;
-    offset < groups.length;
-    offset += IMAGE_INDEX_CONCURRENCY
-  ) {
-    const entries = await Promise.all(
-      groups
-        .slice(offset, offset + IMAGE_INDEX_CONCURRENCY)
-        .map(async (group) => {
+  const entriesByGroup: Array<Map<string, AgentImageIndexEntry> | undefined> =
+    Array(groups.length);
+  let nextGroup = 0;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(IMAGE_INDEX_CONCURRENCY, groups.length) },
+      async () => {
+        for (;;) {
+          const groupIndex = nextGroup++;
+          const group = groups[groupIndex];
+          if (!group) return;
           const groupEntries = new Map<string, AgentImageIndexEntry>();
           for (const source of group) {
-            await addChunkedImageIndexEntry(groupEntries, env, source);
+            await addChunkedImageIndexEntry(
+              groupEntries,
+              env,
+              source,
+              headCache,
+            );
           }
-          return groupEntries;
-        }),
-    );
-    for (const groupEntries of entries) {
-      for (const [identity, entry] of groupEntries) byKey.set(identity, entry);
+          entriesByGroup[groupIndex] = groupEntries;
+        }
+      },
+    ),
+  );
+  for (const groupEntries of entriesByGroup) {
+    if (!groupEntries) continue;
+    for (const [identity, entry] of groupEntries) {
+      byKey.set(identity, entry);
     }
   }
 }
@@ -378,9 +393,7 @@ async function loadDesiredCandidateVms(
     (desiredRows[0]?.docJson.cached_images ?? []).flatMap((image) => {
       if (!isImageKey(image.image_key)) return [];
       const imageId = normalizeSha256(image.image_id);
-      return imageId
-        ? [`${registryImageKey(image.image_key)}:${imageId}`]
-        : [];
+      return imageId ? [`${registryImageKey(image.image_key)}:${imageId}`] : [];
     }),
   );
   if (desiredImages.size === 0) return [];
@@ -420,16 +433,40 @@ async function loadDesiredCandidateVms(
 export async function bootArtifactsExist(
   env: Cloudflare.Env,
   sha256s: string[],
+  headCache: RegistryHeadCache = new Map(),
 ): Promise<boolean> {
   const objectKeys = [...new Set(sha256s.map(artifactObjectKey))];
-  const heads = await Promise.all(
-    objectKeys.map((objectKey) => env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey)),
+  const objects = await Promise.all(
+    objectKeys.map((objectKey) =>
+      registryObjectHead(env, headCache, objectKey),
+    ),
   );
-  return heads.every((head, index) => {
+  return objects.every((head, index) => {
     const objectKey = objectKeys[index];
     const sha256 = objectKey?.slice("artifacts/".length) ?? "";
     return bootArtifactObjectMatchesSha(head, sha256);
   });
+}
+
+function registryObjectHead(
+  env: Cloudflare.Env,
+  headCache: RegistryHeadCache,
+  objectKey: string,
+): Promise<R2Object | null> {
+  const cached = headCache.get(objectKey);
+  if (cached) return cached;
+  const head = env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey);
+  headCache.set(objectKey, head);
+  void head.then(
+    (object) => {
+      if (!object && headCache.get(objectKey) === head)
+        headCache.delete(objectKey);
+    },
+    () => {
+      if (headCache.get(objectKey) === head) headCache.delete(objectKey);
+    },
+  );
+  return head;
 }
 
 export function imageObjectMatchesSha<
