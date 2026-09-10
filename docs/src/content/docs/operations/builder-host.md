@@ -337,23 +337,43 @@ frozen cold and warm results.
 
 The separate late-step median is `238,939 ms`, compared with the `314,852 ms`
 baseline. It uses 24.1107% less time, or is 1.3177 times as fast. It is not a
-cold or warm full-catalog gate. Final 13-scenario proofs and production
-activation remain pending.
+cold or warm full-catalog gate.
 
 No comparable before-and-after boot measurement exists for this cohort. Do not
 claim faster boots.
 
-The late-step window ended at `2026-09-10T10:24:37.033Z`. The candidate builder
-is off with zero jobs. The production builder is inactive and disabled, as
-confirmed at `2026-09-10T10:26:17Z`. The remaining c3 and final 13-scenario
-live proof is blocked only because the browser panel is unavailable. The exact
-13 c3 build IDs are verified against its build window. Live candidate
-availability and scenario behavior still require verification. Do not activate
-production.
+Final verification of the third empty-cache candidate build (C3) passed all
+26 work-order and published-solution comparisons. All seven build credential
+paths were absent from each of its 13 published image root disks. A fresh drain
+completed at `2026-09-10T14:31:46Z` with zero desired VMs.
 
-The final scenario proof must verify that all seven build credential paths are
-absent. The check must reject symbolic links and must not read credential
-contents.
+All 13 candidate scenarios completed fresh Cloud Hypervisor starts, initial
+fault checks, published solutions, final checks, main-run replay, reset checks,
+and deletion.
+
+The OCI layer and VM checkpoint builder is installed as `intar-builder 0.10.1`
+with `intar-image-cli 0.6.1`. [Canonical catalog promotion](https://github.com/intar-dev/intar-dev/actions/runs/34492053933)
+succeeded at `2026-09-10T14:54:04Z` with `main` revision
+`a6812ca8b0ac7f51ebe08bace909e22b2d8f3f67`. It selected
+`scenarios-aa057325eff8c2701e4a8957c52cffd3171b8f85`.
+
+[A normal republish](https://github.com/intar-dev/scenarios/actions/runs/34491886645)
+completed with all 13 images in `Ready`. It reused the existing canonical image
+IDs and guest tool pins. These image IDs differ from the C3 candidate IDs.
+The `intar-agent 0.12.12` package is installed. It protects required guest-tools
+disks from cache eviction and prepares them before scenario image refresh.
+Its offline self-test, doctor, running process hashes, service health, and stable
+tools checks passed. [Scenario scheduling was enabled](https://github.com/intar-dev/intar-dev/actions/runs/34497076945)
+at `2026-09-10T15:40:43Z`.
+
+A normal Broken Nginx learner run then passed the expected initial faults,
+published solution, all four final checks, HTTP, and the runtime credential
+check. Its recording was verified and the test run was deleted. The learner
+host had zero VM rows and archive jobs at `2026-09-10T15:46:11Z`.
+
+Some candidate rollout and HTTP checks needed a repeat after convergence. One
+fresh candidate run lacks raw terminal recording despite an acknowledged
+archive and a passed main replay.
 
 Run the deployed private workflow
 `intar-dev/scenarios/.github/workflows/image-build-benchmark.yml` with these

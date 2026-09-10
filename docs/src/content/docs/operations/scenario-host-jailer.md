@@ -190,3 +190,9 @@ Keep the host unschedulable on any hash, seccomp, Landlock, cgroup, accounting,
 template, or helper failure. Preserve current state and capacity accounting
 while preparing a forward fix; never enable a reduced-isolation, steady-only,
 copy-based, or direct-spawn launch path.
+
+The `intar-agent 0.12.11` package includes the jailerd traversal ACL fix from
+[PR 160](https://github.com/intar-dev/intar-dev/pull/160).
+When image preparation validates an existing shared lifecycle directory,
+jailerd preserves the agent traversal ACL. It still rejects writable lifecycle
+directories and does not grant broad directory access.
