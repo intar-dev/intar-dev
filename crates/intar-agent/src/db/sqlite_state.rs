@@ -268,6 +268,25 @@ ORDER BY image_sha256 ASC;
         .context("collect local vm image shas")
 }
 
+pub(super) fn load_local_vm_guest_tools_jsons(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+SELECT DISTINCT guest_tools_json
+FROM vms
+WHERE guest_tools_json IS NOT NULL
+  AND guest_tools_json <> ''
+ORDER BY guest_tools_json ASC;
+"#,
+        )
+        .context("prepare load local vm guest-tools query")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query local vm guest-tools")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect local vm guest-tools")
+}
+
 #[cfg(test)]
 pub(super) fn delete_image_cache_access(conn: &Connection, image_sha256: &str) -> Result<()> {
     conn.execute(

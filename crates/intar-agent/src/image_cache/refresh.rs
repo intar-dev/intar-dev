@@ -21,6 +21,7 @@ pub(super) async fn run_cache_refresh_cycle(
     context: CacheRefreshContext<'_>,
     scope: CacheRefreshScope,
 ) {
+    warm_desired_guest_tools(context).await;
     let advertised_images =
         match list_registry_images(context.registry, context.bridge, context.client).await {
             Ok(images) => images,
@@ -43,9 +44,6 @@ pub(super) async fn run_cache_refresh_cycle(
             registry = %redact_url_userinfo(&context.registry.url),
             "image registry did not advertise any raw_chunks_v1 images"
         );
-        // The guest-tools disk is independent of scenario images and must be
-        // warmable before the flag-day catalog switch. Continue through the
-        // empty image phase so desired guest-tool pins are still processed.
     } else {
         info!(
             cache_root = %context.cache_root.display(),
@@ -59,6 +57,12 @@ pub(super) async fn run_cache_refresh_cycle(
     }
 
     run_selected_image_refreshes(images, context).await;
+    info!("image cache refresh finished");
+    if let Some(db) = context.db
+        && let Err(error) = evict_cache_if_needed(context.cache, db, context.cache_root).await
+    {
+        warn!(error = %error, cache_root = %context.cache_root.display(), "image cache eviction failed");
+    }
 }
 
 async fn run_selected_image_refreshes(
@@ -133,7 +137,9 @@ async fn run_selected_image_refreshes(
     for handle in handles {
         let _ = handle.await;
     }
+}
 
+async fn warm_desired_guest_tools(context: CacheRefreshContext<'_>) {
     if let Some(db) = context.db
         && let Ok(Some(row)) = db.load_desired_state().await
         && let Ok(desired) =
@@ -163,13 +169,6 @@ async fn run_selected_image_refreshes(
                 warn!(error = %error, tools_disk_sha256 = %pin.tools_disk_sha256, "failed to warm guest tools disk");
             }
         }
-    }
-
-    info!("image cache refresh finished");
-    if let Some(db) = context.db
-        && let Err(error) = evict_cache_if_needed(context.cache, db, context.cache_root).await
-    {
-        warn!(error = %error, cache_root = %context.cache_root.display(), "image cache eviction failed");
     }
 }
 

@@ -107,6 +107,9 @@ pub(super) fn db_thread_main(
             Op::LoadLocalVmImageShas { resp } => {
                 let _ = resp.send(load_local_vm_image_shas(&conn));
             }
+            Op::LoadLocalVmGuestToolsJsons { resp } => {
+                let _ = resp.send(load_local_vm_guest_tools_jsons(&conn));
+            }
             #[cfg(test)]
             Op::DeleteImageCacheAccess { image_sha256, resp } => {
                 let _ = resp.send(delete_image_cache_access(&conn, &image_sha256));

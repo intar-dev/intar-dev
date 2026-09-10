@@ -135,6 +135,10 @@ fn upsert_vm_persists_row_with_ssh_public_port() {
         load_local_vm_image_shas(&conn).expect("load vm image shas"),
         vec![image_sha]
     );
+    assert_eq!(
+        load_local_vm_guest_tools_jsons(&conn).expect("load vm guest-tools"),
+        row.guest_tools_json.into_iter().collect::<Vec<_>>()
+    );
 }
 
 #[test]
