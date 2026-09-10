@@ -167,6 +167,9 @@ enum Op {
     LoadLocalVmImageShas {
         resp: oneshot::Sender<Result<Vec<String>>>,
     },
+    LoadLocalVmGuestToolsJsons {
+        resp: oneshot::Sender<Result<Vec<String>>>,
+    },
     #[cfg(test)]
     #[allow(dead_code)]
     DeleteImageCacheAccess {
@@ -462,6 +465,18 @@ impl Db {
         resp_rx
             .await
             .context("db thread dropped local vm image sha load response")?
+    }
+
+    pub async fn load_local_vm_guest_tools_jsons(&self) -> Result<Vec<String>> {
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<String>>>();
+        self.tx
+            .send(Op::LoadLocalVmGuestToolsJsons { resp: resp_tx })
+            .await
+            .context("db channel closed")?;
+
+        resp_rx
+            .await
+            .context("db thread dropped local vm guest-tools load response")?
     }
 
     #[cfg(test)]
