@@ -479,6 +479,7 @@ use chunked::ensure_cached_chunked_image_entry;
 pub(crate) use chunked::{
     ToolsDiskVerification, ensure_cached_tools_disk, mark_template_ready,
     require_ready_image_launch, touch_cached_image, verified_cached_image_metadata,
+    verify_cached_tools_disk,
 };
 mod refresh;
 use refresh::*;

@@ -278,25 +278,23 @@ pub(super) async fn build_host_state_report(
     let (reported_capabilities, reported_cached_images, reported_cached_guest_tools) =
         if inspect_runtime {
             let capabilities = collect_host_capabilities(attested_jailer.as_ref());
-            let (cached_images, cached_guest_tools) = desired
-                .map(|state| {
-                    let cache_root = crate::image_cache::default_cache_root().ok();
-                    let images = cached_image_states(
-                        state,
-                        now,
-                        attested_jailer.as_ref().is_some_and(|capabilities| {
-                            capabilities.supports_template_backed_launch
-                                && capabilities.fast_template_store
-                        }),
-                    );
-                    let tools = cached_guest_tools_states_with_cache_root(
-                        state,
-                        now,
-                        cache_root.as_deref(),
-                    );
-                    (images, tools)
-                })
-                .unwrap_or_default();
+            let (cached_images, cached_guest_tools) = if let Some(state) = desired {
+                let cache_root = crate::image_cache::default_cache_root().ok();
+                let images = cached_image_states(
+                    state,
+                    now,
+                    attested_jailer.as_ref().is_some_and(|capabilities| {
+                        capabilities.supports_template_backed_launch
+                            && capabilities.fast_template_store
+                    }),
+                );
+                let tools =
+                    cached_guest_tools_states_with_cache_root(state, now, cache_root.as_deref())
+                        .await;
+                (images, tools)
+            } else {
+                (Vec::new(), Vec::new())
+            };
             *report_cache.host_capabilities.write().await = capabilities.clone();
             *report_cache.cached_images.write().await = cached_images.clone();
             *report_cache.cached_guest_tools.write().await = cached_guest_tools.clone();
@@ -841,57 +839,37 @@ pub(super) fn cached_image_states_with_cache_root(
         .collect()
 }
 
-pub(super) fn cached_guest_tools_states_with_cache_root(
+pub(super) async fn cached_guest_tools_states_with_cache_root(
     desired: &HostDesiredStateV2,
     now: i64,
     cache_root: Option<&Path>,
 ) -> Vec<CachedGuestToolsStateV1> {
-    desired
-        .cached_guest_tools
-        .iter()
-        .map(|pin| {
-            let path = cache_root.map(|root| {
-                root.join("tools")
-                    .join(format!("{}.ext4", pin.tools_disk_sha256))
-            });
-            let metadata = path.as_deref().and_then(|path| {
-                let metadata = fs::metadata(path).ok()?;
-                (metadata.is_file()
-                    && metadata.len() == pin.tools_disk_size_bytes
-                    && sha256_file_for_report(path).as_deref()
-                        == Some(pin.tools_disk_sha256.as_str()))
-                .then_some(metadata)
-            });
-            CachedGuestToolsStateV1 {
-                guest_tools: pin.clone(),
-                phase: if metadata.is_some() {
-                    ImageCachePhase::Ready
-                } else {
-                    ImageCachePhase::Missing
-                },
-                bytes_on_disk: metadata.map(|value| value.len()),
-                error: None,
-                updated_at_unix_ms: now,
+    let mut states = Vec::with_capacity(desired.cached_guest_tools.len());
+    for pin in &desired.cached_guest_tools {
+        let ready = match cache_root {
+            Some(root) => {
+                crate::image_cache::verify_cached_tools_disk(
+                    root,
+                    &pin.tools_disk_sha256,
+                    pin.tools_disk_size_bytes,
+                )
+                .await
             }
-        })
-        .collect()
-}
-
-fn sha256_file_for_report(path: &Path) -> Option<String> {
-    use sha2::{Digest as _, Sha256};
-    use std::io::Read as _;
-
-    let mut file = fs::File::open(path).ok()?;
-    let mut buffer = [0_u8; 1024 * 1024];
-    let mut hasher = Sha256::new();
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
+            None => false,
+        };
+        states.push(CachedGuestToolsStateV1 {
+            guest_tools: pin.clone(),
+            phase: if ready {
+                ImageCachePhase::Ready
+            } else {
+                ImageCachePhase::Missing
+            },
+            bytes_on_disk: ready.then_some(pin.tools_disk_size_bytes),
+            error: None,
+            updated_at_unix_ms: now,
+        });
     }
-    Some(base16ct::lower::encode_string(&hasher.finalize()))
+    states
 }
 
 pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> HostCapabilitiesV2 {

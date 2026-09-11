@@ -402,7 +402,7 @@ pub(crate) async fn ensure_cached_tools_disk(
     let directory = cache_root.join("tools");
     tokio::fs::create_dir_all(&directory).await?;
     let raw_path = directory.join(format!("{sha256}.ext4"));
-    if let Some(verified) = probe_cached_tools_disk(
+    if probe_cached_tools_disk(
         &mut state,
         &raw_path,
         &sha256,
@@ -410,8 +410,9 @@ pub(crate) async fn ensure_cached_tools_disk(
         verification,
     )
     .await
+    .is_some()
     {
-        return Ok(verified);
+        return Ok(raw_path);
     }
     // The published disk is missing, replaced, or corrupt. Rebuild it from the
     // registry and verify the descriptor that is actually published.
@@ -453,7 +454,7 @@ pub(crate) async fn ensure_cached_tools_disk(
         let _ = tokio::fs::remove_file(&raw_temporary).await;
         return Err(error).context("publish verified tools disk");
     }
-    match probe_cached_tools_disk(
+    if probe_cached_tools_disk(
         &mut state,
         &raw_path,
         &sha256,
@@ -461,44 +462,80 @@ pub(crate) async fn ensure_cached_tools_disk(
         ToolsDiskVerification::Full,
     )
     .await
+    .is_some()
     {
-        Some(published) => Ok(published),
-        None => {
-            let _ = tokio::fs::remove_file(&raw_path).await;
-            anyhow::bail!("published guest tools disk failed digest verification");
-        }
+        return Ok(raw_path);
+    }
+    let _ = tokio::fs::remove_file(&raw_path).await;
+    anyhow::bail!("published guest tools disk failed digest verification");
+}
+
+/// Read-only cache query used by host state reporting.
+///
+/// Reporting never downloads, removes, or repairs anything. When another cache
+/// operation holds the entry lock, the disk is still verified from its own
+/// descriptor instead of waiting: the lock spans registry download and decode,
+/// while full reports run on the bridge receive path.
+pub(crate) async fn verify_cached_tools_disk(
+    cache_root: &Path,
+    tools_disk_sha256: &str,
+    tools_disk_size_bytes: u64,
+) -> bool {
+    let Some(sha256) = normalize_sha256(tools_disk_sha256) else {
+        return false;
+    };
+    if tools_disk_size_bytes != 64 * 1024 * 1024 {
+        return false;
+    }
+    let raw_path = cache_root.join("tools").join(format!("{sha256}.ext4"));
+    let lock = cache_entry_lock(cache_root, format!("tools:{sha256}")).await;
+    match lock.try_lock() {
+        Ok(mut state) => probe_cached_tools_disk(
+            &mut state,
+            &raw_path,
+            &sha256,
+            tools_disk_size_bytes,
+            ToolsDiskVerification::ReuseVerified,
+        )
+        .await
+        .is_some(),
+        Err(_) => hash_tools_disk_identity(&raw_path, &sha256, tools_disk_size_bytes)
+            .await
+            .is_some(),
     }
 }
 
-/// Verify the cached tools disk under the process cache-entry lock and return
-/// its path, or `None` when the caller must repair it.
+/// Verify the cached tools disk under the process cache-entry lock, or `None`
+/// when the caller must repair it.
 async fn probe_cached_tools_disk(
     state: &mut CacheEntryState,
     raw_path: &Path,
     expected_sha256: &str,
     size_bytes: u64,
     verification: ToolsDiskVerification,
-) -> Option<PathBuf> {
+) -> Option<()> {
     if verification == ToolsDiskVerification::ReuseVerified
         && let Some(recorded) = state.verified_tools_disk
         && let Some((_descriptor, identity)) = open_tools_disk_file(raw_path, size_bytes)
         && identity == recorded.identity
         && path_names_tools_disk(raw_path, identity)
     {
-        return Some(raw_path.to_path_buf());
+        return Some(());
     }
-    hash_and_record_tools_disk(state, raw_path, expected_sha256, size_bytes).await
+    state.verified_tools_disk = None;
+    let identity = hash_tools_disk_identity(raw_path, expected_sha256, size_bytes).await?;
+    state.verified_tools_disk = Some(VerifiedToolsDisk { identity });
+    Some(())
 }
 
-/// Hash the opened descriptor, record it only when its identity survived the
-/// read, and return the path. Any failure clears the record.
-async fn hash_and_record_tools_disk(
-    state: &mut CacheEntryState,
+/// Hash the opened descriptor and return its identity when the digest matched
+/// and the identity survived the read. This does not touch cache state:
+/// callers decide what a verification record may be published from.
+async fn hash_tools_disk_identity(
     raw_path: &Path,
     expected_sha256: &str,
     size_bytes: u64,
-) -> Option<PathBuf> {
-    state.verified_tools_disk = None;
+) -> Option<ToolsDiskFileIdentity> {
     let (descriptor, before) = open_tools_disk_file(raw_path, size_bytes)?;
     let mut file = tokio::fs::File::from_std(descriptor);
     let actual = sha256_open_file(&mut file, raw_path).await.ok()?;
@@ -506,19 +543,24 @@ async fn hash_and_record_tools_disk(
     if actual != expected_sha256 || before != after || !path_names_tools_disk(raw_path, after) {
         return None;
     }
-    state.verified_tools_disk = Some(VerifiedToolsDisk { identity: after });
-    Some(raw_path.to_path_buf())
+    Some(after)
 }
 
 /// Open a candidate tools disk without following a final symlink and require a
 /// regular file of the expected size.
+///
+/// Nonblocking so a FIFO planted at the cache path fails the descriptor check
+/// instead of stalling the opener.
 fn open_tools_disk_file(
     raw_path: &Path,
     size_bytes: u64,
 ) -> Option<(std::fs::File, ToolsDiskFileIdentity)> {
     let descriptor = rustix::fs::open(
         raw_path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
         rustix::fs::Mode::empty(),
     )
     .ok()?;

@@ -160,6 +160,16 @@ async fn ensure_cached_tools_disk_repairs_in_place_corruption_with_restored_mtim
         file.set_modified(modified)?;
     }
 
+    assert!(
+        !verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
+    assert_eq!(registry.requests(), 1);
+    // Reporting is read-only: the corrupt bytes are still in place.
+    let mut header = [0u8; 8];
+    std::fs::File::open(&path)?.read_exact(&mut header)?;
+    assert_eq!(&header, b"CORRUPT!");
+
     let repaired = ensure(
         &registry,
         cache_root.path(),
@@ -174,6 +184,10 @@ async fn ensure_cached_tools_disk_repairs_in_place_corruption_with_restored_mtim
         assert_published_disk(&registry, cache_root.path()).await?
     );
     assert_eq!(registry.requests(), 2);
+    assert!(
+        verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
     Ok(())
 }
 
@@ -195,6 +209,16 @@ async fn ensure_cached_tools_disk_repairs_an_atomically_replaced_disk() -> Resul
     std::fs::write(&replacement, vec![0u8; TOOLS_DISK_BYTES])?;
     std::fs::rename(&replacement, &path)?;
 
+    assert!(
+        !verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
+    assert_eq!(registry.requests(), 1);
+    // Reporting is read-only: the zero replacement is still published.
+    let mut prefix = [0u8; 8];
+    std::fs::File::open(&path)?.read_exact(&mut prefix)?;
+    assert_eq!(prefix, [0u8; 8]);
+
     let repaired = ensure(
         &registry,
         cache_root.path(),
@@ -209,6 +233,10 @@ async fn ensure_cached_tools_disk_repairs_an_atomically_replaced_disk() -> Resul
         assert_published_disk(&registry, cache_root.path()).await?
     );
     assert_eq!(registry.requests(), 2);
+    assert!(
+        verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
     Ok(())
 }
 
@@ -228,6 +256,14 @@ async fn ensure_cached_tools_disk_rebuilds_a_missing_disk() -> Result<()> {
 
     std::fs::remove_file(&path)?;
 
+    assert!(
+        !verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
+    assert_eq!(registry.requests(), 1);
+    // Reporting is read-only: the disk is still absent.
+    assert!(std::fs::symlink_metadata(&path).is_err());
+
     let rebuilt = ensure(
         &registry,
         cache_root.path(),
@@ -242,6 +278,10 @@ async fn ensure_cached_tools_disk_rebuilds_a_missing_disk() -> Result<()> {
         assert_published_disk(&registry, cache_root.path()).await?
     );
     assert_eq!(registry.requests(), 2);
+    assert!(
+        verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
     Ok(())
 }
 
@@ -265,6 +305,15 @@ async fn ensure_cached_tools_disk_rejects_a_symlinked_disk_without_touching_its_
     std::fs::rename(&path, &displaced)?;
     std::os::unix::fs::symlink(&displaced, &path)?;
 
+    assert!(
+        !verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
+    assert_eq!(registry.requests(), 1);
+    // Reporting is read-only: the link and its valid target are untouched.
+    assert!(std::fs::symlink_metadata(&path)?.file_type().is_symlink());
+    assert_eq!(sha256_file(&displaced).await?, registry.sha256);
+
     let rebuilt = ensure(
         &registry,
         cache_root.path(),
@@ -279,6 +328,10 @@ async fn ensure_cached_tools_disk_rejects_a_symlinked_disk_without_touching_its_
     // Repair removes the link, never the verified file it pointed at.
     assert_eq!(sha256_file(&displaced).await?, registry.sha256);
     assert_eq!(registry.requests(), 2);
+    assert!(
+        verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
     Ok(())
 }
 
@@ -324,5 +377,67 @@ async fn ensure_cached_tools_disk_serves_concurrent_callers_from_one_verificatio
         assert_published_disk(&registry, cache_root.path()).await?
     );
     assert_eq!(registry.requests(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn verify_cached_tools_disk_does_not_wait_for_repair() -> Result<()> {
+    ensure_ring_provider()?;
+    let registry = ToolsDiskRegistry::start()?;
+    let cache_root = tempfile::tempdir()?;
+    let client = reqwest::Client::new();
+    let path = ensure(
+        &registry,
+        cache_root.path(),
+        &client,
+        ToolsDiskVerification::ReuseVerified,
+    )
+    .await?;
+
+    // Hold the real cache-entry lock as deterministic setup for an in-progress
+    // cache operation; a report must verify from the file, never wait on it.
+    let lock = cache_entry_lock(cache_root.path(), format!("tools:{}", registry.sha256)).await;
+    let guard = lock.lock().await;
+
+    let verified = tokio::time::timeout(
+        Duration::from_secs(10),
+        verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64),
+    )
+    .await
+    .expect("valid verification must not wait for the cache-entry lock");
+    assert!(verified);
+    assert_eq!(registry.requests(), 1);
+
+    let modified = std::fs::metadata(&path)?.modified()?;
+    {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path)?;
+        file.write_all(b"CORRUPT!")?;
+        file.set_modified(modified)?;
+    }
+
+    let verified = tokio::time::timeout(
+        Duration::from_secs(10),
+        verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64),
+    )
+    .await
+    .expect("corrupt verification must not wait for the cache-entry lock");
+    assert!(!verified);
+    assert_eq!(registry.requests(), 1);
+
+    drop(guard);
+
+    let repaired = ensure(
+        &registry,
+        cache_root.path(),
+        &client,
+        ToolsDiskVerification::ReuseVerified,
+    )
+    .await?;
+    assert_eq!(repaired, path);
+    assert_eq!(
+        repaired,
+        assert_published_disk(&registry, cache_root.path()).await?
+    );
+    assert_eq!(registry.requests(), 2);
     Ok(())
 }

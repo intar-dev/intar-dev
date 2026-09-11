@@ -641,6 +641,96 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
     );
 }
 
+#[tokio::test]
+async fn cached_guest_tools_reports_verified_readiness() {
+    const DISK_BYTES: u64 = 64 * 1024 * 1024;
+    let zero_disk_sha256 = {
+        let mut hasher = sha2::Sha256::new();
+        let zeros = [0u8; 64 * 1024];
+        for _ in 0..(DISK_BYTES / zeros.len() as u64) {
+            hasher.update(zeros);
+        }
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cache_root = temp.path().join("cache");
+    let mut valid = desired_vm().guest_tools;
+    valid.tools_disk_sha256 = zero_disk_sha256.to_ascii_uppercase();
+    let mut absent = valid.clone();
+    absent.tools_disk_sha256 = "3".repeat(64);
+    absent.kino_sha256 = "4".repeat(64);
+    let mut desired = empty_desired_state(1);
+    desired.cached_guest_tools = vec![valid.clone(), absent.clone()];
+
+    // A missing cache root reports every pin Missing and creates nothing.
+    let states = cached_guest_tools_states_with_cache_root(&desired, 111, Some(&cache_root)).await;
+    assert_eq!(states.len(), 2);
+    assert!(
+        states
+            .iter()
+            .all(|state| state.phase == ImageCachePhase::Missing)
+    );
+    assert!(states.iter().all(|state| state.bytes_on_disk.is_none()));
+    assert!(states.iter().all(|state| state.error.is_none()));
+    assert!(states.iter().all(|state| state.updated_at_unix_ms == 111));
+    assert!(
+        !cache_root.exists(),
+        "reporting must not create cache state"
+    );
+
+    let without_root = cached_guest_tools_states_with_cache_root(&desired, 111, None).await;
+    assert_eq!(without_root, states);
+
+    let tools_dir = cache_root.join("tools");
+    std::fs::create_dir_all(&tools_dir).expect("tools cache dir");
+    let disk_path = tools_dir.join(format!("{zero_disk_sha256}.ext4"));
+    std::fs::File::create(&disk_path)
+        .expect("sparse tools disk")
+        .set_len(DISK_BYTES)
+        .expect("sparse length");
+
+    let states = cached_guest_tools_states_with_cache_root(&desired, 222, Some(&cache_root)).await;
+    assert_eq!(states[0].guest_tools, valid);
+    assert_eq!(states[0].phase, ImageCachePhase::Ready);
+    assert_eq!(states[0].bytes_on_disk, Some(DISK_BYTES));
+    assert_eq!(states[0].updated_at_unix_ms, 222);
+    assert_eq!(states[1].guest_tools, absent);
+    assert_eq!(states[1].phase, ImageCachePhase::Missing);
+    assert_eq!(states[1].bytes_on_disk, None);
+    assert_eq!(states[1].updated_at_unix_ms, 222);
+
+    // A later report keeps the readiness and advances the timestamp.
+    let states = cached_guest_tools_states_with_cache_root(&desired, 333, Some(&cache_root)).await;
+    assert_eq!(states[0].phase, ImageCachePhase::Ready);
+    assert_eq!(states[0].bytes_on_disk, Some(DISK_BYTES));
+    assert_eq!(states[0].updated_at_unix_ms, 333);
+    assert_eq!(states[1].updated_at_unix_ms, 333);
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&disk_path)
+        .expect("open tools disk")
+        .set_len(0)
+        .expect("truncated length");
+    let states = cached_guest_tools_states_with_cache_root(&desired, 444, Some(&cache_root)).await;
+    assert_eq!(states[0].phase, ImageCachePhase::Missing);
+    assert_eq!(states[0].bytes_on_disk, None);
+    // Reporting observes but never repairs or removes the cache entry.
+    assert_eq!(std::fs::metadata(&disk_path).expect("metadata").len(), 0);
+
+    let mut unpinned = empty_desired_state(1);
+    unpinned.cached_guest_tools = Vec::new();
+    assert!(
+        cached_guest_tools_states_with_cache_root(&unpinned, 555, Some(&cache_root))
+            .await
+            .is_empty()
+    );
+}
+
 #[test]
 fn desired_lease_duration_has_minimum_one_second() {
     let mut vm = desired_vm();
