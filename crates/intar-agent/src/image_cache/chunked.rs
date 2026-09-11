@@ -370,6 +370,19 @@ pub(crate) async fn touch_cached_image(db: &Db, image: &CachedChunkedImage) -> R
     .await
 }
 
+/// How thoroughly a cached guest tools disk must be verified before use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolsDiskVerification {
+    /// Reuse a recorded verification while the file identity is unchanged.
+    ///
+    /// Used on the launch path: the identity is an agent-cache hint, not a
+    /// substitute for the root-owned and guest-side integrity checks that
+    /// still run on the staged disk.
+    ReuseVerified,
+    /// Read the whole file even when its metadata is unchanged.
+    Full,
+}
+
 pub(crate) async fn ensure_cached_tools_disk(
     tools_disk_sha256: &str,
     tools_disk_size_bytes: u64,
@@ -377,6 +390,7 @@ pub(crate) async fn ensure_cached_tools_disk(
     bridge: Option<&BridgeConfig>,
     cache_root: &Path,
     client: &reqwest::Client,
+    verification: ToolsDiskVerification,
 ) -> Result<PathBuf> {
     let sha256 = normalize_sha256(tools_disk_sha256).context("invalid tools disk SHA-256")?;
     anyhow::ensure!(
@@ -384,16 +398,23 @@ pub(crate) async fn ensure_cached_tools_disk(
         "tools disk must be exactly 64 MiB"
     );
     let lock = cache_entry_lock(cache_root, format!("tools:{sha256}")).await;
-    let _guard = lock.lock().await;
+    let mut state = lock.lock().await;
     let directory = cache_root.join("tools");
     tokio::fs::create_dir_all(&directory).await?;
     let raw_path = directory.join(format!("{sha256}.ext4"));
-    if let Ok(metadata) = tokio::fs::metadata(&raw_path).await
-        && metadata.len() == tools_disk_size_bytes
-        && matches!(sha256_file(&raw_path).await, Ok(actual) if actual == sha256)
+    if let Some(verified) = probe_cached_tools_disk(
+        &mut state,
+        &raw_path,
+        &sha256,
+        tools_disk_size_bytes,
+        verification,
+    )
+    .await
     {
-        return Ok(raw_path);
+        return Ok(verified);
     }
+    // The published disk is missing, replaced, or corrupt. Rebuild it from the
+    // registry and verify the descriptor that is actually published.
     let _ = tokio::fs::remove_file(&raw_path).await;
     let compressed_path = directory.join(format!(".{sha256}.ext4.zst"));
     let (temporary, mut output) = create_tmp_file(&directory, "tools.ext4.zst").await?;
@@ -432,5 +453,122 @@ pub(crate) async fn ensure_cached_tools_disk(
         let _ = tokio::fs::remove_file(&raw_temporary).await;
         return Err(error).context("publish verified tools disk");
     }
-    Ok(raw_path)
+    match probe_cached_tools_disk(
+        &mut state,
+        &raw_path,
+        &sha256,
+        tools_disk_size_bytes,
+        ToolsDiskVerification::Full,
+    )
+    .await
+    {
+        Some(published) => Ok(published),
+        None => {
+            let _ = tokio::fs::remove_file(&raw_path).await;
+            anyhow::bail!("published guest tools disk failed digest verification");
+        }
+    }
+}
+
+/// Verify the cached tools disk under the process cache-entry lock and return
+/// its path, or `None` when the caller must repair it.
+async fn probe_cached_tools_disk(
+    state: &mut CacheEntryState,
+    raw_path: &Path,
+    expected_sha256: &str,
+    size_bytes: u64,
+    verification: ToolsDiskVerification,
+) -> Option<PathBuf> {
+    if verification == ToolsDiskVerification::ReuseVerified
+        && let Some(recorded) = state.verified_tools_disk
+        && let Some((_descriptor, identity)) = open_tools_disk_file(raw_path, size_bytes)
+        && identity == recorded.identity
+        && path_names_tools_disk(raw_path, identity)
+    {
+        return Some(raw_path.to_path_buf());
+    }
+    hash_and_record_tools_disk(state, raw_path, expected_sha256, size_bytes).await
+}
+
+/// Hash the opened descriptor, record it only when its identity survived the
+/// read, and return the path. Any failure clears the record.
+async fn hash_and_record_tools_disk(
+    state: &mut CacheEntryState,
+    raw_path: &Path,
+    expected_sha256: &str,
+    size_bytes: u64,
+) -> Option<PathBuf> {
+    state.verified_tools_disk = None;
+    let (descriptor, before) = open_tools_disk_file(raw_path, size_bytes)?;
+    let mut file = tokio::fs::File::from_std(descriptor);
+    let actual = sha256_open_file(&mut file, raw_path).await.ok()?;
+    let after = tools_disk_file_identity(&file.metadata().await.ok()?)?;
+    if actual != expected_sha256 || before != after || !path_names_tools_disk(raw_path, after) {
+        return None;
+    }
+    state.verified_tools_disk = Some(VerifiedToolsDisk { identity: after });
+    Some(raw_path.to_path_buf())
+}
+
+/// Open a candidate tools disk without following a final symlink and require a
+/// regular file of the expected size.
+fn open_tools_disk_file(
+    raw_path: &Path,
+    size_bytes: u64,
+) -> Option<(std::fs::File, ToolsDiskFileIdentity)> {
+    let descriptor = rustix::fs::open(
+        raw_path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()?;
+    let file = std::fs::File::from(descriptor);
+    let identity = tools_disk_file_identity(&file.metadata().ok()?)?;
+    (identity.size_bytes == size_bytes).then_some((file, identity))
+}
+
+/// Confirm the path still names the regular file behind `identity`.
+fn path_names_tools_disk(raw_path: &Path, identity: ToolsDiskFileIdentity) -> bool {
+    std::fs::symlink_metadata(raw_path)
+        .ok()
+        .and_then(|metadata| tools_disk_file_identity(&metadata))
+        == Some(identity)
+}
+
+fn tools_disk_file_identity(metadata: &std::fs::Metadata) -> Option<ToolsDiskFileIdentity> {
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(ToolsDiskFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size_bytes: metadata.len(),
+            mtime_seconds: metadata.mtime(),
+            mtime_nanoseconds: metadata.mtime_nsec(),
+            ctime_seconds: metadata.ctime(),
+            ctime_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // Without device/inode identity only the length and modification time
+        // can invalidate a recorded verification.
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        Some(ToolsDiskFileIdentity {
+            device: 0,
+            inode: 0,
+            size_bytes: metadata.len(),
+            mtime_seconds: modified.as_secs() as i64,
+            mtime_nanoseconds: i64::from(modified.subsec_nanos()),
+            ctime_seconds: 0,
+            ctime_nanoseconds: 0,
+        })
+    }
 }

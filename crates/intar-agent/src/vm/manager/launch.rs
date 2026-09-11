@@ -822,6 +822,7 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         Some(&inner.bridge),
         &cache_root,
         &inner.http,
+        image_cache::ToolsDiskVerification::ReuseVerified,
     )
     .await
     .context("pinned guest tools disk is unavailable")?;

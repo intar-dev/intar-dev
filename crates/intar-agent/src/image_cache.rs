@@ -33,7 +33,37 @@ const REGISTRY_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const REGISTRY_ACCESS_TOKEN_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
 type CacheEntryLockKey = (PathBuf, String);
-type CacheEntryLocks = Mutex<HashMap<CacheEntryLockKey, Arc<Mutex<()>>>>;
+type CacheEntryLocks = Mutex<HashMap<CacheEntryLockKey, Arc<Mutex<CacheEntryState>>>>;
+
+/// Identity of the guest tools disk descriptor that a verification covered.
+///
+/// Hashing 64 MiB on every launch is the cost this record removes, so the
+/// record must be invalidated by anything that can change the file content.
+/// A device/inode pair catches replacement (including an atomic rename), and
+/// the nanosecond change times catch an in-place write whose author restored
+/// the modification time. Only the identity that is stable across a full read
+/// is recorded, so a concurrent writer cannot donate its identity to an
+/// unverified file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ToolsDiskFileIdentity {
+    device: u64,
+    inode: u64,
+    size_bytes: u64,
+    mtime_seconds: i64,
+    mtime_nanoseconds: i64,
+    ctime_seconds: i64,
+    ctime_nanoseconds: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VerifiedToolsDisk {
+    identity: ToolsDiskFileIdentity,
+}
+
+#[derive(Default)]
+struct CacheEntryState {
+    verified_tools_disk: Option<VerifiedToolsDisk>,
+}
 
 static CACHE_ENTRY_LOCKS: OnceLock<CacheEntryLocks> = OnceLock::new();
 static CACHE_DOWNLOADS: OnceLock<Semaphore> = OnceLock::new();
@@ -161,13 +191,9 @@ fn cache_downloads() -> &'static Semaphore {
     CACHE_DOWNLOADS.get_or_init(|| Semaphore::new(MAX_CONCURRENT_CACHE_DOWNLOADS))
 }
 
-async fn cache_entry_lock(cache_root: &Path, key: String) -> Arc<Mutex<()>> {
+async fn cache_entry_lock(cache_root: &Path, key: String) -> Arc<Mutex<CacheEntryState>> {
     let mut locks = cache_entry_locks().lock().await;
-    Arc::clone(
-        locks
-            .entry((cache_root.to_path_buf(), key))
-            .or_insert_with(|| Arc::new(Mutex::new(()))),
-    )
+    Arc::clone(locks.entry((cache_root.to_path_buf(), key)).or_default())
 }
 
 pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
@@ -451,8 +477,8 @@ fn validate_prepared_source(
 mod chunked;
 use chunked::ensure_cached_chunked_image_entry;
 pub(crate) use chunked::{
-    ensure_cached_tools_disk, mark_template_ready, require_ready_image_launch, touch_cached_image,
-    verified_cached_image_metadata,
+    ToolsDiskVerification, ensure_cached_tools_disk, mark_template_ready,
+    require_ready_image_launch, touch_cached_image, verified_cached_image_metadata,
 };
 mod refresh;
 use refresh::*;

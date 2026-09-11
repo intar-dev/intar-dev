@@ -98,6 +98,10 @@ Agents list and download images through the Worker registry endpoint. The agent
 caches only compressed chunks, manifests, boot artifacts, and the pinned tools
 disk. Jailerd verifies and imports chunks into a root-owned immutable store, then
 uses reflink ranges to assemble templates without a full unprivileged raw image.
+A launch reuses the recorded tools-disk verification while that descriptor's
+device, inode, size, and change times are unchanged; the scheduled full repair
+still re-reads the bytes, and jailerd independently verifies the digest of the
+copy it stages.
 
 ## Builder Daemon
 
@@ -236,7 +240,9 @@ VM networking is isolated per run:
 - VMs in the same run can communicate through the run bridge.
 - Traffic between runs must route through the host and is dropped.
 - Jailerd applies the required routes and nftables state; the agent has neither
-  `CAP_NET_ADMIN` nor `CAP_NET_RAW`.
+  `CAP_NET_ADMIN` nor `CAP_NET_RAW`. Each policy update is one `nft -f` batch,
+  which the kernel applies atomically, so a rejected batch leaves the installed
+  ruleset untouched.
 - Guest egress drops link-local metadata, RFC1918, and CGNAT destinations before
   internet egress is accepted.
 - SSH DNAT is constrained to the detected egress interface and, when available, the

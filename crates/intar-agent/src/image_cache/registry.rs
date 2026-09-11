@@ -353,6 +353,18 @@ pub(super) async fn sha256_file(path: &Path) -> Result<String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("failed to open file for hashing at {}", path.display()))?;
+    sha256_open_file(&mut file, path).await
+}
+
+/// Hash an already opened descriptor.
+///
+/// Callers that must not follow a symlink or accept a path replacement open
+/// the file themselves, validate the descriptor, and only then stream it here,
+/// so the digest always describes the file they checked.
+pub(super) async fn sha256_open_file<R>(file: &mut R, path: &Path) -> Result<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {

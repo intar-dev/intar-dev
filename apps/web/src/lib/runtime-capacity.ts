@@ -33,19 +33,23 @@ export interface ActiveRuntimeResourceSnapshot {
 }
 
 /**
- * Loads the scenario reservation ledger. Expired pending rows
- * deliberately stop consuming capacity, while committed rows remain charged
- * until teardown has been observed and releases them.
+ * Loads the scenario reservation ledger for the given hosts. Expired pending
+ * rows deliberately stop consuming capacity, while committed rows remain
+ * charged until teardown has been observed and releases them.
+ *
+ * `hostIds` is required: every caller already knows which hosts it can
+ * dispatch to, and D1 charges bound parameters, so the host list travels as
+ * one JSON array instead of one placeholder per host.
  */
 export async function loadActiveRuntimeResourceSnapshot(
   now: number,
-  hostIds?: readonly string[],
+  hostIds: readonly string[],
 ): Promise<ActiveRuntimeResourceSnapshot> {
-  const scopedHostIds = hostIds ? [...new Set(hostIds)] : null;
-  if (scopedHostIds?.length === 0) {
+  const scopedHostIds = [...new Set(hostIds)];
+  if (scopedHostIds.length === 0) {
     return { reservations: [], reservedVms: [] };
   }
-  const hostPlaceholders = scopedHostIds?.map(() => "?").join(", ");
+  const hostIdsJson = JSON.stringify(scopedHostIds);
   const [reservationRows, reservedVmRows] = await Promise.all([
     env.DB.prepare(
       `SELECT
@@ -54,9 +58,9 @@ export async function loadActiveRuntimeResourceSnapshot(
        FROM host_resource_reservations
        WHERE state IN ('pending', 'committed')
          AND (state = 'committed' OR expires_at IS NULL OR expires_at > ?)
-         ${hostPlaceholders ? `AND host_id IN (${hostPlaceholders})` : ""}`,
+         AND host_id IN (SELECT value FROM json_each(?))`,
     )
-      .bind(now, ...(scopedHostIds ?? []))
+      .bind(now, hostIdsJson)
       .all<RuntimeResourceReservationSnapshot>(),
     env.DB.prepare(
       `SELECT
@@ -70,13 +74,9 @@ export async function loadActiveRuntimeResourceSnapshot(
            OR reservation.expires_at IS NULL
            OR reservation.expires_at > ?
          )
-         ${
-           hostPlaceholders
-             ? `AND reservation.host_id IN (${hostPlaceholders})`
-             : ""
-         }`,
+         AND reservation.host_id IN (SELECT value FROM json_each(?))`,
     )
-      .bind(now, ...(scopedHostIds ?? []))
+      .bind(now, hostIdsJson)
       .all<RuntimeReservedVmSnapshot>(),
   ]);
   return {

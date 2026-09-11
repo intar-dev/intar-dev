@@ -21,7 +21,7 @@ pub(super) async fn run_cache_refresh_cycle(
     context: CacheRefreshContext<'_>,
     scope: CacheRefreshScope,
 ) {
-    warm_desired_guest_tools(context).await;
+    warm_desired_guest_tools(context, scope).await;
     let advertised_images =
         match list_registry_images(context.registry, context.bridge, context.client).await {
             Ok(images) => images,
@@ -139,7 +139,14 @@ async fn run_selected_image_refreshes(
     }
 }
 
-async fn warm_desired_guest_tools(context: CacheRefreshContext<'_>) {
+async fn warm_desired_guest_tools(context: CacheRefreshContext<'_>, scope: CacheRefreshScope) {
+    // The periodic full repair keeps the byte-level guarantee on a schedule;
+    // event-driven warms only need to repair a disk that is missing or no
+    // longer matches its recorded verification.
+    let verification = match scope {
+        CacheRefreshScope::FullRepair => ToolsDiskVerification::Full,
+        CacheRefreshScope::MissingOnly => ToolsDiskVerification::ReuseVerified,
+    };
     if let Some(db) = context.db
         && let Ok(Some(row)) = db.load_desired_state().await
         && let Ok(desired) =
@@ -163,6 +170,7 @@ async fn warm_desired_guest_tools(context: CacheRefreshContext<'_>) {
                 context.bridge,
                 context.cache_root,
                 context.client,
+                verification,
             )
             .await
             {

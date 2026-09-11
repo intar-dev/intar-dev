@@ -843,12 +843,14 @@ impl NetworkManager {
         .map(|_| ())
     }
 
+    /// Apply one complete ruleset batch.
+    ///
+    /// `nft -f` loads the whole file inside a single kernel transaction, so a
+    /// rejected batch leaves the previously installed policy untouched. The
+    /// removed `--check` pass validated the same text a second time and cost
+    /// an extra trusted-helper process on every policy application without
+    /// adding atomicity that the apply itself does not already provide.
     fn nft_script(&self, script: &str) -> Result<()> {
-        run_checked(
-            &self.nft,
-            [OsStr::new("--check"), OsStr::new("-f"), OsStr::new("-")],
-            Some(script.as_bytes()),
-        )?;
         run_checked(
             &self.nft,
             [OsStr::new("-f"), OsStr::new("-")],

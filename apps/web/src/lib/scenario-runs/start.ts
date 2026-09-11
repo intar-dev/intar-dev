@@ -1636,7 +1636,10 @@ export async function selectScenarioHosts(
 
   const availableResourcesByHost = new Map<string, RuntimeResourceDemand>();
   if (requiredResources) {
-    const snapshot = await loadActiveRuntimeResourceSnapshot(now);
+    const snapshot = await loadActiveRuntimeResourceSnapshot(
+      now,
+      imageReadyCandidates.map((candidate) => candidate.id),
+    );
     imageReadyCandidates = imageReadyCandidates.filter((candidate) => {
       if (!candidate.actualReport) return false;
       const available = availableRuntimeHostResources({
@@ -1724,7 +1727,7 @@ async function assertScenarioRuntimeCapacity(
     .from(hostActualState)
     .where(eq(hostActualState.hostId, hostId))
     .limit(1);
-  const snapshot = await loadActiveRuntimeResourceSnapshot(now);
+  const snapshot = await loadActiveRuntimeResourceSnapshot(now, [hostId]);
   const available = actual?.report
     ? availableRuntimeHostResources({
         hostId,
