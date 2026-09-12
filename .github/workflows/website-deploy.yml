@@ -63,8 +63,6 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Pin and verify production configuration
-        env:
-          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           set -euo pipefail
           config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
@@ -75,16 +73,13 @@ jobs:
           ' "${config}")"
           [[ "${database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
           jq -e \
-            --arg database_id "${database_id}" \
-            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
+            --arg database_id "${database_id}" '
               ([.d1_databases[] | select(.binding == "DB")]) as $databases |
-              ([.kv_namespaces[] | select(.binding == "SESSION")]) as $sessions |
               .name == "intar-dev" and
               .vars.CONTROL_PLANE_MAINTENANCE == "off" and
               ($databases | length) == 1 and
               $databases[0].database_id == $database_id and
-              ($sessions | length) == 1 and
-              $sessions[0].id == $session_namespace_id and
+              ([.kv_namespaces[]? | select(.binding == "SESSION")] | length) == 0 and
               .assets.directory == "../client" and
               .assets.run_worker_first == ["/api/*"]
             ' "${config}" >/dev/null
@@ -279,7 +274,6 @@ jobs:
           tools/deploy/deploy-web.sh \
             "${MAINTENANCE_DEPLOYMENT_CONFIG}" \
             "${DATABASE_ID}" \
-            "87ad9df7e37e4ced900553aa1a7775a1" \
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-maintenance.json"
 
@@ -367,7 +361,6 @@ jobs:
           tools/deploy/deploy-web.sh \
             "${DEPLOYMENT_CONFIG}" \
             "${DATABASE_ID}" \
-            "87ad9df7e37e4ced900553aa1a7775a1" \
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-production.json"
 

@@ -48,12 +48,6 @@
   "triggers": {
     "crons": ["* * * * *"],
   },
-  "kv_namespaces": [
-    {
-      "binding": "SESSION",
-      "id": "87ad9df7e37e4ced900553aa1a7775a1",
-    },
-  ],
   "d1_databases": [
     {
       "binding": "DB",

@@ -4,21 +4,17 @@ import { readFile } from "node:fs/promises";
 
 type JsonRecord = Record<string, unknown>;
 
-interface ActiveWorkerVersion {
+export interface ActiveWorkerRuntimeVersion {
   versionId: string;
   databaseId: string;
 }
 
-export interface ActiveWorkerRuntimeVersion extends ActiveWorkerVersion {
-  sessionNamespaceId: string;
-}
-
-function assertActiveWorkerVersion(
+export function assertActiveWorkerRuntimeVersion(
   deployment: unknown,
   version: unknown,
   expectedDatabaseId: string,
   expectedVersionId?: string,
-): ActiveWorkerVersion {
+): ActiveWorkerRuntimeVersion {
   const deploymentRecord = record(deployment, "deployment");
   const versions = array(deploymentRecord.versions, "deployment.versions");
   if (versions.length !== 1) {
@@ -52,64 +48,14 @@ function assertActiveWorkerVersion(
   return { versionId, databaseId };
 }
 
-export function assertActiveWorkerRuntimeVersion(
-  deployment: unknown,
-  version: unknown,
-  expectedDatabaseId: string,
-  expectedSessionNamespaceId: string,
-  expectedVersionId?: string,
-): ActiveWorkerRuntimeVersion {
-  const active = assertActiveWorkerVersion(
-    deployment,
-    version,
-    expectedDatabaseId,
-    expectedVersionId,
-  );
-  return {
-    ...active,
-    sessionNamespaceId: assertSessionNamespaceBinding(
-      version,
-      expectedSessionNamespaceId,
-    ),
-  };
-}
-
-function assertSessionNamespaceBinding(
-  version: unknown,
-  expectedSessionNamespaceId: string,
-): string {
-  const versionRecord = record(version, "version");
-  const resources = record(versionRecord.resources, "version.resources");
-  const bindings = array(resources.bindings, "version.resources.bindings");
-  const sessionBindings = bindings
-    .map((binding, index) => record(binding, `version.resources.bindings[${index}]`))
-    .filter(
-      (binding) => binding.type === "kv_namespace" && binding.name === "SESSION",
-    );
-  if (sessionBindings.length !== 1) {
-    throw new Error("the Worker version must have exactly one KV binding named SESSION");
-  }
-  const namespaceId = text(
-    sessionBindings[0]!.namespace_id,
-    "SESSION namespace id",
-  );
-  if (namespaceId !== expectedSessionNamespaceId) {
-    throw new Error(
-      "the Worker SESSION binding does not match the expected namespace",
-    );
-  }
-  return namespaceId;
-}
-
 async function main(): Promise<void> {
-  const [deploymentPath, versionPath, databaseId, sessionNamespaceId, expectedVersionId] =
+  const [deploymentPath, versionPath, databaseId, expectedVersionId] =
     process.argv.slice(2);
-  if (!deploymentPath || !versionPath || !databaseId || !sessionNamespaceId) usage();
+  if (!deploymentPath || !versionPath || !databaseId) usage();
   const result = assertActiveWorkerRuntimeVersion(
     JSON.parse(await readFile(deploymentPath, "utf8")),
     JSON.parse(await readFile(versionPath, "utf8")),
     databaseId,
-    sessionNamespaceId,
     expectedVersionId || undefined,
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -143,7 +89,7 @@ function number(value: unknown, label: string): number {
 
 function usage(): never {
   throw new Error(
-    "usage: tools/deploy/worker-version.ts <deployment.json> <version.json> <database-id> <session-namespace-id> [version-id]",
+    "usage: tools/deploy/worker-version.ts <deployment.json> <version.json> <database-id> [version-id]",
   );
 }
 

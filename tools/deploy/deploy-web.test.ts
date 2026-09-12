@@ -19,11 +19,12 @@ const script = readFileSync(deployScriptPath, "utf8");
 const beforeVersionId = "11111111-2222-4333-8444-555555555555";
 const deployedVersionId = "22222222-3333-4444-8555-666666666666";
 const databaseId = "33333333-4444-4555-8666-777777777777";
-const sessionNamespaceId = "87ad9df7e37e4ced900553aa1a7775a1";
 
 interface RunOptions {
   beforeMaintenance?: boolean;
   deploySucceeds?: boolean;
+  includeRetiredSessionBinding?: boolean;
+  retainRetiredSessionAfterDeploy?: boolean;
   targetHealthFailures?: number;
   targetMaintenance?: boolean;
 }
@@ -31,6 +32,10 @@ interface RunOptions {
 function runDeployment(options: RunOptions = {}) {
   const beforeMaintenance = options.beforeMaintenance ?? false;
   const deploySucceeds = options.deploySucceeds ?? true;
+  const includeRetiredSessionBinding =
+    options.includeRetiredSessionBinding ?? false;
+  const retainRetiredSessionAfterDeploy =
+    options.retainRetiredSessionAfterDeploy ?? false;
   const targetHealthFailures = options.targetHealthFailures ?? 0;
   const targetMaintenance = options.targetMaintenance ?? false;
   const root = mkdtempSync(join(tmpdir(), "intar-web-deploy-test-"));
@@ -60,7 +65,9 @@ function runDeployment(options: RunOptions = {}) {
     JSON.stringify({
       name: "intar-dev",
       d1_databases: [{ binding: "DB", database_id: databaseId }],
-      kv_namespaces: [{ binding: "SESSION", id: sessionNamespaceId }],
+      ...(includeRetiredSessionBinding
+        ? { kv_namespaces: [{ binding: "SESSION", id: "retired" }] }
+        : {}),
       assets: { directory: "../client", run_worker_first: ["/api/*"] },
       vars: {
         CONTROL_PLANE_MAINTENANCE: targetMaintenance ? "on" : "off",
@@ -87,7 +94,8 @@ fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
   if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; else maintenance="$TARGET_MAINTENANCE"; fi
-  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"},{type:"secret_text",name:"OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"},{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:(if $maintenance == "true" then "on" else "off" end)}],script_runtime:{migration_tag:"v4"}}}'
+  if [ "$version" = "$BEFORE_VERSION_ID" ] || [ "$MOCK_RETAIN_RETIRED_SESSION" = true ]; then retired_session='[{"type":"kv_namespace","name":"SESSION","namespace_id":"retired"}]'; else retired_session='[]'; fi
+  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" --argjson retired_session "$retired_session" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db}] + $retired_session + [{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"},{type:"secret_text",name:"OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"},{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:(if $maintenance == "true" then "on" else "off" end)}]),script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1" = "deploy" ]; then
@@ -173,7 +181,7 @@ esac
 
   const result = spawnSync(
     "bash",
-    [deployScriptPath, config, databaseId, sessionNamespaceId, secrets, evidence],
+    [deployScriptPath, config, databaseId, secrets, evidence],
     {
       cwd: repositoryRoot,
       encoding: "utf8",
@@ -191,10 +199,10 @@ esac
         MOCK_TARGET_HEALTH_COUNT: targetHealthCount,
         MOCK_TARGET_HEALTH_FAILURES: String(targetHealthFailures),
         MOCK_DEPLOY_SUCCEEDS: String(deploySucceeds),
+        MOCK_RETAIN_RETIRED_SESSION: String(retainRetiredSessionAfterDeploy),
         BEFORE_VERSION_ID: beforeVersionId,
         DEPLOYED_VERSION_ID: deployedVersionId,
         DATABASE_ID: databaseId,
-        SESSION_NAMESPACE_ID: sessionNamespaceId,
         DO_NAMESPACE_ID: "667e00c5c90a4a68b08676230cbb6e5c",
         BEFORE_DEPLOYMENT_ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         AFTER_DEPLOYMENT_ID: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
@@ -246,6 +254,28 @@ describe("automatic web deployment", () => {
         propagation_observed_attempt: 7,
         live_health_proven: true,
       });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("rejects a configuration that retains the SESSION binding", () => {
+    const run = runDeployment({ includeRetiredSessionBinding: true });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.state).toBe(beforeVersionId);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("rejects a deployed version that retains the SESSION binding", () => {
+    const run = runDeployment({ retainRetiredSessionAfterDeploy: true });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.state).toBe(deployedVersionId);
+      expect(run.evidence).toBeNull();
     } finally {
       run.cleanup();
     }

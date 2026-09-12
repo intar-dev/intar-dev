@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 5 ]; then
-  echo "usage: tools/deploy/deploy-web.sh <wrangler-config> <database-id> <session-namespace-id> <secrets-file> <evidence.json>" >&2
+if [ "$#" -ne 4 ]; then
+  echo "usage: tools/deploy/deploy-web.sh <wrangler-config> <database-id> <secrets-file> <evidence.json>" >&2
   exit 64
 fi
 
 readonly config="$1"
 readonly database_id="$2"
-readonly session_namespace_id="$3"
-readonly secrets_file="$4"
-readonly evidence="$5"
+readonly secrets_file="$3"
+readonly evidence="$4"
 readonly worker_name="intar-dev"
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly deploy_label="${WEB_DEPLOY_LABEL:-standard}"
@@ -29,7 +28,6 @@ test -f "${config}"
 test -f "${secrets_file}"
 test ! -e "${evidence}"
 [[ "${database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-[[ "${session_namespace_id}" =~ ^[0-9a-f]{32}$ ]]
 [[ "${deploy_label}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
 test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
 test -n "${CLOUDFLARE_API_TOKEN:-}"
@@ -46,14 +44,11 @@ favicon_sha256="$(sha256sum "${favicon_path}" | cut -d ' ' -f 1)"
 [[ "${favicon_sha256}" =~ ^[0-9a-f]{64}$ ]]
 
 jq -e \
-  --arg database_id "${database_id}" \
-  --arg session_namespace_id "${session_namespace_id}" '
+  --arg database_id "${database_id}" '
     ([.d1_databases[]? | select(.binding == "DB")]) as $databases |
-    ([.kv_namespaces[]? | select(.binding == "SESSION")]) as $sessions |
     ($databases | length) == 1 and
     $databases[0].database_id == $database_id and
-    ($sessions | length) == 1 and
-    $sessions[0].id == $session_namespace_id and
+    ([.kv_namespaces[]? | select(.binding == "SESSION")] | length) == 0 and
     .assets.run_worker_first == ["/api/*"] and
     (.migrations | type) == "array" and
     (.migrations | length) >= 1 and
@@ -162,7 +157,7 @@ bunx wrangler versions view "${before_version_id}" \
   --name "${worker_name}" --json > "${before_version}"
 bun "${repository_root}/tools/deploy/worker-version.ts" \
   "${before_deployment}" "${before_version}" \
-  "${database_id}" "${session_namespace_id}" "${before_version_id}" >/dev/null
+  "${database_id}" "${before_version_id}" >/dev/null
 before_maintenance_value="$(jq -r '
   [.resources.bindings[] | select(
     .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE"
@@ -214,8 +209,9 @@ bunx wrangler versions view "${deployed_version_id}" \
   --name "${worker_name}" --json > "${after_version}"
 bun "${repository_root}/tools/deploy/worker-version.ts" \
   "${after_deployment}" "${after_version}" \
-  "${database_id}" "${session_namespace_id}" "${deployed_version_id}" >/dev/null
+  "${database_id}" "${deployed_version_id}" >/dev/null
 jq -e '
+  ([.resources.bindings[] | select(.name == "SESSION")] | length) == 0 and
   ([.resources.bindings[] | select(
     .type == "secret_text" and .name == "ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1"
   )] | length) == 1 and
@@ -278,7 +274,6 @@ jq -n \
   --arg before_version_id "${before_version_id}" \
   --arg deployed_version_id "${deployed_version_id}" \
   --arg database_id "${database_id}" \
-  --arg session_namespace_id "${session_namespace_id}" \
   --arg target_mode "${target_mode}" \
   --argjson propagation_max_attempts "${propagation_max_attempts}" \
   --argjson propagation_required_consecutive_healthy "${propagation_required_consecutive_healthy}" \
@@ -298,7 +293,6 @@ jq -n \
       before_version_id: $before_version_id,
       deployed_version_id: $deployed_version_id,
       database_id: $database_id,
-      session_namespace_id: $session_namespace_id,
       target_mode: $target_mode,
       exact_version_active: true,
       active_runtime_bindings_proven: true,

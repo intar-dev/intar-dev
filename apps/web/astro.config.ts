@@ -26,6 +26,8 @@ export default defineConfig({
 
   output: "server",
 
+  session: false,
+
   vite: {
     define: {
       "import.meta.env.PUBLIC_RELEASE_VERSION": JSON.stringify(process.env.GITHUB_SHA ?? "development"),
