@@ -18,7 +18,11 @@ export function sanitizeBrowserTelemetry(item: TransportItem): TransportItem | n
   const meta = {
     ...(item.meta.app ? { app: item.meta.app } : {}),
     ...(item.meta.sdk ? { sdk: item.meta.sdk } : {}),
-    ...(item.meta.session?.id ? { session: { id: item.meta.session.id } } : {}),
+    ...(item.meta.session?.id ? { session: {
+      id: item.meta.session.id,
+      // Faro checks this after beforeSend and removes it before transport.
+      attributes: { isSampled: item.meta.session.attributes?.isSampled === "true" ? "true" : "false" },
+    } } : {}),
     page: { url: telemetryUrl(item.meta.page?.url ?? "/") },
   };
   if (item.type === "exception") {

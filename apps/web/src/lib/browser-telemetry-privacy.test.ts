@@ -4,6 +4,16 @@ import { sanitizeBrowserTelemetry, telemetryUrl } from "./browser-telemetry-priv
 
 describe("browser telemetry privacy", () => {
   const secret = "secret-token-and-terminal-output";
+  it("preserves Faro sampling admission while removing arbitrary session data", () => {
+    for (const isSampled of ["true", "false"]) {
+      const result = sanitizeBrowserTelemetry({ type: TransportItemType.EVENT,
+        meta: { session: { id: "sample-session", attributes: { isSampled, private: secret } } },
+        payload: { name: "session_start", timestamp: "2026-09-12T00:00:00Z", attributes: {} },
+      });
+      expect(result?.meta.session).toEqual({ id: "sample-session", attributes: { isSampled } });
+      expect(JSON.stringify(result)).not.toContain(secret);
+    }
+  });
   it("removes credentials and arbitrary URL segments", () => {
     expect(telemetryUrl(`https://intar.dev/api/auth/sso/${secret}?token=${secret}#${secret}`)).toBe("https://intar.dev/api/auth/sso/:id");
     expect(telemetryUrl(`https://${secret}.example/path`)).toBe("external");

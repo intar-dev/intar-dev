@@ -12,8 +12,8 @@ Alloy 1.19.2 runs on these persistent hosts:
 
 | Host identity | Services |
 | --- | --- |
-| `agent-01-gq5kkxas` | agent, jailerd |
-| `builder-01-fcho1ysq` | builder, BuildKit, legacy workshop builder, Actions runner |
+| `agent-01-fsz7cpce` | agent, jailerd |
+| `builder-01-el81wm4u` | builder, BuildKit, legacy workshop builder, Actions runner |
 | `stargate` | Stargate, cloudflared |
 
 Host metrics, selected service journals, Linux auth/authpriv journals, kernel
