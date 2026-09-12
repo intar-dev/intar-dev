@@ -1,3 +1,5 @@
+import { traceOperation } from "@/lib/tracing";
+import { recordSecurityResponse } from "@/lib/security-events";
 import { handle } from "@astrojs/cloudflare/handler";
 import { handleAgentBootstrap, handleAgentConnect } from "@/control-plane/auth";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
@@ -14,12 +16,14 @@ import { hardenWorkerResponse } from "@/lib/response-security";
 
 export default {
   async fetch(request, env, ctx) {
-    const respond = (response: Response) =>
-      hardenWorkerResponse(request, response, env);
+    const respond = (response: Response) => {
+      recordSecurityResponse(request, response);
+      return hardenWorkerResponse(request, response, env);
+    };
     const canonicalPath = guardCanonicalRequestPath(request);
     if (!canonicalPath.ok) return respond(canonicalPath.response);
 
-    const maintenanceResponse = await handleMaintenanceMode(request, env);
+    const maintenanceResponse = await traceOperation("request.maintenance", () => handleMaintenanceMode(request, env));
     if (maintenanceResponse) return respond(maintenanceResponse);
 
     const url = new URL(request.url);
@@ -28,36 +32,36 @@ export default {
       url.pathname === "/agent/bootstrap" ||
       url.pathname === "/api/agent/bootstrap"
     ) {
-      return respond(await handleAgentBootstrap(request, env));
+      return respond(await traceOperation("agent.authenticate", () => handleAgentBootstrap(request, env)));
     }
 
     if (
       url.pathname === "/agent/connect" ||
       url.pathname === "/api/agent/connect"
     ) {
-      return respond(await handleAgentConnect(request, env));
+      return respond(await traceOperation("agent.connect", () => handleAgentConnect(request, env)));
     }
 
-    const registryResponse = await handleImageRegistryRequest(request, env);
+    const registryResponse = await traceOperation("image.registry", () => handleImageRegistryRequest(request, env));
     if (registryResponse) {
       return respond(registryResponse);
     }
 
     if (url.pathname.startsWith("/agent/runs")) {
-      const runCliResponse = await handleAgentRunCliRequest(request, env);
+      const runCliResponse = await traceOperation("run.cli", () => handleAgentRunCliRequest(request, env));
       if (runCliResponse) {
         return respond(runCliResponse);
       }
-      const response = await handleAgentRunArtifactRequest(request, env);
+      const response = await traceOperation("run.artifacts", () => handleAgentRunArtifactRequest(request, env));
       if (response) {
         return respond(response);
       }
     }
 
-    const securedRequest = await secureApplicationApiRequest(request, env);
+    const securedRequest = await traceOperation("request.security", () => secureApplicationApiRequest(request, env));
     if (!securedRequest.ok) return respond(securedRequest.response);
 
-    const response = await handle(securedRequest.request, env, ctx);
+    const response = await traceOperation("app.handle", () => handle(securedRequest.request, env, ctx));
     const applicationResponse =
       url.pathname === "/join"
         ? hardenJoinResponse(response, {

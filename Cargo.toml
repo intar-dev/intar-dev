@@ -13,6 +13,7 @@ members = [
     "crates/intar-jailer-protocol",
     "crates/intar-jailerd",
     "crates/intar-kino-proto",
+    "crates/intar-observability",
     "crates/kino",
     "crates/stargate-core",
     "crates/stargate-gateway",
@@ -85,6 +86,10 @@ tokio-vsock = { version = "=0.7.2", features = ["axum08"] }
 toml = "=1.1.2"
 tower = "=0.5.3"
 tracing = "=0.1.44"
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "=0.33.0", default-features = false }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = { version = "=2.5.8", features = ["serde"] }
 uuid = { version = "=1.23.4", features = ["serde", "v4"] }

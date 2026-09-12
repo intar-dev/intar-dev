@@ -4,7 +4,6 @@ use anyhow::{Context, anyhow, ensure};
 use sd_notify::NotifyState;
 use stargate_core::ServerSettings;
 use tokio::net::TcpListener;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{
     GatewayState, SqliteRouteStore, build_admin_router, build_public_router, run_public_ssh_server,
@@ -20,7 +19,7 @@ pub fn load_settings(path: &Path) -> anyhow::Result<ServerSettings> {
 }
 
 pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
-    init_tracing(&settings)?;
+    let _telemetry = init_tracing(&settings)?;
     validate_runtime_security(&settings)?;
     ensure_parent_dirs(&settings).await?;
     let host_key = load_or_create_host_key(
@@ -388,20 +387,18 @@ async fn ensure_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing(settings: &ServerSettings) -> anyhow::Result<()> {
+fn init_tracing(settings: &ServerSettings) -> anyhow::Result<intar_observability::TelemetryGuard> {
     let filter = settings
         .trace
         .as_ref()
-        .map(|trace| trace.filter.clone())
-        .unwrap_or_else(|| "info,stargate=debug".to_owned());
-    let env_filter = EnvFilter::new(filter);
-    let registry = tracing_subscriber::registry().with(env_filter);
-    if settings.trace.as_ref().is_some_and(|trace| trace.json) {
-        registry.with(fmt::layer().json()).try_init()?;
-    } else {
-        registry.with(fmt::layer()).try_init()?;
-    }
-    Ok(())
+        .map(|trace| trace.filter.as_str())
+        .unwrap_or("info,stargate=debug");
+    intar_observability::init(
+        "stargate",
+        env!("CARGO_PKG_VERSION"),
+        filter,
+        settings.trace.as_ref().is_none_or(|trace| trace.json),
+    )
 }
 
 async fn join_task<T>(handle: tokio::task::JoinHandle<anyhow::Result<T>>) -> anyhow::Result<T> {

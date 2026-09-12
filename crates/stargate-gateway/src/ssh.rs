@@ -76,6 +76,7 @@ impl server::Server for SshProxyServer {
     type Handler = SshConnection;
 
     fn new_client(&mut self, peer_addr: Option<SocketAddr>) -> Self::Handler {
+        tracing::info!(event = "security.ssh_connection", client_address = ?peer_addr, "SSH connection opened");
         SshConnection {
             state: self.state.clone(),
             peer_addr,
@@ -101,19 +102,20 @@ impl server::Handler for SshConnection {
     ) -> Result<Auth, Self::Error> {
         self.clear_route_authorization();
         let Some((route, admission)) = self.load_route_with_admission(user).await? else {
-            return Ok(Auth::reject());
+            return Ok(self.reject_key(user, public_key, "route_unavailable"));
         };
         if !route.allows_client_public_key(public_key)? {
-            return Ok(Auth::reject());
+            return Ok(self.reject_key(user, public_key, "key_not_allowed"));
         }
         if admission.token().is_cancelled() {
-            return Ok(Auth::reject());
+            return Ok(self.reject_key(user, public_key, "route_revoked"));
         }
         self.route = Some(route);
         self.route_admission = Some(admission);
         Ok(Auth::Accept)
     }
 
+    #[tracing::instrument(name = "ssh.authenticate", skip_all)]
     async fn auth_publickey(
         &mut self,
         user: &str,
@@ -128,17 +130,17 @@ impl server::Handler for SshConnection {
             _ => {
                 self.clear_route_authorization();
                 let Some((route, admission)) = self.load_route_with_admission(user).await? else {
-                    return Ok(Auth::reject());
+                    return Ok(self.reject_key(user, public_key, "route_unavailable"));
                 };
                 (route, Some(admission))
             }
         };
         if !route.allows_client_public_key(public_key)? {
-            return Ok(Auth::reject());
+            return Ok(self.reject_key(user, public_key, "key_not_allowed"));
         }
         if let Some(admission) = admission {
             if admission.token().is_cancelled() {
-                return Ok(Auth::reject());
+                return Ok(self.reject_key(user, public_key, "route_revoked"));
             }
             self.route_admission = Some(admission);
         }
@@ -147,14 +149,13 @@ impl server::Handler for SshConnection {
             .as_ref()
             .is_none_or(|lease| lease.token().is_cancelled())
         {
-            return Ok(Auth::reject());
+            return Ok(self.reject_key(user, public_key, "route_revoked"));
         }
         self.route = Some(route);
         Ok(Auth::Accept)
     }
 
     async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
-        let _ = self.peer_addr;
         let Some(route) = self.route.as_ref() else {
             session.disconnect(Disconnect::ByApplication, "route unavailable", "en-US")?;
             return Ok(());
@@ -186,9 +187,15 @@ impl server::Handler for SshConnection {
         }
         self.connection_lease = Some(connection_lease);
         self.route_admission = None;
+        tracing::info!(
+            event = "security.ssh_authenticated", outcome = "accepted",
+            client_address = ?self.peer_addr, route_username = %route.route_username,
+            "SSH authentication accepted"
+        );
         Ok(())
     }
 
+    #[tracing::instrument(name = "ssh.open_channel", skip_all)]
     async fn channel_open_session(
         &mut self,
         channel: russh::Channel<Msg>,
@@ -249,6 +256,7 @@ impl server::Handler for SshConnection {
         Ok(())
     }
 
+    #[tracing::instrument(name = "ssh.open_shell", skip_all)]
     async fn shell_request(
         &mut self,
         channel: ChannelId,
@@ -303,6 +311,7 @@ impl server::Handler for SshConnection {
         Ok(())
     }
 
+    #[tracing::instrument(name = "ssh.exec", skip_all)]
     async fn exec_request(
         &mut self,
         channel: ChannelId,
@@ -442,6 +451,32 @@ impl server::Handler for SshConnection {
 }
 
 impl SshConnection {
+    fn reject_key(
+        &self,
+        username: &str,
+        key: &russh::keys::ssh_key::PublicKey,
+        reason: &'static str,
+    ) -> Auth {
+        // Record only a bounded route name and public-key fingerprint. Never
+        // record key material, commands, environment values, or terminal data.
+        let route_username = if username.len() <= 128
+            && username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        {
+            username
+        } else {
+            "[invalid]"
+        };
+        tracing::warn!(
+            event = "security.ssh_auth_rejected", outcome = "rejected", reason,
+            client_address = ?self.peer_addr, route_username,
+            key_fingerprint = %key.fingerprint(russh::keys::ssh_key::HashAlg::Sha256),
+            "SSH authentication rejected"
+        );
+        Auth::reject()
+    }
+
     async fn load_route_with_admission(
         &self,
         username: &str,

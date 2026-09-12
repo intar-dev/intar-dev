@@ -1,3 +1,5 @@
+// Unit tests run outside workerd; runtime spans are covered by Worker tests.
+vi.mock("@/lib/tracing", () => ({ traceOperation: (_name: string, operation: () => Promise<unknown>) => operation() }));
 import { describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/host-runtime-wake", () => ({
   tryWakeHostRuntime: vi.fn().mockResolvedValue(undefined),

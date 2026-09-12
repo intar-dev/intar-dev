@@ -7,6 +7,7 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+intar-observability = { path = "../intar-observability" }
 anyhow.workspace = true
 axum = { workspace = true, features = ["http1", "json", "macros", "query", "tokio", "ws"] }
 base64.workspace = true
@@ -38,6 +39,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 
 [lints]

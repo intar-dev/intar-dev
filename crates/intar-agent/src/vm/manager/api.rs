@@ -639,8 +639,7 @@ impl VmManager {
 
         tokio::spawn(async move {
             let _permit = permit;
-            let span =
-                tracing::info_span!("vm_create", vm = %name_for_task, image = %image_key_for_task);
+            let span = tracing::info_span!("vm_create", vm = %name_for_task, run_id = %run_id, image = %image_key_for_task);
 
             let create_input = RunCreateInput {
                 api_started_at,

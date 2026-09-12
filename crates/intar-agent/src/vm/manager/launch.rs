@@ -138,6 +138,7 @@ pub(super) async fn cached_jailer_launch_capabilities(
         .await
 }
 
+#[tracing::instrument(name = "vm.prepare_image", skip_all)]
 pub(super) async fn ensure_jailer_image_template(
     inner: &Inner,
     image: &image_cache::CachedChunkedImage,
@@ -280,6 +281,7 @@ where
     }
 }
 
+#[tracing::instrument(name = "vm.launch", skip_all, fields(vm = req.name, run_id = req.run_id))]
 pub(super) async fn launch_jailed_cloud_hypervisor(
     inner: &Inner,
     req: &RunCreateInput<'_>,

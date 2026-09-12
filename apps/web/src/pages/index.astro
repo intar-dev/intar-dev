@@ -6,6 +6,10 @@ import { THEME_BOOTSTRAP_SCRIPT } from "../components/app/theme";
 
 <html lang="en">
 	<head>
+        <script>
+            import { initializeBrowserTelemetry } from "../lib/browser-telemetry";
+            initializeBrowserTelemetry();
+        </script>
 		<meta charset="utf-8" />
 		<script is:inline set:html={THEME_BOOTSTRAP_SCRIPT}></script>
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />

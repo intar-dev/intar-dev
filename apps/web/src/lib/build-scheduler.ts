@@ -1,3 +1,4 @@
+import { traceOperation } from "./tracing";
 import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
@@ -46,6 +47,7 @@ export async function queueImageBuildsFromBundle(
     nowUnixMs: number;
   },
 ): Promise<{ queued: number }> {
+  return traceOperation("build.queue", async () => {
   const organizationId = input.organizationId ?? null;
   await db
     .insert(imageBuildBundles)
@@ -90,6 +92,8 @@ export async function queueImageBuildsFromBundle(
   }
 
   return { queued };
+
+  });
 }
 
 async function queueImageBuildScenario(
@@ -351,6 +355,7 @@ export async function assignQueuedImageBuilds(
   db: DrizzleD1Database,
   nowUnixMs: number,
 ): Promise<Array<{ buildId: string; hostId: string }>> {
+  return traceOperation("build.assign", async () => {
   const [queuedBuilds, builders] = await Promise.all([
     loadQueuedBuildRows(db),
     loadBuilderCandidates(db, nowUnixMs),
@@ -462,6 +467,8 @@ export async function assignQueuedImageBuilds(
   }
 
   return assigned;
+
+  });
 }
 
 export async function maintainHostBuildAssignments(
@@ -497,6 +504,7 @@ export async function reconcileAssignedBuildsForHost(
   hostId: string,
   nowUnixMs: number,
 ): Promise<string[]> {
+  return traceOperation("build.reconcile", async () => {
   const assignments = await db
     .select({
       buildId: imageBuilds.id,
@@ -561,6 +569,8 @@ export async function reconcileAssignedBuildsForHost(
   });
 
   return missingIds.filter((buildId) => activeIds.has(buildId));
+
+  });
 }
 
 export async function recordImageBuildReport(
@@ -569,6 +579,7 @@ export async function recordImageBuildReport(
   report: BuildReportV1,
   nowUnixMs: number,
 ): Promise<{ updated: boolean; terminal: boolean }> {
+  return traceOperation("build.report", async () => {
   const identities = await db
     .select({
       scenarioId: imageBuilds.scenarioId,
@@ -648,6 +659,8 @@ export async function recordImageBuildReport(
       updated: updated.length > 0,
       terminal: updated.length > 0 && isTerminalBuildPhase(report.phase),
     };
+  });
+
   });
 }
 

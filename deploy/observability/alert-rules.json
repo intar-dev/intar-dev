@@ -1,0 +1,493 @@
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "orgId": 1,
+      "name": "Intar operations",
+      "folder": "Intar operations",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "afy1bt1icogzke",
+          "title": "Intar host data missing",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "grafanacloud-prom",
+              "model": {
+                "refId": "A",
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "grafanacloud-prom"
+                },
+                "expr": "sum(up{job=\"integrations/unix\",environment=\"production\"}) or vector(0)",
+                "instant": true,
+                "range": false,
+                "queryType": "instant",
+                "editorMode": "code",
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": {
+                "from": 0,
+                "to": 0
+              },
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        3
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    },
+                    "reducer": {
+                      "type": "last",
+                      "params": []
+                    },
+                    "query": {
+                      "params": [
+                        "B"
+                      ]
+                    },
+                    "type": "query"
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "NoData",
+          "execErrState": "Error",
+          "for": "2m",
+          "annotations": {
+            "summary": "Intar host data missing",
+            "description": "Expected three persistent hosts. Check Alloy and host connectivity.",
+            "__dashboardUid__": "intar-operations"
+          },
+          "labels": {
+            "intar_observability": "true"
+          },
+          "isPaused": false,
+          "notification_settings": {
+            "receiver": "empty"
+          }
+        },
+        {
+          "uid": "bfy1c0lje3jlsd",
+          "title": "Intar critical service stopped",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "grafanacloud-prom",
+              "model": {
+                "refId": "A",
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "grafanacloud-prom"
+                },
+                "expr": "sum(1 - node_systemd_unit_state{state=\"active\",name=~\"intar-agent.service|intar-jailerd.service|intar-builder.service|intar-buildkitd.service|stargate.service|cloudflared.service|alloy.service|ssh.service|sshd.service\"}) or vector(0)",
+                "instant": true,
+                "range": false,
+                "queryType": "instant",
+                "editorMode": "code",
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": {
+                "from": 0,
+                "to": 0
+              },
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    },
+                    "reducer": {
+                      "type": "last",
+                      "params": []
+                    },
+                    "query": {
+                      "params": [
+                        "B"
+                      ]
+                    },
+                    "type": "query"
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "NoData",
+          "execErrState": "Error",
+          "for": "1m",
+          "annotations": {
+            "summary": "Intar critical service stopped",
+            "description": "Inspect the unit journal and recent changes before restarting runtime services.",
+            "__dashboardUid__": "intar-operations"
+          },
+          "labels": {
+            "intar_observability": "true"
+          },
+          "isPaused": false,
+          "notification_settings": {
+            "receiver": "empty"
+          }
+        },
+        {
+          "uid": "cfy1c3lq0s83ke",
+          "title": "Intar disk space low",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "grafanacloud-prom",
+              "model": {
+                "refId": "A",
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "grafanacloud-prom"
+                },
+                "expr": "min(100 * node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\",mountpoint!~\"/run.*\"} / node_filesystem_size_bytes)",
+                "instant": true,
+                "range": false,
+                "queryType": "instant",
+                "editorMode": "code",
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": {
+                "from": 0,
+                "to": 0
+              },
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        10
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    },
+                    "reducer": {
+                      "type": "last",
+                      "params": []
+                    },
+                    "query": {
+                      "params": [
+                        "B"
+                      ]
+                    },
+                    "type": "query"
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "NoData",
+          "execErrState": "Error",
+          "for": "5m",
+          "annotations": {
+            "summary": "Intar disk space low",
+            "description": "A persistent filesystem has less than ten percent available.",
+            "__dashboardUid__": "intar-operations"
+          },
+          "labels": {
+            "intar_observability": "true"
+          },
+          "isPaused": false,
+          "notification_settings": {
+            "receiver": "empty"
+          }
+        },
+        {
+          "uid": "ffy1c7n5ryby8a",
+          "title": "Intar memory pressure",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "grafanacloud-prom",
+              "model": {
+                "refId": "A",
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "grafanacloud-prom"
+                },
+                "expr": "max(100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
+                "instant": true,
+                "range": false,
+                "queryType": "instant",
+                "editorMode": "code",
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": {
+                "from": 0,
+                "to": 0
+              },
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        90
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    },
+                    "reducer": {
+                      "type": "last",
+                      "params": []
+                    },
+                    "query": {
+                      "params": [
+                        "B"
+                      ]
+                    },
+                    "type": "query"
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "NoData",
+          "execErrState": "Error",
+          "for": "5m",
+          "annotations": {
+            "summary": "Intar memory pressure",
+            "description": "A host has less than ten percent available memory. Check memory use and OOM events.",
+            "__dashboardUid__": "intar-operations"
+          },
+          "labels": {
+            "intar_observability": "true"
+          },
+          "isPaused": false,
+          "notification_settings": {
+            "receiver": "empty"
+          }
+        },
+        {
+          "uid": "ffy1cfeokwmwwa",
+          "title": "Intar suspicious login burst",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "grafanacloud-logs",
+              "model": {
+                "refId": "A",
+                "datasource": {
+                  "type": "loki",
+                  "uid": "grafanacloud-logs"
+                },
+                "expr": "sum(count_over_time({service_name=~\"ssh|sshd|linux-auth|stargate|intar-dev\"} |~ \"Failed password|Failed publickey|Invalid user|authentication failure|security.ssh_auth_rejected|security.webssh_auth.*rejected|security.auth_request.*rejected\" [5m])) or vector(0)",
+                "instant": true,
+                "range": false,
+                "queryType": "instant",
+                "editorMode": "code",
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": {
+                "from": 0,
+                "to": 0
+              },
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        20
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    },
+                    "reducer": {
+                      "type": "last",
+                      "params": []
+                    },
+                    "query": {
+                      "params": [
+                        "B"
+                      ]
+                    },
+                    "type": "query"
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "NoData",
+          "execErrState": "Error",
+          "for": "1m",
+          "annotations": {
+            "summary": "Intar suspicious login burst",
+            "description": "More than twenty login rejections in five minutes. Inspect source IP and accepted sessions. Rejections alone do not prove an attack.",
+            "__dashboardUid__": "intar-operations"
+          },
+          "labels": {
+            "intar_observability": "true"
+          },
+          "isPaused": false,
+          "notification_settings": {
+            "receiver": "empty"
+          }
+        },
+        {
+          "uid": "afy1co47z2whsc",
+          "title": "Intar kernel or VM failure",
+          "condition": "B",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "grafanacloud-logs",
+              "model": {
+                "refId": "A",
+                "datasource": {
+                  "type": "loki",
+                  "uid": "grafanacloud-logs"
+                },
+                "expr": "sum(count_over_time({service_name=~\"intar-kernel|systemd|intar-agent|intar-jailerd\"} |~ \"(?i)out of memory|oom-kill|killed process|I/O error|kernel panic|vm boot.*failed|scenario runtime.*timeout\" [5m])) or vector(0)",
+                "instant": true,
+                "range": false,
+                "queryType": "instant",
+                "editorMode": "code",
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "relativeTimeRange": {
+                "from": 0,
+                "to": 0
+              },
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    },
+                    "operator": {
+                      "type": "and"
+                    },
+                    "reducer": {
+                      "type": "last",
+                      "params": []
+                    },
+                    "query": {
+                      "params": [
+                        "B"
+                      ]
+                    },
+                    "type": "query"
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "NoData",
+          "execErrState": "Error",
+          "for": "0s",
+          "annotations": {
+            "summary": "Intar kernel or VM failure",
+            "description": "Inspect kernel, systemd and agent events. Drain the host before service recovery.",
+            "__dashboardUid__": "intar-operations"
+          },
+          "labels": {
+            "intar_observability": "true"
+          },
+          "isPaused": false,
+          "notification_settings": {
+            "receiver": "empty"
+          }
+        }
+      ]
+    }
+  ]
+}

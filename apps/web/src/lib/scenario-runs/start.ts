@@ -1,3 +1,4 @@
+import { traceOperation } from "../tracing";
 import { env } from "cloudflare:workers";
 import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
@@ -149,6 +150,7 @@ export async function startScenarioRunInternal(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
+  return traceOperation("scenario.start", async () => {
   await assertAgentKvmRunsOpen(env.DB, {
     ...(params.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
   });
@@ -523,6 +525,8 @@ export async function startScenarioRunInternal(params: {
     acceptedAt: createdAt,
     reused: false,
   };
+
+  }, {"intar.scenario.id": params.scenarioId});
 }
 
 /** @internal Exported for adversarial D1-boundary tests. */
@@ -822,6 +826,7 @@ async function allocateScenarioRuntime(input: {
   leaseExpiresAt: number | null;
   now: number;
 }): Promise<{ hostId: string }> {
+  return traceOperation("scenario.allocate", async () => {
   return withRuntimeAllocationLock({
     key: runtimeCapacityAllocationKey(input.organizationId),
     now: input.now,
@@ -916,6 +921,8 @@ async function allocateScenarioRuntime(input: {
       return { hostId: reservation.hostId };
     },
   });
+
+  }, {"intar.run.id": input.runId, "intar.scenario.id": input.scenarioId});
 }
 
 export function scenarioRuntimeReservationResources(
@@ -1077,6 +1084,7 @@ export async function reserveScenarioBootCpuWithJitter(input: {
   | { ok: true; hostId: string }
   | { ok: false; reason: "boot_capacity_pending" | "host_unavailable" }
 > {
+  return traceOperation("scenario.boot_capacity", async () => {
   let sawBootCapacityPending = false;
   for (
     let attempt = 0;
@@ -1114,6 +1122,8 @@ export async function reserveScenarioBootCpuWithJitter(input: {
       ? "boot_capacity_pending"
       : "host_unavailable",
   };
+
+  }, {"intar.run.id": input.runId});
 }
 
 export async function bootCapacityRetryJitter(): Promise<void> {
@@ -1163,6 +1173,7 @@ export async function upsertRunVmsIntoDesiredState(input: {
   sshAuthorizedKeysByVmId: Map<string, string[]>;
   allowDrainedAdminProof?: boolean;
 }): Promise<void> {
+  return traceOperation("scenario.publish_desired", async () => {
   await assertAgentKvmRunsOpen(env.DB, {
     ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
   });
@@ -1225,6 +1236,8 @@ export async function upsertRunVmsIntoDesiredState(input: {
         }),
     },
   );
+
+  }, {"intar.run.id": input.runId, "intar.host.id": input.hostId});
 }
 
 export async function markRunVmsAbsentInDesiredState(input: {
@@ -1615,6 +1628,7 @@ export async function selectScenarioHosts(
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
 ): Promise<HostSelectionResult> {
+  return traceOperation("scenario.select_host", async () => {
   const db = drizzle(env.DB);
   const candidates = await loadEligibleScenarioLaunchHosts(
     organizationId,
@@ -1714,6 +1728,8 @@ export async function selectScenarioHosts(
   return hostIds.length
     ? { ok: true, hostIds }
     : { ok: false, reason: "unavailable" };
+
+  });
 }
 
 async function assertScenarioRuntimeCapacity(

@@ -87,14 +87,31 @@ struct TerminalTokenClaims {
     jti: String,
 }
 
+#[tracing::instrument(name = "terminal.authenticate", skip_all)]
 pub async fn terminal_websocket(
     ws: WebSocketUpgrade,
     State(state): State<GatewayState>,
     headers: HeaderMap,
     Query(query): Query<TerminalWebSocketQuery>,
 ) -> Result<Response, GatewayHttpError> {
-    validate_origin(&headers, &state)?;
-    let route_username = validate_terminal_token(&state, query.token.as_deref()).await?;
+    validate_origin(&headers, &state).inspect_err(|_| {
+        tracing::warn!(
+            event = "security.webssh_auth",
+            outcome = "rejected",
+            reason = "origin_not_allowed",
+            "browser terminal admission rejected"
+        );
+    })?;
+    let route_username = validate_terminal_token(&state, query.token.as_deref())
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                event = "security.webssh_auth",
+                outcome = "rejected",
+                reason = "invalid_token",
+                "browser terminal admission rejected"
+            );
+        })?;
     // Register before the route lookup so a concurrent assist revoke or
     // workspace teardown cannot fall between authorization and the WebSocket
     // upgrade. A cancelled admission lease is carried into the socket task.
@@ -106,10 +123,30 @@ pub async fn terminal_websocket(
         _ = admission_cancel.cancelled() => None,
         route = state.store.get_route(&route_username) => route?,
     }
-    .ok_or(StargateError::Unauthorized)?;
+    .ok_or(StargateError::Unauthorized)
+    .inspect_err(|_| {
+        tracing::warn!(
+            event = "security.webssh_auth",
+            outcome = "rejected",
+            reason = "route_unavailable",
+            "browser terminal admission rejected"
+        );
+    })?;
     if admission_cancel.is_cancelled() {
+        tracing::warn!(
+            event = "security.webssh_auth",
+            outcome = "rejected",
+            reason = "route_revoked",
+            "browser terminal admission rejected"
+        );
         return Err(GatewayHttpError(StargateError::Unauthorized));
     }
+    tracing::info!(
+        event = "security.webssh_auth",
+        outcome = "accepted",
+        route_username,
+        "browser terminal admitted"
+    );
 
     Ok(ws
         .max_frame_size(MAX_FRAME_BYTES)
@@ -152,6 +189,7 @@ async fn handle_socket(socket: WebSocket, route: RouteRecord, lease: SessionLeas
     }
 }
 
+#[tracing::instrument(name = "terminal.session", skip_all, fields(route_username = route.route_username))]
 async fn run_terminal_socket(
     socket: WebSocket,
     route: RouteRecord,

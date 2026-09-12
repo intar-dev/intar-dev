@@ -43,7 +43,6 @@ use rustix::net::{
 };
 #[cfg(target_os = "linux")]
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
 
 #[cfg(target_os = "linux")]
 const MAINTENANCE_LOCK_PATH: &str = "/run/intar-jailerd/maintenance.lock";
@@ -134,9 +133,8 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    let _telemetry =
+        intar_observability::init("intar-jailerd", env!("CARGO_PKG_VERSION"), "info", true)?;
     #[cfg(not(target_os = "linux"))]
     {
         let _ = cli;

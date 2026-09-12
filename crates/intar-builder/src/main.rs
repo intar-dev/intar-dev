@@ -114,7 +114,12 @@ struct BuildLogFile {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    let _telemetry = intar_observability::init(
+        "intar-builder",
+        env!("CARGO_PKG_VERSION"),
+        "intar_builder=info,warn",
+        true,
+    )?;
     let cli = Cli::parse();
     match cli.command {
         Command::Doctor(args) => doctor(args),
@@ -608,16 +613,6 @@ pub(crate) async fn cleanup_reported_build_attempt_artifacts(
             );
         }
     }
-}
-
-fn init_tracing() {
-    let filter =
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "intar_builder=info,warn".to_string());
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .init();
 }
 
 #[cfg(test)]

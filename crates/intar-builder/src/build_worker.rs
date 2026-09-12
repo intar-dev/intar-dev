@@ -172,6 +172,7 @@ pub(super) async fn process_next_queued_build(
     result
 }
 
+#[tracing::instrument(name = "image.build", skip_all, fields(build_id = job.build_id))]
 pub(super) async fn run_claimed_build_job(
     cfg: &config::BuilderConfig,
     job: &db::BuildJobRow,
@@ -612,6 +613,7 @@ async fn process_next_publication(
     Ok(true)
 }
 
+#[tracing::instrument(name = "image.publish", skip_all, fields(build_id = job.build_id))]
 async fn publish_claimed_build_outputs(
     cfg: &config::BuilderConfig,
     job: &db::BuildJobRow,

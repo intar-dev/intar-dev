@@ -345,6 +345,7 @@ pub(super) fn archive_batch_needs_follow_up(job_count: usize) -> bool {
     job_count == ARCHIVE_JOB_BATCH_SIZE
 }
 
+#[tracing::instrument(name = "vm.archive", skip_all, fields(vm = job.vm_name, run_id = job.run_id, retry_count = job.retry_count))]
 pub(super) async fn process_archive_job(
     inner: &Inner,
     job: ArchiveJobRow,

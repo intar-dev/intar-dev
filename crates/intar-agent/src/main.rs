@@ -44,7 +44,8 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    let _telemetry =
+        intar_observability::init("intar-agent", env!("CARGO_PKG_VERSION"), "info", true)?;
     tls_provider::ensure_ring_provider()
         .context("failed to initialize rustls ring crypto provider")?;
 
@@ -173,13 +174,6 @@ async fn main() -> Result<()> {
         .context("server error")?;
 
     Ok(())
-}
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 fn print_preflight_report(report: &preflight::PreflightReport) {

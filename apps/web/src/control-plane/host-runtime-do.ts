@@ -1,3 +1,4 @@
+import { traceOperation } from "@/lib/tracing";
 import {
   DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
   HostRuntimeBase,
@@ -88,19 +89,19 @@ export class HostRuntimeDO extends HostRuntimeBase {
     const url = new URL(request.url);
 
     if (url.pathname === "/connect") {
-      return this.handleConnect(request);
+      return traceOperation("host.handleConnect", () => this.handleConnect(request));
     }
 
     if (url.pathname === "/_internal/run-status") {
-      return this.handleRunStatusStream(request);
+      return traceOperation("host.handleRunStatusStream", () => this.handleRunStatusStream(request));
     }
 
     if (url.pathname === "/_internal/wake") {
-      return this.handleWake(request);
+      return traceOperation("host.handleWake", () => this.handleWake(request));
     }
 
     if (url.pathname === "/_internal/retire") {
-      return this.handleRetire(request);
+      return traceOperation("host.handleRetire", () => this.handleRetire(request));
     }
 
     if (url.pathname.startsWith("/_internal/cpu-reservations/")) {
@@ -121,7 +122,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    await this.reconcileHost(hostId);
+    await traceOperation("host.reconcile", () => this.reconcileHost(hostId), { "intar.host.id": hostId });
   }
 
   override async webSocketMessage(
@@ -158,7 +159,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
     const bridgeMessage = parseBridgeMessageV7(message);
     if (bridgeMessage) {
-      await this.handleBridgeMessageV7(ws, attachment, bridgeMessage);
+      await traceOperation("host.bridge.message", () => this.handleBridgeMessageV7(ws, attachment, bridgeMessage), { "intar.bridge.message_type": bridgeMessage.type });
       return;
     }
 

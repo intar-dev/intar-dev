@@ -128,5 +128,17 @@
   ],
   "observability": {
     "enabled": true,
+    "redact_query_string": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "destinations": ["intar-grafana-logs"],
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "destinations": ["intar-grafana-traces"],
+    },
   },
 }

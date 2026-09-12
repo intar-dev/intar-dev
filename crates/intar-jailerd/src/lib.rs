@@ -729,6 +729,7 @@ mod core_lifecycle;
 /// or VMM readiness polling. Admission and completion remain short,
 /// generation-fenced critical sections, and the boot quota is charged for the
 /// entire unlocked interval.
+#[tracing::instrument(name = "vm.launch_v2", skip_all)]
 pub fn launch_vm_v2_response<B, P>(
     core: &Arc<Mutex<JailerdCore<B, P>>>,
     request: LaunchVmV2Request,
@@ -817,6 +818,7 @@ where
 
 /// Execute a V3 chunked-image launch without holding the lifecycle mutex over
 /// template validation, staging, networking, or VMM readiness.
+#[tracing::instrument(name = "vm.launch_v3", skip_all)]
 pub fn launch_vm_v3_response<B, P>(
     core: &Arc<Mutex<JailerdCore<B, P>>>,
     request: LaunchVmV3Request,
@@ -912,6 +914,7 @@ fn protocol_error_response(error: anyhow::Error) -> Response {
 
 /// Execute the long-running, stateless template import after production
 /// dispatch has released `JailerdCore`'s lifecycle mutex.
+#[tracing::instrument(name = "image.prepare_v2", skip_all)]
 pub fn prepare_image_v2_response(
     config: &JailerdConfig,
     request: PrepareImageV2Request,
@@ -955,6 +958,7 @@ pub fn prepare_image_v2_response(
     }
 }
 
+#[tracing::instrument(name = "image.prepare_v3", skip_all)]
 pub fn prepare_chunked_image_v3_response(
     config: &JailerdConfig,
     request: PrepareChunkedImageV3Request,

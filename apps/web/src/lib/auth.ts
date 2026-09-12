@@ -1,3 +1,4 @@
+import { recordSecurityEvent } from "@/lib/security-events";
 import { env } from "cloudflare:workers";
 import { defineRequestState } from "@better-auth/core/context";
 import { oauthProvider } from "@better-auth/oauth-provider";
@@ -1525,12 +1526,20 @@ function buildAuthInstance() {
                 session,
                 expected: fence.admission,
               });
+              recordSecurityEvent(context?.request, {
+                event: "security.session_created", outcome: "accepted",
+                userId: session.userId, admission: "active",
+              });
               return;
             }
             if (
               fence?.kind === "restricted" &&
               (await isValidRestrictedSessionFlow(session.userId, fence.flow))
             ) {
+              recordSecurityEvent(context?.request, {
+                event: "security.session_created", outcome: "accepted",
+                userId: session.userId, admission: "restricted",
+              });
               return;
             }
 

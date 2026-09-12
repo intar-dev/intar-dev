@@ -1,3 +1,5 @@
+// Unit tests run outside workerd; runtime spans are covered by Worker tests.
+vi.mock("@/lib/tracing", () => ({ traceOperation: (_name: string, operation: () => Promise<unknown>) => operation() }));
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assignQueuedImageBuilds,

@@ -1,3 +1,4 @@
+import { traceOperation } from "@/lib/tracing";
 import type { APIRoute } from "astro";
 import { auth } from "../../../lib/auth";
 import { accessInviteError, accessInviteJson } from "@/lib/access-invite-http";
@@ -10,7 +11,7 @@ export const prerender = false;
 
 export const ALL: APIRoute = async ({ request }) => {
   try {
-    return sanitizeOidcErrorResponse(request, await auth.handler(request));
+    return sanitizeOidcErrorResponse(request, await traceOperation("auth.handle", () => auth.handler(request)));
   } catch (error) {
     if (isOidcSsoErrorBoundaryRequest(request)) {
       console.warn(JSON.stringify({ event: "oidc_auth_request_failed" }));

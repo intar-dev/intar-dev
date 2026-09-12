@@ -1,0 +1,232 @@
+// Grafana Cloud stack: https://intar.grafana.net
+// Run on persistent Linux hosts with Grafana Alloy 1.19.2 or newer.
+logging {
+	level  = "info"
+	format = "json"
+}
+
+local.file "grafana_cloud_token" {
+	filename  = "/etc/alloy/grafana-cloud-token"
+	is_secret = true
+}
+
+// Alloy 1.19.2 builds both authentication handlers. Its client_auth-only
+// configuration fails at runtime because the server handler has no credentials.
+otelcol.auth.basic "grafana" {
+	username = "1827603"
+	password = local.file.grafana_cloud_token.content
+}
+
+otelcol.storage.file "grafana" { }
+
+otelcol.exporter.otlphttp "grafana" {
+	client {
+		endpoint = "https://otlp-gateway-prod-eu-west-2.grafana.net/otlp"
+		auth     = otelcol.auth.basic.grafana.handler
+		timeout  = "15s"
+	}
+
+	sending_queue {
+		storage           = otelcol.storage.file.grafana.handler
+		sizer             = "bytes"
+		queue_size        = 16777216
+		num_consumers     = 2
+		block_on_overflow = false
+	}
+
+	retry_on_failure {
+		max_elapsed_time = "15m"
+	}
+}
+
+otelcol.processor.batch "grafana" {
+	timeout             = "5s"
+	send_batch_size     = 1024
+	send_batch_max_size = 2048
+
+	output {
+		logs    = [otelcol.exporter.otlphttp.grafana.input]
+		metrics = [otelcol.exporter.otlphttp.grafana.input]
+		traces  = [otelcol.exporter.otlphttp.grafana.input]
+	}
+}
+
+// Local application exporters use OTLP/HTTP. Guest networks cannot use this
+// listener. Applications must set their own service and release attributes.
+otelcol.receiver.otlp "applications" {
+	http {
+		endpoint = "127.0.0.1:4318"
+	}
+
+	output {
+		logs    = [otelcol.processor.batch.grafana.input]
+		metrics = [otelcol.processor.batch.grafana.input]
+		traces  = [otelcol.processor.batch.grafana.input]
+	}
+}
+
+loki.relabel "services" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal_syslog_facility"]
+		regex         = "4|10"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		regex         = "(intar-(agent|builder|workshop-builder|jailerd|buildkitd)|stargate|cloudflared(-.*)?|alloy|ssh|sshd|actions[.]runner[.].+)\\.service"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		regex         = "(.+)\\.service"
+		replacement   = "$1"
+		target_label  = "service_name"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		target_label  = "level"
+	}
+}
+
+loki.source.journal "services" {
+	max_age       = "1h"
+	relabel_rules = loki.relabel.services.rules
+	labels        = {service_name = "intar-host", environment = "production", host = sys.env("INTAR_HOST_ID")}
+	forward_to    = [otelcol.receiver.loki.journal.receiver]
+}
+
+// Authentication can be emitted by PAM or sudo from session scopes.
+loki.relabel "authentication" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal_syslog_identifier"]
+		regex         = "(sshd|ssh|sudo|su|login|systemd-logind)"
+		replacement   = "$1"
+		target_label  = "service_name"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		target_label  = "level"
+	}
+}
+
+loki.source.journal "auth" {
+	matches       = "SYSLOG_FACILITY=4"
+	max_age       = "1h"
+	relabel_rules = loki.relabel.authentication.rules
+	labels        = {service_name = "linux-auth", environment = "production", host = sys.env("INTAR_HOST_ID")}
+	forward_to    = [loki.process.authentication.receiver]
+}
+
+loki.source.journal "authpriv" {
+	matches       = "SYSLOG_FACILITY=10"
+	max_age       = "1h"
+	relabel_rules = loki.relabel.authentication.rules
+	labels        = {service_name = "linux-auth", environment = "production", host = sys.env("INTAR_HOST_ID")}
+	forward_to    = [loki.process.authentication.receiver]
+}
+
+loki.process "authentication" {
+	stage.replace {
+		expression = "COMMAND=(.*)$"
+		replace    = "[redacted]"
+	}
+	forward_to = [otelcol.receiver.loki.journal.receiver]
+}
+
+// PID 1 records unit exits and OOM kills without reading guest console output.
+loki.source.journal "service_manager" {
+	matches    = "_PID=1"
+	max_age    = "1h"
+	labels     = {service_name = "systemd", environment = "production", host = sys.env("INTAR_HOST_ID")}
+	forward_to = [otelcol.receiver.loki.journal.receiver]
+}
+
+loki.source.journal "kernel" {
+	max_age    = "1h"
+	matches    = "_TRANSPORT=kernel"
+	labels     = {service_name = "intar-kernel", environment = "production", host = sys.env("INTAR_HOST_ID")}
+	forward_to = [otelcol.receiver.loki.journal.receiver]
+}
+
+otelcol.receiver.loki "journal" {
+	output {
+		logs = [otelcol.processor.transform.journal.input]
+	}
+}
+
+// Loki labels arrive as log attributes. Promote only stable identity fields
+// to OTLP resource attributes so Grafana can group logs by service and host.
+otelcol.processor.transform "journal" {
+	log_statements {
+		context    = "log"
+		statements = [
+			`set(resource.attributes["service.name"], log.attributes["service_name"])`,
+			`set(resource.attributes["host.name"], log.attributes["host"])`,
+			`set(resource.attributes["deployment.environment.name"], log.attributes["environment"])`,
+			`delete_key(log.attributes, "loki.attribute.labels")`,
+		]
+	}
+
+	output {
+		logs = [otelcol.processor.batch.grafana.input]
+	}
+}
+
+prometheus.exporter.unix "host" {
+	set_collectors = ["cpu", "diskstats", "filesystem", "loadavg", "meminfo", "netdev", "pressure", "stat", "systemd", "time", "uname", "vmstat"]
+
+	systemd {
+		unit_include    = "(intar-(agent|builder|workshop-builder|jailerd|buildkitd)|stargate|cloudflared(-.*)?|alloy|ssh|sshd|actions[.]runner[.].+)\\.service"
+		enable_restarts = true
+		start_time      = true
+	}
+}
+
+prometheus.scrape "host" {
+	targets         = prometheus.exporter.unix.host.targets
+	job_name        = "integrations/unix"
+	scrape_interval = "30s"
+	forward_to      = [prometheus.relabel.host.receiver]
+}
+
+prometheus.exporter.self "alloy" { }
+
+prometheus.scrape "alloy" {
+	targets         = prometheus.exporter.self.alloy.targets
+	job_name        = "integrations/self"
+	scrape_interval = "30s"
+	forward_to      = [prometheus.relabel.host.receiver]
+}
+
+prometheus.relabel "host" {
+	forward_to = [otelcol.receiver.prometheus.host.receiver]
+
+	rule {
+		target_label = "instance"
+		replacement  = sys.env("INTAR_HOST_ID")
+	}
+
+	rule {
+		target_label = "environment"
+		replacement  = "production"
+	}
+}
+
+otelcol.receiver.prometheus "host" {
+	output {
+		metrics = [otelcol.processor.batch.grafana.input]
+	}
+}

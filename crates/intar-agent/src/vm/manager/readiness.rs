@@ -9,6 +9,7 @@ pub(super) fn boot_capacity_retry_delay(attempt: u32) -> Duration {
     Duration::from_millis(base_ms.saturating_add(jitter_ms).min(1_000))
 }
 
+#[tracing::instrument(name = "vm.wait_ready", skip_all, fields(vm = vm_name, run_id = ?details.run_id))]
 pub(super) async fn wait_for_scenario_runtime_ready(
     inner: &Arc<Inner>,
     vm_name: &str,
