@@ -721,7 +721,6 @@ fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
     assert!(!start_sshd.contains("deadline_seconds="));
     assert!(!start_sshd.contains("systemctl restart"));
     assert!(!start_sshd.contains("systemctl reset-failed"));
-    let generate_keys = start_sshd.find("generate_ssh_host_keys").unwrap();
     let create_sshd_runtime = start_sshd
         .find("install -d -o root -g root -m 0755 /run/sshd")
         .unwrap();
@@ -730,12 +729,11 @@ fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
         .find("install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready")
         .unwrap();
     let start_service = start_sshd.find("systemctl start ssh.service").unwrap();
-    assert!(generate_keys < create_sshd_runtime);
     assert!(create_sshd_runtime < validate_sshd);
     assert!(validate_sshd < create_ready_gate);
     assert!(create_ready_gate < start_service);
     assert!(start_sshd.contains(
-        "install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready\n  if ! systemctl start ssh.service"
+        "install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready\n  if ! timeout --kill-after=5s"
     ));
     assert!(start_sshd.contains("log_phase ssh_boot end"));
     assert!(start_sshd.contains("print_sshd_diagnostics"));
@@ -743,40 +741,180 @@ fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
     assert!(script.contains("systemctl status --no-pager --full ssh.service >&2"));
     assert!(script.contains("journalctl --no-pager --full --unit ssh.service --lines 100 >&2"));
 
-    let configure_network = script.rfind("\nconfigure_guest_network\n").unwrap();
-    let configure_access = script.rfind("\nconfigure_ssh_access\n").unwrap();
-    let start_sshd_call = script.rfind("\nstart_sshd\n").unwrap();
-    assert!(configure_network < configure_access);
-    assert!(configure_access < start_sshd_call);
+    let prepare = script.rfind("\nprepare_network_and_ssh\n").unwrap();
+    let start = script.rfind("\nstart_sshd\n").unwrap();
+    let kino = script.rfind("\nstart_kino\n").unwrap();
+    assert!(prepare < start && start < kino);
 }
 
 #[test]
-fn scenario_supervisor_retains_bounded_async_ssh_start_for_fractional_cpu() {
-    let script = render_minimal_runtime_stage_with_cpu("0.125");
-    assert!(script.contains("vm_cpu_millis=125"));
+fn scenario_supervisor_ssh_start_is_bounded_at_every_cpu_limit() {
+    for cpu in ["0.125", "1", "2"] {
+        let script = render_minimal_runtime_stage_with_cpu(cpu);
+        let start = script
+            .split_once("start_sshd() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\n# intar-runtime-main")
+            .unwrap()
+            .0;
+        assert!(!script.contains("vm_cpu_millis="));
+        assert!(!start.contains("--no-block"));
+        assert!(!start.contains("sleep"));
+        let function =
+            format!("start_sshd() {{\n{start}\n}}\n").replace("/usr/sbin/sshd", "mock_sshd");
+        for status in [0, 1, 124, 143] {
+            let harness = format!(
+                r#"set -eu
+ssh_ready_timeout_seconds=120
+install() {{ :; }}
+mock_sshd() {{ return 0; }}
+log_phase() {{ :; }}
+print_sshd_diagnostics() {{ echo diagnostics; }}
+timeout() {{
+  test "$1" = --kill-after=5s
+  test "$2" = 120s
+  shift 2
+  if [ {status} -ne 0 ]; then return {status}; fi
+  "$@"
+}}
+systemctl() {{
+  if [ "$1" = start ]; then echo start-completed; else test "$1" = is-active; fi
+}}
+{function}
+start_sshd
+echo terminal-ready
+"#
+            );
+            let output = run_bash(&harness, false);
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                output.status.success(),
+                status == 0,
+                "cpu={cpu} status={status}"
+            );
+            assert_eq!(text.contains("terminal-ready"), status == 0);
+            assert_eq!(text.contains("diagnostics"), status != 0);
+        }
+    }
+}
 
-    let (_, start_sshd_and_rest) = script.split_once("start_sshd() {\n").unwrap();
-    let (start_sshd, _) = start_sshd_and_rest
-        .split_once("\n}\n\n# intar-runtime-main")
-        .unwrap();
-    assert!(
-        start_sshd
-            .contains("deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))")
+#[test]
+fn scenario_supervisor_timestamp_conversion_handles_decimal_boundaries() {
+    let script = render_minimal_supervisor();
+    let function = script
+        .split_once("uptime_millis() {\n")
+        .unwrap()
+        .1
+        .split_once("\n}\n")
+        .unwrap()
+        .0;
+    let harness = format!(
+        r#"set -eu
+uptime_millis() {{
+{function}
+}}
+for pair in 0.00:0 0.01:10 000.09:90 1.001:1001 9.999:9999 10.00:10000; do
+  uptime_millis "${{pair%:*}}"
+  test "$UPTIME_MILLIS" = "${{pair#*:}}"
+done
+"#
     );
-    assert!(start_sshd.contains("systemctl start --no-block ssh.service"));
+    let output = run_bash(&harness, false);
     assert!(
-        start_sshd.contains("systemctl show ssh.service --property=ActiveState --property=Job")
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(start_sshd.contains("while true; do"));
-    assert!(start_sshd.contains("sleep 0.1"));
-    assert!(!start_sshd.contains("sleep 1"));
-    assert!(start_sshd.contains("now_seconds=\"$(monotonic_seconds)\""));
-    assert!(start_sshd.contains("-ge \"$deadline_seconds\""));
-    assert!(start_sshd.contains(
-        "timed out after ${ssh_ready_timeout_seconds}s waiting for ssh service to become active"
-    ));
-    assert!(!start_sshd.contains("if ! systemctl start ssh.service; then"));
-    assert!(!start_sshd.contains("systemctl is-active"));
+    assert!(!script.contains("awk"));
+}
+
+#[test]
+fn scenario_supervisor_joins_both_preparation_branches_and_stops_on_failure() {
+    let script = render_minimal_supervisor();
+    let function = script
+        .split_once("prepare_network_and_ssh() {\n")
+        .unwrap()
+        .1
+        .split_once("\n}\n")
+        .unwrap()
+        .0;
+    for (network_delay, key_delay, network_status, key_status) in [
+        ("0.01", "0.05", 0, 0),
+        ("0.05", "0.01", 0, 0),
+        ("0.01", "0.05", 7, 0),
+        ("0.05", "0.01", 0, 8),
+    ] {
+        let harness = format!(
+            r#"set -Eeuo pipefail
+log_phase() {{ :; }}
+configure_guest_network() {{ sleep {network_delay}; echo network-done; return {network_status}; }}
+configure_ssh_access() {{ echo access-ready; }}
+generate_ssh_host_keys() {{ sleep {key_delay}; echo keys-done; return {key_status}; }}
+prepare_network_and_ssh() {{
+{function}
+}}
+prepare_network_and_ssh
+echo ssh-start
+echo kino-start
+"#
+        );
+        let output = run_bash(&harness, false);
+        let text = String::from_utf8_lossy(&output.stdout);
+        let success = network_status == 0 && key_status == 0;
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(text.contains("ssh-start"), success);
+        assert_eq!(text.contains("kino-start"), success);
+        if success {
+            assert!(text.find("network-done").unwrap() < text.find("ssh-start").unwrap());
+            assert!(text.find("keys-done").unwrap() < text.find("ssh-start").unwrap());
+        }
+    }
+}
+
+#[test]
+fn scenario_supervisor_interruption_stops_worker_helper_processes() {
+    let temp = tempfile::tempdir().unwrap();
+    let survived = shell_quote(&temp.path().join("survived").display().to_string());
+    let script = render_minimal_supervisor();
+    let function = script
+        .split_once("prepare_network_and_ssh() {\n")
+        .unwrap()
+        .1
+        .split_once("\n}\n")
+        .unwrap()
+        .0;
+    let harness = format!(
+        r#"set -Eeuo pipefail
+log_phase() {{ :; }}
+configure_guest_network() {{ bash -c 'sleep 0.3; echo leaked' >>{survived}; }}
+configure_ssh_access() {{ :; }}
+generate_ssh_host_keys() {{ bash -c 'sleep 0.3; echo leaked' >>{survived}; }}
+prepare_network_and_ssh() {{
+{function}
+}}
+prepare_network_and_ssh &
+worker=$!
+sleep 0.1
+kill -TERM "$worker"
+status=0
+wait "$worker" || status=$?
+test "$status" -ne 0
+sleep 0.35
+test ! -s {survived}
+"#
+    );
+    let output = run_bash(&harness, false);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

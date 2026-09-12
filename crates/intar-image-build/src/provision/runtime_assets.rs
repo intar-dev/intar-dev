@@ -4,7 +4,6 @@ pub(super) fn append_runtime_assets(
     script: &mut String,
     kino_template: &str,
     scenario_motd: &str,
-    cpu_millis: u32,
     requires_kubernetes_modules: bool,
 ) -> Result<()> {
     writeln!(script, "install -d -m 0755 /etc/kino /etc/intar").context("format error")?;
@@ -291,7 +290,6 @@ pub(super) fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "recording_mount_path=\"{RECORDING_MOUNT_PATH}\"").context("format error")?;
     writeln!(script, "recording_user=\"{DEFAULT_USERNAME}\"").context("format error")?;
-    writeln!(script, "vm_cpu_millis={cpu_millis}").context("format error")?;
     writeln!(
         script,
         "ssh_ready_timeout_seconds={GUEST_SSH_READY_TIMEOUT_SECONDS}"
@@ -315,14 +313,14 @@ pub(super) fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, ": >\"$phase_timing_path\" 2>/dev/null || true").context("format error")?;
     writeln!(script).context("format error")?;
-    writeln!(script, "uptime_millis() {{").context("format error")?;
-    writeln!(
-        script,
-        "  awk '{{ printf \"%.0f\\n\", $1 * 1000 }}' /proc/uptime"
-    )
-    .context("format error")?;
-    writeln!(script, "}}").context("format error")?;
-    writeln!(script).context("format error")?;
+    script.push_str(
+        r#"uptime_millis() {
+  local seconds="${1%%.*}" fraction="${1#*.}000"
+  UPTIME_MILLIS=$((10#$seconds * 1000 + 10#${fraction:0:3}))
+}
+
+"#,
+    );
     writeln!(script, "log_phase() {{").context("format error")?;
     writeln!(
         script,
@@ -330,7 +328,8 @@ pub(super) fn append_runtime_assets(
     )
     .context("format error")?;
     writeln!(script, "  read -r uptime _ </proc/uptime").context("format error")?;
-    writeln!(script, "  now_ms=\"$(uptime_millis)\"").context("format error")?;
+    writeln!(script, "  uptime_millis \"$uptime\"").context("format error")?;
+    writeln!(script, "  now_ms=$UPTIME_MILLIS").context("format error")?;
     writeln!(script, "  if [ \"$status\" = start ]; then").context("format error")?;
     writeln!(
         script,
@@ -809,121 +808,60 @@ pub(super) fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
-    writeln!(script, "start_sshd() {{").context("format error")?;
-    if cpu_millis < 1_000 {
-        writeln!(script, "  local deadline_seconds now_seconds ssh_active_state ssh_job ssh_properties property value").context("format error")?;
-        writeln!(
-            script,
-            "  deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))"
-        )
-        .context("format error")?;
-    }
-    writeln!(script, "  log_phase ssh_boot start").context("format error")?;
-    writeln!(script, "  generate_ssh_host_keys").context("format error")?;
-    writeln!(script, "  install -d -o root -g root -m 0755 /run/sshd").context("format error")?;
-    writeln!(script, "  if ! /usr/sbin/sshd -t; then").context("format error")?;
-    writeln!(
-        script,
-        "    echo 'generated SSH host keys failed sshd configuration validation' >&2"
-    )
-    .context("format error")?;
-    writeln!(script, "    print_sshd_diagnostics").context("format error")?;
-    writeln!(script, "    return 1").context("format error")?;
-    writeln!(script, "  fi").context("format error")?;
-    writeln!(
-        script,
-        "  install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready"
-    )
-    .context("format error")?;
-    if cpu_millis >= 1_000 {
-        // `systemctl start` waits for the job to finish. The distribution unit's
-        // TimeoutStartSec bounds the wait, and a single postcondition check avoids
-        // adding up to one second of polling latency to normal-capacity guests.
-        writeln!(script, "  if ! systemctl start ssh.service; then").context("format error")?;
-        writeln!(script, "    echo 'failed to start ssh.service' >&2").context("format error")?;
-        writeln!(script, "    print_sshd_diagnostics").context("format error")?;
-        writeln!(script, "    return 1").context("format error")?;
-        writeln!(script, "  fi").context("format error")?;
-        writeln!(
-            script,
-            "  if ! systemctl is-active --quiet ssh.service; then"
-        )
-        .context("format error")?;
-        writeln!(
-            script,
-            "    echo 'ssh.service did not become active after its start job completed' >&2"
-        )
-        .context("format error")?;
-        writeln!(script, "    print_sshd_diagnostics").context("format error")?;
-        writeln!(script, "    return 1").context("format error")?;
-        writeln!(script, "  fi").context("format error")?;
-        writeln!(script, "  log_phase ssh_boot end").context("format error")?;
-    } else {
-        writeln!(
-            script,
-            "  if ! systemctl start --no-block ssh.service; then"
-        )
-        .context("format error")?;
-        writeln!(script, "    echo 'failed to enqueue ssh.service start' >&2")
-            .context("format error")?;
-        writeln!(script, "    print_sshd_diagnostics").context("format error")?;
-        writeln!(script, "    return 1").context("format error")?;
-        writeln!(script, "  fi").context("format error")?;
-        writeln!(script, "  while true; do").context("format error")?;
-        writeln!(script, "    ssh_active_state=unknown").context("format error")?;
-        writeln!(script, "    ssh_job=unknown").context("format error")?;
-        writeln!(
-            script,
-            "    ssh_properties=\"$(systemctl show ssh.service --property=ActiveState --property=Job 2>/dev/null || true)\""
-        )
-        .context("format error")?;
-        writeln!(script, "    while IFS='=' read -r property value; do").context("format error")?;
-        writeln!(script, "      case \"$property\" in").context("format error")?;
-        writeln!(
-            script,
-            "        ActiveState) ssh_active_state=\"$value\" ;;"
-        )
-        .context("format error")?;
-        writeln!(script, "        Job) ssh_job=\"$value\" ;;").context("format error")?;
-        writeln!(script, "      esac").context("format error")?;
-        writeln!(script, "    done <<<\"$ssh_properties\"").context("format error")?;
-        writeln!(script, "    if [ -z \"$ssh_job\" ]; then").context("format error")?;
-        writeln!(script, "      case \"$ssh_active_state\" in").context("format error")?;
-        writeln!(script, "        active)").context("format error")?;
-        writeln!(script, "          log_phase ssh_boot end").context("format error")?;
-        writeln!(script, "          return 0").context("format error")?;
-        writeln!(script, "          ;;").context("format error")?;
-        writeln!(script, "        failed)").context("format error")?;
-        writeln!(
-            script,
-            "          echo 'ssh.service entered failed state during startup' >&2"
-        )
-        .context("format error")?;
-        writeln!(script, "          print_sshd_diagnostics").context("format error")?;
-        writeln!(script, "          return 1").context("format error")?;
-        writeln!(script, "          ;;").context("format error")?;
-        writeln!(script, "      esac").context("format error")?;
-        writeln!(script, "    fi").context("format error")?;
-        writeln!(script, "    now_seconds=\"$(monotonic_seconds)\"").context("format error")?;
-        writeln!(
-            script,
-            "    if [ \"$now_seconds\" -ge \"$deadline_seconds\" ]; then"
-        )
-        .context("format error")?;
-        writeln!(script, "      break").context("format error")?;
-        writeln!(script, "    fi").context("format error")?;
-        writeln!(script, "    sleep 0.1").context("format error")?;
-        writeln!(script, "  done").context("format error")?;
-        writeln!(script, "  print_sshd_diagnostics").context("format error")?;
-        writeln!(
-            script,
-            "  echo \"timed out after ${{ssh_ready_timeout_seconds}}s waiting for ssh service to become active\" >&2"
-        )
-        .context("format error")?;
-        writeln!(script, "  return 1").context("format error")?;
-    }
-    writeln!(script, "}}").context("format error")?;
-    writeln!(script).context("format error")?;
+    script.push_str(
+        r#"prepare_network_and_ssh() {
+  # Each worker has a process group so interruption also stops its helpers.
+  set -m
+  local network_pid= ssh_pid= result=0
+  cleanup_preparation() {
+    local pid
+    for pid in "$network_pid" "$ssh_pid"; do
+      [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true
+    done
+    for pid in "$network_pid" "$ssh_pid"; do
+      [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    done
+  }
+  trap cleanup_preparation EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  configure_guest_network &
+  network_pid=$!
+  (configure_ssh_access; log_phase ssh_boot start; generate_ssh_host_keys) &
+  ssh_pid=$!
+  wait "$network_pid" || result=$?
+  network_pid=
+  [ "$result" -eq 0 ] || exit "$result"
+  wait "$ssh_pid" || result=$?
+  ssh_pid=
+  [ "$result" -eq 0 ] || exit "$result"
+  trap - EXIT INT TERM
+  set +m
+}
+
+start_sshd() {
+  install -d -o root -g root -m 0755 /run/sshd
+  if ! /usr/sbin/sshd -t; then
+    echo 'generated SSH host keys failed sshd configuration validation' >&2
+    print_sshd_diagnostics
+    return 1
+  fi
+  install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready
+  if ! timeout --kill-after=5s "${ssh_ready_timeout_seconds}s" systemctl start ssh.service; then
+    echo 'ssh.service failed to start within its time limit' >&2
+    print_sshd_diagnostics
+    return 1
+  fi
+  if ! systemctl is-active --quiet ssh.service; then
+    echo 'ssh.service did not become active after its start job completed' >&2
+    print_sshd_diagnostics
+    return 1
+  fi
+  log_phase ssh_boot end
+}
+
+"#,
+    );
     writeln!(script, "# intar-runtime-main").context("format error")?;
     writeln!(script, "log_phase runtime_disk start").context("format error")?;
     writeln!(
@@ -1036,11 +974,12 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "log_phase recording_canary end").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "configure_run_cli").context("format error")?;
-    writeln!(script, "configure_guest_network").context("format error")?;
-    writeln!(script, "configure_ssh_access").context("format error")?;
+    writeln!(script, "prepare_network_and_ssh").context("format error")?;
     writeln!(script, "start_sshd").context("format error")?;
     writeln!(script, "start_kino").context("format error")?;
-    writeln!(script, "printf 'READY_UPTIME_MS=%s\\n' \"$(uptime_millis)\" >>\"$phase_timing_path\" 2>/dev/null || true").context("format error")?;
+    writeln!(script, "read -r ready_uptime _ </proc/uptime").context("format error")?;
+    writeln!(script, "uptime_millis \"$ready_uptime\"").context("format error")?;
+    writeln!(script, "printf 'READY_UPTIME_MS=%s\\n' \"$UPTIME_MILLIS\" >>\"$phase_timing_path\" 2>/dev/null || true").context("format error")?;
     writeln!(script, "log_phase ready end").context("format error")?;
     writeln!(script, "wait -n \"$KINO_PID\" || true").context("format error")?;
     writeln!(script, "if ! kill -0 \"$KINO_PID\" >/dev/null 2>&1; then cat \"$kino_log_path\" >&2 || true; echo 'kino exited unexpectedly' >&2; exit 1; fi").context("format error")?;

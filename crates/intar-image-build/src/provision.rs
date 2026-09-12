@@ -100,7 +100,6 @@ pub(crate) fn render_scenario_build_stages(
         &mut runtime,
         &inputs.kino_template,
         &inputs.scenario_motd,
-        vm.cpu_millis,
         inputs.requires_kubernetes_modules,
     )?;
     stages.push(ProvisionStage {
@@ -303,16 +302,9 @@ fn append_runtime_activation(
     script: &mut String,
     kino_template: &str,
     motd: &str,
-    cpu_millis: u32,
     requires_kubernetes_modules: bool,
 ) -> Result<()> {
-    append_runtime_assets(
-        script,
-        kino_template,
-        motd,
-        cpu_millis,
-        requires_kubernetes_modules,
-    )?;
+    append_runtime_assets(script, kino_template, motd, requires_kubernetes_modules)?;
     append_ssh_runtime_gate(script)
 }
 

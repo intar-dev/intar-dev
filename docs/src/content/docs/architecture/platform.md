@@ -197,7 +197,7 @@ gates `ssh.service` on `/run/intar/ssh-ready` before removing baked host keys. O
 first boot the supervisor configures networking and access, generates and
 validates the keys, creates the root-only gate, and then explicitly starts
 `ssh.service`. Image content hashes use build format
-`intar-image-build-v12`, ensuring images with the stable guest bootstrap ABI,
+`intar-image-build-v13`, ensuring images with the stable guest bootstrap ABI,
 conditional root resizing, scenario-specific module preload, and faster normal-
 capacity SSH startup are rebuilt rather than reused. Lecture Markdown is not a
 technical hash input, so a Markdown-only update does not rebuild an image. When
