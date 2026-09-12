@@ -1,3 +1,4 @@
+import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   associateScenarioRunBootEvidence,
@@ -5,11 +6,13 @@ import {
   markPendingScenarioRunBootStage,
   markScenarioRunBootStage,
   readScenarioRunBootEvidence,
+  startScenarioRunBootBenchmark,
 } from "./scenario-run-performance";
 
 describe("scenario run boot evidence", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("preserves the click time through acceptance and records first terminal milestones", () => {
@@ -68,6 +71,62 @@ describe("scenario run boot evidence", () => {
         detail: expect.objectContaining({ runId: "run-1", scenarioId: "repair-nginx" }),
       }),
     );
+  });
+
+  function armBenchmark(options: { search?: string; stage?: string; reused?: boolean } = {}) {
+    vi.stubGlobal("window", { sessionStorage: new MemoryStorage(), location: { search: options.search ?? "?bootBenchmark=1" } });
+    vi.stubGlobal("crypto", { randomUUID: () => "11111111-2222-4333-8444-555555555555", subtle: webcrypto.subtle });
+    beginScenarioRunBootEvidence("repair-nginx", options.stage ?? "start-click");
+    associateScenarioRunBootEvidence({ runId: "run-1", scenarioId: "repair-nginx", reused: options.reused ?? false });
+    markScenarioRunBootStage({ runId: "run-1", scenarioId: "repair-nginx", stage: "terminal-connected" });
+    return { runId: "run-1", scenarioId: "repair-nginx", vmName: "vm-1", isCurrent: () => true };
+  }
+
+  it("logs one safe result only after the split remote nonce, never input echo", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const input = armBenchmark();
+    const probe = startScenarioRunBootBenchmark(input)!;
+    const nonce = "intar-bench-11111111222243338444555555555555";
+    expect(probe.command).not.toContain(nonce);
+    probe.observe(new TextEncoder().encode(probe.command));
+    expect(log).not.toHaveBeenCalled();
+    probe.observe(new TextEncoder().encode(`private terminal text ${nonce.slice(0, 17)}`));
+    probe.observe(new TextEncoder().encode(nonce.slice(17)));
+    await vi.waitFor(() => expect(log).toHaveBeenCalledTimes(1));
+    const output = JSON.parse(String(log.mock.calls[0]?.[1]));
+    expect(output.firstCommand.outputObservedAfterCommand).toBe(true);
+    expect(output.firstCommand.nonceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(output.firstCommand.successUnixMs).toBeGreaterThanOrEqual(output.firstCommand.startedUnixMs);
+    expect(JSON.stringify(output)).not.toContain("private terminal");
+    expect(JSON.stringify(output)).not.toContain(nonce);
+    probe.observe(new TextEncoder().encode(nonce));
+    expect(startScenarioRunBootBenchmark(input)).toBeNull();
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not run without opt-in, a real click, and a fresh accepted run", () => {
+    for (const options of [{ search: "" }, { stage: "start-route" }, { reused: true }]) {
+      expect(startScenarioRunBootBenchmark(armBenchmark(options))).toBeNull();
+    }
+  });
+
+  it("rejects output from a disconnected generation and does not resend on reconnect", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    let current = true;
+    const input = { ...armBenchmark(), isCurrent: () => current };
+    const probe = startScenarioRunBootBenchmark(input)!;
+    current = false;
+    probe.observe(new TextEncoder().encode("intar-bench-11111111222243338444555555555555"));
+    await Promise.resolve();
+    expect(log).not.toHaveBeenCalled();
+    expect(startScenarioRunBootBenchmark({ ...input, isCurrent: () => true })).toBeNull();
+  });
+
+  it("rejects a wrong run identity and fails quietly without cryptography", () => {
+    const input = armBenchmark();
+    expect(startScenarioRunBootBenchmark({ ...input, scenarioId: "other" })).toBeNull();
+    vi.stubGlobal("crypto", undefined);
+    expect(startScenarioRunBootBenchmark(input)).toBeNull();
   });
 
   it("does not block a start when browser storage is unavailable", () => {

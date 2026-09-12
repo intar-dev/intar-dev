@@ -27,7 +27,10 @@ import {
   isReplayTerminalFontLoaded,
   loadReplayTerminalFont,
 } from "@/lib/replay/config";
-import { markScenarioRunBootStage } from "@/lib/scenario-run-performance";
+import {
+  markScenarioRunBootStage,
+  startScenarioRunBootBenchmark,
+} from "@/lib/scenario-run-performance";
 
 interface WebSshTerminalProps {
   vmName: string;
@@ -281,6 +284,7 @@ export function WebSshTerminal({
     connectionGenerationRef.current = connectionGeneration;
     setError(null);
     setStatus("connecting");
+    let benchmark: ReturnType<typeof startScenarioRunBootBenchmark> = null;
 
     try {
       const fontLoad = loadReplayTerminalFont();
@@ -341,7 +345,8 @@ export function WebSshTerminal({
           setError(message);
           setStatus("error");
         },
-        onOutput: () => {
+        onOutput: (payload) => {
+          benchmark?.observe(payload);
           markTerminalStage("terminal-first-output");
           if (inputObservedRef.current) {
             // This records visible byte responsiveness only. A benchmark must
@@ -366,6 +371,14 @@ export function WebSshTerminal({
       });
       setStatus("connected");
       markTerminalStage("terminal-connected");
+      if (bootEvidence) {
+        benchmark = startScenarioRunBootBenchmark({
+          ...bootEvidence,
+          vmName,
+          isCurrent: () => connectionGenerationRef.current === connectionGeneration,
+        });
+        if (benchmark) websocket.send(textEncoder.encode(benchmark.command));
+      }
     } catch (connectError) {
       if (connectionGenerationRef.current !== connectionGeneration) return;
       closeCurrentSocket();
@@ -377,6 +390,8 @@ export function WebSshTerminal({
       setStatus("error");
     }
   }, [
+    bootEvidence,
+    vmName,
     closeCurrentSocket,
     ensureTerminal,
     markTerminalStage,
@@ -633,7 +648,7 @@ async function connectBrowserTerminalWithRetries(input: {
   isCurrent: () => boolean;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
-  onOutput: () => void;
+  onOutput: (payload: Uint8Array) => void;
 }): Promise<WebSocket> {
   let lastError = "unknown error";
 
@@ -663,7 +678,7 @@ async function connectBrowserTerminal(input: {
   isCurrent: () => boolean;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
-  onOutput: () => void;
+  onOutput: (payload: Uint8Array) => void;
 }): Promise<WebSocket> {
   const websocket = new WebSocket(input.session.browser.websocketUrl);
   websocket.binaryType = "arraybuffer";
@@ -714,7 +729,7 @@ async function connectBrowserTerminal(input: {
         }
 
         if (event.data instanceof ArrayBuffer && input.isCurrent()) {
-          input.onOutput();
+          input.onOutput(new Uint8Array(event.data));
           input.terminal.write(decodeTerminalOutput(event.data));
         }
       };

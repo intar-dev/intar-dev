@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct RunCreateInput<'a> {
+    pub(super) api_started_at: Instant,
     pub(super) name: &'a str,
     pub(super) run_id: &'a str,
     pub(super) image_key: &'a str,
@@ -765,6 +766,18 @@ pub(super) async fn remove_agent_launch_sources(req: &RunCreateInput<'_>) -> Res
     Ok(())
 }
 
+/// Difference rounded cumulative timestamps so adjacent phases sum exactly to
+/// the rounded total. Guest detail timings overlap and are not part of this sum.
+pub(super) fn boot_phase_millis(start: Instant, ends: [Instant; 10]) -> [u128; 10] {
+    let mut previous = 0;
+    ends.map(|end| {
+        let elapsed = end.duration_since(start).as_millis();
+        let phase = elapsed - previous;
+        previous = elapsed;
+        phase
+    })
+}
+
 pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     let create_started_at = Instant::now();
     set_state(inner, req.name, VmLifecycleState::CachingImage).await;
@@ -1037,7 +1050,6 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
     commit_ready_vm_and_probe(inner, req.name, &launch.generation, &ready)
         .await
         .context("durably commit sealed VM readiness")?;
-    let terminal_ready_at = Instant::now();
     let terminal = terminal_state_for_attested_ready(inner, req.name, &launch.generation)
         .await
         .context("build generation-fenced terminal-ready projection")?;
@@ -1045,15 +1057,44 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
     start_terminal_worker(inner, req.name)
         .await
         .context("failed to start vm terminal worker")?;
+    let terminal_ready_at = Instant::now();
+    let [
+        queue_ms,
+        image_cache_ms,
+        disk_stage_ms,
+        jail_launch_ms,
+        vmm_start_ms,
+        vm_api_ms,
+        guest_ready_ms,
+        quota_seal_ms,
+        ssh_verify_ms,
+        terminal_publish_ms,
+    ] = boot_phase_millis(
+        req.api_started_at,
+        [
+            create_started_at,
+            image_ready_at,
+            disks_ready_at,
+            jail_ready_at,
+            vmm_ready_at,
+            boot_accepted_at,
+            guest_ready_at,
+            quota_sealed_at,
+            ssh_verified_at,
+            terminal_ready_at,
+        ],
+    );
     info!(
         vm = req.name,
         run_id = req.run_id,
-        image_cache_ms = image_ready_at.duration_since(create_started_at).as_millis(),
-        disk_stage_ms = disks_ready_at.duration_since(image_ready_at).as_millis(),
-        jail_launch_ms = jail_ready_at.duration_since(disks_ready_at).as_millis(),
-        vmm_start_ms = vmm_ready_at.duration_since(jail_ready_at).as_millis(),
-        vm_api_ms = boot_accepted_at.duration_since(vmm_ready_at).as_millis(),
-        guest_ready_ms = guest_ready_at.duration_since(boot_accepted_at).as_millis(),
+        boot_timing_version = 2_u16,
+        queue_ms,
+        image_cache_ms,
+        disk_stage_ms,
+        jail_launch_ms,
+        vmm_start_ms,
+        vm_api_ms,
+        guest_ready_ms,
         guest_runtime_disk_ms = ready.guest_phase_timings.runtime_disk_ms,
         guest_tools_disk_ms = ready.guest_phase_timings.tools_disk_ms,
         guest_network_ms = ready.guest_phase_timings.network_ms,
@@ -1061,13 +1102,11 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         guest_ssh_service_ms = ready.guest_phase_timings.ssh_service_ms,
         guest_kino_ms = ready.guest_phase_timings.kino_ms,
         guest_ready_uptime_ms = ready.guest_phase_timings.ready_uptime_ms,
-        quota_seal_ms = quota_sealed_at.duration_since(guest_ready_at).as_millis(),
-        ssh_verify_ms = ssh_verified_at.duration_since(quota_sealed_at).as_millis(),
-        terminal_publish_ms = terminal_ready_at
-            .duration_since(ssh_verified_at)
-            .as_millis(),
+        quota_seal_ms,
+        ssh_verify_ms,
+        terminal_publish_ms,
         total_ms = terminal_ready_at
-            .duration_since(create_started_at)
+            .duration_since(req.api_started_at)
             .as_millis(),
         "vm booted"
     );

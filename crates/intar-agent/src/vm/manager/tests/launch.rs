@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn boot_timing_includes_queue_and_publication_and_sums_after_rounding() {
+    let start = Instant::now();
+    let ends = [
+        12_100, 12_900, 18_600, 25_900, 26_100, 28_700, 120_400, 125_800, 128_900, 145_300,
+    ]
+    .map(|micros| start + Duration::from_micros(micros));
+    let phases = boot_phase_millis(start, ends);
+    assert_eq!(phases[0], 12, "queue work precedes run_create");
+    assert_eq!(
+        phases[9], 17,
+        "publication and worker registration finish last"
+    );
+    assert_eq!(phases.iter().sum::<u128>(), 145);
+    assert_eq!(
+        phases.iter().sum::<u128>(),
+        ends[9].duration_since(start).as_millis()
+    );
+}
+
 #[tokio::test]
 async fn ssh_readiness_accepts_only_kino_reported_host_key_material() {
     let reported = vec![

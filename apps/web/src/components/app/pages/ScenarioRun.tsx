@@ -186,8 +186,8 @@ export function ScenarioRunStart() {
       organizationId,
       onCapacityWait: () => setStartState("waiting"),
     })
-      .then(async ({ runId, run }) => {
-        associateScenarioRunBootEvidence({ runId, scenarioId });
+      .then(async ({ runId, run, reused }) => {
+        associateScenarioRunBootEvidence({ runId, scenarioId, reused });
         queryClient.setQueryData<ScenarioRunResponse>(
           ["scenarios", "run", runId],
           { run: presentScenarioRun(run) },

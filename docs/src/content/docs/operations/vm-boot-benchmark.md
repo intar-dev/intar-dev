@@ -11,6 +11,39 @@ explain a slow boot.
 Every sample must start a new VM. Do not use a running VM pool, paused VM,
 memory snapshot, or an existing active Scenario run as a sample.
 
+## Built-in browser production check
+
+For an explicitly requested production check, use five serial fresh starts per
+scenario before and after the change. Use the same browser account, host, and
+scenario IDs. Finish teardown before the next start. Record failures and host
+pressure; do not clear caches or add a concurrent load to production. Report
+count, median, minimum, and maximum. This small operational comparison does not
+establish a reliable p95 or replace the isolated benchmark below.
+
+Deploy measurement-only changes before collecting the baseline. Open the
+lecture page with `?bootBenchmark=1`, then select its normal Start link. The
+opt-in is captured at that click and applies only to a newly accepted run.
+After SSH connects, the terminal sends one encoded `printf` nonce. It writes
+one `intar:boot-benchmark` console record only when remote output returns that
+nonce. The console record contains timing fields and the nonce hash, not
+terminal contents or credentials. Reconnecting does not send another command.
+Use the built-in browser's console reader to collect these records.
+
+Agent events must have `boot_timing_version=2`. `queue_ms` starts at VM-create
+API entry. `terminal_publish_ms` ends after terminal publication and worker
+registration. The ten host phase fields sum exactly to `total_ms`: each is the
+difference between rounded cumulative monotonic timestamps. Guest phase fields
+are details, not additional host phases. In particular, `guest_ssh_service_ms`
+already includes `guest_ssh_keys_ms`.
+
+Collect early-boot diagnostics in separate runs after command timing finishes:
+`sudo dmesg`, `systemd-analyze time`,
+`systemd-analyze critical-chain intar-scenario.service ssh.service`,
+`systemd-analyze plot`, and the supervisor's `[intar-runtime]` serial markers.
+The supervisor uses `Type=simple`, so use its own markers to measure its work.
+Keep the kernel/initrd, systemd, supervisor, and host readiness-delivery spans
+separate. Keep every release manifest and the prior catalog for rollback.
+
 ## Before the benchmark
 
 Use a dedicated benchmark environment. An idle production host is not an

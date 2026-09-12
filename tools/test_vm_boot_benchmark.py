@@ -14,7 +14,10 @@ SPEC.loader.exec_module(benchmark)
 
 
 def phase_timings(offset=0):
-    return {key: index + offset for index, key in enumerate(benchmark.AGENT_TIMING_KEYS)}
+    phases = {key: index + offset for index, key in enumerate(benchmark.AGENT_TIMING_KEYS)}
+    host_keys = benchmark.AGENT_TIMING_KEYS[:benchmark.AGENT_TIMING_KEYS.index("total_ms")]
+    phases["total_ms"] = sum(phases[key] for key in host_keys)
+    return phases
 
 
 def host_delta(vm_name="vm_1"):
@@ -193,8 +196,8 @@ class VmBootBenchmarkTest(unittest.TestCase):
         self.assertEqual(delta["host_pressure_us"]["io"]["some_total_us"], 5)
 
     def test_agent_log_extraction_requires_all_phase_fields_and_never_copies_log_text(self):
-        fields = ["run_id=run_1", "vm=vm_1"]
-        fields.extend(f"{key}={index}" for index, key in enumerate(benchmark.AGENT_TIMING_KEYS))
+        fields = ["run_id=run_1", "vm=vm_1", "boot_timing_version=2"]
+        fields.extend(f"{key}={value}" for key, value in phase_timings().items())
         event = benchmark.parse_agent_timing_line("INFO vm booted " + " ".join(fields))
         self.assertEqual(event["run_id"], "run_1")
         self.assertEqual(event["phase_ms"]["guest_kino_ms"], benchmark.AGENT_TIMING_KEYS.index("guest_kino_ms"))
@@ -205,9 +208,18 @@ class VmBootBenchmarkTest(unittest.TestCase):
         )
         self.assertEqual(colored, event)
 
-        missing = "INFO vm booted run_id=run_1 vm=vm_1 image_cache_ms=1"
+        missing = "INFO vm booted run_id=run_1 vm=vm_1 boot_timing_version=2 queue_ms=1 image_cache_ms=1"
         with self.assertRaisesRegex(benchmark.BenchmarkError, "disk_stage_ms"):
             benchmark.parse_agent_timing_line(missing)
+
+    def test_agent_timing_rejects_old_versions_and_inconsistent_totals(self):
+        event = {"boot_timing_version": 2, "phase_ms": phase_timings()}
+        self.assertEqual(benchmark.agent_phase_timings(event), phase_timings())
+        for version in (None, 1, 3):
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "boot timing version"):
+                benchmark.agent_phase_timings({**event, "boot_timing_version": version})
+        with self.assertRaisesRegex(benchmark.BenchmarkError, "sum to total_ms"):
+            benchmark.agent_phase_timings({**event, "phase_ms": {**phase_timings(), "total_ms": 0}})
 
     def test_multi_vm_agent_evidence_requires_each_planned_vm(self):
         events = [
@@ -215,12 +227,14 @@ class VmBootBenchmarkTest(unittest.TestCase):
                 "schema_version": 1,
                 "run_id": "run_1",
                 "vm": "control",
+                "boot_timing_version": 2,
                 "phase_ms": phase_timings(10),
             },
             {
                 "schema_version": 1,
                 "run_id": "run_1",
                 "vm": "worker",
+                "boot_timing_version": 2,
                 "phase_ms": phase_timings(20),
             },
         ]
@@ -228,7 +242,7 @@ class VmBootBenchmarkTest(unittest.TestCase):
         self.assertEqual(aggregate["vm_count"], 2)
         self.assertEqual(
             benchmark.slowest_agent_phase(aggregate, "total_ms"),
-            benchmark.AGENT_TIMING_KEYS.index("total_ms") + 20,
+            phase_timings(20)["total_ms"],
         )
         with self.assertRaisesRegex(benchmark.BenchmarkError, "planned VM topology"):
             benchmark.aggregate_agent_events("run_1", events, 3)
@@ -283,6 +297,7 @@ class VmBootBenchmarkTest(unittest.TestCase):
                         "schema_version": 1,
                         "run_id": run_id,
                         "vm": "vm_1",
+                        "boot_timing_version": 2,
                         "phase_ms": phase_timings(index),
                     }
                 )

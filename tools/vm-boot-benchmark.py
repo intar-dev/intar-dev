@@ -49,7 +49,9 @@ CONDITIONS: dict[str, dict[str, Any]] = {
         "cache_refresh_required": False,
     },
 }
+BOOT_TIMING_VERSION = 2
 AGENT_TIMING_KEYS = (
+    "queue_ms",
     "image_cache_ms",
     "disk_stage_ms",
     "jail_launch_ms",
@@ -744,18 +746,23 @@ def parse_agent_timing_line(line: str) -> dict[str, Any] | None:
     vm = fields.get("vm")
     if run_id is None or vm is None:
         fail("a vm booted event has no run_id or vm field")
+    if fields.get("boot_timing_version") != str(BOOT_TIMING_VERSION):
+        fail("agent event has an unsupported boot timing version")
     timing: dict[str, int] = {}
     for key in AGENT_TIMING_KEYS:
         raw = fields.get(key)
         if raw is None or not raw.isdigit():
             fail(f"vm booted event for {run_id} has no valid {key}")
         timing[key] = int(raw)
-    return {
+    event = {
         "schema_version": SCHEMA_VERSION,
+        "boot_timing_version": BOOT_TIMING_VERSION,
         "run_id": require_run_id(run_id),
         "vm": require_id(vm, "VM name"),
         "phase_ms": timing,
     }
+    agent_phase_timings(event)
+    return event
 
 
 def extract_agent_events(input_path: Path, output: Path | None) -> list[dict[str, Any]]:
@@ -792,6 +799,17 @@ def extract_agent_events(input_path: Path, output: Path | None) -> list[dict[str
     return events
 
 
+def agent_phase_timings(event: dict[str, Any]) -> dict[str, int]:
+    if event.get("boot_timing_version") != BOOT_TIMING_VERSION:
+        fail("agent event has an unsupported boot timing version")
+    timing = require_object(event.get("phase_ms"), "agent phase timings")
+    phases = {key: require_int(timing.get(key), f"agent phase {key}") for key in AGENT_TIMING_KEYS}
+    host_keys = AGENT_TIMING_KEYS[:AGENT_TIMING_KEYS.index("total_ms")]
+    if sum(phases[key] for key in host_keys) != phases["total_ms"]:
+        fail("agent host phases do not sum to total_ms")
+    return phases
+
+
 def load_agent_events(path: Path) -> dict[str, list[dict[str, Any]]]:
     events = parse_json_lines(path)
     result: dict[str, list[dict[str, Any]]] = {}
@@ -800,14 +818,11 @@ def load_agent_events(path: Path) -> dict[str, list[dict[str, Any]]]:
             fail("agent event has an unsupported schema version")
         run_id = require_run_id(event.get("run_id"))
         vm = require_id(event.get("vm"), "agent VM name")
-        timing = require_object(event.get("phase_ms"), "agent phase timings")
         normalized = {
             "run_id": run_id,
             "vm": vm,
-            "phase_ms": {
-                key: require_int(timing.get(key), f"agent phase {key}")
-                for key in AGENT_TIMING_KEYS
-            },
+            "boot_timing_version": BOOT_TIMING_VERSION,
+            "phase_ms": agent_phase_timings(event),
         }
         events_for_run = result.setdefault(run_id, [])
         if any(item["vm"] == vm for item in events_for_run):
@@ -827,14 +842,11 @@ def aggregate_agent_events(run_id: str, events: list[dict[str, Any]], expected_v
         vm_name = require_id(event.get("vm"), "agent VM name")
         if vm_name in by_vm:
             fail("agent events repeat a VM")
-        phase_ms = require_object(event.get("phase_ms"), "agent phase timings")
         by_vm[vm_name] = {
             "run_id": run_id,
             "vm": vm_name,
-            "phase_ms": {
-                key: require_int(phase_ms.get(key), f"agent phase {key}")
-                for key in AGENT_TIMING_KEYS
-            },
+            "boot_timing_version": BOOT_TIMING_VERSION,
+            "phase_ms": agent_phase_timings(event),
         }
     if len(by_vm) != expected_vm_count:
         fail("agent events repeat a VM")

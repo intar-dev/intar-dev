@@ -372,6 +372,7 @@ impl VmStatusResponse {
 }
 
 struct QueueVmCreateRequest {
+    api_started_at: Instant,
     requested_name: String,
     requested_run_id: String,
     requested_image: String,

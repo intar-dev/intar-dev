@@ -244,6 +244,7 @@ impl VmManager {
         &self,
         req: CreateScenarioVmRequest,
     ) -> Result<CreateVmResponse, ApiError> {
+        let api_started_at = Instant::now();
         let ssh_authorized_keys_openssh = req
             .runtime
             .ssh_authorized_keys_openssh
@@ -271,6 +272,7 @@ impl VmManager {
         };
 
         self.queue_vm_create(QueueVmCreateRequest {
+            api_started_at,
             requested_name: req.name,
             requested_run_id: req.run_id,
             requested_image: req.image,
@@ -289,6 +291,7 @@ impl VmManager {
         req: QueueVmCreateRequest,
     ) -> Result<CreateVmResponse, ApiError> {
         let QueueVmCreateRequest {
+            api_started_at,
             requested_name,
             requested_run_id,
             requested_image,
@@ -640,6 +643,7 @@ impl VmManager {
                 tracing::info_span!("vm_create", vm = %name_for_task, image = %image_key_for_task);
 
             let create_input = RunCreateInput {
+                api_started_at,
                 name: &name_for_task,
                 run_id: &run_id,
                 image_key: &image_key_for_task,

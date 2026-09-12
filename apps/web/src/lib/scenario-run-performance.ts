@@ -1,15 +1,20 @@
+import { nonEchoNonceCommand, scanRemoteTerminalFrame } from "./vm-boot-nonce";
+
 export interface ScenarioRunBootEvidence {
   runId: string;
   scenarioId: string;
   startUnixMs: number;
   terminalConnectedUnixMs?: number;
   terminalFirstOutputUnixMs?: number;
+  benchmark?: boolean;
+  benchmarkAttemptId?: string;
   stages: Record<string, number>;
 }
 
 interface PendingScenarioRunBootEvidence {
   scenarioId: string;
   startUnixMs: number;
+  benchmark?: boolean;
   stages: Record<string, number>;
 }
 
@@ -118,6 +123,9 @@ export function beginScenarioRunBootEvidence(
     scenarioId,
     startUnixMs,
     stages: { [startStage]: startUnixMs },
+    ...(startStage === "start-click" && typeof window !== "undefined" &&
+      new URLSearchParams(window.location?.search).get("bootBenchmark") === "1"
+      ? { benchmark: true } : {}),
   } satisfies PendingScenarioRunBootEvidence);
   return startUnixMs;
 }
@@ -139,6 +147,7 @@ export function markPendingScenarioRunBootStage(
 export function associateScenarioRunBootEvidence(input: {
   runId: string;
   scenarioId: string;
+  reused?: boolean;
 }): ScenarioRunBootEvidence | null {
   const key = runKey(input.runId);
   const existing = read<ScenarioRunBootEvidence>(key);
@@ -152,6 +161,7 @@ export function associateScenarioRunBootEvidence(input: {
     scenarioId: input.scenarioId,
     startUnixMs: pending.startUnixMs,
     stages: pending.stages,
+    ...(pending.benchmark && input.reused === false ? { benchmark: true } : {}),
   };
   if (!write(key, evidence)) return null;
   try {
@@ -228,4 +238,56 @@ function clearPreviousScenarioRunBootEvidence() {
   } catch {
     // Performance entries are optional browser diagnostic state.
   }
+}
+
+/** Opt-in, one-command check for a fresh run. Only remote output may complete it. */
+export function startScenarioRunBootBenchmark(input: {
+  runId: string;
+  scenarioId: string;
+  vmName: string;
+  isCurrent: () => boolean;
+}) {
+  const evidence = readScenarioRunBootEvidence(input.runId);
+  if (!input.isCurrent() || !evidence?.benchmark || evidence.benchmarkAttemptId ||
+      evidence.scenarioId !== input.scenarioId ||
+      evidence.stages["start-click"] === undefined || !evidence.terminalConnectedUnixMs) return null;
+  let nonce: string;
+  try {
+    nonce = `intar-bench-${crypto.randomUUID().replaceAll("-", "")}`;
+  } catch {
+    return null;
+  }
+  const startedUnixMs = nowUnixMs();
+  if (!write(runKey(input.runId), { ...evidence, benchmarkAttemptId: nonce })) return null;
+  let tail = "";
+  let complete = false;
+  const isCurrent = () => input.isCurrent() &&
+    readScenarioRunBootEvidence(input.runId)?.benchmarkAttemptId === nonce;
+  return {
+    command: `${nonEchoNonceCommand(nonce)}\r`,
+    observe(payload: Uint8Array) {
+      if (complete || !isCurrent()) return;
+      const result = scanRemoteTerminalFrame({ needle: nonce, previousTail: tail, payload });
+      tail = result.nextTail;
+      if (!result.matches) return;
+      complete = true;
+      const successUnixMs = nowUnixMs();
+      void (async () => {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(nonce));
+        if (!isCurrent()) return;
+        const nonceSha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        console.info("intar:boot-benchmark", JSON.stringify({
+          schemaVersion: 1,
+          runId: evidence.runId,
+          scenarioId: evidence.scenarioId,
+          vmName: input.vmName,
+          startBoundary: "learner-start-link-click",
+          startUnixMs: evidence.startUnixMs,
+          terminalConnectedUnixMs: evidence.terminalConnectedUnixMs,
+          firstCommand: { startedUnixMs, successUnixMs, nonceSha256, outputObservedAfterCommand: true },
+          stages: evidence.stages,
+        }));
+      })().catch(() => { /* Diagnostic failure cannot affect the terminal. */ });
+    },
+  };
 }
