@@ -1,13 +1,10 @@
 import { env } from "cloudflare:workers";
 import { and, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts, member } from "@/db/schema";
+import { accessAllowlist, agentHosts, member } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
 import { auth } from "@/lib/auth";
-import {
-  getBetaAccess,
-  type BetaAdmissionEpoch,
-} from "@/lib/allowlist";
+import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
 const ONLINE_HEARTBEAT_TTL_MS = 90_000;
@@ -143,21 +140,35 @@ export async function requireUserContext(
     };
   }
 
-  // Access is checked before loading tenant context. Membership is not a
-  // substitute for beta entitlement and must never revive a blocked user.
-  const betaAccess = await getBetaAccess(sessionUser.id);
-  if (betaAccess?.state !== "active") {
+  // Read the admission and its memberships in one database round trip. The
+  // active admission is the root: membership cannot authorize a blocked user.
+  // A left join also admits active users who have no organization membership.
+  const memberships = await drizzle(env.DB)
+    .select({
+      sourceInviteId: accessAllowlist.sourceInviteId,
+      sourceLeaseId: accessAllowlist.sourceLeaseId,
+      grantedAt: accessAllowlist.grantedAt,
+      organizationId: member.organizationId,
+    })
+    .from(accessAllowlist)
+    .leftJoin(member, eq(member.userId, accessAllowlist.userId))
+    .where(
+      and(
+        eq(accessAllowlist.userId, sessionUser.id),
+        eq(accessAllowlist.state, "active"),
+      ),
+    );
+  const betaAccess = memberships[0];
+  if (!betaAccess) {
     return {
       ok: false,
       response: jsonResponse({ error: "access revoked" }, { status: 403 }),
     };
   }
 
-  const memberships = await drizzle(env.DB)
-    .select({ organizationId: member.organizationId })
-    .from(member)
-    .where(eq(member.userId, sessionUser.id));
-  const organizationIds = memberships.map((row) => row.organizationId);
+  const organizationIds = memberships.flatMap((row) =>
+    row.organizationId === null ? [] : [row.organizationId],
+  );
 
   const role = getUserRole(sessionUser);
   const activeOrganizationId =

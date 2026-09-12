@@ -32,6 +32,7 @@ import {
 } from "@/lib/stargate";
 import { loadScenarioRunSshKey } from "@/lib/scenario-run-ssh-keys";
 import { deleteScenarioRunRuntimeProjection } from "@/lib/runtime-executions";
+import { traceOperation } from "@/lib/tracing";
 import { listUserAuthorizedSshKeysForNativeRoutes } from "@/lib/user-ssh-keys";
 import {
   type ScenarioTerminalSessionResult,
@@ -451,7 +452,11 @@ export async function createScenarioSshSessionForUser(params: {
    */
   clientPublicKeyOpenssh?: string;
 }): Promise<ScenarioTerminalSessionResult> {
-  const row = await loadRunRow(params.runId, params.userId);
+  const row = await traceOperation(
+    "scenario.terminal.load_run",
+    () => loadRunRow(params.runId, params.userId),
+    { "intar.run.id": params.runId },
+  );
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
@@ -537,39 +542,45 @@ export async function createScenarioSshSessionForUser(params: {
     vm.id,
     routeType,
   );
-  const targetKey = await loadScenarioRunSshKey({
-    runId: row.runId,
-    vmId: vm.id,
-  });
-  return issueBetaAccessFencedRoute({
-    userId: params.userId,
-    routeId: routeUsername,
-    revoke: deleteStargateRoute,
-    issuedRouteIds: (session) => [session.routeUsername],
-    issue: () =>
-      issueStargateTerminalSession({
-        routeUsername,
-        targetUsername,
-        targetHost: host,
-        targetPort: port,
-        targetHostKeyOpenssh,
-        targetPrivateKeyOpenssh: targetKey.privateKeyOpenssh,
-        expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
-        mode: requestedMode,
-        authorizedClientPublicKeysOpenssh: usesProfileKeys
-          ? profileKeys.map((key) => key.publicKeyOpenssh)
-          : [],
-        ...(temporaryClientPublicKeyOpenssh
-          ? { temporaryClientPublicKeyOpenssh }
-          : {}),
-        metadata: {
-          hostId: row.hostId,
-          runId: row.runId,
-          vmId: vm.id,
-          userId: row.userId,
-        },
+  const targetKey = await traceOperation(
+    "scenario.terminal.route_keys",
+    () => loadScenarioRunSshKey({ runId: row.runId, vmId: vm.id }),
+    { "intar.run.id": row.runId, "intar.vm.id": vm.id },
+  );
+  return traceOperation(
+    "scenario.terminal.route_issue",
+    () =>
+      issueBetaAccessFencedRoute({
+        userId: params.userId,
+        routeId: routeUsername,
+        revoke: deleteStargateRoute,
+        issuedRouteIds: (session) => [session.routeUsername],
+        issue: () =>
+          issueStargateTerminalSession({
+            routeUsername,
+            targetUsername,
+            targetHost: host,
+            targetPort: port,
+            targetHostKeyOpenssh,
+            targetPrivateKeyOpenssh: targetKey.privateKeyOpenssh,
+            expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
+            mode: requestedMode,
+            authorizedClientPublicKeysOpenssh: usesProfileKeys
+              ? profileKeys.map((key) => key.publicKeyOpenssh)
+              : [],
+            ...(temporaryClientPublicKeyOpenssh
+              ? { temporaryClientPublicKeyOpenssh }
+              : {}),
+            metadata: {
+              hostId: row.hostId,
+              runId: row.runId,
+              vmId: vm.id,
+              userId: row.userId,
+            },
+          }),
       }),
-  });
+    { "intar.run.id": params.runId },
+  );
 }
 
 export async function listHostRunsForUser(params: {

@@ -17,6 +17,10 @@ const userSshKeysMock = vi.hoisted(() => ({
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/scenario-runs", () => scenarioRunsMock);
 vi.mock("@/lib/user-ssh-keys", () => userSshKeysMock);
+vi.mock("@/lib/tracing", () => ({
+  traceOperation: (_name: string, operation: () => Promise<unknown>) =>
+    operation(),
+}));
 
 import { POST } from "@/pages/api/scenarios/runs/[runId]/ssh";
 

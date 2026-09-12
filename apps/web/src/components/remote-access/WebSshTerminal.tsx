@@ -322,6 +322,7 @@ export function WebSshTerminal({
       // Fit before the websocket dance so `open` carries the real grid.
       fitGridRef.current?.();
 
+      markTerminalStage("terminal-session-request");
       const sessionBundle = await createSessionWithRetries({
         sessionRequestBodyJson,
         sessionRequestUrl,
@@ -334,6 +335,10 @@ export function WebSshTerminal({
         terminal: connectedTerminal,
         isCurrent: () =>
           connectionGenerationRef.current === connectionGeneration,
+        onWebSocketOpen: () => {
+          if (connectionGenerationRef.current !== connectionGeneration) return;
+          markTerminalStage("terminal-websocket-open");
+        },
         onRemoteClose: () => {
           if (connectionGenerationRef.current !== connectionGeneration) return;
           websocketRef.current = null;
@@ -646,6 +651,7 @@ async function connectBrowserTerminalWithRetries(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
   isCurrent: () => boolean;
+  onWebSocketOpen: () => void;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
   onOutput: (payload: Uint8Array) => void;
@@ -676,6 +682,7 @@ async function connectBrowserTerminal(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
   isCurrent: () => boolean;
+  onWebSocketOpen: () => void;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
   onOutput: (payload: Uint8Array) => void;
@@ -685,6 +692,7 @@ async function connectBrowserTerminal(input: {
   await waitForWebSocketOpen(websocket);
 
   try {
+    input.onWebSocketOpen();
     const ready = new Promise<void>((resolve, reject) => {
       let resolved = false;
       let terminalEnded = false;

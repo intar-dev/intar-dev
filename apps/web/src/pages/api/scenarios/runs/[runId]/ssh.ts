@@ -2,6 +2,7 @@ import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
 import { createScenarioSshSessionForUser } from "@/lib/scenario-runs";
+import { traceOperation } from "@/lib/tracing";
 import { normalizeTemporaryNativeSshPublicKey } from "@/lib/user-ssh-keys";
 
 interface ScenarioSshBody {
@@ -13,10 +14,14 @@ interface ScenarioSshBody {
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request, params }) => {
-  const authz = await requireUserContext(request);
+  const runId = params.runId?.trim() ?? "";
+  const authz = await traceOperation(
+    "scenario.terminal.auth",
+    () => requireUserContext(request),
+    { "intar.run.id": runId || undefined },
+  );
   if (!authz.ok) return authz.response;
 
-  const runId = params.runId?.trim() ?? "";
   if (!runId) {
     return jsonResponse({ error: "runId is required" }, { status: 400 });
   }

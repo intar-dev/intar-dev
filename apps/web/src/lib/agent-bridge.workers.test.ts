@@ -54,6 +54,125 @@ describe("jsonResponse", () => {
 });
 
 describe("requireUserContext", () => {
+  it.each([
+    {
+      name: "an active user without memberships",
+      organizationIds: [],
+      activeOrganizationId: null,
+      expectedActiveOrganizationId: null,
+      betaAccess: true,
+      expired: false,
+      status: 200,
+    },
+    {
+      name: "all memberships and the selected organization",
+      organizationIds: ["first-organization", "second-organization"],
+      activeOrganizationId: "second-organization",
+      expectedActiveOrganizationId: "second-organization",
+      betaAccess: true,
+      expired: false,
+      status: 200,
+    },
+    {
+      name: "a stale active organization without granting membership",
+      organizationIds: ["first-organization", "second-organization"],
+      activeOrganizationId: "unrelated-organization",
+      expectedActiveOrganizationId: null,
+      betaAccess: true,
+      expired: false,
+      status: 200,
+    },
+    {
+      name: "membership without beta access",
+      organizationIds: ["first-organization"],
+      activeOrganizationId: "first-organization",
+      expectedActiveOrganizationId: null,
+      betaAccess: false,
+      expired: false,
+      status: 403,
+    },
+    {
+      name: "an expired session with active beta access",
+      organizationIds: [],
+      activeOrganizationId: null,
+      expectedActiveOrganizationId: null,
+      betaAccess: true,
+      expired: true,
+      status: 401,
+    },
+  ])("handles $name", async (testCase) => {
+    const now = Date.now();
+    const userId = "context-user";
+    await db.insert(user).values({
+      id: userId,
+      name: "Context User",
+      email: "context-user@example.test",
+      emailVerified: true,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    if (testCase.betaAccess) {
+      await grantFixtureBetaAccess({
+        d1: env.DB,
+        userId,
+        githubAccountId: "context-github-account",
+        githubUsername: "context-user",
+        now,
+      });
+    }
+    for (const organizationId of testCase.organizationIds) {
+      await db.insert(organization).values({
+        id: organizationId,
+        name: organizationId,
+        slug: organizationId,
+        createdAt: new Date(now),
+      });
+      await db.insert(member).values({
+        id: `${organizationId}-membership`,
+        userId,
+        organizationId,
+        role: "member",
+        createdAt: new Date(now),
+      });
+    }
+    const sessionToken = "context-session-token";
+    await db.insert(session).values({
+      id: "context-session",
+      token: sessionToken,
+      userId,
+      expiresAt: new Date(now + (testCase.expired ? -1_000 : 3_600_000)),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+      activeOrganizationId: testCase.activeOrganizationId,
+    });
+
+    const result = await requireUserContext(
+      new Request("http://localhost/api/agent", {
+        headers: { cookie: await signedSessionCookie(sessionToken) },
+      }),
+    );
+    if (testCase.status !== 200) {
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unauthorized user was admitted");
+      expect(result.response.status).toBe(testCase.status);
+      return;
+    }
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("active user was rejected");
+    expect(result.context.organizationIds.toSorted()).toEqual(
+      testCase.organizationIds.toSorted(),
+    );
+    expect(result.context.activeOrganizationId).toBe(
+      testCase.expectedActiveOrganizationId,
+    );
+    const admission = await getBetaAccess(userId);
+    expect(result.context.betaAdmission).toEqual({
+      sourceInviteId: admission!.sourceInviteId,
+      sourceLeaseId: admission!.sourceLeaseId,
+      grantedAt: admission!.grantedAt,
+    });
+  });
+
   it("authorizes only the active Better Auth user id and never organization membership", async () => {
     const now = Date.now();
     const userId = "beta-user-id";

@@ -187,6 +187,7 @@ export function ScenarioRunStart() {
       onCapacityWait: () => setStartState("waiting"),
     })
       .then(async ({ runId, run, reused }) => {
+        markPendingScenarioRunBootStage(scenarioId, "start-accepted");
         associateScenarioRunBootEvidence({ runId, scenarioId, reused });
         queryClient.setQueryData<ScenarioRunResponse>(
           ["scenarios", "run", runId],

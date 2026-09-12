@@ -1174,10 +1174,22 @@ export async function upsertRunVmsIntoDesiredState(input: {
   allowDrainedAdminProof?: boolean;
 }): Promise<void> {
   return traceOperation("scenario.publish_desired", async () => {
-  await assertAgentKvmRunsOpen(env.DB, {
-    ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
-  });
-  const guestTools = await loadScenarioGuestToolsPin(env, "stable");
+  // The drained gate query and the guest-tools pin read are independent, so
+  // they run together. The gate rejection stays first because a drained host
+  // must fail with the gate error, not with a pin error.
+  const [gate, pin] = await Promise.allSettled([
+    assertAgentKvmRunsOpen(env.DB, {
+      ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
+    }),
+    loadScenarioGuestToolsPin(env, "stable"),
+  ]);
+  if (gate.status === "rejected") {
+    throw gate.reason;
+  }
+  if (pin.status === "rejected") {
+    throw pin.reason;
+  }
+  const guestTools = pin.value;
   const desiredVms = input.vms.map((vm) => {
     const desiredVm = desiredVmFromRunVm({
       runId: input.runId,

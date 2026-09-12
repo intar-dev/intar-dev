@@ -29,10 +29,23 @@ describe("scenario run boot evidence", () => {
 
     const startUnixMs = beginScenarioRunBootEvidence("repair-nginx");
     markPendingScenarioRunBootStage("repair-nginx", "start-request", 1_011);
+    markPendingScenarioRunBootStage("repair-nginx", "start-accepted", 1_012);
     associateScenarioRunBootEvidence({
       runId: "run-1",
       scenarioId: "repair-nginx",
     });
+    for (const [stage, unixMs] of [
+      ["terminal-session-request", 1_015],
+      ["terminal-session", 1_017],
+      ["terminal-websocket-open", 1_018],
+    ] as const) {
+      markScenarioRunBootStage({
+        runId: "run-1",
+        scenarioId: "repair-nginx",
+        stage,
+        unixMs,
+      });
+    }
     markScenarioRunBootStage({
       runId: "run-1",
       scenarioId: "repair-nginx",
@@ -61,6 +74,10 @@ describe("scenario run boot evidence", () => {
       stages: {
         "start-click": startUnixMs,
         "start-request": 1_011,
+        "start-accepted": 1_012,
+        "terminal-session-request": 1_015,
+        "terminal-session": 1_017,
+        "terminal-websocket-open": 1_018,
         "terminal-connected": 1_020,
         "terminal-first-output": 1_030,
       },
