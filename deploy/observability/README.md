@@ -18,15 +18,15 @@ Alloy 1.19.2 runs on these persistent hosts:
 
 Host metrics, selected service journals, Linux auth/authpriv journals, kernel
 logs, and systemd lifecycle events are live. Both Cloudflare destinations are
-live: `intar-grafana-logs` and `intar-grafana-traces`. The existing Worker sends
-native request and Durable Object traces. This configuration was changed without
-deploying application code.
+live: `intar-grafana-logs` and `intar-grafana-traces`. The Worker sends native
+request, Durable Object and custom operation traces.
+The audit events, browser telemetry and Rust exporters are deployed.
 
-The new audit events, custom Worker spans, browser telemetry, and Rust trace
-exporters need an application release. `enable-service-tracing.sh` has set the
-local OTLP endpoint for each installed Rust service's next normal start. It does
-not restart services. Follow the existing release and drain procedures before
-replacing host binaries. Keep the paused boot optimization changes separate.
+The 2026-09-12 release uses web commit `41a0ecff`, agent `v0.12.18` (including
+jailerd), builder `v0.10.3`, and Stargate `v0.2.12`. The five paused boot
+optimization files were excluded. `enable-service-tracing.sh` configures the
+local OTLP endpoint for each installed Rust service. The script does not restart
+services. Follow the release and drain procedures before replacing host binaries.
 
 ## Security and VM coverage
 
@@ -72,10 +72,11 @@ service log filter at `info` to retain these spans.
 Faro 2.11 reports browser request traces, web vitals, error source locations and
 existing VM boot performance marks. Boot stage spans include the run ID. Collection runs only on `https://intar.dev`.
 The public collector ID is origin restricted and is not a Grafana API token.
-The filter removes user metadata, URL queries/fragments, arbitrary path values,
-request headers, console output, DOM click data and exception text. It retains
-compiled JS chunk locations for diagnosis. CI uses `GITHUB_SHA` as browser release
-identity. Source map upload is not configured.
+The filter preserves Faro's internal sampling flag until the SDK removes it
+before transport. It removes user metadata, URL queries/fragments, arbitrary
+path values, request headers, console output, DOM click data and exception text.
+It retains compiled JS chunk locations for diagnosis. CI uses `GITHUB_SHA` as
+browser release identity. Source map upload is not configured.
 
 Cloudflare currently does not propagate its native trace IDs outside Cloudflare.
 Browser, Worker, and host traces are separate trace trees. Use run/VM/build IDs
@@ -132,11 +133,44 @@ success in Grafana. Live Worker logs and traces were visible in Loki and Tempo.
 A collector restart on each host preserved application process IDs, restored
 readiness and left all export queues empty.
 
-Local checks passed: 588 web unit tests, 303 Worker tests, 391 Rust tests,
-Cloudflare type generation, Astro checking/build, UI bundle budgets and Alloy
-validation. The Rust HTTP receiver probe verified `/v1/traces`, service/host
-identity, final-batch flush inside Tokio, and exclusion of log text from traces.
-These checks do not prove deployment of the new application code.
+Release CI passed 589 web unit tests, 298 Worker tests, the Chromium smoke test,
+and 819 Rust workspace tests. Cloudflare type generation, Astro checking/build,
+UI bundle budgets, Clippy, dependency audits and Alloy validation also passed.
+The local Rust HTTP receiver probe verified `/v1/traces`, service/host identity,
+final-batch flush inside Tokio, and exclusion of log text from traces.
+
+The agent package passed the eight-VM privileged isolation self-test and agent
+doctor. Builder doctor passed. The protected Stargate deployment verified its
+backup, drained routes, service readiness and public routing. Its temporary
+operator window was closed after deployment. The production run gate is open.
+
+Two fresh Broken Nginx runs reached working browser terminals. Run
+`falsxih191w9wz6pric5ju58` completed its first command round trip in 8.089
+seconds. Run `cb4ofjdtnd5o12sticy86k92` completed it in 9.202 seconds. These
+are release checks, not a speed comparison. Grafana stored browser boot spans,
+Worker custom spans, jailerd image preparation spans and the web security
+rejection event. Stargate exported terminal admission and session spans.
+
+Agent `v0.12.18` initializes its TLS provider before trace exporter setup.
+The regression test starts the real agent binary and passed in CI and the release
+package. Grafana stored the second run's agent trace
+`0ff639d2ab3acff36d756583afe40d3a`: `vm_create` took 4.20 seconds, with
+`vm.launch` and `vm.wait_ready` child spans. Its `vm.archive` trace took 6.24
+seconds. The same run ID selected its browser boot spans and the Worker POST
+trace, which took 2.01 seconds.
+
+Both runs were ended and their artifacts were uploaded. No VM, populated VM
+cgroup, or active Stargate route remained. The builder exporter is enabled,
+but no new image build was started for these checks.
+
+Release evidence:
+
+- [Website deployment and live health](https://github.com/intar-dev/intar-dev/actions/runs/34699085769)
+- [Agent package and privileged release checks](https://github.com/intar-dev/intar-dev/actions/runs/34700383010)
+- [Builder package](https://github.com/intar-dev/intar-dev/actions/runs/34699098725)
+- [Stargate package](https://github.com/intar-dev/intar-dev/actions/runs/34699294698)
+- [Stargate deployment](https://github.com/intar-dev/intar-dev/actions/runs/34699563802)
+- [Run gate reopened](https://github.com/intar-dev/intar-dev/actions/runs/34701050390)
 
 Actual datasource UIDs are `grafanacloud-prom`, `grafanacloud-logs`, and
 `grafanacloud-traces`. Exporter target labels use jobs `integrations/unix` and
