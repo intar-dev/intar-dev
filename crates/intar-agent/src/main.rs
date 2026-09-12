@@ -44,10 +44,10 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _telemetry =
-        intar_observability::init("intar-agent", env!("CARGO_PKG_VERSION"), "info", true)?;
     tls_provider::ensure_ring_provider()
         .context("failed to initialize rustls ring crypto provider")?;
+    let _telemetry =
+        intar_observability::init("intar-agent", env!("CARGO_PKG_VERSION"), "info", true)?;
 
     let cli = Cli::parse();
     let cfg = config::load(&cli.config)?;
