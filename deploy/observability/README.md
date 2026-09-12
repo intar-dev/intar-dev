@@ -46,6 +46,8 @@ Host metrics, selected service journals, Linux auth/authpriv journals, kernel
 logs, and systemd lifecycle events are live. Both Cloudflare destinations are
 live: `intar-grafana-logs` and `intar-grafana-traces`. The Worker sends native
 request, Durable Object and custom operation traces.
+Both signals use `persist: false`: Grafana receives the data, and Cloudflare
+does not store a second copy. Logs and traces retain a 100% sampling rate.
 The audit events, browser telemetry and Rust exporters are deployed.
 
 The 2026-09-12 release uses web commit `41a0ecff`, agent `v0.12.18` (including

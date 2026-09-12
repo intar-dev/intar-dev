@@ -131,12 +131,14 @@
     "redact_query_string": true,
     "logs": {
       "enabled": true,
+      "persist": false,
       "head_sampling_rate": 1,
       "invocation_logs": true,
       "destinations": ["intar-grafana-logs"],
     },
     "traces": {
       "enabled": true,
+      "persist": false,
       "head_sampling_rate": 1,
       "destinations": ["intar-grafana-traces"],
     },
