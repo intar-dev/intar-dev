@@ -1,0 +1,1100 @@
+{
+  "uid": "intar-app-performance",
+  "title": "Intar / App performance",
+  "description": "Browser web vitals, Worker span rate and latency, errors and trace drill-down.",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "intar",
+    "intar-observability"
+  ],
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "01 Operations",
+      "type": "link",
+      "url": "/d/intar-operations",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "02 Security",
+      "type": "link",
+      "url": "/d/intar-security",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "03 VM performance",
+      "type": "link",
+      "url": "/d/intar-vm-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "04 App performance",
+      "type": "link",
+      "url": "/d/intar-app-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Alert rules",
+      "type": "link",
+      "url": "/alerting/list",
+      "targetBlank": true
+    }
+  ],
+  "panels": [
+    {
+      "title": "",
+      "type": "text",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Application experience** \u00b7 Browser measurements show user experience. Worker charts use server spans; request traces remain separate from host traces across Cloudflare. Use run IDs to connect a VM run."
+      },
+      "id": 1
+    },
+    {
+      "title": "LCP \u00b7 p75",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Largest Contentful Paint. Good: at most 2.5 seconds.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.75, {service_name=\"intar-web\"} |= \"type=web-vitals\" |= \" lcp=\" | logfmt | unwrap lcp | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2500
+              },
+              {
+                "color": "red",
+                "value": 4000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 2
+    },
+    {
+      "title": "INP \u00b7 p75",
+      "type": "stat",
+      "gridPos": {
+        "x": 6,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Interaction to Next Paint. Good: at most 200 ms.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.75, {service_name=\"intar-web\"} |= \"type=web-vitals\" |= \" inp=\" | logfmt | unwrap inp | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 3
+    },
+    {
+      "title": "CLS \u00b7 p75",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Cumulative Layout Shift. Good: at most 0.1.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.75, {service_name=\"intar-web\"} |= \"type=web-vitals\" |= \" cls=\" | logfmt | unwrap cls | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 4
+    },
+    {
+      "title": "Browser errors",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Unhandled browser exceptions in the selected range. Error text is redacted.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service_name=\"intar-web\"} |= \"kind=exception\" [$__range])) or vector(0)",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 5
+    },
+    {
+      "title": "01 / Browser experience",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 6
+    },
+    {
+      "title": "Content loading by page \u00b7 p75",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Page paths are normalized. A 30-minute window makes low traffic easier to inspect.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.75, {service_name=\"intar-web\"} |= \"type=web-vitals\" |= \" lcp=\" | logfmt | unwrap lcp | __error__=\"\" [30m]) by (page_id)",
+          "legendFormat": "{{page_id}}",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 7
+    },
+    {
+      "title": "Input response by page \u00b7 p75",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "description": "",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.75, {service_name=\"intar-web\"} |= \"type=web-vitals\" |= \" inp=\" | logfmt | unwrap inp | __error__=\"\" [30m]) by (page_id)",
+          "legendFormat": "{{page_id}}",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 8
+    },
+    {
+      "title": "02 / Worker requests",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 9
+    },
+    {
+      "title": "Server span rate",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 8,
+        "h": 8
+      },
+      "description": "Cloudflare server spans per second. Includes instrumented request and binding operations; this is not a billable request counter.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "grafanacloud-traces"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "grafanacloud-traces"
+          },
+          "editorMode": "code",
+          "query": "{ resource.service.name = \"intar-dev\" && span:kind = server } | rate()",
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "step": "1m",
+          "limit": 25,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:spans/s",
+          "decimals": 2,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5794F2"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 10
+    },
+    {
+      "title": "Server latency",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 17,
+        "w": 8,
+        "h": 8
+      },
+      "description": "Elapsed duration of Cloudflare server spans.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "grafanacloud-traces"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "grafanacloud-traces"
+          },
+          "editorMode": "code",
+          "query": "{ resource.service.name = \"intar-dev\" && span:kind = server } | quantile_over_time(span:duration, .5, .95)",
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "step": "1m",
+          "limit": 25,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "0.5"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p50"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "0.95"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p95"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 11
+    },
+    {
+      "title": "Server errors",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 17,
+        "w": 8,
+        "h": 8
+      },
+      "description": "Server spans marked as errors or HTTP 5xx. Empty means no matching spans, not a health guarantee.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "grafanacloud-traces"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "grafanacloud-traces"
+          },
+          "editorMode": "code",
+          "query": "{ resource.service.name = \"intar-dev\" && span:kind = server && (span:status = error || span.http.response.status_code >= 500) } | rate()",
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "step": "1m",
+          "limit": 25,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:spans/s",
+          "decimals": 3,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#F2495C"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 12
+    },
+    {
+      "title": "03 / Find the slow operation",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 13
+    },
+    {
+      "title": "Operation duration \u00b7 p95",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Custom Worker operation spans. They can overlap and must not be added together.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "grafanacloud-traces"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "grafanacloud-traces"
+          },
+          "editorMode": "code",
+          "query": "{ resource.service.name = \"intar-dev\" && span:name =~ \"app.handle|request.auth|scenario.start|scenario.allocate|scenario.boot_capacity|scenario.publish_desired|scenario.select_host\" } | quantile_over_time(span:duration, .95) by (span:name)",
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "step": "1m",
+          "limit": 25,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 14,
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^\\{name=\"([^\"]+)\".*\\}$",
+            "renamePattern": "$1"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Slow app requests",
+      "type": "table",
+      "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Matching server spans slower than 500 ms. This is a search sample, not an exhaustive ranking.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "grafanacloud-traces"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "grafanacloud-traces"
+          },
+          "editorMode": "code",
+          "query": "{ resource.service.name = \"intar-dev\" && span:kind = server && span:duration > 500ms }",
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "step": "1m",
+          "limit": 25,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 15
+    },
+    {
+      "title": "Browser boot traces",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 12,
+        "h": 9
+      },
+      "description": "Inspect the intar.run.id and intar.stage attributes to connect the request with VM traces.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "grafanacloud-traces"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "grafanacloud-traces"
+          },
+          "editorMode": "code",
+          "query": "{ resource.service.name = \"intar-web\" && span:name = \"browser.vm_boot_stage\" }",
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "step": "1m",
+          "limit": 25,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 16
+    },
+    {
+      "title": "Browser exceptions",
+      "type": "logs",
+      "gridPos": {
+        "x": 12,
+        "y": 34,
+        "w": 12,
+        "h": 9
+      },
+      "description": "Compiled source locations are retained. Exception text, console output and personal metadata are removed.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=\"intar-web\"} |= \"kind=exception\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 17
+    },
+    {
+      "title": "",
+      "type": "text",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "[Open frontend sessions](https://intar.grafana.net/a/grafana-kowalski-app/apps/7377/sessions) \u00b7 [Explore traces](/explore?schemaVersion=1&panes=%7B%22q%22%3A%7B%22datasource%22%3A%22grafanacloud-traces%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22query%22%3A%22%7Bresource.service.name%3D~%5C%22intar-.*%7Cstargate%5C%22%7D%22%2C%22queryType%22%3A%22traceql%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-1h%22%2C%22to%22%3A%22now%22%7D%7D%7D)\n\n**Reading low traffic:** No samples means no matching event in the selected range. It is different from a measured zero. Use 24 hours when only a few sessions or VM runs are available."
+      },
+      "id": 18
+    }
+  ]
+}

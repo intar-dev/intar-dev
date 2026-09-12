@@ -1,0 +1,1034 @@
+{
+  "uid": "intar-security",
+  "title": "Intar / Security",
+  "description": "Rejected and accepted access, source ranking, web audit and privilege activity.",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "intar",
+    "intar-observability"
+  ],
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "01 Operations",
+      "type": "link",
+      "url": "/d/intar-operations",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "02 Security",
+      "type": "link",
+      "url": "/d/intar-security",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "03 VM performance",
+      "type": "link",
+      "url": "/d/intar-vm-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "04 App performance",
+      "type": "link",
+      "url": "/d/intar-app-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Alert rules",
+      "type": "link",
+      "url": "/alerting/list",
+      "targetBlank": true
+    }
+  ],
+  "panels": [
+    {
+      "title": "",
+      "type": "text",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Access and security** \u00b7 Compare rejected activity with accepted sessions. Counts are log records; one attempt can produce several records. The host filter applies to Linux and SSH panels."
+      },
+      "id": 1
+    },
+    {
+      "title": "SSH rejections",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Selected time range. Multiple records can describe one attempt.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service_name=~\"ssh|sshd|linux-auth\"} | host_name=~\"${host:regex}\" |~ \"Failed password|Failed publickey|Invalid user|authentication failure\" [$__range])) or vector(0)",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 2
+    },
+    {
+      "title": "SSH accepted",
+      "type": "stat",
+      "gridPos": {
+        "x": 6,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Accepted public-key or password authentication records in the selected range.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service_name=~\"ssh|sshd|linux-auth\"} | host_name=~\"${host:regex}\" |~ \"Accepted (publickey|password)\" [$__range])) or vector(0)",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#73BF69"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 3
+    },
+    {
+      "title": "Web rejections",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Rejected auth and protected API requests. Independent of host filter.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service_name=\"intar-dev\"} |= \"security.\" |= \"rejected\" [$__range])) or vector(0)",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 4
+    },
+    {
+      "title": "Privilege use",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "sudo and su records; includes session lifecycle records. Commands are redacted.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service_name=~\"sudo|su\"} | host_name=~\"${host:regex}\" [$__range])) or vector(0)",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5794F2"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 5
+    },
+    {
+      "title": "01 / Rejection patterns",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 6
+    },
+    {
+      "title": "SSH rejections by host",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 14,
+        "h": 8
+      },
+      "description": "Rolling five-minute record count. Look for a sudden increase or repeated sources.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host_name) (count_over_time({service_name=~\"ssh|sshd|linux-auth\"} | host_name=~\"${host:regex}\" |~ \"Failed password|Failed publickey|Invalid user|authentication failure\" [5m]))",
+          "legendFormat": "{{host_name}}",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 7
+    },
+    {
+      "title": "Web rejections by route",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 14,
+        "y": 8,
+        "w": 10,
+        "h": 8
+      },
+      "description": "Rolling five-minute count, grouped by bounded application route.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum by (route) (count_over_time({service_name=\"intar-dev\"} |= \"security.\" |= \"rejected\" | json route=\"route\" | route!=\"\" | __error__=\"\" [5m]))",
+          "legendFormat": "{{route}}",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 8
+    },
+    {
+      "title": "Top rejected SSH sources",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 9
+      },
+      "description": "Sources parsed from SSH messages containing \u201cfrom IP\u201d. PAM-only messages can be absent from this ranking.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "topk(10, sum by (source_ip) (count_over_time({service_name=~\"ssh|sshd|linux-auth\"} | host_name=~\"${host:regex}\" |~ \"Failed password|Failed publickey|Invalid user|authentication failure\" | regexp \"from (?P<source_ip>[0-9a-fA-F:.]+)\" | source_ip!=\"\" [$__range])))",
+          "legendFormat": "{{source_ip}}",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FFB357"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Records",
+            "desc": true
+          }
+        ]
+      },
+      "id": 9,
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "source_ip": "Source IP",
+              "Value #A": "Records"
+            },
+            "indexByName": {
+              "source_ip": 0,
+              "Value #A": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Accepted SSH logins by host",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 9
+      },
+      "description": "Use the records below to inspect accepted sources and accounts.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host_name) (count_over_time({service_name=~\"ssh|sshd|linux-auth\"} | host_name=~\"${host:regex}\" |~ \"Accepted (publickey|password)\" [5m]))",
+          "legendFormat": "{{host_name}}",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 10
+    },
+    {
+      "title": "02 / Audit evidence",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 11
+    },
+    {
+      "title": "Accepted access records",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 10
+      },
+      "description": "Check source address, account and time against known operator activity.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"ssh|sshd|linux-auth\"} | host_name=~\"${host:regex}\" |~ \"Accepted (publickey|password)\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 12
+    },
+    {
+      "title": "Web and terminal audit",
+      "type": "logs",
+      "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 10
+      },
+      "description": "Web session creation and terminal admission events. Authentication request acceptance alone does not prove a new login.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"intar-dev|stargate\"} |= \"security.\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 13
+    },
+    {
+      "title": "SSH rejections",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 9
+      },
+      "description": "",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"ssh|sshd|linux-auth\"} | host_name=~\"${host:regex}\" |~ \"Failed password|Failed publickey|Invalid user|authentication failure\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 14
+    },
+    {
+      "title": "Privilege changes",
+      "type": "logs",
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 9
+      },
+      "description": "sudo and su messages. Command arguments are removed before export.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"sudo|su\"} | host_name=~\"${host:regex}\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 15
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "Host",
+        "type": "custom",
+        "query": "VM host : agent-01-fsz7cpce,Builder : builder-01-el81wm4u,Gateway : stargate",
+        "includeAll": true,
+        "allValue": "agent-01-fsz7cpce|builder-01-el81wm4u|stargate",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "VM host",
+            "value": "agent-01-fsz7cpce",
+            "selected": false
+          },
+          {
+            "text": "Builder",
+            "value": "builder-01-el81wm4u",
+            "selected": false
+          },
+          {
+            "text": "Gateway",
+            "value": "stargate",
+            "selected": false
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  }
+}

@@ -1,10 +1,36 @@
 # Intar observability
 
-[Operations and security dashboard](https://intar.grafana.net/d/intar-operations)
-collects host health, authentication events, VM failures, boot timings, builds,
-and telemetry delivery. [Frontend Observability](https://intar.grafana.net/a/grafana-kowalski-app/apps)
-contains the `intar-web` application. Notifications must remain in Grafana only. The existing `empty` contact point
-has no integrations. Assign new rules to that receiver.
+Four linked dashboards in the **Intar operations** folder cover the main checks:
+
+| Dashboard | Use it to check | Repository file |
+| --- | --- | --- |
+| [Operations](https://intar.grafana.net/d/intar-operations) | Host collection, active alerts, CPU, memory, disk, critical services and export queues | `dashboard.json` |
+| [Security](https://intar.grafana.net/d/intar-security) | SSH rejections and accepted logins, source IPs, web audit and privilege activity | `security-dashboard.json` |
+| [VM performance](https://intar.grafana.net/d/intar-vm-performance) | Learner wait, boot phase cost, archive work, VM failures and traces | `vm-performance-dashboard.json` |
+| [App performance](https://intar.grafana.net/d/intar-app-performance) | Browser web vitals, Worker span rate and latency, errors and traces | `app-performance-dashboard.json` |
+
+The dashboards refresh every minute. Operations starts with one hour; the other
+views start with six hours. Navigation links keep the selected time range.
+Operations and Security have a host filter. VM host, Builder and Gateway use
+consistent colors. App performance links to the existing Frontend Observability
+sessions for `intar-web`.
+
+Counts cover the selected time range unless a panel names a rolling window.
+Browser percentiles use received measurements. Boot percentiles use only records
+with structured phase timings and combine samples across runs. The phase chart
+shows means, which can be added; do not add percentiles. Completed boot samples
+are not an active VM count. Worker rate charts count server spans, including
+binding operations, and are not billable request counters. Trace tables show a
+bounded search result, not every matching trace. No samples means no matching
+record; it is not a measured zero. Failure panels use text patterns and need review.
+
+Import each JSON file with Grafana's **New > Import dashboard** action. Select
+**Intar operations**, retain the UID, and overwrite the existing dashboard when
+updating it. No application release or host restart is needed. The dashboard
+files use the existing Prometheus, Loki and Tempo datasource UIDs.
+
+Notifications remain in Grafana only. The existing `empty` contact point has no
+integrations. Dashboard changes do not change the six alert rules or their receiver.
 
 ## Collection and release state
 
@@ -128,6 +154,13 @@ MemoryHigh 384 MiB, MemoryMax 512 MiB and CPUQuota 50%.
 
 ## Validation
 
+The four dashboards were saved and checked in Grafana on 2026-09-12. Live checks
+covered host metrics, the host filter, authentication counts and source ranking,
+boot phase values, browser measurements, and TraceQL rates and percentiles.
+The VM trace link opened its span tree. Empty failure and exception panels had
+no matching records. The dashboard JSON also passed layout, datasource, panel ID
+and query reference checks. These checks did not require a service restart.
+
 On 2026-09-12, all three host targets and all three systemd collectors reported
 success in Grafana. Live Worker logs and traces were visible in Loki and Tempo.
 A collector restart on each host preserved application process IDs, restored
@@ -183,3 +216,5 @@ Actual datasource UIDs are `grafanacloud-prom`, `grafanacloud-logs`, and
 - [Cloudflare trace limitations](https://developers.cloudflare.com/workers/observability/traces/known-limitations/)
 - [OpenTelemetry Rust exporter](https://docs.rs/opentelemetry-otlp/0.32.0/opentelemetry_otlp/)
 - [Faro setup](https://grafana.com/docs/grafana-cloud/observe-and-act/monitor-applications/frontend-observability/instrument/faro/)
+
+Dashboard references: [LogQL metric queries](https://grafana.com/docs/loki/latest/query/metric_queries/), [TraceQL metric functions](https://grafana.com/docs/tempo/latest/metrics-from-traces/metrics-queries/functions/), and [Web Vitals thresholds](https://web.dev/articles/vitals).

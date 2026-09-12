@@ -1,0 +1,1105 @@
+{
+  "uid": "intar-vm-performance",
+  "title": "Intar / VM performance",
+  "description": "Learner wait, agent boot phase costs, cleanup time and VM failure evidence.",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "intar",
+    "intar-observability"
+  ],
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "01 Operations",
+      "type": "link",
+      "url": "/d/intar-operations",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "02 Security",
+      "type": "link",
+      "url": "/d/intar-security",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "03 VM performance",
+      "type": "link",
+      "url": "/d/intar-vm-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "04 App performance",
+      "type": "link",
+      "url": "/d/intar-app-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Alert rules",
+      "type": "link",
+      "url": "/alerting/list",
+      "targetBlank": true
+    }
+  ],
+  "panels": [
+    {
+      "title": "",
+      "type": "text",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**VM startup and cleanup** \u00b7 Compare what the learner waits for with the agent boot phases. Percentiles summarize the selected samples; use the boot count to judge small samples."
+      },
+      "id": 1
+    },
+    {
+      "title": "Boot samples",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Completed boots with structured phase timings; this is not an active VM count.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.total_ms\" | sample!=\"\" | __error__=\"\" [$__range])) or vector(0)",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5794F2"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 2
+    },
+    {
+      "title": "Boot \u00b7 p95",
+      "type": "stat",
+      "gridPos": {
+        "x": 6,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Agent boot time only. It excludes earlier web scheduling and later browser connection work.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.total_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FFB357"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 3
+    },
+    {
+      "title": "Terminal \u00b7 p95",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Learner Start click to connected browser terminal.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-web\"} |= \"type=vm_boot\" |= \" terminal-connected=\" | regexp \"terminal-connected=(?P<elapsed_ms>[0-9.]+)\" | unwrap elapsed_ms | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FFB357"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 4
+    },
+    {
+      "title": "Archive \u00b7 p95",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 3,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Archive processing time. The queue wait is shown separately below.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-agent\"} |= \"scenario_run_archive_timing\" | json sample=\"fields.processing_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5794F2"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 5
+    },
+    {
+      "title": "01 / Where startup time goes",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 6
+    },
+    {
+      "title": "Agent boot duration",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 14,
+        "h": 8
+      },
+      "description": "Rolling 30-minute percentiles. Gaps mean no completed boots in that window.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.5, {service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.total_ms\" | unwrap sample | __error__=\"\" [30m]) by ()",
+          "legendFormat": "p50",
+          "queryType": "range",
+          "maxLines": 100
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.total_ms\" | unwrap sample | __error__=\"\" [30m]) by ()",
+          "legendFormat": "p95",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 7
+    },
+    {
+      "title": "Average boot phase cost",
+      "type": "bargauge",
+      "gridPos": {
+        "x": 14,
+        "y": 8,
+        "w": 10,
+        "h": 12
+      },
+      "description": "Average time per phase over the selected range. Agent phase boundaries are sequential; percentiles are not added together.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.queue_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Queue",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.image_cache_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Image cache",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.disk_stage_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Disk staging",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.jail_launch_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Jail setup",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.vmm_start_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Hypervisor",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.vm_api_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "VM API",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.guest_ready_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Guest ready",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.quota_seal_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Quota seal",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "I",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.ssh_verify_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "SSH check",
+          "queryType": "instant",
+          "maxLines": 100
+        },
+        {
+          "refId": "J",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({service_name=\"intar-agent\"} |= \"vm booted\" | json sample=\"fields.terminal_publish_ms\" | unwrap sample | __error__=\"\" [$__range]) by ()",
+          "legendFormat": "Publish terminal",
+          "queryType": "instant",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FFB357"
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Queue"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Image cache"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Disk staging"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "D"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Jail setup"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "E"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Hypervisor"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "F"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM API"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "G"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Guest ready"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "H"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Quota seal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "I"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SSH check"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "J"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Publish terminal"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizHeight": 18,
+        "maxVizHeight": 40,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "titleSize": 13,
+          "valueSize": 18
+        }
+      },
+      "id": 8
+    },
+    {
+      "title": "Learner wait to terminal",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 14,
+        "h": 8
+      },
+      "description": "",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-web\"} |= \"type=vm_boot\" |= \" terminal-connected=\" | regexp \"terminal-connected=(?P<elapsed_ms>[0-9.]+)\" | unwrap elapsed_ms | __error__=\"\" [30m]) by ()",
+          "legendFormat": "Connected \u00b7 p95",
+          "queryType": "range",
+          "maxLines": 100
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-web\"} |= \"type=vm_boot\" |= \" terminal-first-output=\" | regexp \"terminal-first-output=(?P<elapsed_ms>[0-9.]+)\" | unwrap elapsed_ms | __error__=\"\" [30m]) by ()",
+          "legendFormat": "First output \u00b7 p95",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 9
+    },
+    {
+      "title": "Archive queue and processing",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 14,
+        "y": 20,
+        "w": 10,
+        "h": 7
+      },
+      "description": "",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-agent\"} |= \"scenario_run_archive_timing\" | json sample=\"fields.queue_wait_ms\" | unwrap sample | __error__=\"\" [30m]) by ()",
+          "legendFormat": "Queue \u00b7 p95",
+          "queryType": "range",
+          "maxLines": 100
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {service_name=\"intar-agent\"} |= \"scenario_run_archive_timing\" | json sample=\"fields.processing_ms\" | unwrap sample | __error__=\"\" [30m]) by ()",
+          "legendFormat": "Processing \u00b7 p95",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 10
+    },
+    {
+      "title": "02 / Run evidence and failures",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 11
+    },
+    {
+      "title": "VM and archive traces",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 14,
+        "h": 10
+      },
+      "description": "Select a trace ID to see the span tree. Use the run ID to find its browser and Worker traces.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "grafanacloud-traces"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "grafanacloud-traces"
+          },
+          "editorMode": "code",
+          "query": "{ resource.service.name = \"intar-agent\" && (span:name = \"vm_create\" || span:name = \"vm.archive\") }",
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "step": "1m",
+          "limit": 25,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 12
+    },
+    {
+      "title": "VM or kernel failures",
+      "type": "logs",
+      "gridPos": {
+        "x": 14,
+        "y": 28,
+        "w": 10,
+        "h": 10
+      },
+      "description": "Empty means no matching failure records in the selected range.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"intar-agent|intar-jailerd|jailerd|intar-kernel|kernel|systemd\"} |~ \"(?i)out of memory|oom-kill|killed process|I/O error|kernel panic|vm boot.*failed|scenario runtime.*timeout\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 13
+    },
+    {
+      "title": "Boot phase records",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 12,
+        "h": 10
+      },
+      "description": "Compact boot records. Open log details for all fields.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=\"intar-agent\"} |= \"vm booted\" | json | line_format \"run={{.fields_run_id}} vm={{.fields_vm}} total={{.fields_total_ms}}ms queue={{.fields_queue_ms}}ms disk={{.fields_disk_stage_ms}}ms guest={{.fields_guest_ready_ms}}ms ssh={{.fields_ssh_verify_ms}}ms\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 14
+    },
+    {
+      "title": "Build and archive activity",
+      "type": "logs",
+      "gridPos": {
+        "x": 12,
+        "y": 38,
+        "w": 12,
+        "h": 10
+      },
+      "description": "Build and archive lifecycle messages; no learner terminal contents.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"intar-builder|builder|intar-agent\"} |~ \"(?i)build (started|completed|failed)|archive job|uploaded archived|retry\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 15
+    }
+  ]
+}

@@ -1,801 +1,1839 @@
 {
   "uid": "intar-operations",
-  "title": "Intar operations and security",
-  "description": "Host health, security events, VM boot timings, builds and telemetry delivery. Browser and Rust application panels require the instrumented release. Alerts remain visible in Grafana only.",
+  "title": "Intar / Operations",
+  "description": "Production readiness, host capacity, critical services and telemetry delivery.",
   "schemaVersion": 41,
   "version": 1,
+  "editable": true,
   "tags": [
     "intar",
-    "security",
-    "operations"
+    "intar-observability"
   ],
   "timezone": "browser",
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-1h",
     "to": "now"
   },
-  "panels": [
-    {
-      "id": 1,
-      "title": "Host collection (expected: 3)",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 0,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "up{job=\"integrations/unix\",environment=\"production\"}",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": "One series per persistent host. Missing data is a collection failure; it is not evidence that the host is healthy."
-    },
-    {
-      "id": 2,
-      "title": "Systemd collection",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "node_scrape_collector_success{job=\"integrations/unix\",collector=\"systemd\"}",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 3,
-      "title": "CPU use",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 8,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job=\"integrations/unix\",mode=\"idle\"}[5m])))",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 4,
-      "title": "Memory use",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 8,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 5,
-      "title": "Disk free",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 16,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "100 * node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\",mountpoint!~\"/run.*\"} / node_filesystem_size_bytes",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 6,
-      "title": "CPU and I/O waiting",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 16,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "rate(node_pressure_cpu_waiting_seconds_total[5m]) or rate(node_pressure_io_waiting_seconds_total[5m])",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 7,
-      "title": "Critical service state",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "node_systemd_unit_state{state=\"active\",name=~\"intar-agent.service|intar-jailerd.service|intar-builder.service|intar-buildkitd.service|stargate.service|cloudflared.service|alloy.service|ssh.service|sshd.service\"}",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 8,
-      "title": "Service restarts",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "increase(node_systemd_service_restart_total[15m])",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 9,
-      "title": "Telemetry queue use",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 32,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "otelcol_exporter_queue_size / otelcol_exporter_queue_capacity",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 10,
-      "title": "Telemetry delivery failures",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "grafanacloud-prom"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 32,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (instance) (rate({__name__=~\"otelcol_exporter_send_failed_.*\"}[5m]))",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "grafanacloud-prom"
-          }
-        }
-      ],
-      "description": "A missing series can mean no failure has been recorded. Check collection health as well."
-    },
-    {
-      "id": 11,
-      "title": "Rejected SSH logins in 5 minutes",
-      "type": "timeseries",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 40,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (host_name) (count_over_time({service_name=~\"ssh|sshd|linux-auth|stargate\"} |~ \"Failed password|Failed publickey|Invalid user|authentication failure|security.ssh_auth_rejected\" [5m]))",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 12,
-      "title": "Web authentication rejections in 5 minutes",
-      "type": "timeseries",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 40,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum (count_over_time({service_name=\"intar-dev\"} |= \"security.\" |= \"rejected\" [5m]))",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": "Requires the new audit events to be deployed. A rejected response does not prove an attack; inspect IP, event type and rate."
-    },
-    {
-      "id": 13,
-      "title": "Login and privilege audit",
-      "type": "logs",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 48,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{service_name=~\"ssh|sshd|sudo|su|login|linux-auth|stargate|intar-dev\"} |~ \"Accepted |Failed |Invalid user|authentication failure|security[.]|session opened|session closed|COMMAND=\"",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 14,
-      "title": "VM and host failures",
-      "type": "logs",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 48,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{service_name=~\"intar-agent|intar-jailerd|intar-kernel|systemd\"} |~ \"(?i)oom|out of memory|killed process|failed|panic|timeout|I/O error|read-only\"",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 15,
-      "title": "VM boot duration (p95)",
-      "type": "timeseries",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 56,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "quantile_over_time(0.95, {service_name=\"intar-agent\"} |= \"vm booted\" | json | unwrap fields_total_ms | __error__=\"\" [15m])",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": "JSON service logging is available after the Rust release. Inspect queue, image, guest, SSH and terminal phase fields in the adjacent panel."
-    },
-    {
-      "id": 16,
-      "title": "VM boot phase details",
-      "type": "logs",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 56,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{service_name=\"intar-agent\"} |= \"vm booted\"",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 17,
-      "title": "Build and archive lifecycle",
-      "type": "logs",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 64,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{service_name=~\"intar-builder|intar-workshop-builder|intar-agent\"} |~ \"(?i)build|archive|upload|retry\"",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": ""
-    },
-    {
-      "id": 18,
-      "title": "All service errors",
-      "type": "logs",
-      "datasource": {
-        "type": "loki",
-        "uid": "grafanacloud-logs"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 64,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{service_name=~\"intar-.*|stargate|cloudflared|alloy\"} |~ \"(?i)error|failed|panic\"",
-          "editorMode": "code",
-          "range": true,
-          "datasource": {
-            "type": "loki",
-            "uid": "grafanacloud-logs"
-          },
-          "queryType": "range"
-        }
-      ],
-      "description": ""
-    }
-  ],
+  "graphTooltip": 1,
   "links": [
     {
-      "title": "Application traces",
+      "title": "01 Operations",
       "type": "link",
-      "url": "/explore",
-      "targetBlank": true
+      "url": "/d/intar-operations",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
     },
     {
-      "title": "Browser performance",
+      "title": "02 Security",
       "type": "link",
-      "url": "/a/grafana-kowalski-app/apps",
+      "url": "/d/intar-security",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "03 VM performance",
+      "type": "link",
+      "url": "/d/intar-vm-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "04 App performance",
+      "type": "link",
+      "url": "/d/intar-app-performance",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Alert rules",
+      "type": "link",
+      "url": "/alerting/list",
       "targetBlank": true
     }
-  ]
+  ],
+  "panels": [
+    {
+      "title": "",
+      "type": "text",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 2
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Production readiness** \u00b7 Start with host and service status. Use the next dashboards to investigate access, VM delays, and application errors."
+      },
+      "id": 1
+    },
+    {
+      "title": "Hosts reporting",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 2,
+        "w": 8,
+        "h": 4
+      },
+      "description": "Selected hosts reporting successfully. All hosts should show 3. A smaller host selection changes the expected count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(up{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\"}) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5794F2"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 2
+    },
+    {
+      "title": "Stopped services",
+      "type": "stat",
+      "gridPos": {
+        "x": 8,
+        "y": 2,
+        "w": 8,
+        "h": 4
+      },
+      "description": "Inactive critical services on reporting hosts. Check Hosts reporting for missing collectors.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(1 - node_systemd_unit_state{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\",state=\"active\",name=~\"intar-agent.service|intar-jailerd.service|intar-builder.service|intar-buildkitd.service|stargate.service|cloudflared.service|alloy.service|ssh.service|sshd.service\"}) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 3
+    },
+    {
+      "title": "Lowest disk free",
+      "type": "stat",
+      "gridPos": {
+        "x": 16,
+        "y": 2,
+        "w": 8,
+        "h": 4
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "min(100 * node_filesystem_avail_bytes{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\",fstype!~\"tmpfs|overlay|squashfs\",mountpoint!~\"/run.*\"} / node_filesystem_size_bytes)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 20
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "left",
+        "orientation": "horizontal",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 36
+        }
+      },
+      "id": 4
+    },
+    {
+      "title": "Needs attention",
+      "type": "alertlist",
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 6
+      },
+      "description": "Firing, pending, recovery and data errors for Intar. All notifications remain in Grafana.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "viewMode": "list",
+        "maxItems": 8,
+        "sortOrder": 3,
+        "dashboardAlerts": false,
+        "groupMode": "default",
+        "groupBy": [],
+        "alertName": "Intar",
+        "showInstances": false,
+        "folder": {
+          "uid": "fk8qn9",
+          "title": "Intar operations"
+        },
+        "stateFilter": {
+          "firing": true,
+          "pending": true,
+          "recovering": true,
+          "normal": false,
+          "noData": true,
+          "error": true
+        },
+        "showInactiveAlerts": false,
+        "alertInstanceLabelFilter": ""
+      },
+      "id": 5
+    },
+    {
+      "title": "Host collection over time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 6
+      },
+      "description": "A value of 1 means a successful collection. Gaps can mean no data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "up{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\"}",
+          "legendFormat": "{{instance}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 6
+    },
+    {
+      "title": "01 / Capacity and service health",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 7
+    },
+    {
+      "title": "CPU use",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 8,
+        "h": 7
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\",mode=\"idle\"}[$__rate_interval])))",
+          "legendFormat": "{{instance}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 8
+    },
+    {
+      "title": "Memory use",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 8,
+        "h": 7
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\"} / node_memory_MemTotal_bytes)",
+          "legendFormat": "{{instance}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 9
+    },
+    {
+      "title": "Disk free",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 13,
+        "w": 8,
+        "h": 7
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "100 * node_filesystem_avail_bytes{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\",fstype!~\"tmpfs|overlay|squashfs\",mountpoint!~\"/run.*\"} / node_filesystem_size_bytes",
+          "legendFormat": "{{instance}} \u00b7 {{mountpoint}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 /"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 /"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 /boot"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 /boot"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 /boot/efi"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 /boot/efi"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 /"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 /"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 /boot"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 /boot"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 /boot/efi"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 /boot/efi"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 /"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 /"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 /boot"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 /boot"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 /boot/efi"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 /boot/efi"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 10
+    },
+    {
+      "title": "Critical services",
+      "type": "bargauge",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 9
+      },
+      "description": "1 = active. 0 = inactive. Only installed critical services are listed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "node_systemd_unit_state{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\",state=\"active\",name=~\"intar-agent.service|intar-jailerd.service|intar-builder.service|intar-buildkitd.service|stargate.service|cloudflared.service|alloy.service|ssh.service|sshd.service\"}",
+          "legendFormat": "{{instance}} \u00b7 {{name}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizHeight": 18,
+        "maxVizHeight": 40,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "titleSize": 13,
+          "valueSize": 18
+        }
+      },
+      "id": 11
+    },
+    {
+      "title": "CPU and disk waiting",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 9
+      },
+      "description": "Time in which processes wait for CPU or I/O. These are separate signals, not combined with a set union.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(node_pressure_cpu_waiting_seconds_total{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} \u00b7 CPU waiting",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(node_pressure_io_waiting_seconds_total{job=\"integrations/unix\",environment=\"production\",instance=~\"${host:regex}\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} \u00b7 I/O waiting",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 CPU waiting"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 CPU waiting"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 I/O waiting"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 I/O waiting"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 CPU waiting"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 CPU waiting"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 I/O waiting"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 I/O waiting"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 CPU waiting"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 CPU waiting"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 I/O waiting"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 I/O waiting"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 12
+    },
+    {
+      "title": "02 / Is telemetry arriving?",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 13
+    },
+    {
+      "title": "Export queue use",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 12,
+        "h": 7
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "otelcol_exporter_queue_size{job=\"integrations/self\",environment=\"production\",instance=~\"${host:regex}\"} / otelcol_exporter_queue_capacity",
+          "legendFormat": "{{instance}} \u00b7 {{data_type}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 logs"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 logs"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 metrics"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 metrics"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce \u00b7 traces"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host \u00b7 traces"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 logs"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 logs"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 metrics"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 metrics"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u \u00b7 traces"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder \u00b7 traces"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 logs"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 logs"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 metrics"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 metrics"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate \u00b7 traces"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway \u00b7 traces"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 14
+    },
+    {
+      "title": "Log volume",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 30,
+        "w": 12,
+        "h": 7
+      },
+      "description": "All collected services. This chart helps detect missing sources and unexpected volume.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service_name) (rate({service_name=~\".+\"}[5m]))",
+          "legendFormat": "{{service_name}}",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "logs/sec",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 15
+    },
+    {
+      "title": "Export failures",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 12,
+        "h": 7
+      },
+      "description": "Failed export items per second. Zero is shown only when the collector is reporting.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "grafanacloud-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (instance) (rate({__name__=~\"otelcol_exporter_send_failed_.*\",job=\"integrations/self\",environment=\"production\",instance=~\"${host:regex}\"}[$__rate_interval])) or on(instance) (0 * up{job=\"integrations/self\",environment=\"production\",instance=~\"${host:regex}\"})",
+          "legendFormat": "{{instance}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent-01-fsz7cpce"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "VM host"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "builder-01-el81wm4u"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Builder"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FFB357"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stargate"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gateway"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 16
+    },
+    {
+      "title": "Recent service errors",
+      "type": "logs",
+      "gridPos": {
+        "x": 12,
+        "y": 37,
+        "w": 12,
+        "h": 7
+      },
+      "description": "Read the message before classifying the event; this panel matches text patterns.",
+      "datasource": {
+        "type": "loki",
+        "uid": "grafanacloud-logs"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "grafanacloud-logs"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\"intar-.*|stargate|cloudflared|alloy\"} |~ \"(?i)error|failed|panic\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "id": 17
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "Host",
+        "type": "custom",
+        "query": "VM host : agent-01-fsz7cpce,Builder : builder-01-el81wm4u,Gateway : stargate",
+        "includeAll": true,
+        "allValue": "agent-01-fsz7cpce|builder-01-el81wm4u|stargate",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "VM host",
+            "value": "agent-01-fsz7cpce",
+            "selected": false
+          },
+          {
+            "text": "Builder",
+            "value": "builder-01-el81wm4u",
+            "selected": false
+          },
+          {
+            "text": "Gateway",
+            "value": "stargate",
+            "selected": false
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  }
 }
