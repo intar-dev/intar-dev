@@ -143,7 +143,8 @@ describe("automatic web deployment workflow", () => {
 
   it("deploys the complete configuration at 100 percent with no rollback", () => {
     expect(deployScript).toContain("bunx wrangler deploy");
-    expect(deployScript).toContain("--strict");
+    expect(deployScript).toContain('--config "${config}"');
+    expect(deployScript).not.toContain("--strict");
     expect(deployScript).toContain("--experimental-provision=false");
     expect(deployScript).toContain("--autoconfig=false");
     expect(deployScript).not.toContain("wrangler versions upload");

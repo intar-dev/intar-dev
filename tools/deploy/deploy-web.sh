@@ -175,6 +175,10 @@ esac
 probe_health before "${before_health}" "${before_mode}" false
 
 test ! -e "${deploy_output}"
+# The repository configuration is authoritative: a dashboard edit makes the
+# strict preflight compare response-only metadata and abort. The checks below
+# stay the guard: the exact DB binding, no SESSION binding, the required
+# secrets, and the deployed version with proven live health.
 WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
   bunx wrangler deploy \
     --name "${worker_name}" \
@@ -182,7 +186,6 @@ WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
     --tag "web-${GITHUB_SHA:0:12}-${deploy_label}" \
     --message "Automatic web deployment for ${GITHUB_SHA}" \
     --secrets-file "${secrets_file}" \
-    --strict \
     --experimental-provision=false \
     --autoconfig=false
 bun "${repository_root}/tools/deploy/wrangler-output.ts" \

@@ -224,9 +224,10 @@ esac
 }
 
 describe("automatic web deployment", () => {
-  it("uses one strict full deploy with no rollback path", () => {
+  it("deploys the repository configuration with no rollback path", () => {
     expect(script).toContain("bunx wrangler deploy");
-    expect(script).toContain("--strict");
+    expect(script).toContain('--config "${config}"');
+    expect(script).not.toContain("--strict");
     expect(script).toContain("--secrets-file");
     expect(script).toContain("--experimental-provision=false");
     expect(script).toContain("--autoconfig=false");
