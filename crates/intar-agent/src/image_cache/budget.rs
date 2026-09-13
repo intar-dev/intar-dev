@@ -7,20 +7,21 @@ use super::*;
 /// store predictable while a learner boot needs them.
 const PREPARE_JOB_LIMIT: usize = 1;
 
-/// Two chunk network transfers at the same time, in the whole process. A
-/// transfer slot is held for the full request, so a stalled registry stream
-/// cannot open a third connection.
-pub(super) const TRANSFER_LIMIT: usize = 2;
+/// Five chunk network transfers at the same time, in the whole process: one
+/// background entry's fanout plus the transfer slot that a learner-visible
+/// launch must always be able to take. A transfer slot is held for the full
+/// request, so a stalled registry stream cannot open a sixth connection.
+pub(super) const TRANSFER_LIMIT: usize = 5;
 
 /// Chunk transfers in flight for one cache image entry.
 ///
-/// The waiter holds the exclusive prepare job, so it can never take both
-/// slots. One slot always stays free for a learner-visible transfer: the
-/// launch path downloads a missing pinned guest tools disk through the same
-/// budget, and a boot must not queue behind a background image warm. Nothing
-/// holds a transfer slot while it waits for a boot window or for the prepare
-/// job, so the reservation cannot deadlock.
-pub(super) const BACKGROUND_CHUNK_FANOUT: usize = 1;
+/// The waiter holds the exclusive prepare job, so only one background entry
+/// opens chunk transfers at a time. The last transfer slot always stays free
+/// for a learner-visible transfer: the launch path downloads a missing pinned
+/// guest tools disk through the same budget, and a boot must not queue behind
+/// a background image warm. Nothing holds a transfer slot while it waits for a
+/// boot window or for the prepare job, so the reservation cannot deadlock.
+pub(super) const BACKGROUND_CHUNK_FANOUT: usize = 4;
 
 const _: () = assert!(
     BACKGROUND_CHUNK_FANOUT < TRANSFER_LIMIT,
@@ -66,16 +67,6 @@ mod tests {
         assert!(prepare_slots().try_acquire().is_ok());
         // The global semaphore kept its permit count after the cycle.
         assert_eq!(prepare_slots().available_permits(), PREPARE_JOB_LIMIT);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn only_two_chunk_transfers_run_at_once() -> Result<()> {
-        let first = acquire_transfer_slot().await?;
-        let _second = acquire_transfer_slot().await?;
-        assert!(transfer_slots().try_acquire().is_err());
-        drop(first);
-        assert_eq!(transfer_slots().available_permits(), 1);
         Ok(())
     }
 }

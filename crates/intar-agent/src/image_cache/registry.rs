@@ -315,7 +315,7 @@ pub(super) async fn download_to_file(
     file: &mut tokio::fs::File,
 ) -> Result<DownloadResult> {
     // Every registry transfer, chunk or artifact or manifest, takes one of the
-    // two global transfer slots. No pass can open a third connection.
+    // five global transfer slots. No pass can go past the budget.
     let _transfer = budget::acquire_transfer_slot().await?;
     let url = build_registry_url(registry, image_url_or_path)?;
     let display_url = redact_url_userinfo(url.as_str());
