@@ -321,12 +321,57 @@ mod tests {
             authorize_peer(foreign_user, None),
             Err("the recording user is not configured")
         );
-        // This test process runs the test binary, not the Kino probe binary,
-        // so the executable check must refuse it as well.
-        let same_user = PeerIdentity {
+        let unknown_peer = PeerIdentity {
             uid: 1000,
+            pid: None,
+        };
+        assert_eq!(
+            authorize_peer(unknown_peer, Some(1000)),
+            Err("the peer process id is not known")
+        );
+    }
+
+    /// The executable check compares `/proc/<pid>/exe` with this build's own
+    /// path, so only Linux can exercise it: the running process matches its own
+    /// path, and a second process does not. The accepted identity is read from
+    /// `/proc/self` instead of a constant, so a wrong uid or a different
+    /// executable fails here rather than agreeing by construction.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authorization_follows_the_linux_executable_boundary() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let current_uid = std::fs::metadata("/proc/self")
+            .expect("the test process must have /proc/self")
+            .uid();
+        let this_process = PeerIdentity {
+            uid: current_uid,
             pid: Some(std::process::id()),
         };
-        assert!(authorize_peer(same_user, Some(1000)).is_err());
+        assert_eq!(authorize_peer(this_process, Some(current_uid)), Ok(()));
+
+        // A real second process runs a different executable, so the recorder
+        // boundary must refuse it even when the uid matches.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("the sleep child must start");
+        let other_executable = PeerIdentity {
+            uid: current_uid,
+            pid: Some(child.id()),
+        };
+        let refused = authorize_peer(other_executable, Some(current_uid));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(refused, Err("the peer is not a Kino recorder"));
+
+        let unreadable = PeerIdentity {
+            uid: current_uid,
+            pid: Some(u32::MAX),
+        };
+        assert_eq!(
+            authorize_peer(unreadable, Some(current_uid)),
+            Err("the peer executable is not readable")
+        );
     }
 }
