@@ -43,9 +43,9 @@ therefore inside the fence, so the fleet drain must be applied while the
 control plane is still open. Close the plane first and the drain can no
 longer be set from CI.
 
-Every step except the last talks to `/api/*` or `/registry/*`, so every one of
-them must run while the plane is still open. Maintenance is the last switch,
-not the first.
+Every step here talks to `/api/*` or `/registry/*`, so every one of them must
+run while the plane is still open. This step never flips maintenance: the
+cutover lane closes the plane itself, as the first action of step 4.
 
 ```sh
 # 1. Runtime cutover gate: block new scenario placement fleet-wide. The lane
@@ -70,18 +70,16 @@ curl -sS -X PATCH -H 'content-type: application/json' \
 # 4. Stage the immutable artifacts here, while the plane is open. See step 3.
 #    Build and upload only: the tools build lane makes no plane call.
 
-# 5. Control plane maintenance, and prove it. This is the close, and it fences
-#    /api/* and /registry/* until the return to service.
-#    Set CONTROL_PLANE_MAINTENANCE=on in the worker config for this deploy,
-#    then check the probe: it must answer 503 with code "maintenance".
-curl -sS -H 'Accept: application/json' -o /tmp/maintenance.json \
-  -w '%{http_code}\n' https://intar.dev/api/control-plane-maintenance-probe
-cat /tmp/maintenance.json
+# 5. Do NOT flip maintenance here. The cutover lane owns the close: it runs
+#    its preflight while the plane is still open, then deploys the worker with
+#    maintenance on, which fences /api/* and /registry/*. That is the first
+#    action of step 4.
 ```
 
-With the gate drained, the host enabled, and the plane still open, a learner
-start already answers `503 runtime_cutover_drained`, so no learner VM is
-placed while the proof configuration is in place.
+With the gate drained and the host enabled, and the plane still open, a
+learner start already answers `503 runtime_cutover_drained`, so no learner VM
+is placed while the proof configuration is in place. This step ends with the
+plane open and the fleet drained; step 4 closes the plane.
 
 The host enable call is the item that is easy to get wrong: it is an
 `/api/*` request, so once maintenance is `on` it answers the JSON 503 and the
@@ -167,25 +165,26 @@ opens, because the release has no compatibility path. While maintenance is
 `on`, `/api/*` and `/agent/*` answer the JSON 503 and `/registry/*` answers
 the maintenance page, so registry work cannot run in the middle of this step.
 
-1. Gateway:
+1. Web: run `website-cutover.yml` with `operation=cutover`. It runs its
+   preflight while the plane is still open, then deploys the worker with the
+   ABI 2 static pin and maintenance `on`, which closes the fence. The
+   generated D1 migration is applied after the maintenance fence is proven,
+   inside the same run.
+2. Gateway:
    `intar-deploy-stargate apply <tag> <archive-sha256> <binary-sha256>`.
    It stops the service, then requires a drained gateway: zero terminal
    routes, zero workspace app routes, and zero browser sessions, read from
    the gateway database. It installs, starts, waits for readiness, and
    verifies the migrations and the host routing. `plan` prints those three
    route counts, so prove zero before you apply.
-2. Scenario host runtime: `sudo crates/intar-jailerd/deploy/install.sh`, then
-   `sudo /usr/lib/intar/intar-jailerd-self-test`, then the agent `--doctor`.
-   Keep the host enabled: the fleet gate, not the host switch, is what stops
-   learner placement, and the administrator proof needs an enabled host.
-   Keep the host disabled only on a hash, seccomp, Landlock, cgroup,
-   accounting, template, or helper failure.
+3. Scenario host runtime and builder, under the fence:
+   `sudo crates/intar-jailerd/deploy/install.sh`, then
+   `sudo /usr/lib/intar/intar-jailerd-self-test`, then the agent `--doctor`,
+   and install the builder package. Keep the host enabled: the fleet gate,
+   not the host switch, is what stops learner placement, and the
+   administrator proof needs an enabled host. Keep the host disabled only on
+   a hash, seccomp, Landlock, cgroup, accounting, template, or helper failure.
    `crates/intar-jailerd/deploy/uninstall.sh` reverses the package.
-3. Web: run `website-cutover.yml` with `operation=cutover`. It proves the
-   release, requires the drained gate and the D1 zero state, and deploys the
-   worker with the ABI 2 static pin and maintenance `on`. The generated D1
-   migration is applied after the maintenance fence is proven, inside the
-   same run.
 4. While the plane is fenced the bridge is closed by design: maintenance
    answers every `/api/*` and `/agent/*` request with the JSON 503, so the
    agent cannot reach the bridge and that is expected, not a failure. Run the
