@@ -20,7 +20,8 @@ use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
     FinalizeVmBootRequest, JailerdConfig, LaunchVmV2Request, PrepareImageV2Request,
     PreparedImageV2Result, Request, Response, SandboxHealth, Sha256Digest, SourceArtifacts,
-    ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+    RequestClass, ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest,
+    VmLaunchResult,
 };
 use kvm_ioctls::Kvm;
 use landlock::{
