@@ -10,17 +10,6 @@ use crate::config::QemuBuildConfig;
 
 pub(crate) const BASE_EXT4_LABEL: &str = "INTARROOT";
 
-/// Kernel image name that the kernel build stage writes into the staging
-/// directory. The final image copies it to /boot/vmlinuz-<release>.
-pub(crate) const KERNEL_VMLINUZ_FILE: &str = "vmlinuz";
-
-/// Initramfs name that the kernel build stage writes into the staging
-/// directory. The final image copies it to /boot/initrd.img-<release>.
-pub(crate) const KERNEL_INITRD_FILE: &str = "initrd.img";
-
-/// Provenance record that the kernel build stage writes next to the artifacts.
-pub(crate) const KERNEL_BUILD_RECORD_FILE: &str = "kernel-build.json";
-
 pub(crate) const BASE_RUNTIME_MODULES: &[&str] = &["nf_tables"];
 pub(crate) const KUBERNETES_RUNTIME_MODULES: &[&str] = &["overlay", "br_netfilter", "vxlan"];
 
@@ -67,8 +56,6 @@ pub struct RootfsBuildPaths {
     pub base_ext4_path: PathBuf,
     pub kernel_path: PathBuf,
     pub initrd_path: PathBuf,
-    /// Host directory that the kernel build stage writes into.
-    pub kernel_build_dir: PathBuf,
 }
 
 #[derive(Debug)]
@@ -130,45 +117,57 @@ pub(crate) fn base_rootfs_artifact_from_plan(
     }
 }
 
-/// Move the compiled kernel artifacts into the base-image output paths.
+/// Move the compiled kernel artifacts from the unpacked image to the output paths.
 ///
-/// The kernel build stage writes the image, the initramfs, and the provenance
-/// record into `plan.paths.kernel_build_dir`. This function requires all three
-/// and copies the two boot artifacts to `kernel_path` and `initrd_path`.
+/// The generated Dockerfile is the only writer. It copies the compiled kernel to
+/// kernel_image_path_in_image, the initramfs to kernel_initrd_path_in_image, and
+/// the provenance record to KERNEL_PROVENANCE_PATH. After the OCI import unpacks
+/// that image, this function is the only reader: it takes the pair from those
+/// paths and copies it to kernel_path and initrd_path for the harness to boot.
 ///
-/// There is one profile, so there is one expected artifact set. A missing or
-/// empty artifact is a build failure, never a silent fallback.
+/// Every path comes from crate::kernel, so the writer and the reader use the
+/// same values and can not drift apart.
+///
+/// The image keeps its own copies. They are part of the base image bytes, and
+/// the guest reports and inspects them.
+///
+/// There is one kernel profile, so there is one expected artifact set. A missing
+/// or empty artifact is a build failure, never a silent fallback.
 pub(crate) fn install_kernel_boot_artifacts(plan: &RootfsBuildPlan) -> Result<()> {
-    for (name, destination) in [
-        (KERNEL_VMLINUZ_FILE, &plan.paths.kernel_path),
-        (KERNEL_INITRD_FILE, &plan.paths.initrd_path),
+    let rootfs = &plan.paths.rootfs_dir;
+    let mut sources = Vec::new();
+    for in_image in [
+        crate::kernel::kernel_image_path_in_image(),
+        crate::kernel::kernel_initrd_path_in_image(),
+        crate::kernel::KERNEL_PROVENANCE_PATH.to_string(),
     ] {
-        let source = plan.paths.kernel_build_dir.join(name);
+        let source = rootfs.join(in_image.trim_start_matches('/'));
         let metadata = fs::symlink_metadata(&source).with_context(|| {
             format!(
-                "the kernel build did not produce '{}'; the kernel stage must succeed before the base image is assembled",
-                source.display()
+                "the built image has no file at '{in_image}'; the kernel stage must copy it into the image before the base image is assembled"
             )
         })?;
         ensure!(
             metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0,
-            "kernel artifact '{}' is not a non-empty regular file",
-            source.display()
+            "image artifact '{in_image}' is not a non-empty regular file"
         );
-        fs::copy(&source, destination).with_context(|| {
+        sources.push((in_image, source));
+    }
+
+    for (in_image, source) in sources.iter().take(2) {
+        let destination = if in_image == &crate::kernel::kernel_image_path_in_image() {
+            &plan.paths.kernel_path
+        } else {
+            &plan.paths.initrd_path
+        };
+        fs::copy(source, destination).with_context(|| {
             format!(
-                "failed to copy kernel artifact '{}' to '{}'",
+                "failed to copy image artifact '{}' to '{}'",
                 source.display(),
                 destination.display()
             )
         })?;
     }
-    let record = plan.paths.kernel_build_dir.join(KERNEL_BUILD_RECORD_FILE);
-    ensure!(
-        record.is_file(),
-        "the kernel build did not produce the provenance record '{}'",
-        record.display()
-    );
     Ok(())
 }
 
@@ -268,7 +267,6 @@ fn rootfs_build_paths(
 
     RootfsBuildPaths {
         rootfs_dir: work_root.join("rootfs"),
-        kernel_build_dir: work_root.join("kernel"),
         work_root,
         base_ext4_path: output_root.join("root.ext4"),
         kernel_path: output_root.join("vmlinuz"),
@@ -771,19 +769,42 @@ base_image "trixie" {
         render_rootfs_build_plan(&base_image(), &config)
     }
 
-    fn write_kernel_build_output(plan: &super::RootfsBuildPlan, kernel: &str, initrd: &str) {
-        std::fs::create_dir_all(&plan.paths.kernel_build_dir).unwrap();
+    /// Stage the layout a real OCI build leaves behind after umoci unpacks it:
+    /// the compiled pair and the provenance record inside the image rootfs, at
+    /// the paths the generated Dockerfile copies them to. Nothing writes a host
+    /// directory, so the test must not create one.
+    fn stage_unpacked_image(plan: &super::RootfsBuildPlan, kernel: &str, initrd: &str) {
+        let rootfs = &plan.paths.rootfs_dir;
+        let boot = rootfs.join("boot");
+        let provenance = rootfs.join(crate::kernel::KERNEL_PROVENANCE_PATH.trim_start_matches('/'));
+        std::fs::create_dir_all(&boot).unwrap();
+        std::fs::create_dir_all(provenance.parent().unwrap()).unwrap();
+        std::fs::write(
+            rootfs.join(crate::kernel::kernel_image_path_in_image().trim_start_matches('/')),
+            kernel,
+        )
+        .unwrap();
+        std::fs::write(
+            rootfs.join(crate::kernel::kernel_initrd_path_in_image().trim_start_matches('/')),
+            initrd,
+        )
+        .unwrap();
+        std::fs::write(&provenance, "{\"schema_version\":1}\n").unwrap();
+        std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+        std::fs::write(rootfs.join("etc/hostname"), "intar-build\n").unwrap();
+        // The OCI staging step creates the artifact directory before this runs.
         std::fs::create_dir_all(plan.paths.base_ext4_path.parent().unwrap()).unwrap();
-        std::fs::write(plan.paths.kernel_build_dir.join("vmlinuz"), kernel).unwrap();
-        std::fs::write(plan.paths.kernel_build_dir.join("initrd.img"), initrd).unwrap();
-        std::fs::write(plan.paths.kernel_build_dir.join("kernel-build.json"), "{}").unwrap();
+    }
+
+    fn in_image_path(plan: &super::RootfsBuildPlan, path: &str) -> std::path::PathBuf {
+        plan.paths.rootfs_dir.join(path.trim_start_matches('/'))
     }
 
     #[test]
-    fn installs_the_compiled_kernel_and_initramfs_into_the_output_paths() {
+    fn installs_the_pair_from_the_image_paths_the_dockerfile_writes() {
         let temp = tempfile::tempdir().unwrap();
         let plan = plan_for(&temp);
-        write_kernel_build_output(&plan, "kernel", "initrd");
+        stage_unpacked_image(&plan, "kernel", "initrd");
 
         super::install_kernel_boot_artifacts(&plan).unwrap();
 
@@ -795,41 +816,77 @@ base_image "trixie" {
             std::fs::read_to_string(&plan.paths.initrd_path).unwrap(),
             "initrd"
         );
+        // The base image keeps its own copies, and every other byte is untouched.
+        assert_eq!(
+            std::fs::read_to_string(in_image_path(&plan, "/boot/vmlinuz-6.12.96-intar-cutover"))
+                .unwrap(),
+            "kernel"
+        );
+        assert_eq!(
+            std::fs::read_to_string(in_image_path(
+                &plan,
+                "/boot/initrd.img-6.12.96-intar-cutover"
+            ))
+            .unwrap(),
+            "initrd"
+        );
+        assert!(in_image_path(&plan, "/usr/lib/intar/kernel/kernel-build.json").is_file());
+        assert!(in_image_path(&plan, "/etc/hostname").is_file());
     }
 
     #[test]
-    fn a_missing_kernel_artifact_fails_the_build() {
-        let temp = tempfile::tempdir().unwrap();
-        let plan = plan_for(&temp);
-        write_kernel_build_output(&plan, "kernel", "initrd");
-        std::fs::remove_file(plan.paths.kernel_build_dir.join("vmlinuz")).unwrap();
+    fn a_missing_image_artifact_fails_the_build() {
+        for missing in [
+            "/boot/vmlinuz-6.12.96-intar-cutover",
+            "/boot/initrd.img-6.12.96-intar-cutover",
+            "/usr/lib/intar/kernel/kernel-build.json",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let plan = plan_for(&temp);
+            stage_unpacked_image(&plan, "kernel", "initrd");
+            std::fs::remove_file(in_image_path(&plan, missing)).unwrap();
 
-        let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
+            let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
 
-        assert!(format!("{error:#}").contains("did not produce"));
+            assert!(
+                format!("{error:#}").contains("the built image has no file"),
+                "{missing}"
+            );
+        }
     }
 
     #[test]
-    fn an_empty_kernel_artifact_fails_the_build() {
+    fn an_empty_or_symlinked_image_artifact_fails_the_build() {
+        for empty in [
+            "/boot/vmlinuz-6.12.96-intar-cutover",
+            "/boot/initrd.img-6.12.96-intar-cutover",
+            "/usr/lib/intar/kernel/kernel-build.json",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let plan = plan_for(&temp);
+            stage_unpacked_image(&plan, "kernel", "initrd");
+            std::fs::write(in_image_path(&plan, empty), "").unwrap();
+
+            let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
+
+            assert!(
+                format!("{error:#}").contains("not a non-empty regular file"),
+                "{empty}"
+            );
+        }
+
+        // A symlink is not an artifact, whatever it points at.
         let temp = tempfile::tempdir().unwrap();
         let plan = plan_for(&temp);
-        write_kernel_build_output(&plan, "", "initrd");
+        stage_unpacked_image(&plan, "kernel", "initrd");
+        let path = in_image_path(&plan, "/boot/vmlinuz-6.12.96-intar-cutover");
+        let target = in_image_path(&plan, "/boot/initrd.img-6.12.96-intar-cutover");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
 
         let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
 
-        assert!(format!("{error:#}").contains("non-empty regular file"));
-    }
-
-    #[test]
-    fn a_missing_provenance_record_fails_the_build() {
-        let temp = tempfile::tempdir().unwrap();
-        let plan = plan_for(&temp);
-        write_kernel_build_output(&plan, "kernel", "initrd");
-        std::fs::remove_file(plan.paths.kernel_build_dir.join("kernel-build.json")).unwrap();
-
-        let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
-
-        assert!(format!("{error:#}").contains("provenance record"));
+        assert!(format!("{error:#}").contains("not a non-empty regular file"));
     }
 
     #[test]

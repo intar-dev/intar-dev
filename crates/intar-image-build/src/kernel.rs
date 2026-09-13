@@ -215,6 +215,22 @@ pub fn kernel_initrd_file_name() -> String {
     format!("initrd.img-{}", kernel_release())
 }
 
+/// Absolute path of the kernel inside the built image.
+///
+/// The Dockerfile copies the compiled kernel to this path, and the host-side
+/// assembly reads it back from the unpacked image. Both sides call this
+/// function, so the two can not drift apart.
+#[must_use]
+pub fn kernel_image_path_in_image() -> String {
+    format!("/boot/{}", kernel_image_file_name())
+}
+
+/// Absolute path of the initramfs inside the built image.
+#[must_use]
+pub fn kernel_initrd_path_in_image() -> String {
+    format!("/boot/{}", kernel_initrd_file_name())
+}
+
 /// Token fields that the build script template declares.
 #[must_use]
 pub fn kernel_build_script_tokens() -> Vec<&'static str> {
