@@ -45,7 +45,7 @@ describe("automatic web deployment workflow", () => {
   it("uses maintenance only when a generated D1 migration is pending", () => {
     const plan = deployWorkflow.indexOf("Plan production D1 migrations");
     const rehearsal = deployWorkflow.indexOf(
-      "Rehearse migrations on disposable D1",
+      "Rehearse pending migrations on disposable D1",
     );
     const preMigrationEvidence = deployWorkflow.indexOf(
       "Capture pre-migration D1 evidence",
@@ -55,7 +55,6 @@ describe("automatic web deployment workflow", () => {
     );
     const drain = deployWorkflow.indexOf("Drain and recheck maintenance");
     const migrate = deployWorkflow.indexOf("Apply pending D1 migrations");
-    const purge = deployWorkflow.indexOf("Remove retired runtime domains");
     const verify = deployWorkflow.indexOf("Verify production D1 schema");
     const deploy = deployWorkflow.indexOf("Deploy production at 100 percent");
 
@@ -67,8 +66,6 @@ describe("automatic web deployment workflow", () => {
     expect(maintenance).toBeGreaterThan(preMigrationEvidence);
     expect(drain).toBeGreaterThan(maintenance);
     expect(migrate).toBeGreaterThan(drain);
-    expect(purge).toBeGreaterThan(migrate);
-    expect(verify).toBeGreaterThan(purge);
     expect(verify).toBeGreaterThan(migrate);
     expect(deploy).toBeGreaterThan(verify);
     expect(deployWorkflow).toContain("--expect observed-ledger-prefix");
@@ -76,20 +73,34 @@ describe("automatic web deployment workflow", () => {
       "if: steps.migrations.outputs.pending == 'true'",
     );
     expect(deployWorkflow).toContain("sleep 30");
+    // Every pending generated migration is applied, so a later append needs no
+    // new step and no new tool.
     expect(deployWorkflow).toContain(
-      "bun tools/database/apply-removal-migration.ts",
+      "bun tools/database/apply-generated-migrations.ts",
     );
+    expect(deployWorkflow).not.toContain("apply-removal-migration.ts");
     expect(deployWorkflow).toContain(
       "bun tools/database/rehearse-removal-migration.ts",
     );
     expect(deployWorkflow).toContain("d1-removal-rehearsal.json");
+    // The rehearsal follows whatever prefix production reports, so it runs for
+    // any pending set instead of one hardcoded boundary.
+    // The step output travels through the environment and is never
+    // interpolated into the command line.
     expect(deployWorkflow).toContain(
-      "steps.migrations.outputs.applied == '13' && steps.migrations.outputs.committed == '14'",
+      "APPLIED_MIGRATION_COUNT: ${{ steps.migrations.outputs.applied }}",
     );
-    expect(deployWorkflow).toContain(
+    expect(deployWorkflow).toContain('--applied "$APPLIED_MIGRATION_COUNT"');
+    expect(deployWorkflow).not.toContain('--applied "${{');
+    expect(deployWorkflow).not.toContain("outputs.applied == '13'");
+    expect(deployWorkflow).not.toContain("outputs.committed == '14'");
+    // The one-time legacy runtime purge is retired: production already applied
+    // the migration that created the need, and it must not run in front of
+    // every future generated migration.
+    expect(deployWorkflow).not.toContain(
       "bun tools/database/purge-removed-runtime-domains.ts",
     );
-    expect(deployWorkflow).toContain("removed-runtime-domains.json");
+    expect(deployWorkflow).not.toContain("removed-runtime-domains.json");
     expect(deployWorkflow).toContain("--expect full");
     expect(deployWorkflow).not.toContain("wrangler d1 migrations");
   });

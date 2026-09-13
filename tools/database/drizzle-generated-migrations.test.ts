@@ -206,7 +206,7 @@ test("selects the removal migration by index when a later migration is appended"
             "SELECT id FROM runtime_executions WHERE domain_kind = 'scenario'",
           )
           .all(),
-      ).toEqual([{ id: "execution-1" }]);
+      ).toEqual([{ id: "run-1" }]);
       expect(
         database
           .query(
