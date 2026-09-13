@@ -332,7 +332,7 @@ INSERT INTO image_cache_verified_content (
 )
 ON CONFLICT(content_sha256) DO UPDATE SET
   verified_at_ms = excluded.verified_at_ms,
-  bytes_read = excluded.bytes_read,
+  bytes_read = excluded.bytes_read
 "#,
         params![row.content_sha256, row.verified_at_ms, row.bytes_read,],
     )
