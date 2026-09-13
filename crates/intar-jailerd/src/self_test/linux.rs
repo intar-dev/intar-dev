@@ -19,9 +19,8 @@ use cloud_hypervisor_client::{
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
     FinalizeVmBootRequest, JailerdConfig, LaunchVmV2Request, PrepareImageV2Request,
-    PreparedImageV2Result, Request, Response, SandboxHealth, Sha256Digest, SourceArtifacts,
-    RequestClass, ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest,
-    VmLaunchResult,
+    PreparedImageV2Result, Request, RequestClass, Response, SandboxHealth, Sha256Digest,
+    SourceArtifacts, ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use kvm_ioctls::Kvm;
 use landlock::{
