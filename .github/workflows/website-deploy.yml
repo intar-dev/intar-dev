@@ -72,11 +72,16 @@ jobs:
           run_json="${RUNNER_TEMP}/website-dist-run.json"
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${WEBSITE_DIST_RUN_ID}" \
             > "${run_json}"
+          # A trusted automatic push or a manual dispatch of the same
+          # workflow may produce the artifact. Both must be the same main
+          # revision, which the exact-SHA check below requires; a manual run
+          # exists because the release workflow pushes with GITHUB_TOKEN and
+          # GitHub suppresses workflow triggers for that token.
           jq -e --arg sha "${GITHUB_SHA}" --arg repository "${GITHUB_REPOSITORY}" '
             .repository.full_name == $repository and
             .head_sha == $sha and
             .head_branch == "main" and
-            .event == "push" and
+            (.event == "push" or .event == "workflow_dispatch") and
             .conclusion == "success" and
             (.path | endswith("website.yml"))
           ' "${run_json}" >/dev/null

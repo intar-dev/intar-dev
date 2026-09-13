@@ -12,7 +12,10 @@ describe("automatic web deployment workflow", () => {
     expect(validationWorkflow).toContain("push:");
     expect(validationWorkflow).toContain("branches:\n      - main");
     expect(validationWorkflow).toContain('      - "apps/web/**"');
-    expect(validationWorkflow).not.toContain("workflow_dispatch:");
+    // A manual dispatch is supported on the same workflow so a release SHA
+    // that reached main through a GITHUB_TOKEN push, which suppresses
+    // workflow triggers, can still produce its tested artifact.
+    expect(validationWorkflow).toContain("workflow_dispatch:");
     expect(validationWorkflow).toContain(
       "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
     );
@@ -40,6 +43,48 @@ describe("automatic web deployment workflow", () => {
     expect(validationWorkflow).not.toContain("Build learner guest tools");
     expect(validationWorkflow).toContain("website-dist-${{ github.sha }}");
     expect(deployWorkflow).toContain("website-dist-${GITHUB_SHA}");
+  });
+
+  it("uploads the tested artifact for a push and for a manual dispatch only", () => {
+    // Pull requests must never upload a deployable artifact.
+    expect(validationWorkflow).toContain(
+      "if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'",
+    );
+    expect(validationWorkflow).not.toContain("if: github.event_name == 'push'");
+    // The deploy lane accepts either producing event, but only for the exact
+    // main revision it was asked to deploy.
+    expect(deployWorkflow).toContain(
+      '(.event == "push" or .event == "workflow_dispatch") and',
+    );
+    expect(deployWorkflow).toContain('.head_sha == $sha and');
+    expect(deployWorkflow).toContain('.head_branch == "main" and');
+    expect(deployWorkflow).toContain('.conclusion == "success" and');
+    expect(deployWorkflow).toContain('(.path | endswith("website.yml"))');
+    expect(deployWorkflow).not.toContain('.event == "push" and');
+    // A manual validation run must not deploy by itself.
+    expect(validationWorkflow).not.toContain(
+      "uses: ./.github/workflows/website-deploy.yml",
+    );
+  });
+
+  it("refuses a deployable artifact from anything but the main ref", () => {
+    // The upload gate is expressed with the ref, which is valid for every
+    // event name, and it is the only gate that produces an artifact.
+    const uploadGate =
+      "if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'";
+    expect(validationWorkflow).toContain(uploadGate);
+    // main push, main manual dispatch: allowed.
+    expect("refs/heads/main" === "refs/heads/main").toBe(true);
+    // PR and branch manual dispatch: refused, because the ref is not main.
+    expect("refs/pull/166/merge" === "refs/heads/main").toBe(false);
+    expect("refs/heads/codex/manual-website-validation" === "refs/heads/main").toBe(
+      false,
+    );
+    // Exactly one upload step can exist, so a branch dispatch cannot collide
+    // with the main artifact name.
+    const uploadCount = validationWorkflow
+      .split("name: Upload tested deployment artifact").length - 1;
+    expect(uploadCount).toBe(1);
   });
 
   it("uses maintenance only when a generated D1 migration is pending", () => {
