@@ -351,7 +351,6 @@ fn staged_paths(
     rootfs_plan.paths.base_ext4_path = artifact_dir.join(ROOTFS_FILE);
     rootfs_plan.paths.kernel_path = artifact_dir.join(KERNEL_FILE);
     rootfs_plan.paths.initrd_path = artifact_dir.join(INITRD_FILE);
-    rootfs_plan.paths.kernel_build_dir = work_root.join("kernel");
 
     Ok(OciStagingPaths {
         context_dir: work_root.join("context"),
@@ -698,13 +697,15 @@ fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Resu
     dockerfile.push_str(&docker_run(packages)?);
     // The kernel and the initramfs come from the kernel stage. The module
     // metadata tree holds no loadable module: every guest feature is built in.
+    // The destination paths come from the same helpers the host-side assembler
+    // reads, so the two can not drift apart.
     dockerfile.push_str(&format!(
-        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/vmlinuz /boot/{}\n",
-        crate::kernel::kernel_image_file_name()
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/vmlinuz {}\n",
+        crate::kernel::kernel_image_path_in_image()
     ));
     dockerfile.push_str(&format!(
-        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/initrd.img /boot/{}\n",
-        crate::kernel::kernel_initrd_file_name()
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/initrd.img {}\n",
+        crate::kernel::kernel_initrd_path_in_image()
     ));
     dockerfile.push_str(&format!(
         "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/modules/lib/modules/{release} /lib/modules/{release}\n"
@@ -1391,11 +1392,11 @@ mod tests {
         BaseArtifactRecord, BootstrapCaBundle, HOST_CA_BUNDLE_FILE, INITRD_FILE, KERNEL_FILE,
         METADATA_FILE, OCI_BASE_CACHE_ABI, OCI_NEUTRAL_HOSTNAME, OCI_NEUTRAL_HOSTS, ROOTFS_FILE,
         bootstrap_ca_bundle_from_bytes, cached_base_rootfs_artifact, converted_artifact_dir,
-        converted_cache_key, finalize_private_staging, layered_artifact_dir_is_valid,
-        layered_definition_hash, private_artifact_directory, prune_oci_cache,
-        read_oci_manifest_reference, remove_container_policy_rc_d, render_buildctl_args,
-        render_oci_dockerfile, staged_paths, unpack_oci_archive, write_artifact_record,
-        write_oci_build_context, write_oci_neutral_host_files,
+        converted_cache_key, finalize_private_staging, install_kernel_boot_artifacts,
+        layered_artifact_dir_is_valid, layered_definition_hash, private_artifact_directory,
+        prune_oci_cache, read_oci_manifest_reference, remove_container_policy_rc_d,
+        render_buildctl_args, render_oci_dockerfile, staged_paths, unpack_oci_archive,
+        write_artifact_record, write_oci_build_context, write_oci_neutral_host_files,
     };
     use crate::config::QemuBuildConfig;
     use crate::content_hash::sha256_bytes_hex;
@@ -1926,5 +1927,78 @@ base_image "trixie" {
 
         drop(lease);
         assert!(!artifact_path.exists());
+    }
+
+    /// The writer and the reader must agree on the same three paths.
+    ///
+    /// This is the regression that a fixture at reader-derived paths can not
+    /// catch: the test writes only where the rendered Dockerfile says it writes,
+    /// then requires the installer to find those exact bytes. A Dockerfile that
+    /// copied the kernel anywhere else fails here.
+    #[test]
+    fn the_dockerfile_writes_the_artifacts_where_the_installer_reads_them() {
+        let root = tempfile::tempdir().unwrap();
+        let base = base_image();
+        let config = layered_config(root.path());
+        let dockerfile = render_oci_dockerfile(&base, &config).unwrap();
+        let plan = render_rootfs_build_plan(&base, &config);
+        let artifact_parent = plan.paths.base_ext4_path.parent().unwrap();
+        let staging = staged_paths(&plan, artifact_parent, "base").unwrap();
+        let rootfs = &staging.rootfs_plan.paths.rootfs_dir;
+        // build_staged_oci_base creates the artifact directory before the
+        // installer runs, so the test does the same.
+        fs::create_dir_all(&staging.artifact_dir).unwrap();
+
+        // Read the COPY events out of the generated Dockerfile, not out of the
+        // helpers: only the rendered text decides where the bytes land.
+        let mut copies = Vec::new();
+        for line in dockerfile.lines() {
+            let Some(rest) = line.strip_prefix("COPY --from=intar-kernel ") else {
+                continue;
+            };
+            let (source, destination) = rest.rsplit_once(' ').unwrap();
+            copies.push((source.to_string(), destination.to_string()));
+        }
+        assert_eq!(
+            copies.len(),
+            4,
+            "the kernel stage copies the kernel, the initramfs, the module tree, and the record: {copies:?}"
+        );
+
+        // Write one distinguishable payload at every file destination the
+        // Dockerfile declares, exactly as the image build would.
+        let mut file_copies = Vec::new();
+        for (source, destination) in &copies {
+            if destination.starts_with("/lib/modules/") {
+                continue;
+            }
+            let path = rootfs.join(destination.trim_start_matches('/'));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("image bytes from {source}\n")).unwrap();
+            file_copies.push((source.clone(), destination.clone()));
+        }
+        assert_eq!(file_copies.len(), 3, "{file_copies:?}");
+
+        install_kernel_boot_artifacts(&staging.rootfs_plan).unwrap();
+
+        // The pair landed outside the image, and each carries the bytes the
+        // Dockerfile put at its own destination.
+        let expected_kernel = format!("image bytes from {}\n", file_copies[0].0);
+        let expected_initrd = format!("image bytes from {}\n", file_copies[1].0);
+        assert_eq!(
+            fs::read_to_string(&staging.rootfs_plan.paths.kernel_path).unwrap(),
+            expected_kernel
+        );
+        assert_eq!(
+            fs::read_to_string(&staging.rootfs_plan.paths.initrd_path).unwrap(),
+            expected_initrd
+        );
+        // The image keeps its own copies at the destinations the writer chose.
+        for (_, destination) in &file_copies {
+            assert!(
+                rootfs.join(destination.trim_start_matches('/')).is_file(),
+                "{destination} must stay in the image"
+            );
+        }
     }
 }
