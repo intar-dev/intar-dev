@@ -19,7 +19,9 @@ from typing import Any
 
 BUILD_CREDENTIAL_PATHS = (
     "/etc/systemd/system/intar-build.service",
+    "/etc/systemd/system/intar-build.path",
     "/etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf",
+    "/etc/systemd/system/multi-user.target.wants/intar-build.path",
     "/usr/local/sbin/intar-build-start",
     "/etc/pam.d/intar-build",
     "/home/ubuntu/.ssh/authorized_keys",
@@ -28,7 +30,7 @@ BUILD_CREDENTIAL_PATHS = (
 )
 ENABLED_UNITS = {
     "acpid.service": "/usr/lib/systemd/system/acpid.service",
-    "intar-scenario.service": "/etc/systemd/system/intar-scenario.service",
+    "intar-scenario.path": "/etc/systemd/system/intar-scenario.path",
 }
 
 
@@ -237,6 +239,13 @@ def main() -> int:
 
         for unit, target in ENABLED_UNITS.items():
             enabled_unit(evidence, args.debugfs, args.disk, unit, target)
+        path_missing(
+            evidence,
+            args.debugfs,
+            args.disk,
+            "/etc/systemd/system/multi-user.target.wants/intar-scenario.service",
+            "scenario supervisor is not early enabled through the boot target",
+        )
         if scenario_id == "broken-nginx":
             path_missing(
                 evidence,

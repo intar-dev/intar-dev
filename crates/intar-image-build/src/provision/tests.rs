@@ -391,7 +391,7 @@ fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
     assert!(script.contains("/run/intar/run-cli-broker"));
     assert!(script.contains("vsock://2:18082"));
     assert!(script.contains("KINO_CONTROL_SOCKET=\"$kino_control_socket\""));
-    assert!(script.contains("systemctl enable intar-scenario.service"));
+    assert!(script.contains("systemctl enable intar-scenario.path"));
 
     let (_, runtime_drop_in_and_rest) = script.split_once("<<'EOF_INTAR_RUNTIME_DISK'\n").unwrap();
     let (runtime_drop_in, _) = runtime_drop_in_and_rest
@@ -429,6 +429,24 @@ fn runtime_activation_script_is_valid_bash_and_selects_one_boot_path() {
         "bash -n rejected runtime activation script: {}",
         String::from_utf8_lossy(&syntax.stderr)
     );
+}
+
+#[test]
+fn runtime_path_unit_activates_the_supervisor_after_the_udev_label_appears() {
+    let script = render_minimal_runtime_stage();
+
+    let (_, path_unit_and_rest) = script
+        .split_once("cat >/etc/systemd/system/intar-scenario.path <<'EOF_INTAR_RUNTIME_PATH'\n")
+        .unwrap();
+    let (path_unit, _) = path_unit_and_rest
+        .split_once("\nEOF_INTAR_RUNTIME_PATH")
+        .unwrap();
+    assert_eq!(
+        path_unit,
+        "[Unit]\nDescription=Intar scenario runtime disk activation\n\n[Path]\nPathExists=/dev/disk/by-label/INTARRUN\nUnit=intar-scenario.service\n\n[Install]\nWantedBy=multi-user.target"
+    );
+    assert!(script.contains("systemctl enable intar-scenario.path"));
+    assert!(!script.contains("systemctl enable intar-scenario.service"));
 }
 
 #[test]
@@ -1433,7 +1451,7 @@ packages = ["nginx"]
     assert!(script.contains("log_phase recording_canary start"));
     assert!(script.contains("/usr/bin/setpriv --reuid=\"$recording_uid\" --regid=\"$recording_gid\" --clear-groups /bin/sh -c"));
     assert!(script.contains("StandardOutput=journal+console"));
-    assert!(script.contains("systemctl enable intar-scenario.service"));
+    assert!(script.contains("systemctl enable intar-scenario.path"));
     assert!(
         script.contains("systemd-networkd-wait-online.service NetworkManager-wait-online.service")
     );
@@ -1502,9 +1520,9 @@ packages = ["nginx"]
     assert!(script.contains("start_sshd"));
     assert!(script.contains("release_lab_services"));
     assert!(script.contains("/run/intar-build-state/initial-boot-files"));
-    assert!(script.contains("systemctl disable intar-build.service"));
+    assert!(script.contains("systemctl disable intar-build.service intar-build.path"));
     assert!(script.contains(
-                "rm -f /etc/systemd/system/intar-build.service /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
+                "rm -f /etc/systemd/system/intar-build.service /etc/systemd/system/intar-build.path /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
             ));
     assert!(script.contains("rm -f /home/${bootstrap_username}/.ssh/authorized_keys"));
     assert!(script.contains("final_boot_files=\"$(find /boot"));

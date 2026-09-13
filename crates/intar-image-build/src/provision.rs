@@ -381,8 +381,24 @@ fn append_ssh_runtime_gate(script: &mut String) -> Result<()> {
         "chmod 0644 /etc/systemd/system/ssh.service.d/10-intar-gate.conf"
     )
     .context("format error")?;
+    // udev can create /dev/disk/by-label/INTARRUN after the boot-time
+    // condition checks, so an enabled service can skip itself forever. A
+    // passive path unit holds no boot job and triggers the supervisor when the
+    // label appears.
+    writeln!(
+        script,
+        "cat >/etc/systemd/system/intar-scenario.path <<'EOF_INTAR_RUNTIME_PATH'\n[Unit]\nDescription=Intar scenario runtime disk activation\n\n[Path]\nPathExists=/dev/disk/by-label/INTARRUN\nUnit=intar-scenario.service\n\n[Install]\nWantedBy=multi-user.target\nEOF_INTAR_RUNTIME_PATH"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "chown root:root /etc/systemd/system/intar-scenario.path"
+    )
+    .context("format error")?;
+    writeln!(script, "chmod 0644 /etc/systemd/system/intar-scenario.path")
+        .context("format error")?;
     writeln!(script, "systemctl daemon-reload").context("format error")?;
-    writeln!(script, "systemctl enable intar-scenario.service").context("format error")?;
+    writeln!(script, "systemctl enable intar-scenario.path").context("format error")?;
     writeln!(
         script,
         "systemctl disable ssh.service sshd.service ssh.socket >/dev/null 2>&1 || true"
@@ -430,12 +446,12 @@ fn append_scenario_image_finalization(script: &mut String) -> Result<()> {
     writeln!(script, "log_phase image_finalize start").context("format error")?;
     writeln!(
         script,
-        "systemctl disable intar-build.service >/dev/null 2>&1 || true"
+        "systemctl disable intar-build.service intar-build.path >/dev/null 2>&1 || true"
     )
     .context("format error")?;
     writeln!(
         script,
-        "rm -f /etc/systemd/system/intar-build.service /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
+        "rm -f /etc/systemd/system/intar-build.service /etc/systemd/system/intar-build.path /etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
     )
     .context("format error")?;
     writeln!(

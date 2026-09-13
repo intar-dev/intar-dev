@@ -15,6 +15,7 @@ const INTAR_MANAGED_KINO_PATHS: &[&str] = &[
     "/etc/kino/ssh-recording.hcl",
     "/etc/ssh/sshd_config.d/90-intar-kino-shell.conf",
     "/etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf",
+    "/etc/systemd/system/intar-scenario.path",
     "/etc/systemd/system/intar-scenario.service",
     "/etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf",
     "/etc/systemd/system/ssh.service.d/10-intar-gate.conf",
@@ -31,7 +32,9 @@ const INTAR_MANAGED_KINO_PATHS: &[&str] = &[
 
 const INTAR_MANAGED_KINO_UNITS: &[&str] = &[
     "intar-scenario",
+    "intar-scenario.path",
     "intar-scenario.service",
+    "intar-build.path",
     "ssh",
     "ssh.service",
     "sshd",
