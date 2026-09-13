@@ -253,14 +253,18 @@ jobs:
             "${applied}" "${committed}" "${pending}" \
             >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Rehearse migrations on disposable D1
-        if: steps.migrations.outputs.pending == 'true' && steps.migrations.outputs.applied == '13' && steps.migrations.outputs.committed == '14'
+      - name: Rehearse pending migrations on disposable D1
+        if: steps.migrations.outputs.pending == 'true'
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Step outputs travel through the environment, never interpolated
+          # into the command line.
+          APPLIED_MIGRATION_COUNT: ${{ steps.migrations.outputs.applied }}
         run: |
           bun tools/database/rehearse-removal-migration.ts \
+            --applied "$APPLIED_MIGRATION_COUNT" \
             --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
 
       - name: Capture pre-migration D1 evidence
@@ -446,18 +450,8 @@ jobs:
           MIGRATION_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-migrate.json
         run: |
           set -euo pipefail
-          bun tools/database/apply-removal-migration.ts 2>&1 | \
+          bun tools/database/apply-generated-migrations.ts 2>&1 | \
             tee "${RUNNER_TEMP}/production-d1-migrate.log"
-
-      - name: Remove retired runtime domains
-        if: steps.migrations.outputs.pending == 'true'
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
-          RUNTIME_PURGE_EVIDENCE: ${{ runner.temp }}/removed-runtime-domains.json
-        run: bun tools/database/purge-removed-runtime-domains.ts
 
       - name: Verify production D1 schema
         working-directory: ${{ github.workspace }}
@@ -513,7 +507,6 @@ jobs:
             ${{ runner.temp }}/pre-migration-enabled-scenarios.json
             ${{ runner.temp }}/production-d1-migrate.log
             ${{ runner.temp }}/production-d1-migrate.json
-            ${{ runner.temp }}/removed-runtime-domains.json
             ${{ runner.temp }}/production-d1-verified.json
             ${{ runner.temp }}/maintenance-after-drain-deployment.json
             ${{ runner.temp }}/maintenance-after-drain.json

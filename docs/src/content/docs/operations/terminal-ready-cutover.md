@@ -170,6 +170,12 @@ the maintenance page, so registry work cannot run in the middle of this step.
    ABI 2 static pin and maintenance `on`, which closes the fence. The
    generated D1 migration is applied after the maintenance fence is proven,
    inside the same run.
+   Before the production apply, the same run rehearses every pending generated
+   migration on a disposable D1 database built at the applied prefix that
+   production reports, seeds the rows that must survive, applies the pending
+   set, and verifies the full committed schema. The in-repository tests prove
+   the apply logic against an in-memory database, but only this rehearsal
+   proves the real transition.
 2. Gateway:
    `intar-deploy-stargate apply <tag> <archive-sha256> <binary-sha256>`.
    It stops the service, then requires a drained gateway: zero terminal
