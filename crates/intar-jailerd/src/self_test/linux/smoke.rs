@@ -591,6 +591,10 @@ pub(super) fn prepare_smoke_image(
             .as_ref()
             .map(|artifact| protocol_artifact(config, artifact, ArtifactAccess::ReadOnly))
             .transpose()?,
+        // The package self-test prepares the image in the foreground lane,
+        // the same lane a learner launch uses, so the smoke covers the
+        // foreground admission path.
+        request_class: RequestClass::Foreground,
     };
     match core.handle(Request::PrepareImageV2(Box::new(request))) {
         Response::PrepareImageV2(prepared) if prepared.fast_template_store => Ok(prepared),
