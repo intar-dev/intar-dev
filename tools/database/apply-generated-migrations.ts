@@ -63,12 +63,13 @@ export async function planGeneratedMigrations(
     expectation: "observed-ledger-prefix",
   });
   const migrations = readMigrationFiles({ migrationsFolder });
-  // One guard before any write: the observed ledger must fit inside the
-  // committed stream, so a database ahead of the repository is refused here
-  // instead of having every migration replayed.
-  if (observed.appliedMigrationCount > migrations.length) {
+  // One guard before any write: the migrations read from this checkout must
+  // be exactly the stream the verifier matched the observed ledger against,
+  // so a checkout that disagrees with the committed count is refused here
+  // instead of having the pending set computed from a different stream.
+  if (migrations.length !== observed.committedMigrationCount) {
     throw new Error(
-      `D1 has ${observed.appliedMigrationCount} applied migrations but the committed stream holds ${migrations.length}`,
+      `this checkout holds ${migrations.length} committed migrations but the committed stream declares ${observed.committedMigrationCount}`,
     );
   }
   const lastObserved = observed.migrations.at(-1)?.createdAt ?? 0;
