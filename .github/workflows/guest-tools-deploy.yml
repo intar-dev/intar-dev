@@ -128,28 +128,6 @@ jobs:
       - name: Install pinned Wrangler
         run: bun install --frozen-lockfile
 
-      - name: Require drained host and retain previous stable pin
-        working-directory: apps/web
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --max-time 30 \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            https://intar.dev/registry/v1/cutover/gate \
-            | jq -e '.state == "drained" and .active_desired_vms == 0' >/dev/null
-          bunx wrangler r2 object get "${BUCKET}/guest-tools/scenario/stable.json" \
-            --remote --jurisdiction eu --file "${TOOLS_DIR}/previous-stable.json"
-
-      - name: Retain rollback pin before publication
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: guest-tools-rollback-${{ github.run_id }}
-          path: ${{ runner.temp }}/guest-tools/previous-stable.json
-          if-no-files-found: error
-
       - name: Upload candidate objects
         working-directory: apps/web
         env:
@@ -166,56 +144,40 @@ jobs:
           bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/candidate.json" \
             --remote --jurisdiction eu --file "${TOOLS_DIR}/candidate.json" --content-type application/json
 
-      - name: Verify uploaded content and prepare host cache
+      - name: Verify uploaded objects by re-download
+        working-directory: apps/web
         env:
-          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          candidate_sha="$(sha256sum "${TOOLS_DIR}/candidate.json" | cut -d ' ' -f 1)"
-          curl --fail --silent --show-error --max-time 60 --request POST \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            --header "x-intar-candidate-sha256: ${candidate_sha}" \
-            https://intar.dev/registry/v1/guest-tools/warm > "${TOOLS_DIR}/warm.json"
+          # Byte-level verification of the published objects. This lane
+          # builds and publishes only; it never calls the control plane, so it
+          # can run while the previous ABI is still serving. Promotion to the
+          # stable channel is a separate lane that needs the new plane.
+          verify_dir="${TOOLS_DIR}/verify"
+          mkdir -p "${verify_dir}"
           disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
-          jq -e --arg disk "${disk}" '.ok == true and .candidate.tools_disk_sha256 == $disk and (.warmed_host_ids | length > 0)' \
-            "${TOOLS_DIR}/warm.json" >/dev/null
-          for _ in $(seq 1 24); do
-            curl --fail --silent --show-error --max-time 30 \
-              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-              "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=candidate" > "${TOOLS_DIR}/cache.json"
-            if jq -e --arg disk "${disk}" '
-              .ok == true and .guest_tools.tools_disk_sha256 == $disk and (.hosts | length > 0) and
-              all(.hosts[]; .ready == true and .desired_guest_tools_ready == true and .actual_guest_tools_ready == true)
-            ' "${TOOLS_DIR}/cache.json" >/dev/null; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo 'Candidate host cache did not become ready.' >&2
-          exit 1
-
-      - name: Promote exact candidate while drained
-        env:
-          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: |
-          set -euo pipefail
-          candidate_sha="$(sha256sum "${TOOLS_DIR}/candidate.json" | cut -d ' ' -f 1)"
-          curl --fail --silent --show-error --max-time 30 \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            https://intar.dev/registry/v1/cutover/gate \
-            | jq -e '.state == "drained" and .active_desired_vms == 0' >/dev/null
-          curl --fail --silent --show-error --max-time 60 --request POST \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            --header "x-intar-candidate-sha256: ${candidate_sha}" \
-            https://intar.dev/registry/v1/guest-tools/promote > "${TOOLS_DIR}/promotion.json"
-          disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
-          jq -e --arg disk "${disk}" '.ok == true and .stable.tools_disk_sha256 == $disk' \
-            "${TOOLS_DIR}/promotion.json" >/dev/null
-          curl --fail --silent --show-error --max-time 30 \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" > "${TOOLS_DIR}/stable.json"
-          jq -e --arg disk "${disk}" '.ok == true and .tools_channel == "stable" and .guest_tools.tools_disk_sha256 == $disk' \
-            "${TOOLS_DIR}/stable.json" >/dev/null
+          kino="$(jq -r .kino_sha256 "${TOOLS_DIR}/candidate.json")"
+          bunx wrangler r2 object get \
+            "${BUCKET}/guest-tools/scenario/disks/${disk}.ext4.zst" \
+            --remote --jurisdiction eu --file "${verify_dir}/${disk}.ext4.zst"
+          bunx wrangler r2 object get \
+            "${BUCKET}/guest-tools/scenario/kino/${kino}/kino" \
+            --remote --jurisdiction eu --file "${verify_dir}/kino"
+          bunx wrangler r2 object get \
+            "${BUCKET}/guest-tools/scenario/candidate.json" \
+            --remote --jurisdiction eu --file "${verify_dir}/candidate.json"
+          cmp --silent "${TOOLS_DIR}/candidate.json" "${verify_dir}/candidate.json"
+          cmp --silent "${TOOLS_DIR}/${disk}.ext4.zst" "${verify_dir}/${disk}.ext4.zst"
+          cmp --silent "${TOOLS_DIR}/kino" "${verify_dir}/kino"
+          test "$(sha256sum "${verify_dir}/${disk}.ext4.zst" | cut -d ' ' -f 1)" = \
+            "$(jq -r .compressed_disk_sha256 "${TOOLS_DIR}/candidate.json")"
+          test "$(sha256sum "${verify_dir}/kino" | cut -d ' ' -f 1)" = "${kino}"
+          jq -n --arg disk "${disk}" --arg kino "${kino}" \
+            '{uploaded_objects_verified: 3, tools_disk_sha256: $disk, kino_sha256: $kino}' \
+            > "${TOOLS_DIR}/upload-verification.json"
+          cat "${TOOLS_DIR}/upload-verification.json"
 
       - name: Retain build and deployment evidence
         if: always()
