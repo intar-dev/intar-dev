@@ -63,6 +63,11 @@ jobs:
           bun test tools/ci/check-workflow-security.test.ts
           bun tools/ci/check-workflow-security.ts
 
+      - name: Parse every workflow shell block with the shell
+        run: |
+          bun test tools/ci/check-workflow-syntax.test.ts
+          bun tools/ci/check-workflow-syntax.ts
+
       - name: Audit JavaScript dependencies
         run: bun audit --audit-level=moderate
 

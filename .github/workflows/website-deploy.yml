@@ -93,12 +93,8 @@ jobs:
                 type == "string" and test("^sha256:[0-9a-f]{64}$"))
             else false end
           ' "${artifacts_json}" >/dev/null
-          artifact_id="$(jq -er --arg name "${artifact_name}" \
-            '[.artifacts[] | select(.name == $name)] | .[0].id' \
-            "${artifacts_json}")
-          expected_digest="$(jq -er --arg name "${artifact_name}" \
-            '[.artifacts[] | select(.name == $name)] | .[0].digest' \
-            "${artifacts_json}" | cut -d: -f2)"
+          artifact_id="$(jq -er --arg name "${artifact_name}" '[.artifacts[] | select(.name == $name)] | .[0].id' "${artifacts_json}")"
+          expected_digest="$(jq -er --arg name "${artifact_name}" '[.artifacts[] | select(.name == $name)] | .[0].digest' "${artifacts_json}" | cut -d: -f2)"
           artifact_zip="${RUNNER_TEMP}/website-dist.zip"
           gh api \
             "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
