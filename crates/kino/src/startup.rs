@@ -186,6 +186,17 @@ mod tests {
                 .expect("run mkfifo")
                 .success()
         );
+        // A FIFO holds no data of its own, so an open can fail before the
+        // checks under test run: a write-only open with no reader fails with
+        // ENXIO, and a blocking read-only open waits for a writer that never
+        // comes. One read-write keeper handle holds both ends open for the
+        // whole test. The production open stays write-only, non-blocking, and
+        // no-follow.
+        let _keeper = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .expect("open the pipe read-write as the keeper");
         // The guest supervisor creates the pipe as root with mode 0600. This
         // test process owns its own pipe, so it also owns the root check.
         if std::fs::metadata(temp.path()).expect("metadata").uid() != 0 {
