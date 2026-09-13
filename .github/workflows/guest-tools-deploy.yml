@@ -8,10 +8,6 @@ on:
         description: Published Kino release tag (kino/vX.Y.Z)
         required: true
         type: string
-      revision:
-        description: Current published scenario bundle revision for host cache checks
-        required: true
-        type: string
       confirmation:
         description: Type DEPLOY GUEST TOOLS
         required: true
@@ -26,13 +22,12 @@ concurrency:
 
 jobs:
   deploy:
-    name: Build, verify, and promote tools
+    name: Build and verify tools
     runs-on: namespace-profile-intar-dev
     environment: production
     timeout-minutes: 30
     env:
       KINO_TAG: ${{ inputs.kino_tag }}
-      REVISION: ${{ inputs.revision }}
       CONFIRMATION: ${{ inputs.confirmation }}
       BUCKET: intar-dev-vm-image-registry-20260709
 
@@ -43,7 +38,6 @@ jobs:
           test "${GITHUB_REF}" = refs/heads/main
           test "${CONFIRMATION}" = 'DEPLOY GUEST TOOLS'
           [[ "${KINO_TAG}" =~ ^kino/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
           mkdir -p "${RUNNER_TEMP}/guest-tools"
           printf 'TOOLS_DIR=%s/guest-tools\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
 

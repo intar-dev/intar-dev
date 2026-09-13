@@ -148,5 +148,30 @@ describe("no-compatibility rollout graph", () => {
     expect(promote).toContain("guest-tools/warm");
     expect(promote).toContain('test "\${CONFIRMATION}" = \'PROMOTE GUEST TOOLS\'');
   });
-});
 
+  it("binds promotion to the candidate digest the cutover pinned", () => {
+    const promote = workflow("guest-tools-promote.yml");
+    const build = workflow("guest-tools-deploy.yml");
+    // The build lane may run again between the cutover and the promotion, so
+    // the promotion must take the expected manifest digest as an input and
+    // refuse a published candidate that no longer matches it. Without this the
+    // promotion would warm and promote a release the worker was not deployed
+    // with.
+    expect(promote).toContain("expected_candidate_sha256:");
+    expect(promote).toContain("EXPECTED_CANDIDATE_SHA256");
+    expect(promote).toContain("^[0-9a-f]{64}$");
+    expect(promote).toContain("The published candidate does not match the expected digest.");
+    expect(promote).toContain("x-intar-candidate-sha256");
+    // The digest must be checked before the warm call, so a stale candidate is
+    // refused before anything is scheduled on a host.
+    const bindingIndex = promote.indexOf("does not match the expected digest");
+    const warmIndex = promote.indexOf("guest-tools/warm");
+    expect(bindingIndex).toBeGreaterThan(-1);
+    expect(warmIndex).toBeGreaterThan(bindingIndex);
+    // The build lane now only builds and verifies, and no longer takes the
+    // bundle revision it does not use.
+    expect(build).toContain("Build and verify tools");
+    expect(build).not.toContain("Build, verify, and promote");
+    expect(build).not.toContain("REVISION");
+  });
+});
