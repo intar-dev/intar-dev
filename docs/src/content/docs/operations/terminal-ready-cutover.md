@@ -22,10 +22,15 @@ gate.
 3. A rollback restores matching state, not only a binary. Migration 0005 drops
    columns, so an old gateway binary against the new database fails. Restore
    the recorded database snapshot and the D1 bookmark with the old release.
-4. Keep the control plane in maintenance until the candidate is proven. A
-   normal web deploy bakes `CONTROL_PLANE_MAINTENANCE=off` into the generated
-   config, so deploy the candidate with a temporary config that keeps it
-   `on`.
+4. Maintenance is a fence, not a lock on the release. While it is `on`, every
+   `/api/*` and `/agent/*` request answers the JSON 503 and every other path,
+   including `/registry/*`, answers the maintenance page, and no operator
+   bypass reaches the application. The cutover operation therefore closes the
+   plane and deploys the ABI 2 worker, and a separate reopen operation opens
+   the plane again while the fleet gate stays drained. Registry work, which
+   includes the image catalog and the tools promotion, can only run after
+   that reopen. The browser proof runs with the plane open and the fleet
+   still drained.
 
 ## Step 1: close the gates
 
@@ -62,10 +67,8 @@ curl -sS -X PATCH -H 'content-type: application/json' \
   -d '{"disabled":false}' \
   https://intar.dev/api/organizations/<orgId>/runners/<runnerId>
 
-# 4. Publish the registry-dependent artifacts here, while the plane is open:
-#    the image catalog and the guest tools candidate and promotion. The same
-#    work may instead run after step 4 of this sequence returns the plane to
-#    service, as long as the fleet gate stays drained.
+# 4. Stage the immutable artifacts here, while the plane is open. See step 3.
+#    Build and upload only: the tools build lane makes no plane call.
 
 # 5. Control plane maintenance, and prove it. This is the close, and it fences
 #    /api/* and /registry/* until the return to service.
@@ -100,74 +103,116 @@ Do this before any migration, and record every identifier.
 ssh root@<gateway-host> /usr/local/sbin/intar-deploy-stargate plan
 # apply prints the backup id it captured; record it.
 
-# Agent state and jail data on the scenario host.
-ssh root@<host> tar -C / -czf /root/intar-agent-state-<date>.tgz \
-  var/cache/intar-agent var/lib/intar/jails
-ssh root@<host> sha256sum /root/intar-agent-state-<date>.tgz
+# Agent state on the scenario host. The state is one SQLite database, at
+# /var/cache/intar-agent/state/intar-agent/intar-agent.sqlite3 (the unit sets
+# XDG_STATE_HOME=/var/cache/intar-agent/state). Copy it with the SQLite backup
+# API so the snapshot is consistent, exactly as the gateway backup does, and
+# assert integrity before you rely on it:
+ssh root@<host> sqlite3 /var/cache/intar-agent/state/intar-agent/\
+intar-agent.sqlite3 ".backup '/root/intar-agent-state-<date>.sqlite3'"
+ssh root@<host> sqlite3 /root/intar-agent-state-<date>.sqlite3 \
+  'PRAGMA integrity_check;'
+ssh root@<host> sha256sum /root/intar-agent-state-<date>.sqlite3
+# Do not tar the cache or the jail tree. /var/cache/intar-agent holds the
+# image cache and the jail chunk store, which are large and are rebuilt in
+# place; archiving them risks a multi-terabyte copy and is unnecessary.
+# Keep the config and the installed binaries with the release record.
 ```
 
 For D1, record the current bookmark before the web deploy. Time Travel needs
 that exact bookmark to restore matching state.
 
-## Step 3: deploy with traffic closed
+## Step 3: build and stage the immutable artifacts
 
-1. Gateway: `intar-deploy-stargate apply <tag> <archive-sha256> <binary-sha256>`.
+Everything here runs while the plane is still open and the fleet gate is
+already drained, so a learner start answers `503 runtime_cutover_drained` and
+no learner run is placed. Nothing in this step changes what the product
+serves; it stages the release.
+
+1. Guest tools: `image-gate` is already `drained`. Run the build lane
+   `guest-tools-deploy.yml`. It builds the Kino binary and the tools disk,
+   uploads the three immutable objects, and byte-verifies them by
+   re-downloading. It makes no control-plane call, so it succeeds against the
+   old ABI 2-rejecting plane. It leaves the `candidate` channel in R2, which
+   the old plane never reads. Do not run promotion here: it needs the new
+   plane.
+2. Do not publish images here. An ABI 2 catalog manifest is validated by the
+   plane, and the old plane rejects ABI 2, so image publication belongs after
+   the new web and runtime are installed. See step 4.
+
+### Note on catalog content
+
+The bundle carries whatever Course source it is given, and the server
+replaces the whole scope on publish. Rebuild from the live Course source, not
+from a sample or fixture tree. `content/courses` holds `linux-operations` in
+this repository; if the live catalog serves a different course set, publish
+that same live content or do not publish a catalog at all in this window.
+Confirm the course and scenario set before and after the publish, because a
+publish replaces the scope rather than merging.
+
+## Step 4: install, then bring the release to service
+
+Order matters. The runtime components must all be installed before the plane
+opens, because the release has no compatibility path. While maintenance is
+`on`, `/api/*` and `/agent/*` answer the JSON 503 and `/registry/*` answers
+the maintenance page, so registry work cannot run in the middle of this step.
+
+1. Gateway:
+   `intar-deploy-stargate apply <tag> <archive-sha256> <binary-sha256>`.
    It stops the service, then requires a drained gateway: zero terminal
    routes, zero workspace app routes, and zero browser sessions, read from
    the gateway database. It installs, starts, waits for readiness, and
    verifies the migrations and the host routing. `plan` prints those three
    route counts, so prove zero before you apply.
-2. Web: deploy the worker with `tools/deploy/deploy-web.sh` and a
-   `CONTROL_PLANE_MAINTENANCE=on` config. The deploy validates the expected
-   mode and probes the maintenance endpoint. Do not deploy with the generated
-   `off` config in this step.
-3. Scenario host runtime: `sudo crates/intar-jailerd/deploy/install.sh`, then
-   `sudo crates/intar-jailerd/deploy/intar-jailerd-self-test.sh` for the
-   privileged proof, and the agent doctor. Keep the host disabled on any hash,
-   seccomp, Landlock, cgroup, accounting, template, or helper failure.
+2. Scenario host runtime: `sudo crates/intar-jailerd/deploy/install.sh`, then
+   `sudo /usr/lib/intar/intar-jailerd-self-test`, then the agent `--doctor`.
+   Keep the host enabled: the fleet gate, not the host switch, is what stops
+   learner placement, and the administrator proof needs an enabled host.
+   Keep the host disabled only on a hash, seccomp, Landlock, cgroup,
+   accounting, template, or helper failure.
    `crates/intar-jailerd/deploy/uninstall.sh` reverses the package.
-4. Images: publish the candidate catalog with Kino ABI 2, and wait for every
-   required image to report ready in the host cache. This step and the
-   candidate distribution in `guest-tools-deploy` both talk to `/registry/*`,
-   which the maintenance fence covers. Do them either before maintenance is
-   `on`, or after the cutover deploy returns the plane to service while the
-   fleet gate is still drained. While maintenance is `on` they return the
-   maintenance page, so a run started then fails closed.
-
-Do not start a web-worker deploy from a branch push. A partial deploy on main
-would replace the worker with a maintenance-off config while the runtime is
-still closed. Coordinate the branch so the web action runs only in this
-window, with the maintenance config and the complete release manifest.
-
-## Step 4: verify, then reopen
-
-The proof window is bounded and single-pass: the runtime version is deployed,
-the VMs are created, tested, and deleted, and only then does the web release
-return the product to service. Maintenance `off` is the last deploy action,
-not an early one.
-
-1. With maintenance still `on`, deploy the runtime version: the agent and
-   jailerd package and the gateway. Run the host-side proofs: the jailerd
-   self-test and the agent `--doctor`. Image and guest-tools publication
-   happens in step 3, before the close, or after this cutover with the fleet
-   still drained, because the registry is fenced here.
-2. Create the test VMs, run the proofs, and delete the VMs inside this window.
-   A scenario start that goes through the product needs the plane open,
-   because `/api/*` is fenced while maintenance is `on`. The administrator
-   path in step 3 needs the host enabled, which step 1 already asserted, and
-   the plane open, which step 4's return to service provides. The fleet gate
-   stays drained throughout, so no learner run is placed.
-3. Run the built-in browser production check from the benchmark runbook and
+3. Web: run `website-cutover.yml` with `operation=cutover`. It proves the
+   release, requires the drained gate and the D1 zero state, and deploys the
+   worker with the ABI 2 static pin and maintenance `on`. The generated D1
+   migration is applied after the maintenance fence is proven, inside the
+   same run.
+4. Reachability check before you open the plane: confirm the agent still
+   reaches the bridge. Between steps 2 and 3 the agent runs the new runtime
+   against the old control plane, so a host manifest that the new agent
+   refuses would show as a disconnected or unhealthy host. The fleet gate is
+   drained for exactly this window, so no learner run is affected; if the
+   bridge is refused, stop and roll back rather than opening the plane.
+5. Open the plane: run `website-cutover.yml` with `operation=reopen`. The
+   same `tools_run_id` rebuilds the same static pin, the live worker tag must
+   still match the cutover revision, and the gate must still be `drained`.
+   This is the step that returns the product to service, and the fleet stays
+   drained.
+6. Registry work, now that the plane is open and the fleet gate is still
+   `drained`: publish the candidate image catalog with Kino ABI 2, promote it
+   while drained, and run `guest-tools-promote.yml`. Each call goes to
+   `/registry/*`, which the fence covered until step 5, so this is the first
+   point where they can run. The tools promotion warms every host and moves
+   the `candidate` objects to the `stable` channel. Publishing the catalog
+   replaces its scope, so use the live Course source and confirm the set.
+7. Host-side proofs with the plane open: the jailerd self-test and the agent
+   `--doctor` already ran in step 2; re-run them if any component changed.
+   Then create the test VMs, run the proofs, and delete the VMs inside this
+   window. A scenario start that goes through the product needs the plane
+   open, which step 5 provided, and the administrator path needs the host
+   enabled, which step 2 kept. The fleet gate stays drained, so no learner
+   run is placed.
+8. Run the built-in browser production check from the benchmark runbook and
    confirm the login, run, and terminal flows. Rescue and verify one Klustered
    run, including K3s readiness, and play back one SSH recording. While the
    gate is drained a learner start answers `503` `runtime_cutover_drained`;
    the existing `isAdmin` to `allowDrainedAdminProof` path admits an
    administrator-started run for exactly this proof.
-4. Return the product to service: deploy the web release with maintenance
-   `off`. This is the last deploy action of the window.
-5. Only then reopen the fleet: set the cutover gate to `open`, then enable the
-   host (`{"disabled":false}`).
-6. Confirm the host reports healthy and the fleet accepts a normal start.
+9. Only then reopen the fleet: set the cutover gate to `open`, then confirm
+   the host reports healthy and the fleet accepts a normal start.
+
+Do not start a web-worker deploy from a branch push. The automatic website
+lane validates and uploads a tested artifact only; the cutover lane is the
+only deploy path, so the worker cannot move without this window.
 
 ## Step 5: roll back with matching state
 
@@ -186,28 +231,39 @@ not an early one.
 
 `.github/workflows/website-cutover.yml` is the manual lane that performs the
 web part of this sequence. It runs only on `workflow_dispatch` against `main`
-with the `CUTOVER WEB RELEASE` confirmation, and it refuses to continue while
-any gate it can read is still open:
+and takes two operations, which is exactly the split step 4 uses:
 
-1. The fleet-wide runtime cutover gate must answer `drained` with
-   `active_desired_vms` zero. The lane reads
-   `/registry/v1/cutover/gate` before it downloads anything.
-2. The control plane must answer the maintenance probe with `503` and code
-   `maintenance`, and maintenance stays on for the candidate deploy. A normal
-   web deploy bakes `CONTROL_PLANE_MAINTENANCE=off`, so the lane pins the
-   maintenance config for the whole window. Opening the control plane is a
-   separate, later action in step 4, after the fleet proof, and it is the
-   precondition for any browser probe.
+- `operation=cutover` (confirmation `CUTOVER WEB RELEASE`) closes the plane
+  and deploys the candidate with the ABI 2 static pin.
+- `operation=reopen` (confirmation `REOPEN WEB RELEASE`) returns the same
+  release to service with the fleet gate still drained.
+
+Both operations must name the cutover revision in `cutover_sha`, and it must
+equal the dispatch revision, so a reopen returns the revision that was cut
+over and never a later `main`. Before the deploy it refuses to continue while
+a gate it can read is still open:
+
+1. For `cutover`, the fleet-wide runtime cutover gate must answer `drained`
+   with `active_desired_vms` zero. The lane reads
+   `/registry/v1/cutover/gate` before it downloads anything. This read only
+   works while the plane is open, because the registry sits behind the
+   maintenance fence, and the lane says so when the answer is fenced.
+2. For `reopen`, the live worker must still answer the maintenance probe with
+   `503` and code `maintenance`. The gate itself is unreadable behind the
+   fence, so the enforced release binding is the `cutover_sha` equality plus
+   the live worker tag check: the active version's `workers/tag` must carry
+   the named revision.
 3. The D1 drain audit must report zero active scenario runs, zero non-uploaded
-   run artifacts, and zero enabled agent hosts.
+   run artifacts, and the `image_cutover` gate state `drained` for both
+   operations. The enabled-host count is recorded as evidence, not enforced:
+   the host stays enabled on purpose so the administrator proof can be placed.
 
-What the lane cannot read, and what an operator therefore confirms by hand
-before the dispatch: the gateway route drain (`intar-deploy-stargate plan`
-reports zero terminal routes, zero workspace app routes, and zero browser
-sessions), the scenario host package install and its disable switch, the image
-readiness in the host cache, and the runtime version on every host. The
-confirmation prompt is not proof of those gates; the recorded `plan` output
-and the host evidence are.
+What the lane cannot read, and what an operator therefore confirms by hand:
+the gateway route drain (`intar-deploy-stargate plan` reports zero terminal
+routes, zero workspace app routes, and zero browser sessions), the scenario
+host package install and its self-test, the image readiness in the host cache,
+and the runtime version on every host. The confirmation prompt is not proof of
+those gates; the recorded `plan` output and the host evidence are.
 
 ## Honest bounds
 
