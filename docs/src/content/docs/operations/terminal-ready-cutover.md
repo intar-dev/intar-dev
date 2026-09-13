@@ -105,13 +105,23 @@ ssh root@<gateway-host> /usr/local/sbin/intar-deploy-stargate plan
 
 # Agent state on the scenario host. The state is one SQLite database, at
 # /var/cache/intar-agent/state/intar-agent/intar-agent.sqlite3 (the unit sets
-# XDG_STATE_HOME=/var/cache/intar-agent/state). Copy it with the SQLite backup
-# API so the snapshot is consistent, exactly as the gateway backup does, and
-# assert integrity before you rely on it:
-ssh root@<host> sqlite3 /var/cache/intar-agent/state/intar-agent/\
-intar-agent.sqlite3 ".backup '/root/intar-agent-state-<date>.sqlite3'"
-ssh root@<host> sqlite3 /root/intar-agent-state-<date>.sqlite3 \
-  'PRAGMA integrity_check;'
+# XDG_STATE_HOME=/var/cache/intar-agent/state). The host does not need the
+# sqlite3 CLI: Python's sqlite3 module is present, and the read-only mode plus
+# the backup API give a consistent snapshot. Assert integrity before you rely
+# on it:
+ssh root@<host> 'python3 -' <<'PY'
+import sqlite3, sys
+
+source = "/var/cache/intar-agent/state/intar-agent/intar-agent.sqlite3"
+target = "/root/intar-agent-state-<date>.sqlite3"
+src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+dst = sqlite3.connect(target)
+src.backup(dst)
+if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+    sys.exit("integrity check failed")
+dst.close()
+src.close()
+PY
 ssh root@<host> sha256sum /root/intar-agent-state-<date>.sqlite3
 # Do not tar the cache or the jail tree. /var/cache/intar-agent holds the
 # image cache and the jail chunk store, which are large and are rebuilt in
