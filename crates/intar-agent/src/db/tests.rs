@@ -511,3 +511,57 @@ fn archive_job_upsert_preserves_its_rowid_and_created_timestamp() {
         vec!["vm-z"]
     );
 }
+
+/// A completed scrub writes its verification through the real async `Db` API.
+///
+/// This is the path the image cache uses, and until now no test executed it: the
+/// other database tests call the synchronous helpers with a raw connection, so a
+/// statement that was invalid SQL could sit in the shipped binary and fail only
+/// in production. Exercise both the initial insert and the conflict update, and
+/// assert the stored values, so a broken statement fails here instead.
+#[tokio::test]
+async fn verified_content_upsert_inserts_then_updates_the_same_row() {
+    let db = open_test_db_thread(test_db_path()).await;
+    let digest = "a".repeat(64);
+
+    db.upsert_verified_content(CacheVerifyRow {
+        content_sha256: digest.clone(),
+        verified_at_ms: 1_700_000_000_000,
+        bytes_read: 4096,
+    })
+    .await
+    .expect("insert verified content");
+
+    let rows = db.load_verified_content().await.expect("load after insert");
+    assert_eq!(rows.len(), 1, "one content digest occupies exactly one row");
+    assert_eq!(rows[0].content_sha256, digest);
+    assert_eq!(rows[0].bytes_read, 4096, "the insert stores the byte count");
+    assert_eq!(
+        rows[0].verified_at_ms, 1_700_000_000_000,
+        "the insert stores the verification timestamp"
+    );
+
+    db.upsert_verified_content(CacheVerifyRow {
+        content_sha256: digest.clone(),
+        verified_at_ms: 1_700_000_009_000,
+        bytes_read: 8192,
+    })
+    .await
+    .expect("update verified content");
+
+    let rows = db.load_verified_content().await.expect("load after update");
+    assert_eq!(
+        rows.len(),
+        1,
+        "a repeated digest updates its row instead of inserting a second one"
+    );
+    assert_eq!(rows[0].content_sha256, digest);
+    assert_eq!(
+        rows[0].bytes_read, 8192,
+        "the conflict update replaces the byte count"
+    );
+    assert_eq!(
+        rows[0].verified_at_ms, 1_700_000_009_000,
+        "the conflict update replaces the verification timestamp"
+    );
+}
