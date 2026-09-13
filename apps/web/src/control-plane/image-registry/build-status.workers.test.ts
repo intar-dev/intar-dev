@@ -29,12 +29,45 @@ const TOOLS: DesiredGuestToolsV1 = {
   tools_disk_sha256: "1".repeat(64),
   tools_disk_size_bytes: 64 * 1024 * 1024,
   kino_sha256: "2".repeat(64),
-  bootstrap_abi: 1,
+  bootstrap_abi: 2,
 };
+const CHANNEL_PIN = {
+  schema_version: 1,
+  bootstrap_abi: 2,
+  tools_disk_sha256: TOOLS.tools_disk_sha256,
+  tools_disk_size_bytes: TOOLS.tools_disk_size_bytes,
+  compressed_disk_sha256: "3".repeat(64),
+  compressed_disk_size_bytes: 64,
+  kino_sha256: TOOLS.kino_sha256,
+  kino_size_bytes: 32,
+};
+
+/**
+ * Publish the channel pin the endpoint reports on. The builders own this
+ * channel: the web deploy pin is a different, release-scoped value.
+ */
+async function publishChannel(channel: "stable" | "candidate"): Promise<void> {
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(
+    "guest-tools/scenario/" + channel + ".json",
+    JSON.stringify(CHANNEL_PIN),
+  );
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(
+    "guest-tools/scenario/disks/" +
+      CHANNEL_PIN.tools_disk_sha256 +
+      ".ext4.zst",
+    new Uint8Array(CHANNEL_PIN.compressed_disk_size_bytes),
+  );
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(
+    "guest-tools/scenario/kino/" + CHANNEL_PIN.kino_sha256 + "/kino",
+    new Uint8Array(CHANNEL_PIN.kino_size_bytes),
+  );
+}
 
 describe("image revision completion status", () => {
   beforeEach(async () => {
     await resetD1Database();
+    await publishChannel("stable");
+    await publishChannel("candidate");
     const db = drizzle(env.DB);
     await db.insert(user).values({
       id: "owner",
@@ -155,6 +188,35 @@ describe("image revision completion status", () => {
       hosts: [],
     });
   });
+
+  it("fails closed when the published channel pin is absent", async () => {
+    await env.VM_IMAGE_REGISTRY_BUCKET.delete(
+      "guest-tools/scenario/stable.json",
+    );
+
+    const response = await status();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "scenario guest-tools stable pin is unavailable",
+    });
+  });
+
+  it("fails closed when the published channel objects do not match the pin", async () => {
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(
+      "guest-tools/scenario/disks/" +
+        CHANNEL_PIN.tools_disk_sha256 +
+        ".ext4.zst",
+      new Uint8Array(CHANNEL_PIN.compressed_disk_size_bytes + 1),
+    );
+
+    const response = await status();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "scenario guest-tools stable objects are unavailable",
+    });
+  });
 });
 
 async function status(): Promise<Response> {
@@ -270,7 +332,7 @@ function manifest(): ScenarioManifestV4 {
         image_format: "raw_chunks_v1",
         image_virtual_size_bytes: 1,
         chunk_manifest_sha256: MANIFEST_SHA,
-        guest_bootstrap_abi: 1,
+        guest_bootstrap_abi: 2,
         boot: {
           kernel_sha256: "e".repeat(64),
           initrd_sha256: "f".repeat(64),

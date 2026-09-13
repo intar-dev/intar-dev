@@ -209,7 +209,7 @@ function candidateSourceFromManifest(input: {
   const vms = manifest.vms.flatMap((vm, ordinal) => {
     if (
       vm.image_format !== "raw_chunks_v1" ||
-      vm.guest_bootstrap_abi !== 1
+      vm.guest_bootstrap_abi !== 2
     ) {
       return [];
     }

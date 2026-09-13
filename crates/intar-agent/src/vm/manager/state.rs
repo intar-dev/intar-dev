@@ -118,7 +118,7 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
                 == Some(pin.tools_disk_sha256.as_str())
                 && pin.tools_disk_size_bytes == 64 * 1024 * 1024
                 && normalize_sha256(&pin.kino_sha256).as_deref() == Some(pin.kino_sha256.as_str())
-                && pin.bootstrap_abi == 1,
+                && pin.bootstrap_abi == GUEST_BOOTSTRAP_ABI_V2,
             "persisted VM guest-tools pin is invalid"
         );
     }

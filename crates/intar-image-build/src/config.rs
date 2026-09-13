@@ -120,6 +120,8 @@ pub struct LayeredBuildConfig {
     pub checkpoint_cache_bytes: u64,
     #[serde(default = "default_minimum_free_bytes")]
     pub minimum_free_bytes: u64,
+    #[serde(default = "default_kernel_build_jobs")]
+    pub kernel_build_jobs: u32,
 }
 
 impl Default for LayeredBuildConfig {
@@ -135,6 +137,7 @@ impl Default for LayeredBuildConfig {
             oci_cache_bytes: default_oci_cache_bytes(),
             checkpoint_cache_bytes: default_checkpoint_cache_bytes(),
             minimum_free_bytes: default_minimum_free_bytes(),
+            kernel_build_jobs: default_kernel_build_jobs(),
         }
     }
 }
@@ -244,6 +247,14 @@ fn default_checkpoint_cache_bytes() -> u64 {
 
 fn default_minimum_free_bytes() -> u64 {
     20 * 1024 * 1024 * 1024
+}
+
+/// Parallel jobs for the kernel compile inside the builder container.
+///
+/// The build runs in an isolated container next to a scenario build, so the
+/// default stays low. Raise it on a dedicated builder host with spare cores.
+fn default_kernel_build_jobs() -> u32 {
+    4
 }
 
 #[cfg(test)]

@@ -95,6 +95,33 @@ async function seedOtherUserActiveReservation(input: {
   });
 }
 
+/**
+ * Seeds a committed host CPU reservation, the durable row the admission batch
+ * writes for an admitted run. A committed row keeps its whole quota charged
+ * until teardown, so it is the shape that makes a host look full to the next
+ * admission without any legacy reservation endpoint.
+ */
+async function seedCommittedCpuReservation(input: {
+  hostId: string;
+  runId: string;
+  steadyCpuMillis: number;
+  bootCpuMillis: number;
+  now: number;
+}): Promise<void> {
+  await drizzle(env.DB).insert(hostCpuReservations).values({
+    runId: input.runId,
+    hostId: input.hostId,
+    cpuMillis: input.bootCpuMillis,
+    steadyCpuMillis: input.steadyCpuMillis,
+    bootCpuMillis: input.bootCpuMillis,
+    quotaPhase: "boot",
+    state: "committed",
+    expiresAt: null,
+    createdAt: input.now,
+    updatedAt: input.now,
+  });
+}
+
 describe("HostRuntimeDO scheduling and capacity", () => {
   beforeEach(resetHostRuntimeTestDatabase);
 
@@ -136,6 +163,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
 
     await expect(
       startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-1",
         scenarioId: "broken-nginx",
         userId: "user-1",
         betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -144,11 +172,11 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     ws.close();
   });
 
-  it("returns boot_capacity_pending for a pinned saturated host", async () => {
+  it("refuses a pinned host whose committed CPU quota is full", async () => {
     const hostId = "host-pinned-saturated";
     const now = Date.now();
     await seedHost(hostId);
-    const { stub, ws } = await connectHost(hostId);
+    const { ws } = await connectHost(hostId);
     await seedEnabledScenario(drizzle(env.DB), now);
     sendBridge(
       ws,
@@ -171,27 +199,27 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       hostId,
       (row) => row.observedAt === now,
     );
-    const fill = await stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/reserve",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          hostId,
-          runId: "capacity-fill",
-          steadyCpuMillisByVm: [125],
-        }),
-      },
-    );
-    expect(fill.status).toBe(201);
+    // Admission charges a committed boot quota for every run it admits, so a
+    // host whose quota is fully committed has no room for another start. The
+    // reservation row is the same row the admission batch writes; there is no
+    // legacy reservation endpoint left to call.
+    await seedCommittedCpuReservation({
+      hostId,
+      runId: "capacity-fill",
+      steadyCpuMillis: 125,
+      bootCpuMillis: 2_000,
+      now,
+    });
 
     await expect(
       startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-2",
         scenarioId: "broken-nginx",
         userId: "user-1",
         betaAdmission: await betaAdmissionForHostFixture("user-1"),
         hostId,
       }),
-    ).rejects.toMatchObject({ code: "boot_capacity_pending" });
+    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
     ws.close();
   });
 
@@ -224,6 +252,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     );
 
     const first = await startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-3",
       scenarioId: "broken-nginx",
       userId: "user-1",
       betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -238,6 +267,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       },
     );
     const second = await startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-4",
       scenarioId: "broken-nginx",
       userId: "user-1",
       betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -311,20 +341,18 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       ),
     ]);
 
-    const fill = await first.stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/reserve",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          hostId: firstHostId,
-          runId: "first-host-fill",
-          steadyCpuMillisByVm: [2_000],
-        }),
-      },
-    );
-    expect(fill.status).toBe(201);
+    // The first host carries a committed boot quota equal to its whole
+    // schedulable CPU, so the ranked selection must move to the second host.
+    await seedCommittedCpuReservation({
+      hostId: firstHostId,
+      runId: "first-host-fill",
+      steadyCpuMillis: 2_000,
+      bootCpuMillis: 2_000,
+      now,
+    });
 
     const started = await startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-5",
       scenarioId: "broken-nginx",
       userId: "user-1",
       betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -355,11 +383,12 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     expect(reservationAfterAcceptance?.state).toBe("committed");
     await expect(
       startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-6",
         scenarioId: "broken-nginx",
         userId: "user-1",
         betaAdmission: await betaAdmissionForHostFixture("user-1"),
       }),
-    ).rejects.toMatchObject({ code: "boot_capacity_pending" });
+    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
 
     first.ws.close();
     second.ws.close();
@@ -425,6 +454,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
 
     await expect(
       startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-7",
         scenarioId: "broken-nginx",
         userId: "user-1",
         betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -433,6 +463,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
 
     const started = await startScenarioRunForUser({
+      idempotencyKey: "scheduling-start-8",
       scenarioId: "broken-nginx",
       userId: "user-1",
       betaAdmission: await betaAdmissionForHostFixture("user-1"),

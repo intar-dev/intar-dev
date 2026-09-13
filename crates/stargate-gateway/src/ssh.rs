@@ -7,7 +7,7 @@ use russh::{
     mac,
     server::{self, Auth, Msg, Server as _, Session},
 };
-use stargate_core::{RouteRecord, SessionKind};
+use stargate_core::{SessionKind, StoredTerminalRoute};
 
 use crate::{
     GatewayState, SessionLease,
@@ -25,7 +25,7 @@ pub struct SshProxyServer {
 pub struct SshConnection {
     state: GatewayState,
     peer_addr: Option<SocketAddr>,
-    route: Option<RouteRecord>,
+    route: Option<StoredTerminalRoute>,
     route_admission: Option<SessionLease>,
     connection_lease: Option<SessionLease>,
     channels: HashMap<ChannelId, ChannelState>,
@@ -104,7 +104,10 @@ impl server::Handler for SshConnection {
         let Some((route, admission)) = self.load_route_with_admission(user).await? else {
             return Ok(self.reject_key(user, public_key, "route_unavailable"));
         };
-        if !route.allows_client_public_key(public_key)? {
+        let Some(target) = route.ready_target() else {
+            return Ok(self.reject_key(user, public_key, "route_unavailable"));
+        };
+        if !stargate_core::allows_client_public_key(target, public_key)? {
             return Ok(self.reject_key(user, public_key, "key_not_allowed"));
         }
         if admission.token().is_cancelled() {
@@ -135,7 +138,10 @@ impl server::Handler for SshConnection {
                 (route, Some(admission))
             }
         };
-        if !route.allows_client_public_key(public_key)? {
+        let Some(target) = route.ready_target() else {
+            return Ok(self.reject_key(user, public_key, "route_unavailable"));
+        };
+        if !stargate_core::allows_client_public_key(target, public_key)? {
             return Ok(self.reject_key(user, public_key, "key_not_allowed"));
         }
         if let Some(admission) = admission {
@@ -480,7 +486,7 @@ impl SshConnection {
     async fn load_route_with_admission(
         &self,
         username: &str,
-    ) -> anyhow::Result<Option<(RouteRecord, SessionLease)>> {
+    ) -> anyhow::Result<Option<(StoredTerminalRoute, SessionLease)>> {
         // Coordinate the admission with terminal-route replacement. Without
         // this, a new-key client can register under the old session generation
         // after the route upsert but before replacement revokes that generation.
@@ -588,8 +594,8 @@ mod tests {
 
     use futures_util::poll;
     use stargate_core::{
-        AdminAuthSettings, RegisteredRoute, RouteMetadata, SessionKind, TerminalTokenSettings,
-        WebSettings,
+        AdminAuthSettings, RouteMetadata, SessionKind, StoredTarget, StoredTerminalRoute,
+        TerminalSessionMode, TerminalTarget, TerminalTokenSettings, WebSettings,
     };
     use time::OffsetDateTime;
 
@@ -629,7 +635,10 @@ mod tests {
             anyhow::bail!("admission was cancelled by the rotation it waited for");
         };
         assert_eq!(
-            route.authorized_client_public_keys_openssh,
+            route
+                .ready_target()
+                .expect("native route carries a target")
+                .authorized_client_public_keys_openssh,
             vec![SECOND_KEY.to_owned()]
         );
         assert!(
@@ -643,22 +652,32 @@ mod tests {
         Ok(())
     }
 
-    fn test_route(key: &str) -> RegisteredRoute {
-        RegisteredRoute {
+    fn test_route(key: &str) -> StoredTerminalRoute {
+        let now = OffsetDateTime::now_utc();
+        StoredTerminalRoute {
             route_username: "run-01-web".to_owned(),
-            target_username: "ubuntu".to_owned(),
-            target_ip: "127.0.0.1".to_owned(),
-            target_port: 22,
-            authorized_client_public_keys_openssh: vec![key.to_owned()],
-            target_host_key_openssh: "target-host-key".to_owned(),
-            target_private_key_openssh: "target-private-key".to_owned(),
-            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            generation: "exec-01:7".to_owned(),
+            expires_at: now + time::Duration::hours(1),
+            mode: TerminalSessionMode::Native,
             metadata: RouteMetadata {
-                host_id: Some("host-01".to_owned()),
-                run_id: Some("run-01".to_owned()),
-                vm_id: Some("vm-01".to_owned()),
-                user_id: Some("user-01".to_owned()),
+                host_id: "host-01".to_owned(),
+                run_id: "run-01".to_owned(),
+                vm_id: "vm-01".to_owned(),
+                user_id: "user-01".to_owned(),
             },
+            target: StoredTarget::Active {
+                attachment_id: "attachment-01".to_owned(),
+                target: TerminalTarget {
+                    username: "ubuntu".to_owned(),
+                    host: "127.0.0.1".to_owned(),
+                    port: 22,
+                    host_key_openssh: "target-host-key".to_owned(),
+                    private_key_openssh: "target-private-key".to_owned(),
+                    authorized_client_public_keys_openssh: vec![key.to_owned()],
+                },
+            },
+            created_at: now,
+            updated_at: now,
         }
     }
 

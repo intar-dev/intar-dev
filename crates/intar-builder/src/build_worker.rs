@@ -1049,7 +1049,7 @@ mod tests {
     use std::path::Path;
 
     use intar_contracts::catalog::{
-        GUEST_BOOTSTRAP_ABI_V1, IMAGE_CHUNK_ENCODING, IMAGE_CHUNK_MANIFEST_SCHEMA_VERSION,
+        GUEST_BOOTSTRAP_ABI_V2, IMAGE_CHUNK_ENCODING, IMAGE_CHUNK_MANIFEST_SCHEMA_VERSION,
         IMAGE_CHUNK_SIZE_BYTES, ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ImageFormat,
         ImageKey, Mib, ScenarioDifficulty, ScenarioManifestV4, ScenarioVmBootManifestV4,
         ScenarioVmManifestV4,
@@ -1164,7 +1164,7 @@ mod tests {
                     image_format: ImageFormat::RawChunksV1,
                     image_virtual_size_bytes: u64::from(IMAGE_CHUNK_SIZE_BYTES),
                     chunk_manifest_sha256: chunk_manifest_sha256.clone(),
-                    guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V1,
+                    guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
                     boot: ScenarioVmBootManifestV4 {
                         kernel_sha256: kernel_sha256_hex.clone(),
                         initrd_sha256: initrd_sha256_hex.clone(),

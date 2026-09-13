@@ -406,7 +406,7 @@ function isGuestToolsPayload(value: unknown): boolean {
     isSha256Hex(value.tools_disk_sha256) &&
     value.tools_disk_size_bytes === 64 * 1024 * 1024 &&
     isSha256Hex(value.kino_sha256) &&
-    value.bootstrap_abi === 1
+    value.bootstrap_abi === 2
   );
 }
 
@@ -415,7 +415,7 @@ function isVmGuestToolsPayload(value: unknown): boolean {
     isRecord(value) &&
     isSha256Hex(value.tools_disk_sha256) &&
     isSha256Hex(value.kino_sha256) &&
-    value.bootstrap_abi === 1 &&
+    value.bootstrap_abi === 2 &&
     typeof value.verified === "boolean"
   );
 }

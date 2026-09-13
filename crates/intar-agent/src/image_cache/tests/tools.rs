@@ -441,3 +441,152 @@ async fn verify_cached_tools_disk_does_not_wait_for_repair() -> Result<()> {
     assert_eq!(registry.requests(), 2);
     Ok(())
 }
+
+/// The scrub pass must send a corrupt guest tools disk down the tools repair
+/// path, and that repair must replace the corrupt bytes on the wire. The item
+/// is built the way the scrub pass builds it: from the pin alone, with no
+/// image involved.
+#[tokio::test]
+async fn a_corrupt_tools_item_is_repaired_by_the_scrub_repair_path() -> Result<()> {
+    ensure_ring_provider()?;
+    let registry = ToolsDiskRegistry::start()?;
+    let cache_root = tempfile::tempdir()?;
+    let client = reqwest::Client::new();
+    let config = registry_config(registry.addr);
+
+    let path = ensure(
+        &registry,
+        cache_root.path(),
+        &client,
+        ToolsDiskVerification::ReuseVerified,
+    )
+    .await?;
+    let served_before = registry.requests();
+
+    let item = tools_scrub_item(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+        .expect("a 64 MiB pin must produce a tools scrub item");
+    assert_eq!(
+        item.target,
+        scheduler::ScrubTarget::GuestTools {
+            tools_disk_sha256: registry.sha256.clone(),
+            tools_disk_size_bytes: TOOLS_DISK_BYTES as u64,
+        },
+        "a tools disk must never be routed to the image repair path"
+    );
+    assert_eq!(item.expected_sha256, registry.sha256);
+
+    // Corrupt the disk in place and restore the modification time, so only a
+    // real byte check can find it.
+    let modified = std::fs::metadata(&path)?.modified()?;
+    {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path)?;
+        file.write_all(b"CORRUPT!")?;
+        file.set_modified(modified)?;
+    }
+
+    let hashed = hash_file_bounded(&item.path).await?;
+    assert_ne!(hashed.digest_hex(), item.expected_sha256);
+
+    let repaired = repair_cached_tools_disk(
+        &registry.sha256,
+        TOOLS_DISK_BYTES as u64,
+        &item.expected_sha256,
+        &config,
+        None,
+        cache_root.path(),
+        &client,
+    )
+    .await?;
+
+    assert_eq!(repaired, path);
+    assert!(
+        registry.requests() > served_before,
+        "the repair must fetch the disk again"
+    );
+    assert_eq!(
+        repaired,
+        assert_published_disk(&registry, cache_root.path()).await?
+    );
+    // The published-object check above already proved the repaired bytes with
+    // the launch-path reader, so this test pays one paced read, not two.
+    Ok(())
+}
+
+/// A pin whose digest does not match the item must be refused before any
+/// download, so a bad pin can never overwrite a good disk.
+#[tokio::test]
+async fn a_tools_repair_refuses_a_mismatched_pin_digest() -> Result<()> {
+    ensure_ring_provider()?;
+    let registry = ToolsDiskRegistry::start()?;
+    let cache_root = tempfile::tempdir()?;
+    let client = reqwest::Client::new();
+    let config = registry_config(registry.addr);
+
+    let error = repair_cached_tools_disk(
+        &registry.sha256,
+        TOOLS_DISK_BYTES as u64,
+        &"f".repeat(64),
+        &config,
+        None,
+        cache_root.path(),
+        &client,
+    )
+    .await
+    .expect_err("a mismatched digest must be refused");
+
+    assert!(
+        error.to_string().contains("digest mismatch"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(registry.requests(), 0, "no download may start");
+    Ok(())
+}
+
+/// The failure this test rules out: a fresh host whose desired state pins only
+/// a guest tools disk, with no admitted image. The pass must still download,
+/// decode, and verify the disk, so a VM that later boots finds a ready tools
+/// disk instead of waiting for a scrub pass or failing forever.
+#[tokio::test]
+async fn a_tools_only_pin_downloads_a_verified_disk_with_no_image() -> Result<()> {
+    ensure_ring_provider()?;
+    let registry = ToolsDiskRegistry::start()?;
+    let cache_root = tempfile::tempdir()?;
+    let client = reqwest::Client::new();
+
+    let mut pins = RequiredPins::default();
+    pins.guest_tools.insert((
+        registry.sha256.clone(),
+        TOOLS_DISK_BYTES as u64,
+        "b".repeat(64),
+        2,
+    ));
+    assert!(
+        pins.images.is_empty(),
+        "the desired state pins the tools disk alone"
+    );
+    assert_eq!(registry.requests(), 0);
+
+    warm_required_guest_tools(
+        &pins,
+        &registry_config(registry.addr),
+        None,
+        cache_root.path(),
+        &client,
+    )
+    .await;
+
+    assert_eq!(
+        registry.requests(),
+        1,
+        "a tools-only pin must fetch the published disk"
+    );
+    assert_eq!(
+        registry.cached_path(cache_root.path()),
+        assert_published_disk(&registry, cache_root.path()).await?
+    );
+    assert!(
+        verify_cached_tools_disk(cache_root.path(), &registry.sha256, TOOLS_DISK_BYTES as u64)
+            .await
+    );
+    Ok(())
+}

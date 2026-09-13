@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
-use intar_contracts::catalog::ImageChunkManifestV1;
+use intar_contracts::catalog::{GUEST_BOOTSTRAP_ABI_V2, ImageChunkManifestV1};
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, PREPARED_IMAGE_SOURCE_ROOT, PreparedImageV3Result, Sha256Digest,
 };
@@ -17,15 +17,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex, Notify, Semaphore};
-use tracing::{Instrument as _, error, info, warn};
+use tracing::{Instrument as _, debug, error, info, warn};
 
 use crate::config::{
     BridgeConfig, ImageCacheConfig, ImageRegistryConfig, normalize_sha256, redact_url_userinfo,
 };
 use crate::db::{Db, ImageCacheAccessRow};
 
-const MAX_CONCURRENT_IMAGE_WARMS: usize = 8;
-const MAX_CONCURRENT_CACHE_DOWNLOADS: usize = 16;
 const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const REGISTRY_INDEX_TIMEOUT: Duration = Duration::from_secs(15);
@@ -66,7 +64,6 @@ struct CacheEntryState {
 }
 
 static CACHE_ENTRY_LOCKS: OnceLock<CacheEntryLocks> = OnceLock::new();
-static CACHE_DOWNLOADS: OnceLock<Semaphore> = OnceLock::new();
 static CACHE_REFRESH_WAKE: OnceLock<Notify> = OnceLock::new();
 static REGISTRY_ACCESS_TOKEN: OnceLock<Mutex<RegistryAccessTokenCache>> = OnceLock::new();
 static REGISTRY_ACCESS_TOKEN_REFRESH: OnceLock<Mutex<()>> = OnceLock::new();
@@ -185,10 +182,6 @@ pub(crate) fn wake_cache_refresh() {
 
 fn cache_entry_locks() -> &'static CacheEntryLocks {
     CACHE_ENTRY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cache_downloads() -> &'static Semaphore {
-    CACHE_DOWNLOADS.get_or_init(|| Semaphore::new(MAX_CONCURRENT_CACHE_DOWNLOADS))
 }
 
 async fn cache_entry_lock(cache_root: &Path, key: String) -> Arc<Mutex<CacheEntryState>> {
@@ -346,7 +339,11 @@ pub fn spawn_warm_cache_with_bridge(
             client: &client,
             vm: &vm,
         };
-        run_cache_refresh_cycle(refresh_context, refresh::CacheRefreshScope::FullRepair).await;
+        // Startup prepares the pinned entries that the agent already knows
+        // about. It never starts a full-cache repair: a pass covers only the
+        // pins, and the incremental scrub covers them over several bounded
+        // passes.
+        run_cache_refresh_cycle(refresh_context, refresh::CacheRefreshScope::MissingOnly).await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(
             registry.refresh_interval_minutes.saturating_mul(60),
@@ -355,7 +352,7 @@ pub fn spawn_warm_cache_with_bridge(
         interval.tick().await;
         loop {
             let scope = tokio::select! {
-                _ = interval.tick() => refresh::CacheRefreshScope::FullRepair,
+                _ = interval.tick() => refresh::CacheRefreshScope::Scrub,
                 () = CACHE_REFRESH_WAKE.get_or_init(Notify::new).notified() => {
                     refresh::CacheRefreshScope::MissingOnly
                 }
@@ -481,7 +478,17 @@ pub(crate) use chunked::{
     require_ready_image_launch, touch_cached_image, verified_cached_image_metadata,
     verify_cached_tools_disk,
 };
+mod priority;
+pub(crate) use priority::{
+    BootCriticalGuard, begin_vm_boot_critical, vm_boot_critical, wait_for_vm_boot_idle,
+};
+mod budget;
+mod hashing;
+use hashing::hash_file_bounded;
+mod pins;
+use pins::RequiredPins;
 mod refresh;
+mod scheduler;
 use refresh::*;
 
 mod storage;

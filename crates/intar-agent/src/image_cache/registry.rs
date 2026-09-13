@@ -45,7 +45,7 @@ pub(super) fn registry_images_from_index(index: RegistryIndex) -> Vec<RegistryIm
             let chunk_manifest_sha256 = normalize_sha256(image.chunk_manifest_sha256.as_deref()?)?;
             if image.image_format != "raw_chunks_v1"
                 || image.image_virtual_size_bytes == 0
-                || image.guest_bootstrap_abi != Some(1)
+                || image.guest_bootstrap_abi != Some(GUEST_BOOTSTRAP_ABI_V2)
             {
                 return None;
             }
@@ -65,7 +65,7 @@ pub(super) fn registry_images_from_index(index: RegistryIndex) -> Vec<RegistryIm
                 image_id,
                 image_virtual_size_bytes: image.image_virtual_size_bytes,
                 chunk_manifest_sha256,
-                guest_bootstrap_abi: 1,
+                guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
                 boot: RegistryImageBoot {
                     kernel_sha256,
                     initrd_sha256,
@@ -314,10 +314,9 @@ pub(super) async fn download_to_file(
     image_url_or_path: &str,
     file: &mut tokio::fs::File,
 ) -> Result<DownloadResult> {
-    let _download_permit = cache_downloads()
-        .acquire()
-        .await
-        .context("image cache download semaphore closed")?;
+    // Every registry transfer, chunk or artifact or manifest, takes one of the
+    // two global transfer slots. No pass can open a third connection.
+    let _transfer = budget::acquire_transfer_slot().await?;
     let url = build_registry_url(registry, image_url_or_path)?;
     let display_url = redact_url_userinfo(url.as_str());
     let response = apply_registry_auth(client.get(url.clone()), &url, registry, bridge, client)

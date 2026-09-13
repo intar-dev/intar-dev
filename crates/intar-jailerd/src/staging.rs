@@ -281,7 +281,7 @@ fn open_or_import_tools_disk(config: &JailerdConfig, source: &ArtifactSource) ->
         return Ok(file);
     }
     let destination = config.jail_root.join("tools").join(&name);
-    copy_template_source(config, source, &destination, Some(64 * 1024 * 1024))?;
+    copy_template_source(config, source, &destination, Some(64 * 1024 * 1024), None)?;
     open_existing()
 }
 

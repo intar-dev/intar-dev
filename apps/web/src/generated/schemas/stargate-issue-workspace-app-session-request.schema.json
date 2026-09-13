@@ -9,13 +9,8 @@
       "default": false
     },
     "metadata": {
-      "$ref": "#/$defs/RouteMetadata",
-      "default": {
-        "host_id": null,
-        "run_id": null,
-        "user_id": null,
-        "vm_id": null
-      }
+      "$ref": "#/$defs/WorkspaceAppMetadata",
+      "default": {}
     },
     "protocol": {
       "$ref": "#/$defs/WorkspaceAppProtocol"
@@ -74,7 +69,8 @@
     "route_expires_at"
   ],
   "$defs": {
-    "RouteMetadata": {
+    "WorkspaceAppMetadata": {
+      "description": "Workspace app routes keep optional metadata: they carry no terminal route\nidentity, and an absent value is not an authorization decision.",
       "type": "object",
       "properties": {
         "host_id": {

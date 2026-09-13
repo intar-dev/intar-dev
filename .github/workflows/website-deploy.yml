@@ -2,6 +2,20 @@ name: Website production
 
 on:
   workflow_call:
+    inputs:
+      guest_tools_static_pin_json:
+        description: Verified ABI 2 guest-tools pin for this release
+        required: true
+        type: string
+      maintenance:
+        description: Hold control-plane maintenance for the cutover window (on), return the release to service (off), or follow pending migrations (auto)
+        required: false
+        default: auto
+        type: string
+      website_dist_run_id:
+        description: Run ID of the successful Website validate run that produced website-dist-<sha>
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -26,22 +40,82 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify automatic exact-main deployment
+      - name: Verify exact-main deployment revision
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          test "${GITHUB_EVENT_NAME}" = push
           test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
-          test "${GITHUB_WORKFLOW_REF}" = \
-            "intar-dev/intar-dev/.github/workflows/website.yml@refs/heads/main"
+          # Only the coordinated cutover lane may deploy. The automatic
+          # website lane validates and uploads a tested artifact, and it must
+          # never deploy: a push deploy would bypass the cutover gates.
+          case "${GITHUB_WORKFLOW_REF}" in
+            intar-dev/intar-dev/.github/workflows/website-cutover.yml@refs/heads/main)
+              test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+              ;;
+            *)
+              echo "unexpected calling workflow: ${GITHUB_WORKFLOW_REF}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Download tested deployment artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: website-dist-${{ github.sha }}
-          path: apps/web/dist
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBSITE_DIST_RUN_ID: ${{ inputs.website_dist_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${WEBSITE_DIST_RUN_ID}" =~ ^[0-9]{1,20}$ ]]
+          artifact_name="website-dist-${GITHUB_SHA}"
+          run_json="${RUNNER_TEMP}/website-dist-run.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${WEBSITE_DIST_RUN_ID}" \
+            > "${run_json}"
+          jq -e --arg sha "${GITHUB_SHA}" --arg repository "${GITHUB_REPOSITORY}" '
+            .repository.full_name == $repository and
+            .head_sha == $sha and
+            .head_branch == "main" and
+            .event == "push" and
+            .conclusion == "success" and
+            (.path | endswith("website.yml"))
+          ' "${run_json}" >/dev/null
+          artifacts_json="${RUNNER_TEMP}/website-dist-artifacts.json"
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${WEBSITE_DIST_RUN_ID}/artifacts" \
+            > "${artifacts_json}"
+          jq -e --arg name "${artifact_name}" '
+            [.artifacts[] | select(.name == $name and .expired == false)] |
+            if length == 1 then
+              .[0] as $artifact |
+              ($artifact.id | type == "number") and
+              ($artifact.digest |
+                type == "string" and test("^sha256:[0-9a-f]{64}$"))
+            else false end
+          ' "${artifacts_json}" >/dev/null
+          artifact_id="$(jq -er --arg name "${artifact_name}" \
+            '[.artifacts[] | select(.name == $name)] | .[0].id' \
+            "${artifacts_json}")
+          expected_digest="$(jq -er --arg name "${artifact_name}" \
+            '[.artifacts[] | select(.name == $name)] | .[0].digest' \
+            "${artifacts_json}" | cut -d: -f2)"
+          artifact_zip="${RUNNER_TEMP}/website-dist.zip"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+            > "${artifact_zip}"
+          measured_digest="$(sha256sum "${artifact_zip}" | cut -d ' ' -f 1)"
+          test "${measured_digest}" = "${expected_digest}"
+          mkdir -p apps/web/dist
+          python3 - "${artifact_zip}" "${GITHUB_WORKSPACE}/apps/web/dist" <<'PY'
+          import sys, zipfile
+          archive_path, destination = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(archive_path) as archive:
+              for name in archive.namelist():
+                  if name.startswith("/") or ".." in name.split("/"):
+                      sys.exit("unsafe artifact member: " + name)
+              archive.extractall(destination)
+          PY
+          test -f "${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
 
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -88,6 +162,41 @@ jobs:
           {
             printf 'DATABASE_ID=%s\n' "${database_id}"
             printf 'DEPLOYMENT_CONFIG=%s\n' "${config}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Inject the verified ABI 2 guest-tools pin
+        working-directory: ${{ github.workspace }}
+        env:
+          GUEST_TOOLS_PIN_JSON: ${{ inputs.guest_tools_static_pin_json }}
+          MAINTENANCE_MODE: ${{ inputs.maintenance }}
+        run: |
+          set -euo pipefail
+          case "${MAINTENANCE_MODE}" in
+            auto|on|off) ;;
+            *) echo "maintenance input must be auto, on, or off" >&2; exit 1 ;;
+          esac
+          if [ -z "${GUEST_TOOLS_PIN_JSON}" ]; then
+            echo 'SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON is not set.' >&2
+            echo 'The ABI 2 release has no dynamic channel fallback, so the' >&2
+            echo 'verified release pin must come from the release bundle.' >&2
+            exit 1
+          fi
+          pin_file="${RUNNER_TEMP}/release-static-pin.json"
+          pin_check="${RUNNER_TEMP}/release-static-pin-check.json"
+          printf '%s' "${GUEST_TOOLS_PIN_JSON}" > "${pin_file}"
+          bun tools/deploy/guest-tools-pin.ts check --pin "${pin_file}" > "${pin_check}"
+          jq -e '.status == "valid"' "${pin_check}" >/dev/null
+          jq --slurpfile pin "${pin_file}" \
+            '.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON = $pin[0]' \
+            "${DEPLOYMENT_CONFIG}" > "${DEPLOYMENT_CONFIG}.pinned"
+          mv "${DEPLOYMENT_CONFIG}.pinned" "${DEPLOYMENT_CONFIG}"
+          jq -e --slurpfile pin "${pin_file}" \
+            '.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON == $pin[0]' \
+            "${DEPLOYMENT_CONFIG}" >/dev/null
+          printf 'deployment pin sha256: %s\n' \
+            "$(jq -er '.static_pin_sha256' "${pin_check}")"
+          {
+            printf 'MAINTENANCE_MODE=%s\n' "${MAINTENANCE_MODE}"
           } >> "${GITHUB_ENV}"
 
       - name: Prepare runtime secrets
@@ -159,11 +268,15 @@ jobs:
             --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
 
       - name: Capture pre-migration D1 evidence
-        if: steps.migrations.outputs.pending == 'true'
+        if: steps.migrations.outputs.pending == 'true' || inputs.maintenance != 'auto'
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Both cutover operations, the pin deploy and the return to service,
+          # require the drained gate and a whole-fleet zero state. The normal
+          # migration path keeps only its original run and artifact checks.
+          REQUIRE_DRAINED_GATE: ${{ inputs.maintenance != 'auto' }}
         run: |
           set -euo pipefail
           d1_info="${RUNNER_TEMP}/production-d1-info.json"
@@ -218,18 +331,31 @@ jobs:
           }
 
           run_drain_sql="SELECT
+              -- Evidence only for the enabled-host count: the cutover keeps the
+              -- host enabled while the fleet gate is drained, so an admin proof
+              -- run can be placed. The gate state and the two zero counts are
+              -- the enforced conditions.
               (SELECT COUNT(*) FROM scenario_runs
                 WHERE hidden_at IS NULL AND
                   (active_key IS NOT NULL OR state NOT IN ('completed', 'failed')))
                 AS active_scenario_run_count,
               (SELECT COUNT(*) FROM scenario_run_artifacts
                 WHERE upload_status <> 'uploaded')
-                AS non_uploaded_run_artifact_count;"
+                AS non_uploaded_run_artifact_count,
+              (SELECT COUNT(*) FROM agent_hosts
+                WHERE role = 'agent' AND disabled = 0)
+                AS enabled_agent_host_count,
+              (SELECT state FROM runtime_operation_gates
+                WHERE key = 'image_cutover')
+                AS cutover_gate_state;"
           d1_readonly_query "${run_drain_sql}" "${run_drain_audit}"
-          jq -e '
+          jq -e --argjson require_drained "${REQUIRE_DRAINED_GATE}" '
             (.result[0].results | length == 1) and
             .result[0].results[0].active_scenario_run_count == 0 and
-            .result[0].results[0].non_uploaded_run_artifact_count == 0
+            .result[0].results[0].non_uploaded_run_artifact_count == 0 and
+            (if $require_drained then
+              .result[0].results[0].cutover_gate_state == "drained"
+            else true end)
           ' "${run_drain_audit}" >/dev/null
 
           assignment_counts_sql='SELECT organization_id, scenario_id,
@@ -250,7 +376,7 @@ jobs:
           d1_readonly_query "${enabled_scenarios_sql}" "${enabled_scenarios}"
 
       - name: Prepare maintenance configuration
-        if: steps.migrations.outputs.pending == 'true'
+        if: steps.migrations.outputs.pending == 'true' || inputs.maintenance == 'on'
         run: |
           set -euo pipefail
           config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"
@@ -262,9 +388,16 @@ jobs:
             "${maintenance_config}" >/dev/null
           printf 'MAINTENANCE_DEPLOYMENT_CONFIG=%s\n' "${maintenance_config}" \
             >> "${GITHUB_ENV}"
+          if [ "${MAINTENANCE_MODE}" = on ]; then
+            # The cutover holds the control plane closed for the whole window.
+            # The candidate deploy must not reopen it: the runtime gates reopen
+            # in order, and only then does a maintenance-off deploy run.
+            printf 'DEPLOYMENT_CONFIG=%s\n' "${maintenance_config}" \
+              >> "${GITHUB_ENV}"
+          fi
 
       - name: Enable maintenance for pending migrations
-        if: steps.migrations.outputs.pending == 'true'
+        if: steps.migrations.outputs.pending == 'true' || inputs.maintenance == 'on'
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -278,7 +411,7 @@ jobs:
             "${RUNNER_TEMP}/web-maintenance.json"
 
       - name: Drain and recheck maintenance
-        if: steps.migrations.outputs.pending == 'true'
+        if: steps.migrations.outputs.pending == 'true' || inputs.maintenance == 'on'
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

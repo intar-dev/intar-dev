@@ -20,6 +20,48 @@ describe("generated contract schemas", () => {
     )).toBe(true);
   });
 
+  it("validates the stargate terminal target stage fixture", () => {
+    expect(validateFixture(
+      "schemas/stargate-stage-terminal-target-request.schema.json",
+      "fixtures/stargate/stage-terminal-target-request.json",
+    )).toBe(true);
+  });
+
+  it("validates the stargate terminal target stage response fixture", () => {
+    expect(validateFixture(
+      "schemas/stargate-stage-terminal-target-response.schema.json",
+      "fixtures/stargate/stage-terminal-target-response.json",
+    )).toBe(true);
+  });
+
+  it("validates the stargate terminal target activate fixture", () => {
+    expect(validateFixture(
+      "schemas/stargate-activate-terminal-target-request.schema.json",
+      "fixtures/stargate/activate-terminal-target-request.json",
+    )).toBe(true);
+  });
+
+  it("rejects a pending target on the stage call", () => {
+    const fixture = readJson(
+      "fixtures/stargate/stage-terminal-target-request.json",
+    ) as Record<string, unknown>;
+    expect(validateValue(
+      "schemas/stargate-stage-terminal-target-request.schema.json",
+      { ...fixture, target: { state: "pending" } },
+    )).toBe(false);
+  });
+
+  it("rejects an activate call with no attachment id", () => {
+    const fixture = readJson(
+      "fixtures/stargate/activate-terminal-target-request.json",
+    ) as Record<string, unknown>;
+    const { attachment_id: _omitted, ...withoutAttachment } = fixture;
+    expect(validateValue(
+      "schemas/stargate-activate-terminal-target-request.schema.json",
+      withoutAttachment,
+    )).toBe(false);
+  });
+
   it("validates the scenario manifest fixture", () => {
     expect(validateFixture(
       "schemas/catalog-scenario-manifest-v4.schema.json",

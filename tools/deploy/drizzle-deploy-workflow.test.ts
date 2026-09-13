@@ -8,7 +8,7 @@ const validationWorkflow = read(".github/workflows/website.yml");
 const deployScript = read("tools/deploy/deploy-web.sh");
 
 describe("automatic web deployment workflow", () => {
-  it("runs one fixed lane automatically for web changes on main", () => {
+  it("validates and builds web changes on main without deploying", () => {
     expect(validationWorkflow).toContain("push:");
     expect(validationWorkflow).toContain("branches:\n      - main");
     expect(validationWorkflow).toContain('      - "apps/web/**"');
@@ -16,13 +16,13 @@ describe("automatic web deployment workflow", () => {
     expect(validationWorkflow).toContain(
       "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
     );
-    expect(validationWorkflow).toContain(
-      "needs:\n      - validate\n      - ui",
-    );
-    expect(validationWorkflow).toContain(
+    // The ABI 2 release has no compatibility path, so the automatic lane
+    // stops at a tested artifact and the manual cutover lane deploys it.
+    expect(validationWorkflow).not.toContain(
       "uses: ./.github/workflows/website-deploy.yml",
     );
-    expect(validationWorkflow).toContain("secrets: inherit");
+    expect(validationWorkflow).not.toContain("secrets: inherit");
+    expect(validationWorkflow).not.toContain("name: Deploy production");
   });
 
   it("keeps only web checks and one Chromium smoke test", () => {
@@ -39,7 +39,7 @@ describe("automatic web deployment workflow", () => {
     expect(validationWorkflow).not.toContain("workspace-agent:");
     expect(validationWorkflow).not.toContain("Build learner guest tools");
     expect(validationWorkflow).toContain("website-dist-${{ github.sha }}");
-    expect(deployWorkflow).toContain("website-dist-${{ github.sha }}");
+    expect(deployWorkflow).toContain("website-dist-${GITHUB_SHA}");
   });
 
   it("uses maintenance only when a generated D1 migration is pending", () => {

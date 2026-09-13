@@ -226,7 +226,7 @@ async function seedDestroyableRun(runId: string, now: number) {
         tools_disk_sha256: "1".repeat(64),
         tools_disk_size_bytes: 64 * 1024 * 1024,
         kino_sha256: "2".repeat(64),
-        bootstrap_abi: 1,
+        bootstrap_abi: 2,
       },
       resources: {
         cpu_millis: 1_000,

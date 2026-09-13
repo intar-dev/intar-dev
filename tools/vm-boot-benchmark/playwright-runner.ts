@@ -40,17 +40,69 @@ export interface BrowserMeasurementOptions {
 interface StartAcceptedResponse {
   runId: string;
   acceptedUnixMs: number;
+  acceptedUnixSource: "control-plane" | "browser-receive";
   attempts: number;
 }
 
-export function freshStartRunId(responseOk: boolean, body: unknown) {
+/**
+ * Decide whether a Start response proves a run this attempt created.
+ *
+ * A transport retry inside one Start attempt can return reused: true for the
+ * run that the same attempt already created. That is still this attempt's run,
+ * so the rule is the run's own acceptance time: a sample is invalid only when
+ * the returned run was accepted before this attempt started.
+ *
+ * The reuse test is only sound where acceptedAt is the durable acceptance time.
+ * The baseline release returns Date.now() on its reuse path, so a baseline
+ * reused response always looks recent and cannot be attributed to an attempt.
+ * The variant therefore decides the rule:
+ *
+ * - candidate: a reused run is accepted only with a durable acceptedAt at or
+ *   after the attempt start;
+ * - baseline: a reused run is refused. A fresh accept is still accepted, and
+ *   that is the normal path.
+ *
+ * record.reused must be a boolean. A response without it is refused, because an
+ * absent flag means "unknown", not "fresh", and treating it as fresh would
+ * attach a pre-existing run to a new sample.
+ */
+export function freshStartRunId(
+  responseOk: boolean,
+  body: unknown,
+  attemptStartedUnixMs: number,
+  variant: "baseline" | "candidate",
+): { runId: string; acceptedUnixMs: number | null; reused: boolean } | null {
   const record = asRecord(body);
-  return responseOk &&
-    record?.accepted === true &&
-    record.reused === false &&
-    typeof record.runId === "string"
-    ? record.runId
-    : null;
+  if (!responseOk || record?.accepted !== true || typeof record.runId !== "string") {
+    return null;
+  }
+  if (typeof record.reused !== "boolean") {
+    return null;
+  }
+  const acceptedAt = finiteNumber(record.acceptedAt);
+  if (record.reused === false) {
+    // A fresh accept is this attempt's own run: the page action produced it, so
+    // no timestamp is needed to attribute it. A newer control plane reports the
+    // durable acceptance time, and an older release reports only the creation
+    // time; both are used when present.
+    const createdAt = finiteNumber(record.createdAt);
+    return {
+      runId: record.runId,
+      acceptedUnixMs: acceptedAt ?? createdAt,
+      reused: false,
+    };
+  }
+  if (variant === "baseline") {
+    // The baseline reuse path returns a response clock in the same field, so a
+    // reused baseline run cannot be told apart from a truly fresh one.
+    return null;
+  }
+  // A candidate reused run must prove it was accepted by this attempt. Only a
+  // durable acceptance time at or after the attempt start can do that.
+  if (acceptedAt === null || acceptedAt < attemptStartedUnixMs) {
+    return null;
+  }
+  return { runId: record.runId, acceptedUnixMs: acceptedAt, reused: true };
 }
 
 interface StoredBootEvidence {
@@ -66,7 +118,7 @@ type CompleteStoredBootEvidence = StoredBootEvidence & {
 };
 
 export interface BrowserMeasurementEvidence {
-  schemaVersion: 1;
+  schemaVersion: 2;
   benchmarkRunId: string;
   participantId: string;
   variant: string;
@@ -78,7 +130,11 @@ export interface BrowserMeasurementEvidence {
   startBoundary: "learner-start-link-click";
   startUnixMs: number;
   startAttempts: number;
+  startReused: boolean;
+  acceptedUnixMs: number;
+  acceptedUnixSource: "control-plane" | "browser-receive";
   terminalConnectedUnixMs: number;
+  clientRttMs: number;
   firstCommand: {
     startedUnixMs: number;
     successUnixMs: number;
@@ -305,6 +361,9 @@ function observeScenarioStart(
   const targetPath = `/api/scenarios/${encodeURIComponent(scenarioId)}/start`;
   let attempts = 0;
   let settled = false;
+  // The attempt starts before the click, so the run's own acceptance time
+  // decides whether the run predates this attempt.
+  const attemptStartedUnixMs = Date.now();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let cancel: () => void = () => {};
 
@@ -329,12 +388,23 @@ function observeScenarioStart(
       attempts += 1;
       const body = (await response.json().catch(() => null)) as unknown;
       const record = asRecord(body);
-      const acceptedRunId = freshStartRunId(response.ok(), body);
-      if (acceptedRunId) {
+      const accepted = freshStartRunId(
+        response.ok(),
+        body,
+        attemptStartedUnixMs,
+        options.variant,
+      );
+      if (accepted !== null) {
         finish(() =>
           resolveStart({
-            runId: acceptedRunId,
-            acceptedUnixMs: Date.now(),
+            runId: accepted.runId,
+            // The control plane's own time when it reports one, and the browser
+            // receive time when a release does not. The two clocks are not
+            // comparable, so the report records which source was used and the
+            // boot window stays measured from the page clock.
+            acceptedUnixMs: accepted.acceptedUnixMs ?? Date.now(),
+            acceptedUnixSource:
+              accepted.acceptedUnixMs === null ? "browser-receive" : "control-plane",
             attempts,
           }),
         );
@@ -373,7 +443,18 @@ function observeScenarioStart(
   return { promise, cancel };
 }
 
-async function waitForConnectedTerminal(page: Page, deadlineUnixMs: number) {
+/**
+ * Wait until the learner page shows a terminal the learner could use, then read
+ * the browser clock.
+ *
+ * The collector checks visibility itself instead of trusting the page state. A
+ * warm or hidden session can answer with the benchmark nonce while the terminal
+ * stays invisible, so the nonce alone is not proof that a learner reached a
+ * terminal. The returned value comes from the same clock source as the page's
+ * own timing marks, so the tool can compare it with the connected mark and the
+ * first command.
+ */
+export async function waitForVisibleTerminal(page: Page, deadlineUnixMs: number) {
   await page
     .locator("[data-scenario-terminal-ready]")
     .waitFor({ state: "visible", timeout: remainingTimeout(deadlineUnixMs) });
@@ -384,6 +465,21 @@ async function waitForConnectedTerminal(page: Page, deadlineUnixMs: number) {
     .locator(".xterm")
     .first()
     .waitFor({ state: "visible", timeout: remainingTimeout(deadlineUnixMs) });
+  const terminalInput = page.getByRole("textbox", { name: "Terminal input" });
+  await terminalInput.waitFor({
+    state: "visible",
+    timeout: remainingTimeout(deadlineUnixMs),
+  });
+  if (!(await terminalInput.isEnabled())) {
+    throw new Error("the terminal input is not editable");
+  }
+  const visibleUnixMs = await page.evaluate(() =>
+    Math.round(performance.timeOrigin + performance.now()),
+  );
+  if (typeof visibleUnixMs !== "number" || !Number.isFinite(visibleUnixMs)) {
+    throw new Error("the browser clock did not produce a terminal-visible mark");
+  }
+  return visibleUnixMs;
 }
 
 
@@ -600,6 +696,25 @@ export function observeRemoteTerminalFrames(
   };
 }
 
+export async function measureClientRttMs(page: Page, origin: string) {
+  const samples: number[] = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const elapsed = await page.evaluate(async (url: string) => {
+      const started = performance.now();
+      await fetch(url, { cache: "no-store", credentials: "omit" }).catch(
+        () => null,
+      );
+      return Math.round(performance.now() - started);
+    }, new URL("/favicon.svg", origin).href);
+    if (Number.isSafeInteger(elapsed) && elapsed >= 0) samples.push(elapsed);
+  }
+  if (samples.length === 0) {
+    throw new Error("could not measure the learner client round trip time");
+  }
+  return Math.max(1, Math.min(...samples));
+}
+
+
 async function clickLearnerStartLink(input: {
   page: Page;
   origin: string;
@@ -714,6 +829,7 @@ export async function runBrowserMeasurement(
         waitUntil: "domcontentloaded",
         timeout: remainingTimeout(deadlineUnixMs),
       });
+      const clientRttMs = await measureClientRttMs(page, options.origin);
       learnerStartLinkClickedUnixMs = await clickLearnerStartLink({
         page,
         origin: options.origin,
@@ -736,7 +852,7 @@ export async function runBrowserMeasurement(
     await page.waitForURL(runPath(options.origin, accepted.runId), {
       timeout: remainingTimeout(deadlineUnixMs),
     });
-    await waitForConnectedTerminal(page, deadlineUnixMs);
+    const terminalVisibleUnixMs = await waitForVisibleTerminal(page, deadlineUnixMs);
     await terminalFrames.waitForSocketListeners(
       remainingTimeout(deadlineUnixMs),
     );
@@ -762,12 +878,20 @@ export async function runBrowserMeasurement(
       startBoundary: "learner-start-link-click",
       startUnixMs: sessionEvidence.startUnixMs,
       startAttempts: accepted.attempts,
+      startReused: accepted.reused,
+      acceptedUnixMs: accepted.acceptedUnixMs,
+      acceptedUnixSource: accepted.acceptedUnixSource,
       terminalConnectedUnixMs: sessionEvidence.terminalConnectedUnixMs,
+      clientRttMs,
       firstCommand,
       stages: {
         ...sessionEvidence.stages,
         "learner-start-link-click": learnerStartLinkClickedUnixMs,
         "start-accepted": accepted.acceptedUnixMs,
+        // The collector writes this mark from its own observation, so a page
+        // that reports a connected socket while the terminal stays hidden
+        // cannot produce it.
+        "terminal-visible": terminalVisibleUnixMs,
       },
     };
   } finally {

@@ -1,5 +1,19 @@
 use super::*;
 
+/// Services that belong to the scenario laboratory, not to the terminal path.
+///
+/// The runtime stage removes their boot enablement and enables them into
+/// `intar-lab.target` instead, so the runtime supervisor's single
+/// `systemctl start intar-lab.target` action is the only thing that starts
+/// them. The build guest keeps them running: the stage moves links and never
+/// stops a unit.
+///
+/// The list holds the K3s control plane and the K3s worker. The current
+/// catalog installs the server only, so a worker unit is usually absent and
+/// the loop skips it. Fault services that a scenario deliberately breaks, such
+/// as nginx, are not heavy laboratory services and stay in the boot path.
+const LAB_GATED_UNITS: &[&str] = &["k3s.service", "k3s-agent.service"];
+
 pub(super) fn append_runtime_assets(
     script: &mut String,
     kino_template: &str,
@@ -280,6 +294,29 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "kino_log_path=\"$runtime_state_path/kino.log\"").context("format error")?;
     writeln!(
         script,
+        "kino_ready_fifo=\"$runtime_state_path/kino-ready.fifo\""
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "lab_release_fifo=\"$runtime_state_path/lab-release.fifo\""
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "kino_ready_timeout_seconds={GUEST_KINO_READY_TIMEOUT_SECONDS}"
+    )
+    .context("format error")?;
+    writeln!(script, "kino_start_attempts={GUEST_KINO_START_ATTEMPTS}").context("format error")?;
+    writeln!(
+        script,
+        "lab_release_fallback_seconds={GUEST_LAB_RELEASE_FALLBACK_SECONDS}"
+    )
+    .context("format error")?;
+    writeln!(script, "kino_lab_release_uid=\"\"").context("format error")?;
+    writeln!(script, "lab_release_done=\"\"").context("format error")?;
+    writeln!(
+        script,
         "phase_timing_path=\"$runtime_state_path/phase-timings.env\""
     )
     .context("format error")?;
@@ -358,7 +395,16 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "  local command=\"$3\"").context("format error")?;
     writeln!(script, "  local uptime").context("format error")?;
     writeln!(script, "  trap - ERR").context("format error")?;
-    writeln!(script, "  read -r uptime _ </proc/uptime").context("format error")?;
+    // The error report must never fail. A read error here would end the shell
+    // before it prints the report, because the shell runs with errexit, so the
+    // report falls back to an explicit unknown value.
+    writeln!(
+        script,
+        "  if ! read -r uptime _ </proc/uptime 2>/dev/null; then"
+    )
+    .context("format error")?;
+    writeln!(script, "    uptime=unknown").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
     writeln!(
         script,
         "  printf '[intar-runtime] ts=boot+%ss error=command_failed status=%s line=%s command=%q\\n' \"$uptime\" \"$status\" \"$line\" \"$command\" >&2"
@@ -420,7 +466,7 @@ pub(super) fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "  [ -f \"$tools_mount_path/manifest.json\" ] || {{ echo 'guest tools manifest is missing' >&2; return 1; }}").context("format error")?;
     writeln!(script, "  [ -x \"$tools_mount_path/bin/kino\" ] || {{ echo 'Kino guest tool is missing or not executable' >&2; return 1; }}").context("format error")?;
-    writeln!(script, "  [ \"$INTAR_GUEST_BOOTSTRAP_ABI\" = 1 ] || {{ echo 'guest tools bootstrap ABI is unsupported' >&2; return 1; }}").context("format error")?;
+    writeln!(script, "  [ \"$INTAR_GUEST_BOOTSTRAP_ABI\" = {GUEST_BOOTSTRAP_ABI_V2} ] || {{ echo 'guest tools bootstrap ABI is unsupported' >&2; return 1; }}").context("format error")?;
     writeln!(script, "  grep -Fq '\"schema_version\":1' \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest schema is invalid' >&2; return 1; }}").context("format error")?;
     writeln!(script, "  grep -Fq \"\\\"bootstrap_abi\\\":$INTAR_GUEST_BOOTSTRAP_ABI\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest ABI mismatch' >&2; return 1; }}").context("format error")?;
     writeln!(script, "  grep -Fq \"\\\"kino_sha256\\\":\\\"$INTAR_KINO_SHA256\\\"\" \"$tools_mount_path/manifest.json\" || {{ echo 'guest tools manifest Kino SHA-256 mismatch' >&2; return 1; }}").context("format error")?;
@@ -624,6 +670,92 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "}}").context("format error")?;
     writeln!(script, "trap cleanup EXIT INT TERM").context("format error")?;
     writeln!(script).context("format error")?;
+    script.push_str(
+        r#"monotonic_millis() {
+  local uptime
+  read -r uptime _ </proc/uptime
+  uptime_millis "$uptime"
+  printf '%s\n' "$UPTIME_MILLIS"
+}
+
+# Create the root-only channels that Kino writes and this supervisor reads.
+# The supervisor holds both read ends for the life of the boot, so Kino never
+# waits for a reader and the pipes never report a premature end of file.
+prepare_guest_channels() {
+  kino_lab_release_uid="$(id -u "$recording_user")"
+  rm -f "$lab_release_fifo"
+  mkfifo -m 0600 "$lab_release_fifo"
+  exec {lab_release_fd}<>"$lab_release_fifo"
+}
+
+# Accept one startup acknowledgement from Kino. The version, the Kino digest,
+# and the process identity must all match this boot.
+kino_ready_line_is_valid() {
+  local fields
+  read -r -a fields <<<"$1"
+  [ "${#fields[@]}" -eq 4 ] || return 1
+  [ "${fields[0]}" = INTAR_KINO_READY ] || return 1
+  [ "${fields[1]}" = v2 ] || return 1
+  [ "${fields[2]}" = "sha256=$INTAR_KINO_SHA256" ] || return 1
+  [ "${fields[3]}" = "pid=$KINO_PID" ] || return 1
+  return 0
+}
+
+# Report one startup failure with the Kino log, stop Kino, and stop the boot.
+# The EXIT trap unmounts the runtime, tools, and recording disks.
+report_kino_startup_failure() {
+  local message="$1"
+  kill "$KINO_PID" >/dev/null 2>&1 || true
+  wait "$KINO_PID" 2>/dev/null || true
+  cat "$kino_log_path" >&2 || true
+  echo "$message" >&2
+  exit 1
+}
+
+# Start the heavy scenario lab services. The action is fixed and idempotent:
+# the target pulls the scenario lab units, including the K3s unit when the
+# scenario installs one.
+start_lab_target() {
+  if [ -n "$lab_release_done" ]; then
+    return 0
+  fi
+  lab_release_done=1
+  if systemctl start intar-lab.target; then
+    log_phase lab_release end
+  else
+    echo 'the scenario lab target did not start' >&2
+  fi
+  return 0
+}
+
+# Release the lab after the first authenticated recorded terminal, or after
+# the fallback interval, so a student who never opens a terminal still gets a
+# complete lab. Both paths call the same action once.
+release_lab_services() {
+  local deadline_ms line
+  log_phase lab_release start
+  deadline_ms=$(( $(monotonic_millis) + lab_release_fallback_seconds * 1000 ))
+  while :; do
+    if IFS= read -r -t 0.1 -u "$lab_release_fd" line; then
+      if [ "$line" = "INTAR_EVENT v2 recording_started vm=$INTAR_VM_HOSTNAME kino=$KINO_PID" ]; then
+        start_lab_target
+        return 0
+      fi
+      echo "ignoring an unknown laboratory release event: $line" >&2
+      continue
+    fi
+    if ! kill -0 "$KINO_PID" 2>/dev/null; then
+      return 0
+    fi
+    if [ "$(monotonic_millis)" -ge "$deadline_ms" ]; then
+      start_lab_target
+      return 0
+    fi
+  done
+}
+
+"#,
+    );
     writeln!(script, "configure_run_cli() {{").context("format error")?;
     writeln!(script, "  log_phase run_cli_config start").context("format error")?;
     writeln!(
@@ -662,37 +794,75 @@ pub(super) fn append_runtime_assets(
     writeln!(script, "  chmod 0644 \"$kino_config_path\"").context("format error")?;
     writeln!(script, "  wait_for_vsock_ready").context("format error")?;
     writeln!(script, "  rm -f \"$kino_control_socket\"").context("format error")?;
-    writeln!(script, "  for _ in {{1..100}}; do").context("format error")?;
+    writeln!(script, "  prepare_guest_channels").context("format error")?;
+    writeln!(script, "  local deadline_ms attempts_left line").context("format error")?;
+    writeln!(
+        script,
+        "  deadline_ms=$(( $(monotonic_millis) + kino_ready_timeout_seconds * 1000 ))"
+    )
+    .context("format error")?;
+    writeln!(script, "  attempts_left=$kino_start_attempts").context("format error")?;
+    writeln!(script, "  while :; do").context("format error")?;
+    writeln!(script, "    rm -f \"$kino_ready_fifo\"").context("format error")?;
+    writeln!(script, "    mkfifo -m 0600 \"$kino_ready_fifo\"").context("format error")?;
+    writeln!(script, "    exec {{kino_ready_fd}}<>\"$kino_ready_fifo\"").context("format error")?;
     writeln!(script, "    : >\"$kino_log_path\"").context("format error")?;
     writeln!(
         script,
-        "    KINO_CONTROL_SOCKET=\"$kino_control_socket\" /usr/local/bin/kino --config \"$kino_config_path\" >\"$kino_log_path\" 2>&1 &"
+        "    KINO_CONTROL_SOCKET=\"$kino_control_socket\" KINO_READY_FIFO=\"$kino_ready_fifo\" KINO_LAB_RELEASE_FIFO=\"$lab_release_fifo\" KINO_LAB_RELEASE_UID=\"$kino_lab_release_uid\" /usr/local/bin/kino --config \"$kino_config_path\" >>\"$kino_log_path\" 2>&1 &"
     )
     .context("format error")?;
     writeln!(script, "    KINO_PID=\"$!\"").context("format error")?;
-    writeln!(script, "    sleep 0.2").context("format error")?;
-    writeln!(script, "    if kill -0 \"$KINO_PID\" >/dev/null 2>&1; then")
-        .context("format error")?;
-    writeln!(script, "      log_phase kino_boot end").context("format error")?;
-    writeln!(script, "      return 0").context("format error")?;
-    writeln!(script, "    fi").context("format error")?;
-    writeln!(script, "    wait \"$KINO_PID\" || true").context("format error")?;
+    writeln!(script, "    while :; do").context("format error")?;
     writeln!(
         script,
-        "    if grep -q 'failed to bind vsock://' \"$kino_log_path\"; then"
+        "      if [ \"$(monotonic_millis)\" -ge \"$deadline_ms\" ]; then"
     )
     .context("format error")?;
-    writeln!(script, "      sleep 0.1").context("format error")?;
-    writeln!(script, "      continue").context("format error")?;
-    writeln!(script, "    fi").context("format error")?;
-    writeln!(script, "    cat \"$kino_log_path\" >&2 || true").context("format error")?;
-    writeln!(script, "    echo 'kino exited during startup' >&2").context("format error")?;
-    writeln!(script, "    exit 1").context("format error")?;
-    writeln!(script, "  done").context("format error")?;
-    writeln!(script, "  cat \"$kino_log_path\" >&2 || true").context("format error")?;
-    writeln!(script, "  echo 'timed out waiting for kino vsock bind' >&2")
+    writeln!(
+        script,
+        "        report_kino_startup_failure 'kino did not acknowledge startup before the deadline'"
+    )
+    .context("format error")?;
+    writeln!(script, "      fi").context("format error")?;
+    writeln!(script, "      if ! kill -0 \"$KINO_PID\" 2>/dev/null; then")
         .context("format error")?;
-    writeln!(script, "  exit 1").context("format error")?;
+    writeln!(script, "        wait \"$KINO_PID\" || true").context("format error")?;
+    writeln!(
+        script,
+        "        if [ \"$attempts_left\" -gt 1 ] && grep -q 'failed to bind vsock://' \"$kino_log_path\"; then"
+    )
+    .context("format error")?;
+    writeln!(script, "          attempts_left=$((attempts_left - 1))").context("format error")?;
+    writeln!(script, "          break").context("format error")?;
+    writeln!(script, "        fi").context("format error")?;
+    writeln!(
+        script,
+        "        report_kino_startup_failure 'kino exited during startup'"
+    )
+    .context("format error")?;
+    writeln!(script, "      fi").context("format error")?;
+    writeln!(
+        script,
+        "      if IFS= read -r -t 0.1 -u \"$kino_ready_fd\" line; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "        if ! kino_ready_line_is_valid \"$line\"; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "          report_kino_startup_failure \"kino sent an unusable startup acknowledgement: $line\""
+    )
+    .context("format error")?;
+    writeln!(script, "        fi").context("format error")?;
+    writeln!(script, "        log_phase kino_boot end").context("format error")?;
+    writeln!(script, "        return 0").context("format error")?;
+    writeln!(script, "      fi").context("format error")?;
+    writeln!(script, "    done").context("format error")?;
+    writeln!(script, "  done").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "configure_guest_network() {{").context("format error")?;
@@ -981,6 +1151,7 @@ start_sshd() {
     writeln!(script, "uptime_millis \"$ready_uptime\"").context("format error")?;
     writeln!(script, "printf 'READY_UPTIME_MS=%s\\n' \"$UPTIME_MILLIS\" >>\"$phase_timing_path\" 2>/dev/null || true").context("format error")?;
     writeln!(script, "log_phase ready end").context("format error")?;
+    writeln!(script, "release_lab_services").context("format error")?;
     writeln!(script, "wait -n \"$KINO_PID\" || true").context("format error")?;
     writeln!(script, "if ! kill -0 \"$KINO_PID\" >/dev/null 2>&1; then cat \"$kino_log_path\" >&2 || true; echo 'kino exited unexpectedly' >&2; exit 1; fi").context("format error")?;
     writeln!(script, "echo 'runtime supervisor exited unexpectedly' >&2")
@@ -1019,5 +1190,70 @@ start_sshd() {
     writeln!(script, "EOF_RUNTIME_UNIT").context("format error")?;
     writeln!(script).context("format error")?;
 
+    Ok(())
+}
+
+/// Write the laboratory release assets into the image.
+///
+/// The image finalization stage calls this, so the baked image:
+///
+/// * always has \`/etc/systemd/system/intar-lab.target\`, which makes the single
+///   \`systemctl start intar-lab.target\` action of the runtime supervisor
+///   always valid;
+/// * never pulls a laboratory service from \`multi-user.target\`, so the
+///   terminal path does not wait for the laboratory.
+///
+/// The build guest keeps its laboratory running: moving an enablement link
+/// does not stop a unit, and this stage never stops one.
+pub(super) fn append_lab_release_assets(script: &mut String) -> Result<()> {
+    writeln!(script, "log_phase lab_units start").context("format error")?;
+    writeln!(
+        script,
+        "cat >/etc/systemd/system/intar-lab.target <<'EOF_LAB_TARGET'"
+    )
+    .context("format error")?;
+    writeln!(script, "[Unit]").context("format error")?;
+    writeln!(script, "Description=Intar scenario laboratory services").context("format error")?;
+    writeln!(script, "EOF_LAB_TARGET").context("format error")?;
+    writeln!(
+        script,
+        "chown root:root /etc/systemd/system/intar-lab.target"
+    )
+    .context("format error")?;
+    writeln!(script, "chmod 0644 /etc/systemd/system/intar-lab.target").context("format error")?;
+    writeln!(
+        script,
+        "install -d -o root -g root -m 0755 /etc/systemd/system/intar-lab.target.wants"
+    )
+    .context("format error")?;
+    writeln!(script, "for unit in {}; do", LAB_GATED_UNITS.join(" ")).context("format error")?;
+    writeln!(script, "  unit_path=\"\"").context("format error")?;
+    writeln!(
+        script,
+        "  for candidate in \"/etc/systemd/system/$unit\" \"/usr/lib/systemd/system/$unit\" \"/lib/systemd/system/$unit\"; do"
+    )
+    .context("format error")?;
+    writeln!(script, "    if [ -f \"$candidate\" ]; then").context("format error")?;
+    writeln!(script, "      unit_path=\"$candidate\"").context("format error")?;
+    writeln!(script, "      break").context("format error")?;
+    writeln!(script, "    fi").context("format error")?;
+    writeln!(script, "  done").context("format error")?;
+    writeln!(script, "  if [ -z \"$unit_path\" ]; then").context("format error")?;
+    writeln!(script, "    continue").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(script, "  for wants_dir in /etc/systemd/system/*.wants; do")
+        .context("format error")?;
+    writeln!(script, "    if [ -d \"$wants_dir\" ]; then").context("format error")?;
+    writeln!(script, "      rm -f \"$wants_dir/$unit\"").context("format error")?;
+    writeln!(script, "    fi").context("format error")?;
+    writeln!(script, "  done").context("format error")?;
+    writeln!(
+        script,
+        "  ln -sfn \"$unit_path\" \"/etc/systemd/system/intar-lab.target.wants/$unit\""
+    )
+    .context("format error")?;
+    writeln!(script, "done").context("format error")?;
+    writeln!(script, "systemctl daemon-reload").context("format error")?;
+    writeln!(script, "log_phase lab_units end").context("format error")?;
     Ok(())
 }

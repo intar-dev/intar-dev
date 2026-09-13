@@ -29,7 +29,7 @@
       "image_format": "raw_chunks_v1",
       "image_virtual_size_bytes": 8589934592,
       "chunk_manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "guest_bootstrap_abi": 1,
+      "guest_bootstrap_abi": 2,
       "boot": {
         "kernel_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "initrd_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

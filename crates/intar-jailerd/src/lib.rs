@@ -21,9 +21,9 @@ use intar_jailer_protocol::{
     FinalizeVmBootResult, JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig,
     LaunchVmV2Request, LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT,
     PROTOCOL_VERSION, PrepareChunkedImageV3Request, PrepareImageV2Request, PreparedImageV2Result,
-    PreparedImageV3Result, ProtocolError, Request, Response, RunNetworkResult, SandboxHealth,
-    Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase, VmCpuRuntimeState, VmIdentityRequest,
-    VmInspection, VmLaunchRequest, VmLaunchResult,
+    PreparedImageV3Result, ProtocolError, Request, RequestClass, Response, RunNetworkResult,
+    SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase, VmCpuRuntimeState,
+    VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use rustix::fs::{Mode, OFlags, open};
 #[cfg(target_os = "linux")]
@@ -949,7 +949,13 @@ pub fn prepare_image_v2_response(
             format!("host runtime template validation failed: {error:#}"),
         ));
     }
-    match prepare_image_template(config, &request) {
+    // A background class yields between fixed blocks. The lane is a scheduling
+    // hint only: every digest, ownership, and trust check below is unchanged.
+    let lane = match PrepareLane::claim(request.request_class) {
+        Ok(lane) => lane,
+        Err(error) => return protocol_error_response(error),
+    };
+    match prepare_image_template(config, &request, &lane) {
         Ok(result) => Response::PrepareImageV2(result),
         Err(error) => Response::Error(ProtocolError::new(
             "image_prepare_failed",
@@ -993,7 +999,13 @@ pub fn prepare_chunked_image_v3_response(
             format!("host runtime template validation failed: {error:#}"),
         ));
     }
-    match prepare_chunked_image_template(config, &request) {
+    // A background class yields between fixed blocks. The lane is a scheduling
+    // hint only: every digest, ownership, and trust check below is unchanged.
+    let lane = match PrepareLane::claim(request.request_class) {
+        Ok(lane) => lane,
+        Err(error) => return protocol_error_response(error),
+    };
+    match prepare_chunked_image_template(config, &request, &lane) {
         Ok(result) => Response::PrepareChunkedImageV3(result),
         Err(error) => Response::Error(ProtocolError::new(
             "image_prepare_failed",
@@ -1022,6 +1034,9 @@ fn validate_protocol_request(request: &Request) -> Result<()> {
 fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str {
     if error.downcast_ref::<BootCapacityPendingError>().is_some() {
         "boot_capacity_pending"
+    } else if error.downcast_ref::<PrepareDeferred>().is_some() {
+        // The coordinator requeues this work. It is not a failure.
+        "image_prepare_requeued"
     } else if message.contains("unknown jail generation") {
         "not_found"
     } else if message.contains("readiness attestation") {
@@ -1053,6 +1068,8 @@ mod recovery;
 use recovery::*;
 mod chunked_templates;
 use chunked_templates::*;
+mod prepare_lane;
+use prepare_lane::*;
 mod store_gc;
 pub use store_gc::{StoreGcReport, gc_root_stores};
 const IMAGE_TEMPLATE_METADATA_V2: u16 = 2;

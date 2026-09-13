@@ -5,9 +5,10 @@ pub(super) async fn evict_cache_if_needed(
     db: &Db,
     cache_root: &Path,
 ) -> Result<()> {
-    let Some(max_bytes) = cache.max_bytes else {
+    let max_bytes = cache.max_bytes;
+    if max_bytes == 0 {
         return Ok(());
-    };
+    }
     let protected = protected_cache_entries(db).await;
     let eviction_root = cache_root.to_path_buf();
     let protected_images_for_eviction = protected.image_ids.clone();
@@ -28,7 +29,7 @@ pub(super) async fn evict_cache_if_needed(
             max_bytes,
             remaining_bytes = remaining,
             protected_count = protected.image_ids.len() + protected.tools_disk_shas.len(),
-            "chunk cache remains over budget because live or recent files are protected"
+            "chunk cache remains over budget because pinned, live, or recent files are protected"
         );
     }
     Ok(())
@@ -404,7 +405,7 @@ mod tests {
             tools_disk_sha256: tools_disk_sha256.to_owned(),
             tools_disk_size_bytes: 64 * 1024 * 1024,
             kino_sha256: "d".repeat(64),
-            bootstrap_abi: 1,
+            bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
         }
     }
 

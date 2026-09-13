@@ -13,7 +13,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudflareD1RestClient, type D1Statement } from "./d1-rest-client";
-import { applyRemovalMigration } from "./apply-removal-migration";
+import {
+  REMOVAL_MIGRATION_IDX,
+  applyRemovalMigration,
+  removalMigrationEntry,
+} from "./apply-removal-migration";
 import { verifyGeneratedD1Schema } from "./generated-d1-schema";
 import { purgeRemovedRuntimeDomains } from "./purge-removed-runtime-domains";
 
@@ -48,7 +52,17 @@ if (import.meta.main) {
     await client.batch(rehearsalSeedStatements());
     await applyRemovalMigration(client);
     const cleanup = await purgeRemovedRuntimeDomains(client);
-    const proof = await verifyGeneratedD1Schema(client, { expectation: "full" });
+    // The rehearsal covers the removal transition only. Verify the observed
+    // ledger prefix, so a later appended migration does not fail the run, and
+    // assert the ledger reached exactly the removal migration.
+    const proof = await verifyGeneratedD1Schema(client, {
+      expectation: "observed-ledger-prefix",
+    });
+    if (proof.appliedMigrationCount !== REMOVAL_MIGRATION_IDX + 1) {
+      throw new Error(
+        `rehearsal applied ${proof.appliedMigrationCount} migrations; expected ${REMOVAL_MIGRATION_IDX + 1}`,
+      );
+    }
     const scenarioCounts = await client.batchRead?.([
       { sql: "SELECT count(*) AS count FROM runtime_executions WHERE domain_kind = 'scenario'" },
       { sql: "SELECT count(*) AS count FROM runtime_vms" },
@@ -107,17 +121,19 @@ export function rehearsalSeedStatements(): D1Statement[] {
   ];
 }
 
-function prepareBaselineMigrations(destination: string): void {
+export function prepareBaselineMigrations(destination: string): void {
   cpSync(migrationsRoot, destination, { recursive: true });
   const journalPath = join(destination, "meta/_journal.json");
   const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
     entries: Array<{ idx: number; tag: string }>;
   };
-  const removal = journal.entries.at(-1);
-  if (!removal || removal.idx !== 13) {
-    throw new Error("expected removal migration at index 13");
-  }
-  journal.entries.pop();
+  // The removal migration is pinned by index and tag. The baseline is the
+  // stream before it, so later appended migrations are dropped from the
+  // baseline journal rather than removing whichever entry happens to be last.
+  const removal = removalMigrationEntry(journal);
+  journal.entries = journal.entries.filter(
+    (entry) => entry.idx < REMOVAL_MIGRATION_IDX,
+  );
   writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
   unlinkSync(join(destination, `${removal.tag}.sql`));
   const snapshotPath = join(destination, "meta/0013_snapshot.json");

@@ -48,7 +48,7 @@ describe("catalog manifest", () => {
         imageVirtualSizeBytes: 8589934592,
         chunkManifestSha256:
           "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        guestBootstrapAbi: 1,
+        guestBootstrapAbi: 2,
         kernelSha256:
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         initrdSha256:

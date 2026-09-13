@@ -3,21 +3,12 @@
   "title": "IssueTerminalSessionRequest",
   "type": "object",
   "properties": {
-    "authorized_client_public_keys_openssh": {
-      "type": "array",
-      "default": [],
-      "items": {
-        "type": "string"
-      }
+    "generation": {
+      "description": "Opaque route generation. An attach call must repeat this exact string.",
+      "type": "string"
     },
     "metadata": {
-      "$ref": "#/$defs/RouteMetadata",
-      "default": {
-        "host_id": null,
-        "run_id": null,
-        "user_id": null,
-        "vm_id": null
-      }
+      "$ref": "#/$defs/RouteMetadata"
     },
     "mode": {
       "$ref": "#/$defs/TerminalSessionMode"
@@ -29,70 +20,117 @@
     "route_username": {
       "type": "string"
     },
-    "target_host_key_openssh": {
-      "type": "string"
-    },
-    "target_ip": {
-      "type": "string"
-    },
-    "target_port": {
-      "type": "integer",
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
-    },
-    "target_private_key_openssh": {
-      "type": "string"
-    },
-    "target_username": {
-      "type": "string"
+    "target": {
+      "description": "`pending` for a browser route. `ready` with the complete endpoint for a\nnative route.",
+      "$ref": "#/$defs/TerminalTargetState"
     }
   },
   "required": [
     "route_username",
-    "target_username",
-    "target_ip",
-    "target_port",
-    "target_host_key_openssh",
-    "target_private_key_openssh",
+    "generation",
+    "target",
     "route_expires_at",
-    "mode"
+    "mode",
+    "metadata"
   ],
   "$defs": {
     "RouteMetadata": {
+      "description": "Route identity. Every field is mandatory and non-empty: a pending route\nmust name the host, the run, the VM, and the user that it belongs to.",
       "type": "object",
       "properties": {
         "host_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "run_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "user_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "vm_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
-      }
+      },
+      "required": [
+        "host_id",
+        "run_id",
+        "vm_id",
+        "user_id"
+      ]
     },
     "TerminalSessionMode": {
       "type": "string",
       "enum": [
         "browser",
         "native"
+      ]
+    },
+    "TerminalTarget": {
+      "description": "The complete SSH endpoint of one scenario VM terminal. Only the admin API\ncarries this value: `private_key_openssh` is the credential that reaches\nthe guest, and the gateway never sends it to a browser or a native client.",
+      "type": "object",
+      "properties": {
+        "authorized_client_public_keys_openssh": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_key_openssh": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "private_key_openssh": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "username",
+        "host",
+        "port",
+        "host_key_openssh",
+        "private_key_openssh",
+        "authorized_client_public_keys_openssh"
+      ]
+    },
+    "TerminalTargetState": {
+      "description": "One terminal route. A browser route starts pending: the route exists and a\nbrowser socket can connect, but Stargate must not dial the guest yet. An\nadmin attach moves the route to ready, and only then does the PTY and the\nrecording start.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "pending"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "$ref": "#/$defs/TerminalTarget",
+          "required": [
+            "state"
+          ]
+        }
       ]
     }
   }

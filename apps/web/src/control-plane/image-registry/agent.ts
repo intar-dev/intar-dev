@@ -265,7 +265,7 @@ async function addChunkedImageIndexEntry(
     source.imageFormat !== "raw_chunks_v1" ||
     !Number.isSafeInteger(source.imageVirtualSizeBytes) ||
     source.imageVirtualSizeBytes <= 0 ||
-    source.guestBootstrapAbi !== 1 ||
+    source.guestBootstrapAbi !== 2 ||
     !kernelSha256 ||
     !initrdSha256 ||
     !bootCmdline
@@ -307,7 +307,7 @@ async function addChunkedImageIndexEntry(
     image_format: source.imageFormat,
     image_virtual_size_bytes: source.imageVirtualSizeBytes,
     chunk_manifest_sha256: chunkManifestSha256,
-    guest_bootstrap_abi: 1,
+    guest_bootstrap_abi: 2,
     boot: {
       kernel_sha256: kernelSha256,
       initrd_sha256: initrdSha256,

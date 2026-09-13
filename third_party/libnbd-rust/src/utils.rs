@@ -24,9 +24,7 @@ pub unsafe extern "C" fn drop_data<T>(data: *mut c_void) {
 
 /// Turn a [FnOnce] (with a single `&mut` argument) to a [FnMut]
 /// which panics on the second invocation.
-pub fn fn_once_to_fn_mut<T, U>(
-    f: impl FnOnce(&mut T) -> U,
-) -> impl FnMut(&mut T) -> U {
+pub fn fn_once_to_fn_mut<T, U>(f: impl FnOnce(&mut T) -> U) -> impl FnMut(&mut T) -> U {
     let mut f = Some(f);
     move |x| (f.take().unwrap())(x)
 }

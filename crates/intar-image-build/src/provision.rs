@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_lines)]
 
 use anyhow::{Context, Result};
+use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
 use intar_contracts::guest::RUNTIME_AUTHORIZED_KEYS_FILENAME;
 use intar_image_scenario::{
     KINO_VSOCK_CID_PLACEHOLDER, KINO_VSOCK_PORT_PLACEHOLDER, KinoProbeKind, Scenario, VmAction,
@@ -38,6 +39,13 @@ const GUEST_NETWORK_READY_TIMEOUT_SECONDS: u64 = 30;
 // uptime. Capping this phase at 120 seconds leaves a nominal 240 seconds of the
 // agent's 360-second whole-runtime window for the other first-boot phases.
 const GUEST_SSH_READY_TIMEOUT_SECONDS: u64 = 2 * 60;
+// One overall deadline for the Kino startup acknowledgement. The deadline is
+// inside the agent's whole-runtime window, and it never resets on a retry.
+const GUEST_KINO_READY_TIMEOUT_SECONDS: u64 = 10;
+// Bound the vsock bind retry. The same deadline applies to every attempt.
+const GUEST_KINO_START_ATTEMPTS: u32 = 3;
+// Release the scenario lab without a terminal arrival after this interval.
+const GUEST_LAB_RELEASE_FALLBACK_SECONDS: u64 = 5;
 
 /// One independently executable part of scenario provisioning.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -629,6 +637,7 @@ fn append_apt_cleanup_config(script: &mut String) -> Result<()> {
 
 fn append_final_cleanup(script: &mut String) -> Result<()> {
     writeln!(script).context("format error")?;
+    append_lab_release_assets(script)?;
     writeln!(script, "log_phase acpi_poweroff_handler start").context("format error")?;
     writeln!(
         script,

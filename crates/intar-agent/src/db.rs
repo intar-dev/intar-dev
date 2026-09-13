@@ -99,6 +99,19 @@ pub struct ImageCacheAccessRow {
     pub last_accessed_at_ms: i64,
 }
 
+/// One completed byte-level verification of immutable cached content.
+///
+/// The row is keyed by the content digest, so a chunk that two images share
+/// has one row and one timestamp. Only a full read that covered every byte of
+/// the content writes this row. A file timestamp or change time is never a
+/// substitute for that read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheVerifyRow {
+    pub content_sha256: String,
+    pub verified_at_ms: i64,
+    pub bytes_read: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Db {
     tx: mpsc::Sender<Op>,
@@ -157,6 +170,13 @@ enum Op {
     },
     TouchImageCacheEntry {
         row: Box<ImageCacheAccessRow>,
+        resp: oneshot::Sender<Result<()>>,
+    },
+    LoadVerifiedContent {
+        resp: oneshot::Sender<Result<Vec<CacheVerifyRow>>>,
+    },
+    UpsertVerifiedContent {
+        row: Box<CacheVerifyRow>,
         resp: oneshot::Sender<Result<()>>,
     },
     #[cfg(test)]
@@ -439,6 +459,33 @@ impl Db {
         resp_rx
             .await
             .context("db thread dropped image cache touch response")?
+    }
+
+    pub async fn load_verified_content(&self) -> Result<Vec<CacheVerifyRow>> {
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<CacheVerifyRow>>>();
+        self.tx
+            .send(Op::LoadVerifiedContent { resp: resp_tx })
+            .await
+            .context("db channel closed")?;
+
+        resp_rx
+            .await
+            .context("db thread dropped verified content response")?
+    }
+
+    pub async fn upsert_verified_content(&self, row: CacheVerifyRow) -> Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
+        self.tx
+            .send(Op::UpsertVerifiedContent {
+                row: Box::new(row),
+                resp: resp_tx,
+            })
+            .await
+            .context("db channel closed")?;
+
+        resp_rx
+            .await
+            .context("db thread dropped verified content upsert response")?
     }
 
     #[cfg(test)]

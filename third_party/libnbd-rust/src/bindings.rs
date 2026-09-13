@@ -137,8 +137,7 @@ where
     {
         let callback_ptr = data as *mut F;
         let callback = &mut *callback_ptr;
-        let subbuf: &[u8] =
-            slice::from_raw_parts(subbuf_ffi as *const u8, count_ffi);
+        let subbuf: &[u8] = slice::from_raw_parts(subbuf_ffi as *const u8, count_ffi);
         let offset: u64 = offset_ffi;
         let status: c_uint = status_ffi;
         let error: &mut c_int = error_ffi.as_mut().unwrap();
@@ -156,10 +155,7 @@ pub(crate) unsafe fn completion_to_raw<F>(f: F) -> sys::nbd_completion_callback
 where
     F: FnMut(&mut c_int) -> c_int + Send + Sync,
 {
-    unsafe extern "C" fn call_closure<F>(
-        data: *mut c_void,
-        error_ffi: *mut c_int,
-    ) -> c_int
+    unsafe extern "C" fn call_closure<F>(data: *mut c_void, error_ffi: *mut c_int) -> c_int
     where
         F: FnMut(&mut c_int) -> c_int + Send + Sync,
     {
@@ -221,8 +217,7 @@ where
         let callback = &mut *callback_ptr;
         let metacontext: &[u8] = CStr::from_ptr(metacontext_ffi).to_bytes();
         let offset: u64 = offset_ffi;
-        let entries: &[u32] =
-            slice::from_raw_parts(entries_ffi, nr_entries_ffi);
+        let entries: &[u32] = slice::from_raw_parts(entries_ffi, nr_entries_ffi);
         let error: &mut c_int = error_ffi.as_mut().unwrap();
         callback(metacontext, offset, entries, error)
     }
@@ -253,10 +248,8 @@ where
         let callback = &mut *callback_ptr;
         let metacontext: &[u8] = CStr::from_ptr(metacontext_ffi).to_bytes();
         let offset: u64 = offset_ffi;
-        let entries: &[NbdExtent] = slice::from_raw_parts(
-            entries_ffi as *const NbdExtent,
-            nr_entries_ffi,
-        );
+        let entries: &[NbdExtent] =
+            slice::from_raw_parts(entries_ffi as *const NbdExtent, nr_entries_ffi);
         let error: &mut c_int = error_ffi.as_mut().unwrap();
         callback(metacontext, offset, entries, error)
     }
@@ -298,10 +291,7 @@ pub(crate) unsafe fn context_to_raw<F>(f: F) -> sys::nbd_context_callback
 where
     F: FnMut(&[u8]) -> c_int + Send + Sync,
 {
-    unsafe extern "C" fn call_closure<F>(
-        data: *mut c_void,
-        name_ffi: *const c_char,
-    ) -> c_int
+    unsafe extern "C" fn call_closure<F>(data: *mut c_void, name_ffi: *const c_char) -> c_int
     where
         F: FnMut(&[u8]) -> c_int + Send + Sync,
     {
@@ -378,8 +368,7 @@ impl Handle {
         let debug_ffi = unsafe { crate::bindings::debug_to_raw(debug) };
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_debug_callback(self.handle, debug_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_debug_callback(self.handle, debug_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -492,18 +481,13 @@ impl Handle {
     /// form `"nbd1"`, `"nbd2"`, etc., but you can optionally use
     /// this call to give the handles a name which is meaningful for
     /// your application to make debugging output easier to understand.
-    pub fn set_handle_name(
-        &self,
-        handle_name: impl Into<Vec<u8>>,
-    ) -> Result<()> {
+    pub fn set_handle_name(&self, handle_name: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let handle_name_buf =
-            CString::new(handle_name.into()).map_err(|e| Error::from(e))?;
+        let handle_name_buf = CString::new(handle_name.into()).map_err(|e| Error::from(e))?;
         let handle_name_ffi = handle_name_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_handle_name(self.handle, handle_name_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_handle_name(self.handle, handle_name_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -530,8 +514,7 @@ impl Handle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -557,8 +540,7 @@ impl Handle {
         let private_data_ffi = private_data;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_private_data(self.handle, private_data_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_private_data(self.handle, private_data_ffi) };
 
         // Convert the result to something more rusty.
         ffi_ret as usize
@@ -601,18 +583,13 @@ impl Handle {
     ///
     /// This call may be skipped if using [connect_uri](Handle::connect_uri) to connect
     /// to a URI that includes an export name.
-    pub fn set_export_name(
-        &self,
-        export_name: impl Into<Vec<u8>>,
-    ) -> Result<()> {
+    pub fn set_export_name(&self, export_name: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let export_name_buf =
-            CString::new(export_name.into()).map_err(|e| Error::from(e))?;
+        let export_name_buf = CString::new(export_name.into()).map_err(|e| Error::from(e))?;
         let export_name_ffi = export_name_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_export_name(self.handle, export_name_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_export_name(self.handle, export_name_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -640,8 +617,7 @@ impl Handle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -671,9 +647,7 @@ impl Handle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_request_block_size(self.handle, request_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_request_block_size(self.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -722,8 +696,7 @@ impl Handle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_full_info(self.handle, request_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_full_info(self.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -766,16 +739,14 @@ impl Handle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_canonical_export_name(self.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_canonical_export_name(self.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -804,8 +775,7 @@ impl Handle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -937,13 +907,12 @@ impl Handle {
     /// is also used to request or require TLS.
     pub fn set_tls_certificates(&self, dir: impl Into<PathBuf>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let dir_buf = CString::new(dir.into().into_os_string().into_vec())
-            .map_err(|e| Error::from(e))?;
+        let dir_buf =
+            CString::new(dir.into().into_os_string().into_vec()).map_err(|e| Error::from(e))?;
         let dir_ffi = dir_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_tls_certificates(self.handle, dir_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_tls_certificates(self.handle, dir_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -968,8 +937,7 @@ impl Handle {
         let verify_ffi = verify;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_tls_verify_peer(self.handle, verify_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_tls_verify_peer(self.handle, verify_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1003,13 +971,11 @@ impl Handle {
     /// is also used to request or require TLS.
     pub fn set_tls_username(&self, username: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let username_buf =
-            CString::new(username.into()).map_err(|e| Error::from(e))?;
+        let username_buf = CString::new(username.into()).map_err(|e| Error::from(e))?;
         let username_ffi = username_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_tls_username(self.handle, username_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_tls_username(self.handle, username_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1033,8 +999,7 @@ impl Handle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -1057,13 +1022,11 @@ impl Handle {
     /// is also used to request or require TLS.
     pub fn set_tls_hostname(&self, hostname: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let hostname_buf =
-            CString::new(hostname.into()).map_err(|e| Error::from(e))?;
+        let hostname_buf = CString::new(hostname.into()).map_err(|e| Error::from(e))?;
         let hostname_ffi = hostname_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_tls_hostname(self.handle, hostname_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_tls_hostname(self.handle, hostname_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1088,8 +1051,7 @@ impl Handle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -1110,14 +1072,12 @@ impl Handle {
     /// is also used to request or require TLS.
     pub fn set_tls_psk_file(&self, filename: impl Into<PathBuf>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let filename_buf =
-            CString::new(filename.into().into_os_string().into_vec())
-                .map_err(|e| Error::from(e))?;
+        let filename_buf = CString::new(filename.into().into_os_string().into_vec())
+            .map_err(|e| Error::from(e))?;
         let filename_ffi = filename_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_tls_psk_file(self.handle, filename_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_tls_psk_file(self.handle, filename_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1144,9 +1104,7 @@ impl Handle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_request_extended_headers(self.handle, request_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_request_extended_headers(self.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1168,8 +1126,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_request_extended_headers(self.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_request_extended_headers(self.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -1199,8 +1156,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_extended_headers_negotiated(self.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_extended_headers_negotiated(self.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1228,9 +1184,7 @@ impl Handle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_request_structured_replies(self.handle, request_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_request_structured_replies(self.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1252,8 +1206,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_request_structured_replies(self.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_request_structured_replies(self.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -1274,8 +1227,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_structured_replies_negotiated(self.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_structured_replies_negotiated(self.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1314,9 +1266,7 @@ impl Handle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_request_meta_context(self.handle, request_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_request_meta_context(self.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1384,8 +1334,7 @@ impl Handle {
         let flags_ffi = flags.bits();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_handshake_flags(self.handle, flags_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_handshake_flags(self.handle, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1440,8 +1389,7 @@ impl Handle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_pread_initialize(self.handle, request_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_pread_initialize(self.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1566,8 +1514,7 @@ impl Handle {
         let flags_ffi = flags.bits();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_strict_mode(self.handle, flags_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_strict_mode(self.handle, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1944,8 +1891,7 @@ impl Handle {
         let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_opt_list_meta_context(self.handle, context_ffi) };
+        let ffi_ret = unsafe { sys::nbd_opt_list_meta_context(self.handle, context_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2004,9 +1950,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
         let queries_ffi_c_strs: Vec<CString> = queries
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
             .iter()
@@ -2018,11 +1962,7 @@ impl Handle {
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_opt_list_meta_context_queries(
-                self.handle,
-                queries_ffi,
-                context_ffi,
-            )
+            sys::nbd_opt_list_meta_context_queries(self.handle, queries_ffi, context_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -2088,8 +2028,7 @@ impl Handle {
         let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_opt_set_meta_context(self.handle, context_ffi) };
+        let ffi_ret = unsafe { sys::nbd_opt_set_meta_context(self.handle, context_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2150,9 +2089,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
         let queries_ffi_c_strs: Vec<CString> = queries
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
             .iter()
@@ -2163,13 +2100,8 @@ impl Handle {
         let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_opt_set_meta_context_queries(
-                self.handle,
-                queries_ffi,
-                context_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_opt_set_meta_context_queries(self.handle, queries_ffi, context_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2217,8 +2149,7 @@ impl Handle {
         let name_ffi = name_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_add_meta_context(self.handle, name_ffi) };
+        let ffi_ret = unsafe { sys::nbd_add_meta_context(self.handle, name_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2277,8 +2208,7 @@ impl Handle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2341,8 +2271,7 @@ impl Handle {
         let mask_ffi = mask.bits();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_uri_allow_transports(self.handle, mask_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_uri_allow_transports(self.handle, mask_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2379,8 +2308,7 @@ impl Handle {
         let tls_ffi = tls as c_int;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_uri_allow_tls(self.handle, tls_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_uri_allow_tls(self.handle, tls_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2402,9 +2330,7 @@ impl Handle {
         let allow_ffi = allow;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_uri_allow_local_file(self.handle, allow_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_uri_allow_local_file(self.handle, allow_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2661,14 +2587,12 @@ impl Handle {
     /// option negotiation performed before transmission phase.
     pub fn connect_unix(&self, unixsocket: impl Into<PathBuf>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let unixsocket_buf =
-            CString::new(unixsocket.into().into_os_string().into_vec())
-                .map_err(|e| Error::from(e))?;
+        let unixsocket_buf = CString::new(unixsocket.into().into_os_string().into_vec())
+            .map_err(|e| Error::from(e))?;
         let unixsocket_ffi = unixsocket_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_connect_unix(self.handle, unixsocket_ffi) };
+        let ffi_ret = unsafe { sys::nbd_connect_unix(self.handle, unixsocket_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2701,8 +2625,7 @@ impl Handle {
         let port_ffi = port;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_connect_vsock(self.handle, cid_ffi, port_ffi) };
+        let ffi_ret = unsafe { sys::nbd_connect_vsock(self.handle, cid_ffi, port_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2730,16 +2653,13 @@ impl Handle {
         port: impl Into<Vec<u8>>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let hostname_buf =
-            CString::new(hostname.into()).map_err(|e| Error::from(e))?;
+        let hostname_buf = CString::new(hostname.into()).map_err(|e| Error::from(e))?;
         let hostname_ffi = hostname_buf.as_ptr();
         let port_buf = CString::new(port.into()).map_err(|e| Error::from(e))?;
         let port_ffi = port_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_connect_tcp(self.handle, hostname_ffi, port_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_connect_tcp(self.handle, hostname_ffi, port_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2813,16 +2733,11 @@ impl Handle {
     /// this proceeds all the way to transmission phase, but
     /// [set_opt_mode](Handle::set_opt_mode) can be used for manual control over
     /// option negotiation performed before transmission phase.
-    pub fn connect_command(
-        &self,
-        argv: impl IntoIterator<Item = impl AsRef<[u8]>>,
-    ) -> Result<()> {
+    pub fn connect_command(&self, argv: impl IntoIterator<Item = impl AsRef<[u8]>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let argv_ffi_c_strs: Vec<CString> = argv
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
             .iter()
@@ -2832,8 +2747,7 @@ impl Handle {
         let argv_ffi = argv_ffi_ptrs.as_mut_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_connect_command(self.handle, argv_ffi) };
+        let ffi_ret = unsafe { sys::nbd_connect_command(self.handle, argv_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2897,9 +2811,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
         let argv_ffi_c_strs: Vec<CString> = argv
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
             .iter()
@@ -2909,9 +2821,7 @@ impl Handle {
         let argv_ffi = argv_ffi_ptrs.as_mut_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_connect_systemd_socket_activation(self.handle, argv_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_connect_systemd_socket_activation(self.handle, argv_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2937,19 +2847,13 @@ impl Handle {
     /// The parameter `socket_name` can be a short alphanumeric string.
     /// If it is set to the empty string (also the default when the handle
     /// is created) then the name `unknown` will be seen by the server.
-    pub fn set_socket_activation_name(
-        &self,
-        socket_name: impl Into<Vec<u8>>,
-    ) -> Result<()> {
+    pub fn set_socket_activation_name(&self, socket_name: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let socket_name_buf =
-            CString::new(socket_name.into()).map_err(|e| Error::from(e))?;
+        let socket_name_buf = CString::new(socket_name.into()).map_err(|e| Error::from(e))?;
         let socket_name_ffi = socket_name_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_socket_activation_name(self.handle, socket_name_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_socket_activation_name(self.handle, socket_name_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2969,16 +2873,14 @@ impl Handle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_socket_activation_name(self.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_socket_activation_name(self.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -3258,18 +3160,13 @@ impl Handle {
     ///
     /// This call does not block, because it returns data that is saved in
     /// the handle from the NBD protocol handshake.
-    pub fn can_meta_context(
-        &self,
-        metacontext: impl Into<Vec<u8>>,
-    ) -> Result<bool> {
+    pub fn can_meta_context(&self, metacontext: impl Into<Vec<u8>>) -> Result<bool> {
         // Convert all arguments to FFI-like types.
-        let metacontext_buf =
-            CString::new(metacontext.into()).map_err(|e| Error::from(e))?;
+        let metacontext_buf = CString::new(metacontext.into()).map_err(|e| Error::from(e))?;
         let metacontext_ffi = metacontext_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_can_meta_context(self.handle, metacontext_ffi) };
+        let ffi_ret = unsafe { sys::nbd_can_meta_context(self.handle, metacontext_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3406,8 +3303,7 @@ impl Handle {
         let size_type_ffi = size_type as c_int;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_block_size(self.handle, size_type_ffi) };
+        let ffi_ret = unsafe { sys::nbd_get_block_size(self.handle, size_type_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3448,12 +3344,7 @@ impl Handle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub fn pread(
-        &self,
-        buf: &mut [u8],
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> Result<()> {
+    pub fn pread(&self, buf: &mut [u8], offset: u64, flags: Option<CmdFlag>) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let buf_ffi = buf.as_mut_ptr() as *mut c_void;
         let count_ffi = buf.len();
@@ -3461,15 +3352,8 @@ impl Handle {
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_pread(
-                self.handle,
-                buf_ffi,
-                count_ffi,
-                offset_ffi,
-                flags_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_pread(self.handle, buf_ffi, count_ffi, offset_ffi, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3566,10 +3450,7 @@ impl Handle {
         &self,
         buf: &mut [u8],
         offset: u64,
-        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
@@ -3630,12 +3511,7 @@ impl Handle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub fn pwrite(
-        &self,
-        buf: &[u8],
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> Result<()> {
+    pub fn pwrite(&self, buf: &[u8], offset: u64, flags: Option<CmdFlag>) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let buf_ffi = buf.as_ptr() as *const c_void;
         let count_ffi = buf.len();
@@ -3643,15 +3519,8 @@ impl Handle {
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_pwrite(
-                self.handle,
-                buf_ffi,
-                count_ffi,
-                offset_ffi,
-                flags_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_pwrite(self.handle, buf_ffi, count_ffi, offset_ffi, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3761,21 +3630,14 @@ impl Handle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub fn trim(
-        &self,
-        count: u64,
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> Result<()> {
+    pub fn trim(&self, count: u64, offset: u64, flags: Option<CmdFlag>) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let count_ffi = count;
         let offset_ffi = offset;
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_trim(self.handle, count_ffi, offset_ffi, flags_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_trim(self.handle, count_ffi, offset_ffi, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3810,21 +3672,14 @@ impl Handle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub fn cache(
-        &self,
-        count: u64,
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> Result<()> {
+    pub fn cache(&self, count: u64, offset: u64, flags: Option<CmdFlag>) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let count_ffi = count;
         let offset_ffi = offset;
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_cache(self.handle, count_ffi, offset_ffi, flags_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_cache(self.handle, count_ffi, offset_ffi, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3868,21 +3723,14 @@ impl Handle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub fn zero(
-        &self,
-        count: u64,
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> Result<()> {
+    pub fn zero(&self, count: u64, offset: u64, flags: Option<CmdFlag>) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let count_ffi = count;
         let offset_ffi = offset;
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_zero(self.handle, count_ffi, offset_ffi, flags_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_zero(self.handle, count_ffi, offset_ffi, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3970,10 +3818,7 @@ impl Handle {
         &self,
         count: u64,
         offset: u64,
-        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
@@ -3984,13 +3829,7 @@ impl Handle {
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_block_status(
-                self.handle,
-                count_ffi,
-                offset_ffi,
-                extent_ffi,
-                flags_ffi,
-            )
+            sys::nbd_block_status(self.handle, count_ffi, offset_ffi, extent_ffi, flags_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -4072,28 +3911,18 @@ impl Handle {
         &self,
         count: u64,
         offset: u64,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let count_ffi = count;
         let offset_ffi = offset;
-        let extent64_ffi =
-            unsafe { crate::bindings::extent64_to_raw(extent64) };
+        let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_block_status_64(
-                self.handle,
-                count_ffi,
-                offset_ffi,
-                extent64_ffi,
-                flags_ffi,
-            )
+            sys::nbd_block_status_64(self.handle, count_ffi, offset_ffi, extent64_ffi, flags_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -4131,10 +3960,7 @@ impl Handle {
         count: u64,
         offset: u64,
         contexts: impl IntoIterator<Item = impl AsRef<[u8]>>,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
@@ -4142,9 +3968,7 @@ impl Handle {
         let offset_ffi = offset;
         let contexts_ffi_c_strs: Vec<CString> = contexts
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut contexts_ffi_ptrs: Vec<*mut c_char> = contexts_ffi_c_strs
             .iter()
@@ -4152,8 +3976,7 @@ impl Handle {
             .collect();
         contexts_ffi_ptrs.push(ptr::null_mut());
         let contexts_ffi = contexts_ffi_ptrs.as_mut_ptr();
-        let extent64_ffi =
-            unsafe { crate::bindings::extent64_to_raw(extent64) };
+        let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
@@ -4217,8 +4040,7 @@ impl Handle {
         let timeout_ffi = timeout;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_poll2(self.handle, fd_ffi, timeout_ffi) };
+        let ffi_ret = unsafe { sys::nbd_poll2(self.handle, fd_ffi, timeout_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4247,8 +4069,7 @@ impl Handle {
         let addrlen_ffi = addr_os.len();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_connect(self.handle, addr_ffi, addrlen_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_connect(self.handle, addr_ffi, addrlen_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4299,19 +4120,14 @@ impl Handle {
     /// once [aio_is_negotiating](Handle::aio_is_negotiating) returns true; otherwise, the
     /// connection attempt will include the NBD handshake, and is ready
     /// for use once [aio_is_ready](Handle::aio_is_ready) returns true.
-    pub fn aio_connect_unix(
-        &self,
-        unixsocket: impl Into<PathBuf>,
-    ) -> Result<()> {
+    pub fn aio_connect_unix(&self, unixsocket: impl Into<PathBuf>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let unixsocket_buf =
-            CString::new(unixsocket.into().into_os_string().into_vec())
-                .map_err(|e| Error::from(e))?;
+        let unixsocket_buf = CString::new(unixsocket.into().into_os_string().into_vec())
+            .map_err(|e| Error::from(e))?;
         let unixsocket_ffi = unixsocket_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_connect_unix(self.handle, unixsocket_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_unix(self.handle, unixsocket_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4340,9 +4156,7 @@ impl Handle {
         let port_ffi = port;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_vsock(self.handle, cid_ffi, port_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_vsock(self.handle, cid_ffi, port_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4370,16 +4184,13 @@ impl Handle {
         port: impl Into<Vec<u8>>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let hostname_buf =
-            CString::new(hostname.into()).map_err(|e| Error::from(e))?;
+        let hostname_buf = CString::new(hostname.into()).map_err(|e| Error::from(e))?;
         let hostname_ffi = hostname_buf.as_ptr();
         let port_buf = CString::new(port.into()).map_err(|e| Error::from(e))?;
         let port_ffi = port_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_tcp(self.handle, hostname_ffi, port_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_tcp(self.handle, hostname_ffi, port_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4406,8 +4217,7 @@ impl Handle {
         let sock_ffi = sock.as_raw_fd();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_connect_socket(self.handle, sock_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_socket(self.handle, sock_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4437,9 +4247,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
         let argv_ffi_c_strs: Vec<CString> = argv
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
             .iter()
@@ -4449,8 +4257,7 @@ impl Handle {
         let argv_ffi = argv_ffi_ptrs.as_mut_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_connect_command(self.handle, argv_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_command(self.handle, argv_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4480,9 +4287,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
         let argv_ffi_c_strs: Vec<CString> = argv
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
             .iter()
@@ -4492,12 +4297,8 @@ impl Handle {
         let argv_ffi = argv_ffi_ptrs.as_mut_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_systemd_socket_activation(
-                self.handle,
-                argv_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_connect_systemd_socket_activation(self.handle, argv_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4525,9 +4326,7 @@ impl Handle {
     /// when [aio_is_negotiating](Handle::aio_is_negotiating) returns true.
     pub fn aio_opt_go(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -4540,8 +4339,7 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_opt_go(self.handle, completion_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_go(self.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4590,9 +4388,7 @@ impl Handle {
     /// callback.
     pub fn aio_opt_starttls(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -4605,8 +4401,7 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_opt_starttls(self.handle, completion_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_starttls(self.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4633,9 +4428,7 @@ impl Handle {
     /// callback.
     pub fn aio_opt_extended_headers(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -4648,9 +4441,7 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_extended_headers(self.handle, completion_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_extended_headers(self.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4677,9 +4468,7 @@ impl Handle {
     /// callback.
     pub fn aio_opt_structured_reply(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -4692,9 +4481,7 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_structured_reply(self.handle, completion_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_structured_reply(self.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4720,9 +4507,7 @@ impl Handle {
     pub fn aio_opt_list(
         &self,
         list: impl FnMut(&[u8], &[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let list_ffi = unsafe { crate::bindings::list_to_raw(list) };
@@ -4736,9 +4521,7 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_list(self.handle, list_ffi, completion_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_list(self.handle, list_ffi, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4765,9 +4548,7 @@ impl Handle {
     /// callback.
     pub fn aio_opt_info(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -4780,8 +4561,7 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_opt_info(self.handle, completion_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_info(self.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4812,9 +4592,7 @@ impl Handle {
     pub fn aio_opt_list_meta_context(
         &self,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
@@ -4828,13 +4606,8 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_list_meta_context(
-                self.handle,
-                context_ffi,
-                completion_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_opt_list_meta_context(self.handle, context_ffi, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4866,16 +4639,12 @@ impl Handle {
         &self,
         queries: impl IntoIterator<Item = impl AsRef<[u8]>>,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let queries_ffi_c_strs: Vec<CString> = queries
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
             .iter()
@@ -4938,9 +4707,7 @@ impl Handle {
     pub fn aio_opt_set_meta_context(
         &self,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
@@ -4954,13 +4721,8 @@ impl Handle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_set_meta_context(
-                self.handle,
-                context_ffi,
-                completion_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_opt_set_meta_context(self.handle, context_ffi, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -4998,16 +4760,12 @@ impl Handle {
         &self,
         queries: impl IntoIterator<Item = impl AsRef<[u8]>>,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let queries_ffi_c_strs: Vec<CString> = queries
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
             .iter()
@@ -5072,9 +4830,7 @@ impl Handle {
         &self,
         buf: &'static mut [u8],
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5140,13 +4896,8 @@ impl Handle {
         &self,
         buf: &'static mut [u8],
         offset: u64,
-        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5205,9 +4956,7 @@ impl Handle {
         &self,
         buf: &'static [u8],
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5266,8 +5015,7 @@ impl Handle {
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_disconnect(self.handle, flags_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_disconnect(self.handle, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -5294,9 +5042,7 @@ impl Handle {
     /// reply rather than failing fast.
     pub fn aio_flush(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5311,9 +5057,7 @@ impl Handle {
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_flush(self.handle, completion_ffi, flags_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_flush(self.handle, completion_ffi, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -5342,9 +5086,7 @@ impl Handle {
         &self,
         count: u64,
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5398,9 +5140,7 @@ impl Handle {
         &self,
         count: u64,
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5454,9 +5194,7 @@ impl Handle {
         &self,
         count: u64,
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5521,13 +5259,8 @@ impl Handle {
         &self,
         count: u64,
         offset: u64,
-        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5583,20 +5316,14 @@ impl Handle {
         &self,
         count: u64,
         offset: u64,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
         let count_ffi = count;
         let offset_ffi = offset;
-        let extent64_ffi =
-            unsafe { crate::bindings::extent64_to_raw(extent64) };
+        let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
         let completion_ffi = match completion {
             Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
             None => sys::nbd_completion_callback {
@@ -5647,13 +5374,8 @@ impl Handle {
         count: u64,
         offset: u64,
         contexts: impl IntoIterator<Item = impl AsRef<[u8]>>,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -5661,9 +5383,7 @@ impl Handle {
         let offset_ffi = offset;
         let contexts_ffi_c_strs: Vec<CString> = contexts
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut contexts_ffi_ptrs: Vec<*mut c_char> = contexts_ffi_c_strs
             .iter()
@@ -5671,8 +5391,7 @@ impl Handle {
             .collect();
         contexts_ffi_ptrs.push(ptr::null_mut());
         let contexts_ffi = contexts_ffi_ptrs.as_mut_ptr();
-        let extent64_ffi =
-            unsafe { crate::bindings::extent64_to_raw(extent64) };
+        let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
         let completion_ffi = match completion {
             Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
             None => sys::nbd_completion_callback {
@@ -5954,8 +5673,7 @@ impl Handle {
         let cookie_ffi = cookie;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_command_completed(self.handle, cookie_ffi) };
+        let ffi_ret = unsafe { sys::nbd_aio_command_completed(self.handle, cookie_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -5977,8 +5695,7 @@ impl Handle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_peek_command_completed(self.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_peek_command_completed(self.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -6111,8 +5828,7 @@ impl Handle {
         let signum_ffi = signum;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_kill_subprocess(self.handle, signum_ffi) };
+        let ffi_ret = unsafe { sys::nbd_kill_subprocess(self.handle, signum_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -6221,8 +5937,7 @@ impl Handle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }

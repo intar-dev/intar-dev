@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StageTerminalTargetRequest",
+  "description": "Stage a ready target on a pending browser route. The gateway stores the\ntarget and returns an attachment identifier, but the route is still not\nready: no waiter wakes and no socket dials. The control plane activates the\nattachment after its own admission fence.",
+  "type": "object",
+  "properties": {
+    "generation": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "target": {
+      "description": "The complete target. There is no pending shape on a stage call: a call\nthat carries no target is a validation error.",
+      "$ref": "#/$defs/TerminalTarget"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "vm_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "vm_id",
+    "user_id",
+    "generation",
+    "target"
+  ],
+  "$defs": {
+    "TerminalTarget": {
+      "description": "The complete SSH endpoint of one scenario VM terminal. Only the admin API\ncarries this value: `private_key_openssh` is the credential that reaches\nthe guest, and the gateway never sends it to a browser or a native client.",
+      "type": "object",
+      "properties": {
+        "authorized_client_public_keys_openssh": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_key_openssh": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "private_key_openssh": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "username",
+        "host",
+        "port",
+        "host_key_openssh",
+        "private_key_openssh",
+        "authorized_client_public_keys_openssh"
+      ]
+    }
+  }
+}

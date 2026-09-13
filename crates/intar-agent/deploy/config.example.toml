@@ -51,6 +51,7 @@ refresh_interval_minutes = 15
 # password = ""
 
 [image_cache]
-# Optional maximum bytes for compressed chunks, manifests, guest tools, and
-# direct-boot artifacts. The agent does not keep a full unprivileged raw image.
+# Maximum bytes for compressed chunks, manifests, guest tools, and direct-boot
+# artifacts. The default is 53687091200 (50 GiB). The agent does not keep a
+# full unprivileged raw image. Pinned entries are never deleted to reach it.
 # max_bytes = 53687091200

@@ -129,6 +129,7 @@ fn prepare_image_v2_is_hash_bound_and_cannot_reimport_templates() {
         root_disk: source("images/root.raw"),
         kernel: source("artifacts/kernel"),
         initrd: Some(source("artifacts/initrd")),
+        request_class: RequestClass::Foreground,
     };
     request.validate().expect("valid prepared image request");
     let envelope = RequestEnvelope::new(9, Request::PrepareImageV2(Box::new(request.clone())));
@@ -242,6 +243,7 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         },
         kernel: readonly("artifacts/kernel", artifact_sha256.clone()),
         initrd: Some(readonly("artifacts/initrd", artifact_sha256.clone())),
+        request_class: RequestClass::Foreground,
     };
     prepare.validate().expect("valid chunked prepare");
     let envelope = RequestEnvelope::new(

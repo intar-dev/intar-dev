@@ -464,7 +464,7 @@ async function loadScenarioCacheIntent(
       row.imageFormat !== "raw_chunks_v1" ||
       row.imageVirtualSizeBytes <= 0 ||
       !normalizeSha256(row.chunkManifestSha256 ?? "") ||
-      row.guestBootstrapAbi !== 1 ||
+      row.guestBootstrapAbi !== 2 ||
       !normalizeSha256(row.kernelSha256) ||
       !normalizeSha256(row.initrdSha256) ||
       !row.bootCmdline.trim()

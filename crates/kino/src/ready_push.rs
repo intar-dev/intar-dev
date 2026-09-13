@@ -3,6 +3,8 @@ use crate::host_keys::collect_ssh_host_keys_openssh;
 #[cfg(any(target_os = "linux", test))]
 use crate::proto::kino_v1;
 use crate::state::{ProbeStore, duration_millis_u64};
+#[cfg(any(target_os = "linux", test))]
+use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
 #[cfg(target_os = "linux")]
 use prost::Message as _;
 #[cfg(target_os = "linux")]
@@ -186,11 +188,15 @@ async fn encode_ready_frame(
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         })
         .ok_or_else(|| anyhow::anyhow!("{ENV_KINO_SHA256} is missing or invalid"))?;
-    snapshot.guest_bootstrap_abi = env::var(ENV_GUEST_BOOTSTRAP_ABI)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value == 1)
-        .ok_or_else(|| anyhow::anyhow!("{ENV_GUEST_BOOTSTRAP_ABI} is missing or invalid"))?;
+    snapshot.guest_bootstrap_abi = parse_guest_bootstrap_abi(
+        env::var(ENV_GUEST_BOOTSTRAP_ABI).ok().as_deref(),
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "{ENV_GUEST_BOOTSTRAP_ABI} must be {} (the only accepted guest bootstrap ABI)",
+            GUEST_BOOTSTRAP_ABI_V2
+        )
+    })?;
     snapshot.guest_phase_timings = Some(native_timings.overlay(read_guest_phase_timings()));
     let len = snapshot.encoded_len();
     anyhow::ensure!(
@@ -200,6 +206,18 @@ async fn encode_ready_frame(
     let mut bytes = Vec::with_capacity(len);
     snapshot.encode(&mut bytes)?;
     Ok(bytes)
+}
+
+/// The guest bootstrap ABI the ready frame must carry.
+///
+/// The host agent compares this value against the image manifest, so a
+/// missing value, an unparsable value, or an older ABI stops the frame. There
+/// is no older ABI path.
+#[cfg(any(target_os = "linux", test))]
+fn parse_guest_bootstrap_abi(raw: Option<&str>) -> Option<u32> {
+    raw?.parse::<u32>()
+        .ok()
+        .filter(|value| *value == u32::from(GUEST_BOOTSTRAP_ABI_V2))
 }
 
 #[cfg(target_os = "linux")]
@@ -242,6 +260,16 @@ mod tests {
     use crate::proto::kino_v1::{GuestPhaseTimingsV1, ProbesSnapshotV1};
     use prost::Message as _;
     use std::time::Duration;
+
+    #[test]
+    fn guest_bootstrap_abi_accepts_only_the_current_abi() {
+        assert_eq!(super::parse_guest_bootstrap_abi(Some("2")), Some(2));
+        assert_eq!(super::parse_guest_bootstrap_abi(Some("1")), None);
+        assert_eq!(super::parse_guest_bootstrap_abi(Some("3")), None);
+        assert_eq!(super::parse_guest_bootstrap_abi(Some("")), None);
+        assert_eq!(super::parse_guest_bootstrap_abi(Some("abi2")), None);
+        assert_eq!(super::parse_guest_bootstrap_abi(None), None);
+    }
 
     #[test]
     fn encodes_native_timings_before_shell_markers_with_zero_kino_duration() {

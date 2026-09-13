@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result, bail};
 use intar_contracts::catalog::{
-    CourseCatalogLectureV2, GUEST_BOOTSTRAP_ABI_V1, ImageArchitecture, ImageFormat, ImageKey, Mib,
+    CourseCatalogLectureV2, GUEST_BOOTSTRAP_ABI_V2, ImageArchitecture, ImageFormat, ImageKey, Mib,
     ProbePhase as CatalogProbePhase, ScenarioHintManifestV3, ScenarioManifestV4,
     ScenarioProbeManifestV3, ScenarioVmBootManifestV4, ScenarioVmManifestV4,
 };
@@ -154,7 +154,7 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV4> {
             image_format: ImageFormat::RawChunksV1,
             image_virtual_size_bytes: input.image_virtual_size_bytes,
             chunk_manifest_sha256: input.chunk_manifest_sha256.to_string(),
-            guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V1,
+            guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
             boot: ScenarioVmBootManifestV4 {
                 kernel_sha256: input.kernel_sha256.to_string(),
                 initrd_sha256: input.initrd_sha256.to_string(),
@@ -242,7 +242,6 @@ base_image "trixie" {
   suite          = "trixie"
   mirror         = "https://deb.debian.org/debian"
   arch           = "amd64"
-  kernel_package = "linux-image-cloud-amd64"
   packages       = ["openssh-server", "ca-certificates", "sudo", "zstd"]
 }
 "#,
@@ -289,7 +288,7 @@ base_image "trixie" {
         assert_eq!(manifest.briefing_markdown, "Lecture theory.");
         assert_eq!(
             vm.guest_bootstrap_abi,
-            intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1
+            intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2
         );
         assert_eq!(vm.cpu_millis, 1_000);
         assert_eq!(vm.vcpu_count, 1);
@@ -347,7 +346,7 @@ base_image "trixie" {
                 image_format: intar_contracts::catalog::ImageFormat::RawChunksV1,
                 image_virtual_size_bytes: 1024,
                 chunk_manifest_sha256: "c".repeat(64),
-                guest_bootstrap_abi: intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1,
+                guest_bootstrap_abi: intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2,
                 boot: intar_contracts::catalog::ScenarioVmBootManifestV4 {
                     kernel_sha256: "k".repeat(64),
                     initrd_sha256: "i".repeat(64),

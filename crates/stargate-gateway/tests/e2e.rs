@@ -35,9 +35,12 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use stargate_core::{
-    AdminAuthSettings, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
-    IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode,
-    RouteMetadata, TerminalSessionMode, TerminalTokenSettings, WebSettings, WorkspaceAppProtocol,
+    ActivateTerminalTargetRequest, AdminAuthSettings, IssueTerminalSessionRequest,
+    IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
+    IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode, RouteMetadata,
+    StageTerminalTargetRequest, StageTerminalTargetResponse, TerminalSessionMode, TerminalTarget,
+    TerminalTargetState, TerminalTokenSettings, WebSettings, WorkspaceAppMetadata,
+    WorkspaceAppProtocol,
 };
 use stargate_gateway::{
     GatewayState, SqliteRouteStore, build_admin_router, build_public_router, run_public_ssh_server,
@@ -67,7 +70,7 @@ async fn issue_native_terminal_session_happy_path() -> Result<()> {
         harness.public_host_public.to_openssh()?
     );
 
-    Ok(())
+    harness.shutdown().await
 }
 
 #[tokio::test]
@@ -221,6 +224,189 @@ async fn browser_terminal_closes_at_route_expiry() -> Result<()> {
 
     assert_websocket_closes(&mut websocket, Duration::from_secs(5)).await?;
     Ok(())
+}
+
+/// The route name alone is not authorization. The control plane can replace a
+/// route with the same name under a new generation, and a token that was
+/// minted for the old generation must not open the replacement.
+#[tokio::test]
+async fn a_terminal_token_for_a_replaced_generation_is_refused() -> Result<()> {
+    let harness = Harness::start().await?;
+    let first_url = harness
+        .issue_browser_terminal_url("exec-01:7", Duration::from_secs(60 * 60))
+        .await?;
+    // The control plane replaces the route for the same run and VM.
+    let second_url = harness
+        .issue_browser_terminal_url("exec-02:1", Duration::from_secs(60 * 60))
+        .await?;
+
+    assert_eq!(
+        harness.browser_terminal_connect_status(&first_url).await?,
+        401,
+        "a token for the replaced generation opened the replacement route"
+    );
+    // The refused attempt must not hold the socket slot or a live lease for
+    // the generation it was refused for, so the current token still connects.
+    assert_eq!(
+        harness.browser_terminal_connect_status(&second_url).await?,
+        101,
+        "the refused attempt kept the current generation from opening"
+    );
+
+    harness.shutdown().await
+}
+
+#[tokio::test]
+async fn a_terminal_token_for_an_expired_route_is_refused() -> Result<()> {
+    let harness = Harness::start().await?;
+    let url = harness
+        .issue_browser_terminal_url("exec-03:1", Duration::from_secs(2))
+        .await?;
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert_eq!(
+        harness.browser_terminal_connect_status(&url).await?,
+        401,
+        "a token for an expired route opened a socket"
+    );
+
+    harness.shutdown().await
+}
+
+/// The whole point of the two phases. The target is staged FIRST and then a
+/// browser socket asks for its terminal, which is the case that a single-phase
+/// attach would dial on: the socket reads a route that already holds a target.
+/// The gateway still does not touch the guest. Only the activation dials.
+#[tokio::test]
+async fn a_staged_target_does_not_dial_the_guest_until_activation() -> Result<()> {
+    let harness = Harness::start().await?;
+    let url = harness
+        .issue_browser_terminal_url("exec-10:1", Duration::from_secs(60 * 60))
+        .await?;
+
+    // The control plane stages the target and has not activated it yet.
+    let target = harness.terminal_target(Vec::new())?;
+    let staged = harness
+        .stage_terminal_target_for_generation(target.clone(), "exec-10:1")
+        .await?;
+    assert_eq!(staged.status(), reqwest::StatusCode::OK);
+    let staged = staged.json::<StageTerminalTargetResponse>().await?;
+    assert!(!staged.attachment_id.is_empty());
+
+    // Now the browser connects and asks for its terminal. The route already
+    // holds a target, so a staged target that were served as ready would dial
+    // here, before the control plane activated anything.
+    let mut websocket = harness.connect_browser_terminal(&url).await?;
+    browser_request_terminal(&mut websocket).await?;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        harness.target_connections.load(Ordering::SeqCst),
+        0,
+        "the gateway dialled the guest from a staged target"
+    );
+    assert!(
+        !websocket_has_ready(&mut websocket).await?,
+        "the gateway reported ready before the activation"
+    );
+
+    // Activation is what opens the terminal.
+    let activate = harness
+        .activate_terminal_target_for_generation(&staged.attachment_id, "exec-10:1")
+        .await?;
+    assert_eq!(activate.status(), reqwest::StatusCode::NO_CONTENT);
+    browser_wait_for_ready(&mut websocket).await?;
+
+    // Positive control for the counter above: after activation the gateway
+    // really does reach the guest, so the zero above was a real zero.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        harness.target_connections.load(Ordering::SeqCst) >= 1,
+        "the gateway never reached the guest after the activation"
+    );
+
+    websocket.close(None).await?;
+    harness.shutdown().await
+}
+
+/// A stage that the control plane never activates can not be activated from a
+/// stale identifier, and a revoked route can not be activated at all.
+#[tokio::test]
+async fn a_stale_attachment_id_can_not_activate_another_target() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .issue_browser_terminal_url("exec-11:1", Duration::from_secs(60 * 60))
+        .await?;
+    let first = harness
+        .stage_terminal_target_for_generation(harness.terminal_target(Vec::new())?, "exec-11:1")
+        .await?
+        .json::<StageTerminalTargetResponse>()
+        .await?;
+
+    // A different target on the same route is a conflict: the staged target is
+    // immutable, so a second stage can not swap it under the control plane.
+    let target = harness.terminal_target(Vec::new())?;
+    let mut other = target.clone();
+    other.host = "127.0.0.2".to_owned();
+    let conflict = harness.stage_terminal_target(other).await?;
+    assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+
+    // The same target returns the same attachment, so a retry is safe.
+    let repeat = harness
+        .stage_terminal_target_for_generation(target, "exec-11:1")
+        .await?
+        .json::<StageTerminalTargetResponse>()
+        .await?;
+    assert_eq!(repeat.attachment_id, first.attachment_id);
+
+    // Another identifier can not activate this route.
+    let stale = harness
+        .activate_terminal_target_for_generation(
+            "00000000-0000-4000-8000-000000000000",
+            "exec-11:1",
+        )
+        .await?;
+    assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
+
+    assert_eq!(
+        harness
+            .activate_terminal_target_for_generation(&first.attachment_id, "exec-11:1")
+            .await?
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    // An exact repeat of the activation is idempotent.
+    assert_eq!(
+        harness
+            .activate_terminal_target_for_generation(&first.attachment_id, "exec-11:1")
+            .await?
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    harness.shutdown().await
+}
+
+#[tokio::test]
+async fn a_revoked_route_can_not_be_activated() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness
+        .issue_browser_terminal_url("exec-12:1", Duration::from_secs(60 * 60))
+        .await?;
+    let staged = harness
+        .stage_terminal_target_for_generation(harness.terminal_target(Vec::new())?, "exec-12:1")
+        .await?
+        .json::<StageTerminalTargetResponse>()
+        .await?;
+
+    harness.delete_route().await?;
+    let activate = harness
+        .activate_terminal_target_for_generation(&staged.attachment_id, "exec-12:1")
+        .await?;
+    assert_eq!(activate.status(), reqwest::StatusCode::NOT_FOUND);
+
+    harness.shutdown().await
 }
 
 #[tokio::test]
@@ -742,17 +928,19 @@ struct WorkspaceAppBrowserSession {
 struct Harness {
     _temp_dir: TempDir,
     database_path: PathBuf,
-    admin_task: tokio::task::JoinHandle<()>,
-    public_task: tokio::task::JoinHandle<()>,
-    public_ssh_task: tokio::task::JoinHandle<()>,
-    target_task: tokio::task::JoinHandle<()>,
-    app_task: tokio::task::JoinHandle<()>,
+    // Every spawned server task, held so a test can cancel and join it. A test
+    // that returns without joining leaves the task running in the shared test
+    // runtime, where it can outlive the test that owns its files.
+    tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>,
     admin_addr: std::net::SocketAddr,
     public_addr: std::net::SocketAddr,
     public_ssh_addr: std::net::SocketAddr,
     target_addr: std::net::SocketAddr,
     app_addr: std::net::SocketAddr,
     route_username: String,
+    /// The route generation both the create call and the attach call repeat.
+    /// The control plane derives it from the current runtime execution.
+    generation: String,
     target_username: String,
     target_host_key: String,
     target_private_key_openssh: String,
@@ -767,6 +955,23 @@ struct Harness {
 impl Harness {
     async fn start() -> Result<Self> {
         Self::start_with_workspace_app_domain(None).await
+    }
+
+    /// Stop every server task and join it. The tasks are cancelled newest
+    /// first, so a server stops before the servers it depends on, and each
+    /// join proves the task really ended. Call this before a test returns.
+    async fn shutdown(mut self) -> Result<()> {
+        for (_, task) in &self.tasks {
+            task.abort();
+        }
+        while let Some((name, task)) = self.tasks.pop() {
+            if let Err(error) = task.await
+                && !error.is_cancelled()
+            {
+                anyhow::bail!("the {name} task did not shut down cleanly: {error}");
+            }
+        }
+        Ok(())
     }
 
     async fn start_with_workspace_app_domain(
@@ -893,17 +1098,20 @@ impl Harness {
         let harness = Self {
             _temp_dir: temp_dir,
             database_path,
-            admin_task,
-            public_task,
-            public_ssh_task,
-            target_task,
-            app_task,
+            tasks: vec![
+                ("app", app_task),
+                ("target", target_task),
+                ("public_ssh", public_ssh_task),
+                ("public", public_task),
+                ("admin", admin_task),
+            ],
             admin_addr,
             public_addr,
             public_ssh_addr,
             target_addr,
             app_addr,
             route_username: "run-01-web".to_owned(),
+            generation: "exec-01:7".to_owned(),
             target_username: "ubuntu".to_owned(),
             target_host_key: target_host_public,
             target_private_key_openssh,
@@ -1002,25 +1210,149 @@ impl Harness {
         authorized_client_public_keys_openssh: Vec<String>,
         route_lifetime: Duration,
     ) -> Result<IssueTerminalSessionRequest> {
+        self.terminal_session_request_with_generation(
+            mode,
+            authorized_client_public_keys_openssh,
+            route_lifetime,
+            &self.generation,
+        )
+    }
+
+    fn terminal_session_request_with_generation(
+        &self,
+        mode: TerminalSessionMode,
+        authorized_client_public_keys_openssh: Vec<String>,
+        route_lifetime: Duration,
+        generation: &str,
+    ) -> Result<IssueTerminalSessionRequest> {
+        let target = match mode {
+            // A browser route starts pending: it carries the run identity and
+            // no guest endpoint at all. The admin attach supplies the target.
+            TerminalSessionMode::Browser => TerminalTargetState::Pending,
+            TerminalSessionMode::Native => TerminalTargetState::Ready(
+                self.terminal_target(authorized_client_public_keys_openssh)?,
+            ),
+        };
         Ok(IssueTerminalSessionRequest {
             route_username: self.route_username.clone(),
-            target_username: self.target_username.clone(),
-            target_ip: "127.0.0.1".to_owned(),
-            target_port: self.target_addr.port(),
-            target_host_key_openssh: self.target_host_key.clone(),
-            target_private_key_openssh: self.target_private_key_openssh.clone(),
-            authorized_client_public_keys_openssh,
+            generation: generation.to_owned(),
+            target,
             route_expires_at: (OffsetDateTime::now_utc()
                 + time::Duration::seconds(i64::try_from(route_lifetime.as_secs())?))
             .unix_timestamp(),
             mode,
-            metadata: RouteMetadata {
-                host_id: Some("host-01".to_owned()),
-                run_id: Some("run-01".to_owned()),
-                vm_id: Some("vm-01".to_owned()),
-                user_id: Some("user-01".to_owned()),
-            },
+            metadata: self.route_metadata(),
         })
+    }
+
+    fn terminal_target(
+        &self,
+        authorized_client_public_keys_openssh: Vec<String>,
+    ) -> Result<TerminalTarget> {
+        Ok(TerminalTarget {
+            username: self.target_username.clone(),
+            host: "127.0.0.1".to_owned(),
+            port: self.target_addr.port(),
+            host_key_openssh: self.target_host_key.clone(),
+            private_key_openssh: self.target_private_key_openssh.clone(),
+            authorized_client_public_keys_openssh,
+        })
+    }
+
+    fn route_metadata(&self) -> RouteMetadata {
+        RouteMetadata {
+            host_id: "host-01".to_owned(),
+            run_id: "run-01".to_owned(),
+            vm_id: "vm-01".to_owned(),
+            user_id: "user-01".to_owned(),
+        }
+    }
+
+    /// Attach the ready target to the pending browser route. The control plane
+    /// repeats the run identity and the generation it sent in the create call.
+    /// Stage the ready target, then activate it. This is the control plane
+    /// sequence: the stage stores the target, and the activation after the
+    /// control plane fence is what lets the gateway dial.
+    async fn stage_and_activate_terminal_target(&self) -> Result<reqwest::Response> {
+        let stage = self
+            .stage_terminal_target(self.terminal_target(Vec::new())?)
+            .await?;
+        let status = stage.status();
+        if !status.is_success() {
+            return Ok(stage);
+        }
+        let staged = stage.json::<StageTerminalTargetResponse>().await?;
+        self.activate_terminal_target(&staged.attachment_id).await
+    }
+
+    /// Stage one target. The route is still not ready after this call, so a
+    /// test can assert that nothing dialled the guest yet.
+    async fn stage_terminal_target(&self, target: TerminalTarget) -> Result<reqwest::Response> {
+        self.stage_terminal_target_for_generation(target, &self.generation)
+            .await
+    }
+
+    async fn stage_terminal_target_for_generation(
+        &self,
+        target: TerminalTarget,
+        generation: &str,
+    ) -> Result<reqwest::Response> {
+        self.stage_terminal_target_with(target, "run-01", "vm-01", "user-01", generation.to_owned())
+            .await
+    }
+
+    async fn stage_terminal_target_with(
+        &self,
+        target: TerminalTarget,
+        run_id: &str,
+        vm_id: &str,
+        user_id: &str,
+        generation: String,
+    ) -> Result<reqwest::Response> {
+        let request = StageTerminalTargetRequest {
+            run_id: run_id.to_owned(),
+            vm_id: vm_id.to_owned(),
+            user_id: user_id.to_owned(),
+            generation,
+            target,
+        };
+        Ok(reqwest::Client::new()
+            .post(format!(
+                "http://{}/v1/terminal-sessions/{}/target",
+                self.admin_addr, self.route_username
+            ))
+            .header("x-stargate-admin-assertion", self.admin_token()?)
+            .json(&request)
+            .send()
+            .await?)
+    }
+
+    async fn activate_terminal_target(&self, attachment_id: &str) -> Result<reqwest::Response> {
+        self.activate_terminal_target_for_generation(attachment_id, &self.generation)
+            .await
+    }
+
+    async fn activate_terminal_target_for_generation(
+        &self,
+        attachment_id: &str,
+        generation: &str,
+    ) -> Result<reqwest::Response> {
+        let request = ActivateTerminalTargetRequest {
+            run_id: "run-01".to_owned(),
+            vm_id: "vm-01".to_owned(),
+            user_id: "user-01".to_owned(),
+            generation: generation.to_owned(),
+            attachment_id: attachment_id.to_owned(),
+        };
+        Ok(reqwest::Client::new()
+            .post(format!(
+                "http://{}/v1/terminal-sessions/{}/activate",
+                self.admin_addr, self.route_username
+            ))
+            .header("x-stargate-admin-assertion", self.admin_token()?)
+            .json(&request)
+            .send()
+            .await?)
     }
 
     async fn send_terminal_session_request(
@@ -1120,7 +1452,7 @@ impl Harness {
             route_expires_at: (OffsetDateTime::now_utc()
                 + time::Duration::seconds(i64::try_from(route_lifetime.as_secs())?))
             .unix_timestamp(),
-            metadata: RouteMetadata {
+            metadata: WorkspaceAppMetadata {
                 host_id: Some("host-01".to_owned()),
                 run_id: Some("runtime-01".to_owned()),
                 vm_id: Some("vm-01".to_owned()),
@@ -1486,8 +1818,10 @@ impl Harness {
             vec![self.profile_client_public_key_openssh.clone()],
             Duration::from_secs(60 * 60),
         )?;
-        replacement.target_username = "replacement-target-user".to_owned();
-        replacement.metadata.run_id = Some("run-02".to_owned());
+        if let TerminalTargetState::Ready(target) = &mut replacement.target {
+            target.username = "replacement-target-user".to_owned();
+        }
+        replacement.metadata.run_id = "run-02".to_owned();
         let response = self.send_terminal_session_request(&replacement).await?;
         assert!(response.status().is_success(), "{}", response.text().await?);
         wait_for_native_channel_close(&mut old_channel).await?;
@@ -1529,7 +1863,8 @@ impl Harness {
             .connect_with(options)
             .await?;
         let updated = sqlx::query(
-            "UPDATE routes SET authorized_client_public_keys_json = ? WHERE route_username = ?",
+            "UPDATE terminal_route_targets SET authorized_client_public_keys_json = ? \
+             WHERE route_username = ?",
         )
         .bind(value)
         .bind(&self.route_username)
@@ -1566,6 +1901,71 @@ impl Harness {
         let session = response.json::<IssueTerminalSessionResponse>().await?;
         let browser = session.browser.context("missing browser bundle")?;
         let mut request = browser.websocket_url.into_client_request()?;
+        request.headers_mut().insert(
+            "origin",
+            self.allowed_origin
+                .parse()
+                .context("invalid origin header")?,
+        );
+        let (websocket, _) = connect_async(request).await?;
+        // The control plane stages the target and then activates it after its
+        // own fence. The browser waits through both steps.
+        let activate = self.stage_and_activate_terminal_target().await?;
+        assert_eq!(activate.status(), reqwest::StatusCode::NO_CONTENT);
+        Ok(websocket)
+    }
+
+    /// Create one browser route with a named generation and return its
+    /// capability URL. The URL carries the terminal token for that generation.
+    async fn issue_browser_terminal_url(
+        &self,
+        generation: &str,
+        route_lifetime: Duration,
+    ) -> Result<String> {
+        let request = self.terminal_session_request_with_generation(
+            TerminalSessionMode::Browser,
+            Vec::new(),
+            route_lifetime,
+            generation,
+        )?;
+        let response = self.send_terminal_session_request(&request).await?;
+        assert!(response.status().is_success(), "{}", response.text().await?);
+        let session = response.json::<IssueTerminalSessionResponse>().await?;
+        Ok(session
+            .browser
+            .context("missing browser bundle")?
+            .websocket_url)
+    }
+
+    /// Ask the gateway to open a browser terminal socket for one URL, and
+    /// return the HTTP status it answered. 101 means the socket opened; 401
+    /// means the gateway refused the terminal token.
+    async fn browser_terminal_connect_status(&self, websocket_url: &str) -> Result<u16> {
+        let mut request = websocket_url.into_client_request()?;
+        request.headers_mut().insert(
+            "origin",
+            self.allowed_origin
+                .parse()
+                .context("invalid origin header")?,
+        );
+        match connect_async(request).await {
+            Ok((websocket, response)) => {
+                drop(websocket);
+                Ok(response.status().as_u16())
+            }
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                Ok(response.status().as_u16())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Open a browser terminal socket for a URL that was already issued.
+    async fn connect_browser_terminal(
+        &self,
+        websocket_url: &str,
+    ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+        let mut request = websocket_url.into_client_request()?;
         request.headers_mut().insert(
             "origin",
             self.allowed_origin
@@ -1682,11 +2082,12 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        self.admin_task.abort();
-        self.public_task.abort();
-        self.public_ssh_task.abort();
-        self.target_task.abort();
-        self.app_task.abort();
+        // Fallback for a test that returns through `?` before it reaches
+        // `shutdown`. Cancelling alone still lets the task run to its next
+        // await point; `shutdown` is what joins it.
+        for (_, task) in &self.tasks {
+            task.abort();
+        }
     }
 }
 
@@ -1756,6 +2157,15 @@ async fn wait_for_native_channel_close(channel: &mut Channel<client::Msg>) -> Re
 async fn browser_open_terminal(
     websocket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 ) -> Result<()> {
+    browser_request_terminal(websocket).await?;
+    browser_wait_for_ready(websocket).await
+}
+
+/// Ask for the terminal without waiting for it to become usable. A pending
+/// route accepts this request and waits, which is the normal browser start.
+async fn browser_request_terminal(
+    websocket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+) -> Result<()> {
     websocket
         .send(Message::Text(
             serde_json::json!({
@@ -1767,7 +2177,13 @@ async fn browser_open_terminal(
             .into(),
         ))
         .await?;
+    Ok(())
+}
 
+/// Wait for the gateway's `ready` frame on an already opened terminal.
+async fn browser_wait_for_ready(
+    websocket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             match websocket.next().await {
@@ -1780,6 +2196,24 @@ async fn browser_open_terminal(
     })
     .await
     .context("timed out waiting for browser terminal readiness")?
+}
+
+/// Whether a `ready` frame arrived within a short window. `false` means the
+/// gateway has not reported the terminal as usable yet.
+async fn websocket_has_ready(
+    websocket: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+) -> Result<bool> {
+    Ok(tokio::time::timeout(Duration::from_millis(150), async {
+        loop {
+            match websocket.next().await {
+                Some(Ok(Message::Text(text))) if text.contains("\"ready\"") => return true,
+                Some(Ok(_)) => continue,
+                Some(Err(_)) | None => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false))
 }
 
 async fn read_browser_output(

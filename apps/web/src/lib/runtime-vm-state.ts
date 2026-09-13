@@ -66,13 +66,40 @@ export async function loadRuntimeVmAccessKey(input: {
     publicKeyOpenssh: row.public_key_openssh,
     privateKeyOpenssh: await decryptAccessKey({
       executionId: execution.id,
-      runtimeVmId: row.runtime_vm_id,
       vmId: row.vm_id,
       runtimeVmName: row.runtime_vm_name,
       publicKeyOpenssh: row.public_key_openssh,
       ciphertextB64: row.private_key_ciphertext_b64,
       ivB64: row.private_key_iv_b64,
     }),
+  };
+}
+
+/**
+ * Encrypts one runtime VM access key for the mirror row. Admission inserts the
+ * row with the runtime VM id resolved in SQL, so the authenticated context
+ * cannot include that id and this function is the only encryptor.
+ */
+export async function encryptRuntimeVmAccessKey(input: {
+  executionId: string;
+  vmId: string;
+  runtimeVmName: string;
+  publicKeyOpenssh: string;
+  privateKeyOpenssh: string;
+}): Promise<{ ciphertextB64: string; ivB64: string }> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: copyBuffer(iv),
+      additionalData: copyBuffer(accessKeyContext(input)),
+    },
+    await encryptionKey(),
+    copyBuffer(textEncoder.encode(input.privateKeyOpenssh)),
+  );
+  return {
+    ciphertextB64: bytesToBase64(new Uint8Array(ciphertext)),
+    ivB64: bytesToBase64(iv),
   };
 }
 
@@ -205,7 +232,6 @@ export async function recordRuntimeVmActualState(input: {
 
 async function decryptAccessKey(input: {
   executionId: string;
-  runtimeVmId: string;
   vmId: string;
   runtimeVmName: string;
   publicKeyOpenssh: string;
@@ -245,14 +271,21 @@ async function encryptionKey(): Promise<CryptoKey> {
 
 function accessKeyContext(input: {
   executionId: string;
-  runtimeVmId: string;
   vmId: string;
   runtimeVmName: string;
   publicKeyOpenssh: string;
 }): Uint8Array {
   return textEncoder.encode(
-    `${input.executionId}\0${input.runtimeVmId}\0${input.vmId}\0${input.runtimeVmName}\0${input.publicKeyOpenssh}`,
+    `${input.executionId}\0${input.vmId}\0${input.runtimeVmName}\0${input.publicKeyOpenssh}`,
   );
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }
 
 function required(value: string, label: string): string {

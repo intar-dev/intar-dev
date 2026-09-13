@@ -1,6 +1,7 @@
 mod config;
 mod host_keys;
 mod http;
+mod lab_release;
 mod probe;
 mod proto;
 mod ready_push;
@@ -10,6 +11,7 @@ mod run_cli_control;
 mod run_cli_pending;
 mod run_cli_wire;
 mod scheduler;
+mod startup;
 mod state;
 
 use anyhow::Context;
@@ -216,12 +218,18 @@ async fn run_probe_service(
     );
     let probe_tasks = scheduler::spawn_probe_tasks(shared_probes, &store, probe_executor);
 
-    tokio::pin!(server);
+    // Run the server as its own task, then give the runtime one turn so the
+    // task reaches its first accept before the ACK goes out. The ACK therefore
+    // means "this process accepts connections", not only "the socket exists".
+    let mut server_task = tokio::spawn(server);
+    tokio::task::yield_now().await;
+    startup::publish_ready().context("failed to publish the Kino startup ACK")?;
 
     let server_result = tokio::select! {
-        result = &mut server => Some(result),
+        result = &mut server_task => Some(result),
         () = shutdown_signal() => None,
     };
+    server_task.abort();
 
     for task in probe_tasks {
         task.abort();
@@ -232,7 +240,9 @@ async fn run_probe_service(
     control_socket.shutdown().await;
 
     if let Some(result) = server_result {
-        result.context("http server terminated unexpectedly")?;
+        result
+            .context("http server task stopped unexpectedly")?
+            .context("http server terminated unexpectedly")?;
     }
 
     Ok(())

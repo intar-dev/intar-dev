@@ -51,7 +51,7 @@ fn create_scenario_vm_request_accepts_runtime() {
             "tools_disk_sha256": "b".repeat(64),
             "tools_disk_size_bytes": 67108864,
             "kino_sha256": "c".repeat(64),
-            "bootstrap_abi": 1
+            "bootstrap_abi": GUEST_BOOTSTRAP_ABI_V2
         },
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"],
@@ -329,4 +329,85 @@ fn terminal_state_reports_failed_with_vm_error() {
     assert_eq!(state.state, VmTerminalStateKind::Failed);
     assert_eq!(state.reason.as_deref(), Some("boot failed"));
     assert_eq!(state.terminal_target, None);
+}
+
+#[test]
+fn a_foreground_prepare_keeps_the_fixed_budget() {
+    // A foreground import resolves from a ready descriptor before this path,
+    // so the fixed budget stays whatever the size is.
+    for bytes in [0, 4 << 30, 64 << 30] {
+        assert_eq!(
+            jailer_prepare_timeout(RequestClass::Foreground, bytes),
+            JAILER_PREPARE_IMAGE_TIMEOUT
+        );
+    }
+}
+
+#[test]
+fn a_background_prepare_budget_covers_the_rate_limited_import() {
+    // The rate limit is the point of the background class: the import is
+    // allowed to be slow, so the client budget must cover the physical
+    // minimum. A fixed budget would abandon work that jailerd keeps running.
+    let biggest = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
+    let timeout = jailer_prepare_timeout(RequestClass::Background, biggest);
+    let physical_minimum =
+        Duration::from_secs(biggest.div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND));
+    assert!(
+        timeout > JAILER_PREPARE_IMAGE_TIMEOUT,
+        "the largest image needs more than the fixed budget: {timeout:?}"
+    );
+    assert!(
+        timeout > physical_minimum,
+        "the budget must exceed the rate-limited minimum {physical_minimum:?}"
+    );
+}
+
+#[test]
+fn a_small_background_prepare_keeps_the_foreground_budget() {
+    // A catalog-sized image inside the fixed budget is unchanged.
+    let four_gib = 4 * 1024 * 1024 * 1024;
+    assert_eq!(
+        jailer_prepare_timeout(RequestClass::Background, four_gib),
+        JAILER_PREPARE_IMAGE_TIMEOUT
+    );
+    // The crossover is exactly where the rate-limited import meets the fixed
+    // budget: below it the fixed budget still wins.
+    let crossover = JAILER_PREPARE_IMAGE_TIMEOUT
+        .as_secs()
+        .saturating_sub(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS)
+        .saturating_mul(BACKGROUND_PREPARE_BYTES_PER_SECOND)
+        / 2;
+    assert_eq!(
+        jailer_prepare_timeout(RequestClass::Background, crossover),
+        JAILER_PREPARE_IMAGE_TIMEOUT
+    );
+    assert!(
+        jailer_prepare_timeout(RequestClass::Background, crossover + 1)
+            > JAILER_PREPARE_IMAGE_TIMEOUT
+    );
+}
+
+#[test]
+fn the_background_prepare_budget_grows_with_the_image() {
+    let mut previous = Duration::ZERO;
+    for gib in 1..=64 {
+        let timeout = jailer_prepare_timeout(RequestClass::Background, gib << 30);
+        assert!(timeout >= previous, "the budget must not shrink with size");
+        assert!(timeout >= JAILER_PREPARE_IMAGE_TIMEOUT);
+        previous = timeout;
+    }
+}
+
+#[test]
+fn the_background_budget_is_bounded_by_the_contract_maximum() {
+    // The derivation is a bound, not an open wait: the size is clamped to the
+    // contract maximum, so an unvalidated field cannot hold the socket open.
+    let over = jailer_prepare_timeout(RequestClass::Background, u64::MAX);
+    let derived = Duration::from_secs(
+        intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES
+            .div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND)
+            .saturating_mul(2)
+            .saturating_add(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS),
+    );
+    assert_eq!(over, derived.max(JAILER_PREPARE_IMAGE_TIMEOUT));
 }

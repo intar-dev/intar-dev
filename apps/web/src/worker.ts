@@ -8,6 +8,7 @@ import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { handleMaintenanceMode } from "@/maintenance";
 import { hardenJoinResponse } from "@/lib/join-security";
+import { sweepUndeliveredHostDesiredState } from "@/lib/host-runtime-dispatch-outbox";
 import {
   guardCanonicalRequestPath,
   secureApplicationApiRequest,
@@ -78,6 +79,21 @@ export default {
     if (String(env.CONTROL_PLANE_MAINTENANCE) === "on") {
       console.info(JSON.stringify({ event: "scheduled_maintenance_fenced" }));
       return;
+    }
+    // The durable dispatch outbox is the committed host desired-state version.
+    // The wake that follows a commit is only a latency hint, so this sweep is
+    // what recovers a delivery that a crash, a lost alarm, or a dead socket
+    // dropped. It is bounded and idempotent: a wake for an already applied
+    // version sends nothing.
+    try {
+      await sweepUndeliveredHostDesiredState();
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "host_desired_dispatch_sweep_failed",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     }
   },
 } satisfies ExportedHandler<Cloudflare.Env>;

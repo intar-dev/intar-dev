@@ -529,7 +529,7 @@ export function imageIndexRow(
     imageFormat: "raw_chunks_v1",
     imageVirtualSizeBytes: 8_589_934_592,
     chunkManifestSha256: "d".repeat(64),
-    guestBootstrapAbi: 1,
+    guestBootstrapAbi: 2,
     kernelSha256: "b".repeat(64),
     initrdSha256: "c".repeat(64),
     bootCmdline:
@@ -567,7 +567,7 @@ export function publishManifest(input: {
         image_format: "raw_chunks_v1",
         image_virtual_size_bytes: 8_589_934_592,
         chunk_manifest_sha256: "d".repeat(64),
-        guest_bootstrap_abi: 1,
+        guest_bootstrap_abi: 2,
         boot: {
           kernel_sha256: input.artifactSha256,
           initrd_sha256: input.artifactSha256,

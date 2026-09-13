@@ -143,7 +143,7 @@ mod tests {
             kino_vsock_port: 18_080,
             kino_host_ready_port: 18_081,
             kino_sha256: "b".repeat(64),
-            guest_bootstrap_abi: 1,
+            guest_bootstrap_abi: 2,
             vm_hostname: "pair-ping-db".to_owned(),
             guest_ip_cidr: "10.200.0.2/24".to_owned(),
             gateway: "10.200.0.1".to_owned(),

@@ -465,7 +465,7 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
         .collect::<Vec<_>>();
     let mut meta = serde_json::json!({
         "rev": rev,
-        "guest_bootstrap_abi": intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1,
+        "guest_bootstrap_abi": intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2,
         "build_format_version": BUILD_FORMAT_VERSION,
         "catalog_channel": "candidate",
         "target_arch": config.qemu.target_arch,

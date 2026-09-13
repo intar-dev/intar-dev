@@ -644,7 +644,15 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         self.pending_cpu_reservations
             .insert(generation.clone(), effective_quota);
         self.inflight_launches
-            .insert(generation, reservation.clone());
+            .insert(generation.clone(), reservation.clone());
+        // Publish the boot window inside the same critical section. Background
+        // image preparation requeues while it is live, so a boot never shares
+        // the disk or the template store with an import. Every terminal path
+        // closes it again; the window also self-expires after one lease.
+        open_boot_window(
+            &generation,
+            Duration::from_millis(self.config.boot_cpu_lease_ms),
+        );
 
         Ok(DetachedLaunchAdmission::Reserved(Box::new(
             DetachedLaunchTask {
@@ -701,6 +709,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             DetachedLaunchOutcome::Failure(failure) => {
                 let generation = failure.reservation.generation.clone();
                 self.inflight_launches.remove(&generation);
+                // A failed detached launch is terminal for this generation,
+                // whatever containment still owes recovery.
+                close_boot_window(&generation);
                 if failure.cgroup_drain_proven {
                     self.pending_cpu_reservations.remove(&generation);
                 }
@@ -821,6 +832,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     // transition that installs any conservative capacity hold.
                     self.records.remove(&generation);
                 }
+                // The unit is contained: no boot window for it stays open.
+                close_boot_window(&generation);
                 if containment.cgroup_drain_proven {
                     self.pending_cpu_reservations.remove(&generation);
                 } else {

@@ -860,6 +860,7 @@ fn prepare_launch_v2<P: JailPreparer>(
         root_disk: source("/trusted/root.raw", ArtifactAccess::ReadOnly),
         kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
         initrd: None,
+        request_class: RequestClass::Foreground,
     };
     let prepared = match core.handle(Request::PrepareImageV2(Box::new(prepare))) {
         Response::PrepareImageV2(prepared) => prepared,

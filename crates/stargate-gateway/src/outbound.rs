@@ -23,7 +23,7 @@ use russh::{
         ssh_key::{Algorithm, PublicKey},
     },
 };
-use stargate_core::{RouteRecord, WorkspaceAppRouteRecord};
+use stargate_core::{StoredTerminalRoute, TerminalTarget, WorkspaceAppRouteRecord};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc as tokio_mpsc};
 use tokio_util::sync::CancellationToken;
@@ -70,16 +70,16 @@ enum BridgeMode {
 }
 
 pub fn spawn_exec_bridge(
-    route: RouteRecord,
+    route: StoredTerminalRoute,
     command: String,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ExecBridgeControl, tokio_mpsc::Receiver<BridgeEvent>)> {
-    let target = PreparedSshTarget::new(&route)?;
+    let (target, target_username) = prepared_target(&route)?;
     let (events_tx, events_rx) = tokio_mpsc::channel(BRIDGE_EVENT_CAPACITY);
     let (input_tx, input_rx) = tokio_mpsc::channel(BRIDGE_INPUT_CAPACITY);
 
     tokio::spawn(run_bridge(
-        route,
+        target_username,
         target,
         BridgeMode::Exec { command },
         input_rx,
@@ -97,16 +97,16 @@ pub fn spawn_exec_bridge(
 }
 
 pub fn spawn_pty_bridge(
-    route: RouteRecord,
+    route: StoredTerminalRoute,
     options: PtyBridgeOptions,
     cancel: CancellationToken,
 ) -> anyhow::Result<(PtyBridgeControl, tokio_mpsc::Receiver<BridgeEvent>)> {
-    let target = PreparedSshTarget::new(&route)?;
+    let (target, target_username) = prepared_target(&route)?;
     let (events_tx, events_rx) = tokio_mpsc::channel(BRIDGE_EVENT_CAPACITY);
     let (input_tx, input_rx) = tokio_mpsc::channel(BRIDGE_INPUT_CAPACITY);
 
     tokio::spawn(run_bridge(
-        route,
+        target_username,
         target,
         BridgeMode::Pty(options),
         input_rx,
@@ -164,6 +164,18 @@ async fn send_bridge_input(
         _ = cancel.cancelled() => {}
         _ = tx.send(input) => {}
     }
+}
+
+/// A bridge can only start from a route that already carries its target. A
+/// pending route has no guest address and no guest key, so it can not dial.
+fn prepared_target(route: &StoredTerminalRoute) -> anyhow::Result<(PreparedSshTarget, String)> {
+    let target = route
+        .ready_target()
+        .context("terminal route has no attached target")?;
+    Ok((
+        PreparedSshTarget::from_terminal_target(target)?,
+        target.username.clone(),
+    ))
 }
 
 struct PreparedSshTarget {
@@ -382,12 +394,12 @@ fn workspace_app_target_fingerprint(route: &WorkspaceAppRouteRecord) -> [u8; 32]
 }
 
 impl PreparedSshTarget {
-    fn new(route: &RouteRecord) -> anyhow::Result<Self> {
+    fn from_terminal_target(target: &TerminalTarget) -> anyhow::Result<Self> {
         Self::from_parts(
-            &route.target_ip,
-            route.target_port,
-            &route.target_host_key_openssh,
-            &route.target_private_key_openssh,
+            &target.host,
+            target.port,
+            &target.host_key_openssh,
+            &target.private_key_openssh,
         )
     }
 
@@ -467,32 +479,40 @@ impl client::Handler for StrictHostKey {
 }
 
 async fn run_bridge(
-    route: RouteRecord,
+    target_username: String,
     target: PreparedSshTarget,
     mode: BridgeMode,
     input_rx: tokio_mpsc::Receiver<BridgeInput>,
     events_tx: tokio_mpsc::Sender<BridgeEvent>,
     cancel: CancellationToken,
 ) {
-    let exit_status =
-        match run_bridge_inner(route, target, mode, input_rx, &events_tx, &cancel).await {
-            Ok(status) => status,
-            Err(error) => {
-                // Log and surface the full anyhow cause chain: the outermost
-                // context alone ("failed connecting to target …") hides the
-                // underlying russh/auth failure that operators need.
-                tracing::warn!(error = ?error, "outbound ssh bridge failed");
-                send_bridge_event(
-                    &events_tx,
-                    &cancel,
-                    BridgeEvent::Stderr(
-                        format!("stargate outbound ssh bridge failed: {error:#}\n").into_bytes(),
-                    ),
-                )
-                .await;
-                255
-            }
-        };
+    let exit_status = match run_bridge_inner(
+        target_username,
+        target,
+        mode,
+        input_rx,
+        &events_tx,
+        &cancel,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(error) => {
+            // Log and surface the full anyhow cause chain: the outermost
+            // context alone ("failed connecting to target …") hides the
+            // underlying russh/auth failure that operators need.
+            tracing::warn!(error = ?error, "outbound ssh bridge failed");
+            send_bridge_event(
+                &events_tx,
+                &cancel,
+                BridgeEvent::Stderr(
+                    format!("stargate outbound ssh bridge failed: {error:#}\n").into_bytes(),
+                ),
+            )
+            .await;
+            255
+        }
+    };
 
     send_bridge_event(&events_tx, &cancel, BridgeEvent::Exit(exit_status)).await;
 }
@@ -509,7 +529,7 @@ async fn send_bridge_event(
 }
 
 async fn run_bridge_inner(
-    route: RouteRecord,
+    target_username: String,
     target: PreparedSshTarget,
     mode: BridgeMode,
     input_rx: tokio_mpsc::Receiver<BridgeInput>,
@@ -533,7 +553,7 @@ async fn run_bridge_inner(
     let auth_result = tokio::select! {
         _ = cancel.cancelled() => return Ok(255),
         result = session.authenticate_publickey(
-            route.target_username,
+            target_username,
             PrivateKeyWithHashAlg::new(target.private_key, None),
         ) => result.context("target public-key authentication failed")?,
     };
@@ -752,7 +772,7 @@ mod tests {
         ssh_key::{Algorithm, EcdsaCurve, PublicKey},
     };
     use stargate_core::{
-        RouteMetadata, RouteRecord, WorkspaceAppProtocol, WorkspaceAppRouteRecord,
+        TerminalTarget, WorkspaceAppMetadata, WorkspaceAppProtocol, WorkspaceAppRouteRecord,
     };
     use time::OffsetDateTime;
     use tokio::sync::mpsc;
@@ -913,26 +933,21 @@ mod tests {
         let legacy_host_key_openssh = legacy_key.public_key().to_openssh().expect("legacy host");
         let legacy_private_key_openssh = private_key_openssh(&legacy_key);
 
-        let terminal_route = RouteRecord {
-            route_username: "run-01-worker".to_owned(),
-            target_username: "ubuntu".to_owned(),
-            target_ip: "127.0.0.1".to_owned(),
-            target_port: 22,
+        let terminal_target = TerminalTarget {
+            username: "ubuntu".to_owned(),
+            host: "127.0.0.1".to_owned(),
+            port: 22,
+            host_key_openssh: target_host_key_openssh.clone(),
+            private_key_openssh: target_private_key_openssh.clone(),
             authorized_client_public_keys_openssh: Vec::new(),
-            target_host_key_openssh: target_host_key_openssh.clone(),
-            target_private_key_openssh: target_private_key_openssh.clone(),
-            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
-            metadata: RouteMetadata::default(),
-            created_at: OffsetDateTime::now_utc(),
-            updated_at: OffsetDateTime::now_utc(),
         };
-        assert!(PreparedSshTarget::new(&terminal_route).is_ok());
+        assert!(PreparedSshTarget::from_terminal_target(&terminal_target).is_ok());
 
-        let legacy_terminal_route = RouteRecord {
-            target_host_key_openssh: legacy_host_key_openssh,
-            ..terminal_route
+        let legacy_terminal_target = TerminalTarget {
+            host_key_openssh: legacy_host_key_openssh,
+            ..terminal_target
         };
-        assert!(PreparedSshTarget::new(&legacy_terminal_route).is_err());
+        assert!(PreparedSshTarget::from_terminal_target(&legacy_terminal_target).is_err());
 
         let legacy_workspace_app_route = WorkspaceAppRouteRecord {
             route_id: "wa-key-policy".to_owned(),
@@ -945,7 +960,7 @@ mod tests {
             protocol: WorkspaceAppProtocol::Http,
             upstream_host: None,
             expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
-            metadata: RouteMetadata::default(),
+            metadata: WorkspaceAppMetadata::default(),
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
         };

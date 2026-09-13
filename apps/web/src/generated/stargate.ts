@@ -2,24 +2,75 @@
 export type TerminalSessionMode = "browser" | "native";
 export type NativeTerminalAuthMode = "profile_keys";
 
+/** Every field is mandatory and non-empty for a terminal route. */
 export interface RouteMetadata {
+  host_id: string;
+  run_id: string;
+  vm_id: string;
+  user_id: string;
+}
+
+/** Workspace app routes carry no terminal identity, so their metadata stays
+ * optional. */
+export interface WorkspaceAppMetadata {
   host_id?: string | null;
   run_id?: string | null;
   vm_id?: string | null;
   user_id?: string | null;
 }
 
+/** The complete SSH endpoint of one scenario VM terminal. Only the admin API
+ * carries this value: the guest private key never reaches a browser. */
+export interface TerminalTarget {
+  username: string;
+  host: string;
+  port: number;
+  host_key_openssh: string;
+  private_key_openssh: string;
+  authorized_client_public_keys_openssh: string[];
+}
+
+/** A browser route starts pending. An admin attach moves it to ready. */
+export type TerminalTargetState =
+  | { state: "pending" }
+  | ({ state: "ready" } & TerminalTarget);
+
 export interface IssueTerminalSessionRequest {
   route_username: string;
-  target_username: string;
-  target_ip: string;
-  target_port: number;
-  target_host_key_openssh: string;
-  target_private_key_openssh: string;
-  authorized_client_public_keys_openssh?: string[];
+  /** Opaque generation. An attach call must repeat this exact string. */
+  generation: string;
+  /** `pending` for a browser route, `ready` for a native route. */
+  target: TerminalTargetState;
   route_expires_at: number;
   mode: TerminalSessionMode;
-  metadata?: RouteMetadata;
+  metadata: RouteMetadata;
+}
+
+/** Stage the ready target on a pending route. The route is NOT ready after
+ * this call: no waiter wakes and no socket dials, so the SSH shift can not
+ * start before the control plane activates the attachment. */
+export interface StageTerminalTargetRequest {
+  run_id: string;
+  vm_id: string;
+  user_id: string;
+  generation: string;
+  target: TerminalTarget;
+}
+
+/** One staged target. An identical repeat of a stage call returns the same
+ * value, so a lost answer is safe to retry. */
+export interface StageTerminalTargetResponse {
+  attachment_id: string;
+}
+
+/** Activate exactly the staged attachment that the control plane names. Only
+ * this call makes the route ready and wakes the waiting browser socket. */
+export interface ActivateTerminalTargetRequest {
+  run_id: string;
+  vm_id: string;
+  user_id: string;
+  generation: string;
+  attachment_id: string;
 }
 
 export interface BrowserTerminalSession {
@@ -59,7 +110,7 @@ export interface IssueWorkspaceAppSessionRequest {
   protocol: WorkspaceAppProtocol;
   upstream_host?: string;
   route_expires_at: number;
-  metadata?: RouteMetadata;
+  metadata?: WorkspaceAppMetadata;
 }
 
 export interface IssueWorkspaceAppSessionResponse {

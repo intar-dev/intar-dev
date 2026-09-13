@@ -20,7 +20,7 @@ export function initializeBrowserTelemetry() {
       ],
     });
     // Existing boot marks contain only stage times and correlation IDs.
-    const stages = new Set(["start-click", "start-request", "start-accepted", "status-ready", "terminal-module", "terminal-font", "terminal-session-request", "terminal-session", "terminal-websocket-open", "terminal-connected", "terminal-first-output", "terminal-input", "terminal-input-output"]);
+    const stages = new Set(["start-click", "start-request", "start-accepted", "status-ready", "terminal-module", "terminal-font", "terminal-session-request", "terminal-session", "terminal-websocket-open", "terminal-connected", "terminal-visible", "terminal-first-output", "terminal-input", "terminal-input-output"]);
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         const stage = entry.name.replace(/^intar:vm-boot:/u, "");

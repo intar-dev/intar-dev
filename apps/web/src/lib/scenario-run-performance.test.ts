@@ -1,6 +1,7 @@
 import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  VM_BOOT_MARK_PREFIX,
   associateScenarioRunBootEvidence,
   beginScenarioRunBootEvidence,
   markPendingScenarioRunBootStage,
@@ -33,6 +34,8 @@ describe("scenario run boot evidence", () => {
     associateScenarioRunBootEvidence({
       runId: "run-1",
       scenarioId: "repair-nginx",
+      reused: false,
+      acceptedAt: 1_012,
     });
     for (const [stage, unixMs] of [
       ["terminal-session-request", 1_015],
@@ -90,13 +93,65 @@ describe("scenario run boot evidence", () => {
     );
   });
 
-  function armBenchmark(options: { search?: string; stage?: string; reused?: boolean } = {}) {
-    vi.stubGlobal("window", { sessionStorage: new MemoryStorage(), location: { search: options.search ?? "?bootBenchmark=1" } });
-    vi.stubGlobal("crypto", { randomUUID: () => "11111111-2222-4333-8444-555555555555", subtle: webcrypto.subtle });
+  const CLICK_UNIX_MS = 1_000;
+
+  /** Stubs the browser clock, storage, and cryptography the evidence reads. */
+  function stubBrowser(options: { search?: string } = {}) {
+    const storage = new MemoryStorage();
+    vi.stubGlobal("window", {
+      sessionStorage: storage,
+      location: { search: options.search ?? "?bootBenchmark=1" },
+    });
+    vi.stubGlobal("performance", {
+      timeOrigin: CLICK_UNIX_MS,
+      now: () => 0,
+      mark: vi.fn(),
+      getEntriesByType: () => [],
+      clearMarks: vi.fn(),
+    });
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "11111111-2222-4333-8444-555555555555",
+      subtle: webcrypto.subtle,
+    });
+    return storage;
+  }
+
+  function benchmarkInput() {
+    return {
+      runId: "run-1",
+      scenarioId: "repair-nginx",
+      vmName: "vm-1",
+      isCurrent: () => true,
+    };
+  }
+
+  function pendingRecord(storage: Storage) {
+    return storage.getItem(`${VM_BOOT_MARK_PREFIX}pending:repair-nginx`);
+  }
+
+  function armBenchmark(
+    options: {
+      search?: string;
+      stage?: string;
+      reused?: boolean;
+      acceptedAt?: number;
+    } = {},
+  ) {
+    stubBrowser(options);
     beginScenarioRunBootEvidence("repair-nginx", options.stage ?? "start-click");
-    associateScenarioRunBootEvidence({ runId: "run-1", scenarioId: "repair-nginx", reused: options.reused ?? false });
-    markScenarioRunBootStage({ runId: "run-1", scenarioId: "repair-nginx", stage: "terminal-connected" });
-    return { runId: "run-1", scenarioId: "repair-nginx", vmName: "vm-1", isCurrent: () => true };
+    associateScenarioRunBootEvidence({
+      runId: "run-1",
+      scenarioId: "repair-nginx",
+      reused: options.reused ?? false,
+      // The default replayed run is accepted by this attempt, after the click.
+      acceptedAt: options.acceptedAt ?? CLICK_UNIX_MS + 100,
+    });
+    markScenarioRunBootStage({
+      runId: "run-1",
+      scenarioId: "repair-nginx",
+      stage: "terminal-connected",
+    });
+    return benchmarkInput();
   }
 
   it("logs one safe result only after the split remote nonce, never input echo", async () => {
@@ -121,10 +176,82 @@ describe("scenario run boot evidence", () => {
     expect(log).toHaveBeenCalledTimes(1);
   });
 
-  it("does not run without opt-in, a real click, and a fresh accepted run", () => {
-    for (const options of [{ search: "" }, { stage: "start-route" }, { reused: true }]) {
+  it("does not run without opt-in, a real click, and a run of this attempt", () => {
+    for (const options of [
+      { search: "" },
+      { stage: "start-route" },
+      { reused: true, acceptedAt: CLICK_UNIX_MS - 1 },
+    ]) {
       expect(startScenarioRunBootBenchmark(armBenchmark(options))).toBeNull();
     }
+  });
+
+  it("keeps this attempt's nonce evidence when a lost response is replayed", () => {
+    const storage = stubBrowser();
+    // The learner clicks at 1 000, the admission commits at 1 120, and that
+    // response is lost. The retry replays the run of that same attempt.
+    beginScenarioRunBootEvidence("repair-nginx");
+    markPendingScenarioRunBootStage(
+      "repair-nginx",
+      "start-request",
+      CLICK_UNIX_MS + 10,
+    );
+    associateScenarioRunBootEvidence({
+      runId: "run-1",
+      scenarioId: "repair-nginx",
+      reused: true,
+      acceptedAt: CLICK_UNIX_MS + 120,
+    });
+    markScenarioRunBootStage({
+      runId: "run-1",
+      scenarioId: "repair-nginx",
+      stage: "terminal-connected",
+      unixMs: CLICK_UNIX_MS + 900,
+    });
+
+    // The click stays the start boundary, so the replay does not move the
+    // clock, and the run keeps the nonce evidence of the fresh sample.
+    expect(readScenarioRunBootEvidence("run-1")).toMatchObject({
+      startUnixMs: CLICK_UNIX_MS,
+      benchmark: true,
+      terminalConnectedUnixMs: CLICK_UNIX_MS + 900,
+    });
+    expect(pendingRecord(storage)).toBeNull();
+    expect(startScenarioRunBootBenchmark(benchmarkInput())).not.toBeNull();
+  });
+
+  it("refuses a run that predates the click and arms no nonce", () => {
+    const storage = stubBrowser();
+    beginScenarioRunBootEvidence("repair-nginx");
+    associateScenarioRunBootEvidence({
+      runId: "run-1",
+      scenarioId: "repair-nginx",
+      reused: true,
+      acceptedAt: CLICK_UNIX_MS - 1,
+    });
+
+    // The run existed before the click, so it owns no evidence here and no
+    // nonce is armed for it.
+    expect(readScenarioRunBootEvidence("run-1")).toBeNull();
+    expect(startScenarioRunBootBenchmark(benchmarkInput())).toBeNull();
+    // The stale click record is dropped, so a later attempt cannot inherit a
+    // clock that belongs to no run of its own.
+    expect(pendingRecord(storage)).toBeNull();
+  });
+
+  it("refuses a reused response without a usable acceptance time", () => {
+    stubBrowser();
+    beginScenarioRunBootEvidence("repair-nginx");
+    // A missing or malformed acceptance time arrives as a non-finite value,
+    // which proves nothing about which attempt created the run.
+    associateScenarioRunBootEvidence({
+      runId: "run-1",
+      scenarioId: "repair-nginx",
+      reused: true,
+      acceptedAt: Number.NaN,
+    });
+
+    expect(readScenarioRunBootEvidence("run-1")).toBeNull();
   });
 
   it("rejects output from a disconnected generation and does not resend on reconnect", async () => {
@@ -158,6 +285,8 @@ describe("scenario run boot evidence", () => {
       associateScenarioRunBootEvidence({
         runId: "run-1",
         scenarioId: "repair-nginx",
+        reused: false,
+        acceptedAt: 1,
       }),
     ).toBeNull();
   });

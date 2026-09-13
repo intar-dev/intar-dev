@@ -14,14 +14,46 @@ import { verifyGeneratedD1Schema } from "./generated-d1-schema";
 const webRoot = fileURLToPath(new URL("../../apps/web/", import.meta.url));
 const journalPath = `${webRoot}migrations/meta/_journal.json`;
 
-export function removalMigrationBatch(): D1Statement[] {
-  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
-    entries: Array<{ idx: number; tag: string; when: number }>;
-  };
-  const migration = journal.entries.at(-1);
-  if (!migration || migration.idx !== 13) {
-    throw new Error("expected removal migration at index 13");
+/**
+ * The removal migration is pinned by index and tag. Later migrations append
+ * after it, so selecting the newest journal entry would read the wrong SQL
+ * file: the index is the identity, not the position in the journal.
+ */
+export const REMOVAL_MIGRATION_IDX = 13;
+export const REMOVAL_MIGRATION_TAG = "0013_amused_kinsey_walden";
+
+interface RemovalMigrationEntry {
+  idx: number;
+  tag: string;
+  when: number;
+}
+
+/**
+ * Selects the removal migration from the committed journal by exact index and
+ * tag, and refuses a journal that does not contain exactly one such entry.
+ */
+export function removalMigrationEntry(
+  journal: {
+    entries: RemovalMigrationEntry[];
+  } = JSON.parse(readFileSync(journalPath, "utf8")) as {
+    entries: RemovalMigrationEntry[];
+  },
+): RemovalMigrationEntry {
+  const matches = journal.entries.filter(
+    (entry) =>
+      entry.idx === REMOVAL_MIGRATION_IDX &&
+      entry.tag === REMOVAL_MIGRATION_TAG,
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `expected exactly one ${REMOVAL_MIGRATION_TAG} entry at index ${REMOVAL_MIGRATION_IDX}, found ${matches.length}`,
+    );
   }
+  return matches[0]!;
+}
+
+export function removalMigrationBatch(): D1Statement[] {
+  const migration = removalMigrationEntry();
   const sql = readFileSync(`${webRoot}migrations/${migration.tag}.sql`, "utf8");
   const statements = sql
     .split("--> statement-breakpoint")
@@ -44,15 +76,28 @@ export async function applyRemovalMigration(client: D1WriteClient) {
   const before = await verifyGeneratedD1Schema(client, {
     expectation: "observed-ledger-prefix",
   });
-  if (
-    before.appliedMigrationCount !== 13 ||
-    before.committedMigrationCount !== 14
-  ) {
-    throw new Error("D1 is not at the expected removal migration boundary");
+  // Explicit control: the boundary is the removal migration's own index, not
+  // the length of the journal. Later migrations may be appended at any time.
+  if (before.appliedMigrationCount !== REMOVAL_MIGRATION_IDX) {
+    throw new Error(
+      `D1 has ${before.appliedMigrationCount} applied migrations; the removal migration applies from exactly ${REMOVAL_MIGRATION_IDX}`,
+    );
+  }
+  if (before.committedMigrationCount < REMOVAL_MIGRATION_IDX + 1) {
+    throw new Error("the committed migration stream does not contain the removal migration");
   }
   const batch = removalMigrationBatch();
   await client.batch(batch);
-  const after = await verifyGeneratedD1Schema(client, { expectation: "full" });
+  // The workflow covers the removal transition only. Verify the observed
+  // ledger prefix, so a later appended migration does not fail the apply.
+  const after = await verifyGeneratedD1Schema(client, {
+    expectation: "observed-ledger-prefix",
+  });
+  if (after.appliedMigrationCount !== REMOVAL_MIGRATION_IDX + 1) {
+    throw new Error(
+      `D1 has ${after.appliedMigrationCount} applied migrations after the removal migration`,
+    );
+  }
   return {
     statementCount: batch.length - 1,
     appliedMigrationCount: after.appliedMigrationCount,

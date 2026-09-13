@@ -5,6 +5,7 @@
 //! the guest is a single-user/sudo environment, and the broker remains the
 //! source of learner-safe guidance and run state.
 
+use crate::lab_release::{LabReleaseRequestV1, PeerIdentity};
 use crate::probe::ProbeStatus;
 use crate::run_cli_wire::{read_message, write_message};
 use crate::scheduler::ProbeExecutor;
@@ -145,12 +146,22 @@ async fn handle_connection(
     executor: ProbeExecutor,
     store: ProbeStore,
 ) -> anyhow::Result<()> {
-    let request = tokio::time::timeout(
+    let peer = peer_identity(&stream);
+    let value = tokio::time::timeout(
         CONTROL_READ_TIMEOUT,
-        read_message::<RunCliProbeCheckRequestV1, _>(&mut stream),
+        read_message::<serde_json::Value, _>(&mut stream),
     )
     .await
     .context("Kino control request timed out")??;
+
+    // Both request kinds are strict and deny unknown fields, so at most one
+    // deserialization can succeed.
+    if let Ok(release) = serde_json::from_value::<LabReleaseRequestV1>(value.clone()) {
+        return crate::lab_release::handle_request(&mut stream, release, peer).await;
+    }
+
+    let request = serde_json::from_value::<RunCliProbeCheckRequestV1>(value)
+        .context("invalid Kino control request")?;
     request.validate().context("invalid Kino control request")?;
 
     tokio::time::timeout(
@@ -248,6 +259,21 @@ fn manual_result_event(result: crate::scheduler::ManualProbeResult) -> RunCliPro
             ProbeStatus::Unknown => RunCliCheckStatusV1::Unknown,
         },
         duration_ms: result.duration_ms,
+    }
+}
+
+/// The peer credentials of one control connection. Linux reports them from
+/// the socket itself, so no client can claim another identity.
+fn peer_identity(stream: &UnixStream) -> PeerIdentity {
+    match stream.peer_cred() {
+        Ok(cred) => PeerIdentity {
+            uid: cred.uid(),
+            pid: cred.pid().map(|pid| pid as u32),
+        },
+        Err(_) => PeerIdentity {
+            uid: u32::MAX,
+            pid: None,
+        },
     }
 }
 

@@ -334,7 +334,7 @@ export function validateManifest(
     const bootCmdline = vm.boot?.cmdline?.trim() ?? "";
     if (
       vm.image_format !== "raw_chunks_v1" ||
-      vm.guest_bootstrap_abi !== 1 ||
+      vm.guest_bootstrap_abi !== 2 ||
       typeof vm.image_virtual_size_bytes !== "number" ||
       !Number.isSafeInteger(vm.image_virtual_size_bytes) ||
       vm.image_virtual_size_bytes <= 0 ||

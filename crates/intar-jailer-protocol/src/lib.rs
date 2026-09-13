@@ -43,6 +43,16 @@ pub const DEFAULT_SSH_PUBLIC_PORT_END: u16 = 22_999;
 /// Jailerd never accepts a privileged or Linux ephemeral SSH DNAT port.
 pub const MIN_SSH_PUBLIC_PORT: u16 = 1_024;
 pub const MAX_SSH_PUBLIC_PORT: u16 = 32_767;
+/// Aggregate background preparation read budget, in bytes per second.
+///
+/// Jailerd charges every block of a background image import against this
+/// rate, and the agent uses it to size the client budget for the same
+/// request. One shared constant keeps the enforcement and the budget from
+/// drifting apart: a client that waits less than
+/// `MAX_CHUNKED_IMAGE_BYTES / BACKGROUND_PREPARE_BYTES_PER_SECOND` abandons
+/// an import that jailerd is still running.
+pub const BACKGROUND_PREPARE_BYTES_PER_SECOND: u64 = 16 * 1024 * 1024;
+
 /// Pinned Cloud Hypervisor release.
 pub const CLOUD_HYPERVISOR_VERSION: &str = "v53.0";
 /// SHA-256 of the upstream `cloud-hypervisor-static` v53.0 release asset.
@@ -249,6 +259,10 @@ pub struct PrepareImageV2Request {
     pub root_disk: ArtifactSource,
     pub kernel: ArtifactSource,
     pub initrd: Option<ArtifactSource>,
+    /// Coordinator hint that classifies the request. Foreground is the
+    /// learner-visible launch path and the default for older callers.
+    #[serde(default)]
+    pub request_class: RequestClass,
 }
 
 impl PrepareImageV2Request {
@@ -303,6 +317,24 @@ pub struct PrepareChunkedImageV3Request {
     pub chunk_cache_root: TrustedDirectorySource,
     pub kernel: ArtifactSource,
     pub initrd: Option<ArtifactSource>,
+    /// Coordinator hint that classifies the request. Foreground is the
+    /// learner-visible launch path and the default for older callers.
+    #[serde(default)]
+    pub request_class: RequestClass,
+}
+
+/// Work class of a preparation request. This is a scheduling hint from the
+/// unprivileged coordinator. It never widens what the request may read or
+/// write, and it never changes the verified identity of the result.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestClass {
+    /// A learner launch waits for this result.
+    #[default]
+    Foreground,
+    /// Background cache maintenance. Jailerd admits at most one background
+    /// preparation in the process and yields between fixed-size blocks.
+    Background,
 }
 
 impl PrepareChunkedImageV3Request {

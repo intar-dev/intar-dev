@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
+import { readScenarioGuestToolsStaticPin } from "@/lib/scenario-guest-tools";
 
 export const prerender = false;
 
@@ -9,6 +10,16 @@ const headers = {
 } as const;
 
 export const GET: APIRoute = async () => {
+  try {
+    readScenarioGuestToolsStaticPin(env);
+  } catch {
+    // The ABI 2 release requires the verified pin. Fail closed so a bad
+    // deploy is visible before traffic returns.
+    return new Response(
+      JSON.stringify({ status: "unavailable", code: "guest_tools_pin_invalid" }),
+      { status: 503, headers },
+    );
+  }
   try {
     const result = await env.DB.prepare("SELECT 1 AS healthy").first<{
       healthy: number;

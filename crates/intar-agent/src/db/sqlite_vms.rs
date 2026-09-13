@@ -100,6 +100,12 @@ pub(super) fn db_thread_main(
             Op::TouchImageCacheEntry { row, resp } => {
                 let _ = resp.send(touch_image_cache_entry(&conn, &row));
             }
+            Op::LoadVerifiedContent { resp } => {
+                let _ = resp.send(load_verified_content(&conn));
+            }
+            Op::UpsertVerifiedContent { row, resp } => {
+                let _ = resp.send(upsert_verified_content(&conn, &row));
+            }
             #[cfg(test)]
             Op::LoadImageCacheAccess { resp } => {
                 let _ = resp.send(load_image_cache_access(&conn));
@@ -146,6 +152,8 @@ pub(super) fn prepare_connection(conn: &Connection) -> Result<()> {
 pub(super) fn ensure_baseline_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(BASELINE_SCHEMA_SQL)
         .context("failed to apply baseline sqlite schema")?;
+    conn.execute_batch(CACHE_STATE_SCHEMA_SQL)
+        .context("failed to apply image cache state schema")?;
 
     if !table_has_column(conn, "vms", "guest_tools_json")? {
         conn.execute("ALTER TABLE vms ADD COLUMN guest_tools_json TEXT;", [])

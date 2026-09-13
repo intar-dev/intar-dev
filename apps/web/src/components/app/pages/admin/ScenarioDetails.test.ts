@@ -126,7 +126,7 @@ function vm(): ScenarioVmRecord {
     imageFormat: "raw_chunks_v1",
     imageVirtualSizeBytes: 4_294_967_296,
     chunkManifestSha256: "d".repeat(64),
-    guestBootstrapAbi: 1,
+    guestBootstrapAbi: 2,
     kernelSha256: "HIDDEN_KERNEL_HASH",
     initrdSha256: "HIDDEN_INITRD_HASH",
     bootCmdline: "HIDDEN_BOOT_COMMAND",

@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
-use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V1;
+use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::sha256_file_hex;
@@ -54,7 +54,7 @@ pub fn write_guest_tools_disk(
     let kino_sha256 = sha256_file_hex(kino_path)?;
     let manifest = GuestToolsDiskManifestV1 {
         schema_version: 1,
-        bootstrap_abi: GUEST_BOOTSTRAP_ABI_V1,
+        bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
         kino_sha256: kino_sha256.clone(),
         kino_size_bytes: kino_metadata.len(),
     };
@@ -255,14 +255,14 @@ mod tests {
     fn tools_manifest_is_canonical_and_pins_abi() {
         let manifest = GuestToolsDiskManifestV1 {
             schema_version: 1,
-            bootstrap_abi: GUEST_BOOTSTRAP_ABI_V1,
+            bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
             kino_sha256: "a".repeat(64),
             kino_size_bytes: 123,
         };
         assert_eq!(
             serde_json::to_string(&manifest).expect("serialize tools manifest"),
             format!(
-                "{{\"schema_version\":1,\"bootstrap_abi\":1,\"kino_sha256\":\"{}\",\"kino_size_bytes\":123}}",
+                "{{\"schema_version\":1,\"bootstrap_abi\":2,\"kino_sha256\":\"{}\",\"kino_size_bytes\":123}}",
                 "a".repeat(64)
             )
         );

@@ -135,28 +135,33 @@ export async function verifyGeneratedD1Schema(
   };
 }
 
+/**
+ * The schema prefix the committed migration stream produces after
+ * appliedMigrationCount migrations. This is a test and rehearsal fixture:
+ * it builds objects and ledger markers, and it does not claim the verified
+ * status of an observed database.
+ */
+export interface ExpectedGeneratedSchemaPrefix {
+  readonly appliedMigrationCount: number;
+  readonly committedMigrationCount: number;
+  readonly migrations: readonly GeneratedMigrationMarker[];
+  readonly objects: readonly CanonicalSchemaObject[];
+}
+
 export function expectedGeneratedD1Schema(
   appliedMigrationCount?: number,
-): GeneratedSchemaProof {
+): ExpectedGeneratedSchemaPrefix {
   const committed = loadGeneratedMigrationArtifacts();
   const count = appliedMigrationCount ?? committed.length;
   if (!Number.isSafeInteger(count) || count <= 0 || count > committed.length) {
     throw new Error("appliedMigrationCount must select a nonempty migration prefix");
   }
   const selected = committed.slice(0, count);
-  const objects = generatedObjects(selected);
   return {
-    version: 1,
-    status: "exact_generated_schema_verified",
-    expectation: count === committed.length ? "full" : "observed-ledger-prefix",
     appliedMigrationCount: count,
     committedMigrationCount: committed.length,
     migrations: selected.map(({ hash, createdAt }) => ({ hash, createdAt })),
-    schemaSha256: schemaHash(objects),
-    objects,
-    foreignKeyViolations: 0,
-    triggers: 0,
-    views: 0,
+    objects: generatedObjects(selected),
   };
 }
 

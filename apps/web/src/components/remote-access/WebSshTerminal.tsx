@@ -31,6 +31,7 @@ import {
   markScenarioRunBootStage,
   startScenarioRunBootBenchmark,
 } from "@/lib/scenario-run-performance";
+import { shouldSendBenchmarkCommand } from "@/components/app/lib/scenario-terminal-readiness";
 
 interface WebSshTerminalProps {
   vmName: string;
@@ -43,11 +44,24 @@ interface WebSshTerminalProps {
   onClose?: () => void;
   showCloseButton?: boolean;
   bootEvidence?: { runId: string; scenarioId: string } | null;
+  /**
+   * True when the parent has this shell on screen for the learner. The
+   * benchmark command waits for it, because the primary metric counts a
+   * terminal the learner can see, not a warm hidden socket.
+   */
+  visible?: boolean;
+  /**
+   * Reports the gateway-ready truth of this transport attempt. The parent
+   * reveals the shell from this signal instead of waiting for the run
+   * projection poll, and clears it on disconnect, error, and unmount.
+   */
+  onTransportStateChange?: (state: { attempt: number; ready: boolean }) => void;
 }
 
 interface VmBrowserTerminalSessionResponse {
   routeUsername: string;
   expiresAt: number;
+  generation: string;
   browser: {
     websocketUrl: string;
   };
@@ -66,9 +80,21 @@ type TerminalControlMessage =
   | { type: "close" };
 
 type TerminalEventMessage =
+  /**
+   * The only new server frame. The gateway sends it while the route waits for
+   * the admin attach; the socket stays open and silently held.
+   */
+  | { type: "pending"; deadline_ms?: number }
   | { type: "ready" }
   | { type: "exit"; code: number }
   | { type: "error"; message: string };
+
+/**
+ * The gateway opens the SSH PTY only after the admin attach. Before that the
+ * socket carries no terminal output, so the client keeps the transport up and
+ * drops keyboard input instead of buffering it.
+ */
+type TerminalTargetState = "pending" | "ready";
 
 const SSH_CONNECT_RETRY_ATTEMPTS = 6;
 const SSH_CONNECT_RETRY_BASE_MS = 250;
@@ -114,6 +140,8 @@ export function WebSshTerminal({
   onClose,
   showCloseButton = true,
   bootEvidence = null,
+  visible = true,
+  onTransportStateChange,
 }: WebSshTerminalProps) {
   const terminalContainerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -124,6 +152,24 @@ export function WebSshTerminal({
   const resizeSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const markedStagesRef = useRef(new Set<string>());
   const inputObservedRef = useRef(false);
+  const benchmarkRef = useRef<
+    ReturnType<typeof startScenarioRunBootBenchmark>
+  >(null);
+  const benchmarkAttemptRef = useRef<number | null>(null);
+  // The reporter is called from connection callbacks, which must stay stable.
+  // A ref keeps a caller that passes an inline function from changing the
+  // identity of connect and restarting the socket on every parent render.
+  const transportStateCallbackRef = useRef(onTransportStateChange);
+  useEffect(() => {
+    transportStateCallbackRef.current = onTransportStateChange;
+  }, [onTransportStateChange]);
+  const reportTransport = useCallback((attempt: number, ready: boolean) => {
+    transportStateCallbackRef.current?.({ attempt, ready });
+  }, []);
+  // The transport rejects control frames and input before the gateway sends
+  // the ready target. This latch keeps keystrokes off the socket while the
+  // VM boots, so a typed credential is never buffered.
+  const targetStateRef = useRef<TerminalTargetState>("pending");
 
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -211,7 +257,11 @@ export function WebSshTerminal({
 
     terminal.onData((data) => {
       const websocket = websocketRef.current;
-      if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+      if (
+        !websocket ||
+        websocket.readyState !== WebSocket.OPEN ||
+        targetStateRef.current !== "ready"
+      ) {
         return;
       }
       inputObservedRef.current = true;
@@ -282,9 +332,13 @@ export function WebSshTerminal({
   const connect = useCallback(async () => {
     const connectionGeneration = connectionGenerationRef.current + 1;
     connectionGenerationRef.current = connectionGeneration;
+    targetStateRef.current = "pending";
+    // A reconnect must re-measure, so this attempt starts with no benchmark.
+    benchmarkRef.current = null;
+    benchmarkAttemptRef.current = null;
+    reportTransport(connectionGeneration, false);
     setError(null);
     setStatus("connecting");
-    let benchmark: ReturnType<typeof startScenarioRunBootBenchmark> = null;
 
     try {
       const fontLoad = loadReplayTerminalFont();
@@ -335,23 +389,43 @@ export function WebSshTerminal({
         terminal: connectedTerminal,
         isCurrent: () =>
           connectionGenerationRef.current === connectionGeneration,
+        onWebSocketCreated: (websocket) => {
+          // Own the socket before it is ready so a cancel, a page hide, or an
+          // unmount still closes a socket that is waiting for its target.
+          if (connectionGenerationRef.current !== connectionGeneration) {
+            websocket.close();
+            return;
+          }
+          websocketRef.current = websocket;
+        },
         onWebSocketOpen: () => {
           if (connectionGenerationRef.current !== connectionGeneration) return;
           markTerminalStage("terminal-websocket-open");
         },
+        onTargetState: (state) => {
+          if (connectionGenerationRef.current !== connectionGeneration) return;
+          targetStateRef.current = state;
+          if (state === "ready") {
+            markTerminalStage("terminal-target-ready");
+          }
+        },
         onRemoteClose: () => {
           if (connectionGenerationRef.current !== connectionGeneration) return;
+          targetStateRef.current = "pending";
           websocketRef.current = null;
+          reportTransport(connectionGeneration, false);
           setStatus("disconnected");
         },
         onRemoteError: (message) => {
           if (connectionGenerationRef.current !== connectionGeneration) return;
+          targetStateRef.current = "pending";
           websocketRef.current = null;
+          reportTransport(connectionGeneration, false);
           setError(message);
           setStatus("error");
         },
         onOutput: (payload) => {
-          benchmark?.observe(payload);
+          benchmarkRef.current?.observe(payload);
           markTerminalStage("terminal-first-output");
           if (inputObservedRef.current) {
             // This records visible byte responsiveness only. A benchmark must
@@ -376,14 +450,9 @@ export function WebSshTerminal({
       });
       setStatus("connected");
       markTerminalStage("terminal-connected");
-      if (bootEvidence) {
-        benchmark = startScenarioRunBootBenchmark({
-          ...bootEvidence,
-          vmName,
-          isCurrent: () => connectionGenerationRef.current === connectionGeneration,
-        });
-        if (benchmark) websocket.send(textEncoder.encode(benchmark.command));
-      }
+      // The gateway owns the truth that the shell works. The parent reveals
+      // from this signal; the benchmark effect below waits for that reveal.
+      reportTransport(connectionGeneration, true);
     } catch (connectError) {
       if (connectionGenerationRef.current !== connectionGeneration) return;
       closeCurrentSocket();
@@ -400,6 +469,7 @@ export function WebSshTerminal({
     closeCurrentSocket,
     ensureTerminal,
     markTerminalStage,
+    reportTransport,
     sessionRequestBodyJson,
     sessionRequestUrl,
   ]);
@@ -416,6 +486,8 @@ export function WebSshTerminal({
 
     return () => {
       disconnect();
+      // A superseded or unmounted transport is not a usable terminal.
+      reportTransport(connectionGenerationRef.current, false);
       resizeCleanupRef.current?.();
       resizeCleanupRef.current = null;
       terminalRef.current?.dispose();
@@ -423,6 +495,61 @@ export function WebSshTerminal({
       fitGridRef.current = null;
     };
   }, [connect, disconnect]);
+
+  /**
+   * Sends the one benchmark command that proves a usable terminal.
+   *
+   * The primary interval is Start click to nonce round trip, and it is never
+   * reset: the reveal does not restart the clock, it only decides when the
+   * command may be sent. This effect is therefore a gate on the command, not
+   * a second start boundary.
+   *
+   * The command may only leave the client when the gateway handshake is
+   * current AND the learner can see the shell. The reveal commits first, then
+   * one animation frame later the grid is fitted to the real visible box and
+   * the command is sent, so the interval ends on a terminal the learner could
+   * use. A hidden warm socket never ends the measurement.
+   */
+  useEffect(() => {
+    if (!bootEvidence) return;
+    const attempt = connectionGenerationRef.current;
+    const websocket = websocketRef.current;
+    if (
+      !shouldSendBenchmarkCommand({
+        gatewayReady: status === "connected",
+        terminalVisible: visible,
+        connectionCurrent: Boolean(
+          websocket && websocket.readyState === WebSocket.OPEN,
+        ),
+        commandAlreadySent: benchmarkAttemptRef.current === attempt,
+      })
+    ) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      if (connectionGenerationRef.current !== attempt) return;
+      const live = websocketRef.current;
+      if (!live || live.readyState !== WebSocket.OPEN) return;
+      if (benchmarkAttemptRef.current === attempt) return;
+      // The container is on screen, so this is the real geometry: fit before
+      // the clock starts instead of measuring the pre-fit fallback grid. The
+      // font load must never gate this.
+      fitGridRef.current?.();
+      terminalRef.current?.focus();
+      markTerminalStage("terminal-visible");
+      const benchmark = startScenarioRunBootBenchmark({
+        ...bootEvidence,
+        vmName,
+        isCurrent: () => connectionGenerationRef.current === attempt,
+      });
+      if (!benchmark) return;
+      benchmarkRef.current = benchmark;
+      benchmarkAttemptRef.current = attempt;
+      live.send(textEncoder.encode(benchmark.command));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [bootEvidence, markTerminalStage, status, visible, vmName]);
 
   if (variant === "embedded") {
     return (
@@ -651,7 +778,9 @@ async function connectBrowserTerminalWithRetries(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
   isCurrent: () => boolean;
+  onWebSocketCreated: (websocket: WebSocket) => void;
   onWebSocketOpen: () => void;
+  onTargetState: (state: TerminalTargetState) => void;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
   onOutput: (payload: Uint8Array) => void;
@@ -682,18 +811,21 @@ async function connectBrowserTerminal(input: {
   session: VmBrowserTerminalSessionResponse;
   terminal: Terminal;
   isCurrent: () => boolean;
+  onWebSocketCreated: (websocket: WebSocket) => void;
   onWebSocketOpen: () => void;
+  onTargetState: (state: TerminalTargetState) => void;
   onRemoteClose: () => void;
   onRemoteError: (message: string) => void;
   onOutput: (payload: Uint8Array) => void;
 }): Promise<WebSocket> {
   const websocket = new WebSocket(input.session.browser.websocketUrl);
   websocket.binaryType = "arraybuffer";
+  input.onWebSocketCreated(websocket);
   await waitForWebSocketOpen(websocket);
 
   try {
     input.onWebSocketOpen();
-    const ready = new Promise<void>((resolve, reject) => {
+    const target = new Promise<void>((resolve, reject) => {
       let resolved = false;
       let terminalEnded = false;
 
@@ -704,7 +836,13 @@ async function connectBrowserTerminal(input: {
             return;
           }
           switch (control.type) {
+            case "pending":
+              // The route has no target yet and the gateway holds the open
+              // frame. Nothing is written to the terminal and no input is
+              // sent until the ready frame arrives.
+              return;
             case "ready":
+              input.onTargetState("ready");
               resolved = true;
               resolve();
               return;
@@ -767,7 +905,7 @@ async function connectBrowserTerminal(input: {
       cols: input.terminal.cols,
       rows: input.terminal.rows,
     });
-    await ready;
+    await target;
     return websocket;
   } catch (error) {
     try {
@@ -783,6 +921,9 @@ function parseTerminalEvent(raw: string): TerminalEventMessage | null {
   try {
     const parsed = JSON.parse(raw) as TerminalEventMessage;
     if (parsed?.type === "ready") {
+      return parsed;
+    }
+    if (parsed?.type === "pending") {
       return parsed;
     }
     if (parsed?.type === "exit" && typeof parsed.code === "number") {

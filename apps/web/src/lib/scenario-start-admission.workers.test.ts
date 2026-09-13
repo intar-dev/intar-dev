@@ -1,38 +1,39 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
-import { drizzle } from "drizzle-orm/d1";
-import {
-  accessAllowlist,
-  agentHosts,
-  hostDesiredState,
-  organization,
-  runtimeExecutions,
-  scenarioRunSshKeys,
-  scenarioRuns,
-  user,
-} from "@/db/schema";
 import { eq } from "drizzle-orm";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
+import { drizzle } from "drizzle-orm/d1";
+import { beforeEach, describe, expect, it } from "vitest";
+import { accessAllowlist, agentHosts, hostDesiredState, organization, user } from "@/db/schema";
 import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
-import { buildInitialVmState, type RunVmStateDocument } from "@/lib/run-state";
 import {
-  insertScenarioRunForAdmission,
-  rollbackScenarioStartAfterFailure,
-  upsertRunVmsIntoDesiredState,
-} from "@/lib/scenario-runs/start";
+  admissionStatements,
+  type AdmissionCommitInput,
+} from "@/lib/scenario-runs/begin";
+import {
+  desiredVmFromRunVm,
+  mutateDesiredState,
+  upsertDesiredVm,
+} from "@/lib/desired-state";
+import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
+import { buildInitialVmState, type RunVmStateDocument } from "@/lib/run-state";
 import {
   FIXTURE_BETA_ADMIN_ID,
   grantFixtureBetaAccess,
 } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
+/**
+ * The beta-admission fence of the single admission batch. The old per-step
+ * API (insertScenarioRunForAdmission, rollbackScenarioStartAfterFailure,
+ * upsertRunVmsIntoDesiredState) is gone, so every refusal is proved against
+ * the one transaction that now owns admission.
+ */
 describe("scenario start beta-admission fence", () => {
   beforeEach(resetD1Database);
 
   it("cannot insert a run or SSH capability after revocation, including on an organization runner", async () => {
-    const admission = await seedScenarioStartFixture();
+    const parts = await admissionInput();
     await revokeBetaUser({
       d1: env.DB,
       userId: "scenario-user",
@@ -41,22 +42,37 @@ describe("scenario start beta-admission fence", () => {
       now: 20_000,
     });
 
-    await expect(
-      insertScenarioRunForAdmission({
-        row: scenarioRunRow("stale-run"),
-        sshKeyRows: [scenarioSshKeyRow("stale-run")],
-        betaAdmission: admission,
-      }),
-    ).rejects.toMatchObject({ code: "beta_access_revoked" });
+    // The statement batch writes nothing: every admission statement selects
+    // through the live epoch, so a revoked admission leaves the whole batch at
+    // zero rows. The refusal itself is raised by the entry point
+    // (beginScenarioRun returns 403 beta_access_revoked), which the admission
+    // suite covers against the same fixture.
+    const results = await env.DB.batch(admissionStatements(parts).statements);
+    expect(admissionWrites(results)).toBe(0);
 
     await expect(
       env.DB.prepare(
-        "SELECT count(*) AS count FROM scenario_runs WHERE run_id = 'stale-run'",
+        "SELECT count(*) AS count FROM scenario_runs WHERE run_id = 'admission-run'",
       ).first(),
     ).resolves.toEqual({ count: 0 });
     await expect(
       env.DB.prepare(
-        "SELECT count(*) AS count FROM scenario_run_ssh_keys WHERE run_id = 'stale-run'",
+        "SELECT count(*) AS count FROM scenario_run_ssh_keys WHERE run_id = 'admission-run'",
+      ).first(),
+    ).resolves.toEqual({ count: 0 });
+    await expect(
+      env.DB.prepare(
+        "SELECT count(*) AS count FROM runtime_executions WHERE id = 'admission-run'",
+      ).first(),
+    ).resolves.toEqual({ count: 0 });
+    await expect(
+      env.DB.prepare(
+        "SELECT count(*) AS count FROM host_cpu_reservations WHERE run_id = 'admission-run'",
+      ).first(),
+    ).resolves.toEqual({ count: 0 });
+    await expect(
+      env.DB.prepare(
+        "SELECT count(*) AS count FROM host_resource_reservations WHERE execution_id = 'admission-run'",
       ).first(),
     ).resolves.toEqual({ count: 0 });
     await expect(
@@ -66,61 +82,39 @@ describe("scenario start beta-admission fence", () => {
     ).resolves.toEqual({ disabled: 0 });
   });
 
-  it("persists the immutable course and lecture snapshot with the admitted run", async () => {
-    const admission = await seedScenarioStartFixture();
-    const row = {
-      ...scenarioRunRow("curriculum-run"),
-      courseScopeKey: "organization:scenario-organization",
-      courseId: "linux-operations",
-      courseTitle: "Linux operations",
-      lectureId: "01-repair-nginx",
-      lectureTitle: "Repair nginx",
-      lectureSummary: "Learn the nginx service model.",
-      lectureBodyMarkdown: "# Theory\n\nLearn before you repair.",
-      lectureOrdinal: 1,
-      lectureCount: 3,
-    } satisfies typeof scenarioRuns.$inferInsert;
+  it("admits nothing when the run insert is refused but the epoch is active", async () => {
+    const parts = await admissionInput();
+    // Another writer publishes the host desired state after this request read
+    // its version. The compare-and-set can no longer land, so the abort
+    // sentinel rolls the whole admission back even though the admission epoch
+    // itself is still current.
+    await drizzle(env.DB)
+      .update(hostDesiredState)
+      .set({ version: parts.desired.expectedVersion + 1 })
+      .where(eq(hostDesiredState.hostId, "organization-runner"));
+    const stale: AdmissionCommitInput = parts;
 
-    await insertScenarioRunForAdmission({
-      row,
-      sshKeyRows: [scenarioSshKeyRow("curriculum-run")],
-      betaAdmission: admission,
-    });
+    await expect(
+      env.DB.batch(admissionStatements(stale).statements),
+    ).rejects.toThrow(/runtime_executions_generation_positive|CHECK/i);
 
-    const [stored] = await drizzle(env.DB)
-      .select({
-        courseScopeKey: scenarioRuns.courseScopeKey,
-        courseId: scenarioRuns.courseId,
-        courseTitle: scenarioRuns.courseTitle,
-        lectureId: scenarioRuns.lectureId,
-        lectureTitle: scenarioRuns.lectureTitle,
-        lectureSummary: scenarioRuns.lectureSummary,
-        lectureBodyMarkdown: scenarioRuns.lectureBodyMarkdown,
-        lectureOrdinal: scenarioRuns.lectureOrdinal,
-        lectureCount: scenarioRuns.lectureCount,
-      })
-      .from(scenarioRuns)
-      .where(eq(scenarioRuns.runId, "curriculum-run"));
-    expect(stored).toEqual({
-      courseScopeKey: "organization:scenario-organization",
-      courseId: "linux-operations",
-      courseTitle: "Linux operations",
-      lectureId: "01-repair-nginx",
-      lectureTitle: "Repair nginx",
-      lectureSummary: "Learn the nginx service model.",
-      lectureBodyMarkdown: "# Theory\n\nLearn before you repair.",
-      lectureOrdinal: 1,
-      lectureCount: 3,
-    });
+    await expect(countRows("scenario_runs", "run_id")).resolves.toBe(0);
+    await expect(countRows("scenario_run_ssh_keys", "run_id")).resolves.toBe(0);
+    await expect(countRows("runtime_executions", "id")).resolves.toBe(0);
+    await expect(countRows("host_cpu_reservations", "run_id")).resolves.toBe(0);
+    await expect(
+      countRows("host_resource_reservations", "execution_id"),
+    ).resolves.toBe(0);
+    await expect(
+      drizzle(env.DB)
+        .select({ version: hostDesiredState.version })
+        .from(hostDesiredState)
+        .where(eq(hostDesiredState.hostId, "organization-runner")),
+    ).resolves.toEqual([{ version: parts.desired.expectedVersion + 1 }]);
   });
 
-  it("cannot dispatch desired VM state after the admission is blocked", async () => {
-    const admission = await seedScenarioStartFixture();
-    await insertScenarioRunForAdmission({
-      row: scenarioRunRow("allocated-run"),
-      sshKeyRows: [scenarioSshKeyRow("allocated-run")],
-      betaAdmission: admission,
-    });
+  it("never dispatches desired VMs for an admission whose epoch was revoked in the commit window", async () => {
+    const parts = await admissionInput();
     await revokeBetaUser({
       d1: env.DB,
       userId: "scenario-user",
@@ -129,229 +123,33 @@ describe("scenario start beta-admission fence", () => {
       now: 30_000,
     });
 
-    const vm = scenarioVm("allocated-run");
+    const results = await env.DB.batch(admissionStatements(parts).statements);
+    expect(admissionWrites(results)).toBe(0);
     await expect(
-      upsertRunVmsIntoDesiredState({
-        hostId: "organization-runner",
-        runId: "allocated-run",
-        userId: "scenario-user",
-        betaAdmission: admission,
-        vms: [vm],
-        nowUnixMs: 30_001,
-        sshAuthorizedKeysByVmId: new Map([
-          [vm.id, ["ssh-ed25519 AAAAC3Nza stale-start"]],
-        ]),
-      }),
-    ).rejects.toMatchObject({ code: "beta_access_revoked" });
-
-    const desired = await drizzle(env.DB)
-      .select({ doc: hostDesiredState.docJson })
-      .from(hostDesiredState)
-      .where(eq(hostDesiredState.hostId, "organization-runner"))
-      .limit(1);
-    expect(JSON.stringify(desired[0]?.doc ?? {})).not.toContain("allocated-run");
-  });
-
-  it("cannot dispatch a run's desired VM state to a different host", async () => {
-    const admission = await seedScenarioStartFixture();
-    await insertScenarioRunForAdmission({
-      row: scenarioRunRow("host-bound-run"),
-      sshKeyRows: [scenarioSshKeyRow("host-bound-run")],
-      betaAdmission: admission,
-    });
-    await drizzle(env.DB).insert(agentHosts).values({
-      id: "different-runner",
-      userId: FIXTURE_BETA_ADMIN_ID,
-      organizationId: "scenario-organization",
-      name: "Different runner",
-      role: "agent",
-      scenarioEnabled: false,
-      disabled: false,
-      connected: true,
-      createdAt: 10_000,
-      updatedAt: 10_000,
-    });
-
-    const vm = scenarioVm("host-bound-run");
-    await expect(
-      upsertRunVmsIntoDesiredState({
-        hostId: "different-runner",
-        runId: "host-bound-run",
-        userId: "scenario-user",
-        betaAdmission: admission,
-        vms: [vm],
-        nowUnixMs: 10_001,
-        sshAuthorizedKeysByVmId: new Map([
-          [vm.id, ["ssh-ed25519 AAAAC3Nza host-fence"]],
-        ]),
-      }),
-    ).rejects.toMatchObject({ code: "beta_access_revoked" });
-
-    const desired = await drizzle(env.DB)
-      .select({ doc: hostDesiredState.docJson })
-      .from(hostDesiredState)
-      .where(eq(hostDesiredState.hostId, "different-runner"));
-    expect(JSON.stringify(desired[0]?.doc ?? {})).not.toContain(
-      "host-bound-run",
-    );
-  });
-
-  it("does not attach SSH keys to a colliding run when the conditional insert loses admission", async () => {
-    const admission = await seedScenarioStartFixture();
-    await insertScenarioRunForAdmission({
-      row: scenarioRunRow("colliding-run"),
-      sshKeyRows: [scenarioSshKeyRow("colliding-run")],
-      betaAdmission: admission,
-    });
-    await revokeBetaUser({
-      d1: env.DB,
-      userId: "scenario-user",
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "scenario_key_batch_race",
-      now: 40_000,
-    });
-
-    await expect(
-      insertScenarioRunForAdmission({
-        row: scenarioRunRow("colliding-run"),
-        sshKeyRows: [scenarioSshKeyRow("colliding-run", "-stale")],
-        betaAdmission: admission,
-      }),
-    ).rejects.toMatchObject({ code: "beta_access_revoked" });
-
-    await expect(
-      env.DB.prepare(
-        "SELECT count(*) AS count FROM scenario_run_ssh_keys WHERE run_id = 'colliding-run'",
-      ).first(),
-    ).resolves.toEqual({ count: 1 });
-  });
-
-  it("preserves the run and runtime when desired-state rollback fails", async () => {
-    const admission = await seedScenarioStartFixture();
-    const db = drizzle(env.DB);
-    await db.insert(runtimeExecutions).values({
-      id: "rollback-run",
-      userId: "scenario-user",
-      organizationId: "scenario-organization",
-      hostId: "organization-runner",
-      providerKind: "agent_kvm",
-      providerConnectionId: null,
-      domainKind: "scenario",
-      domainId: "rollback-run",
-      generation: 1,
-      sourceExecutionId: null,
-      checkpointId: null,
-      state: "provisioning",
-      leaseExpiresAt: null,
-      archiveRequestedAt: null,
-      endedAt: null,
-      createdAt: 50_000,
-      updatedAt: 50_000,
-    });
-    await insertScenarioRunForAdmission({
-      row: scenarioRunRow("rollback-run", "rollback-run"),
-      sshKeyRows: [scenarioSshKeyRow("rollback-run")],
-      betaAdmission: admission,
-    });
-
-    await expect(
-      rollbackScenarioStartAfterFailure(
-        {
-          hostId: "organization-runner",
-          runId: "rollback-run",
-          userId: "scenario-user",
-          betaAdmission: admission,
-          vms: [scenarioVm("rollback-run")],
-          runInserted: true,
-          runtimeCreated: true,
-        },
-        {
-          markVmsAbsent: async () => {
-            throw new Error("injected desired-state failure");
-          },
-        },
-      ),
-    ).resolves.toEqual({ durableStatePreserved: true });
-
-    await expect(
-      env.DB.prepare(
-        "SELECT count(*) AS count FROM scenario_runs WHERE run_id = 'rollback-run'",
-      ).first(),
-    ).resolves.toEqual({ count: 1 });
-    await expect(
-      env.DB.prepare(
-        "SELECT count(*) AS count FROM runtime_executions WHERE id = 'rollback-run'",
-      ).first(),
-    ).resolves.toEqual({ count: 1 });
-  });
-
-  it("preserves a snapshotted run after revocation even when desired-state rollback succeeds", async () => {
-    const admission = await seedScenarioStartFixture();
-    const db = drizzle(env.DB);
-    await db.insert(runtimeExecutions).values({
-      id: "revoked-rollback-run",
-      userId: "scenario-user",
-      organizationId: "scenario-organization",
-      hostId: "organization-runner",
-      providerKind: "agent_kvm",
-      providerConnectionId: null,
-      domainKind: "scenario",
-      domainId: "revoked-rollback-run",
-      generation: 1,
-      sourceExecutionId: null,
-      checkpointId: null,
-      state: "provisioning",
-      leaseExpiresAt: null,
-      archiveRequestedAt: null,
-      endedAt: null,
-      createdAt: 60_000,
-      updatedAt: 60_000,
-    });
-    await insertScenarioRunForAdmission({
-      row: scenarioRunRow("revoked-rollback-run", "revoked-rollback-run"),
-      sshKeyRows: [scenarioSshKeyRow("revoked-rollback-run")],
-      betaAdmission: admission,
-    });
-    await revokeBetaUser({
-      d1: env.DB,
-      userId: "scenario-user",
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "scenario_snapshot_race",
-      now: 60_001,
-    });
-
-    await expect(
-      rollbackScenarioStartAfterFailure(
-        {
-          hostId: "organization-runner",
-          runId: "revoked-rollback-run",
-          userId: "scenario-user",
-          betaAdmission: admission,
-          vms: [scenarioVm("revoked-rollback-run")],
-          runInserted: true,
-          runtimeCreated: true,
-        },
-        {
-          markVmsAbsent: async () => undefined,
-          rollbackCpu: async () => undefined,
-        },
-      ),
-    ).resolves.toEqual({ durableStatePreserved: true });
-
-    await expect(
-      env.DB.prepare(
-        "SELECT count(*) AS count FROM scenario_runs WHERE run_id = 'revoked-rollback-run'",
-      ).first(),
-    ).resolves.toEqual({ count: 1 });
-    await expect(
-      env.DB.prepare(
-        "SELECT count(*) AS count FROM runtime_executions WHERE id = 'revoked-rollback-run'",
-      ).first(),
-    ).resolves.toEqual({ count: 1 });
+      drizzle(env.DB)
+        .select({ version: hostDesiredState.version })
+        .from(hostDesiredState)
+        .where(eq(hostDesiredState.hostId, "organization-runner")),
+    ).resolves.toEqual([{ version: parts.desired.expectedVersion }]);
   });
 });
 
-async function seedScenarioStartFixture(): Promise<BetaAdmissionEpoch> {
+async function countRows(table: string, column: string): Promise<number> {
+  const row = await env.DB.prepare(
+    "SELECT count(*) AS count FROM " + table + " WHERE " + column + " = 'admission-run'",
+  ).first<{ count: number }>();
+  return row?.count ?? -1;
+}
+
+/** Total rows written by an admission batch. */
+function admissionWrites(results: D1Result<unknown>[]): number {
+  return results.reduce(
+    (total, result) => total + (result.meta.changes ?? 0),
+    0,
+  );
+}
+
+async function admissionInput(): Promise<AdmissionCommitInput> {
   const db = drizzle(env.DB);
   const now = 10_000;
   await db.insert(user).values({
@@ -389,7 +187,7 @@ async function seedScenarioStartFixture(): Promise<BetaAdmissionEpoch> {
     createdAt: now,
     updatedAt: now,
   });
-  const [access] = await db
+  const [admission] = await db
     .select({
       sourceInviteId: accessAllowlist.sourceInviteId,
       sourceLeaseId: accessAllowlist.sourceLeaseId,
@@ -398,64 +196,120 @@ async function seedScenarioStartFixture(): Promise<BetaAdmissionEpoch> {
     .from(accessAllowlist)
     .where(eq(accessAllowlist.userId, "scenario-user"))
     .limit(1);
-  if (!access) throw new Error("fixture admission missing");
-  return access;
+  if (!admission) throw new Error("fixture admission missing");
+
+  const vmState = scenarioVm("admission-run");
+  const current = await loadOrCreateHostDesiredState(
+    db,
+    "organization-runner",
+    now,
+  );
+  const desiredVm = desiredVmFromRunVm({
+    runId: "admission-run",
+    vm: vmState,
+    nowUnixMs: now,
+    sshAuthorizedKeysOpenssh: ["ssh-ed25519 AAAAC3Nza admission"],
+    guestTools,
+  });
+  if (!desiredVm) throw new Error("desired vm");
+  const next = mutateDesiredState(
+    current,
+    (draft) => {
+      upsertDesiredVm(draft, desiredVm);
+    },
+    { nowUnixMs: now },
+  );
+  return {
+    run: {
+      runId: "admission-run",
+      userId: "scenario-user",
+      organizationId: "scenario-organization",
+      runtimeExecutionId: "admission-run",
+      hostId: "organization-runner",
+      scenarioId: "scenario-one",
+      scenarioName: "scenario-one",
+      title: "Scenario one",
+      tagline: "A scenario",
+      briefingMarkdown: "Briefing",
+      objectivesJson: "[]",
+      difficulty: "beginner",
+      estimatedMinutes: 30,
+      tagsJson: [],
+      hintsJson: [],
+      solutionMarkdown: "Solution",
+      revealedHintsJson: [],
+      solutionAssisted: false,
+      vmCount: 1,
+      state: "provisioning",
+      stateRank: 1,
+      activeKey: "scenario-user",
+      requestIdempotencyKey: "key-abcdefgh",
+      requestScopeJson: {
+        scenarioId: "scenario-one",
+        organizationId: "scenario-organization",
+        hostId: null,
+        candidateRevision: null,
+        candidateBuildId: null,
+        allowDrainedAdminProof: false,
+        allowSequenceBypass: false,
+      },
+      stateJson: JSON.stringify({ vms: [{ runtimeVmName: "admission-run-vm" }] }),
+      createdAt: now,
+      updatedAt: now,
+    },
+    sshKeyRows: [
+      {
+        id: "admission-run-ssh-key",
+        runId: "admission-run",
+        vmId: "admission-run-vm",
+        runtimeVmName: "admission-run-vm",
+        publicKeyOpenssh: "ssh-ed25519 AAAAC3Nza admission",
+        privateKeyCiphertextB64: "ciphertext",
+        privateKeyIvB64: "iv",
+        createdAt: now,
+      },
+    ],
+    runtimeVms: [
+      {
+        vmId: "admission-run-vm",
+        ordinal: 0,
+        runtimeVmName: "admission-run-vm",
+        imageKey: { scenario: "scenario-one", vm: "web", arch: "x86_64" },
+        imageSha256: "2".repeat(64),
+        cpuMillis: 1_000,
+        memoryMib: 512,
+        diskMib: 4_096,
+        runtimeVmId: "admission-run-runtime-vm",
+      },
+    ],
+    accessKeys: [{ ciphertextB64: "ciphertext", ivB64: "iv" }],
+    desiredVms: [desiredVm],
+    desired: {
+      hostId: "organization-runner",
+      expectedVersion: current.version,
+      nextVersion: next.version,
+      nextDocJson: JSON.stringify(next),
+    },
+    bootCpuMillis: 2_000,
+    steadyCpuMillis: 1_000,
+    reservationResources: {
+      cpuMillis: 2_000,
+      memoryMib: 512,
+      worstCaseDiskMib: 4_096,
+    },
+    leaseExpiresAt: now + 3_600_000,
+    betaAdmission: admission,
+    now,
+  } satisfies AdmissionCommitInput;
 }
 
-function scenarioRunRow(
-  runId: string,
-  runtimeExecutionId: string | null = null,
-): typeof scenarioRuns.$inferInsert {
-  return {
-    runId,
-    userId: "scenario-user",
-    organizationId: "scenario-organization",
-    runtimeExecutionId,
-    hostId: "organization-runner",
-    scenarioId: "scenario-one",
-    scenarioName: "scenario-one",
-    title: "Scenario one",
-    tagline: "A scenario",
-    briefingMarkdown: "Briefing",
-    objectivesJson: "[]",
-    difficulty: "beginner",
-    estimatedMinutes: 30,
-    tagsJson: [],
-    hintsJson: [],
-    solutionMarkdown: "Solution",
-    revealedHintsJson: [],
-    solutionRevealedAt: null,
-    solutionAssisted: false,
-    vmCount: 1,
-    state: "provisioning",
-    stateRank: 1,
-    activeKey: "scenario-user",
-    stateJson: "{}",
-    deleteRequestedAt: null,
-    solvedAt: null,
-    completedAt: null,
-    failedAt: null,
-    hiddenAt: null,
-    createdAt: 10_100,
-    updatedAt: 10_100,
-  };
-}
-
-function scenarioSshKeyRow(
-  runId: string,
-  suffix = "",
-): typeof scenarioRunSshKeys.$inferInsert {
-  return {
-    id: `${runId}-ssh-key${suffix}`,
-    runId,
-    vmId: `${runId}-vm${suffix}`,
-    runtimeVmName: `${runId}-runtime-vm${suffix}`,
-    publicKeyOpenssh: "ssh-ed25519 AAAAC3Nza scenario-start",
-    privateKeyCiphertextB64: "ciphertext",
-    privateKeyIvB64: "initialization-vector",
-    createdAt: 10_100,
-  };
-}
+/** The guest bootstrap ABI the release set ships. ABI 1 is refused. */
+const guestTools = {
+  tools_disk_sha256: "a".repeat(64),
+  tools_disk_size_bytes: 64 * 1024 * 1024,
+  kino_sha256: "b".repeat(64),
+  bootstrap_abi: 2,
+} as const;
 
 function scenarioVm(runId: string): RunVmStateDocument {
   const vm = buildInitialVmState({
@@ -463,7 +317,7 @@ function scenarioVm(runId: string): RunVmStateDocument {
     ordinal: 0,
     scenarioVmId: "web",
     scenarioVmName: "Web",
-    runtimeVmName: `${runId}-runtime-vm`,
+    runtimeVmName: `${runId}-vm`,
     hostname: "web",
     launchSummary: {
       scenarioVmName: "Web",

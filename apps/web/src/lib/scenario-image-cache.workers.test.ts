@@ -625,7 +625,7 @@ async function seedScenario(input: {
       imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 1_024,
       chunkManifestSha256: "d".repeat(64),
-      guestBootstrapAbi: 1,
+      guestBootstrapAbi: 2,
       kernelSha256: "1".repeat(64),
       initrdSha256: "2".repeat(64),
       bootCmdline: "console=ttyS0 root=/dev/vda rw",
@@ -686,7 +686,7 @@ function desiredVm(
       tools_disk_sha256: "1".repeat(64),
       tools_disk_size_bytes: 64 * 1024 * 1024,
       kino_sha256: "2".repeat(64),
-      bootstrap_abi: 1,
+      bootstrap_abi: 2,
     },
     resources: {
       cpu_millis: 1_000,

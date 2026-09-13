@@ -17,7 +17,7 @@ import type {
   ScenarioManifestV4,
 } from "@/generated/catalog";
 import {
-  loadScenarioGuestToolsPin,
+  loadPublishedScenarioGuestToolsPin,
   type ScenarioGuestToolsChannel,
 } from "@/lib/scenario-guest-tools";
 import {
@@ -108,7 +108,7 @@ export async function handleImageBuildRevisionStatus(
 
   let desiredTools: DesiredGuestToolsV1;
   try {
-    desiredTools = await loadScenarioGuestToolsPin(env, toolsChannel);
+    desiredTools = await loadPublishedScenarioGuestToolsPin(env, toolsChannel);
   } catch (error) {
     return jsonResponse(
       { error: error instanceof Error ? error.message : "guest-tools pin unavailable" },

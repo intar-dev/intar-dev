@@ -115,6 +115,7 @@ fn write_file(dir: &fatfs::Dir<'_, std::fs::File>, name: &str, content: &str) ->
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
     use std::io::Read as _;
 
     use tempfile::tempdir;
@@ -142,7 +143,7 @@ mod tests {
             kino_vsock_port: 18_080,
             kino_host_ready_port: 18_081,
             kino_sha256: &"a".repeat(64),
-            guest_bootstrap_abi: 1,
+            guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
             hostname: "broken-nginx",
             network: &network,
             root_resize_required: false,

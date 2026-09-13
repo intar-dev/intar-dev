@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e6abdf52-4aa0-456c-b8d0-d361873deb87",
-  "prevId": "19648446-772f-47ff-a766-6ff30bd0f98c",
+  "id": "b2927f24-f224-4886-9525-da9de5235ccd",
+  "prevId": "e6abdf52-4aa0-456c-b8d0-d361873deb87",
   "tables": {
     "access_allowlist": {
       "name": "access_allowlist",
@@ -3557,66 +3557,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "runtime_allocation_locks": {
-      "name": "runtime_allocation_locks",
-      "columns": {
-        "key": {
-          "name": "key",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "owner_token": {
-          "name": "owner_token",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
-        }
-      },
-      "indexes": {
-        "runtime_allocation_locks_expiry_idx": {
-          "name": "runtime_allocation_locks_expiry_idx",
-          "columns": [
-            "expires_at"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "runtime_allocation_locks_expiry_valid": {
-          "name": "runtime_allocation_locks_expiry_valid",
-          "value": "\"runtime_allocation_locks\".\"expires_at\" > 0"
-        }
-      }
-    },
     "runtime_artifact_uploads": {
       "name": "runtime_artifact_uploads",
       "columns": {
@@ -4650,6 +4590,13 @@
         },
         "terminal_observed_at": {
           "name": "terminal_observed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "terminal_attached_at": {
+          "name": "terminal_attached_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
@@ -5734,6 +5681,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "request_idempotency_key": {
+          "name": "request_idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_scope_json": {
+          "name": "request_scope_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "state_json": {
           "name": "state_json",
           "type": "text",
@@ -5805,6 +5766,14 @@
           "name": "scenario_runs_active_key_uidx",
           "columns": [
             "active_key"
+          ],
+          "isUnique": true
+        },
+        "scenario_runs_request_idempotency_uidx": {
+          "name": "scenario_runs_request_idempotency_uidx",
+          "columns": [
+            "user_id",
+            "request_idempotency_key"
           ],
           "isUnique": true
         },

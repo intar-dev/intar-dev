@@ -64,6 +64,7 @@ describe("scenario start route", () => {
       scenarioId: "pair-ping",
       userId: "user-1",
       betaAdmission,
+      idempotencyKey: "route-test-key-0001",
     });
   });
 
@@ -75,6 +76,7 @@ describe("scenario start route", () => {
       scenarioId: "pair-ping",
       userId: "user-1",
       betaAdmission,
+      idempotencyKey: "route-test-key-0002",
     });
   });
 
@@ -119,6 +121,7 @@ describe("scenario start route", () => {
       userId: "user-1",
       betaAdmission,
       organizationId: "org-id",
+      idempotencyKey: "route-test-key-0001",
     });
     expect(scenarioRunsMock.courseLocationFromRunSnapshot).toHaveBeenCalledWith(
       expect.objectContaining({ id: "run-1" }),
@@ -141,6 +144,7 @@ describe("scenario start route", () => {
       hostId: "agent-01",
       allowDrainedAdminProof: true,
       allowSequenceBypass: true,
+    idempotencyKey: "route-test-key-0001",
     });
   });
 
@@ -166,6 +170,7 @@ describe("scenario start route", () => {
       candidateBuildId: "candidate-build-1",
       allowDrainedAdminProof: true,
       allowSequenceBypass: true,
+      idempotencyKey: "route-test-key-0001",
     });
   });
 
@@ -270,31 +275,27 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
   });
 
-  it("tells capacity waiters when to retry", async () => {
+  it("tells a contended-capacity waiter when to retry the same key", async () => {
     scenarioRunsMock.startScenarioRunForUser.mockRejectedValueOnce(
       appError(
         409,
-        "boot_capacity_pending",
-        "scenario boot CPU capacity is pending; retry shortly",
+        "scenario_host_capacity_contended",
+        "scenario capacity changed during admission; retry the start",
       ),
     );
 
     const response = await startRequest();
 
     expect(response.status).toBe(409);
-    expect(response.headers.get("retry-after")).toBe("2");
+    expect(response.headers.get("retry-after")).toBe("1");
     await expect(response.json()).resolves.toMatchObject({
-      code: "boot_capacity_pending",
+      code: "scenario_host_capacity_contended",
     });
   });
 
-  it("preserves lock contention without imposing the capacity retry delay", async () => {
+  it("keeps an ordinary refusal free of a retry delay", async () => {
     scenarioRunsMock.startScenarioRunForUser.mockRejectedValueOnce(
-      appError(
-        409,
-        "runtime_allocation_busy",
-        "runtime capacity is being allocated concurrently; retry shortly",
-      ),
+      appError(409, "scenario_host_unavailable", "no scenario host available"),
     );
 
     const response = await startRequest();
@@ -302,7 +303,7 @@ describe("scenario start route", () => {
     expect(response.status).toBe(409);
     expect(response.headers.get("retry-after")).toBeNull();
     await expect(response.json()).resolves.toMatchObject({
-      code: "runtime_allocation_busy",
+      code: "scenario_host_unavailable",
     });
   });
 
@@ -316,13 +317,17 @@ async function startRequest(
     `https://intar.test/api/scenarios/${scenarioId}/start`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "route-test-key-0001",
+      },
       body: JSON.stringify(body),
     },
   );
   return POST({
     request,
     params: { scenarioId },
+    locals: { cfContext: { waitUntil: () => undefined } },
   } as never);
 }
 
@@ -330,7 +335,9 @@ async function bodylessStartRequest(): Promise<Response> {
   return POST({
     request: new Request("https://intar.test/api/scenarios/pair-ping/start", {
       method: "POST",
+      headers: { "idempotency-key": "route-test-key-0002" },
     }),
     params: { scenarioId: "pair-ping" },
+    locals: { cfContext: { waitUntil: () => undefined } },
   } as never);
 }

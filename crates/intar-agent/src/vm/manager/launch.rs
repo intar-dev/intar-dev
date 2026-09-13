@@ -142,6 +142,7 @@ pub(super) async fn cached_jailer_launch_capabilities(
 pub(super) async fn ensure_jailer_image_template(
     inner: &Inner,
     image: &image_cache::CachedChunkedImage,
+    request_class: RequestClass,
 ) -> Result<PreparedImageV3Result> {
     let capabilities = cached_jailer_launch_capabilities(inner).await?;
     if !(capabilities.supports_jailer_v3
@@ -176,16 +177,32 @@ pub(super) async fn ensure_jailer_image_template(
             Some(&image.initrd_sha256),
             ArtifactAccess::ReadOnly,
         )?),
+        // A learner launch waits for this template, so the launch path passes
+        // `Foreground` and is never parked. The background cache warmer passes
+        // `Background`, which keeps it inside jailerd's background lane.
+        request_class,
     };
     request.validate()?;
     let result = match request_jailerd_with_timeout(
         inner,
         JailerRequest::PrepareChunkedImageV3(Box::new(request.clone())),
-        JAILER_PREPARE_IMAGE_TIMEOUT,
+        // A background import is rate limited on purpose, so its budget must
+        // cover the physical minimum for this image size. The foreground
+        // class keeps the fixed budget and is never parked.
+        jailer_prepare_timeout(request_class, image.virtual_size_bytes),
     )
     .await?
     {
         JailerResponse::PrepareChunkedImageV3(result) => result,
+        JailerResponse::Error(error) if error.code == "image_prepare_requeued" => {
+            // Jailerd parked the background import at a block boundary to keep
+            // a boot responsive. The work is not lost and the request is not
+            // broken: the cache pass requeues it.
+            return Err(ImagePrepareRequeued {
+                message: error.message,
+            }
+            .into());
+        }
         JailerResponse::Error(error) => {
             anyhow::bail!("jailerd {}: {}", error.code, error.message)
         }
@@ -780,7 +797,11 @@ pub(super) fn boot_phase_millis(start: Instant, ends: [Instant; 10]) -> [u128; 1
     })
 }
 
-pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
+pub(super) async fn run_create(
+    inner: &Arc<Inner>,
+    req: RunCreateInput<'_>,
+    boot_guard: image_cache::BootCriticalGuard,
+) -> Result<()> {
     let create_started_at = Instant::now();
     set_state(inner, req.name, VmLifecycleState::CachingImage).await;
 
@@ -1060,6 +1081,10 @@ pub(super) async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> R
         .await
         .context("failed to start vm terminal worker")?;
     let terminal_ready_at = Instant::now();
+    // The boot-critical window ends at the durable terminal-ready boundary.
+    // Background cache work may resume between its blocks now; an error,
+    // a delete request, or a task cancel drops this guard on the same path.
+    drop(boot_guard);
     let [
         queue_ms,
         image_cache_ms,

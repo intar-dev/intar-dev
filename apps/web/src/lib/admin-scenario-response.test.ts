@@ -100,7 +100,7 @@ const scenario: ScenarioDetailRecord = {
       imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
       chunkManifestSha256: "d".repeat(64),
-      guestBootstrapAbi: 1,
+      guestBootstrapAbi: 2,
       kernelSha256: "b".repeat(64),
       initrdSha256: "c".repeat(64),
       bootCmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4",

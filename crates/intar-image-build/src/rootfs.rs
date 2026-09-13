@@ -1,25 +1,25 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use intar_image_scenario::BaseImageSpec;
 
 use crate::config::QemuBuildConfig;
 
-const INITRAMFS_MODULES: &[&str] = &[
-    "virtio_blk",
-    "virtio_pci",
-    "virtio_net",
-    "virtio_console",
-    "vmw_vsock_virtio_transport",
-    "ext4",
-    "crc32c",
-];
-
 pub(crate) const BASE_EXT4_LABEL: &str = "INTARROOT";
+
+/// Kernel image name that the kernel build stage writes into the staging
+/// directory. The final image copies it to /boot/vmlinuz-<release>.
+pub(crate) const KERNEL_VMLINUZ_FILE: &str = "vmlinuz";
+
+/// Initramfs name that the kernel build stage writes into the staging
+/// directory. The final image copies it to /boot/initrd.img-<release>.
+pub(crate) const KERNEL_INITRD_FILE: &str = "initrd.img";
+
+/// Provenance record that the kernel build stage writes next to the artifacts.
+pub(crate) const KERNEL_BUILD_RECORD_FILE: &str = "kernel-build.json";
 
 pub(crate) const BASE_RUNTIME_MODULES: &[&str] = &["nf_tables"];
 pub(crate) const KUBERNETES_RUNTIME_MODULES: &[&str] = &["overlay", "br_netfilter", "vxlan"];
@@ -67,6 +67,8 @@ pub struct RootfsBuildPaths {
     pub base_ext4_path: PathBuf,
     pub kernel_path: PathBuf,
     pub initrd_path: PathBuf,
+    /// Host directory that the kernel build stage writes into.
+    pub kernel_build_dir: PathBuf,
 }
 
 #[derive(Debug)]
@@ -128,80 +130,46 @@ pub(crate) fn base_rootfs_artifact_from_plan(
     }
 }
 
-pub(crate) fn extract_boot_artifacts(plan: &RootfsBuildPlan) -> Result<()> {
-    let boot_dir = plan.paths.rootfs_dir.join("boot");
-    let artifacts = find_boot_artifact_pair(&boot_dir)?;
-    fs::copy(&artifacts.kernel_path, &plan.paths.kernel_path).with_context(|| {
-        format!(
-            "failed to copy kernel '{}' to '{}'",
-            artifacts.kernel_path.display(),
-            plan.paths.kernel_path.display()
-        )
-    })?;
-    fs::copy(&artifacts.initrd_path, &plan.paths.initrd_path).with_context(|| {
-        format!(
-            "failed to copy initrd '{}' to '{}'",
-            artifacts.initrd_path.display(),
-            plan.paths.initrd_path.display()
-        )
-    })?;
-    for entry in fs::read_dir(&boot_dir)
-        .with_context(|| format!("failed to read boot directory '{}'", boot_dir.display()))?
-    {
-        let path = entry?.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.is_dir() {
-            fs::remove_dir_all(&path)
-                .with_context(|| format!("failed to remove '{}'", path.display()))?;
-        } else {
-            fs::remove_file(&path)
-                .with_context(|| format!("failed to remove '{}'", path.display()))?;
-        }
-    }
-    Ok(())
-}
-
-struct BootArtifactPair {
-    kernel_path: PathBuf,
-    initrd_path: PathBuf,
-}
-
-fn find_boot_artifact_pair(boot_dir: &Path) -> Result<BootArtifactPair> {
-    let kernels = boot_artifacts_by_version(boot_dir, "vmlinuz-")?;
-    let initrds = boot_artifacts_by_version(boot_dir, "initrd.img-")?;
-    let version = kernels
-        .keys()
-        .rfind(|version| initrds.contains_key(*version))
-        .with_context(|| {
+/// Move the compiled kernel artifacts into the base-image output paths.
+///
+/// The kernel build stage writes the image, the initramfs, and the provenance
+/// record into `plan.paths.kernel_build_dir`. This function requires all three
+/// and copies the two boot artifacts to `kernel_path` and `initrd_path`.
+///
+/// There is one profile, so there is one expected artifact set. A missing or
+/// empty artifact is a build failure, never a silent fallback.
+pub(crate) fn install_kernel_boot_artifacts(plan: &RootfsBuildPlan) -> Result<()> {
+    for (name, destination) in [
+        (KERNEL_VMLINUZ_FILE, &plan.paths.kernel_path),
+        (KERNEL_INITRD_FILE, &plan.paths.initrd_path),
+    ] {
+        let source = plan.paths.kernel_build_dir.join(name);
+        let metadata = fs::symlink_metadata(&source).with_context(|| {
             format!(
-                "missing matching vmlinuz/initrd boot artifacts in '{}'",
-                boot_dir.display()
+                "the kernel build did not produce '{}'; the kernel stage must succeed before the base image is assembled",
+                source.display()
             )
         })?;
-
-    Ok(BootArtifactPair {
-        kernel_path: kernels[version].clone(),
-        initrd_path: initrds[version].clone(),
-    })
-}
-
-fn boot_artifacts_by_version(boot_dir: &Path, prefix: &str) -> Result<BTreeMap<String, PathBuf>> {
-    let mut matches = BTreeMap::new();
-    for entry in fs::read_dir(boot_dir)
-        .with_context(|| format!("failed to read boot directory '{}'", boot_dir.display()))?
-    {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if let Some(version) = name.strip_prefix(prefix) {
-            let version = version.trim();
-            if !version.is_empty() {
-                matches.insert(version.to_string(), path);
-            }
-        }
+        ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0,
+            "kernel artifact '{}' is not a non-empty regular file",
+            source.display()
+        );
+        fs::copy(&source, destination).with_context(|| {
+            format!(
+                "failed to copy kernel artifact '{}' to '{}'",
+                source.display(),
+                destination.display()
+            )
+        })?;
     }
-    Ok(matches)
+    let record = plan.paths.kernel_build_dir.join(KERNEL_BUILD_RECORD_FILE);
+    ensure!(
+        record.is_file(),
+        "the kernel build did not produce the provenance record '{}'",
+        record.display()
+    );
+    Ok(())
 }
 
 pub(crate) fn create_base_ext4(plan: &RootfsBuildPlan, config: &QemuBuildConfig) -> Result<()> {
@@ -300,6 +268,7 @@ fn rootfs_build_paths(
 
     RootfsBuildPaths {
         rootfs_dir: work_root.join("rootfs"),
+        kernel_build_dir: work_root.join("kernel"),
         work_root,
         base_ext4_path: output_root.join("root.ext4"),
         kernel_path: output_root.join("vmlinuz"),
@@ -308,38 +277,26 @@ fn rootfs_build_paths(
 }
 
 fn render_essential_hook() -> String {
-    let module_lines = INITRAMFS_MODULES.join(" ");
-    format!(
-        r#"#!/bin/sh
+    r#"#!/bin/sh
 set -eu
 root="$1"
 # BuildKit binds /etc/hostname and /etc/hosts read-only while this hook runs.
 # The OCI importer writes the neutral VM files after umoci unpack.
-mkdir -p "$root/etc/dpkg/dpkg.cfg.d" "$root/etc/initramfs-tools/conf.d"
+mkdir -p "$root/etc/dpkg/dpkg.cfg.d"
 cat > "$root/etc/dpkg/dpkg.cfg.d/01intar-path-excludes" <<'EOF'
 path-exclude=/usr/share/doc/*
 path-exclude=/usr/share/man/*
 path-exclude=/usr/share/info/*
 path-exclude=/usr/share/locale/*
 EOF
-# Conffiles pre-seeded by this hook (e.g. initramfs.conf) must win over the
-# package defaults; without this dpkg raises an interactive conffile prompt
-# and non-interactive package configuration fails.
+# Conffiles pre-seeded by this hook must win over the package defaults; without
+# this dpkg raises an interactive conffile prompt and non-interactive package
+# configuration fails.
 cat > "$root/etc/dpkg/dpkg.cfg.d/02intar-conffile-policy" <<'EOF'
 force-confold
 EOF
-cat > "$root/etc/initramfs-tools/initramfs.conf" <<'EOF'
-MODULES=list
-COMPRESS=zstd
-EOF
-cat > "$root/etc/initramfs-tools/conf.d/resume" <<'EOF'
-RESUME=none
-EOF
-cat > "$root/etc/initramfs-tools/modules" <<'EOF'
-{module_lines}
-EOF
 "#
-    )
+    .to_string()
 }
 
 fn render_customize_hook(build_service: &str, build_start_script: &str) -> String {
@@ -582,7 +539,6 @@ base_image "trixie" {
   suite          = "trixie"
   mirror         = "https://deb.debian.org/debian"
   arch           = "amd64"
-  kernel_package = "linux-image-cloud-amd64"
   packages       = ["acpid", "openssh-server", "ca-certificates", "curl", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo"]
 }
 "#,
@@ -646,16 +602,11 @@ base_image "trixie" {
             plan.essential_hook
                 .contains("path-exclude=/usr/share/doc/*")
         );
-        assert!(plan.essential_hook.contains("MODULES=list"));
-        assert!(plan.essential_hook.contains("COMPRESS=zstd"));
         assert!(plan.essential_hook.contains("force-confold"));
-        assert!(plan.essential_hook.contains("vmw_vsock_virtio_transport"));
-        assert!(
-            plan.essential_hook
-                .contains("/etc/initramfs-tools/conf.d/resume")
-        );
-        assert!(plan.essential_hook.contains("RESUME=none"));
-        assert!(!plan.essential_hook.contains("RESUME=/dev/"));
+        // The base image has no distribution kernel and no initramfs-tools
+        // run. The image ships the compiled kernel and initramfs pair.
+        assert!(!plan.essential_hook.contains("initramfs-tools"));
+        assert!(!plan.essential_hook.contains("RESUME"));
         assert!(!plan.essential_hook.contains("$root/etc/hostname"));
         assert!(!plan.essential_hook.contains("$root/etc/hosts"));
         assert!(plan.customize_hook.contains(
@@ -811,23 +762,30 @@ base_image "trixie" {
         }
     }
 
-    #[test]
-    fn extracts_boot_artifacts_and_removes_them_from_rootfs_tree() {
-        let temp = tempfile::tempdir().unwrap();
+    fn plan_for(temp: &tempfile::TempDir) -> super::RootfsBuildPlan {
         let config = QemuBuildConfig {
             output_root: temp.path().join("dist"),
             work_root: temp.path().join(".work"),
             ..QemuBuildConfig::default()
         };
-        let plan = render_rootfs_build_plan(&base_image(), &config);
-        let boot_dir = plan.paths.rootfs_dir.join("boot");
-        std::fs::create_dir_all(&boot_dir).unwrap();
-        std::fs::write(boot_dir.join("vmlinuz-6.12.1-cloud-amd64"), "kernel").unwrap();
-        std::fs::write(boot_dir.join("initrd.img-6.12.1-cloud-amd64"), "initrd").unwrap();
-        std::fs::write(boot_dir.join("config-6.12.1-cloud-amd64"), "config").unwrap();
-        std::fs::create_dir_all(plan.paths.base_ext4_path.parent().unwrap()).unwrap();
+        render_rootfs_build_plan(&base_image(), &config)
+    }
 
-        super::extract_boot_artifacts(&plan).unwrap();
+    fn write_kernel_build_output(plan: &super::RootfsBuildPlan, kernel: &str, initrd: &str) {
+        std::fs::create_dir_all(&plan.paths.kernel_build_dir).unwrap();
+        std::fs::create_dir_all(plan.paths.base_ext4_path.parent().unwrap()).unwrap();
+        std::fs::write(plan.paths.kernel_build_dir.join("vmlinuz"), kernel).unwrap();
+        std::fs::write(plan.paths.kernel_build_dir.join("initrd.img"), initrd).unwrap();
+        std::fs::write(plan.paths.kernel_build_dir.join("kernel-build.json"), "{}").unwrap();
+    }
+
+    #[test]
+    fn installs_the_compiled_kernel_and_initramfs_into_the_output_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let plan = plan_for(&temp);
+        write_kernel_build_output(&plan, "kernel", "initrd");
+
+        super::install_kernel_boot_artifacts(&plan).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&plan.paths.kernel_path).unwrap(),
@@ -837,61 +795,41 @@ base_image "trixie" {
             std::fs::read_to_string(&plan.paths.initrd_path).unwrap(),
             "initrd"
         );
-        assert_eq!(std::fs::read_dir(&boot_dir).unwrap().count(), 0);
     }
 
     #[test]
-    fn extracts_latest_matching_kernel_and_initrd_pair() {
+    fn a_missing_kernel_artifact_fails_the_build() {
         let temp = tempfile::tempdir().unwrap();
-        let config = QemuBuildConfig {
-            output_root: temp.path().join("dist"),
-            work_root: temp.path().join(".work"),
-            ..QemuBuildConfig::default()
-        };
-        let plan = render_rootfs_build_plan(&base_image(), &config);
-        let boot_dir = plan.paths.rootfs_dir.join("boot");
-        std::fs::create_dir_all(&boot_dir).unwrap();
-        std::fs::write(boot_dir.join("vmlinuz-6.12.1-cloud-amd64"), "kernel-old").unwrap();
-        std::fs::write(boot_dir.join("initrd.img-6.12.1-cloud-amd64"), "initrd-old").unwrap();
-        std::fs::write(boot_dir.join("vmlinuz-6.12.2-cloud-amd64"), "kernel-new").unwrap();
-        std::fs::write(
-            boot_dir.join("vmlinuz-6.12.3-cloud-amd64"),
-            "kernel-unpaired",
-        )
-        .unwrap();
-        std::fs::write(boot_dir.join("initrd.img-6.12.2-cloud-amd64"), "initrd-new").unwrap();
-        std::fs::create_dir_all(plan.paths.base_ext4_path.parent().unwrap()).unwrap();
+        let plan = plan_for(&temp);
+        write_kernel_build_output(&plan, "kernel", "initrd");
+        std::fs::remove_file(plan.paths.kernel_build_dir.join("vmlinuz")).unwrap();
 
-        super::extract_boot_artifacts(&plan).unwrap();
+        let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
 
-        assert_eq!(
-            std::fs::read_to_string(&plan.paths.kernel_path).unwrap(),
-            "kernel-new"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&plan.paths.initrd_path).unwrap(),
-            "initrd-new"
-        );
+        assert!(format!("{error:#}").contains("did not produce"));
     }
 
     #[test]
-    fn rejects_mismatched_kernel_and_initrd_versions() {
+    fn an_empty_kernel_artifact_fails_the_build() {
         let temp = tempfile::tempdir().unwrap();
-        let config = QemuBuildConfig {
-            output_root: temp.path().join("dist"),
-            work_root: temp.path().join(".work"),
-            ..QemuBuildConfig::default()
-        };
-        let plan = render_rootfs_build_plan(&base_image(), &config);
-        let boot_dir = plan.paths.rootfs_dir.join("boot");
-        std::fs::create_dir_all(&boot_dir).unwrap();
-        std::fs::write(boot_dir.join("vmlinuz-6.12.2-cloud-amd64"), "kernel").unwrap();
-        std::fs::write(boot_dir.join("initrd.img-6.12.1-cloud-amd64"), "initrd").unwrap();
-        std::fs::create_dir_all(plan.paths.base_ext4_path.parent().unwrap()).unwrap();
+        let plan = plan_for(&temp);
+        write_kernel_build_output(&plan, "", "initrd");
 
-        let error = super::extract_boot_artifacts(&plan).unwrap_err();
+        let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
 
-        assert!(format!("{error:#}").contains("missing matching vmlinuz/initrd"));
+        assert!(format!("{error:#}").contains("non-empty regular file"));
+    }
+
+    #[test]
+    fn a_missing_provenance_record_fails_the_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let plan = plan_for(&temp);
+        write_kernel_build_output(&plan, "kernel", "initrd");
+        std::fs::remove_file(plan.paths.kernel_build_dir.join("kernel-build.json")).unwrap();
+
+        let error = super::install_kernel_boot_artifacts(&plan).unwrap_err();
+
+        assert!(format!("{error:#}").contains("provenance record"));
     }
 
     #[test]

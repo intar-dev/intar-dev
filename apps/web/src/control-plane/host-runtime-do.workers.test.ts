@@ -22,7 +22,6 @@ import {
   drizzle,
   agentHosts,
   user,
-  hostCpuReservations,
   hostDesiredState,
   scenarioRuns,
   upsertDesiredCachedImage,
@@ -948,9 +947,8 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     }
   });
 
-  it("dispatches desired state only after the CPU reservation commit succeeds", async () => {
+  it("dispatches the committed desired version to the active bridge session on wake", async () => {
     const hostId = "host-commit-dispatch";
-    const runId = "run-commit-dispatch";
     const now = Date.now();
     await seedHost(hostId);
     const { messages, stub, ws } = await connectHost(hostId);
@@ -974,34 +972,22 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     const db = drizzle(env.DB);
     await waitForHostActualState(db, hostId, (row) => row.observedAt === now);
 
-    const reserved = await stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/reserve",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          hostId,
-          runId,
-          steadyCpuMillisByVm: [1_000],
-        }),
-      },
-    );
-    expect(reserved.status).toBe(201);
+    // A durable desired-state publish is delivered by the wake that follows
+    // it. There is no reservation commit to gate on any more: the admission
+    // batch writes the run, its quota, and the desired version in one
+    // transaction, and the wake is only the latency hint.
     await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
         image_id: "1".repeat(64),
       });
     });
-
-    const committed = await stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/commit",
-      {
-        method: "POST",
-        body: JSON.stringify({ hostId, runId }),
-      },
-    );
-    expect(committed.status).toBe(200);
-    await expect(committed.json()).resolves.toEqual({ ok: true });
+    const woke = await stub.fetch("http://host-runtime/_internal/wake", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hostId }),
+    });
+    expect(woke.status).toBe(202);
     await expect(
       waitForBridgeMessage(
         messages,
@@ -1010,41 +996,21 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
           message.desired_state.version === 1,
       ),
     ).resolves.toMatchObject({ type: "desired_state" });
-    await expect(
-      db
-        .select({ state: hostCpuReservations.state })
-        .from(hostCpuReservations)
-        .where(eq(hostCpuReservations.runId, runId)),
-    ).resolves.toEqual([{ state: "committed" }]);
 
-    await mutateStoredHostDesiredState(db, hostId, now + 2, (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "3".repeat(64),
-      });
-    });
-    const missingCommit = await stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/commit",
-      {
-        method: "POST",
-        body: JSON.stringify({ hostId, runId: "missing-reservation" }),
-      },
-    );
-    await expect(missingCommit.json()).resolves.toEqual({ ok: false });
+    // A repeat wake for an already delivered version sends nothing.
     await sleep(20);
     expect(
-      messages.some(
+      messages.filter(
         (message) =>
           message.type === "desired_state" &&
-          message.desired_state.version === 2,
+          message.desired_state.version === 1,
       ),
-    ).toBe(false);
+    ).toHaveLength(1);
     ws.close();
   });
 
-  it("dispatches a committed reservation only through the newest bridge session", async () => {
+  it("delivers a new desired version only through the newest bridge session", async () => {
     const hostId = "host-commit-replacement-dispatch";
-    const runId = "run-commit-replacement-dispatch";
     const now = Date.now();
     await seedHost(hostId);
     const first = await connectHost(hostId);
@@ -1074,18 +1040,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     );
     const db = drizzle(env.DB);
     await waitForHostActualState(db, hostId, (row) => row.observedAt === now);
-    const reserved = await replacement.stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/reserve",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          hostId,
-          runId,
-          steadyCpuMillisByVm: [1_000],
-        }),
-      },
-    );
-    expect(reserved.status).toBe(201);
+
     await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,
@@ -1100,14 +1055,15 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       ),
     ).toBe(false);
 
-    const committed = await replacement.stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/commit",
+    const woke = await replacement.stub.fetch(
+      "http://host-runtime/_internal/wake",
       {
         method: "POST",
-        body: JSON.stringify({ hostId, runId }),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ hostId }),
       },
     );
-    await expect(committed.json()).resolves.toEqual({ ok: true });
+    expect(woke.status).toBe(202);
     await expect(
       waitForBridgeMessage(
         replacement.messages,
@@ -1127,6 +1083,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     first.ws.close();
     replacement.ws.close();
   });
+
 });
 
 async function blockFixtureBetaAccess(

@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 
 use crate::ScenarioError;
 
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v13";
-pub const GUEST_BOOTSTRAP_ABI: u16 = 1;
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v14";
+pub const GUEST_BOOTSTRAP_ABI: u16 = 2;
 
 #[derive(Debug, Clone)]
 pub struct ScenarioContentHashParams<'a> {
@@ -158,9 +158,9 @@ mod tests {
     }
 
     #[test]
-    fn v13_build_format_invalidates_v12_images_and_matches_the_golden_hash() {
-        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v13");
-        assert_eq!(GUEST_BOOTSTRAP_ABI, 1);
+    fn v14_build_format_invalidates_v13_images_and_matches_the_golden_hash() {
+        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v14");
+        assert_eq!(GUEST_BOOTSTRAP_ABI, 2);
         let hash = scenario_content_hash_from_entries(
             &params(),
             &[
@@ -171,11 +171,15 @@ mod tests {
         .unwrap();
         assert_ne!(
             hash, "e52ce43604b4c7074469382d39d777f718773fd519d4a0574fc43dde9980b50c",
-            "v12 images must not satisfy a v13 build"
+            "a v13 image must not satisfy a v14 build"
+        );
+        assert_ne!(
+            hash, "4872af896df70a8afc2811a50adb1a3b04320f23fd35f4e758f99bef21a60c13",
+            "the v13 golden hash must not satisfy a v14 build"
         );
         assert_eq!(
             hash,
-            "4872af896df70a8afc2811a50adb1a3b04320f23fd35f4e758f99bef21a60c13"
+            "8a354ed23a7f4618ffdaee4f5868a5d29fc08f82cf785d76a3b24e05a926f526"
         );
     }
 

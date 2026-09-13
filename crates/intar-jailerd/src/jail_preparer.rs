@@ -40,7 +40,8 @@ impl JailPreparer for FileSystemJailPreparer {
         config: &JailerdConfig,
         request: &PrepareImageV2Request,
     ) -> Result<PreparedImageV2Result> {
-        prepare_image_template(config, request)
+        let lane = PrepareLane::claim(request.request_class)?;
+        prepare_image_template(config, request, &lane)
     }
 
     fn validate_prepared_launch(
@@ -56,7 +57,8 @@ impl JailPreparer for FileSystemJailPreparer {
         config: &JailerdConfig,
         request: &PrepareChunkedImageV3Request,
     ) -> Result<PreparedImageV3Result> {
-        prepare_chunked_image_template(config, request)
+        let lane = PrepareLane::claim(request.request_class)?;
+        prepare_chunked_image_template(config, request, &lane)
     }
 
     fn validate_prepared_launch_v3(

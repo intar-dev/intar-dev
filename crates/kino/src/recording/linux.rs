@@ -298,6 +298,12 @@ fn record_ssh_linux(
     }
     let mut session =
         LinuxInteractiveSession::start(&config.real_shell, width, height, command, startup_mode)?;
+    // The PTY is live and the .krec.partial file exists, so this recorded
+    // interactive terminal is real. Report it on a detached thread; the guest
+    // supervisor uses the report only to release the lab earlier than its
+    // fallback timer. A one-shot recorded command is not a terminal session
+    // and does not release the lab.
+    crate::lab_release::notify_recording_started("recording-started");
     let loop_result = run_linux_interactive_loop(&mut session, &shared_writer, &recording_path);
     if loop_result.is_err() {
         // Interactive shells ignore TERM; escalate so finish() can join

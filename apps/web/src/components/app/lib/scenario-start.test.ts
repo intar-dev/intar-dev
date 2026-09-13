@@ -57,12 +57,48 @@ describe("scenario capacity waiting", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("retries allocation-lock contention with a short jittered delay", async () => {
+  it("stops the attempt when the user cancels during a connection failure", async () => {
     vi.useFakeTimers();
-    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    // Real fetch rejects on abort; the attempt must end here, with no retry
+    // going out under the key.
     const fetchMock = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(capacityPending("2", "runtime_allocation_busy"))
+      .mockImplementation(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: controller.signal,
+      onCapacityWait: vi.fn(),
+    });
+    // Attach the handler before the abort so the cancellation is not an
+    // unhandled rejection.
+    const rejection = expect(result).rejects.toBeInstanceOf(
+      ScenarioStartCancelledError,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // The abort ends the attempt: no further request goes out with the key.
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses one Idempotency-Key across every retry of one attempt", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(capacityPending("1"))
+      .mockResolvedValueOnce(capacityPending("1"))
       .mockResolvedValueOnce(accepted());
     vi.stubGlobal("fetch", fetchMock);
 
@@ -70,12 +106,118 @@ describe("scenario capacity waiting", () => {
       signal: new AbortController().signal,
       onCapacityWait: vi.fn(),
     });
-    await vi.advanceTimersByTimeAsync(299);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-
+    await vi.advanceTimersByTimeAsync(2_000);
     await expect(result).resolves.toMatchObject({ runId: "run-1" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const keys = fetchMock.mock.calls.map(([, request]) =>
+      new Headers(request?.headers).get("Idempotency-Key"),
+    );
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  it("uses a different Idempotency-Key for a new start attempt", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => accepted());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+    await requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+
+    const keys = fetchMock.mock.calls.map(([, request]) =>
+      new Headers(request?.headers).get("Idempotency-Key"),
+    );
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("generates the key once per attempt with crypto.randomUUID", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const randomUuid = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("11111111-1111-4111-8111-111111111111")
+      .mockReturnValueOnce("22222222-2222-4222-8222-222222222222");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => accepted());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+    const second = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await second;
+
+    // One generation per attempt, outside the transport retry loop, and a new
+    // Start click gets a new key.
+    expect(randomUuid).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.map(([, request]) =>
+        new Headers(request?.headers).get("Idempotency-Key"),
+      ),
+    ).toEqual([
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+    ]);
+  });
+
+  it("keeps the key in the header only, out of the request body", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => accepted());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+
+    const [, request] = fetchMock.mock.calls[0] ?? [];
+    const key = new Headers(request?.headers).get("Idempotency-Key");
+    expect(key).toBeTruthy();
+    // The key is a public nonce for admission replay, never a secret, and the
+    // body carries only the unchanged start options.
+    expect(request?.body).toBe("{}");
+    expect(request?.body).not.toContain(key);
+    expect(JSON.stringify(request)).not.toContain("secret");
+  });
+
+  it("retries a 5xx with the same key because the request may have committed", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ error: "internal error", code: "internal" }, { status: 500 }),
+      )
+      .mockResolvedValueOnce(accepted());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(result).resolves.toMatchObject({ runId: "run-1" });
+
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const keys = fetchMock.mock.calls.map(([, request]) =>
+      new Headers(request?.headers).get("Idempotency-Key"),
+    );
+    expect(new Set(keys).size).toBe(1);
   });
 
   it("times out at 60 seconds without another capacity request", async () => {
@@ -115,6 +257,23 @@ describe("scenario capacity waiting", () => {
         onCapacityWait,
       }),
     ).rejects.toThrow("Scenario image is not ready.");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onCapacityWait).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a 403 decision", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ error: "admin required", code: "admin_required" }, { status: 403 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onCapacityWait = vi.fn();
+
+    await expect(
+      requestScenarioStartWithCapacityWait("pair-ping", {
+        signal: new AbortController().signal,
+        onCapacityWait,
+      }),
+    ).rejects.toThrow("admin required");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(onCapacityWait).not.toHaveBeenCalled();
   });
@@ -165,21 +324,36 @@ describe("scenario capacity waiting", () => {
     );
   });
 
-  it("turns connectivity failures into a recoverable next action", async () => {
+  it("turns connectivity failures into a bounded same-key retry", async () => {
+    vi.useFakeTimers();
+    const randomUuid = vi.spyOn(crypto, "randomUUID");
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockRejectedValue(new TypeError("Failed to fetch"));
     vi.stubGlobal("fetch", fetchMock);
+    const onCapacityWait = vi.fn();
 
-    await expect(
-      requestScenarioStartWithCapacityWait("pair-ping", {
-        signal: new AbortController().signal,
-        onCapacityWait: vi.fn(),
-      }),
-    ).rejects.toThrow(
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait,
+    });
+    const rejection = expect(result).rejects.toThrow(
       "Could not reach the control plane. Check your connection and try starting the scenario again.",
     );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejection;
+
+    // Bounded, and every retry repeats the one key: an admitted-but-lost
+    // first request can not create a second VM set.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(randomUuid).toHaveBeenCalledTimes(1);
+    const keys = fetchMock.mock.calls.map(([, request]) =>
+      new Headers(request?.headers).get("Idempotency-Key"),
+    );
+    expect(new Set(keys).size).toBe(1);
+    // A lost connection is not a capacity wait, so the caller keeps its
+    // current status instead of showing the waiting-on-capacity state.
+    expect(onCapacityWait).not.toHaveBeenCalled();
   });
 });
 
@@ -191,7 +365,7 @@ describe("parseRetryAfterMs", () => {
 
 function capacityPending(
   retryAfter: string,
-  code = "boot_capacity_pending",
+  code = "scenario_host_capacity_contended",
 ) {
   return Response.json(
     {
