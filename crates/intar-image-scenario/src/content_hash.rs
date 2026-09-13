@@ -9,12 +9,12 @@ use crate::ScenarioError;
 /// Epoch of the image content-hash contract.
 ///
 /// Bump this whenever a change alters the compiled image without changing
-/// any hashed input below. The embedded kernel is the case that matters: the
-/// kernel config fragment and profile digest are NOT content-hash inputs (they
-/// key the OCI base-image cache only), so a kernel fix with unchanged scenario
-/// HCL would otherwise reuse the old image. A bump makes every existing image
-/// hash stale and forces a rebuild, which is the intended cost.
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v15";
+/// any hashed input below. The generated guest startup unit and the embedded
+/// kernel are the cases that matter: neither is an input to the scenario
+/// hash, so a change to the unit writer or to the kernel with unchanged
+/// scenario HCL would otherwise reuse the existing image. A bump makes every
+/// existing image hash stale and forces a rebuild, which is the intended cost.
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v16";
 pub const GUEST_BOOTSTRAP_ABI: u16 = 2;
 
 #[derive(Debug, Clone)]
@@ -166,8 +166,8 @@ mod tests {
     }
 
     #[test]
-    fn v15_build_format_invalidates_v14_images_and_matches_the_golden_hash() {
-        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v15");
+    fn v16_build_format_invalidates_v15_images_and_matches_the_golden_hash() {
+        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v16");
         assert_eq!(GUEST_BOOTSTRAP_ABI, 2);
         let hash = scenario_content_hash_from_entries(
             &params(),
@@ -178,23 +178,27 @@ mod tests {
         )
         .unwrap();
         // The regression for the identity bump: the same scenario inputs that
-        // produced the v14 golden hash must NOT produce it again under v15, so a
-        // published v14 image can never satisfy a v15 build.
+        // produced an older golden hash must NOT produce it again under v16, so a
+        // published image from an earlier epoch can never satisfy a v16 build.
+        assert_ne!(
+            hash, "aa185f95ab0bede21d2272f650c55fd0bcb99ddac4f571e8cd9fecdfe39c33cd",
+            "the v15 golden hash must not satisfy a v16 build"
+        );
         assert_ne!(
             hash, "8a354ed23a7f4618ffdaee4f5868a5d29fc08f82cf785d76a3b24e05a926f526",
-            "the v14 golden hash must not satisfy a v15 build"
+            "the v14 golden hash must not satisfy a v16 build"
         );
         assert_ne!(
             hash, "e52ce43604b4c7074469382d39d777f718773fd519d4a0574fc43dde9980b50c",
-            "a v13 image must not satisfy a v15 build"
+            "a v13 image must not satisfy a v16 build"
         );
         assert_ne!(
             hash, "4872af896df70a8afc2811a50adb1a3b04320f23fd35f4e758f99bef21a60c13",
-            "the v13 golden hash must not satisfy a v15 build"
+            "the v13 golden hash must not satisfy a v16 build"
         );
         assert_eq!(
             hash,
-            "aa185f95ab0bede21d2272f650c55fd0bcb99ddac4f571e8cd9fecdfe39c33cd"
+            "e1122e3777248dfb31d26d1910ca480834ad8404007d7752a9480e798514cb9c"
         );
     }
 

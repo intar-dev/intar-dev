@@ -390,7 +390,21 @@ cat > "$root/usr/local/sbin/intar-build-start" <<'EOF'
 {build_start_script}
 EOF
 chmod 0755 "$root/usr/local/sbin/intar-build-start"
-ln -sf /etc/systemd/system/intar-build.service "$root/etc/systemd/system/multi-user.target.wants/intar-build.service"
+# udev can create /dev/disk/by-label/INTARBUILD after the boot-time condition
+# checks, so an enabled bootstrap service can skip itself forever. The passive
+# path unit holds no boot job and starts the bootstrap when the seed appears.
+cat > "$root/etc/systemd/system/intar-build.path" <<'EOF'
+[Unit]
+Description=Intar image build seed activation
+
+[Path]
+PathExists=/dev/disk/by-label/INTARBUILD
+Unit=intar-build.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/intar-build.path "$root/etc/systemd/system/multi-user.target.wants/intar-build.path"
 {masked_units}
 "#
     )
@@ -657,6 +671,19 @@ base_image "trixie" {
         );
         assert!(plan.customize_hook.contains(&build_service));
         assert!(plan.customize_hook.contains(&build_start_script));
+        assert!(
+            plan.customize_hook
+                .contains("cat > \"$root/etc/systemd/system/intar-build.path\" <<'EOF'")
+        );
+        assert!(plan.customize_hook.contains(
+            "[Path]\nPathExists=/dev/disk/by-label/INTARBUILD\nUnit=intar-build.service"
+        ));
+        assert!(plan.customize_hook.contains(
+            "ln -sf /etc/systemd/system/intar-build.path \"$root/etc/systemd/system/multi-user.target.wants/intar-build.path\""
+        ));
+        assert!(!plan.customize_hook.contains(
+            "ln -sf /etc/systemd/system/intar-build.service \"$root/etc/systemd/system/multi-user.target.wants/intar-build.service\""
+        ));
         assert!(build_service.contains("After=local-fs.target"));
         assert!(!build_service.contains("systemd-udev-trigger.service"));
         assert!(build_service.contains("Before=multi-user.target"));

@@ -320,6 +320,13 @@ export function runPhaseAcceptsTerminalSessions(phase: RunPhase): boolean {
   return ["active_partial", "active_full", "solved"].includes(phase);
 }
 
+/** Browser routes can wait for a ready target during provisioning. */
+export function runPhaseAcceptsBrowserTerminalSessions(
+  phase: RunPhase,
+): boolean {
+  return phase === "provisioning" || runPhaseAcceptsTerminalSessions(phase);
+}
+
 export function canAdvanceVmPhase(current: VmPhase, next: VmPhase): boolean {
   return VM_PHASE_ORDER[next] >= VM_PHASE_ORDER[current];
 }

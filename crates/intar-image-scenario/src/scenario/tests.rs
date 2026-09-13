@@ -491,6 +491,7 @@ fn blocks_run_cli_managed_assets() {
         "/run/intar/kino-control.sock",
         "/run/intar/run-cli-broker",
         "/etc/systemd/system/intar-build.service.d/10-intar-build-seed.conf",
+        "/etc/systemd/system/intar-scenario.path",
         "/etc/systemd/system/intar-scenario.service.d/10-intar-runtime-disk.conf",
     ] {
         assert!(is_managed_path(path), "expected managed path {path}");
@@ -703,7 +704,12 @@ scenario "managed-assets" {
         .unwrap_err();
     assert!(matches!(error, ScenarioError::ManagedPath { .. }));
 
-    let hcl = r#"
+    for unit in [
+        "intar-scenario.service",
+        "intar-scenario.path",
+        "intar-build.path",
+    ] {
+        let hcl = r#"
 scenario "managed-unit" {
   image "debian-12-minimal" {
     base = "trixie"
@@ -731,13 +737,18 @@ scenario "managed-unit" {
     probes = ["nginx-running"]
   }
 }
-"#;
+"#
+        .replace("intar-scenario.service", unit);
 
-    let scenario = Scenario::parse_course(hcl).unwrap();
-    let error = scenario
-        .validate_technical_for_builder_arch("amd64")
-        .unwrap_err();
-    assert!(matches!(error, ScenarioError::ManagedUnit { .. }));
+        let scenario = Scenario::parse_course(&hcl).unwrap();
+        let error = scenario
+            .validate_technical_for_builder_arch("amd64")
+            .unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::ManagedUnit { .. }),
+            "typed systemctl action must reject managed unit {unit}"
+        );
+    }
 
     let hcl = r#"
 scenario "managed-command" {

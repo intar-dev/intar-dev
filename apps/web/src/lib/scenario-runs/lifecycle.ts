@@ -23,6 +23,7 @@ import {
 import {
   recomputeRunState,
   runPhaseAcceptsTerminalSessions,
+  runPhaseAcceptsBrowserTerminalSessions,
 } from "@/lib/run-state";
 import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
 import {
@@ -473,8 +474,14 @@ export async function createScenarioSshSessionForUser(params: {
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
+  const requestedMode = params.mode ?? "browser";
+  // A pending browser route waits for ready; native SSH still requires ready.
+  const runAcceptsThisMode =
+    requestedMode === "browser"
+      ? runPhaseAcceptsBrowserTerminalSessions(row.state.phase)
+      : runPhaseAcceptsTerminalSessions(row.state.phase);
   if (
-    !runPhaseAcceptsTerminalSessions(row.state.phase) ||
+    !runAcceptsThisMode ||
     row.completedAt !== null ||
     row.failedAt !== null
   ) {
@@ -505,7 +512,6 @@ export async function createScenarioSshSessionForUser(params: {
     { "intar.run.id": row.runId, "intar.vm.id": vm.id },
   );
 
-  const requestedMode = params.mode ?? "browser";
   const buildNativeTarget = () => {
     const host = vm.terminalTarget.host?.trim() ?? "";
     const port =

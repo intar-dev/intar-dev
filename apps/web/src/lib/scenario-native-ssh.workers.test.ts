@@ -276,6 +276,104 @@ describe("scenario native SSH authorization", () => {
     expect(mocks.attachReadyScenarioTerminalTargets).toHaveBeenCalledTimes(1);
     expect(mocks.deleteStargateRoute).not.toHaveBeenCalled();
   });
+
+  it("opens one pending browser route while the run is still booting", async () => {
+    mocks.loadRunRow.mockResolvedValue(bootingRunRow());
+    mocks.issueStargateTerminalSession.mockResolvedValue({
+      routeUsername: "route-browser",
+      expiresAt: 1_000,
+      generation: "run-1:1",
+      browser: { websocketUrl: "wss://stargate.test/v1/terminal/ws?token=t" },
+    });
+
+    // The transport is mounted and connecting while the VM boots, so this is
+    // the boot-time request. It must return the waiting route, not 409.
+    const session = await createScenarioSshSessionForUser({
+      runId: "run-1",
+      vmId: "vm-1",
+      userId: "user-1",
+    });
+
+    expect(session).toMatchObject({
+      routeUsername: "route-browser",
+      generation: "run-1:1",
+      browser: { websocketUrl: expect.stringContaining("wss://") },
+    });
+    const issueInput = mocks.issueStargateTerminalSession.mock.calls[0]?.[0];
+    expect(issueInput).toMatchObject({ mode: "browser" });
+    // The boot-time create is pending: no endpoint, no host key, no credential.
+    expect(issueInput).not.toHaveProperty("target");
+    expect(mocks.loadScenarioRunSshKey).not.toHaveBeenCalled();
+    // The route exists before the target, so the attach reports not_ready and
+    // the create still succeeds for the transport that waits for ready.
+    expect(mocks.attachReadyScenarioTerminalTargets).toHaveBeenCalledWith(
+      expect.objectContaining({ vmId: "vm-1", force: true }),
+    );
+  });
+
+  it("keeps native SSH closed while the run is still booting", async () => {
+    mocks.loadRunRow.mockResolvedValue(bootingRunRow());
+
+    await expect(
+      createScenarioSshSessionForUser({
+        runId: "run-1",
+        vmId: "vm-1",
+        userId: "user-1",
+        mode: "native",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "scenario_terminal_closed",
+    });
+    expect(mocks.issueStargateTerminalSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps the native ready guard on a booting VM of an active run", async () => {
+    const row = bootingRunRow();
+    row.state.phase = "active_partial";
+    mocks.loadRunRow.mockResolvedValue(row);
+
+    await expect(
+      createScenarioSshSessionForUser({
+        runId: "run-1",
+        vmId: "vm-1",
+        userId: "user-1",
+        mode: "native",
+        // A supplied key clears the key guard so this case reaches the ready
+        // guard that native SSH keeps on a booting VM.
+        clientPublicKeyOpenssh: "ssh-ed25519 TEMP temporary@example.test",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "scenario_shell_not_ready",
+    });
+    expect(mocks.issueStargateTerminalSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps a stopped, failed, or completed run closed to browser prearm", async () => {
+    const booting = bootingRunRow();
+    const cases = [
+      { ...booting, state: { ...booting.state } },
+      { ...readyRunRow(), failedAt: 1 },
+      { ...readyRunRow(), completedAt: 1 },
+    ];
+    cases[0]!.state.phase = "teardown_requested";
+
+    for (const row of cases) {
+      mocks.loadRunRow.mockResolvedValue(row);
+      await expect(
+        createScenarioSshSessionForUser({
+          runId: "run-1",
+          vmId: "vm-1",
+          userId: "user-1",
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "scenario_terminal_closed",
+      });
+    }
+    expect(mocks.issueStargateTerminalSession).not.toHaveBeenCalled();
+  });
 });
 
 function readyRunRow() {
@@ -309,6 +407,44 @@ function readyRunRow() {
     checkedAt: null,
   };
   state.phase = "active_full";
+
+  return {
+    runId: "run-1",
+    userId: "user-1",
+    hostId: "host-1",
+    completedAt: null,
+    failedAt: null,
+    state,
+  };
+}
+
+/**
+ * The run row as it exists right after the begin batch: the phase is
+ * provisioning, the VM is booting, and no terminal target is observed yet.
+ */
+function bootingRunRow() {
+  const state = buildInitialRunState({
+    vms: [
+      {
+        id: "vm-1",
+        ordinal: 0,
+        scenarioVmId: "scenario-vm-1",
+        scenarioVmName: "webserver",
+        runtimeVmName: "run-1-webserver",
+        hostname: "webserver",
+        launchSummary: {
+          scenarioVmName: "webserver",
+          hostname: "webserver",
+          probePhaseMap: {},
+          probeDescriptors: [],
+        },
+      },
+    ],
+  });
+  const vm = state.vms[0];
+  if (!vm) throw new Error("missing test VM");
+  vm.phase = "booting";
+  state.phase = "provisioning";
 
   return {
     runId: "run-1",
