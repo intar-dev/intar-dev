@@ -71,9 +71,7 @@ impl AsyncHandle {
         let name_ffi = name_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_add_meta_context(self.data.handle.handle, name_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_add_meta_context(self.data.handle.handle, name_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -113,13 +111,8 @@ impl AsyncHandle {
         &self,
         count: u64,
         offset: u64,
-        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -175,20 +168,14 @@ impl AsyncHandle {
         &self,
         count: u64,
         offset: u64,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
         let count_ffi = count;
         let offset_ffi = offset;
-        let extent64_ffi =
-            unsafe { crate::bindings::extent64_to_raw(extent64) };
+        let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
         let completion_ffi = match completion {
             Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
             None => sys::nbd_completion_callback {
@@ -239,13 +226,8 @@ impl AsyncHandle {
         count: u64,
         offset: u64,
         contexts: impl IntoIterator<Item = impl AsRef<[u8]>>,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -253,9 +235,7 @@ impl AsyncHandle {
         let offset_ffi = offset;
         let contexts_ffi_c_strs: Vec<CString> = contexts
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut contexts_ffi_ptrs: Vec<*mut c_char> = contexts_ffi_c_strs
             .iter()
@@ -263,8 +243,7 @@ impl AsyncHandle {
             .collect();
         contexts_ffi_ptrs.push(ptr::null_mut());
         let contexts_ffi = contexts_ffi_ptrs.as_mut_ptr();
-        let extent64_ffi =
-            unsafe { crate::bindings::extent64_to_raw(extent64) };
+        let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
         let completion_ffi = match completion {
             Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
             None => sys::nbd_completion_callback {
@@ -315,9 +294,7 @@ impl AsyncHandle {
         &self,
         count: u64,
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -368,9 +345,8 @@ impl AsyncHandle {
         let cookie_ffi = cookie;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_command_completed(self.data.handle.handle, cookie_ffi)
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_command_completed(self.data.handle.handle, cookie_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -399,9 +375,8 @@ impl AsyncHandle {
         let addrlen_ffi = addr_os.len();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect(self.data.handle.handle, addr_ffi, addrlen_ffi)
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_connect(self.data.handle.handle, addr_ffi, addrlen_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -431,9 +406,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
         let argv_ffi_c_strs: Vec<CString> = argv
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
             .iter()
@@ -443,9 +416,7 @@ impl AsyncHandle {
         let argv_ffi = argv_ffi_ptrs.as_mut_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_command(self.data.handle.handle, argv_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_command(self.data.handle.handle, argv_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -472,9 +443,7 @@ impl AsyncHandle {
         let sock_ffi = sock.as_raw_fd();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_socket(self.data.handle.handle, sock_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_socket(self.data.handle.handle, sock_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -504,9 +473,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
         let argv_ffi_c_strs: Vec<CString> = argv
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
             .iter()
@@ -517,10 +484,7 @@ impl AsyncHandle {
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_aio_connect_systemd_socket_activation(
-                self.data.handle.handle,
-                argv_ffi,
-            )
+            sys::nbd_aio_connect_systemd_socket_activation(self.data.handle.handle, argv_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -549,20 +513,14 @@ impl AsyncHandle {
         port: impl Into<Vec<u8>>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let hostname_buf =
-            CString::new(hostname.into()).map_err(|e| Error::from(e))?;
+        let hostname_buf = CString::new(hostname.into()).map_err(|e| Error::from(e))?;
         let hostname_ffi = hostname_buf.as_ptr();
         let port_buf = CString::new(port.into()).map_err(|e| Error::from(e))?;
         let port_ffi = port_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_tcp(
-                self.data.handle.handle,
-                hostname_ffi,
-                port_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_connect_tcp(self.data.handle.handle, hostname_ffi, port_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -585,20 +543,14 @@ impl AsyncHandle {
     /// once [aio_is_negotiating](Handle::aio_is_negotiating) returns true; otherwise, the
     /// connection attempt will include the NBD handshake, and is ready
     /// for use once [aio_is_ready](Handle::aio_is_ready) returns true.
-    pub fn aio_connect_unix(
-        &self,
-        unixsocket: impl Into<PathBuf>,
-    ) -> Result<()> {
+    pub fn aio_connect_unix(&self, unixsocket: impl Into<PathBuf>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let unixsocket_buf =
-            CString::new(unixsocket.into().into_os_string().into_vec())
-                .map_err(|e| Error::from(e))?;
+        let unixsocket_buf = CString::new(unixsocket.into().into_os_string().into_vec())
+            .map_err(|e| Error::from(e))?;
         let unixsocket_ffi = unixsocket_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_unix(self.data.handle.handle, unixsocket_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_unix(self.data.handle.handle, unixsocket_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -626,9 +578,7 @@ impl AsyncHandle {
         let uri_ffi = uri_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_uri(self.data.handle.handle, uri_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_connect_uri(self.data.handle.handle, uri_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -657,13 +607,8 @@ impl AsyncHandle {
         let port_ffi = port;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_connect_vsock(
-                self.data.handle.handle,
-                cid_ffi,
-                port_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_connect_vsock(self.data.handle.handle, cid_ffi, port_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -695,9 +640,7 @@ impl AsyncHandle {
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_disconnect(self.data.handle.handle, flags_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_disconnect(self.data.handle.handle, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -724,9 +667,7 @@ impl AsyncHandle {
     /// reply rather than failing fast.
     pub fn aio_flush(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -741,13 +682,8 @@ impl AsyncHandle {
         let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_flush(
-                self.data.handle.handle,
-                completion_ffi,
-                flags_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_flush(self.data.handle.handle, completion_ffi, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -770,8 +706,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_in_flight(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_in_flight(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -790,8 +725,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_is_closed(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_is_closed(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -807,8 +741,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_is_connecting(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_is_connecting(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -824,8 +757,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_is_created(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_is_created(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -859,8 +791,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_is_negotiating(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_is_negotiating(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -879,8 +810,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_is_processing(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_is_processing(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -914,8 +844,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_aio_opt_abort(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_abort(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -942,9 +871,7 @@ impl AsyncHandle {
     /// callback.
     pub fn aio_opt_extended_headers(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -957,12 +884,8 @@ impl AsyncHandle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_extended_headers(
-                self.data.handle.handle,
-                completion_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_opt_extended_headers(self.data.handle.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -990,9 +913,7 @@ impl AsyncHandle {
     /// when [aio_is_negotiating](Handle::aio_is_negotiating) returns true.
     pub fn aio_opt_go(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -1005,9 +926,7 @@ impl AsyncHandle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_go(self.data.handle.handle, completion_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_go(self.data.handle.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1034,9 +953,7 @@ impl AsyncHandle {
     /// callback.
     pub fn aio_opt_info(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -1049,9 +966,7 @@ impl AsyncHandle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_info(self.data.handle.handle, completion_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_info(self.data.handle.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1077,9 +992,7 @@ impl AsyncHandle {
     pub fn aio_opt_list(
         &self,
         list: impl FnMut(&[u8], &[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let list_ffi = unsafe { crate::bindings::list_to_raw(list) };
@@ -1093,13 +1006,8 @@ impl AsyncHandle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_list(
-                self.data.handle.handle,
-                list_ffi,
-                completion_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_opt_list(self.data.handle.handle, list_ffi, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1130,9 +1038,7 @@ impl AsyncHandle {
     pub fn aio_opt_list_meta_context(
         &self,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
@@ -1147,11 +1053,7 @@ impl AsyncHandle {
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_aio_opt_list_meta_context(
-                self.data.handle.handle,
-                context_ffi,
-                completion_ffi,
-            )
+            sys::nbd_aio_opt_list_meta_context(self.data.handle.handle, context_ffi, completion_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -1184,16 +1086,12 @@ impl AsyncHandle {
         &self,
         queries: impl IntoIterator<Item = impl AsRef<[u8]>>,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let queries_ffi_c_strs: Vec<CString> = queries
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
             .iter()
@@ -1256,9 +1154,7 @@ impl AsyncHandle {
     pub fn aio_opt_set_meta_context(
         &self,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
@@ -1273,11 +1169,7 @@ impl AsyncHandle {
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_aio_opt_set_meta_context(
-                self.data.handle.handle,
-                context_ffi,
-                completion_ffi,
-            )
+            sys::nbd_aio_opt_set_meta_context(self.data.handle.handle, context_ffi, completion_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -1316,16 +1208,12 @@ impl AsyncHandle {
         &self,
         queries: impl IntoIterator<Item = impl AsRef<[u8]>>,
         context: impl FnMut(&[u8]) -> c_int + Send + Sync + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<c_uint> {
         // Convert all arguments to FFI-like types.
         let queries_ffi_c_strs: Vec<CString> = queries
             .into_iter()
-            .map(|x| {
-                CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string()))
-            })
+            .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
             .collect::<Result<Vec<CString>>>()?;
         let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
             .iter()
@@ -1378,9 +1266,7 @@ impl AsyncHandle {
     /// callback.
     pub fn aio_opt_starttls(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -1393,9 +1279,7 @@ impl AsyncHandle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_starttls(self.data.handle.handle, completion_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_opt_starttls(self.data.handle.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1422,9 +1306,7 @@ impl AsyncHandle {
     /// callback.
     pub fn aio_opt_structured_reply(
         &self,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
     ) -> Result<()> {
         // Convert all arguments to FFI-like types.
         let completion_ffi = match completion {
@@ -1437,12 +1319,8 @@ impl AsyncHandle {
         };
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_opt_structured_reply(
-                self.data.handle.handle,
-                completion_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_aio_opt_structured_reply(self.data.handle.handle, completion_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1464,9 +1342,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_aio_peek_command_completed(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_aio_peek_command_completed(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1505,9 +1381,7 @@ impl AsyncHandle {
         &self,
         buf: &mut [u8],
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -1573,13 +1447,8 @@ impl AsyncHandle {
         &self,
         buf: &mut [u8],
         offset: u64,
-        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int + Send + Sync + 'static,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -1638,9 +1507,7 @@ impl AsyncHandle {
         &self,
         buf: &[u8],
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -1696,9 +1563,7 @@ impl AsyncHandle {
         &self,
         count: u64,
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -1752,9 +1617,7 @@ impl AsyncHandle {
         &self,
         count: u64,
         offset: u64,
-        completion: Option<
-            impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static,
-        >,
+        completion: Option<impl FnMut(&mut c_int) -> c_int + Send + Sync + 'static>,
         flags: Option<CmdFlag>,
     ) -> Result<Cookie> {
         // Convert all arguments to FFI-like types.
@@ -1803,9 +1666,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_can_block_status_payload(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_can_block_status_payload(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1873,8 +1734,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_can_fast_zero(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_can_fast_zero(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1947,19 +1807,14 @@ impl AsyncHandle {
     ///
     /// This call does not block, because it returns data that is saved in
     /// the handle from the NBD protocol handshake.
-    pub fn can_meta_context(
-        &self,
-        metacontext: impl Into<Vec<u8>>,
-    ) -> Result<bool> {
+    pub fn can_meta_context(&self, metacontext: impl Into<Vec<u8>>) -> Result<bool> {
         // Convert all arguments to FFI-like types.
-        let metacontext_buf =
-            CString::new(metacontext.into()).map_err(|e| Error::from(e))?;
+        let metacontext_buf = CString::new(metacontext.into()).map_err(|e| Error::from(e))?;
         let metacontext_ffi = metacontext_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_can_meta_context(self.data.handle.handle, metacontext_ffi)
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_can_meta_context(self.data.handle.handle, metacontext_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -1987,8 +1842,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_can_multi_conn(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_can_multi_conn(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2060,8 +1914,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_clear_meta_contexts(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_clear_meta_contexts(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2081,8 +1934,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_connection_state(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_connection_state(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
@@ -2167,9 +2019,7 @@ impl AsyncHandle {
         let size_type_ffi = size_type as c_int;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_block_size(self.data.handle.handle, size_type_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_block_size(self.data.handle.handle, size_type_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2195,17 +2045,14 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_canonical_export_name(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_canonical_export_name(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2227,16 +2074,14 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_export_description(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_export_description(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2256,16 +2101,14 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_export_name(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_export_name(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2298,9 +2141,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_extended_headers_negotiated(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_extended_headers_negotiated(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2317,8 +2158,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_full_info(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_full_info(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2338,16 +2178,14 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_handle_name(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_handle_name(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2371,8 +2209,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_handshake_flags(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_handshake_flags(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         HandshakeFlag::from_bits(ffi_ret).unwrap()
@@ -2394,17 +2231,14 @@ impl AsyncHandle {
         let i_ffi = i;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_meta_context(self.data.handle.handle, i_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_meta_context(self.data.handle.handle, i_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2429,8 +2263,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_nr_meta_contexts(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_nr_meta_contexts(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2461,8 +2294,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_package_name(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_package_name(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         unsafe { CStr::from_ptr(ffi_ret) }.to_bytes()
@@ -2477,8 +2309,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_pread_initialize(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_pread_initialize(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -2493,8 +2324,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_private_data(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_private_data(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret as usize
@@ -2532,8 +2362,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_request_block_size(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_request_block_size(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2555,9 +2384,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_request_extended_headers(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_request_extended_headers(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -2570,9 +2397,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_request_meta_context(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_request_meta_context(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2594,9 +2419,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_request_structured_replies(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_request_structured_replies(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -2639,17 +2462,14 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_socket_activation_name(self.data.handle.handle)
-        };
+        let ffi_ret = unsafe { sys::nbd_get_socket_activation_name(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2668,8 +2488,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_strict_mode(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_strict_mode(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         Strict::from_bits(ffi_ret).unwrap()
@@ -2690,9 +2509,8 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_get_structured_replies_negotiated(self.data.handle.handle)
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_get_structured_replies_negotiated(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2715,8 +2533,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_subprocess_pid(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_subprocess_pid(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2750,16 +2567,14 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_tls_hostname(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_tls_hostname(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2789,8 +2604,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_tls_negotiated(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_tls_negotiated(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2807,16 +2621,14 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_tls_username(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_tls_username(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret.is_null() {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2832,8 +2644,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_get_tls_verify_peer(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_get_tls_verify_peer(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -2867,8 +2678,7 @@ impl AsyncHandle {
             Err(unsafe { Error::get_error(self.raw_handle()) })
         } else {
             Ok({
-                let res =
-                    unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
+                let res = unsafe { CStr::from_ptr(ffi_ret) }.to_owned().into_bytes();
                 unsafe {
                     libc::free(ffi_ret.cast());
                 }
@@ -2963,8 +2773,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_is_rotational(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_is_rotational(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -2992,8 +2801,7 @@ impl AsyncHandle {
         let uri_ffi = uri_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_is_uri(self.data.handle.handle, uri_ffi) };
+        let ffi_ret = unsafe { sys::nbd_is_uri(self.data.handle.handle, uri_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3017,9 +2825,7 @@ impl AsyncHandle {
         let signum_ffi = signum;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_kill_subprocess(self.data.handle.handle, signum_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_kill_subprocess(self.data.handle.handle, signum_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3051,19 +2857,13 @@ impl AsyncHandle {
     ///
     /// This call may be skipped if using [connect_uri](Handle::connect_uri) to connect
     /// to a URI that includes an export name.
-    pub fn set_export_name(
-        &self,
-        export_name: impl Into<Vec<u8>>,
-    ) -> Result<()> {
+    pub fn set_export_name(&self, export_name: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let export_name_buf =
-            CString::new(export_name.into()).map_err(|e| Error::from(e))?;
+        let export_name_buf = CString::new(export_name.into()).map_err(|e| Error::from(e))?;
         let export_name_ffi = export_name_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_export_name(self.data.handle.handle, export_name_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_export_name(self.data.handle.handle, export_name_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3095,9 +2895,7 @@ impl AsyncHandle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_full_info(self.data.handle.handle, request_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_full_info(self.data.handle.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3116,19 +2914,13 @@ impl AsyncHandle {
     /// form `"nbd1"`, `"nbd2"`, etc., but you can optionally use
     /// this call to give the handles a name which is meaningful for
     /// your application to make debugging output easier to understand.
-    pub fn set_handle_name(
-        &self,
-        handle_name: impl Into<Vec<u8>>,
-    ) -> Result<()> {
+    pub fn set_handle_name(&self, handle_name: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let handle_name_buf =
-            CString::new(handle_name.into()).map_err(|e| Error::from(e))?;
+        let handle_name_buf = CString::new(handle_name.into()).map_err(|e| Error::from(e))?;
         let handle_name_ffi = handle_name_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_handle_name(self.data.handle.handle, handle_name_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_handle_name(self.data.handle.handle, handle_name_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3179,9 +2971,7 @@ impl AsyncHandle {
         let flags_ffi = flags.bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_handshake_flags(self.data.handle.handle, flags_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_handshake_flags(self.data.handle.handle, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3221,9 +3011,7 @@ impl AsyncHandle {
         let enable_ffi = enable;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_opt_mode(self.data.handle.handle, enable_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_opt_mode(self.data.handle.handle, enable_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3257,9 +3045,8 @@ impl AsyncHandle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_pread_initialize(self.data.handle.handle, request_ffi)
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_set_pread_initialize(self.data.handle.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3286,9 +3073,8 @@ impl AsyncHandle {
         let private_data_ffi = private_data;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_private_data(self.data.handle.handle, private_data_ffi)
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_set_private_data(self.data.handle.handle, private_data_ffi) };
 
         // Convert the result to something more rusty.
         ffi_ret as usize
@@ -3315,12 +3101,8 @@ impl AsyncHandle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_request_block_size(
-                self.data.handle.handle,
-                request_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_set_request_block_size(self.data.handle.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3347,12 +3129,8 @@ impl AsyncHandle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_request_extended_headers(
-                self.data.handle.handle,
-                request_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_set_request_extended_headers(self.data.handle.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3391,12 +3169,8 @@ impl AsyncHandle {
         let request_ffi = request;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_request_meta_context(
-                self.data.handle.handle,
-                request_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_set_request_meta_context(self.data.handle.handle, request_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3425,10 +3199,7 @@ impl AsyncHandle {
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_set_request_structured_replies(
-                self.data.handle.handle,
-                request_ffi,
-            )
+            sys::nbd_set_request_structured_replies(self.data.handle.handle, request_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -3455,21 +3226,14 @@ impl AsyncHandle {
     /// The parameter `socket_name` can be a short alphanumeric string.
     /// If it is set to the empty string (also the default when the handle
     /// is created) then the name `unknown` will be seen by the server.
-    pub fn set_socket_activation_name(
-        &self,
-        socket_name: impl Into<Vec<u8>>,
-    ) -> Result<()> {
+    pub fn set_socket_activation_name(&self, socket_name: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let socket_name_buf =
-            CString::new(socket_name.into()).map_err(|e| Error::from(e))?;
+        let socket_name_buf = CString::new(socket_name.into()).map_err(|e| Error::from(e))?;
         let socket_name_ffi = socket_name_buf.as_ptr();
 
         // Call the FFI-function.
         let ffi_ret = unsafe {
-            sys::nbd_set_socket_activation_name(
-                self.data.handle.handle,
-                socket_name_ffi,
-            )
+            sys::nbd_set_socket_activation_name(self.data.handle.handle, socket_name_ffi)
         };
 
         // Convert the result to something more rusty.
@@ -3580,9 +3344,7 @@ impl AsyncHandle {
         let flags_ffi = flags.bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_strict_mode(self.data.handle.handle, flags_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_strict_mode(self.data.handle.handle, flags_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3644,8 +3406,7 @@ impl AsyncHandle {
         let tls_ffi = tls as c_int;
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_set_tls(self.data.handle.handle, tls_ffi) };
+        let ffi_ret = unsafe { sys::nbd_set_tls(self.data.handle.handle, tls_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3669,14 +3430,12 @@ impl AsyncHandle {
     /// is also used to request or require TLS.
     pub fn set_tls_certificates(&self, dir: impl Into<PathBuf>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let dir_buf = CString::new(dir.into().into_os_string().into_vec())
-            .map_err(|e| Error::from(e))?;
+        let dir_buf =
+            CString::new(dir.into().into_os_string().into_vec()).map_err(|e| Error::from(e))?;
         let dir_ffi = dir_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_tls_certificates(self.data.handle.handle, dir_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_tls_certificates(self.data.handle.handle, dir_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3700,14 +3459,11 @@ impl AsyncHandle {
     /// is also used to request or require TLS.
     pub fn set_tls_hostname(&self, hostname: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let hostname_buf =
-            CString::new(hostname.into()).map_err(|e| Error::from(e))?;
+        let hostname_buf = CString::new(hostname.into()).map_err(|e| Error::from(e))?;
         let hostname_ffi = hostname_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_tls_hostname(self.data.handle.handle, hostname_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_tls_hostname(self.data.handle.handle, hostname_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3729,15 +3485,12 @@ impl AsyncHandle {
     /// is also used to request or require TLS.
     pub fn set_tls_psk_file(&self, filename: impl Into<PathBuf>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let filename_buf =
-            CString::new(filename.into().into_os_string().into_vec())
-                .map_err(|e| Error::from(e))?;
+        let filename_buf = CString::new(filename.into().into_os_string().into_vec())
+            .map_err(|e| Error::from(e))?;
         let filename_ffi = filename_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_tls_psk_file(self.data.handle.handle, filename_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_tls_psk_file(self.data.handle.handle, filename_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3758,14 +3511,11 @@ impl AsyncHandle {
     /// is also used to request or require TLS.
     pub fn set_tls_username(&self, username: impl Into<Vec<u8>>) -> Result<()> {
         // Convert all arguments to FFI-like types.
-        let username_buf =
-            CString::new(username.into()).map_err(|e| Error::from(e))?;
+        let username_buf = CString::new(username.into()).map_err(|e| Error::from(e))?;
         let username_ffi = username_buf.as_ptr();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_tls_username(self.data.handle.handle, username_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_tls_username(self.data.handle.handle, username_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3790,9 +3540,7 @@ impl AsyncHandle {
         let verify_ffi = verify;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_tls_verify_peer(self.data.handle.handle, verify_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_tls_verify_peer(self.data.handle.handle, verify_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3814,12 +3562,8 @@ impl AsyncHandle {
         let allow_ffi = allow;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_uri_allow_local_file(
-                self.data.handle.handle,
-                allow_ffi,
-            )
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_set_uri_allow_local_file(self.data.handle.handle, allow_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3856,9 +3600,7 @@ impl AsyncHandle {
         let tls_ffi = tls as c_int;
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_uri_allow_tls(self.data.handle.handle, tls_ffi)
-        };
+        let ffi_ret = unsafe { sys::nbd_set_uri_allow_tls(self.data.handle.handle, tls_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3894,9 +3636,8 @@ impl AsyncHandle {
         let mask_ffi = mask.bits();
 
         // Call the FFI-function.
-        let ffi_ret = unsafe {
-            sys::nbd_set_uri_allow_transports(self.data.handle.handle, mask_ffi)
-        };
+        let ffi_ret =
+            unsafe { sys::nbd_set_uri_allow_transports(self.data.handle.handle, mask_ffi) };
 
         // Convert the result to something more rusty.
         if ffi_ret < 0 {
@@ -3917,8 +3658,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_stats_bytes_received(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_stats_bytes_received(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret as u64
@@ -3935,8 +3675,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_stats_bytes_sent(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_stats_bytes_sent(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret as u64
@@ -3956,8 +3695,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_stats_chunks_received(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_stats_chunks_received(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret as u64
@@ -3977,8 +3715,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_stats_chunks_sent(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_stats_chunks_sent(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret as u64
@@ -4026,8 +3763,7 @@ impl AsyncHandle {
         // Convert all arguments to FFI-like types.
 
         // Call the FFI-function.
-        let ffi_ret =
-            unsafe { sys::nbd_supports_vsock(self.data.handle.handle) };
+        let ffi_ret = unsafe { sys::nbd_supports_vsock(self.data.handle.handle) };
 
         // Convert the result to something more rusty.
         ffi_ret != 0
@@ -4063,10 +3799,7 @@ impl AsyncHandle {
         &self,
         count: u64,
         offset: u64,
-        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        extent: impl FnMut(&[u8], u64, &[u32], &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> SharedResult<()> {
         // A oneshot channel to notify when the call is completed.
@@ -4111,30 +3844,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4158,10 +3888,7 @@ impl AsyncHandle {
         &self,
         count: u64,
         offset: u64,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> SharedResult<()> {
         // A oneshot channel to notify when the call is completed.
@@ -4175,8 +3902,7 @@ impl AsyncHandle {
             // Convert all arguments to FFI-like types.
             let count_ffi = count;
             let offset_ffi = offset;
-            let extent64_ffi =
-                unsafe { crate::bindings::extent64_to_raw(extent64) };
+            let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
             let completion_ffi = match completion {
                 Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
                 None => sys::nbd_completion_callback {
@@ -4207,30 +3933,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4255,10 +3978,7 @@ impl AsyncHandle {
         count: u64,
         offset: u64,
         contexts: impl IntoIterator<Item = impl AsRef<[u8]>>,
-        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        extent64: impl FnMut(&[u8], u64, &[NbdExtent], &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> SharedResult<()> {
         // A oneshot channel to notify when the call is completed.
@@ -4274,10 +3994,7 @@ impl AsyncHandle {
             let offset_ffi = offset;
             let contexts_ffi_c_strs: Vec<CString> = contexts
                 .into_iter()
-                .map(|x| {
-                    CString::new(x.as_ref())
-                        .map_err(|e| Error::from(e.to_string()))
-                })
+                .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
                 .collect::<Result<Vec<CString>>>()?;
             let mut contexts_ffi_ptrs: Vec<*mut c_char> = contexts_ffi_c_strs
                 .iter()
@@ -4285,8 +4002,7 @@ impl AsyncHandle {
                 .collect();
             contexts_ffi_ptrs.push(ptr::null_mut());
             let contexts_ffi = contexts_ffi_ptrs.as_mut_ptr();
-            let extent64_ffi =
-                unsafe { crate::bindings::extent64_to_raw(extent64) };
+            let extent64_ffi = unsafe { crate::bindings::extent64_to_raw(extent64) };
             let completion_ffi = match completion {
                 Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
                 None => sys::nbd_completion_callback {
@@ -4318,30 +4034,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4361,12 +4074,7 @@ impl AsyncHandle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub async fn cache(
-        &self,
-        count: u64,
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> SharedResult<()> {
+    pub async fn cache(&self, count: u64, offset: u64, flags: Option<CmdFlag>) -> SharedResult<()> {
         // A oneshot channel to notify when the call is completed.
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let (ccb_tx, mut ccb_rx) = oneshot::channel::<c_int>();
@@ -4407,30 +4115,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4455,13 +4160,8 @@ impl AsyncHandle {
             let addrlen_ffi = addr_os.len();
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_connect(
-                    self.data.handle.handle,
-                    addr_ffi,
-                    addrlen_ffi,
-                )
-            };
+            let ffi_ret =
+                unsafe { sys::nbd_aio_connect(self.data.handle.handle, addr_ffi, addrlen_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -4472,20 +4172,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4511,10 +4210,7 @@ impl AsyncHandle {
             // Convert all arguments to FFI-like types.
             let argv_ffi_c_strs: Vec<CString> = argv
                 .into_iter()
-                .map(|x| {
-                    CString::new(x.as_ref())
-                        .map_err(|e| Error::from(e.to_string()))
-                })
+                .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
                 .collect::<Result<Vec<CString>>>()?;
             let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
                 .iter()
@@ -4524,9 +4220,8 @@ impl AsyncHandle {
             let argv_ffi = argv_ffi_ptrs.as_mut_ptr();
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_connect_command(self.data.handle.handle, argv_ffi)
-            };
+            let ffi_ret =
+                unsafe { sys::nbd_aio_connect_command(self.data.handle.handle, argv_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -4537,20 +4232,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4573,9 +4267,7 @@ impl AsyncHandle {
             let sock_ffi = sock.as_raw_fd();
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_connect_socket(self.data.handle.handle, sock_ffi)
-            };
+            let ffi_ret = unsafe { sys::nbd_aio_connect_socket(self.data.handle.handle, sock_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -4586,20 +4278,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4625,10 +4316,7 @@ impl AsyncHandle {
             // Convert all arguments to FFI-like types.
             let argv_ffi_c_strs: Vec<CString> = argv
                 .into_iter()
-                .map(|x| {
-                    CString::new(x.as_ref())
-                        .map_err(|e| Error::from(e.to_string()))
-                })
+                .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
                 .collect::<Result<Vec<CString>>>()?;
             let mut argv_ffi_ptrs: Vec<*mut c_char> = argv_ffi_c_strs
                 .iter()
@@ -4639,10 +4327,7 @@ impl AsyncHandle {
 
             // Call the FFI-function.
             let ffi_ret = unsafe {
-                sys::nbd_aio_connect_systemd_socket_activation(
-                    self.data.handle.handle,
-                    argv_ffi,
-                )
+                sys::nbd_aio_connect_systemd_socket_activation(self.data.handle.handle, argv_ffi)
             };
 
             // Convert the result to something more rusty.
@@ -4654,20 +4339,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4691,20 +4375,14 @@ impl AsyncHandle {
     ) -> SharedResult<()> {
         {
             // Convert all arguments to FFI-like types.
-            let hostname_buf =
-                CString::new(hostname.into()).map_err(|e| Error::from(e))?;
+            let hostname_buf = CString::new(hostname.into()).map_err(|e| Error::from(e))?;
             let hostname_ffi = hostname_buf.as_ptr();
-            let port_buf =
-                CString::new(port.into()).map_err(|e| Error::from(e))?;
+            let port_buf = CString::new(port.into()).map_err(|e| Error::from(e))?;
             let port_ffi = port_buf.as_ptr();
 
             // Call the FFI-function.
             let ffi_ret = unsafe {
-                sys::nbd_aio_connect_tcp(
-                    self.data.handle.handle,
-                    hostname_ffi,
-                    port_ffi,
-                )
+                sys::nbd_aio_connect_tcp(self.data.handle.handle, hostname_ffi, port_ffi)
             };
 
             // Convert the result to something more rusty.
@@ -4716,20 +4394,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4747,24 +4424,16 @@ impl AsyncHandle {
     /// once [aio_is_negotiating](Handle::aio_is_negotiating) returns true; otherwise, the
     /// connection attempt will include the NBD handshake, and is ready
     /// for use once [aio_is_ready](Handle::aio_is_ready) returns true.
-    pub async fn connect_unix(
-        &self,
-        unixsocket: impl Into<PathBuf>,
-    ) -> SharedResult<()> {
+    pub async fn connect_unix(&self, unixsocket: impl Into<PathBuf>) -> SharedResult<()> {
         {
             // Convert all arguments to FFI-like types.
-            let unixsocket_buf =
-                CString::new(unixsocket.into().into_os_string().into_vec())
-                    .map_err(|e| Error::from(e))?;
+            let unixsocket_buf = CString::new(unixsocket.into().into_os_string().into_vec())
+                .map_err(|e| Error::from(e))?;
             let unixsocket_ffi = unixsocket_buf.as_ptr();
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_connect_unix(
-                    self.data.handle.handle,
-                    unixsocket_ffi,
-                )
-            };
+            let ffi_ret =
+                unsafe { sys::nbd_aio_connect_unix(self.data.handle.handle, unixsocket_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -4775,20 +4444,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4805,20 +4473,14 @@ impl AsyncHandle {
     /// once [aio_is_negotiating](Handle::aio_is_negotiating) returns true; otherwise, the
     /// connection attempt will include the NBD handshake, and is ready
     /// for use once [aio_is_ready](Handle::aio_is_ready) returns true.
-    pub async fn connect_uri(
-        &self,
-        uri: impl Into<Vec<u8>>,
-    ) -> SharedResult<()> {
+    pub async fn connect_uri(&self, uri: impl Into<Vec<u8>>) -> SharedResult<()> {
         {
             // Convert all arguments to FFI-like types.
-            let uri_buf =
-                CString::new(uri.into()).map_err(|e| Error::from(e))?;
+            let uri_buf = CString::new(uri.into()).map_err(|e| Error::from(e))?;
             let uri_ffi = uri_buf.as_ptr();
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_connect_uri(self.data.handle.handle, uri_ffi)
-            };
+            let ffi_ret = unsafe { sys::nbd_aio_connect_uri(self.data.handle.handle, uri_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -4829,20 +4491,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4867,13 +4528,8 @@ impl AsyncHandle {
             let port_ffi = port;
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_connect_vsock(
-                    self.data.handle.handle,
-                    cid_ffi,
-                    port_ffi,
-                )
-            };
+            let ffi_ret =
+                unsafe { sys::nbd_aio_connect_vsock(self.data.handle.handle, cid_ffi, port_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -4884,20 +4540,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4925,9 +4580,7 @@ impl AsyncHandle {
             let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_disconnect(self.data.handle.handle, flags_ffi)
-            };
+            let ffi_ret = unsafe { sys::nbd_aio_disconnect(self.data.handle.handle, flags_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -4938,20 +4591,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_closed() != true {
+                    return false;
                 } else {
-                    if handle.aio_is_closed() != true {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -4992,13 +4644,8 @@ impl AsyncHandle {
             let flags_ffi = flags.unwrap_or(CmdFlag::empty()).bits();
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_flush(
-                    self.data.handle.handle,
-                    completion_ffi,
-                    flags_ffi,
-                )
-            };
+            let ffi_ret =
+                unsafe { sys::nbd_aio_flush(self.data.handle.handle, completion_ffi, flags_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -5008,30 +4655,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5049,8 +4693,7 @@ impl AsyncHandle {
             // Convert all arguments to FFI-like types.
 
             // Call the FFI-function.
-            let ffi_ret =
-                unsafe { sys::nbd_aio_opt_abort(self.data.handle.handle) };
+            let ffi_ret = unsafe { sys::nbd_aio_opt_abort(self.data.handle.handle) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -5061,20 +4704,19 @@ impl AsyncHandle {
         }?;
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |handle: &Handle, res: &SharedResult<()>| {
-                let ret = if let Err(_) = res {
-                    res.clone()
+        let completion_predicate = move |handle: &Handle, res: &SharedResult<()>| {
+            let ret = if let Err(_) = res {
+                res.clone()
+            } else {
+                if handle.aio_is_connecting() != false {
+                    return false;
                 } else {
-                    if handle.aio_is_connecting() != false {
-                        return false;
-                    } else {
-                        Ok(())
-                    }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                    Ok(())
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5115,10 +4757,7 @@ impl AsyncHandle {
 
             // Call the FFI-function.
             let ffi_ret = unsafe {
-                sys::nbd_aio_opt_extended_headers(
-                    self.data.handle.handle,
-                    completion_ffi,
-                )
+                sys::nbd_aio_opt_extended_headers(self.data.handle.handle, completion_ffi)
             };
 
             // Convert the result to something more rusty.
@@ -5129,30 +4768,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5193,9 +4829,7 @@ impl AsyncHandle {
             };
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_opt_go(self.data.handle.handle, completion_ffi)
-            };
+            let ffi_ret = unsafe { sys::nbd_aio_opt_go(self.data.handle.handle, completion_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -5205,30 +4839,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5268,9 +4899,7 @@ impl AsyncHandle {
             };
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_opt_info(self.data.handle.handle, completion_ffi)
-            };
+            let ffi_ret = unsafe { sys::nbd_aio_opt_info(self.data.handle.handle, completion_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -5280,30 +4909,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5345,13 +4971,8 @@ impl AsyncHandle {
             };
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_opt_list(
-                    self.data.handle.handle,
-                    list_ffi,
-                    completion_ffi,
-                )
-            };
+            let ffi_ret =
+                unsafe { sys::nbd_aio_opt_list(self.data.handle.handle, list_ffi, completion_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -5361,30 +4982,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5420,8 +5038,7 @@ impl AsyncHandle {
         }));
         {
             // Convert all arguments to FFI-like types.
-            let context_ffi =
-                unsafe { crate::bindings::context_to_raw(context) };
+            let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
             let completion_ffi = match completion {
                 Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
                 None => sys::nbd_completion_callback {
@@ -5448,30 +5065,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5510,10 +5124,7 @@ impl AsyncHandle {
             // Convert all arguments to FFI-like types.
             let queries_ffi_c_strs: Vec<CString> = queries
                 .into_iter()
-                .map(|x| {
-                    CString::new(x.as_ref())
-                        .map_err(|e| Error::from(e.to_string()))
-                })
+                .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
                 .collect::<Result<Vec<CString>>>()?;
             let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
                 .iter()
@@ -5521,8 +5132,7 @@ impl AsyncHandle {
                 .collect();
             queries_ffi_ptrs.push(ptr::null_mut());
             let queries_ffi = queries_ffi_ptrs.as_mut_ptr();
-            let context_ffi =
-                unsafe { crate::bindings::context_to_raw(context) };
+            let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
             let completion_ffi = match completion {
                 Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
                 None => sys::nbd_completion_callback {
@@ -5550,30 +5160,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5615,8 +5222,7 @@ impl AsyncHandle {
         }));
         {
             // Convert all arguments to FFI-like types.
-            let context_ffi =
-                unsafe { crate::bindings::context_to_raw(context) };
+            let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
             let completion_ffi = match completion {
                 Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
                 None => sys::nbd_completion_callback {
@@ -5643,30 +5249,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5711,10 +5314,7 @@ impl AsyncHandle {
             // Convert all arguments to FFI-like types.
             let queries_ffi_c_strs: Vec<CString> = queries
                 .into_iter()
-                .map(|x| {
-                    CString::new(x.as_ref())
-                        .map_err(|e| Error::from(e.to_string()))
-                })
+                .map(|x| CString::new(x.as_ref()).map_err(|e| Error::from(e.to_string())))
                 .collect::<Result<Vec<CString>>>()?;
             let mut queries_ffi_ptrs: Vec<*mut c_char> = queries_ffi_c_strs
                 .iter()
@@ -5722,8 +5322,7 @@ impl AsyncHandle {
                 .collect();
             queries_ffi_ptrs.push(ptr::null_mut());
             let queries_ffi = queries_ffi_ptrs.as_mut_ptr();
-            let context_ffi =
-                unsafe { crate::bindings::context_to_raw(context) };
+            let context_ffi = unsafe { crate::bindings::context_to_raw(context) };
             let completion_ffi = match completion {
                 Some(f) => unsafe { crate::bindings::completion_to_raw(f) },
                 None => sys::nbd_completion_callback {
@@ -5751,30 +5350,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5814,12 +5410,8 @@ impl AsyncHandle {
             };
 
             // Call the FFI-function.
-            let ffi_ret = unsafe {
-                sys::nbd_aio_opt_starttls(
-                    self.data.handle.handle,
-                    completion_ffi,
-                )
-            };
+            let ffi_ret =
+                unsafe { sys::nbd_aio_opt_starttls(self.data.handle.handle, completion_ffi) };
 
             // Convert the result to something more rusty.
             if ffi_ret < 0 {
@@ -5829,30 +5421,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -5893,10 +5482,7 @@ impl AsyncHandle {
 
             // Call the FFI-function.
             let ffi_ret = unsafe {
-                sys::nbd_aio_opt_structured_reply(
-                    self.data.handle.handle,
-                    completion_ffi,
-                )
+                sys::nbd_aio_opt_structured_reply(self.data.handle.handle, completion_ffi)
             };
 
             // Convert the result to something more rusty.
@@ -5907,30 +5493,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -6008,30 +5591,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -6065,10 +5645,7 @@ impl AsyncHandle {
         &self,
         buf: &mut [u8],
         offset: u64,
-        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int
-            + Send
-            + Sync
-            + 'static,
+        chunk: impl FnMut(&[u8], u64, c_uint, &mut c_int) -> c_int + Send + Sync + 'static,
         flags: Option<CmdFlag>,
     ) -> SharedResult<()> {
         // A oneshot channel to notify when the call is completed.
@@ -6115,30 +5692,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -6207,30 +5781,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -6250,12 +5821,7 @@ impl AsyncHandle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub async fn trim(
-        &self,
-        count: u64,
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> SharedResult<()> {
+    pub async fn trim(&self, count: u64, offset: u64, flags: Option<CmdFlag>) -> SharedResult<()> {
         // A oneshot channel to notify when the call is completed.
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let (ccb_tx, mut ccb_rx) = oneshot::channel::<c_int>();
@@ -6296,30 +5862,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }
@@ -6339,12 +5902,7 @@ impl AsyncHandle {
     /// requesting an unknown command flag.  The [set_strict_mode](Handle::set_strict_mode)
     /// function can be used to alter which scenarios should await a server
     /// reply rather than failing fast.
-    pub async fn zero(
-        &self,
-        count: u64,
-        offset: u64,
-        flags: Option<CmdFlag>,
-    ) -> SharedResult<()> {
+    pub async fn zero(&self, count: u64, offset: u64, flags: Option<CmdFlag>) -> SharedResult<()> {
         // A oneshot channel to notify when the call is completed.
         let (ret_tx, ret_rx) = oneshot::channel::<SharedResult<()>>();
         let (ccb_tx, mut ccb_rx) = oneshot::channel::<c_int>();
@@ -6385,30 +5943,27 @@ impl AsyncHandle {
             }
         }?;
         let mut ret_tx = Some(ret_tx);
-        let completion_predicate =
-            move |_handle: &Handle, res: &SharedResult<()>| {
-                let ret = match res {
-                    Err(e) if e.is_fatal() => res.clone(),
-                    _ => {
-                        let Ok(errno) = ccb_rx.try_recv() else {
-                            return false;
-                        };
-                        if errno == 0 {
-                            Ok(())
+        let completion_predicate = move |_handle: &Handle, res: &SharedResult<()>| {
+            let ret = match res {
+                Err(e) if e.is_fatal() => res.clone(),
+                _ => {
+                    let Ok(errno) = ccb_rx.try_recv() else {
+                        return false;
+                    };
+                    if errno == 0 {
+                        Ok(())
+                    } else {
+                        if let Err(e) = res {
+                            Err(e.clone())
                         } else {
-                            if let Err(e) = res {
-                                Err(e.clone())
-                            } else {
-                                Err(Arc::new(Error::Recoverable(
-                                    ErrorKind::from_errno(errno),
-                                )))
-                            }
+                            Err(Arc::new(Error::Recoverable(ErrorKind::from_errno(errno))))
                         }
                     }
-                };
-                ret_tx.take().unwrap().send(ret).ok();
-                true
+                }
             };
+            ret_tx.take().unwrap().send(ret).ok();
+            true
+        };
         self.add_command(completion_predicate)?;
         ret_rx.await.unwrap()
     }

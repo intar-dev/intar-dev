@@ -19,7 +19,7 @@ beforeEach(async () => {
     "guest-tools/scenario/stable.json",
     JSON.stringify({
       schema_version: 1,
-      bootstrap_abi: 1,
+      bootstrap_abi: 2,
       tools_disk_sha256: toolsDiskSha256,
       tools_disk_size_bytes: 64 * 1024 * 1024,
       compressed_disk_sha256: "3".repeat(64),

@@ -1,6 +1,29 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub const ROUTE_USERNAME_MAX_LEN: usize = 128;
+pub const GENERATION_MAX_LEN: usize = 128;
+
+/// Check the public SSH route name. Stargate prints this value, and the public
+/// SSH server matches it against the path of an attach call, so it must stay
+/// inside a small, non-ambiguous character set.
+pub fn validate_route_username(username: &str) -> Result<(), String> {
+    if username.is_empty() || username.len() > ROUTE_USERNAME_MAX_LEN {
+        return Err(format!(
+            "route_username must be 1..={ROUTE_USERNAME_MAX_LEN} characters"
+        ));
+    }
+    if !username
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(
+            "route_username may only contain ASCII letters, digits, '.', '_' and '-'".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionKind {
@@ -22,30 +45,99 @@ pub enum NativeTerminalAuthMode {
     ProfileKeys,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// The complete SSH endpoint of one scenario VM terminal. Only the admin API
+/// carries this value: `private_key_openssh` is the credential that reaches
+/// the guest, and the gateway never sends it to a browser or a native client.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TerminalTarget {
+    pub username: String,
+    pub host: String,
+    pub port: u16,
+    pub host_key_openssh: String,
+    pub private_key_openssh: String,
+    pub authorized_client_public_keys_openssh: Vec<String>,
+}
+
+/// One terminal route. A browser route starts pending: the route exists and a
+/// browser socket can connect, but Stargate must not dial the guest yet. An
+/// admin attach moves the route to ready, and only then does the PTY and the
+/// recording start.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TerminalTargetState {
+    Pending,
+    Ready(TerminalTarget),
+}
+
+impl TerminalTargetState {
+    pub fn ready_target(&self) -> Option<&TerminalTarget> {
+        match self {
+            Self::Pending => None,
+            Self::Ready(target) => Some(target),
+        }
+    }
+}
+
+/// Route identity. Every field is mandatory and non-empty: a pending route
+/// must name the host, the run, the VM, and the user that it belongs to.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RouteMetadata {
-    pub host_id: Option<String>,
-    pub run_id: Option<String>,
-    pub vm_id: Option<String>,
-    pub user_id: Option<String>,
+    pub host_id: String,
+    pub run_id: String,
+    pub vm_id: String,
+    pub user_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IssueTerminalSessionRequest {
     pub route_username: String,
-    pub target_username: String,
-    pub target_ip: String,
-    pub target_port: u16,
-    pub target_host_key_openssh: String,
-    pub target_private_key_openssh: String,
-    #[serde(default)]
-    pub authorized_client_public_keys_openssh: Vec<String>,
+    /// Opaque route generation. An attach call must repeat this exact string.
+    pub generation: String,
+    /// `pending` for a browser route. `ready` with the complete endpoint for a
+    /// native route.
+    pub target: TerminalTargetState,
     pub route_expires_at: i64,
     pub mode: TerminalSessionMode,
-    #[serde(default)]
     pub metadata: RouteMetadata,
+}
+
+/// Stage a ready target on a pending browser route. The gateway stores the
+/// target and returns an attachment identifier, but the route is still not
+/// ready: no waiter wakes and no socket dials. The control plane activates the
+/// attachment after its own admission fence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StageTerminalTargetRequest {
+    pub run_id: String,
+    pub vm_id: String,
+    pub user_id: String,
+    pub generation: String,
+    /// The complete target. There is no pending shape on a stage call: a call
+    /// that carries no target is a validation error.
+    pub target: TerminalTarget,
+}
+
+/// The identifier of one staged target. An identical repeat of a stage call
+/// returns the same value, so a lost answer is safe to retry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StageTerminalTargetResponse {
+    pub attachment_id: String,
+}
+
+/// Activate one staged target. Only this call makes the route ready and wakes
+/// the waiting browser socket.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ActivateTerminalTargetRequest {
+    pub run_id: String,
+    pub vm_id: String,
+    pub user_id: String,
+    pub generation: String,
+    pub attachment_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -73,9 +165,9 @@ pub struct NativeTerminalSession {
 pub struct IssueTerminalSessionResponse {
     pub route_username: String,
     pub expires_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<BrowserTerminalSession>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<NativeTerminalSession>,
 }
 
@@ -112,7 +204,22 @@ pub struct IssueWorkspaceAppSessionRequest {
     pub upstream_host: Option<String>,
     pub route_expires_at: i64,
     #[serde(default)]
-    pub metadata: RouteMetadata,
+    pub metadata: WorkspaceAppMetadata,
+}
+
+/// Workspace app routes keep optional metadata: they carry no terminal route
+/// identity, and an absent value is not an authorization decision.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceAppMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

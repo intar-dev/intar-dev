@@ -20,10 +20,7 @@ import {
   type RuntimeExecutionState,
 } from "@/db/schema";
 import {
-  commitHostCpuReservation,
   reconcileHostCpuReservations,
-  reserveHostCpuInD1,
-  rollbackPendingHostCpuReservation,
 } from "@/control-plane/host-cpu-reservations";
 import { createAppId } from "@/lib/id";
 import {
@@ -38,6 +35,11 @@ import {
 import { expireOverdueRunLeases } from "@/lib/scenario-runs";
 import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
 import { recordRuntimeVmActualState } from "@/lib/runtime-vm-state";
+import {
+  attachReadyScenarioTerminalTargets,
+  reconcileScenarioTerminalRouteAttachments,
+} from "@/lib/scenario-terminal-attach";
+import { StargateTerminalAttachError } from "@/lib/stargate";
 import {
   isReportedHostRoleAllowed,
   resolveScenarioEnabledForHostRole,
@@ -102,10 +104,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
     if (url.pathname === "/_internal/retire") {
       return traceOperation("host.handleRetire", () => this.handleRetire(request));
-    }
-
-    if (url.pathname.startsWith("/_internal/cpu-reservations/")) {
-      return this.handleCpuReservationRequest(request, url.pathname);
     }
 
     return jsonResponse({ error: "not found" }, 404);
@@ -456,114 +454,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       "";
     await this.retireRuntimeState(hostId, "host retired", 1001);
     return jsonResponse({ ok: true, hostId });
-  }
-
-  private async handleCpuReservationRequest(
-    request: Request,
-    pathname: string,
-  ): Promise<Response> {
-    if (request.method !== "POST") {
-      return jsonResponse({ error: "method not allowed" }, 405);
-    }
-    const input = await parseCpuReservationRequest(request);
-    if (!input) {
-      return jsonResponse({ error: "invalid CPU reservation request" }, 400);
-    }
-    const knownHostId = await this.loadKnownHostId();
-    if (knownHostId && knownHostId !== input.hostId) {
-      return jsonResponse(
-        { error: "host id does not match durable object" },
-        409,
-      );
-    }
-    const commit = pathname.endsWith("/commit");
-    if (!commit) {
-      try {
-        await this.loadRequiredHost(input.hostId);
-      } catch {
-        return jsonResponse({ error: "host not found" }, 404);
-      }
-    }
-    await this.persistKnownHostId(input.hostId);
-
-    return this.withCpuReservationLock(async () => {
-      const db = drizzle(this.env.DB);
-      const now = Date.now();
-      if (pathname.endsWith("/reserve")) {
-        if (input.steadyCpuMillisByVm === null) {
-          return jsonResponse(
-            { error: "steadyCpuMillisByVm is required" },
-            400,
-          );
-        }
-        const result = await reserveHostCpuInD1(db, {
-          hostId: input.hostId,
-          runId: input.runId,
-          steadyCpuMillisByVm: input.steadyCpuMillisByVm,
-          nowUnixMs: now,
-        });
-        if (
-          result.ok &&
-          result.state === "pending" &&
-          result.expiresAt !== null
-        ) {
-          await this.scheduleAlarmNoLaterThan(result.expiresAt);
-        }
-        return jsonResponse(result, result.ok ? 201 : 409);
-      }
-      if (pathname.endsWith("/commit")) {
-        const ok = await commitHostCpuReservation(db, {
-          hostId: input.hostId,
-          runId: input.runId,
-          nowUnixMs: now,
-        });
-        if (ok) {
-          try {
-            if (
-              this.ctx
-                .getWebSockets(`host:${input.hostId}`)
-                .some((socket) => socket.readyState === WebSocket.OPEN)
-            ) {
-              const activeSocket = await this.findActiveSocket(
-                input.hostId,
-                null,
-              );
-              if (activeSocket?.attachment.bridgeProtocol === "v6") {
-                // The desired VM was committed before its CPU reservation.
-                // Dispatch only after the reservation is durable, and retain
-                // the final active-session fence inside the dispatcher.
-                await this.dispatchBridgeDesiredStateIfNeeded(
-                  input.hostId,
-                  activeSocket.socket,
-                );
-              }
-            }
-          } catch (error) {
-            // CPU commit is authoritative even if the socket disappears.
-            // The alarm below retries desired delivery without making the
-            // caller treat a committed reservation as pending or missing.
-            console.error(
-              JSON.stringify({
-                message: "desired dispatch failed after CPU commit",
-                hostId: input.hostId,
-                runId: input.runId,
-                error: error instanceof Error ? error.message : String(error),
-              }),
-            );
-          } finally {
-            await this.scheduleAlarmNoLaterThan(
-              Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
-            );
-          }
-        }
-        return jsonResponse({ ok });
-      }
-      if (pathname.endsWith("/rollback")) {
-        const rolledBack = await rollbackPendingHostCpuReservation(db, input);
-        return jsonResponse({ ok: true, rolledBack });
-      }
-      return jsonResponse({ error: "not found" }, 404);
-    });
   }
 
   private async withCpuReservationLock<T>(
@@ -1215,6 +1105,54 @@ export class HostRuntimeDO extends HostRuntimeBase {
         ),
       );
 
+    // The run projection and the runtime mirror both committed, so a ready
+    // terminal target for this VM is now durable. Attaching on this report is
+    // the latency path: the alarm reconcile is the fallback that catches a
+    // transient gateway or D1 failure, and the gateway treats a repeat attach
+    // as a no-op.
+    this.scheduleScenarioTerminalAttach({
+      executionId: context.executionId,
+      expectedGeneration: context.generation,
+      expectedUserId: context.userId,
+      hostId,
+      runId: context.domainId,
+      vmId: context.vmId,
+      expectedHostSessionId: expectedSessionId,
+    });
+  }
+
+  /**
+   * Runs the terminal attach for one reported VM under the request lifetime,
+   * so the guest endpoint reaches the learner's open route without waiting for
+   * the next alarm. The failure log carries a fixed code and never the raw
+   * error: a gateway error body can echo request fields, and the attach body
+   * carries the guest private key.
+   */
+  private scheduleScenarioTerminalAttach(input: {
+    executionId: string;
+    expectedGeneration: number;
+    expectedUserId: string;
+    hostId: string;
+    runId: string;
+    vmId: string;
+    expectedHostSessionId: string;
+  }): void {
+    this.ctx.waitUntil(
+      attachReadyScenarioTerminalTargets(input).then(
+        () => undefined,
+        (error: unknown) => {
+          console.warn(
+            JSON.stringify({
+              message: "scenario terminal attach failed on vm report",
+              hostId: input.hostId,
+              runId: input.runId,
+              vmId: input.vmId,
+              code: attachFailureCode(error),
+            }),
+          );
+        },
+      ),
+    );
   }
 
   private async loadRuntimeVmReportContext(
@@ -1342,6 +1280,21 @@ export class HostRuntimeDO extends HostRuntimeBase {
       await this.withCpuReservationLock(async () => {
         await reconcileHostCpuReservations(db, hostId, now);
       });
+    }
+    // Terminal attach retries ride the reconcile path because the runtime
+    // mirror row is the durable work marker: a target that is recorded but
+    // not yet marked attached is re-sent, and the gateway treats a repeat
+    // attach as a no-op.
+    try {
+      await reconcileScenarioTerminalRouteAttachments({ hostId });
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          message: "scenario terminal attach reconcile failed",
+          hostId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     }
 
     const activeSocket = await this.findActiveSocket(hostId);
@@ -1866,46 +1819,17 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-async function parseCpuReservationRequest(request: Request): Promise<{
-  hostId: string;
-  runId: string;
-  steadyCpuMillisByVm: number[] | null;
-} | null> {
-  try {
-    const value = (await request.json()) as Record<string, unknown>;
-    const hostId = typeof value.hostId === "string" ? value.hostId.trim() : "";
-    const runId = typeof value.runId === "string" ? value.runId.trim() : "";
-    const steadyCpuMillisByVm = value.steadyCpuMillisByVm;
-    if (
-      !hostId ||
-      hostId.length > 128 ||
-      !runId ||
-      runId.length > 128 ||
-      (steadyCpuMillisByVm !== undefined &&
-        (!Array.isArray(steadyCpuMillisByVm) ||
-          steadyCpuMillisByVm.length === 0 ||
-          steadyCpuMillisByVm.length > 256 ||
-          !steadyCpuMillisByVm.every(isReservationCpuMillis)))
-    ) {
-      return null;
-    }
-    return {
-      hostId,
-      runId,
-      steadyCpuMillisByVm: Array.isArray(steadyCpuMillisByVm)
-        ? (steadyCpuMillisByVm as number[])
-        : null,
-    };
-  } catch {
-    return null;
+/**
+ * Classifies a terminal attach failure without exposing the error text. The
+ * gateway status is the only detail that leaves this module, because an error
+ * body can echo request fields and the request carries guest credentials.
+ */
+function attachFailureCode(error: unknown): string {
+  if (error instanceof StargateTerminalAttachError) {
+    return "gateway_" + String(error.status);
   }
-}
-
-function isReservationCpuMillis(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value > 0 &&
-    value <= 4_294_967_295
-  );
+  if (error instanceof Error && error.name) {
+    return error.name;
+  }
+  return "unknown";
 }

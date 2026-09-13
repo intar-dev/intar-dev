@@ -173,14 +173,16 @@ impl VmManager {
         }
     }
 
-    /// Ensure a cached boot bundle is also present in jailerd's root-owned
-    /// clone-only template store. A missing v2 capability is a hard launch
-    /// incompatibility; this breaking path never downgrades to v1.
-    pub async fn ensure_cached_image_template(
+    /// Import a cached boot bundle into jailerd's root-owned template store.
+    ///
+    /// Only the background cache worker prepares a template. A learner launch
+    /// waits for the ready descriptor instead, so this request carries the
+    /// background class and a launch never queues behind the import.
+    pub async fn ensure_cached_image_template_background(
         &self,
         image: &image_cache::CachedChunkedImage,
     ) -> Result<PreparedImageV3Result> {
-        ensure_jailer_image_template(&self.inner, image).await
+        ensure_jailer_image_template(&self.inner, image, RequestClass::Background).await
     }
 
     pub async fn inspect_jailed_vm(&self, generation: &str) -> Result<Option<VmInspection>> {
@@ -331,7 +333,9 @@ impl VmManager {
             .ok_or_else(|| ApiError::bad_request("guest_tools.tools_disk_sha256 is invalid"))?;
         let kino_sha256 = normalize_sha256(&guest_tools.kino_sha256)
             .ok_or_else(|| ApiError::bad_request("guest_tools.kino_sha256 is invalid"))?;
-        if guest_tools.tools_disk_size_bytes != 64 * 1024 * 1024 || guest_tools.bootstrap_abi != 1 {
+        if guest_tools.tools_disk_size_bytes != 64 * 1024 * 1024
+            || guest_tools.bootstrap_abi != GUEST_BOOTSTRAP_ABI_V2
+        {
             return Err(ApiError::bad_request("guest_tools pin is incompatible"));
         }
         let guest_tools = DesiredGuestToolsV1 {
@@ -354,6 +358,13 @@ impl VmManager {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ApiError::conflict("another vm create is already in progress"))?;
+
+        // The boot-critical window starts at the API entry of an admitted
+        // create, not at the first jailerd call. Background image cache work
+        // parks at its next block boundary until the terminal-ready commit, an
+        // error, a cancel, or a delete request drops the guard. The guard holds
+        // no lock and no permit, so a learner is never queued behind it.
+        let boot_guard = image_cache::begin_vm_boot_critical();
 
         let tap_prefix = self.inner.defaults.tap.trim().to_string();
         if tap_prefix.is_empty() {
@@ -639,6 +650,7 @@ impl VmManager {
 
         tokio::spawn(async move {
             let _permit = permit;
+            let boot_guard = boot_guard;
             let span = tracing::info_span!("vm_create", vm = %name_for_task, run_id = %run_id, image = %image_key_for_task);
 
             let create_input = RunCreateInput {
@@ -670,7 +682,9 @@ impl VmManager {
                 peer_guest_ips: &peer_guest_ips_for_task,
             };
 
-            let create_result = run_create(&inner, create_input).instrument(span).await;
+            let create_result = run_create(&inner, create_input, boot_guard)
+                .instrument(span)
+                .await;
             if take_delete_request(&inner, &name_for_task).await {
                 stop_booting_vm(&inner, &name_for_task).await;
                 match cleanup_tracked_vm(&inner, &name_for_task, false).await {

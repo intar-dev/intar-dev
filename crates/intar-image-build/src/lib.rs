@@ -7,6 +7,7 @@ mod content_hash;
 mod direct;
 mod disk;
 mod guest_tools;
+mod kernel;
 mod manifest;
 mod oci;
 mod provision;
@@ -39,6 +40,15 @@ pub use disk::{
 pub use guest_tools::{
     GUEST_TOOLS_DISK_LABEL, GUEST_TOOLS_DISK_SIZE_BYTES, GuestToolsDiskArtifact,
     GuestToolsDiskManifestV1, write_guest_tools_disk,
+};
+pub use kernel::{
+    KERNEL_APT_SNAPSHOT, KERNEL_APT_SNAPSHOT_URL, KERNEL_BUILD_HOST, KERNEL_BUILD_SCRIPT_SOURCE,
+    KERNEL_BUILD_USER, KERNEL_BUSYBOX_STATIC_VERSION, KERNEL_CONFIG_FRAGMENT,
+    KERNEL_E2FSCK_STATIC_VERSION, KERNEL_INITRAMFS_INIT_SCRIPT, KERNEL_LOCALVERSION,
+    KERNEL_PROVENANCE_PATH, KERNEL_REQUIRED_BUILTINS, KERNEL_SOURCE_BASE_URL,
+    KERNEL_SOURCE_DATE_EPOCH, KERNEL_SOURCE_FILES, KERNEL_SOURCE_VERSION, KERNEL_UPSTREAM_VERSION,
+    KernelSourceFile, kernel_build_script_tokens, kernel_image_file_name, kernel_initrd_file_name,
+    kernel_profile_digest, kernel_release, missing_required_builtins, render_kernel_build_script,
 };
 pub use manifest::{build_direct_manifest_json, combine_scenario_manifests};
 pub use qemu::{

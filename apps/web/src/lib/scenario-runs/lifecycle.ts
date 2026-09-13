@@ -26,10 +26,12 @@ import {
 } from "@/lib/run-state";
 import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
 import {
-  deleteStargateRoute,
+  deleteStargateTerminalRoute,
   issueStargateTerminalSession,
   stargateRouteTtlMs,
 } from "@/lib/stargate";
+import { loadScenarioTerminalRouteGeneration } from "@/lib/scenario-terminal-route-generation";
+import { attachReadyScenarioTerminalTargets } from "@/lib/scenario-terminal-attach";
 import { loadScenarioRunSshKey } from "@/lib/scenario-run-ssh-keys";
 import { deleteScenarioRunRuntimeProjection } from "@/lib/runtime-executions";
 import { traceOperation } from "@/lib/tracing";
@@ -39,15 +41,14 @@ import {
   type ScenarioRunRecord,
 } from "./types";
 import {
-  startScenarioRunInternal,
   markRunVmsAbsentInDesiredState,
   revokeScenarioRunRoutes,
   buildRunVmRouteUsername,
 } from "./start";
+import { beginScenarioRun } from "./begin";
 import {
   loadRunRow,
   updateRunState,
-  loadHostTerminalAddress,
   fromDbRow,
   toScenarioRunRecord,
 } from "./storage";
@@ -56,6 +57,7 @@ export async function startScenarioRunForUser(params: {
   scenarioId: string;
   userId: string;
   betaAdmission: BetaAdmissionEpoch;
+  idempotencyKey: string;
   organizationId?: string | null;
   hostId?: string;
   candidateRevision?: string;
@@ -69,8 +71,14 @@ export async function startScenarioRunForUser(params: {
   acceptedAt: number;
   reused: boolean;
   run: ScenarioRunRecord;
+  /**
+   * The dispatch hint for the committed desired-state version. Pass it to
+   * waitUntil so the response is not delayed; the durable outbox sweep
+   * delivers the version even when the process dies before the wake.
+   */
+  deliveryHint: Promise<void>;
 }> {
-  const result = await startScenarioRunInternal(params);
+  const result = await beginScenarioRun(params);
   const row = await loadRunRow(result.runId, params.userId);
   if (!row) {
     throw appError(
@@ -80,8 +88,13 @@ export async function startScenarioRunForUser(params: {
     );
   }
   return {
-    ...result,
+    accepted: true,
+    runId: result.runId,
+    scenarioId: result.scenarioId,
+    acceptedAt: result.acceptedAt,
+    reused: result.reused,
     run: toScenarioRunRecord(row),
+    deliveryHint: result.deliveryHint,
   };
 }
 
@@ -475,33 +488,48 @@ export async function createScenarioSshSessionForUser(params: {
   if (!vm) {
     throw appError(404, "scenario_vm_not_found", "scenario VM not found");
   }
-  if (!vm.canOpenTerminal || vm.terminalPhase !== "ready") {
-    throw appError(
-      409,
-      "scenario_shell_not_ready",
-      "terminal target is still warming up",
-    );
-  }
 
-  const host =
-    vm.terminalTarget.host?.trim() ||
-    (await loadHostTerminalAddress(row.hostId)) ||
-    "";
-  const port =
-    typeof vm.terminalTarget.port === "number" && vm.terminalTarget.port > 0
-      ? vm.terminalTarget.port
-      : 0;
-  const targetUsername = vm.terminalTarget.username?.trim() || "ubuntu";
-  const targetHostKeyOpenssh = vm.terminalTarget.hostKeyOpenssh?.trim() ?? "";
-  if (!host || !port || !targetHostKeyOpenssh) {
-    throw appError(
-      409,
-      "scenario_shell_not_ready",
-      "terminal target is still warming up",
-    );
-  }
+  /**
+   * A browser route opens before the VM is ready and waits for the admin
+   * attach. It binds to the current runtime execution so a revoked route can
+   * not be revived by a stale attach. A native route still needs the ready
+   * endpoint in the create call.
+   */
+  const routeGeneration = await traceOperation(
+    "scenario.terminal.route_generation",
+    () =>
+      loadScenarioTerminalRouteGeneration({
+        runId: row.runId,
+        vmId: vm.id,
+      }),
+    { "intar.run.id": row.runId, "intar.vm.id": vm.id },
+  );
 
   const requestedMode = params.mode ?? "browser";
+  const buildNativeTarget = () => {
+    const host = vm.terminalTarget.host?.trim() ?? "";
+    const port =
+      typeof vm.terminalTarget.port === "number" && vm.terminalTarget.port > 0
+        ? vm.terminalTarget.port
+        : 0;
+    const targetUsername = vm.terminalTarget.username?.trim() || "ubuntu";
+    const targetHostKeyOpenssh =
+      vm.terminalTarget.hostKeyOpenssh?.trim() ?? "";
+    if (!host || !port || !targetHostKeyOpenssh) {
+      throw appError(
+        409,
+        "scenario_shell_not_ready",
+        "terminal target is still warming up",
+      );
+    }
+    return {
+      host,
+      port,
+      username: targetUsername,
+      hostKeyOpenssh: targetHostKeyOpenssh,
+    };
+  };
+
   const profileKeys =
     requestedMode === "native"
       ? await listUserAuthorizedSshKeysForNativeRoutes(params.userId)
@@ -542,45 +570,105 @@ export async function createScenarioSshSessionForUser(params: {
     vm.id,
     routeType,
   );
-  const targetKey = await traceOperation(
-    "scenario.terminal.route_keys",
-    () => loadScenarioRunSshKey({ runId: row.runId, vmId: vm.id }),
-    { "intar.run.id": row.runId, "intar.vm.id": vm.id },
-  );
-  return traceOperation(
+  // A native route still needs the ready endpoint and the guest private key in
+  // the create call. A pending browser route holds neither.
+  const nativeTarget =
+    requestedMode === "native" ? buildNativeTarget() : null;
+  const targetKey = nativeTarget
+    ? await traceOperation(
+        "scenario.terminal.route_keys",
+        () => loadScenarioRunSshKey({ runId: row.runId, vmId: vm.id }),
+        { "intar.run.id": row.runId, "intar.vm.id": vm.id },
+      )
+    : null;
+  const session = await traceOperation(
     "scenario.terminal.route_issue",
     () =>
       issueBetaAccessFencedRoute({
         userId: params.userId,
         routeId: routeUsername,
-        revoke: deleteStargateRoute,
+        // Fenced by generation: a late cleanup after the same route name was
+        // reissued to a newer run must not delete that newer route.
+        revoke: (routeId) =>
+          deleteStargateTerminalRoute(
+            routeId,
+            routeGeneration.routeGeneration,
+          ),
         issuedRouteIds: (session) => [session.routeUsername],
         issue: () =>
-          issueStargateTerminalSession({
-            routeUsername,
-            targetUsername,
-            targetHost: host,
-            targetPort: port,
-            targetHostKeyOpenssh,
-            targetPrivateKeyOpenssh: targetKey.privateKeyOpenssh,
-            expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
-            mode: requestedMode,
-            authorizedClientPublicKeysOpenssh: usesProfileKeys
-              ? profileKeys.map((key) => key.publicKeyOpenssh)
-              : [],
-            ...(temporaryClientPublicKeyOpenssh
-              ? { temporaryClientPublicKeyOpenssh }
-              : {}),
-            metadata: {
-              hostId: row.hostId,
-              runId: row.runId,
-              vmId: vm.id,
-              userId: row.userId,
-            },
-          }),
+          issueStargateTerminalSession(
+            requestedMode === "browser"
+              ? {
+                  routeUsername,
+                  generation: routeGeneration.routeGeneration,
+                  expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
+                  mode: "browser",
+                  metadata: {
+                    hostId: row.hostId,
+                    runId: row.runId,
+                    vmId: vm.id,
+                    userId: row.userId,
+                  },
+                }
+              : {
+                  routeUsername,
+                  generation: routeGeneration.routeGeneration,
+                  expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
+                  mode: "native",
+                  target: {
+                    ...requireTarget(nativeTarget),
+                    privateKeyOpenssh: requireTarget(targetKey).privateKeyOpenssh,
+                    authorizedClientPublicKeysOpenssh: usesProfileKeys
+                      ? profileKeys.map((key) => key.publicKeyOpenssh)
+                      : [],
+                  },
+                  ...(temporaryClientPublicKeyOpenssh
+                    ? { temporaryClientPublicKeyOpenssh }
+                    : {}),
+                  metadata: {
+                    hostId: row.hostId,
+                    runId: row.runId,
+                    vmId: vm.id,
+                    userId: row.userId,
+                  },
+                },
+          ),
       }),
     { "intar.run.id": params.runId },
   );
+
+  if (requestedMode === "browser") {
+    // A VM can become ready before the pending route exists. Close that gap
+    // here so the browser socket does not wait for the next host report.
+    //
+    // A failure is not swallowed: the attach fence revokes this generation's
+    // route on any unconfirmed outcome, so returning a session now would hand
+    // the browser a socket to a route that no longer exists. The learner
+    // retries, and that retry creates a fresh pending route.
+    await attachReadyScenarioTerminalTargets({
+      executionId: routeGeneration.executionId,
+      expectedGeneration: routeGeneration.generation,
+      expectedUserId: row.userId,
+      hostId: row.hostId,
+      runId: row.runId,
+      vmId: vm.id,
+      // The route was created moments ago, so it is always unattached. A
+      // marker left over from a revoked and re-created route must not skip it.
+      force: true,
+    });
+  }
+  return session;
+}
+
+function requireTarget<ValueType>(value: ValueType | null): ValueType {
+  if (!value) {
+    throw appError(
+      409,
+      "scenario_ssh_key_missing",
+      "terminal credentials are not ready for this VM",
+    );
+  }
+  return value;
 }
 
 export async function listHostRunsForUser(params: {

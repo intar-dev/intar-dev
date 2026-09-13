@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StageTerminalTargetResponse",
+  "description": "The identifier of one staged target. An identical repeat of a stage call\nreturns the same value, so a lost answer is safe to retry.",
+  "type": "object",
+  "properties": {
+    "attachment_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "attachment_id"
+  ]
+}

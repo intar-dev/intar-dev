@@ -133,6 +133,11 @@ export const runtimeVms = sqliteTable(
     ),
     terminalPrivateKeyIvB64: text("terminal_private_key_iv_b64"),
     terminalObservedAt: integer("terminal_observed_at"),
+    // Null until the gateway accepted the ready terminal target for this VM.
+    // The attach retry reads this as the durable work marker, so a crash
+    // after the gateway call but before this write simply repeats an
+    // idempotent attach.
+    terminalAttachedAt: integer("terminal_attached_at"),
     artifactWritesSealed: integer("artifact_writes_sealed", {
       mode: "boolean",
     })
@@ -357,24 +362,6 @@ export const hostResourceReservations = sqliteTable(
     check(
       "host_resource_reservations_state_valid",
       sql`${table.state} in ('pending', 'committed', 'released')`,
-    ),
-  ],
-);
-
-export const runtimeAllocationLocks = sqliteTable(
-  "runtime_allocation_locks",
-  {
-    key: text("key").primaryKey(),
-    ownerToken: text("owner_token").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    index("runtime_allocation_locks_expiry_idx").on(table.expiresAt),
-    check(
-      "runtime_allocation_locks_expiry_valid",
-      sql`${table.expiresAt} > 0`,
     ),
   ],
 );

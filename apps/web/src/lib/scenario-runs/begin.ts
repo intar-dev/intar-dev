@@ -1,0 +1,1735 @@
+import { env } from "cloudflare:workers";
+import { and, eq } from "drizzle-orm";
+import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
+import type {
+  DesiredGuestToolsV1,
+  DesiredVmV2,
+  HostDesiredStateV2,
+  HostStateReportV2,
+} from "@/generated/bridge";
+import {
+  admissionCpuQuotaStatement,
+  admissionResourceReservationStatement,
+  bootCpuReservationForSteadyVms,
+  loadHostCpuReservationCapacity,
+} from "@/control-plane/host-cpu-reservations";
+import {
+  isSafeBuildId,
+  isSafeBundleRev,
+} from "@/control-plane/image-registry/shared";
+import {
+  scenarioRuns,
+  scenarioRunSshKeys,
+} from "@/db/schema";
+import type { ScenarioStartRequestScope } from "@/db/schema/runs";
+import type { BetaAdmissionEpoch } from "@/lib/allowlist";
+import { appError, errorChainMatches } from "@/lib/app-error";
+import {
+  applyLectureBriefingPresentation,
+  assertCourseScenarioStartAllowed,
+} from "@/lib/course-catalogs";
+import {
+  desiredVmFromRunVm,
+  markDesiredVmAbsent,
+  mutateDesiredState,
+  upsertDesiredCachedImage,
+  upsertDesiredGuestTools,
+  upsertDesiredVm,
+} from "@/lib/desired-state";
+import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
+import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { createAppId } from "@/lib/id";
+import { requireIdempotencyKey } from "@/lib/idempotency-key";
+import { assertAgentKvmRunsOpen } from "@/lib/run-admission-gate";
+import {
+  availableRuntimeHostResources,
+  loadActiveRuntimeResourceSnapshot,
+  RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS,
+  runtimeResourcesFit,
+  type RuntimeResourceDemand,
+} from "@/lib/runtime-capacity";
+import { encryptRuntimeVmAccessKey } from "@/lib/runtime-vm-state";
+import {
+  RUN_PHASE_ORDER,
+  buildInitialRunState,
+  buildInitialVmState,
+  recomputeRunState,
+  type RunStateDocument,
+  type RunVmStateDocument,
+} from "@/lib/run-state";
+import type { RuntimeVmSpec } from "@/lib/runtime-executions";
+import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
+import {
+  generateScenarioRunSshKeyDraft,
+  prepareScenarioRunSshKeyRows,
+} from "@/lib/scenario-run-ssh-keys";
+import { traceOperation } from "@/lib/tracing";
+import { loadCandidateScenarioRunSource } from "./candidate";
+import { deterministicRuntimeVmName } from "./runtime-vm-name";
+import {
+  type RequiredScenarioImage,
+} from "@/lib/scenario-host-readiness";
+import {
+  assertScenarioLaunchHostForUser,
+  isActiveKeyUniqueViolation,
+  requiredImagesForScenarioLaunch,
+  scenarioRuntimeReservationResources,
+  selectScenarioHosts,
+} from "./start";
+import {
+  activeKeyFor,
+  activeRunConflictError,
+  loadActiveRunRow,
+  loadEnabledScenarioRows,
+  type ScenarioRunLaunchSource,
+} from "./storage";
+
+/**
+ * The one admission operation for a learner scenario start.
+ *
+ * Architecture: admission is a single D1 atomic batch that runs inside the
+ * Worker request. There is no Durable Object hop and no allocation lock in the
+ * admission path. The batch writes, in one transaction:
+ *
+ * - the run row and its SSH keys,
+ * - the runtime execution, its VM mirror rows, and their access keys,
+ * - the host resource reservation and the host boot-CPU quota,
+ * - the host desired-state document under a version compare-and-set,
+ * - the active-run slot.
+ *
+ * The host desired-state version is the capacity serialization point: every
+ * admission publishes its VMs by bumping that version, so two starts for one
+ * host cannot both read the same capacity and both win. A lost compare-and-set
+ * aborts the whole batch through a generated constraint sentinel, and the
+ * caller retries with fresh reads and the same idempotency key.
+ *
+ * Delivery is a hint after the commit: the committed desired-state version is
+ * the durable dispatch record, and waking the host runtime is best effort.
+ */
+export interface BeginScenarioRunInput {
+  scenarioId: string;
+  userId: string;
+  betaAdmission: BetaAdmissionEpoch;
+  idempotencyKey: string;
+  organizationId?: string | null;
+  hostId?: string;
+  candidateRevision?: string;
+  candidateBuildId?: string;
+  allowDrainedAdminProof?: boolean;
+  allowSequenceBypass?: boolean;
+}
+
+export interface BeginScenarioRunResult {
+  accepted: true;
+  runId: string;
+  scenarioId: string;
+  acceptedAt: number;
+  /**
+   * True when this request did not admit a new run: it replayed the run that
+   * the same idempotency key already admitted, either from the stored key or
+   * as the loser of a concurrent race. The client uses it to keep a transport
+   * retry of one attempt out of the fresh-sample benchmark evidence.
+   */
+  reused: boolean;
+  hostId: string | null;
+  /**
+   * Started after the durable commit. Await it inside the request, or hand it
+   * to ctx.waitUntil(). The outbox sweep delivers the version anyway.
+   */
+  deliveryHint: Promise<void>;
+}
+
+export const ADMISSION_CAS_ATTEMPTS = 3;
+
+interface CandidateProof {
+  revision: string;
+  buildId: string;
+}
+
+export async function beginScenarioRun(
+  input: BeginScenarioRunInput,
+): Promise<BeginScenarioRunResult> {
+  return traceOperation(
+    "scenario.start",
+    async () => {
+      await assertAgentKvmRunsOpen(env.DB, {
+        ...(input.allowDrainedAdminProof
+          ? { allowDrainedAdminProof: true }
+          : {}),
+      });
+      const idempotencyKey = requireIdempotencyKey(input.idempotencyKey);
+      const organizationId = input.organizationId ?? null;
+      const candidateProof = candidateProofFromInput(input);
+      const scope = scenarioStartRequestScope(input, input.scenarioId);
+      const db = drizzle(env.DB);
+      const [scenario, active] = await Promise.all([
+        loadScenarioForStart({
+          db,
+          scenarioId: input.scenarioId,
+          organizationId,
+          candidateProof,
+        }),
+        loadActiveRunRow(input.userId),
+      ]);
+      if (!scenario) {
+        if (candidateProof) {
+          throw appError(
+            409,
+            "scenario_candidate_not_ready",
+            "candidate scenario is unavailable or not ready",
+          );
+        }
+        throw appError(404, "scenario_not_found", "scenario not found");
+      }
+      // Resolve the V2 unit before any reuse can return, so an old direct
+      // request cannot revive an unlinked scenario around the course gate.
+      const courseLecture = await assertCourseScenarioStartAllowed({
+        db,
+        userId: input.userId,
+        organizationId,
+        scenarioId: scenario.scenarioId,
+        ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
+      });
+      await assertAdmissionActive(input.userId, input.betaAdmission);
+
+      const replayed = await loadRunByIdempotencyKey(
+        db,
+        input.userId,
+        idempotencyKey,
+      );
+      if (replayed) {
+        assertReplayMatchesScope(replayed.requestScopeJson, scope);
+        return {
+          accepted: true,
+          runId: replayed.runId,
+          scenarioId: replayed.scenarioId,
+          // The original acceptance, and a replay is not a fresh admission.
+          acceptedAt: replayed.acceptedAt,
+          reused: true,
+          hostId: replayed.hostId,
+          deliveryHint: deliveryHint(replayed.hostId),
+        };
+      }
+
+      if (active) {
+        // An active run never stands in for a new start. Returning it here
+        // would answer a new idempotency key with another request's run, and a
+        // later retry of that key would create a second VM set once the first
+        // run ended. Only an exact replay of the admitting request returns the
+        // stored run, which the idempotency lookup above already handled.
+        throw activeRunConflictError(active.title);
+      }
+
+      return admitNewRun({
+        input,
+        scenario,
+        organizationId,
+        courseLecture,
+        idempotencyKey,
+        candidateProof,
+        scope,
+      });
+    },
+    { "intar.scenario.id": input.scenarioId },
+  );
+}
+
+function candidateProofFromInput(
+  input: BeginScenarioRunInput,
+): CandidateProof | null {
+  const revision =
+    input.candidateRevision === undefined
+      ? null
+      : input.candidateRevision.trim();
+  const buildId =
+    input.candidateBuildId === undefined ? null : input.candidateBuildId.trim();
+  if ((revision === null) !== (buildId === null)) {
+    throw appError(
+      400,
+      "candidate_proof_identity_incomplete",
+      "candidate revision and build id are both required",
+    );
+  }
+  if (revision === null || buildId === null) {
+    return null;
+  }
+  if (!isSafeBundleRev(revision) || !isSafeBuildId(buildId)) {
+    throw appError(
+      400,
+      "candidate_proof_identity_invalid",
+      "candidate revision or build id is invalid",
+    );
+  }
+  if (!input.allowDrainedAdminProof) {
+    throw appError(
+      403,
+      "candidate_proof_admin_required",
+      "candidate proofs require administrator authorization",
+    );
+  }
+  return { revision, buildId };
+}
+
+function scenarioStartRequestScope(
+  input: BeginScenarioRunInput,
+  scenarioId: string,
+): ScenarioStartRequestScope {
+  return {
+    scenarioId,
+    organizationId: input.organizationId ?? null,
+    hostId: input.hostId ?? null,
+    candidateRevision: input.candidateRevision?.trim() ?? null,
+    candidateBuildId: input.candidateBuildId?.trim() ?? null,
+    allowDrainedAdminProof: input.allowDrainedAdminProof === true,
+    allowSequenceBypass: input.allowSequenceBypass === true,
+  };
+}
+
+interface StoredIdempotentRun {
+  runId: string;
+  scenarioId: string;
+  hostId: string;
+  requestScopeJson: ScenarioStartRequestScope | null;
+  /**
+   * The stored run's own acceptance time. A replay reports this value, never
+   * the time of the retry, so a transport retry of one attempt cannot be
+   * recorded as a fresh sample or advertise a later acceptance than the run
+   * actually has.
+   */
+  acceptedAt: number;
+}
+
+async function loadRunByIdempotencyKey(
+  db: DrizzleD1Database,
+  userId: string,
+  idempotencyKey: string,
+): Promise<StoredIdempotentRun | null> {
+  const rows = await db
+    .select({
+      runId: scenarioRuns.runId,
+      scenarioId: scenarioRuns.scenarioId,
+      hostId: scenarioRuns.hostId,
+      requestScopeJson: scenarioRuns.requestScopeJson,
+      createdAt: scenarioRuns.createdAt,
+    })
+    .from(scenarioRuns)
+    .where(
+      and(
+        eq(scenarioRuns.userId, userId),
+        eq(scenarioRuns.requestIdempotencyKey, idempotencyKey),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) {
+    return null;
+  }
+  return {
+    runId: row.runId,
+    scenarioId: row.scenarioId,
+    hostId: row.hostId,
+    requestScopeJson:
+      (row.requestScopeJson as ScenarioStartRequestScope | null) ?? null,
+    acceptedAt: row.createdAt,
+  };
+}
+
+function assertReplayMatchesScope(
+  stored: ScenarioStartRequestScope | null,
+  expected: ScenarioStartRequestScope,
+): void {
+  if (!stored || JSON.stringify(stored) !== JSON.stringify(expected)) {
+    throw appError(
+      409,
+      "idempotency_key_conflict",
+      "this Idempotency-Key was used for a different start request",
+    );
+  }
+}
+
+
+async function loadScenarioForStart(input: {
+  db: DrizzleD1Database;
+  scenarioId: string;
+  organizationId: string | null;
+  candidateProof: CandidateProof | null;
+}): Promise<ScenarioRunLaunchSource | null> {
+  if (input.candidateProof) {
+    return loadCandidateScenarioRunSource(input.db, {
+      revision: input.candidateProof.revision,
+      buildId: input.candidateProof.buildId,
+      scenarioId: input.scenarioId,
+      organizationId: input.organizationId,
+    });
+  }
+  const [scenario] = await loadEnabledScenarioRows(
+    input.scenarioId,
+    input.organizationId,
+  );
+  return scenario ?? null;
+}
+
+async function assertAdmissionActive(
+  userId: string,
+  admission: BetaAdmissionEpoch,
+): Promise<void> {
+  const current = await env.DB.prepare(
+    "SELECT 1 FROM access_allowlist WHERE user_id = ?1 AND state = 'active'" +
+      " AND source_invite_id = ?2 AND source_lease_id = ?3" +
+      " AND granted_at = ?4 LIMIT 1",
+  )
+    .bind(
+      userId,
+      admission.sourceInviteId,
+      admission.sourceLeaseId,
+      admission.grantedAt,
+    )
+    .first();
+  if (!current) throw scenarioStartAdmissionChanged();
+}
+
+async function assertAdmissionStillActive(input: {
+  userId: string;
+  runId: string;
+  hostId: string;
+  betaAdmission: BetaAdmissionEpoch;
+}): Promise<void> {
+  const current = await env.DB.prepare(
+    "SELECT 1 FROM access_allowlist access" +
+      " INNER JOIN scenario_runs run ON run.user_id = access.user_id" +
+      " AND run.run_id = ?2" +
+      " WHERE access.user_id = ?1 AND run.host_id = ?3" +
+      " AND access.state = 'active'" +
+      " AND access.source_invite_id = ?4" +
+      " AND access.source_lease_id = ?5" +
+      " AND access.granted_at = ?6" +
+      " AND run.state = 'provisioning'" +
+      " AND run.delete_requested_at IS NULL LIMIT 1",
+  )
+    .bind(
+      input.userId,
+      input.runId,
+      input.hostId,
+      input.betaAdmission.sourceInviteId,
+      input.betaAdmission.sourceLeaseId,
+      input.betaAdmission.grantedAt,
+    )
+    .first();
+  if (!current) throw scenarioStartAdmissionChanged();
+}
+
+function scenarioStartAdmissionChanged() {
+  return appError(
+    403,
+    "beta_access_revoked",
+    "beta access changed while the scenario was starting",
+  );
+}
+
+/**
+ * Wakes the host runtime so it pushes the committed desired version to a live
+ * agent socket. Best effort and never poison: the wake client already bounds
+ * the call and clears its own timer, the committed version is the durable
+ * record, and the outbox sweep delivers it when this process dies first.
+ *
+ * The failure log carries a fixed code. It never carries the host, the run,
+ * or the error text: a wake failure can echo a request body, and the address
+ * space of a scenario host is not a log field.
+ */
+function deliveryHint(hostId: string): Promise<void> {
+  return tryWakeHostRuntime(hostId).catch(() => {
+    console.warn(
+      JSON.stringify({ event: "scenario_start_delivery_hint_failed" }),
+    );
+  });
+}
+
+/**
+ * Cancels a run that became durable inside the commit window but failed its
+ * post-commit admission fence.
+ *
+ * Both writes travel in one D1 transaction. Marking the VMs absent without
+ * moving the run out of provisioning would leave a run that no reconcile can
+ * release: the CPU quota is committed, so only a terminal or deleting run
+ * releases it, and a crash between two separate transactions would hold that
+ * quota until the lease expired.
+ *
+ * The desired-state publish is a compare-and-set. A lost compare-and-set means
+ * another writer published in between, so the cancel retries against the new
+ * version instead of overwriting it.
+ */
+export async function cancelAdmittedRun(input: {
+  runId: string;
+  userId: string;
+  hostId: string;
+  vms: RunStateDocument;
+}): Promise<void> {
+  const now = Date.now();
+  const teardownVms = input.vms.vms.filter((vm) => vm.phase !== "completed");
+  for (let attempt = 0; attempt < ADMISSION_CAS_ATTEMPTS; attempt += 1) {
+    const current = await loadOrCreateHostDesiredState(
+      drizzle(env.DB),
+      input.hostId,
+      now,
+    );
+    const next = mutateDesiredState(
+      current,
+      (draft) => {
+        for (const vm of teardownVms) {
+          markDesiredVmAbsent(draft, {
+            runId: input.runId,
+            vmName: vm.runtimeVmName,
+          });
+        }
+      },
+      { nowUnixMs: now },
+    );
+    const statements =
+      next === current
+        ? [cancelRunStatement(input, now)]
+        : [
+            cancelDesiredStateStatement(input, current.version, next),
+            cancelRunStatement(input, now),
+            cancelSentinelStatement(input, next.version),
+          ];
+    try {
+      await env.DB.batch(statements);
+      await deliveryHint(input.hostId);
+      return;
+    } catch (error) {
+      if (errorChainMatches(error, /runtime_executions_generation_positive/)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw appError(
+    409,
+    "scenario_host_capacity_contended",
+    "scenario capacity changed while cancelling the start",
+  );
+}
+
+function cancelRunStatement(
+  input: { runId: string; userId: string; hostId: string },
+  now: number,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    "UPDATE scenario_runs SET state = 'teardown_requested'," +
+      " state_rank = ?1, delete_requested_at = coalesce(delete_requested_at, ?2)," +
+      " updated_at = ?2 WHERE run_id = ?3 AND user_id = ?4" +
+      " AND host_id = ?5 AND state = 'provisioning'",
+  ).bind(
+    RUN_PHASE_ORDER.teardown_requested,
+    now,
+    input.runId,
+    input.userId,
+    input.hostId,
+  );
+}
+
+function cancelDesiredStateStatement(
+  input: { runId: string; hostId: string },
+  expectedVersion: number,
+  next: HostDesiredStateV2,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    "UPDATE host_desired_state SET version = ?1, doc_json = ?2, updated_at = ?3" +
+      " WHERE host_id = ?4 AND version = ?5" +
+      " AND EXISTS (SELECT 1 FROM scenario_runs run" +
+      " WHERE run.run_id = ?6 AND run.host_id = ?4)",
+  ).bind(
+    next.version,
+    JSON.stringify(next),
+    Date.now(),
+    input.hostId,
+    expectedVersion,
+    input.runId,
+  );
+}
+
+/**
+ * Aborts the cancel transaction when its compare-and-set did not land, so a
+ * cancel can never move a run to teardown while its VMs stay desired running.
+ */
+function cancelSentinelStatement(
+  input: { runId: string; hostId: string },
+  nextVersion: number,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    "INSERT INTO runtime_executions (" +
+      "id, user_id, organization_id, host_id, provider_kind," +
+      " provider_connection_id, domain_kind, domain_id, generation," +
+      " source_execution_id, checkpoint_id, state, lease_expires_at," +
+      " archive_requested_at, ended_at, created_at, updated_at" +
+      ") SELECT '__admission_cancel_cas__:' || ?1," +
+      " run.user_id, run.organization_id, run.host_id, 'agent_kvm', NULL," +
+      " 'scenario', run.run_id, 0, NULL, NULL, 'queued', NULL, NULL, NULL," +
+      " run.created_at, run.updated_at" +
+      " FROM scenario_runs run" +
+      " WHERE run.run_id = ?1" +
+      " AND NOT EXISTS (SELECT 1 FROM host_desired_state desired" +
+      " WHERE desired.host_id = ?2 AND desired.version = ?3)",
+  ).bind(input.runId, input.hostId, nextVersion);
+}
+
+async function admitNewRun(context: {
+  input: BeginScenarioRunInput;
+  scenario: ScenarioRunLaunchSource;
+  organizationId: string | null;
+  courseLecture: Awaited<
+    ReturnType<typeof assertCourseScenarioStartAllowed>
+  >;
+  idempotencyKey: string;
+  candidateProof: CandidateProof | null;
+  scope: ScenarioStartRequestScope;
+}): Promise<BeginScenarioRunResult> {
+  const { input, scenario, organizationId, courseLecture } = context;
+  const briefing = scenario.candidateSource
+    ? scenario.briefing
+    : applyLectureBriefingPresentation(scenario.briefing, courseLecture.lecture);
+
+  const runId = createAppId();
+  const createdAt = Date.now();
+  const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
+  const steadyCpuMillisByVm = scenario.launchSpecs.map(
+    (spec) => spec.resources.cpuMillis,
+  );
+  const steadyCpuMillis = steadyCpuMillisByVm.reduce(
+    (total, cpuMillis) => total + cpuMillis,
+    0,
+  );
+  if (!Number.isSafeInteger(steadyCpuMillis) || steadyCpuMillis <= 0) {
+    throw appError(
+      500,
+      "scenario_catalog_invalid",
+      "scenario CPU entitlement is invalid",
+    );
+  }
+  const runVmStates = scenario.launchSpecs.map((spec, index) => {
+    const vmId = createAppId();
+    const runtimeVmName = deterministicRuntimeVmName(
+      spec.runtimeVmNamePrefix,
+      runId,
+      index,
+    );
+    const vm = buildInitialVmState({
+      id: vmId,
+      ordinal: index,
+      scenarioVmId: spec.scenarioVmId,
+      scenarioVmName: spec.scenarioVmName,
+      runtimeVmName,
+      hostname: spec.hostname,
+      launchSummary: spec.summary,
+    });
+    return {
+      ...vm,
+      provisioning: {
+        ...vm.provisioning,
+        image: spec.image,
+        imageKey: spec.imageKey,
+        imageSha256: spec.imageSha256,
+        resources: spec.resources,
+        leaseDurationSeconds: spec.leaseDurationSeconds,
+        status: "pending",
+      },
+    } satisfies RunVmStateDocument;
+  });
+  const sshKeyDrafts = runVmStates.map((vm) =>
+    generateScenarioRunSshKeyDraft({
+      runId,
+      vmId: vm.id,
+      runtimeVmName: vm.runtimeVmName,
+    }),
+  );
+  const sshKeyDraftByVmId = new Map(
+    sshKeyDrafts.map((draft) => [draft.vmId, draft]),
+  );
+  const sshAuthorizedKeysByVmId = new Map(
+    sshKeyDrafts.map((draft) => [draft.vmId, [draft.publicKeyOpenssh]]),
+  );
+  const initial = buildInitialRunState({
+    vms: runVmStates.map((vm) => ({
+      id: vm.id,
+      ordinal: vm.ordinal,
+      scenarioVmId: vm.scenarioVmId,
+      scenarioVmName: vm.scenarioVmName,
+      runtimeVmName: vm.runtimeVmName,
+      hostname: vm.hostname,
+      launchSummary: vm.launchSummary,
+    })),
+  });
+  const state = recomputeRunState({
+    ...initial,
+    ...(scenario.candidateSource
+      ? { candidateSource: scenario.candidateSource }
+      : {}),
+    phase: "provisioning",
+    phaseTitle: "Provisioning",
+    phaseDetail: "Queueing launch delivery.",
+    vms: runVmStates,
+  });
+  const provisionedState = recomputeRunState({
+    ...state,
+    vms: state.vms.map(
+      (vm) =>
+        ({
+          ...vm,
+          provisioning: {
+            ...vm.provisioning,
+            status: "queued",
+            error: null,
+          },
+        }) satisfies RunVmStateDocument,
+    ),
+  });
+  const vmStateByRuntimeVmId = new Map(
+    provisionedState.vms.map((vm) => [vm.id, vm]),
+  );
+  const runtimeVms = runtimeVmSpecsFromScenarioState(provisionedState);
+  const runtimeVmRows = runtimeVms.map((vm) => ({
+    ...vm,
+    runtimeVmId: createAppId(),
+  }));
+  const leaseDurationSeconds = Math.max(
+    0,
+    ...provisionedState.vms.map(
+      (vm) => vm.provisioning.leaseDurationSeconds ?? 0,
+    ),
+  );
+  const leaseExpiresAt =
+    leaseDurationSeconds > 0 ? createdAt + leaseDurationSeconds * 1_000 : null;
+  const reservationResources = scenarioRuntimeReservationResources(
+    runtimeVms,
+    steadyCpuMillisByVm,
+  );
+  const bootCpuMillis = bootCpuReservationForSteadyVms(steadyCpuMillisByVm);
+  if (bootCpuMillis !== reservationResources.cpuMillis) {
+    throw appError(
+      500,
+      "scenario_catalog_invalid",
+      "scenario boot CPU reservation is inconsistent",
+    );
+  }
+
+  // The guest-tools pin read, the SSH key encryption, and the runtime access
+  // key encryption are independent, so they run before the first host
+  // candidate is evaluated.
+  const [guestTools, sshKeyRows, accessKeys] = await Promise.all([
+    loadScenarioGuestToolsPin(env),
+    prepareScenarioRunSshKeyRows(sshKeyDrafts, createdAt),
+    Promise.all(
+      runtimeVms.map((vm) => {
+        const draft = sshKeyDraftByVmId.get(vm.vmId);
+        if (!draft) {
+          throw new Error("scenario VM SSH key draft is missing");
+        }
+        return encryptRuntimeVmAccessKey({
+          executionId: runId,
+          vmId: vm.vmId,
+          runtimeVmName: vm.runtimeVmName,
+          publicKeyOpenssh: draft.publicKeyOpenssh,
+          privateKeyOpenssh: draft.privateKeyOpenssh,
+        });
+      }),
+    ),
+  ]);
+  if (sshKeyRows.length === 0) {
+    throw new Error("scenario run has no SSH key rows");
+  }
+  const desiredVms: DesiredVmV2[] = runtimeVms.map((vm) => {
+    const vmState = vmStateByRuntimeVmId.get(vm.vmId);
+    if (!vmState) {
+      throw new Error("scenario VM state is missing for " + vm.runtimeVmName);
+    }
+    const desiredVm = desiredVmFromRunVm({
+      runId,
+      vm: vmState,
+      nowUnixMs: createdAt,
+      sshAuthorizedKeysOpenssh: sshAuthorizedKeysByVmId.get(vm.vmId) ?? [],
+      guestTools,
+    });
+    if (!desiredVm) {
+      throw appError(
+        500,
+        "scenario_vm_desired_state_invalid",
+        "missing desired-state image metadata for " + vm.runtimeVmName,
+      );
+    }
+    return desiredVm;
+  });
+
+  const run = {
+    runId,
+    userId: input.userId,
+    organizationId,
+    runtimeExecutionId: runId,
+    hostId: "",
+    scenarioId: scenario.scenarioId,
+    scenarioName: scenario.scenarioId,
+    courseScopeKey: courseLecture.courseScopeKey,
+    courseId: courseLecture.courseId,
+    courseTitle: courseLecture.courseTitle,
+    lectureId: courseLecture.lectureId,
+    lectureTitle: courseLecture.lectureTitle,
+    lectureSummary: courseLecture.lectureSummary,
+    lectureBodyMarkdown: courseLecture.lectureBodyMarkdown,
+    lectureOrdinal: courseLecture.lectureOrdinal,
+    lectureCount: courseLecture.lectureCount,
+    title: briefing.title,
+    tagline: briefing.tagline,
+    briefingMarkdown: briefing.briefingMarkdown,
+    objectivesJson: JSON.stringify(briefing.objectives),
+    difficulty: briefing.difficulty,
+    estimatedMinutes: briefing.estimatedMinutes,
+    tagsJson: briefing.tags,
+    hintsJson: scenario.content.hints,
+    solutionMarkdown: scenario.content.solutionMarkdown,
+    revealedHintsJson: [],
+    solutionRevealedAt: null,
+    solutionAssisted: false,
+    vmCount: provisionedState.vms.length,
+    state: provisionedState.phase,
+    stateRank: RUN_PHASE_ORDER[provisionedState.phase],
+    activeKey: activeKeyFor(input.userId),
+    requestIdempotencyKey: context.idempotencyKey,
+    requestScopeJson: context.scope,
+    stateJson: JSON.stringify(provisionedState),
+    archiveEnteredAt: null,
+    deleteRequestedAt: null,
+    solvedAt: null,
+    completedAt: null,
+    failedAt: null,
+    hiddenAt: null,
+    createdAt,
+    updatedAt: createdAt,
+  } satisfies typeof scenarioRuns.$inferInsert;
+
+  for (let attempt = 1; attempt <= ADMISSION_CAS_ATTEMPTS; attempt += 1) {
+    const allocated = await allocateAdmissionHost({
+      userId: input.userId,
+      organizationId,
+      ...(input.hostId ? { requestedHostId: input.hostId } : {}),
+      requiredImages,
+      reservationResources,
+      bootCpuMillis,
+      now: Date.now(),
+      desiredVms,
+      guestTools,
+    });
+    // Re-read the cut-over gate after the capacity selection and before the
+    // commit. A drain that lands while this request waits for its allocation
+    // must refuse the start instead of launching a VM into a paused fleet.
+    await assertAgentKvmRunsOpen(env.DB, {
+      ...(input.allowDrainedAdminProof
+        ? { allowDrainedAdminProof: true }
+        : {}),
+    });
+    const outcome = await commitAdmissionBatch({
+      run: { ...run, hostId: allocated.hostId },
+      sshKeyRows,
+      runtimeVms: runtimeVmRows,
+      accessKeys,
+      desiredVms,
+      desired: allocated,
+      bootCpuMillis,
+      steadyCpuMillis,
+      reservationResources,
+      leaseExpiresAt,
+      betaAdmission: input.betaAdmission,
+      ...(input.allowDrainedAdminProof
+        ? { allowDrainedAdminProof: true }
+        : {}),
+      now: Date.now(),
+    });
+    if (outcome.ok) {
+      try {
+        await assertAdmissionStillActive({
+          userId: input.userId,
+          runId,
+          hostId: allocated.hostId,
+          betaAdmission: input.betaAdmission,
+        });
+      } catch (error) {
+        await cancelAdmittedRun({
+          runId,
+          userId: input.userId,
+          hostId: allocated.hostId,
+          vms: provisionedState,
+        });
+        throw error;
+      }
+      return {
+        accepted: true,
+        runId,
+        scenarioId: scenario.scenarioId,
+        acceptedAt: createdAt,
+        reused: false,
+        hostId: allocated.hostId,
+        deliveryHint: deliveryHint(allocated.hostId),
+      };
+    }
+    if (outcome.reason === "duplicate_key") {
+      const raced = await loadRunByIdempotencyKey(
+        drizzle(env.DB),
+        input.userId,
+        context.idempotencyKey,
+      );
+      if (raced) {
+        assertReplayMatchesScope(raced.requestScopeJson, context.scope);
+        return {
+          accepted: true,
+          runId: raced.runId,
+          scenarioId: raced.scenarioId,
+          // The loser of the race reports the winner's run, its original
+          // acceptance time, and that this request did not admit a new run.
+          acceptedAt: raced.acceptedAt,
+          reused: true,
+          hostId: raced.hostId,
+          deliveryHint: deliveryHint(raced.hostId),
+        };
+      }
+      throw appError(
+        409,
+        "idempotency_key_conflict",
+        "this Idempotency-Key was used for a different start request",
+      );
+    }
+    if (outcome.reason === "cas_lost") {
+      // A lost compare-and-set is usually just contention, but a drain or a
+      // revoked admission that landed in the same window outranks it. Without
+      // this check the final attempt reports a retryable 409 and hides a fence
+      // that no retry can pass. It runs only after a failed attempt, so the
+      // normal path pays nothing for it.
+      await assertAdmissionRefusalPriority({
+        userId: input.userId,
+        betaAdmission: input.betaAdmission,
+        ...(input.allowDrainedAdminProof
+          ? { allowDrainedAdminProof: true }
+          : {}),
+      });
+      if (attempt < ADMISSION_CAS_ATTEMPTS) {
+        continue;
+      }
+      throw appError(
+        409,
+        "scenario_host_capacity_contended",
+        "scenario capacity changed during admission; retry the start",
+      );
+    }
+    if (outcome.reason === "error") {
+      throw outcome.error;
+    }
+    throw appError(
+      409,
+      "scenario_host_capacity_contended",
+      "scenario capacity changed during admission; retry the start",
+    );
+  }
+  throw appError(
+    409,
+    "scenario_host_capacity_contended",
+    "scenario capacity changed during admission; retry the start",
+  );
+}
+
+function runtimeVmSpecsFromScenarioState(
+  state: RunStateDocument,
+): RuntimeVmSpec[] {
+  return state.vms.map((vm) => {
+    const resources = vm.provisioning.resources;
+    const imageKey = vm.provisioning.imageKey;
+    const imageSha256 = vm.provisioning.imageSha256?.trim() ?? "";
+    if (!resources || !imageKey || !imageSha256) {
+      throw appError(
+        409,
+        "scenario_runtime_spec_incomplete",
+        "scenario VM " +
+          vm.scenarioVmName +
+          " is missing immutable runtime metadata",
+      );
+    }
+    return {
+      vmId: vm.id,
+      ordinal: vm.ordinal,
+      runtimeVmName: vm.runtimeVmName,
+      imageKey,
+      imageSha256,
+      cpuMillis: resources.cpuMillis,
+      memoryMib: resources.memoryMib,
+      diskMib: resources.diskMib,
+    };
+  });
+}
+
+export interface AdmissionHostAllocation {
+  hostId: string;
+  expectedVersion: number;
+  nextVersion: number;
+  nextDocJson: string;
+}
+
+async function allocateAdmissionHost(input: {
+  userId: string;
+  organizationId: string | null;
+  requestedHostId?: string;
+  requiredImages: RequiredScenarioImage[];
+  reservationResources: RuntimeResourceDemand;
+  bootCpuMillis: number;
+  now: number;
+  desiredVms: DesiredVmV2[];
+  guestTools: DesiredGuestToolsV1;
+}): Promise<AdmissionHostAllocation> {
+  return traceOperation("scenario.allocate", async () => {
+    let candidateHostIds: string[];
+    if (input.requestedHostId) {
+      await assertScenarioLaunchHostForUser(
+        input.requestedHostId,
+        input.userId,
+        input.requiredImages,
+        input.organizationId,
+      );
+      // No separate capacity precheck: planAdmissionHost reads the desired
+      // version, the reported capacity, and the reservation ledger for this
+      // host under one consistent read order, so a precheck would only repeat
+      // the same D1 reads and then race the commit.
+      candidateHostIds = [input.requestedHostId];
+    } else {
+      const selection = await selectScenarioHosts(
+        input.requiredImages,
+        input.organizationId,
+        input.reservationResources,
+        input.now,
+      );
+      if (!selection.ok) {
+        throw appError(
+          409,
+          selection.reason === "image_not_ready"
+            ? "image_not_ready"
+            : "scenario_host_unavailable",
+          selection.reason === "image_not_ready"
+            ? "scenario images are not ready on any available host"
+            : selection.reason === "resource_capacity"
+              ? "no scenario host has enough CPU, memory, and worst-case disk capacity"
+              : "no scenario host available",
+        );
+      }
+      candidateHostIds = selection.hostIds;
+    }
+
+    // Order matters here for correctness, not for style.
+    //
+    // The desired-state version of a candidate is read FIRST, and the host's
+    // reported capacity and reservation ledger only after it. The commit batch
+    // compares and sets that version, so an admission that commits in between
+    // bumps the version, this request's compare-and-set fails, and it retries
+    // with fresh reads, including a fresh capacity read.
+    //
+    // Reading the version after the capacity snapshot would let two concurrent
+    // starts both charge the same free capacity: both would read the ledger at
+    // one version, and the loser's compare-and-set would still succeed on the
+    // version it read after the winner's commit.
+    const allocation = await planAdmissionHost({
+      candidateHostIds,
+      now: input.now,
+      bootCpuMillis: input.bootCpuMillis,
+      reservationResources: input.reservationResources,
+      desiredVms: input.desiredVms,
+      guestTools: input.guestTools,
+    });
+    if (!allocation) {
+      throw appError(
+        409,
+        "scenario_host_unavailable",
+        input.requestedHostId
+          ? "host does not have enough CPU, memory, and worst-case disk capacity"
+          : "no scenario host can provide strict CPU isolation",
+      );
+    }
+    return allocation;
+  });
+}
+
+/**
+ * Picks the first candidate that can hold this run and returns its desired
+ * state under the version the commit batch must compare and set.
+ *
+ * The per-candidate read order is the capacity fence:
+ *
+ * 1. the desired-state version (the compare-and-set anchor);
+ * 2. the reported capacity and the reservation ledger for that host;
+ * 3. the boot-quota check and the generic resource check;
+ * 4. the desired-state draft that carries this run's VMs.
+ *
+ * A candidate that fails any check is skipped without writing anything, so a
+ * refused candidate cannot publish a version bump that other admissions would
+ * then have to retry against.
+ */
+async function planAdmissionHost(input: {
+  candidateHostIds: readonly string[];
+  now: number;
+  bootCpuMillis: number;
+  reservationResources: RuntimeResourceDemand;
+  desiredVms: DesiredVmV2[];
+  guestTools: DesiredGuestToolsV1;
+}): Promise<AdmissionHostAllocation | null> {
+  const db = drizzle(env.DB);
+  for (const hostId of [...new Set(input.candidateHostIds)]) {
+    const current = await loadOrCreateHostDesiredState(db, hostId, input.now);
+    const capacity = await loadHostCpuReservationCapacity(db, hostId);
+    if (!capacity) {
+      continue;
+    }
+    if (input.bootCpuMillis > capacity.availableCpuMillis) {
+      continue;
+    }
+    const report = await loadHostReportOrNull(hostId);
+    if (!report) {
+      continue;
+    }
+    const snapshot = await loadActiveRuntimeResourceSnapshot(input.now, [
+      hostId,
+    ]);
+    const available = availableRuntimeHostResources({
+      hostId,
+      report,
+      snapshot,
+    });
+    if (
+      !available ||
+      !runtimeResourcesFit(input.reservationResources, available)
+    ) {
+      continue;
+    }
+    const next = mutateDesiredState(
+      current,
+      (draft) => {
+        upsertDesiredGuestTools(draft, input.guestTools);
+        for (const desiredVm of input.desiredVms) {
+          upsertDesiredCachedImage(draft, {
+            image_key: desiredVm.image_key,
+            image_id: desiredVm.image_id,
+          });
+          upsertDesiredVm(draft, desiredVm);
+        }
+      },
+      { nowUnixMs: input.now },
+    );
+    if (next === current) {
+      continue;
+    }
+    return {
+      hostId,
+      expectedVersion: current.version,
+      nextVersion: next.version,
+      nextDocJson: JSON.stringify(next),
+    };
+  }
+  return null;
+}
+
+/** Reads one host's last bridge report, or null when it has never reported. */
+async function loadHostReportOrNull(
+  hostId: string,
+): Promise<HostStateReportV2 | null> {
+  const row = await env.DB.prepare(
+    "SELECT report_json FROM host_actual_state WHERE host_id = ?1",
+  )
+    .bind(hostId)
+    .first<{ report_json: string }>();
+  if (!row) {
+    return null;
+  }
+  try {
+    return JSON.parse(row.report_json) as HostStateReportV2;
+  } catch {
+    return null;
+  }
+}
+export interface AdmissionCommitInput {
+  run: typeof scenarioRuns.$inferInsert & { hostId: string };
+  sshKeyRows: Array<typeof scenarioRunSshKeys.$inferInsert>;
+  runtimeVms: Array<RuntimeVmSpec & { runtimeVmId: string }>;
+  accessKeys: Array<{ ciphertextB64: string; ivB64: string }>;
+  desiredVms: DesiredVmV2[];
+  desired: AdmissionHostAllocation;
+  bootCpuMillis: number;
+  steadyCpuMillis: number;
+  reservationResources: RuntimeResourceDemand;
+  leaseExpiresAt: number | null;
+  betaAdmission: BetaAdmissionEpoch;
+  /** Administrative proof may admit a run while the cut-over gate is drained. */
+  allowDrainedAdminProof?: boolean;
+  now: number;
+}
+
+type AdmissionCommitOutcome =
+  | { ok: true }
+  | { ok: false; reason: "cas_lost" }
+  | { ok: false; reason: "duplicate_key" }
+  | { ok: false; reason: "error"; error: unknown };
+
+async function commitAdmissionBatch(
+  input: AdmissionCommitInput,
+): Promise<AdmissionCommitOutcome> {
+  let results: D1Result<unknown>[];
+  const batch = admissionStatements(input);
+  try {
+    results = await env.DB.batch(batch.statements);
+  } catch (error) {
+    if (errorChainMatches(error, /runtime_executions_generation_positive/)) {
+      return { ok: false, reason: "cas_lost" };
+    }
+    // SQLite reports the violated columns, not the index name, so both forms
+    // are matched. Without the column form this branch never fired and a
+    // same-key race surfaced as a false active-run conflict.
+    if (
+      errorChainMatches(
+        error,
+        /scenario_runs_request_idempotency_uidx|UNIQUE constraint failed.*request_idempotency_key/,
+      )
+    ) {
+      return { ok: false, reason: "duplicate_key" };
+    }
+    // A same-key race can be rejected by a different unique constraint than
+    // the idempotency index: the loser's run row also collides with the
+    // one-active-run index. The key is therefore re-read before such a
+    // failure is reported as a conflict, so the loser replays the winner's
+    // run instead of returning a false "you already have an active run".
+    if (isActiveKeyUniqueViolation(error)) {
+      if (await runExistsForIdempotencyKey(input)) {
+        return { ok: false, reason: "duplicate_key" };
+      }
+      return { ok: false, reason: "error", error: activeRunConflictError() };
+    }
+    return { ok: false, reason: "error", error };
+  }
+  if (rowCount(results[batch.runGateIndex]) === 0) {
+    // The run insert selects through the live admission epoch, the enabled
+    // host, the idempotency guard, and the cut-over gate. Zero rows means an
+    // anchor refused and D1 rolled the whole batch back, so report the anchor
+    // that actually refused instead of a generic error.
+    return { ok: false, reason: "error", error: await admissionRefusal(input) };
+  }
+  return { ok: true };
+}
+
+/**
+ * True when the run row of this exact idempotency key is already committed.
+ * It is the authority that decides whether a failed attempt was a race against
+ * the same key rather than a genuine conflict.
+ */
+async function runExistsForIdempotencyKey(
+  input: AdmissionCommitInput,
+): Promise<boolean> {
+  const stored = await loadRunByIdempotencyKey(
+    drizzle(env.DB),
+    input.run.userId,
+    input.run.requestIdempotencyKey ?? "",
+  );
+  return stored !== null;
+}
+
+/**
+ * Names the anchor that refused the run insert. A still-active admission epoch
+ * is the only refusal without its own error, so it means the cut-over gate
+ * drained inside the commit window.
+ */
+async function admissionRefusal(input: AdmissionCommitInput) {
+  await assertAdmissionRefusalPriority({
+    userId: input.run.userId,
+    betaAdmission: input.betaAdmission,
+    ...(input.allowDrainedAdminProof
+      ? { allowDrainedAdminProof: true }
+      : {}),
+  });
+  return scenarioStartAdmissionChanged();
+}
+
+/**
+ * Raises the refusal that outranks a lost compare-and-set or a refused insert,
+ * from fresh reads. A drained cut-over gate is a 503 and a revoked admission
+ * epoch is a 403; both are final, while the capacity conflict is retryable.
+ * Without this ordering a client would keep retrying a fence that cannot pass.
+ */
+export async function assertAdmissionRefusalPriority(input: {
+  userId: string;
+  betaAdmission: BetaAdmissionEpoch;
+  allowDrainedAdminProof?: boolean;
+}): Promise<void> {
+  await assertAgentKvmRunsOpen(env.DB, {
+    ...(input.allowDrainedAdminProof
+      ? { allowDrainedAdminProof: true }
+      : {}),
+  });
+  await assertAdmissionActive(input.userId, input.betaAdmission);
+}
+
+function rowCount(result: D1Result<unknown> | undefined): number {
+  const rows = result?.results;
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
+export interface AdmissionBatch {
+  statements: D1PreparedStatement[];
+  /**
+   * Index of the statement whose insertion is the admission gate. Zero rows
+   * there means the run was refused, and the abort sentinel rolls the whole
+   * batch back.
+   */
+  runGateIndex: number;
+}
+
+/** @internal Exported for adversarial D1-boundary tests. */
+export function admissionStatements(input: AdmissionCommitInput): AdmissionBatch {
+  const run = input.run;
+  const statements = [
+    // The runtime execution is inserted before the run row because the run
+    // row references it. Both carry the same admission guard, so a revoked
+    // epoch refuses both and the abort sentinel below rolls back anything
+    // else that already landed in this transaction.
+    runtimeExecutionStatement(run, input),
+    insertRunStatement(run, input),
+    runRefusedSentinelStatement(run, input),
+    ...sshKeyStatements(run, input.sshKeyRows, input.betaAdmission),
+    desiredStateCasStatement(run, input),
+    casSentinelStatement(run),
+    cpuQuotaStatement(run, input),
+    ...runtimeVmStatements(run, input),
+    resourceReservationStatement(run, input),
+    activeSlotStatement(run),
+  ];
+  return { statements, runGateIndex: 1 };
+}
+
+const RUN_INSERT_COLUMNS = [
+  "run_id",
+  "user_id",
+  "organization_id",
+  "runtime_execution_id",
+  "host_id",
+  "scenario_id",
+  "scenario_name",
+  "course_scope_key",
+  "course_id",
+  "course_title",
+  "lecture_id",
+  "lecture_title",
+  "lecture_summary",
+  "lecture_body_markdown",
+  "lecture_ordinal",
+  "lecture_count",
+  "title",
+  "tagline",
+  "briefing_markdown",
+  "objectives_json",
+  "difficulty",
+  "estimated_minutes",
+  "tags_json",
+  "hints_json",
+  "solution_markdown",
+  "revealed_hints_json",
+  "solution_revealed_at",
+  "solution_assisted",
+  "vm_count",
+  "state",
+  "state_rank",
+  "active_key",
+  "request_idempotency_key",
+  "request_scope_json",
+  "state_json",
+  "archive_entered_at",
+  "delete_requested_at",
+  "solved_at",
+  "completed_at",
+  "failed_at",
+  "hidden_at",
+  "created_at",
+  "updated_at",
+];
+
+/**
+ * The cut-over gate travels inside the insert so a drain that lands in the
+ * commit window refuses the run instead of racing the fleet's pause. An
+ * administrative proof start is the one caller that may bypass it.
+ */
+function drainGateCondition(allowDrainedAdminProof: boolean | undefined) {
+  return allowDrainedAdminProof
+    ? ""
+    : " AND NOT EXISTS (SELECT 1 FROM runtime_operation_gates gate" +
+        " WHERE gate.key = 'image_cutover' AND gate.state = 'drained')";
+}
+
+function insertRunStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  input: AdmissionCommitInput,
+): D1PreparedStatement {
+  const betaAdmission = input.betaAdmission;
+  const values: Array<string | number | null> = [
+    run.runId,
+    run.userId,
+    run.organizationId ?? null,
+    run.runtimeExecutionId ?? null,
+    run.scenarioId,
+    run.scenarioName,
+    run.courseScopeKey ?? null,
+    run.courseId ?? null,
+    run.courseTitle ?? null,
+    run.lectureId ?? null,
+    run.lectureTitle ?? null,
+    run.lectureSummary ?? null,
+    run.lectureBodyMarkdown ?? null,
+    run.lectureOrdinal ?? null,
+    run.lectureCount ?? null,
+    run.title,
+    run.tagline,
+    run.briefingMarkdown,
+    run.objectivesJson,
+    run.difficulty,
+    run.estimatedMinutes,
+    JSON.stringify(run.tagsJson),
+    JSON.stringify(run.hintsJson),
+    run.solutionMarkdown,
+    JSON.stringify(run.revealedHintsJson ?? []),
+    run.solutionRevealedAt ?? null,
+    run.solutionAssisted ? 1 : 0,
+    run.vmCount,
+    run.state,
+    run.stateRank,
+    run.activeKey ?? null,
+    run.requestIdempotencyKey ?? null,
+    run.requestScopeJson ? JSON.stringify(run.requestScopeJson) : null,
+    run.stateJson,
+    run.archiveEnteredAt ?? null,
+    run.deleteRequestedAt ?? null,
+    run.solvedAt ?? null,
+    run.completedAt ?? null,
+    run.failedAt ?? null,
+    run.hiddenAt ?? null,
+    run.createdAt as number,
+    run.updatedAt as number,
+  ];
+  const hostParam = values.length + 1;
+  const organizationParam = values.length + 2;
+  const userParam = values.length + 3;
+  const inviteParam = values.length + 4;
+  const leaseParam = values.length + 5;
+  const grantedAtParam = values.length + 6;
+  // host_id is the fifth column and takes the host row id, so the host join
+  // supplies that one expression and the bound values supply the rest.
+  const hostIdColumnIndex = RUN_INSERT_COLUMNS.indexOf("host_id");
+  const placeholders = values.flatMap((_, index) => {
+    const bound = "?" + String(index + 1);
+    return index === hostIdColumnIndex ? ["host.id", bound] : [bound];
+  });
+  const sqlText =
+    "INSERT INTO scenario_runs (" +
+    RUN_INSERT_COLUMNS.join(", ") +
+    ") SELECT " +
+    placeholders.join(", ") +
+    " FROM agent_hosts host" +
+    " WHERE host.id = ?" +
+    String(hostParam) +
+    " AND host.disabled = 0 AND host.role = 'agent'" +
+    " AND host.scenario_enabled = 1" +
+    " AND ((?" +
+    String(organizationParam) +
+    " IS NULL AND host.organization_id IS NULL) OR host.organization_id = ?" +
+    String(organizationParam) +
+    ")" +
+    drainGateCondition(input.allowDrainedAdminProof) +
+    " AND EXISTS (SELECT 1 FROM access_allowlist access" +
+    " WHERE access.user_id = ?" +
+    String(userParam) +
+    " AND access.state = 'active'" +
+    " AND access.source_invite_id = ?" +
+    String(inviteParam) +
+    " AND access.source_lease_id = ?" +
+    String(leaseParam) +
+    " AND access.granted_at = ?" +
+    String(grantedAtParam) +
+    ")" +
+    " RETURNING run_id";
+  return env.DB.prepare(sqlText).bind(
+    ...values,
+    run.hostId,
+    run.organizationId ?? null,
+    run.userId,
+    betaAdmission.sourceInviteId,
+    betaAdmission.sourceLeaseId,
+    betaAdmission.grantedAt,
+  );
+}
+
+function sshKeyStatements(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  sshKeyRows: Array<typeof scenarioRunSshKeys.$inferInsert>,
+  betaAdmission: BetaAdmissionEpoch,
+): D1PreparedStatement[] {
+  return sshKeyRows.map((key) =>
+    env.DB.prepare(
+      "INSERT INTO scenario_run_ssh_keys (" +
+        "id, run_id, vm_id, runtime_vm_name, public_key_openssh," +
+        " private_key_ciphertext_b64, private_key_iv_b64, created_at" +
+        ") SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8" +
+        " FROM scenario_runs run" +
+        " WHERE run.run_id = ?2 AND run.user_id = ?9 AND run.host_id = ?10" +
+        " AND run.state = 'provisioning'" +
+        " AND EXISTS (SELECT 1 FROM access_allowlist access" +
+        " WHERE access.user_id = ?9 AND access.state = 'active'" +
+        " AND access.source_invite_id = ?11" +
+        " AND access.source_lease_id = ?12" +
+        " AND access.granted_at = ?13)",
+    ).bind(
+      key.id,
+      key.runId,
+      key.vmId,
+      key.runtimeVmName,
+      key.publicKeyOpenssh,
+      key.privateKeyCiphertextB64,
+      key.privateKeyIvB64,
+      key.createdAt,
+      run.userId,
+      run.hostId,
+      betaAdmission.sourceInviteId,
+      betaAdmission.sourceLeaseId,
+      betaAdmission.grantedAt,
+    ),
+  );
+}
+
+function cpuQuotaStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  input: AdmissionCommitInput,
+): D1PreparedStatement {
+  // The boot quota is the strict-isolation record for this run. It is written
+  // under the same desired-state version fence as the run, so a lost
+  // compare-and-set leaves neither the run nor the quota behind.
+  return admissionCpuQuotaStatement({
+    d1: env.DB,
+    runId: run.runId,
+    userId: run.userId,
+    hostId: run.hostId,
+    bootCpuMillis: input.bootCpuMillis,
+    steadyCpuMillis: input.steadyCpuMillis,
+    desiredVersion: input.desired.nextVersion,
+    nowUnixMs: input.now,
+  });
+}
+
+function desiredStateCasStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  input: AdmissionCommitInput,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    "UPDATE host_desired_state" +
+      " SET version = ?1, doc_json = ?2, updated_at = ?3" +
+      " WHERE host_id = ?4 AND version = ?5" +
+      " AND EXISTS (SELECT 1 FROM scenario_runs run" +
+      " WHERE run.run_id = ?6 AND run.host_id = ?4)",
+  ).bind(
+    input.desired.nextVersion,
+    input.desired.nextDocJson,
+    input.now,
+    run.hostId,
+    input.desired.expectedVersion,
+    run.runId,
+  );
+}
+
+function casSentinelStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+): D1PreparedStatement {
+  // A deliberately invalid generation is the abort sentinel. The generated
+  // CHECK constraint aborts the entire batch when it is selected.
+  //
+  // The condition is the presence of this run's own VMs in the committed
+  // document, not the version number. Two concurrent admissions of one host
+  // both compute the same next version, so a version comparison stays silent
+  // for the loser even though its compare-and-set never landed. The loser
+  // would then commit a run whose VMs no host ever receives: the capacity
+  // fence would be a no-op and the run would boot nothing.
+  return env.DB.prepare(
+    "INSERT INTO runtime_executions (" +
+      "id, user_id, organization_id, host_id, provider_kind," +
+      " provider_connection_id, domain_kind, domain_id, generation," +
+      " source_execution_id, checkpoint_id, state, lease_expires_at," +
+      " archive_requested_at, ended_at, created_at, updated_at" +
+      ") SELECT '__admission_desired_cas__:' || run.run_id, run.user_id," +
+      " run.organization_id, run.host_id, 'agent_kvm', NULL, 'scenario'," +
+      " run.run_id, 0, NULL, NULL, 'queued', NULL, NULL, NULL," +
+      " run.created_at, run.updated_at" +
+      " FROM scenario_runs run" +
+      " WHERE run.run_id = ?1" +
+      " AND NOT EXISTS (SELECT 1 FROM host_desired_state desired," +
+      " json_each(desired.doc_json, '$.vms') vm" +
+      " WHERE desired.host_id = run.host_id" +
+      " AND json_extract(vm.value, '$.run_id') = run.run_id)",
+  ).bind(run.runId);
+}
+
+function runtimeExecutionStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  input: AdmissionCommitInput,
+): D1PreparedStatement {
+  // The execution is inserted before the run row because the run row
+  // references it. Both statements carry the same admission guard, so a
+  // revoked epoch refuses both.
+  return env.DB.prepare(
+    "INSERT INTO runtime_executions (" +
+      "id, user_id, organization_id, host_id, provider_kind," +
+      " provider_connection_id, domain_kind, domain_id, generation," +
+      " source_execution_id, checkpoint_id, state, lease_expires_at," +
+      " archive_requested_at, ended_at, created_at, updated_at" +
+      ") SELECT coalesce(?1, ?2), ?3, ?4, ?5, 'agent_kvm', NULL," +
+      " 'scenario', ?2, 1, NULL, NULL, 'provisioning', ?6," +
+      " NULL, NULL, ?7, ?7" +
+      " FROM agent_hosts host" +
+      " WHERE host.id = ?5 AND host.disabled = 0" +
+      " AND ((?4 IS NULL AND host.organization_id IS NULL)" +
+      " OR host.organization_id = ?4)" +
+      " AND EXISTS (SELECT 1 FROM access_allowlist access" +
+      " WHERE access.user_id = ?3 AND access.state = 'active'" +
+      " AND access.source_invite_id = ?8" +
+      " AND access.source_lease_id = ?9" +
+      " AND access.granted_at = ?10)",
+  ).bind(
+    run.runtimeExecutionId ?? null,
+    run.runId,
+    run.userId,
+    run.organizationId ?? null,
+    run.hostId,
+    input.leaseExpiresAt,
+    input.now,
+    input.betaAdmission.sourceInviteId,
+    input.betaAdmission.sourceLeaseId,
+    input.betaAdmission.grantedAt,
+  );
+}
+
+/**
+ * Aborts the batch when the admission gate refused the run while the
+ * admission epoch itself is still active. That combination means an anchor
+ * other than the epoch refused the insert - a duplicate idempotency key or an
+ * occupied active slot - and a partial admission must not survive.
+ */
+function runRefusedSentinelStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  input: AdmissionCommitInput,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    "INSERT INTO runtime_executions (" +
+      "id, user_id, organization_id, host_id, provider_kind," +
+      " provider_connection_id, domain_kind, domain_id, generation," +
+      " source_execution_id, checkpoint_id, state, lease_expires_at," +
+      " archive_requested_at, ended_at, created_at, updated_at" +
+      ") SELECT '__admission_run_refused__:' || ?1, ?2, ?3, ?4," +
+      " 'agent_kvm', NULL, 'scenario', ?1, 0, NULL, NULL, 'queued'," +
+      " NULL, NULL, NULL, ?5, ?5" +
+      " WHERE NOT EXISTS (SELECT 1 FROM scenario_runs run" +
+      " WHERE run.run_id = ?1)" +
+      " AND EXISTS (SELECT 1 FROM access_allowlist access" +
+      " WHERE access.user_id = ?2 AND access.state = 'active'" +
+      " AND access.source_invite_id = ?6" +
+      " AND access.source_lease_id = ?7" +
+      " AND access.granted_at = ?8)",
+  ).bind(
+    run.runId,
+    run.userId,
+    run.organizationId ?? null,
+    run.hostId,
+    input.now,
+    input.betaAdmission.sourceInviteId,
+    input.betaAdmission.sourceLeaseId,
+    input.betaAdmission.grantedAt,
+  );
+}
+function runtimeVmStatements(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  input: AdmissionCommitInput,
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [];
+  for (const [index, vm] of input.runtimeVms.entries()) {
+    statements.push(
+      env.DB.prepare(
+        "INSERT INTO runtime_vms (" +
+          "id, execution_id, vm_id, ordinal, runtime_vm_name," +
+          " image_key_json, image_sha256, cpu_millis, memory_mib, disk_mib," +
+          " created_at, updated_at" +
+          ") SELECT ?1, run.runtime_execution_id, ?2, ?3, ?4, ?5, ?6, ?7," +
+          " ?8, ?9, ?10, ?10" +
+          " FROM scenario_runs run" +
+          " WHERE run.run_id = ?11 AND run.runtime_execution_id = ?12" +
+          " AND run.state = 'provisioning'",
+      ).bind(
+        vm.runtimeVmId,
+        vm.vmId,
+        vm.ordinal,
+        vm.runtimeVmName,
+        JSON.stringify(vm.imageKey),
+        vm.imageSha256,
+        vm.cpuMillis,
+        vm.memoryMib,
+        vm.diskMib,
+        input.now,
+        run.runId,
+        run.runId,
+      ),
+    );
+    const accessKey = input.accessKeys[index];
+    const publicKey =
+      input.desiredVms.find((desired) => desired.vm_name === vm.runtimeVmName)
+        ?.ssh_authorized_keys_openssh[0] ?? "";
+    if (!accessKey || !publicKey) {
+      throw new Error("runtime VM access key material is incomplete");
+    }
+    statements.push(
+      env.DB.prepare(
+        "INSERT INTO runtime_vm_access_keys (" +
+          "runtime_vm_id, execution_id, public_key_openssh," +
+          " private_key_ciphertext_b64, private_key_iv_b64, created_at" +
+          ") SELECT ?1, run.runtime_execution_id, ?2, ?3, ?4, ?5" +
+          " FROM scenario_runs run" +
+          " WHERE run.run_id = ?6 AND run.runtime_execution_id = ?7" +
+          " AND run.state = 'provisioning'",
+      ).bind(
+        vm.runtimeVmId,
+        publicKey,
+        accessKey.ciphertextB64,
+        accessKey.ivB64,
+        input.now,
+        run.runId,
+        run.runId,
+      ),
+    );
+  }
+  return statements;
+}
+
+function resourceReservationStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+  input: AdmissionCommitInput,
+): D1PreparedStatement {
+  return admissionResourceReservationStatement({
+    d1: env.DB,
+    runId: run.runId,
+    hostId: run.hostId,
+    resources: input.reservationResources,
+    expiresAt: input.now + RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS,
+    nowUnixMs: input.now,
+  });
+}
+
+function activeSlotStatement(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+): D1PreparedStatement {
+  // No conflict handler is intentional: a slot owned by another runtime
+  // aborts the whole batch, exactly like the previous projection.
+  return env.DB.prepare(
+    "INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)" +
+      " SELECT run.user_id, run.runtime_execution_id, run.created_at" +
+      " FROM scenario_runs run" +
+      " WHERE run.run_id = ?1 AND run.active_key IS NOT NULL" +
+      " AND run.runtime_execution_id IS NOT NULL",
+  ).bind(run.runId);
+}

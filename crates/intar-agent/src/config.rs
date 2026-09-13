@@ -174,12 +174,21 @@ impl Default for ImageRegistryConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ImageCacheConfig {
     /// Maximum bytes for compressed chunks, manifests, tools disks, and boot
-    /// artifacts in the unprivileged download cache, or unbounded.
-    pub max_bytes: Option<u64>,
+    /// artifacts in the unprivileged download cache. The default is 50 GiB.
+    /// Pinned entries are never deleted to reach this budget.
+    pub max_bytes: u64,
+}
+
+impl Default for ImageCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: 50 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 pub fn redact_url_userinfo(url: &str) -> String {
@@ -391,7 +400,7 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
         );
     }
 
-    if cfg.image_cache.max_bytes == Some(0) {
+    if cfg.image_cache.max_bytes == 0 {
         anyhow::bail!(
             "config value image_cache.max_bytes must be >= 1 when set\n\nExample config:\n{EXAMPLE_TOML}"
         );
@@ -576,7 +585,7 @@ max_bytes = 53687091200
         )?;
 
         let cfg = load(&path)?;
-        assert_eq!(cfg.image_cache.max_bytes, Some(53_687_091_200));
+        assert_eq!(cfg.image_cache.max_bytes, 53_687_091_200);
         Ok(())
     }
 

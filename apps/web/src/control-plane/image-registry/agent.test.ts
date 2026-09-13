@@ -137,7 +137,7 @@ describe("image registry agent routes", () => {
           image_format: "raw_chunks_v1",
           image_virtual_size_bytes: 8_589_934_592,
           chunk_manifest_sha256: "d".repeat(64),
-          guest_bootstrap_abi: 1,
+          guest_bootstrap_abi: 2,
           boot: {
             kernel_sha256: validKernelSha256,
             initrd_sha256: validInitrdSha256,
@@ -562,7 +562,7 @@ describe("image registry agent routes", () => {
                   image_format: "raw_chunks_v1",
                   image_virtual_size_bytes: 4_294_967_296,
                   chunk_manifest_sha256: chunkManifestSha256,
-                  guest_bootstrap_abi: 1,
+                  guest_bootstrap_abi: 2,
                   boot: {
                     kernel_sha256: kernelSha256,
                     initrd_sha256: initrdSha256,
@@ -820,7 +820,7 @@ describe("image registry agent routes", () => {
                   image_format: "raw_chunks_v1",
                   image_virtual_size_bytes: 4_294_967_296,
                   chunk_manifest_sha256: "d".repeat(64),
-                  guest_bootstrap_abi: 1,
+                  guest_bootstrap_abi: 2,
                   boot: {
                     kernel_sha256: artifactSha256,
                     initrd_sha256: "c".repeat(64),

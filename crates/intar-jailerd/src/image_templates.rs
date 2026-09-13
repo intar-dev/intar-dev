@@ -108,6 +108,8 @@ pub(super) fn validate_prepared_launch_template(
         root_disk: request.launch.artifacts.root_disk.clone(),
         kernel: request.launch.artifacts.kernel.clone(),
         initrd: request.launch.artifacts.initrd.clone(),
+        // This request is a validation identity only; it never prepares work.
+        request_class: RequestClass::Foreground,
     };
     let metadata = validate_existing_image_template(config, &identity)?;
     let expected = prepared_image_result(&metadata);
@@ -125,6 +127,7 @@ pub(super) fn copy_template_source(
     source: &ArtifactSource,
     destination: &Path,
     expected_bytes: Option<u64>,
+    lane: Option<&PrepareLane>,
 ) -> Result<ImageTemplateArtifactV2> {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -158,6 +161,12 @@ pub(super) fn copy_template_source(
             output.seek(SeekFrom::Current(length as i64))?;
         } else {
             output.write_all(&buffer[..length])?;
+        }
+        if let Some(lane) = lane {
+            // Charge the delta of this read and give the block away, before
+            // the loop can hold its locks across a boot. The digest still
+            // covers every byte read, so the yield cannot weaken it.
+            lane.charge(length as u64)?;
         }
     }
     output.set_len(bytes)?;
@@ -210,6 +219,7 @@ pub(super) fn copy_template_source(
 pub(super) fn prepare_image_template(
     config: &JailerdConfig,
     request: &PrepareImageV2Request,
+    lane: &PrepareLane,
 ) -> Result<PreparedImageV2Result> {
     request
         .validate()
@@ -274,13 +284,21 @@ pub(super) fn prepare_image_template(
             &request.root_disk,
             &temporary.join("root.raw"),
             Some(request.virtual_size_bytes),
+            Some(lane),
         )?;
-        let kernel =
-            copy_template_source(config, &request.kernel, &temporary.join("kernel"), None)?;
+        let kernel = copy_template_source(
+            config,
+            &request.kernel,
+            &temporary.join("kernel"),
+            None,
+            None,
+        )?;
         let initrd = request
             .initrd
             .as_ref()
-            .map(|source| copy_template_source(config, source, &temporary.join("initrd"), None))
+            .map(|source| {
+                copy_template_source(config, source, &temporary.join("initrd"), None, None)
+            })
             .transpose()?;
         let metadata = ImageTemplateMetadataV2 {
             schema_version: IMAGE_TEMPLATE_METADATA_V2,

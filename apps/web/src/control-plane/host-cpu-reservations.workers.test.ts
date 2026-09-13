@@ -7,9 +7,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   HOST_CPU_RESERVATION_TTL_MS,
   bootCpuReservationForSteadyVms,
-  commitHostCpuReservation,
+  loadHostCpuReservationCapacity,
   reconcileHostCpuReservations,
-  reserveHostCpuInD1,
   strictCpuCapacity,
 } from "@/control-plane/host-cpu-reservations";
 import {
@@ -39,34 +38,6 @@ describe("host CPU reservations", () => {
     expect(() => bootCpuReservationForSteadyVms([])).toThrow(
       "scenario boot CPU reservation is invalid",
     );
-  });
-
-  it("rejects the legacy aggregate reservation request instead of falling back", async () => {
-    const hostId = "host-no-capacity-fallback";
-    await seedStrictCpuHost(hostId, 4_000);
-    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
-    const response = await stub.fetch(
-      "http://host-runtime/_internal/cpu-reservations/reserve",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          hostId,
-          runId: "legacy-reservation",
-          cpuMillis: 1_000,
-        }),
-      },
-    );
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: "steadyCpuMillisByVm is required",
-    });
-    await expect(
-      drizzle(env.DB)
-        .select()
-        .from(hostCpuReservations)
-        .where(eq(hostCpuReservations.hostId, hostId)),
-    ).resolves.toHaveLength(0);
   });
 
   it("rejects legacy host reports without the complete v3 fast-launch contract", () => {
@@ -119,65 +90,24 @@ describe("host CPU reservations", () => {
     expect(triggers.results).toEqual([]);
   });
 
-  it("serializes concurrent boot reservations and admits exactly eight 125m VMs", async () => {
-    const hostId = "host-eight";
-    await seedStrictCpuHost(hostId, 16_000);
-    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
-
-    const responses = await Promise.all(
-      Array.from({ length: 9 }, (_, index) =>
-        stub.fetch("http://host-runtime/_internal/cpu-reservations/reserve", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            hostId,
-            runId: `run-${index}`,
-            steadyCpuMillisByVm: [125],
-          }),
-        }),
-      ),
-    );
-
-    expect(
-      responses.filter((response) => response.status === 201),
-    ).toHaveLength(8);
-    const rejected = responses.find((response) => response.status === 409);
-    await expect(rejected?.json()).resolves.toMatchObject({
-      ok: false,
-      reason: "boot_capacity_pending",
-      capacity: { availableCpuMillis: 0 },
-    });
-    const rows = await drizzle(env.DB)
-      .select()
-      .from(hostCpuReservations)
-      .where(eq(hostCpuReservations.hostId, hostId));
-    expect(rows).toHaveLength(8);
-    expect(rows.reduce((total, row) => total + row.cpuMillis, 0)).toBe(16_000);
-    expect(rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          steadyCpuMillis: 125,
-          bootCpuMillis: 2_000,
-          quotaPhase: "boot",
-        }),
-      ]),
-    );
-  });
-
   it("commits a pending reservation only after its exact desired VMs survive the caller", async () => {
     const hostId = "host-crash-recovery";
     const runId = "run-survived";
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await expect(
-      reserveHostCpuInD1(db, {
+    await seedBootCpuReservation(db, {
         hostId,
         runId,
-        steadyCpuMillisByVm: [125],
+        steadyCpuMillis: 125,
         nowUnixMs: now,
-      }),
-    ).resolves.toMatchObject({ ok: true, state: "pending" });
+        });
+    await expect(
+      db
+        .select({ state: hostCpuReservations.state })
+        .from(hostCpuReservations)
+        .where(eq(hostCpuReservations.runId, runId)),
+    ).resolves.toMatchObject([{ state: "pending" }]);
     const vmName = `${runId}-vm`;
     await seedRun(
       hostId,
@@ -203,12 +133,12 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 3_000, now);
-    await reserveHostCpuInD1(db, {
+    await seedBootCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillisByVm: [1_000],
+      steadyCpuMillis: 1_000,
       nowUnixMs: now,
-    });
+      });
     await seedRun(
       hostId,
       runId,
@@ -216,20 +146,19 @@ describe("host CPU reservations", () => {
       projectedQuotaState("generation-a", "boot_burst"),
     );
     await seedGenericRuntimeReservation(hostId, runId, now, 2_000);
-    await commitHostCpuReservation(db, { hostId, runId, nowUnixMs: now });
+    await db
+      .update(hostCpuReservations)
+      .set({ state: "committed", expiresAt: null, updatedAt: now })
+      .where(eq(hostCpuReservations.runId, runId));
     await seedRunningDesiredState(hostId, runId, "run-seal-capacity-vm", now);
 
-    await expect(
-      reserveHostCpuInD1(db, {
-        hostId,
-        runId: "run-waiting",
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now + 1,
-      }),
-    ).resolves.toMatchObject({
-      ok: false,
-      reason: "boot_capacity_pending",
-      capacity: { availableCpuMillis: 1_000 },
+    await expect(loadHostCpuReservationCapacity(db, hostId)).resolves.toMatchObject({
+      // 3_000 schedulable minus the run's boot quota of max(1_000 steady,
+      // 2_000 boot) = 1_000. A new run needs its own 2_000 boot quota, so this
+      // host is at boot capacity even though its steady quota is only 1_000.
+      availableCpuMillis: 1_000,
+      effectiveCommittedCpuMillis: 2_000,
+      controlPlaneBootCpuMillis: 2_000,
     });
 
     const quotaVerifiedAt = now + 10;
@@ -285,14 +214,11 @@ describe("host CPU reservations", () => {
         .where(eq(hostResourceReservations.executionId, runId)),
     ).resolves.toEqual([{ cpuMillis: 1_000, state: "committed" }]);
 
-    await expect(
-      reserveHostCpuInD1(db, {
-        hostId,
-        runId: "run-after-seal",
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: quotaVerifiedAt + 3,
-      }),
-    ).resolves.toMatchObject({ ok: true, state: "pending" });
+    await expect(loadHostCpuReservationCapacity(db, hostId)).resolves.toMatchObject({
+      availableCpuMillis: 2_000,
+      effectiveCommittedCpuMillis: 1_000,
+      controlPlaneSteadyCpuMillis: 1_000,
+    });
   });
 
   it("restores conservative boot accounting when fresh steady evidence is missing", async () => {
@@ -301,12 +227,12 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await reserveHostCpuInD1(db, {
+    await seedBootCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillisByVm: [1_000],
+      steadyCpuMillis: 1_000,
       nowUnixMs: now,
-    });
+      });
     await seedRun(
       hostId,
       runId,
@@ -314,7 +240,10 @@ describe("host CPU reservations", () => {
       projectedQuotaState("generation-a", "steady", now + 10, `${runId}-vm`),
     );
     await seedRunningDesiredState(hostId, runId, `${runId}-vm`, now);
-    await commitHostCpuReservation(db, { hostId, runId, nowUnixMs: now });
+    await db
+      .update(hostCpuReservations)
+      .set({ state: "committed", expiresAt: null, updatedAt: now })
+      .where(eq(hostCpuReservations.runId, runId));
     await db
       .update(hostActualState)
       .set({
@@ -369,13 +298,16 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await reserveHostCpuInD1(db, {
+    await seedBootCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillisByVm: [875],
+      steadyCpuMillis: 875,
       nowUnixMs: now,
-    });
-    await commitHostCpuReservation(db, { hostId, runId, nowUnixMs: now });
+      });
+    await db
+      .update(hostCpuReservations)
+      .set({ state: "committed", expiresAt: null, updatedAt: now })
+      .where(eq(hostCpuReservations.runId, runId));
     await db
       .update(hostActualState)
       .set({
@@ -386,20 +318,13 @@ describe("host CPU reservations", () => {
       })
       .where(eq(hostActualState.hostId, hostId));
 
-    await expect(
-      reserveHostCpuInD1(db, {
-        hostId,
-        runId: "run-overcommit",
-        steadyCpuMillisByVm: [1],
-        nowUnixMs: now + 1,
-      }),
-    ).resolves.toMatchObject({
-      ok: false,
-      reason: "boot_capacity_pending",
-      capacity: {
-        effectiveCommittedCpuMillis: 2_125,
-        availableCpuMillis: 0,
-      },
+    await expect(loadHostCpuReservationCapacity(db, hostId)).resolves.toMatchObject({
+      // The committed control-plane quota (2_000 boot) plus the locally
+      // reported VMs that no reservation covers (125 of the 250 reported
+      // millicores) is charged, so no unreserved local quota hides behind the
+      // control-plane row.
+      availableCpuMillis: 0,
+      effectiveCommittedCpuMillis: 2_125,
     });
   });
 
@@ -409,12 +334,12 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await reserveHostCpuInD1(db, {
+    await seedBootCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillisByVm: [500],
+      steadyCpuMillis: 500,
       nowUnixMs: now,
-    });
+      });
 
     await expect(
       reconcileHostCpuReservations(
@@ -437,12 +362,12 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await reserveHostCpuInD1(db, {
+    await seedBootCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillisByVm: [500],
+      steadyCpuMillis: 500,
       nowUnixMs: now,
-    });
+      });
     await seedRun(hostId, runId, now);
     await db
       .update(scenarioRuns)
@@ -471,13 +396,16 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await reserveHostCpuInD1(db, {
+    await seedBootCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillisByVm: [500],
+      steadyCpuMillis: 500,
       nowUnixMs: now,
-    });
-    await commitHostCpuReservation(db, { hostId, runId, nowUnixMs: now });
+      });
+    await db
+      .update(hostCpuReservations)
+      .set({ state: "committed", expiresAt: null, updatedAt: now })
+      .where(eq(hostCpuReservations.runId, runId));
 
     const desired = createEmptyHostDesiredState({ hostId, nowUnixMs: now });
     const desiredAtVersionOne = { ...desired, version: 1 };
@@ -523,6 +451,46 @@ describe("host CPU reservations", () => {
   });
 });
 
+/**
+ * Seeds one pending boot reservation the way admission does it. The HTTP
+ * reservation service is gone, so these tests write the durable row the
+ * admission batch writes and keep their assertions on the reconcile logic.
+ */
+async function seedBootCpuReservation(
+  db: ReturnType<typeof drizzle>,
+  input: {
+    hostId: string;
+    runId: string;
+    steadyCpuMillis: number;
+    bootCpuMillis?: number;
+    nowUnixMs: number;
+    state?: "pending" | "committed";
+    quotaPhase?: "boot" | "steady";
+    expiresAt?: number | null;
+  },
+): Promise<void> {
+  const bootCpuMillis =
+    input.bootCpuMillis ?? Math.max(input.steadyCpuMillis, 2_000);
+  await db.insert(hostCpuReservations).values({
+    runId: input.runId,
+    hostId: input.hostId,
+    cpuMillis: input.quotaPhase === "steady"
+      ? input.steadyCpuMillis
+      : bootCpuMillis,
+    steadyCpuMillis: input.steadyCpuMillis,
+    bootCpuMillis,
+    quotaPhase: input.quotaPhase ?? "boot",
+    state: input.state ?? "pending",
+    expiresAt:
+      input.expiresAt === undefined
+        ? (input.state ?? "pending") === "committed"
+          ? null
+          : input.nowUnixMs + HOST_CPU_RESERVATION_TTL_MS
+        : input.expiresAt,
+    createdAt: input.nowUnixMs,
+    updatedAt: input.nowUnixMs,
+  });
+}
 async function seedStrictCpuHost(
   hostId: string,
   schedulableCpuMillis: number,

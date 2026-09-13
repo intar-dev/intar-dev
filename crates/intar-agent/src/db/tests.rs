@@ -15,9 +15,10 @@ fn test_vm_row() -> VmRow {
         image_key: Some("ubuntu".to_string()),
         image_sha256: Some("1".repeat(64)),
         guest_tools_json: Some(format!(
-            "{{\"tools_disk_sha256\":\"{}\",\"tools_disk_size_bytes\":67108864,\"kino_sha256\":\"{}\",\"bootstrap_abi\":1}}",
+            "{{\"tools_disk_sha256\":\"{}\",\"tools_disk_size_bytes\":67108864,\"kino_sha256\":\"{}\",\"bootstrap_abi\":{}}}",
             "2".repeat(64),
-            "3".repeat(64)
+            "3".repeat(64),
+            intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2
         )),
         created_at_s: 100,
         updated_at_s: 200,

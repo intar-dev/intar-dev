@@ -59,7 +59,10 @@ pub(super) async fn ensure_cached_chunked_image_entry(
             .await
         }
     }))
-    .buffer_unordered(16)
+    // One chunk transfer in flight, so the cache entry leaves a global
+    // transfer slot free for a learner-visible download. A large manifest
+    // never queues hundreds of waiting futures either.
+    .buffer_unordered(budget::BACKGROUND_CHUNK_FANOUT)
     .collect::<Vec<_>>()
     .await;
     for result in downloads {
@@ -242,7 +245,7 @@ fn validate_chunked_launch_descriptor(
         normalize_sha256(&descriptor.image_id).as_deref() == Some(descriptor.image_id.as_str())
             && normalize_sha256(&descriptor.chunk_manifest_sha256).as_deref()
                 == Some(descriptor.chunk_manifest_sha256.as_str())
-            && descriptor.guest_bootstrap_abi == 1,
+            && descriptor.guest_bootstrap_abi == GUEST_BOOTSTRAP_ABI_V2,
         "chunked launch identity is invalid"
     );
     if let Some(expected) = expected_image_id {

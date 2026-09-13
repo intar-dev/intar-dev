@@ -5,8 +5,9 @@ use intar_contracts::{
     },
     catalog::{CourseCatalogSnapshotV2, ScenarioManifestV4},
     stargate::{
-        IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
-        IssueWorkspaceAppSessionResponse,
+        ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
+        IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse,
+        StageTerminalTargetRequest, StageTerminalTargetResponse,
     },
 };
 
@@ -15,6 +16,40 @@ fn stargate_request_fixture_round_trips() {
     assert_round_trip::<IssueTerminalSessionRequest>(include_str!(
         "../fixtures/stargate/issue-terminal-session-request.json"
     ));
+}
+
+#[test]
+fn stargate_stage_request_fixture_round_trips() {
+    assert_round_trip::<StageTerminalTargetRequest>(include_str!(
+        "../fixtures/stargate/stage-terminal-target-request.json"
+    ));
+}
+
+#[test]
+fn stargate_stage_response_fixture_round_trips() {
+    assert_round_trip::<StageTerminalTargetResponse>(include_str!(
+        "../fixtures/stargate/stage-terminal-target-response.json"
+    ));
+}
+
+#[test]
+fn stargate_activate_request_fixture_round_trips() {
+    assert_round_trip::<ActivateTerminalTargetRequest>(include_str!(
+        "../fixtures/stargate/activate-terminal-target-request.json"
+    ));
+}
+
+/// A stage call carries ready data only. A pending shape on that call is a
+/// protocol error, and this test holds the fixture to that rule.
+#[test]
+fn stargate_stage_request_rejects_a_pending_shape() {
+    let mut value: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/stargate/stage-terminal-target-request.json"
+    ))
+    .expect("fixture json");
+    value["target"] = serde_json::json!({ "state": "pending" });
+
+    assert!(serde_json::from_value::<StageTerminalTargetRequest>(value).is_err());
 }
 
 #[test]

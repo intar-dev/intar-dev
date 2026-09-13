@@ -107,7 +107,7 @@ jobs:
             --kino-binary "${TOOLS_DIR}/kino" --output-root "${TOOLS_DIR}" \
             --mke2fs-binary /usr/sbin/mke2fs > "${TOOLS_DIR}/build.json"
           jq 'del(.compressed_disk_path)' "${TOOLS_DIR}/build.json" > "${TOOLS_DIR}/candidate.json"
-          jq -e '.schema_version == 1 and .bootstrap_abi == 1' "${TOOLS_DIR}/candidate.json" >/dev/null
+          jq -e '.schema_version == 1 and .bootstrap_abi == 2' "${TOOLS_DIR}/candidate.json" >/dev/null
           cd "${TOOLS_DIR}"
           disk="$(jq -r .tools_disk_sha256 candidate.json)"
           jq -r '"\(.kino_sha256)  kino", "\(.tools_disk_sha256)  \(.tools_disk_sha256).ext4", "\(.compressed_disk_sha256)  \(.tools_disk_sha256).ext4.zst"' \

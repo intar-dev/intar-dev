@@ -297,6 +297,68 @@ pub(super) fn delete_image_cache_access(conn: &Connection, image_sha256: &str) -
     Ok(())
 }
 
+pub(super) fn load_verified_content(conn: &Connection) -> Result<Vec<CacheVerifyRow>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+SELECT content_sha256, verified_at_ms, bytes_read
+FROM image_cache_verified_content
+ORDER BY content_sha256 ASC;
+"#,
+        )
+        .context("prepare load_verified_content")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CacheVerifyRow {
+                content_sha256: row.get(0)?,
+                verified_at_ms: row.get(1)?,
+                bytes_read: row.get(2)?,
+            })
+        })
+        .context("query image_cache_verified_content")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect image_cache_verified_content")
+}
+
+pub(super) fn upsert_verified_content(conn: &Connection, row: &CacheVerifyRow) -> Result<()> {
+    conn.execute(
+        r#"
+INSERT INTO image_cache_verified_content (
+  content_sha256,
+  verified_at_ms,
+  bytes_read
+) VALUES (
+  ?1, ?2, ?3
+)
+ON CONFLICT(content_sha256) DO UPDATE SET
+  verified_at_ms = excluded.verified_at_ms,
+  bytes_read = excluded.bytes_read,
+"#,
+        params![row.content_sha256, row.verified_at_ms, row.bytes_read,],
+    )
+    .context("upsert verified content")?;
+    Ok(())
+}
+
+/// Completed-verification records for the image cache.
+///
+/// This is the agent-local database, not the web database. Drizzle Kit does
+/// not own this file; `ensure_baseline_schema` creates the tables on open.
+///
+/// The verification table is keyed by the immutable content digest, so a
+/// chunk that two images share gets one row and one completed timestamp.
+pub(super) const CACHE_STATE_SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS image_cache_verified_content (
+  content_sha256 TEXT PRIMARY KEY,
+  verified_at_ms INTEGER NOT NULL,
+  bytes_read INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_cache_verified_age
+  ON image_cache_verified_content(verified_at_ms);
+
+"#;
+
 pub(super) const BASELINE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS vms (
   name TEXT PRIMARY KEY,

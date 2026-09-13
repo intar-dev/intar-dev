@@ -903,7 +903,7 @@ mod tests {
         let expected_hash = scenario_content_hash(&ScenarioContentHashInput {
             scenario_id: "broken-nginx",
             scenario_dir: &scenario_dir,
-            base_definition: "trixie\nsuite=trixie\nmirror=https://deb.debian.org/debian\narch=amd64\nkernel_package=linux-image-cloud-amd64\npackages=openssh-server,ca-certificates,sudo,zstd",
+            base_definition: "trixie\nsuite=trixie\nmirror=https://deb.debian.org/debian\narch=amd64\npackages=openssh-server,ca-certificates,sudo,zstd",
             target_arch: "amd64",
         })
         .unwrap();
@@ -1001,7 +1001,6 @@ base_image "trixie" {
   suite = "trixie"
   mirror = "https://deb.debian.org/debian"
   arch = "amd64"
-  kernel_package = "linux-image-cloud-amd64"
   packages = ["openssh-server", "ca-certificates", "sudo", "zstd"]
 }
 "#,

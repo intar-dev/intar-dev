@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ActivateTerminalTargetRequest",
+  "description": "Activate one staged target. Only this call makes the route ready and wakes\nthe waiting browser socket.",
+  "type": "object",
+  "properties": {
+    "attachment_id": {
+      "type": "string"
+    },
+    "generation": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "vm_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "vm_id",
+    "user_id",
+    "generation",
+    "attachment_id"
+  ]
+}

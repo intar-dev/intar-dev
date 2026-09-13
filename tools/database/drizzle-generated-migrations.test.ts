@@ -12,6 +12,11 @@ import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { pruneDrizzleSnapshots } from "./prune-drizzle-snapshots";
+import {
+  REMOVAL_MIGRATION_IDX,
+  REMOVAL_MIGRATION_TAG,
+  removalMigrationEntry,
+} from "./apply-removal-migration";
 import { rehearsalSeedStatements } from "./rehearse-removal-migration";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -119,6 +124,60 @@ describe("Drizzle-generated D1 migrations", () => {
     }
   });
 
+test("selects the removal migration by index when a later migration is appended", () => {
+    const journal = readJson<DrizzleJournal>(join(metadataRoot, "_journal.json"));
+    const appended = journal.entries.filter(
+      (entry) => entry.idx > REMOVAL_MIGRATION_IDX,
+    );
+    // The regression needs the shape that broke the old lookup: at least one
+    // migration appended after the removal migration.
+    expect(appended.length).toBeGreaterThan(0);
+    expect(journal.entries.at(-1)?.idx).toBeGreaterThan(REMOVAL_MIGRATION_IDX);
+
+    const removal = removalMigrationEntry(journal);
+    expect(removal.idx).toBe(REMOVAL_MIGRATION_IDX);
+    expect(removal.tag).toBe(REMOVAL_MIGRATION_TAG);
+    // The selected entry is not the newest entry, and its SQL is the removal
+    // migration's own file rather than the appended migration's.
+    expect(removal).not.toBe(journal.entries.at(-1));
+    const removalSql = readFileSync(
+      join(migrationsRoot, `${removal.tag}.sql`),
+      "utf8",
+    );
+    expect(removalSql.length).toBeGreaterThan(0);
+    expect(removalSql).not.toBe(
+      readFileSync(
+        join(migrationsRoot, `${journal.entries.at(-1)!.tag}.sql`),
+        "utf8",
+      ),
+    );
+
+    // The pre-removal prefix is every earlier entry, and it excludes both the
+    // removal migration and the appended migration.
+    const prefix = journal.entries.filter(
+      (entry) => entry.idx < REMOVAL_MIGRATION_IDX,
+    );
+    expect(prefix.map(({ idx }) => idx)).toEqual(
+      Array.from({ length: REMOVAL_MIGRATION_IDX }, (_, index) => index),
+    );
+
+    // A journal that lost the removal entry, or that carries it twice, is
+    // refused instead of silently selecting something else.
+    expect(() =>
+      removalMigrationEntry({
+        entries: journal.entries.filter(
+          (entry) => entry.idx !== REMOVAL_MIGRATION_IDX,
+        ),
+      }),
+    ).toThrow(/expected exactly one/);
+    expect(() =>
+      removalMigrationEntry({
+        entries: [...journal.entries, removal],
+      }),
+    ).toThrow(/expected exactly one/);
+  });
+
+
   test("removes linked provider data without changing scenario runtime data", () => {
     const database = new Database(":memory:", { strict: true });
     try {
@@ -126,13 +185,12 @@ describe("Drizzle-generated D1 migrations", () => {
       const journal = readJson<DrizzleJournal>(
         join(metadataRoot, "_journal.json"),
       );
-      const removal = journal.entries.at(-1);
-      if (!removal || removal.idx !== 13) {
-        throw new Error("expected removal migration at index 13");
-      }
+      const removal = removalMigrationEntry(journal);
       database.transaction(() => {
-        for (const entry of journal.entries.slice(0, -1)) {
-          applyMigration(database, entry.tag);
+        for (const entry of journal.entries) {
+          if (entry.idx < REMOVAL_MIGRATION_IDX) {
+            applyMigration(database, entry.tag);
+          }
         }
       })();
 

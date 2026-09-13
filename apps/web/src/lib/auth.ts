@@ -938,11 +938,22 @@ async function isValidRestrictedSessionFlow(
 
 const betaAuthBeforeRequest = createAuthMiddleware(async (context) => {
   const requestHeaders = context.request?.headers ?? context.headers;
+  const encodedHandoff = requestHeaders?.get(INVITE_OAUTH_HANDOFF_HEADER);
+  // Session inspection carries no credential material beyond the cookie, and
+  // every protected call re-reads the live admission through
+  // requireUserContext. A request without the handoff header cannot enter a
+  // restricted flow, so the session read below is redundant for it. A present
+  // header, including an empty one, keeps that verification path unchanged.
+  if (
+    context.path === "/get-session" &&
+    !requestHeaders?.has(INVITE_OAUTH_HANDOFF_HEADER)
+  ) {
+    return undefined;
+  }
   const session = await getSessionFromCtx(context, {
     disableCookieCache: true,
     disableRefresh: true,
   });
-  const encodedHandoff = requestHeaders?.get(INVITE_OAUTH_HANDOFF_HEADER);
   let acceptedHandoff = false;
 
   if (encodedHandoff) {

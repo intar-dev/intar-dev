@@ -890,6 +890,213 @@ describe("auth policy", () => {
     await expect(signOut.json()).resolves.toMatchObject({ success: true });
   });
 
+  it("keeps the session inspection response identical without the handoff header", async () => {
+    const now = Date.now();
+    const sessionLifetimeMs = 7 * 24 * 60 * 60_000;
+
+    async function seedInspectionState(
+      state: "active" | "restricted" | "expired" | "anonymous",
+    ): Promise<string | null> {
+      if (state === "anonymous") return null;
+      const userId = `${state}-inspection-user`;
+      const token = `${state}-inspection-token`;
+      if (state === "active") {
+        await seedActiveBetaUser({
+          id: userId,
+          accountId: `${userId}-github`,
+          username: userId,
+          now,
+        });
+      } else {
+        await seedGithubIdentity({
+          id: userId,
+          accountId: `${userId}-github`,
+          username: userId,
+          now,
+        });
+      }
+      await drizzle(env.DB).insert(session).values({
+        id: `${state}-inspection-session`,
+        token,
+        userId,
+        expiresAt: new Date(
+          state === "expired" ? now - 60_000 : now + sessionLifetimeMs,
+        ),
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+      });
+      return signedSessionCookie(token);
+    }
+
+    async function readInspection(
+      cookie: string | null,
+      handoffHeader: string | undefined,
+    ) {
+      const response = await auth.handler(
+        inspectionRequest(cookie, handoffHeader),
+      );
+      return {
+        status: response.status,
+        setCookie: response.headers.get("set-cookie"),
+        body: await response.json(),
+      };
+    }
+
+    for (const state of [
+      "active",
+      "restricted",
+      "expired",
+      "anonymous",
+    ] as const) {
+      const cookie = await seedInspectionState(state);
+      const withoutHeader = await readInspection(cookie, undefined);
+
+      await resetD1Database();
+      await ensureFixtureBetaAdmin(env.DB, now);
+      const repeatedCookie = await seedInspectionState(state);
+      const withEmptyHeader = await readInspection(repeatedCookie, "");
+
+      expect(repeatedCookie).toBe(cookie);
+      expect(withEmptyHeader).toEqual(withoutHeader);
+    }
+  });
+
+  it("keeps handoff verification on the session inspection route", async () => {
+    const now = Date.now();
+    const fixtureAdmin = await ensureFixtureBetaAdmin(env.DB, now - 120_000);
+    await drizzle(env.DB).insert(accessInviteCodes).values({
+      id: "invite-inspection-test",
+      codeHash: "b".repeat(64),
+      codePrefix: "inspection-test",
+      tokenCiphertext: `v1.${"A".repeat(16)}.${"B".repeat(32)}`,
+      kind: "standard",
+      state: "pending",
+      createdBy: fixtureAdmin,
+      createdAt: now - 60_000,
+      expiresAt: now - 60_000 + 14 * 24 * 60 * 60_000,
+      claimExpiresAt: now - 60_000 + BETA_INVITE_LIFETIME_MS,
+      updatedAt: now,
+    });
+    const handoff = await createInviteOAuthHandoff({
+      inviteId: "invite-inspection-test",
+      attemptId: "attempt-inspection-test",
+      expiresAt: now + 600_000,
+    });
+    const forged = `${handoff.slice(0, -1)}${handoff.endsWith("a") ? "b" : "a"}`;
+
+    // Positive control: the same handoff opens its own route.
+    const accepted = await auth.handler(
+      authRequest(
+        "/api/auth/sign-in/social",
+        {
+          provider: "github",
+          callbackURL: "http://localhost/join",
+          errorCallbackURL: "http://localhost/join",
+        },
+        { [INVITE_OAUTH_HANDOFF_HEADER]: handoff },
+      ),
+    );
+    expect(accepted.status).toBe(200);
+
+    for (const header of [forged, "not-a-handoff", handoff]) {
+      const response = await auth.handler(inspectionRequest(null, header));
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        code: "invalid_beta_oauth_handoff",
+      });
+    }
+  });
+
+  it("keeps restricted sessions out of every route except inspection", async () => {
+    const now = Date.now();
+    const userId = "restricted-route-user";
+    const token = "restricted-route-token";
+    await seedGithubIdentity({
+      id: userId,
+      accountId: `${userId}-github`,
+      username: userId,
+      now,
+    });
+    await drizzle(env.DB).insert(session).values({
+      id: "restricted-route-session",
+      token,
+      userId,
+      expiresAt: new Date(now + 7 * 24 * 60 * 60_000),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    const cookie = await signedSessionCookie(token);
+
+    const inspection = await auth.handler(
+      inspectionRequest(cookie, undefined),
+    );
+    expect(inspection.status).toBe(200);
+
+    const denied = await Promise.all([
+      auth.handler(authGetRequest("/api/auth/organization/list", cookie)),
+      auth.handler(
+        authGetRequest(
+          "/api/auth/oauth2/authorize?client_id=blocked&response_type=code",
+          cookie,
+        ),
+      ),
+      auth.handler(
+        authRequest(
+          "/api/auth/sign-in/social",
+          {
+            provider: "github",
+            callbackURL: "http://localhost/join",
+          },
+          { cookie },
+        ),
+      ),
+    ]);
+    for (const response of denied) {
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        code: "restricted_beta_session",
+      });
+    }
+  });
+
+  it("reads beta admission only when the handoff header is present", async () => {
+    const now = Date.now();
+    const userId = "inspection-query-user";
+    const token = "inspection-query-token";
+    await seedActiveBetaUser({
+      id: userId,
+      accountId: `${userId}-github`,
+      username: userId,
+      now,
+    });
+    await drizzle(env.DB).insert(session).values({
+      id: "inspection-query-session",
+      token,
+      userId,
+      expiresAt: new Date(now + 7 * 24 * 60 * 60_000),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    const cookie = await signedSessionCookie(token);
+
+    const withoutHeader = await capturePreparedSql(async () => {
+      const response = await auth.handler(
+        inspectionRequest(cookie, undefined),
+      );
+      expect(response.status).toBe(200);
+    });
+    const withEmptyHeader = await capturePreparedSql(async () => {
+      const response = await auth.handler(inspectionRequest(cookie, ""));
+      expect(response.status).toBe(200);
+    });
+
+    const admissionReads = (statements: string[]) =>
+      statements.filter((sql) => sql.includes("access_allowlist"));
+    expect(admissionReads(withoutHeader)).toEqual([]);
+    expect(admissionReads(withEmptyHeader)).toHaveLength(1);
+    expect(withoutHeader.length).toBeLessThan(withEmptyHeader.length);
+  });
+
   it("dynamically rejects a blocked user's OAuth credentials after authenticating the request", async () => {
     const now = Date.now();
     const fixtureAdmin = await ensureFixtureBetaAdmin(env.DB, now - 1_000);
@@ -1748,6 +1955,39 @@ function authGetRequest(path: string, cookie: string): Request {
   return new Request(`http://localhost${path}`, {
     headers: { cookie, origin: "http://localhost" },
   });
+}
+
+function inspectionRequest(
+  cookie: string | null,
+  handoffHeader: string | undefined,
+): Request {
+  const headers = new Headers({ origin: "http://localhost" });
+  if (cookie) headers.set("cookie", cookie);
+  if (handoffHeader !== undefined) {
+    headers.set(INVITE_OAUTH_HANDOFF_HEADER, handoffHeader);
+  }
+  return new Request("http://localhost/api/auth/get-session", { headers });
+}
+
+/**
+ * Records the SQL text of every prepared statement while `run` executes. The
+ * wrapper shadows the binding's prototype method, so it observes the queries
+ * that the app code and its ORM issue through the same binding.
+ */
+async function capturePreparedSql(run: () => Promise<void>): Promise<string[]> {
+  const binding = env.DB as D1Database;
+  const prepare = binding.prepare.bind(binding);
+  const statements: string[] = [];
+  (binding as { prepare: D1Database["prepare"] }).prepare = ((query: string) => {
+    statements.push(query);
+    return prepare(query);
+  }) as D1Database["prepare"];
+  try {
+    await run();
+  } finally {
+    delete (binding as { prepare?: D1Database["prepare"] }).prepare;
+  }
+  return statements;
 }
 
 async function signedSessionCookie(token: string): Promise<string> {

@@ -71,6 +71,7 @@ describe("candidate scenario proof runs", () => {
     );
 
     const started = await startScenarioRunForUser({
+      idempotencyKey: "candidate-start-1",
       scenarioId: "broken-nginx",
       userId: "user-1",
       betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -190,6 +191,7 @@ describe("candidate scenario proof runs", () => {
 
     await expect(
       startScenarioRunForUser({
+      idempotencyKey: "candidate-start-2",
         scenarioId: "broken-nginx",
         userId: "user-1",
         betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -245,6 +247,7 @@ describe("candidate scenario proof runs", () => {
     );
 
     const published = await startScenarioRunForUser({
+      idempotencyKey: "candidate-start-3",
       scenarioId: "broken-nginx",
       userId: "user-1",
       betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -252,6 +255,7 @@ describe("candidate scenario proof runs", () => {
     });
     await expect(
       startScenarioRunForUser({
+      idempotencyKey: "candidate-start-4",
         scenarioId: "broken-nginx",
         userId: "user-1",
         betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -308,6 +312,7 @@ describe("candidate scenario proof runs", () => {
     );
 
     const candidate = await startScenarioRunForUser({
+      idempotencyKey: "candidate-start-5",
       scenarioId: "broken-nginx",
       userId: "user-1",
       betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -326,6 +331,7 @@ describe("candidate scenario proof runs", () => {
 
     await expect(
       startScenarioRunForUser({
+      idempotencyKey: "candidate-start-6",
         scenarioId: "broken-nginx",
         userId: "user-1",
         betaAdmission: await betaAdmissionForHostFixture("user-1"),
@@ -611,7 +617,7 @@ function candidateManifest(): ScenarioManifestV4 {
         image_format: "raw_chunks_v1",
         image_virtual_size_bytes: 1_073_741_824,
         chunk_manifest_sha256: "d".repeat(64),
-        guest_bootstrap_abi: 1,
+        guest_bootstrap_abi: 2,
         boot: {
           kernel_sha256: "e".repeat(64),
           initrd_sha256: "f".repeat(64),

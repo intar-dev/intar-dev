@@ -310,6 +310,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         unit_name: &str,
         cgroup_drain_proven: &mut bool,
     ) -> Result<()> {
+        // A failed launch is terminal for this generation. Release the
+        // background lane even if containment below needs recovery retries.
+        close_boot_window(generation);
         let mut failures = Vec::new();
         let stop_proved_drain = match self.backend.stop_unit(unit_name) {
             Ok(_) => true,
@@ -495,6 +498,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         record.boot_deadline_unix_ms = None;
         record.boot_deadline_monotonic = None;
         record.quota_attestation = Some(quota_attestation(record.quota)?);
+        // The boot is over. Release the background lane now instead of letting
+        // the window run to the end of the boot CPU lease.
+        close_boot_window(generation);
         if let Err(error) = self.preparer.persist(&self.config, &record) {
             return self.contain_failed_boot_seal(
                 &record,
@@ -591,6 +597,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
 
     pub(super) fn destroy_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {
         let generation = self.resolve_generation(&request)?;
+        // A destroy is terminal: no boot window for this generation survives it.
+        close_boot_window(&generation);
         let Some(record) = self.records.get(&generation).cloned() else {
             let unit_name = format!("intar-vm-{generation}.service");
             let backend_changed = self.backend.destroy_unit(&unit_name)?;

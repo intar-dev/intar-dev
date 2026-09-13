@@ -20,11 +20,12 @@ use getrandom::fill as getrandom_fill;
 use intar_contracts::bridge::{
     DesiredGuestToolsV1, VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1,
 };
+use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
 use intar_jailer_protocol::{
-    ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, DestroyRunNetworkRequest,
-    EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap,
-    JailerCapabilities, LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT,
-    PrepareChunkedImageV3Request, PreparedImageV3Result, Request as JailerRequest,
+    ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, BACKGROUND_PREPARE_BYTES_PER_SECOND,
+    DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult,
+    JailPathMap, JailerCapabilities, LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT,
+    PrepareChunkedImageV3Request, PreparedImageV3Result, Request as JailerRequest, RequestClass,
     Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
     TrustedDirectorySource, ValidatedId, VmCpuPhase, VmCpuRuntimeState, VmIdentityRequest,
     VmInspection, VmLaunchRequest, VmLaunchResult,
@@ -414,7 +415,35 @@ const TERMINAL_READY_POLL_INTERVAL_SECONDS: u64 = 5;
 const SCENARIO_READY_BASE_TIMEOUT_SECONDS: u64 = 45;
 const SCENARIO_READY_REFERENCE_CPU_MILLIS: u32 = 1_000;
 const SCENARIO_READY_MAX_TIMEOUT_SECONDS: u64 = 6 * 60;
+/// Client budget for one privilege-boundary image import.
+///
+/// A foreground import resolves from a ready descriptor before this path, so
+/// the foreground class keeps this fixed budget.
 const JAILER_PREPARE_IMAGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Fixed part of the background budget: socket, store, and hashing latency.
+const JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS: u64 = 300;
+/// Client budget for one background image import of `virtual_size_bytes`.
+///
+/// Jailerd rate limits a background import to
+/// [`BACKGROUND_PREPARE_BYTES_PER_SECOND`], so a fixed budget would abandon a
+/// large import that jailerd keeps running: the whole point of the rate limit
+/// is that the import is allowed to be slow. The bound is derived, not
+/// arbitrary. Two passes cover the charged import and the decompression,
+/// hashing, and store work that follows it, and the size is clamped to the
+/// contract maximum, so the result stays below
+/// `2 * MAX_CHUNKED_IMAGE_BYTES / BACKGROUND_PREPARE_BYTES_PER_SECOND + margin`.
+/// A foreground request keeps [`JAILER_PREPARE_IMAGE_TIMEOUT`].
+fn jailer_prepare_timeout(class: RequestClass, virtual_size_bytes: u64) -> Duration {
+    if class == RequestClass::Foreground {
+        return JAILER_PREPARE_IMAGE_TIMEOUT;
+    }
+    let bytes = virtual_size_bytes.min(intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES);
+    let seconds = bytes
+        .div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND)
+        .saturating_mul(2)
+        .saturating_add(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS);
+    JAILER_PREPARE_IMAGE_TIMEOUT.max(Duration::from_secs(seconds))
+}
 const SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS: u64 = 500;
 const SCENARIO_READY_API_POLL_INTERVAL_SECONDS: u64 = 3;
 const SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS: u64 = 2;
@@ -434,6 +463,14 @@ struct LeaseExpiryErrorLogState {
 #[error("jailerd boot capacity is temporarily unavailable: {message}")]
 struct BootCapacityPending {
     message: String,
+}
+
+/// Jailerd parked a background image import at a block boundary to keep a VM
+/// boot responsive. The work is requeued, never lost.
+#[derive(Debug, thiserror::Error)]
+#[error("jailerd requeued the background image preparation: {message}")]
+pub(crate) struct ImagePrepareRequeued {
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

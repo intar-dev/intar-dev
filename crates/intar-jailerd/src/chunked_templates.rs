@@ -13,6 +13,7 @@ const MAX_CHUNK_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 pub(super) fn prepare_chunked_image_template(
     config: &JailerdConfig,
     request: &PrepareChunkedImageV3Request,
+    lane: &PrepareLane,
 ) -> Result<PreparedImageV3Result> {
     request
         .validate()
@@ -72,13 +73,21 @@ pub(super) fn prepare_chunked_image_template(
             &chunk_cache,
             &chunk_store,
             &temporary.join("root.raw"),
+            lane,
         )?;
-        let kernel =
-            copy_template_source(config, &request.kernel, &temporary.join("kernel"), None)?;
+        let kernel = copy_template_source(
+            config,
+            &request.kernel,
+            &temporary.join("kernel"),
+            None,
+            None,
+        )?;
         let initrd = request
             .initrd
             .as_ref()
-            .map(|source| copy_template_source(config, source, &temporary.join("initrd"), None))
+            .map(|source| {
+                copy_template_source(config, source, &temporary.join("initrd"), None, None)
+            })
             .transpose()?;
         let metadata = ImageTemplateMetadataV2 {
             schema_version: IMAGE_TEMPLATE_METADATA_V3,
@@ -264,6 +273,7 @@ fn assemble_chunked_root(
     chunk_cache: &OwnedFd,
     chunk_store: &OwnedFd,
     destination: &Path,
+    lane: &PrepareLane,
 ) -> Result<ImageTemplateArtifactV2> {
     let root = OpenOptions::new()
         .read(true)
@@ -282,6 +292,10 @@ fn assemble_chunked_root(
         .to_offset(u64::from(chunk.index) * u64::from(IMAGE_CHUNK_SIZE_BYTES))
         .reflink_block()
         .with_context(|| format!("FICLONERANGE image chunk {}", chunk.index))?;
+        // A copy-on-write clone is metadata-only on the same filesystem, but a
+        // cross-filesystem fallback copies the whole chunk. Charge the chunk
+        // just placed, then give the foreground launch its turn.
+        lane.charge(u64::from(chunk.raw_size_bytes))?;
     }
     root.sync_all()?;
     rustix::fs::fchmod(&root, Mode::RUSR)?;

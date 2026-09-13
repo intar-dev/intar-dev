@@ -23,7 +23,6 @@ export {
 export {
   activeRuntimeSlots,
   hostResourceReservations,
-  runtimeAllocationLocks,
   runtimeArtifactUploads,
   runtimeArtifacts,
   runtimeExecutions,

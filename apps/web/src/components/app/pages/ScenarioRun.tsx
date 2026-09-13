@@ -85,6 +85,11 @@ import {
 } from "@/lib/scenario-run-performance";
 import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
+import {
+  isTransportReadyFor,
+  shouldRevealTerminal,
+  type TerminalTransportReport,
+} from "@/components/app/lib/scenario-terminal-readiness";
 
 const LazyWebSshTerminal = lazy(() =>
   import("@/components/remote-access/WebSshTerminal").then(
@@ -186,9 +191,14 @@ export function ScenarioRunStart() {
       organizationId,
       onCapacityWait: () => setStartState("waiting"),
     })
-      .then(async ({ runId, run, reused }) => {
+      .then(async ({ runId, run, reused, acceptedAt }) => {
         markPendingScenarioRunBootStage(scenarioId, "start-accepted");
-        associateScenarioRunBootEvidence({ runId, scenarioId, reused });
+        associateScenarioRunBootEvidence({
+          runId,
+          scenarioId,
+          reused,
+          acceptedAt,
+        });
         queryClient.setQueryData<ScenarioRunResponse>(
           ["scenarios", "run", runId],
           { run: presentScenarioRun(run) },
@@ -309,6 +319,8 @@ export function ScenarioRun() {
   const { runId } = useParams({ from: "/app/runs/$runId" });
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [terminalVisible, setTerminalVisible] = useState(false);
+  const [transportReport, setTransportReport] =
+    useState<TerminalTransportReport | null>(null);
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
@@ -883,12 +895,32 @@ export function ScenarioRun() {
         : null,
     [attemptData?.id, runId, selectedVm],
   );
+  // The gateway `ready` frame is the transport truth and the projection is a
+  // poll, so the reveal follows the transport. The projection keeps the
+  // existing manual path working.
+  const transportReady = isTransportReadyFor(
+    transportReport,
+    selectedVm?.id ?? null,
+  );
+  const showTerminal = shouldRevealTerminal({
+    transportReady,
+    projectedReady: selectedVmShellReady,
+    userWantsTerminal: terminalVisible,
+    runForeground: attemptData?.activity === "foreground",
+  });
+  // The transport starts while the VM boots, hidden. It connects and waits for
+  // its target, and reports readiness so the shell can be revealed at once.
+  const terminalTransportMounted = Boolean(
+    selectedVm &&
+      selectedVmSessionRequest &&
+      attemptData?.activity === "foreground",
+  );
 
   useEffect(() => {
-    if (selectedVmShellReady) {
+    if (transportReady || selectedVmShellReady) {
       setTerminalVisible(true);
     }
-  }, [selectedVmShellReady]);
+  }, [selectedVmShellReady, transportReady]);
 
   useEffect(() => {
     if (
@@ -1361,19 +1393,31 @@ export function ScenarioRun() {
                 onSelect={setSelectedVmId}
               />
 
-              {selectedVm && selectedVmShellReady && terminalVisible ? (
+              {/* One transport instance for the whole run. It starts during VM
+                  boot and stays mounted across the ready transition, so the
+                  WebSocket is already waiting for the target and no second
+                  session is opened when the shell becomes visible. */}
+              {selectedVm && terminalTransportMounted ? (
                 <div
-                  data-scenario-terminal-ready
-                  className="relative min-h-0 min-w-0 flex-1 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200"
+                  {...(showTerminal ? { "data-scenario-terminal-ready": true } : {})}
+                  aria-hidden={showTerminal ? undefined : true}
+                  className={cn(
+                    "relative min-h-0 min-w-0 flex-1",
+                    showTerminal
+                      ? "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200"
+                      : "hidden",
+                  )}
                 >
                   <Suspense
                     fallback={
-                      <div
-                        className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
-                        role="status"
-                      >
-                        Opening secure shell…
-                      </div>
+                      showTerminal ? (
+                        <div
+                          className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
+                          role="status"
+                        >
+                          Opening secure shell…
+                        </div>
+                      ) : null
                     }
                   >
                     <LazyWebSshTerminal
@@ -1384,10 +1428,20 @@ export function ScenarioRun() {
                       showCloseButton={false}
                       onClose={() => setTerminalVisible(false)}
                       bootEvidence={bootEvidence}
+                      visible={showTerminal}
+                      onTransportStateChange={(state) =>
+                        setTransportReport({
+                          vmId: selectedVm.id,
+                          attempt: state.attempt,
+                          ready: state.ready,
+                        })
+                      }
                     />
                   </Suspense>
                 </div>
-              ) : (
+              ) : null}
+
+              {showTerminal ? null : (
                 <div
                   aria-label={
                     showSelectedVmPreparation

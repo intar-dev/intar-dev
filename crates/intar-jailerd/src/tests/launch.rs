@@ -16,6 +16,7 @@ fn capabilities_and_prepare_image_v2_require_fast_template_store() {
         root_disk: cached_source("images/root.raw"),
         kernel: cached_source("artifacts/kernel"),
         initrd: Some(cached_source("artifacts/initrd")),
+        request_class: RequestClass::Foreground,
     };
 
     let mut unavailable = JailerdCore::new_with_readiness(
@@ -87,6 +88,7 @@ fn launch_vm_v2_requires_and_uses_one_prepared_template_bundle() {
         root_disk: cached_source("images/root.raw"),
         kernel: cached_source("artifacts/kernel"),
         initrd: Some(cached_source("artifacts/initrd")),
+        request_class: RequestClass::Foreground,
     };
     let mut core = JailerdCore::new_with_readiness(
         config,

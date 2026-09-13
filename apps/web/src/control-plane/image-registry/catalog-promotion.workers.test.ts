@@ -137,7 +137,7 @@ describe("candidate scenario catalog promotion", () => {
     expect(vms[0]).toMatchObject({
       imageSha256: IMAGE_ID,
       imageFormat: "raw_chunks_v1",
-      guestBootstrapAbi: 1,
+      guestBootstrapAbi: 2,
     });
 
     const rollback = await handleImageRegistryRequest(
@@ -232,7 +232,7 @@ function manifest(): ScenarioManifestV4 {
         image_format: "raw_chunks_v1",
         image_virtual_size_bytes: 1,
         chunk_manifest_sha256: "f".repeat(64),
-        guest_bootstrap_abi: 1,
+        guest_bootstrap_abi: 2,
         boot: {
           kernel_sha256: "d".repeat(64),
           initrd_sha256: "e".repeat(64),

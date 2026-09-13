@@ -18,7 +18,7 @@ use crate::config::QemuBuildConfig;
 use crate::content_hash::sha256_bytes_hex;
 use crate::rootfs::{
     BASE_EXT4_LABEL, BaseRootfsArtifact, BaseRootfsLease, RootfsBuildPlan,
-    base_rootfs_artifact_from_plan, create_base_ext4, extract_boot_artifacts,
+    base_rootfs_artifact_from_plan, create_base_ext4, install_kernel_boot_artifacts,
 };
 
 const OCI_BASE_CACHE_ABI: &str = "intar-oci-base-v3";
@@ -35,6 +35,20 @@ const OCI_NEUTRAL_HOSTS: &str = "127.0.0.1 localhost\n127.0.1.1 intar-build\n";
 const HOST_CA_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 const HOST_CA_BUNDLE_FILE: &str = "intar-host-ca-certificates.crt";
 const APT_HTTPS_CA_INFO: &str = "Acquire::https::CaInfo=/etc/ssl/certs/ca-certificates.crt";
+
+/// Kernel build stage in the generated Dockerfile. The stage compiles the
+/// pinned kernel profile and its minimal initramfs, and the final stage copies
+/// the artifacts from it.
+const KERNEL_STAGE_NAME: &str = "intar-kernel";
+/// Build context file names for the kernel stage.
+const KERNEL_BUILD_SCRIPT_FILE: &str = "intar-kernel-build.sh";
+const KERNEL_CONFIG_FILE: &str = "intar-kernel.config";
+const KERNEL_INIT_SCRIPT_FILE: &str = "intar-initramfs-init.sh";
+/// In-container paths for the kernel stage.
+const KERNEL_BUILD_SCRIPT_PATH: &str = "/usr/local/libexec/intar/intar-kernel-build.sh";
+const KERNEL_STAGE_CONFIG_PATH: &str = "/build/intar-kernel.config";
+const KERNEL_STAGE_INIT_PATH: &str = "/build/intar-initramfs-init.sh";
+const KERNEL_STAGE_OUTPUT_DIR: &str = "/kernel";
 
 static OCI_BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -89,11 +103,12 @@ pub(crate) fn layered_definition_hash(
     config: &QemuBuildConfig,
 ) -> String {
     let identity = format!(
-        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}\n--layered-oci--\nabi={OCI_BASE_CACHE_ABI}\nimage={}\nplatform=linux/{}\nfilesystem=ext4\nlabel={BASE_EXT4_LABEL}\nmke2fs={}",
+        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}\n--layered-oci--\nabi={OCI_BASE_CACHE_ABI}\nimage={}\nplatform=linux/{}\nfilesystem=ext4\nlabel={BASE_EXT4_LABEL}\nmke2fs={}\nkernel={}",
         base.content_identity(),
         config.layered.debian_image,
         base.arch,
         config.mke2fs_binary.display(),
+        crate::kernel::kernel_profile_digest(),
     );
     sha256_bytes_hex(identity.as_bytes())
 }
@@ -176,7 +191,7 @@ fn validate_layered_inputs(base: &BaseImageSpec, config: &QemuBuildConfig) -> Re
     );
     validate_apt_token("suite", &base.suite)?;
     validate_apt_mirror(&base.mirror)?;
-    for package in std::iter::once(&base.kernel_package).chain(base.packages.iter()) {
+    for package in &base.packages {
         validate_apt_package(package)?;
     }
     Ok(())
@@ -336,6 +351,7 @@ fn staged_paths(
     rootfs_plan.paths.base_ext4_path = artifact_dir.join(ROOTFS_FILE);
     rootfs_plan.paths.kernel_path = artifact_dir.join(KERNEL_FILE);
     rootfs_plan.paths.initrd_path = artifact_dir.join(INITRD_FILE);
+    rootfs_plan.paths.kernel_build_dir = work_root.join("kernel");
 
     Ok(OciStagingPaths {
         context_dir: work_root.join("context"),
@@ -471,7 +487,7 @@ fn build_staged_oci_base(
     );
     write_oci_neutral_host_files(&staging.rootfs_plan.paths.rootfs_dir)?;
     remove_container_policy_rc_d(&staging.rootfs_plan.paths.rootfs_dir)?;
-    extract_boot_artifacts(&staging.rootfs_plan)?;
+    install_kernel_boot_artifacts(&staging.rootfs_plan)?;
     create_base_ext4(&staging.rootfs_plan, config)?;
 
     let filesystem_size_bytes = fs::metadata(&staging.rootfs_plan.paths.base_ext4_path)
@@ -543,6 +559,36 @@ fn write_oci_build_context(
         )
     })?;
     fs::write(
+        context_dir.join(KERNEL_BUILD_SCRIPT_FILE),
+        crate::kernel::render_kernel_build_script(config),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write kernel build script in '{}'",
+            context_dir.display()
+        )
+    })?;
+    fs::write(
+        context_dir.join(KERNEL_CONFIG_FILE),
+        crate::kernel::KERNEL_CONFIG_FRAGMENT,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write kernel config fragment in '{}'",
+            context_dir.display()
+        )
+    })?;
+    fs::write(
+        context_dir.join(KERNEL_INIT_SCRIPT_FILE),
+        crate::kernel::KERNEL_INITRAMFS_INIT_SCRIPT,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write kernel initramfs init script in '{}'",
+            context_dir.display()
+        )
+    })?;
+    fs::write(
         context_dir.join("intar-debian.list"),
         render_debian_sources(base),
     )
@@ -567,10 +613,52 @@ fn write_oci_build_context(
 
 fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Result<String> {
     validate_layered_inputs(base, config)?;
-    let mut dockerfile = format!(
-        "FROM {}\nENV DEBIAN_FRONTEND=noninteractive\n",
-        config.layered.debian_image
-    );
+    let debian_image = &config.layered.debian_image;
+    let release = crate::kernel::kernel_release();
+    let mut dockerfile = String::new();
+
+    // Stage one compiles the pinned kernel profile and the minimal initramfs.
+    // The stage holds a compiler and the Debian source tooling, so the final
+    // image never carries them. BuildKit caches this stage, and the stage is
+    // part of the normal base-image build: no separate build step exists.
+    dockerfile.push_str(&format!(
+        "FROM {debian_image} AS {KERNEL_STAGE_NAME}\nENV DEBIAN_FRONTEND=noninteractive\n"
+    ));
+    dockerfile.push_str(&format!(
+        "COPY {HOST_CA_BUNDLE_FILE} {HOST_CA_BUNDLE_PATH}\n"
+    ));
+    dockerfile.push_str(&format!("ENV INTAR_APT_CA_INFO=\"{APT_HTTPS_CA_INFO}\"\n"));
+    dockerfile.push_str(&format!(
+        "ENV INTAR_KERNEL_CONFIG={KERNEL_STAGE_CONFIG_PATH}\n"
+    ));
+    dockerfile.push_str(&format!(
+        "ENV INTAR_KERNEL_INIT_SOURCE={KERNEL_STAGE_INIT_PATH}\n"
+    ));
+    dockerfile.push_str(&format!(
+        "COPY --chmod=0755 {KERNEL_BUILD_SCRIPT_FILE} {KERNEL_BUILD_SCRIPT_PATH}\n"
+    ));
+    dockerfile.push_str(&format!(
+        "COPY {KERNEL_CONFIG_FILE} {KERNEL_STAGE_CONFIG_PATH}\n"
+    ));
+    dockerfile.push_str(&format!(
+        "COPY {KERNEL_INIT_SCRIPT_FILE} {KERNEL_STAGE_INIT_PATH}\n"
+    ));
+    dockerfile.push_str(&docker_run([
+        "rm",
+        "-f",
+        "/etc/apt/sources.list",
+        "/etc/apt/sources.list.d/debian.sources",
+    ])?);
+    dockerfile.push_str("COPY intar-debian.list /etc/apt/sources.list\n");
+    dockerfile.push_str(&docker_run([
+        KERNEL_BUILD_SCRIPT_PATH,
+        KERNEL_STAGE_OUTPUT_DIR,
+    ])?);
+
+    // Stage two is the image the guest boots.
+    dockerfile.push_str(&format!(
+        "FROM {debian_image}\nENV DEBIAN_FRONTEND=noninteractive\n"
+    ));
     dockerfile.push_str(&format!(
         "COPY {HOST_CA_BUNDLE_FILE} {HOST_CA_BUNDLE_PATH}\n"
     ));
@@ -606,9 +694,25 @@ fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Resu
         "install".to_string(),
         "-y".to_string(),
     ];
-    packages.push(base.kernel_package.clone());
     packages.extend(base.packages.iter().cloned());
     dockerfile.push_str(&docker_run(packages)?);
+    // The kernel and the initramfs come from the kernel stage. The module
+    // metadata tree holds no loadable module: every guest feature is built in.
+    dockerfile.push_str(&format!(
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/vmlinuz /boot/{}\n",
+        crate::kernel::kernel_image_file_name()
+    ));
+    dockerfile.push_str(&format!(
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/initrd.img /boot/{}\n",
+        crate::kernel::kernel_initrd_file_name()
+    ));
+    dockerfile.push_str(&format!(
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/modules/lib/modules/{release} /lib/modules/{release}\n"
+    ));
+    dockerfile.push_str(&format!(
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/kernel-build.json {}\n",
+        crate::kernel::KERNEL_PROVENANCE_PATH
+    ));
     dockerfile.push_str(&docker_run(["update-ca-certificates", "--fresh"])?);
     dockerfile.push_str(&docker_run([
         "/usr/local/libexec/intar/customize-hook.sh",
@@ -1304,7 +1408,6 @@ base_image "trixie" {
   suite          = "trixie"
   mirror         = "https://deb.debian.org/debian"
   arch           = "amd64"
-  kernel_package = "linux-image-cloud-amd64"
   packages       = ["acpid", "openssh-server", "ca-certificates", "curl", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo"]
 }
 "#,
@@ -1332,16 +1435,37 @@ base_image "trixie" {
         let dockerfile = render_oci_dockerfile(&base, &layered_config(root.path())).unwrap();
 
         assert!(!dockerfile.starts_with("# syntax="));
-        assert!(dockerfile.contains("FROM docker.io/library/debian@sha256:"));
+        // Two stages: the kernel stage, then the image the guest boots. Both
+        // start from the same immutable base digest.
+        assert!(dockerfile.starts_with("FROM docker.io/library/debian@sha256:"));
+        assert_eq!(
+            dockerfile
+                .matches("FROM docker.io/library/debian@sha256:")
+                .count(),
+            2
+        );
+        assert!(dockerfile.contains("AS intar-kernel"));
         let ca_copy = dockerfile
             .find("COPY intar-host-ca-certificates.crt /etc/ssl/certs/ca-certificates.crt")
             .unwrap();
         let apt_update = dockerfile.find("APT::Update::Error-Mode=any").unwrap();
         assert!(ca_copy < apt_update);
-        assert_eq!(dockerfile.matches("Acquire::https::CaInfo=").count(), 2);
+        // The kernel stage inherits the CA path through the build environment.
+        assert!(dockerfile.contains("ENV INTAR_APT_CA_INFO=\"Acquire::https::CaInfo="));
         assert!(dockerfile.contains("COPY --chmod=0755 intar-essential-hook.sh"));
         assert!(dockerfile.contains("COPY --chmod=0755 intar-customize-hook.sh"));
-        assert!(dockerfile.contains("linux-image-cloud-amd64"));
+        // The kernel stage compiles the pinned profile and the final stage
+        // takes the boot artifacts from it. No distribution kernel package.
+        assert!(dockerfile.contains("COPY --chmod=0755 intar-kernel-build.sh"));
+        assert!(dockerfile.contains("intar-kernel.config"));
+        assert!(dockerfile.contains("intar-initramfs-init.sh"));
+        assert!(dockerfile.contains("COPY --from=intar-kernel /kernel/vmlinuz /boot/vmlinuz-"));
+        assert!(
+            dockerfile.contains("COPY --from=intar-kernel /kernel/initrd.img /boot/initrd.img-")
+        );
+        assert!(dockerfile.contains("/lib/modules/"));
+        assert!(dockerfile.contains("/usr/lib/intar/kernel/kernel-build.json"));
+        assert!(!dockerfile.contains("linux-image-cloud-amd64"));
         assert!(dockerfile.contains("systemd-sysv"));
         assert!(dockerfile.contains("openssh-server"));
         assert!(dockerfile.contains("apt-get"));

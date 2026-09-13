@@ -726,6 +726,36 @@ describe("image registry publish validation", () => {
     });
   });
 
+  it("rejects publish manifests from the previous guest bootstrap ABI", async () => {
+    const manifest = publishManifest({
+      imageSha256: "a".repeat(64),
+      artifactSha256: "b".repeat(64),
+    });
+    const vm = manifest.vms[0];
+    if (!vm) {
+      throw new Error("expected publish manifest vm");
+    }
+    manifest.vms = [{ ...vm, guest_bootstrap_abi: 1 }];
+    const form = new FormData();
+    form.set("manifest", JSON.stringify(manifest));
+
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/publish", {
+        method: "POST",
+        headers: { authorization: "Bearer publish-secret" },
+        body: form,
+      }),
+      {
+        REGISTRY_PUBLISH_TOKEN: "publish-secret",
+      } as Cloudflare.Env,
+    );
+
+    expect(response?.status).toBe(400);
+    await expect(response?.json()).resolves.toEqual({
+      error: "manifest contains invalid boot metadata",
+    });
+  });
+
   it("rejects publish manifests with invalid image hashes", async () => {
     const manifest = publishManifest({
       imageSha256: "not-a-sha",

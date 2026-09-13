@@ -74,14 +74,7 @@ pub(crate) struct HandleData {
     /// set to some error.
     pub pending_commands: Mutex<
         SharedResult<
-            Vec<
-                Box<
-                    dyn FnMut(&Handle, &SharedResult<()>) -> bool
-                        + Send
-                        + Sync
-                        + 'static,
-                >,
-            >,
+            Vec<Box<dyn FnMut(&Handle, &SharedResult<()>) -> bool + Send + Sync + 'static>>,
         >,
     >,
 
@@ -109,8 +102,7 @@ impl AsyncHandle {
             let err = Arc::new(Error::Fatal(err));
             // Call the completion predicates for all pending commands with the
             // error.
-            let mut pending_cmds =
-                handle_data_2.pending_commands.lock().unwrap();
+            let mut pending_cmds = handle_data_2.pending_commands.lock().unwrap();
             let res = Err(err);
             for f in pending_cmds.as_mut().unwrap().iter_mut() {
                 f(&handle_data_2.handle, &res);
@@ -133,14 +125,10 @@ impl AsyncHandle {
     /// predicate which should return [true] iff the command is completed.
     pub(crate) fn add_command(
         &self,
-        mut completion_predicate: impl FnMut(&Handle, &SharedResult<()>) -> bool
-            + Send
-            + Sync
-            + 'static,
+        mut completion_predicate: impl FnMut(&Handle, &SharedResult<()>) -> bool + Send + Sync + 'static,
     ) -> SharedResult<()> {
         if !completion_predicate(&self.data.handle, &Ok(())) {
-            let mut pending_cmds_lock =
-                self.data.pending_commands.lock().unwrap();
+            let mut pending_cmds_lock = self.data.pending_commands.lock().unwrap();
             pending_cmds_lock
                 .as_mut()
                 .map_err(|e| e.clone())?

@@ -11,6 +11,22 @@ import { agentHosts } from "./platform";
 import { runtimeExecutions } from "./runtime";
 import { type ScenarioRunHintSnapshot, jsonText, nowMsDefault } from "./shared";
 
+/**
+ * The exact request scope of an admitted start. It is stored with the run so
+ * an idempotent replay can prove it belongs to the same attempt: a replay that
+ * changes the scenario, the host, the organization, the candidate proof, or
+ * the trusted authorization flags is a conflict, never a reuse.
+ */
+export interface ScenarioStartRequestScope {
+  scenarioId: string;
+  organizationId: string | null;
+  hostId: string | null;
+  candidateRevision: string | null;
+  candidateBuildId: string | null;
+  allowDrainedAdminProof: boolean;
+  allowSequenceBypass: boolean;
+}
+
 export const scenarioRuns = sqliteTable(
   "scenario_runs",
   {
@@ -62,6 +78,11 @@ export const scenarioRuns = sqliteTable(
     // The owning user id while the run is active, null once terminal; the
     // unique index enforces one active run per user across all scenarios.
     activeKey: text("active_key"),
+    // The caller-supplied idempotency key of the admitted start request. The
+    // unique index makes an identical repeat return the same run instead of
+    // creating a second VM set.
+    requestIdempotencyKey: text("request_idempotency_key"),
+    requestScopeJson: jsonText<ScenarioStartRequestScope>("request_scope_json"),
     stateJson: text("state_json").notNull(),
     archiveEnteredAt: integer("archive_entered_at"),
     deleteRequestedAt: integer("delete_requested_at"),
@@ -74,6 +95,10 @@ export const scenarioRuns = sqliteTable(
   },
   (table) => [
     uniqueIndex("scenario_runs_active_key_uidx").on(table.activeKey),
+    uniqueIndex("scenario_runs_request_idempotency_uidx").on(
+      table.userId,
+      table.requestIdempotencyKey,
+    ),
     index("scenario_runs_user_scenario_idx").on(
       table.userId,
       table.scenarioId,

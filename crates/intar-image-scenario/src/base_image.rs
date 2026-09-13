@@ -17,7 +17,6 @@ pub struct BaseImageSpec {
     pub suite: String,
     pub mirror: String,
     pub arch: String,
-    pub kernel_package: String,
     pub packages: Vec<String>,
 }
 
@@ -34,7 +33,6 @@ impl BaseImageSpec {
             format!("suite={}", self.suite),
             format!("mirror={}", self.mirror),
             format!("arch={}", self.arch),
-            format!("kernel_package={}", self.kernel_package),
             format!("packages={}", self.packages.join(",")),
         ]
         .join("\n")
@@ -146,7 +144,6 @@ fn parse_base_image(block: &hcl::Block) -> Result<BaseImageSpec, ScenarioError> 
     let mut suite = String::new();
     let mut mirror = String::new();
     let mut arch = String::new();
-    let mut kernel_package = String::new();
     let mut packages = Vec::new();
 
     for attr in block.body.attributes() {
@@ -154,7 +151,6 @@ fn parse_base_image(block: &hcl::Block) -> Result<BaseImageSpec, ScenarioError> 
             "suite" => suite = extract_string(&attr.expr)?,
             "mirror" => mirror = extract_string(&attr.expr)?,
             "arch" => arch = extract_string(&attr.expr)?,
-            "kernel_package" => kernel_package = extract_string(&attr.expr)?,
             "packages" => packages = extract_string_array(&attr.expr)?,
             other => {
                 return Err(ScenarioError::InvalidBaseImageCatalog(format!(
@@ -186,11 +182,6 @@ fn parse_base_image(block: &hcl::Block) -> Result<BaseImageSpec, ScenarioError> 
             "base_image '{name}' missing 'arch'"
         )));
     }
-    if kernel_package.is_empty() {
-        return Err(ScenarioError::InvalidBaseImageCatalog(format!(
-            "base_image '{name}' missing 'kernel_package'"
-        )));
-    }
     if packages.is_empty() {
         return Err(ScenarioError::InvalidBaseImageCatalog(format!(
             "base_image '{name}' missing non-empty 'packages'"
@@ -202,7 +193,6 @@ fn parse_base_image(block: &hcl::Block) -> Result<BaseImageSpec, ScenarioError> 
         suite,
         mirror,
         arch: normalize_arch(&arch).to_string(),
-        kernel_package,
         packages,
     })
 }
@@ -239,7 +229,6 @@ base_image "trixie" {
   suite          = "trixie"
   mirror         = "https://deb.debian.org/debian"
   arch           = "amd64"
-  kernel_package = "linux-image-cloud-amd64"
   packages       = ["openssh-server", "ca-certificates", "sudo", "zstd"]
 }
 "#
@@ -254,10 +243,9 @@ base_image "trixie" {
         assert_eq!(definition.arch, "amd64");
         assert_eq!(definition.suite, "trixie");
         assert_eq!(definition.mirror, "https://deb.debian.org/debian");
-        assert_eq!(definition.kernel_package, "linux-image-cloud-amd64");
         assert_eq!(
             definition.content_identity(),
-            "suite=trixie\nmirror=https://deb.debian.org/debian\narch=amd64\nkernel_package=linux-image-cloud-amd64\npackages=openssh-server,ca-certificates,sudo,zstd"
+            "suite=trixie\nmirror=https://deb.debian.org/debian\narch=amd64\npackages=openssh-server,ca-certificates,sudo,zstd"
         );
     }
 
@@ -269,7 +257,6 @@ base_image "../escape" {
   suite          = "trixie"
   mirror         = "https://deb.debian.org/debian"
   arch           = "amd64"
-  kernel_package = "linux-image-cloud-amd64"
   packages       = ["openssh-server"]
 }
 "#,

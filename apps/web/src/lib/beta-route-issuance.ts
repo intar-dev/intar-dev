@@ -2,6 +2,19 @@ import { appError } from "@/lib/app-error";
 import { getBetaAccess, type BetaAccessSnapshot } from "@/lib/allowlist";
 import { revokeAllRoutes } from "@/lib/route-revocation";
 
+/**
+ * Runs one route mutation under the admission fence, and fails closed.
+ *
+ * The route id is inside the cleanup set before the mutation starts. Any
+ * outcome that is not a confirmed success with an unchanged admission epoch
+ * revokes the route: a rejected mutation, a lost response, a timeout, a 5xx,
+ * an admission mismatch, a rejected pre-check, and a failure of the post-read
+ * itself. An ambiguous failure therefore can not leave a ready route behind.
+ *
+ * A caller passes a generation-fenced `revoke` when the route has one
+ * generation, so a late cleanup can not delete a route that the same name was
+ * reissued to for a newer run.
+ */
 export async function issueBetaAccessFencedRoute<Result>(params: {
   userId: string;
   routeId: string;
@@ -9,17 +22,21 @@ export async function issueBetaAccessFencedRoute<Result>(params: {
   issuedRouteIds: (result: Result) => Iterable<string>;
   revoke: (routeId: string) => Promise<void>;
 }): Promise<Result> {
+  // The pre-check runs before the cleanup fence. A blocked pre-check made no
+  // remote mutation, so it must not revoke anything; only an outcome after
+  // the write is ambiguous.
   const admission = await getBetaAccess(params.userId);
   if (!isActiveAdmission(admission)) throw betaAccessRevoked();
 
+  // Keep the deterministic requested id inside the cleanup fence even when
+  // the mutation reached Stargate but its response was lost or malformed.
   const issuedRouteIds = new Set([params.routeId]);
   try {
-    // Keep the deterministic requested id inside the cleanup fence even when
-    // Stargate created the route but its response was lost or malformed.
     const result = await params.issue();
     for (const routeId of params.issuedRouteIds(result)) {
       issuedRouteIds.add(routeId);
     }
+    // A throw here is a failure to confirm, so it revokes like any other.
     const current = await getBetaAccess(params.userId);
     if (!sameActiveAdmission(admission, current)) throw betaAccessRevoked();
     return result;

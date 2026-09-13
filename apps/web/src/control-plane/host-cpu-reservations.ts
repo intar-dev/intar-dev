@@ -40,22 +40,6 @@ export interface HostCpuReservationCapacityRow {
   state: "pending" | "committed";
 }
 
-export type ReserveHostCpuResult =
-  | {
-      ok: true;
-      state: "pending" | "committed";
-      expiresAt: number | null;
-      capacity: HostCpuReservationCapacity;
-    }
-  | {
-      ok: false;
-      reason:
-        | "host_not_ready"
-        | "boot_capacity_pending"
-        | "conflict";
-      capacity: HostCpuReservationCapacity | null;
-    };
-
 export function bootCpuReservationForSteadyVms(
   steadyCpuMillisByVm: readonly number[],
 ): number {
@@ -78,125 +62,6 @@ export function bootCpuReservationForSteadyVms(
   return bootCpuMillis;
 }
 
-export async function reserveHostCpuInD1(
-  db: RuntimeD1Database,
-  input: {
-    hostId: string;
-    runId: string;
-    steadyCpuMillisByVm: readonly number[];
-    nowUnixMs: number;
-  },
-): Promise<ReserveHostCpuResult> {
-  const steadyCpuMillis = input.steadyCpuMillisByVm.reduce(
-    (sum, value) => sum + value,
-    0,
-  );
-  const bootCpuMillis = bootCpuReservationForSteadyVms(
-    input.steadyCpuMillisByVm,
-  );
-  if (
-    !Number.isSafeInteger(steadyCpuMillis) ||
-    steadyCpuMillis <= 0 ||
-    !Number.isSafeInteger(bootCpuMillis)
-  ) {
-    throw new Error("invalid boot CPU reservation contract");
-  }
-  await reconcileHostCpuReservations(db, input.hostId, input.nowUnixMs);
-
-  const [existing] = await db
-    .select()
-    .from(hostCpuReservations)
-    .where(eq(hostCpuReservations.runId, input.runId))
-    .limit(1);
-  if (existing) {
-    if (
-      existing.hostId !== input.hostId ||
-      existing.steadyCpuMillis !== steadyCpuMillis ||
-      existing.bootCpuMillis !== bootCpuMillis
-    ) {
-      return { ok: false, reason: "conflict", capacity: null };
-    }
-    const capacity = await loadHostCpuReservationCapacity(db, input.hostId);
-    if (!capacity) {
-      return { ok: false, reason: "host_not_ready", capacity: null };
-    }
-    return {
-      ok: true,
-      state: existing.state,
-      expiresAt: existing.expiresAt,
-      capacity,
-    };
-  }
-
-  const capacity = await loadHostCpuReservationCapacity(db, input.hostId);
-  if (!capacity) {
-    return { ok: false, reason: "host_not_ready", capacity: null };
-  }
-  if (bootCpuMillis > capacity.availableCpuMillis) {
-    return { ok: false, reason: "boot_capacity_pending", capacity };
-  }
-
-  const expiresAt = input.nowUnixMs + HOST_CPU_RESERVATION_TTL_MS;
-  try {
-    await db.insert(hostCpuReservations).values({
-      runId: input.runId,
-      hostId: input.hostId,
-      cpuMillis: bootCpuMillis,
-      steadyCpuMillis,
-      bootCpuMillis,
-      quotaPhase: "boot",
-      state: "pending",
-      expiresAt,
-      createdAt: input.nowUnixMs,
-      updatedAt: input.nowUnixMs,
-    });
-  } catch (error) {
-    const [raced] = await db
-      .select()
-      .from(hostCpuReservations)
-      .where(eq(hostCpuReservations.runId, input.runId))
-      .limit(1);
-    if (!raced) {
-      throw error;
-    }
-    if (
-      raced.hostId !== input.hostId ||
-      raced.steadyCpuMillis !== steadyCpuMillis ||
-      raced.bootCpuMillis !== bootCpuMillis
-    ) {
-      return { ok: false, reason: "conflict", capacity: null };
-    }
-    const racedCapacity = await loadHostCpuReservationCapacity(
-      db,
-      input.hostId,
-    );
-    if (!racedCapacity) {
-      return { ok: false, reason: "host_not_ready", capacity: null };
-    }
-    return {
-      ok: true,
-      state: raced.state,
-      expiresAt: raced.expiresAt,
-      capacity: racedCapacity,
-    };
-  }
-
-  return {
-    ok: true,
-    state: "pending",
-    expiresAt,
-    capacity: {
-      ...capacity,
-      controlPlanePendingCpuMillis:
-        capacity.controlPlanePendingCpuMillis + bootCpuMillis,
-      controlPlaneBootCpuMillis:
-        capacity.controlPlaneBootCpuMillis + bootCpuMillis,
-      effectiveCommittedCpuMillis:
-        capacity.effectiveCommittedCpuMillis + bootCpuMillis,
-      availableCpuMillis: capacity.availableCpuMillis - bootCpuMillis,
-    },
-  };
-}
 
 export async function commitHostCpuReservation(
   db: DrizzleD1Database,
@@ -1121,4 +986,70 @@ function readNonEmptyString(value: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+/** Builds the D1 statement that admits one run into the host CPU quota. */
+export function admissionCpuQuotaStatement(input: {
+  d1: D1Database;
+  runId: string;
+  userId: string;
+  hostId: string;
+  bootCpuMillis: number;
+  steadyCpuMillis: number;
+  desiredVersion: number;
+  nowUnixMs: number;
+}): D1PreparedStatement {
+  // The row is written under the desired-state version fence, so a lost
+  // compare-and-set leaves neither the run nor the quota behind.
+  return input.d1
+    .prepare(
+      "INSERT INTO host_cpu_reservations (" +
+        "run_id, host_id, cpu_millis, steady_cpu_millis, boot_cpu_millis," +
+        " quota_phase, state, expires_at, created_at, updated_at" +
+        ") SELECT run.run_id, run.host_id, ?1, ?2, ?1, 'boot', 'committed'," +
+        " NULL, ?3, ?3" +
+        " FROM scenario_runs run" +
+        " WHERE run.run_id = ?4 AND run.user_id = ?5 AND run.host_id = ?6" +
+        " AND EXISTS (SELECT 1 FROM host_desired_state desired" +
+        " WHERE desired.host_id = run.host_id AND desired.version = ?7)",
+    )
+    .bind(
+      input.bootCpuMillis,
+      input.steadyCpuMillis,
+      input.nowUnixMs,
+      input.runId,
+      input.userId,
+      input.hostId,
+      input.desiredVersion,
+    );
+}
+
+/** Builds the D1 statement that records the generic resource reservation. */
+export function admissionResourceReservationStatement(input: {
+  d1: D1Database;
+  runId: string;
+  hostId: string;
+  resources: { cpuMillis: number; memoryMib: number; worstCaseDiskMib: number };
+  expiresAt: number | null;
+  nowUnixMs: number;
+}): D1PreparedStatement {
+  return input.d1
+    .prepare(
+      "INSERT INTO host_resource_reservations (" +
+        "execution_id, host_id, cpu_millis, memory_mib, worst_case_disk_mib," +
+        " state, expires_at, released_at, created_at, updated_at" +
+        ") SELECT run.runtime_execution_id, run.host_id, ?1, ?2, ?3, 'pending'," +
+        " ?4, NULL, ?5, ?5" +
+        " FROM scenario_runs run" +
+        " WHERE run.run_id = ?6 AND run.host_id = ?7" +
+        " AND run.state = 'provisioning'",
+    )
+    .bind(
+      input.resources.cpuMillis,
+      input.resources.memoryMib,
+      input.resources.worstCaseDiskMib,
+      input.expiresAt,
+      input.nowUnixMs,
+      input.runId,
+      input.hostId,
+    );
 }

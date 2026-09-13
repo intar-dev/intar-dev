@@ -33,7 +33,7 @@ export interface ScenarioVmRecord {
   imageFormat: "raw_chunks_v1" | "raw_zstd";
   imageVirtualSizeBytes: number;
   chunkManifestSha256: string | null;
-  guestBootstrapAbi: 1 | null;
+  guestBootstrapAbi: 2 | null;
   kernelSha256: string;
   initrdSha256: string;
   bootCmdline: string;
@@ -100,7 +100,7 @@ export function normalizeScenarioVmDirectBootMetadata(input: {
   const bootCmdline = input.bootCmdline.trim();
   if (
     (input.imageFormat === "raw_chunks_v1" &&
-      (!chunkManifestSha256 || input.guestBootstrapAbi !== 1)) ||
+      (!chunkManifestSha256 || input.guestBootstrapAbi !== 2)) ||
     !kernelSha256 ||
     !initrdSha256 ||
     !bootCmdline.split(/\s+/).includes("root=/dev/vda")
@@ -113,7 +113,7 @@ export function normalizeScenarioVmDirectBootMetadata(input: {
     imageVirtualSizeBytes: input.imageVirtualSizeBytes,
     chunkManifestSha256:
       input.imageFormat === "raw_chunks_v1" ? chunkManifestSha256 : null,
-    guestBootstrapAbi: input.imageFormat === "raw_chunks_v1" ? 1 : null,
+    guestBootstrapAbi: input.imageFormat === "raw_chunks_v1" ? 2 : null,
     kernelSha256,
     initrdSha256,
     bootCmdline,

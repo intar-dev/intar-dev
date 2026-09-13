@@ -340,6 +340,16 @@ where
 pub(super) async fn wait_for_archive_worker_signal(notify: &Notify) {
     notify.notified().await;
 }
+/// The blocking variant of the boot wait, for the tar writer.
+///
+/// That writer runs on a blocking thread which cannot await the async waiter.
+/// The loop rechecks the signal, so the thread leaves as soon as the last boot
+/// window closes.
+pub(super) fn park_archive_while_vm_boots() {
+    while image_cache::vm_boot_critical() {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
 
 pub(super) fn archive_batch_needs_follow_up(job_count: usize) -> bool {
     job_count == ARCHIVE_JOB_BATCH_SIZE
@@ -1229,6 +1239,10 @@ fn write_raw_recordings_tar_atomically(
         let mut archive = TarBuilder::new(output);
         archive.mode(HeaderMode::Deterministic);
         for (filename, source) in sources {
+            // A blocking thread cannot borrow the async waiter, so it parks on
+            // the same boot-critical signal between whole recordings. A
+            // recording is the natural block boundary of this writer.
+            park_archive_while_vm_boots();
             let metadata = std::fs::symlink_metadata(source)
                 .with_context(|| format!("failed to inspect raw recording {}", source.display()))?;
             if !metadata.file_type().is_file() {
@@ -1666,6 +1680,12 @@ pub(super) async fn upload_single_artifact(
     let mut buffer = vec![0_u8; ARTIFACT_UPLOAD_PART_BYTES];
     loop {
         use tokio::io::AsyncReadExt as _;
+        // Archive work is the lowest priority on the host. At a part
+        // boundary, before the next 16 MiB read, yield the host to a live VM
+        // boot. A pause is not a cancel: the part cursor and the open file
+        // handle survive, so the upload resumes at the same offset. The wait
+        // holds no mutex and no lock that a launch needs.
+        image_cache::wait_for_vm_boot_idle().await;
         let read = file
             .read(&mut buffer)
             .await

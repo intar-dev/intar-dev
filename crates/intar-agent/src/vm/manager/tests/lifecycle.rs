@@ -290,7 +290,7 @@ fn probe_replay_preserves_stored_envelope_payload() {
         },
         ssh_host_keys_openssh: vec!["ssh-ed25519 AAAAHOST host".to_string()],
         kino_sha256: "a".repeat(64),
-        guest_bootstrap_abi: 1,
+        guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
         guest_phase_timings: GuestPhaseTimings {
             ready_uptime_ms: 1_000,
             ..GuestPhaseTimings::default()

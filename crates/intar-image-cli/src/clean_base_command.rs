@@ -421,10 +421,6 @@ fn validate_base(base: &BaseImageSpec) -> Result<()> {
         base.arch == "amd64",
         "clean-base architecture must be amd64"
     );
-    ensure!(
-        base.kernel_package == "linux-image-cloud-amd64",
-        "clean-base kernel package must be linux-image-cloud-amd64"
-    );
     let forbidden = [
         "docker",
         "containerd",
@@ -436,9 +432,7 @@ fn validate_base(base: &BaseImageSpec) -> Result<()> {
         "talos",
         "intar",
     ];
-    for package in std::iter::once(base.kernel_package.as_str())
-        .chain(base.packages.iter().map(String::as_str))
-    {
+    for package in base.packages.iter().map(String::as_str) {
         let normalized = package.to_ascii_lowercase();
         ensure!(
             !forbidden.iter().any(|item| normalized.contains(item)),

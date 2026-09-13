@@ -100,7 +100,38 @@ fn stage_text(stages: &[super::ProvisionStage]) -> String {
 }
 
 fn run_bash(script: &str, syntax_only: bool) -> Output {
-    let mut command = Command::new("bash");
+    run_bash_with("bash", script, syntax_only)
+}
+
+/// The supervisor uses `exec {fd}<>pipe` and `EPOCHREALTIME`, which need
+/// bash 5. The guest image ships bash 5 and CI ships bash 5, so the
+/// functional checks run there. A host without bash 5 reports a skip instead
+/// of a failure, because a missing interpreter is an environment fact and
+/// not a defect in the rendered script.
+fn bash5() -> Option<String> {
+    let candidates = std::env::var("KINO_TEST_BASH").ok().into_iter().chain([
+        String::from("/opt/homebrew/bin/bash"),
+        String::from("/usr/local/bin/bash"),
+        String::from("/bin/bash"),
+        String::from("bash"),
+    ]);
+    for candidate in candidates {
+        // The probe is "printf %s ${EPOCHREALTIME:-}" without the shell
+        // expansion above. A bash 5 host answers with a value; bash 3 or 4
+        // answers with an empty string.
+        let probe = format!("printf %s {}{}", "$", "{EPOCHREALTIME:-}");
+        if let Ok(output) = Command::new(&candidate).args(["-c", &probe, "--"]).output()
+            && output.status.success()
+            && !output.stdout.is_empty()
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn run_bash_with(program: &str, script: &str, syntax_only: bool) -> Output {
+    let mut command = Command::new(program);
     if syntax_only {
         command.arg("-n");
     }
@@ -684,7 +715,10 @@ fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
     let install_ssh_gate = script
         .find("/etc/systemd/system/ssh.service.d/10-intar-gate.conf")
         .unwrap();
-    let daemon_reload = script.find("systemctl daemon-reload").unwrap();
+    let daemon_reload = install_ssh_gate
+        + script[install_ssh_gate..]
+            .find("systemctl daemon-reload")
+            .unwrap();
     let mask_ssh_socket = script.find("systemctl mask ssh.socket").unwrap();
     let remove_host_keys = script
         .rfind("rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub")
@@ -745,6 +779,124 @@ fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
     let start = script.rfind("\nstart_sshd\n").unwrap();
     let kino = script.rfind("\nstart_kino\n").unwrap();
     assert!(prepare < start && start < kino);
+}
+
+#[test]
+fn scenario_supervisor_waits_for_the_kino_acknowledgement() {
+    let script = render_minimal_runtime_stage();
+    let (_, start_kino_and_rest) = script.split_once("start_kino() {\n").unwrap();
+    let (start_kino, _) = start_kino_and_rest
+        .split_once("\n}\n\nconfigure_guest_network")
+        .unwrap();
+
+    // The readiness decision is the acknowledgement, never a fixed wait.
+    assert!(start_kino.contains("mkfifo -m 0600 \"$kino_ready_fifo\""));
+    assert!(start_kino.contains("KINO_READY_FIFO=\"$kino_ready_fifo\""));
+    assert!(start_kino.contains("kino_ready_line_is_valid \"$line\""));
+    assert!(start_kino.contains("read -r -t 0.1 -u \"$kino_ready_fd\" line"));
+    assert!(!start_kino.contains("sleep 0.2"));
+    assert!(!start_kino.contains("timed out waiting for kino vsock bind"));
+
+    // One overall deadline covers the bind retry, and it is computed once
+    // before the loop so an attempt never renews it.
+    let deadline = start_kino
+        .find("deadline_ms=$(( $(monotonic_millis) + kino_ready_timeout_seconds * 1000 ))")
+        .unwrap();
+    let retry = start_kino
+        .find("attempts_left=$kino_start_attempts")
+        .unwrap();
+    let loop_start = start_kino.find("while :; do").unwrap();
+    assert!(deadline < retry && retry < loop_start);
+    assert_eq!(
+        start_kino
+            .matches("deadline_ms=$(( $(monotonic_millis)")
+            .count(),
+        1,
+        "the deadline must not be recomputed per attempt"
+    );
+
+    // Every failure path reports, stops Kino, and stops the boot.
+    assert!(start_kino.contains(
+        "report_kino_startup_failure 'kino did not acknowledge startup before the deadline'"
+    ));
+    assert!(start_kino.contains("report_kino_startup_failure 'kino exited during startup'"));
+    assert!(
+        start_kino.contains(
+            "report_kino_startup_failure \"kino sent an unusable startup acknowledgement"
+        )
+    );
+    assert!(script.contains("kino_ready_timeout_seconds=10"));
+    assert!(script.contains("kino_start_attempts=3"));
+    assert!(script.contains("lab_release_fallback_seconds=5"));
+    assert!(script.contains("kino_ready_fifo=\"$runtime_state_path/kino-ready.fifo\""));
+    assert!(script.contains("lab_release_fifo=\"$runtime_state_path/lab-release.fifo\""));
+}
+
+#[test]
+fn scenario_supervisor_accepts_only_a_matching_acknowledgement() {
+    let script = render_minimal_runtime_stage();
+    let (_, helper_and_rest) = script.split_once("kino_ready_line_is_valid() {\n").unwrap();
+    let (helper, _) = helper_and_rest.split_once("\n}\n").unwrap();
+
+    assert!(helper.contains(r#"[ "${#fields[@]}" -eq 4 ] || return 1"#));
+    assert!(helper.contains(r#"[ "${fields[0]}" = INTAR_KINO_READY ] || return 1"#));
+    assert!(helper.contains(r#"[ "${fields[1]}" = v2 ] || return 1"#));
+    assert!(helper.contains(r#"[ "${fields[2]}" = "sha256=$INTAR_KINO_SHA256" ] || return 1"#));
+    assert!(helper.contains(r#"[ "${fields[3]}" = "pid=$KINO_PID" ] || return 1"#));
+    assert!(!helper.contains("v1"), "there is no older acknowledgement");
+}
+
+#[test]
+fn scenario_supervisor_releases_the_lab_once_from_one_known_action() {
+    let script = render_minimal_runtime_stage();
+    let (_, release_and_rest) = script.split_once("release_lab_services() {\n").unwrap();
+    let (release, _) = release_and_rest.split_once("\n}\n").unwrap();
+
+    assert!(release.contains("log_phase lab_release start"));
+    assert!(
+        release.contains(
+            "deadline_ms=$(( $(monotonic_millis) + lab_release_fallback_seconds * 1000 ))"
+        )
+    );
+    assert!(
+        release.contains("INTAR_EVENT v2 recording_started vm=$INTAR_VM_HOSTNAME kino=$KINO_PID")
+    );
+    assert!(release.contains("start_lab_target"));
+
+    // The only privileged action is one fixed systemd start.
+    let (_, target_and_rest) = script.split_once("start_lab_target() {\n").unwrap();
+    let (target, _) = target_and_rest.split_once("\n}\n").unwrap();
+    assert!(target.contains("systemctl start intar-lab.target"));
+    assert_eq!(
+        target.matches("systemctl ").count(),
+        1,
+        "the release must call exactly one systemd action"
+    );
+    assert!(target.contains("lab_release_done=1"));
+
+    // The release channel is root-only and lives for this boot only.
+    let (_, channels_and_rest) = script.split_once("prepare_guest_channels() {\n").unwrap();
+    let (channels, _) = channels_and_rest.split_once("\n}\n").unwrap();
+    assert!(channels.contains("rm -f \"$lab_release_fifo\""));
+    assert!(channels.contains("mkfifo -m 0600 \"$lab_release_fifo\""));
+    assert!(channels.contains("kino_lab_release_uid=\"$(id -u \"$recording_user\")\""));
+    assert!(script.contains("KINO_LAB_RELEASE_UID=\"$kino_lab_release_uid\""));
+
+    // The guest can not name another unit or another action.
+    assert!(!script.contains("systemctl start k3s"));
+    assert!(!script.contains("systemctl stop"));
+}
+
+#[test]
+fn scenario_supervisor_starts_the_lab_after_the_ready_marker() {
+    let script = render_minimal_runtime_stage();
+    let ready = script.rfind("log_phase ready end").unwrap();
+    let release = script.rfind("\nrelease_lab_services\n").unwrap();
+    let supervise = script.rfind("wait -n \"$KINO_PID\" || true").unwrap();
+    assert!(
+        ready < release && release < supervise,
+        "the lab release must follow the terminal-ready marker"
+    );
 }
 
 #[test]
@@ -1186,6 +1338,40 @@ wait_for_guest_network
     );
 }
 
+/// The error report survives a missing uptime source.
+///
+/// The guest has /proc/uptime, but the report must not depend on it: a read
+/// error inside the handler would end the shell before it prints the report,
+/// because the shell runs with errexit.
+#[test]
+fn scenario_supervisor_error_report_survives_a_missing_uptime_source() {
+    let script = render_minimal_supervisor_prefix();
+    let function = script
+        .split_once("report_runtime_error() {\n")
+        .unwrap()
+        .1
+        .split_once("\n}\n")
+        .unwrap()
+        .0;
+    let harness = format!(
+        r#"set -Eeuo pipefail
+read() {{ return 1; }}
+report_runtime_error() {{
+{function}
+}}
+trap 'report_runtime_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+false
+"#
+    );
+    let output = run_bash(&harness, false);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error=command_failed"), "{stderr}");
+    assert!(stderr.contains("status=1"), "{stderr}");
+    assert!(stderr.contains("ts=boot+unknowns"), "{stderr}");
+    assert!(stderr.contains("command=false"), "{stderr}");
+}
+
 #[test]
 fn build_stages_contain_runtime_assets() {
     let scenario = Scenario::parse_course(
@@ -1314,6 +1500,7 @@ packages = ["nginx"]
     assert!(!script.contains("INTAR_STARGATE_TARGET_PUBLIC_KEY_OPENSSH"));
     assert!(script.contains("wait -n \"$KINO_PID\" || true"));
     assert!(script.contains("start_sshd"));
+    assert!(script.contains("release_lab_services"));
     assert!(script.contains("/run/intar-build-state/initial-boot-files"));
     assert!(script.contains("systemctl disable intar-build.service"));
     assert!(script.contains(
@@ -1407,4 +1594,144 @@ step "break-workload" {
         .split_once("\nEOF_RUNTIME_MODULES")
         .unwrap();
     assert_eq!(modules, "nf_tables\noverlay\nbr_netfilter\nvxlan");
+}
+
+/// Collect named generated functions into a runnable shell prelude.
+fn supervisor_functions(script: &str, headers: &[&str]) -> String {
+    let mut prelude = String::new();
+    for header in headers {
+        let (_, rest) = script
+            .split_once(&format!("{header}\n"))
+            .unwrap_or_else(|| panic!("missing supervisor function {header}"));
+        let (body, _) = rest
+            .split_once("\n}\n")
+            .unwrap_or_else(|| panic!("unterminated supervisor function {header}"));
+        prelude.push_str(header);
+        prelude.push('\n');
+        prelude.push_str(body);
+        prelude.push_str("\n}\n\n");
+    }
+    prelude
+}
+
+/// Run one guest runtime fixture with the generated code substituted in.
+fn run_guest_runtime_fixture(fixture: &str, substitutions: &[(&str, &str)]) -> Output {
+    let Some(bash) = bash5() else {
+        eprintln!("skipped {fixture}: bash 5 is not available");
+        return Command::new("true")
+            .output()
+            .expect("the trivially true command must run");
+    };
+    let mut harness = fixture.to_owned();
+    for (placeholder, value) in substitutions {
+        harness = harness.replace(placeholder, value);
+    }
+    run_bash_with(&bash, &harness, false)
+}
+
+/// Temporary debug dump.
+/// The acknowledgement gate decides readiness against real fake Kino
+/// processes: only a matching acknowledgement reaches the ready marker, and
+/// every other child outcome stops the boot with a reason.
+#[test]
+fn scenario_supervisor_acknowledgement_gate_runs_against_fake_kino() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = render_minimal_supervisor();
+    let functions = supervisor_functions(
+        &script,
+        &[
+            "monotonic_millis() {",
+            "prepare_guest_channels() {",
+            "kino_ready_line_is_valid() {",
+            "report_kino_startup_failure() {",
+            "start_kino() {",
+        ],
+    )
+    // The generated supervisor starts the installed Kino and reads the image
+    // configuration template. The check owns both paths.
+    .replace("/usr/local/bin/kino", "\"$FAKE_KINO\"")
+    .replace("/etc/kino/kino.hcl.tpl", "\"$work/kino.hcl.tpl\"");
+    let output = run_guest_runtime_fixture(
+        include_str!("../../tests/guest-runtime/acknowledgement-gate.sh"),
+        &[
+            ("@WORK@", &shell_quote(&temp.path().display().to_string())),
+            ("@FUNCTIONS@", &functions),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert_eq!(stdout.matches("PASS ").count(), 7, "{stdout}");
+    assert!(stdout.contains("failures=0"), "{stdout}");
+}
+
+/// One recording event, the fallback timer, and an unknown event each start
+/// the single known laboratory target exactly once.
+#[test]
+fn scenario_supervisor_lab_release_runs_the_fixed_target_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = render_minimal_supervisor();
+    let functions = supervisor_functions(
+        &script,
+        &[
+            "monotonic_millis() {",
+            "prepare_guest_channels() {",
+            "start_lab_target() {",
+            "release_lab_services() {",
+        ],
+    );
+    let output = run_guest_runtime_fixture(
+        include_str!("../../tests/guest-runtime/lab-release.sh"),
+        &[
+            ("@WORK@", &shell_quote(&temp.path().display().to_string())),
+            ("@FUNCTIONS@", &functions),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert_eq!(stdout.matches("PASS ").count(), 3, "{stdout}");
+}
+
+/// The image finalization stage writes the lab target, moves every laboratory
+/// service out of the boot path, and never stops a running unit.
+#[test]
+fn image_finalization_moves_lab_units_behind_the_lab_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let system_dir = temp.path().join("system");
+    let script = render_minimal_cleanup_stage();
+    assert!(script.contains("cat >/etc/systemd/system/intar-lab.target <<'EOF_LAB_TARGET'"));
+    assert!(script.contains("Description=Intar scenario laboratory services"));
+    assert!(script.contains("chmod 0644 /etc/systemd/system/intar-lab.target"));
+    let unit_loop = script
+        .split_once("for unit in k3s.service k3s-agent.service; do\n")
+        .expect("the finalization must walk the gated units")
+        .1
+        .split_once("\ndone\nsystemctl daemon-reload")
+        .expect("the unit loop must end with one reload")
+        .0;
+    // The check points the generated loop at a temporary tree and keeps the
+    // real link logic. install -d and systemctl are stubbed by the fixture.
+    let function = format!(
+        "configure_lab_services() {{\n  local unit unit_path wants_dir candidate\n  for unit in k3s.service k3s-agent.service; do\n{unit_loop}\n  done\n  systemctl daemon-reload\n}}\n"
+    )
+    .replace("/etc/systemd/system", &system_dir.display().to_string());
+    assert!(!function.contains("systemctl stop"));
+    assert!(!function.contains("systemctl disable"));
+    assert!(!function.contains("systemctl restart"));
+    let output = run_guest_runtime_fixture(
+        include_str!("../../tests/guest-runtime/lab-units.sh"),
+        &[
+            ("@WORK@", &shell_quote(&temp.path().display().to_string())),
+            (
+                "@SYSTEM_DIR@",
+                &shell_quote(&system_dir.display().to_string()),
+            ),
+            ("@FUNCTION@", &function),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert_eq!(stdout.matches("PASS ").count(), 5, "{stdout}");
 }

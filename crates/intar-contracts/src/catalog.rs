@@ -9,7 +9,10 @@ pub const IMAGE_CHUNK_MANIFEST_SCHEMA_VERSION: u16 = 1;
 pub const IMAGE_CHUNK_SIZE_BYTES: u32 = 4 * 1024 * 1024;
 pub const IMAGE_CHUNK_ENCODING: &str = "zstd-v1-level-6";
 pub const MAX_CHUNKED_IMAGE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-pub const GUEST_BOOTSTRAP_ABI_V1: u16 = 1;
+/// Guest bootstrap ABI. The image, the guest tools disk, Kino, and the guest
+/// runtime supervisor ship as one release, so this value is the only accepted
+/// value on both sides of the cutover.
+pub const GUEST_BOOTSTRAP_ABI_V2: u16 = 2;
 
 static FULL_ZERO_CHUNK_SHA256: OnceLock<[u8; 32]> = OnceLock::new();
 

@@ -8,6 +8,7 @@ mod replay_media;
 mod runtime_disk;
 mod transcript;
 
+pub(crate) use manager::ImagePrepareRequeued;
 #[cfg(test)]
 pub use manager::VmTerminalTarget;
 pub use manager::{

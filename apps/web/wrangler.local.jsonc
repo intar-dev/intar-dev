@@ -10,6 +10,9 @@
     "LEARNER_RUN_CLI_V1_ENFORCEMENT": "off",
     "AGENT_JWT_ISSUER": "intar-agent-bridge",
     "AGENT_JWT_AUDIENCE": "agent-connect",
+    // Local test fixture only. Production receives the verified release pin
+    // from the cutover deploy, so this value must never ship.
+    "SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON": "{\"schema_version\":1,\"bootstrap_abi\":2,\"tools_disk_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"tools_disk_size_bytes\":67108864,\"compressed_disk_sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"compressed_disk_size_bytes\":1048576,\"kino_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"kino_size_bytes\":4096}",
     "STARGATE_ROUTE_TTL_SECONDS": "14400",
     "STARGATE_ADMIN_AUTH_HEADER": "cf-access-jwt-assertion",
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",

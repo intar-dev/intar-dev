@@ -11,18 +11,33 @@ export interface ScenarioStartAcceptedResponse {
 
 const CAPACITY_WAIT_TIMEOUT_MS = 60_000;
 const DEFAULT_CAPACITY_RETRY_MS = 2_000;
-const ALLOCATION_BUSY_RETRY_MIN_MS = 250;
-const ALLOCATION_BUSY_RETRY_MAX_MS = 350;
+/** Bounded jitter for host capacity contention, to avoid a retry thundering herd. */
+const CAPACITY_RETRY_JITTER_MIN_MS = 250;
+const CAPACITY_RETRY_JITTER_MAX_MS = 350;
+/**
+ * Start admission is idempotent on the caller-supplied key, so a bounded
+ * transport retry of one attempt is safe even when the first request reached
+ * the control plane and its response was lost.
+ */
+const TRANSPORT_RETRY_ATTEMPTS = 3;
 
 class ScenarioStartRequestError extends Error {
   readonly code: string | null;
   readonly retryAfterMs: number;
+  /** True when the response carried no admission decision. */
+  readonly retryable: boolean;
 
-  constructor(message: string, code: string | null, retryAfterMs: number) {
+  constructor(
+    message: string,
+    code: string | null,
+    retryAfterMs: number,
+    retryable = false,
+  ) {
     super(message);
     this.name = "ScenarioStartRequestError";
     this.code = code;
     this.retryAfterMs = retryAfterMs;
+    this.retryable = retryable;
   }
 }
 
@@ -33,6 +48,14 @@ export class ScenarioStartCancelledError extends Error {
   }
 }
 
+/**
+ * Starts one scenario run, waiting out host capacity contention.
+ *
+ * The idempotency key is generated once for this call and reused by every
+ * retry inside it, so a retry can never create a second VM set even when the
+ * first request was admitted and only its response was lost. A new Start
+ * click calls this function again and gets a new key.
+ */
 export async function requestScenarioStartWithCapacityWait(
   scenarioId: string,
   options: {
@@ -44,7 +67,9 @@ export async function requestScenarioStartWithCapacityWait(
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   const startedAt = Date.now();
+  const idempotencyKey = crypto.randomUUID();
   let requested = false;
+  let transportAttempts = 1;
   while (true) {
     if (options.signal.aborted) {
       throw new ScenarioStartCancelledError();
@@ -60,6 +85,7 @@ export async function requestScenarioStartWithCapacityWait(
         scenarioId,
         options.signal,
         {
+          idempotencyKey,
           organizationId: options.organizationId ?? null,
           ...(options.candidateRevision
             ? { candidateRevision: options.candidateRevision }
@@ -73,11 +99,7 @@ export async function requestScenarioStartWithCapacityWait(
       if (options.signal.aborted) {
         throw new ScenarioStartCancelledError();
       }
-      if (
-        !(error instanceof ScenarioStartRequestError) ||
-        (error.code !== "boot_capacity_pending" &&
-          error.code !== "runtime_allocation_busy")
-      ) {
+      if (!(error instanceof ScenarioStartRequestError)) {
         throw error;
       }
 
@@ -88,25 +110,56 @@ export async function requestScenarioStartWithCapacityWait(
           "VM capacity did not become available within 60 seconds. Try again shortly or choose another scenario.",
         );
       }
-      options.onCapacityWait();
-      await waitForCapacityRetry(
-        Math.min(
-          error.code === "runtime_allocation_busy"
-            ? allocationBusyRetryMs()
-            : error.retryAfterMs,
-          remainingMs,
-        ),
-        options.signal,
-      );
+
+      if (isCapacityContention(error.code)) {
+        options.onCapacityWait();
+        await waitForCapacityRetry(
+          Math.min(capacityRetryMs(error.retryAfterMs), remainingMs),
+          options.signal,
+        );
+        continue;
+      }
+
+      // An unconfirmed transport failure may still have been admitted: the
+      // same key makes a repeat call return that same run instead of creating
+      // a second one, so a bounded retry is safe. This is not a capacity wait,
+      // so the caller keeps its current status while the retry runs.
+      if (isRetryableTransportFailure(error) && transportAttempts < TRANSPORT_RETRY_ATTEMPTS) {
+        transportAttempts += 1;
+        await waitForCapacityRetry(
+          Math.min(error.retryAfterMs, remainingMs),
+          options.signal,
+        );
+        continue;
+      }
+
+      throw error;
     }
   }
 }
 
-function allocationBusyRetryMs() {
+/** Host capacity contention is a wait, not a failure. */
+function isCapacityContention(code: string | null): boolean {
+  return code === "scenario_host_capacity_contended";
+}
+
+/**
+ * 5xx and unreachable responses carry no admission decision, so the request
+ * may have committed. 4xx responses are decisions and are never retried.
+ */
+function isRetryableTransportFailure(error: ScenarioStartRequestError): boolean {
+  return error.code === "connectivity_failed" || error.retryable;
+}
+
+function capacityRetryMs(retryAfterMs: number): number {
+  return Math.max(retryAfterMs, capacityRetryJitterMs());
+}
+
+function capacityRetryJitterMs() {
   return Math.floor(
-    ALLOCATION_BUSY_RETRY_MIN_MS +
+    CAPACITY_RETRY_JITTER_MIN_MS +
       Math.random() *
-        (ALLOCATION_BUSY_RETRY_MAX_MS - ALLOCATION_BUSY_RETRY_MIN_MS + 1),
+        (CAPACITY_RETRY_JITTER_MAX_MS - CAPACITY_RETRY_JITTER_MIN_MS + 1),
   );
 }
 
@@ -114,6 +167,7 @@ async function requestScenarioStart(
   scenarioId: string,
   signal: AbortSignal,
   options: {
+    idempotencyKey: string;
     organizationId: string | null;
     candidateRevision?: string;
     candidateBuildId?: string;
@@ -127,7 +181,11 @@ async function requestScenarioStart(
         method: "POST",
         credentials: "include",
         signal,
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          // One key per Start attempt, reused by every retry of that attempt.
+          "Idempotency-Key": options.idempotencyKey,
+        },
         body: JSON.stringify({
           ...(options.organizationId
             ? { organizationId: options.organizationId }
@@ -172,6 +230,9 @@ async function requestScenarioStart(
         ? body.code
         : null,
       parseRetryAfterMs(response.headers.get("retry-after")),
+      // A 5xx carries no admission decision: the request may have committed,
+      // so a same-key retry is safe. A 4xx is a decision and is never retried.
+      response.status >= 500,
     );
   }
 

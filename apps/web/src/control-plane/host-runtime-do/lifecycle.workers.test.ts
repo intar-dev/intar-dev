@@ -632,7 +632,7 @@ async function seedCatalogImage(sha256: string): Promise<void> {
       imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 1_024,
       chunkManifestSha256: "d".repeat(64),
-      guestBootstrapAbi: 1,
+      guestBootstrapAbi: 2,
       kernelSha256: "a".repeat(64),
       initrdSha256: "b".repeat(64),
       bootCmdline: "console=ttyS0 root=/dev/vda rw",

@@ -24,8 +24,9 @@ use intar_contracts::{
         RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliRequestV1, RunCliResponseV1,
     },
     stargate::{
-        IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
-        IssueWorkspaceAppSessionResponse,
+        ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
+        IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse,
+        StageTerminalTargetRequest, StageTerminalTargetResponse,
     },
 };
 use schemars::schema_for;
@@ -50,6 +51,8 @@ fn main() -> Result<()> {
         "schemas/bridge-message-v5.schema.json",
         "schemas/bridge-message-v6.schema.json",
         "schemas/run-cli-probe-check-response-v1.schema.json",
+        "schemas/stargate-attach-terminal-target-request.schema.json",
+        "fixtures/stargate/attach-terminal-target-request.json",
         "fixtures/catalog/scenario-manifest-v2.json",
         "fixtures/catalog/scenario-manifest-v3.json",
         "fixtures/bridge/host-desired-state-v1.json",
@@ -77,6 +80,18 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("stargate-issue-workspace-app-session-request.schema.json"),
         &schema_for!(IssueWorkspaceAppSessionRequest),
+    )?;
+    write_schema(
+        &schema_dir.join("stargate-stage-terminal-target-request.schema.json"),
+        &schema_for!(StageTerminalTargetRequest),
+    )?;
+    write_schema(
+        &schema_dir.join("stargate-stage-terminal-target-response.schema.json"),
+        &schema_for!(StageTerminalTargetResponse),
+    )?;
+    write_schema(
+        &schema_dir.join("stargate-activate-terminal-target-request.schema.json"),
+        &schema_for!(ActivateTerminalTargetRequest),
     )?;
     write_schema(
         &schema_dir.join("stargate-issue-workspace-app-session-response.schema.json"),
@@ -148,6 +163,18 @@ fn main() -> Result<()> {
     copy_fixture(
         "crates/intar-contracts/fixtures/stargate/issue-workspace-app-session-request.json",
         &fixture_dir.join("stargate/issue-workspace-app-session-request.json"),
+    )?;
+    copy_fixture(
+        "crates/intar-contracts/fixtures/stargate/stage-terminal-target-request.json",
+        &fixture_dir.join("stargate/stage-terminal-target-request.json"),
+    )?;
+    copy_fixture(
+        "crates/intar-contracts/fixtures/stargate/stage-terminal-target-response.json",
+        &fixture_dir.join("stargate/stage-terminal-target-response.json"),
+    )?;
+    copy_fixture(
+        "crates/intar-contracts/fixtures/stargate/activate-terminal-target-request.json",
+        &fixture_dir.join("stargate/activate-terminal-target-request.json"),
     )?;
     copy_fixture(
         "crates/intar-contracts/fixtures/stargate/issue-workspace-app-session-response.json",
@@ -281,24 +308,75 @@ fn stargate_ts() -> &'static str {
 export type TerminalSessionMode = "browser" | "native";
 export type NativeTerminalAuthMode = "profile_keys";
 
+/** Every field is mandatory and non-empty for a terminal route. */
 export interface RouteMetadata {
+  host_id: string;
+  run_id: string;
+  vm_id: string;
+  user_id: string;
+}
+
+/** Workspace app routes carry no terminal identity, so their metadata stays
+ * optional. */
+export interface WorkspaceAppMetadata {
   host_id?: string | null;
   run_id?: string | null;
   vm_id?: string | null;
   user_id?: string | null;
 }
 
+/** The complete SSH endpoint of one scenario VM terminal. Only the admin API
+ * carries this value: the guest private key never reaches a browser. */
+export interface TerminalTarget {
+  username: string;
+  host: string;
+  port: number;
+  host_key_openssh: string;
+  private_key_openssh: string;
+  authorized_client_public_keys_openssh: string[];
+}
+
+/** A browser route starts pending. An admin attach moves it to ready. */
+export type TerminalTargetState =
+  | { state: "pending" }
+  | ({ state: "ready" } & TerminalTarget);
+
 export interface IssueTerminalSessionRequest {
   route_username: string;
-  target_username: string;
-  target_ip: string;
-  target_port: number;
-  target_host_key_openssh: string;
-  target_private_key_openssh: string;
-  authorized_client_public_keys_openssh?: string[];
+  /** Opaque generation. An attach call must repeat this exact string. */
+  generation: string;
+  /** `pending` for a browser route, `ready` for a native route. */
+  target: TerminalTargetState;
   route_expires_at: number;
   mode: TerminalSessionMode;
-  metadata?: RouteMetadata;
+  metadata: RouteMetadata;
+}
+
+/** Stage the ready target on a pending route. The route is NOT ready after
+ * this call: no waiter wakes and no socket dials, so the SSH shift can not
+ * start before the control plane activates the attachment. */
+export interface StageTerminalTargetRequest {
+  run_id: string;
+  vm_id: string;
+  user_id: string;
+  generation: string;
+  target: TerminalTarget;
+}
+
+/** One staged target. An identical repeat of a stage call returns the same
+ * value, so a lost answer is safe to retry. */
+export interface StageTerminalTargetResponse {
+  attachment_id: string;
+}
+
+/** Activate exactly the staged attachment that the control plane names. Only
+ * this call makes the route ready and wakes the waiting browser socket. */
+export interface ActivateTerminalTargetRequest {
+  run_id: string;
+  vm_id: string;
+  user_id: string;
+  generation: string;
+  attachment_id: string;
 }
 
 export interface BrowserTerminalSession {
@@ -338,7 +416,7 @@ export interface IssueWorkspaceAppSessionRequest {
   protocol: WorkspaceAppProtocol;
   upstream_host?: string;
   route_expires_at: number;
-  metadata?: RouteMetadata;
+  metadata?: WorkspaceAppMetadata;
 }
 
 export interface IssueWorkspaceAppSessionResponse {
@@ -972,4 +1050,78 @@ export interface RunCliProbeCheckResultV1 {
 
 fn label_to_string(label: [u8; 11]) -> String {
     String::from_utf8_lossy(&label).trim_end().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stargate_ts;
+
+    /// One emitted interface block, so a check names the type it means. The
+    /// workspace app request legitimately keeps `target_username`, and the
+    /// terminal route request must not.
+    fn block<'a>(ts: &'a str, name: &str) -> &'a str {
+        let header = format!("export interface {name} {{");
+        let start = ts.find(&header).expect("the emitter kept this interface");
+        let rest = &ts[start + header.len()..];
+        let end = rest.find("\n}").expect("the interface closes");
+        &rest[..end]
+    }
+
+    /// The emitted TypeScript is the contract the web app compiles against.
+    /// Hold it to the fields the Rust types carry, so a type change that the
+    /// emitter does not follow fails here instead of in the web build.
+    #[test]
+    fn emitted_stargate_typescript_carries_the_terminal_route_contract() {
+        let ts = stargate_ts();
+
+        for required in [
+            "generation: string;",
+            "target: TerminalTargetState;",
+            "export type TerminalTargetState =",
+            "{ state: \"pending\" }",
+            "({ state: \"ready\" } & TerminalTarget)",
+            "export interface StageTerminalTargetRequest {",
+            "export interface StageTerminalTargetResponse {",
+            "attachment_id: string;",
+            "export interface ActivateTerminalTargetRequest {",
+            "private_key_openssh: string;",
+            "host_key_openssh: string;",
+            "authorized_client_public_keys_openssh: string[];",
+            "export interface WorkspaceAppMetadata {",
+        ] {
+            assert!(ts.contains(required), "the emitter dropped {required:?}");
+        }
+
+        // A terminal route identity is mandatory; only the workspace app route
+        // keeps optional metadata. The old flat browser shape must be gone.
+        assert!(ts.contains("host_id: string;"));
+        assert!(ts.contains("metadata: RouteMetadata;"));
+        assert!(ts.contains("metadata?: WorkspaceAppMetadata;"));
+        assert!(
+            block(ts, "StageTerminalTargetRequest").contains("target: TerminalTarget;"),
+            "the stage request must carry the ready target"
+        );
+        for absent in ["target_username", "target_ip", "target_port", "state"] {
+            assert!(
+                !block(ts, "StageTerminalTargetRequest").contains(absent),
+                "the stage request must not carry {absent:?}"
+            );
+        }
+        for absent in [
+            "target_username",
+            "target_ip",
+            "target_host_key_openssh",
+            "private_key_openssh",
+        ] {
+            assert!(
+                !block(ts, "IssueTerminalSessionRequest").contains(absent),
+                "the create request must not carry {absent:?} at the top level"
+            );
+        }
+        assert!(!ts.contains("TerminalTargetView"));
+        assert!(
+            !ts.contains("AttachTerminalTargetRequest"),
+            "the replaced attach type must not remain in the emitted contract"
+        );
+    }
 }

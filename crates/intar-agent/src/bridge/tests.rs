@@ -1,4 +1,5 @@
 use intar_contracts::bridge::DesiredCachedImageV1;
+use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
 use sha2::Digest as _;
 
 use crate::vm::VmTerminalTarget;
@@ -20,7 +21,7 @@ fn desired_vm() -> DesiredVmV2 {
             tools_disk_sha256: "1".repeat(64),
             tools_disk_size_bytes: 64 * 1024 * 1024,
             kino_sha256: "2".repeat(64),
-            bootstrap_abi: 1,
+            bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
         },
         resources: VmResourcesV2 {
             cpu_millis: 125,
@@ -604,7 +605,7 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
         initrd_sha256: initrd_sha256.clone(),
         cmdline: "root=/dev/vda rw".to_string(),
         virtual_size_bytes: 1,
-        guest_bootstrap_abi: 1,
+        guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
     };
     let prepared = intar_jailer_protocol::PreparedImageV3Result {
         image_id: intar_jailer_protocol::Sha256Digest::parse(manifest.image_id.clone())

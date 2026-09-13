@@ -8,6 +8,12 @@ pub enum StargateError {
     RouteNotFound(String),
     #[error("workspace application route `{0}` already exists")]
     WorkspaceAppRouteAlreadyExists(String),
+    #[error("terminal route conflict: {0}")]
+    TerminalRouteConflict(String),
+    #[error("a terminal socket is already open for this route generation")]
+    TerminalSocketAlreadyOpen,
+    #[error("the terminal target did not attach before the deadline")]
+    TerminalTargetTimeout,
     #[error("unauthorized")]
     Unauthorized,
     #[error("database error: {0}")]

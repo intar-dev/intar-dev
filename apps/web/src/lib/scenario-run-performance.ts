@@ -143,11 +143,18 @@ export function markPendingScenarioRunBootStage(
   return next;
 }
 
-/** Associates the persisted click time with the accepted scenario run. */
+/**
+ * Associates the persisted click time with the accepted scenario run.
+ *
+ * The click time is the start boundary and is never reset. A run that this
+ * attempt did not create is refused entirely, so no stage of it can be
+ * attributed to the click.
+ */
 export function associateScenarioRunBootEvidence(input: {
   runId: string;
   scenarioId: string;
-  reused?: boolean;
+  reused: boolean;
+  acceptedAt: number;
 }): ScenarioRunBootEvidence | null {
   const key = runKey(input.runId);
   const existing = read<ScenarioRunBootEvidence>(key);
@@ -156,12 +163,30 @@ export function associateScenarioRunBootEvidence(input: {
   }
   const pending = read<PendingScenarioRunBootEvidence>(pendingKey(input.scenarioId));
   if (!pending || pending.scenarioId !== input.scenarioId) return null;
+  // One start attempt reuses one idempotency key across its transport retries,
+  // so a retry can return `reused: true` for the run that same attempt
+  // created, and that run is still this attempt's run. A fresh acceptance is
+  // this attempt's own run, so no timestamp is needed to attribute it. A
+  // reused acceptance counts only when the durable acceptance time proves the
+  // run did not exist before the click. The benchmark reader applies the same
+  // rule, so the page and the reader agree on which responses are a sample.
+  const isRunOfThisAttempt =
+    !input.reused ||
+    (Number.isFinite(input.acceptedAt) &&
+      input.acceptedAt >= pending.startUnixMs);
+  if (!isRunOfThisAttempt) {
+    // The run existed before the click, so the click did not start its boot.
+    // Drop the click record instead of attaching this attempt's clock to
+    // another attempt's run.
+    clearPendingScenarioRunBootEvidence(input.scenarioId);
+    return null;
+  }
   const evidence: ScenarioRunBootEvidence = {
     runId: input.runId,
     scenarioId: input.scenarioId,
     startUnixMs: pending.startUnixMs,
     stages: pending.stages,
-    ...(pending.benchmark && input.reused === false ? { benchmark: true } : {}),
+    ...(pending.benchmark ? { benchmark: true } : {}),
   };
   if (!write(key, evidence)) return null;
   try {

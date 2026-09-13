@@ -19,6 +19,10 @@ const script = readFileSync(deployScriptPath, "utf8");
 const beforeVersionId = "11111111-2222-4333-8444-555555555555";
 const deployedVersionId = "22222222-3333-4444-8555-666666666666";
 const databaseId = "33333333-4444-4555-8666-777777777777";
+// These tests drive the real deploy script through a fake PATH. One run
+// spawns dozens of subprocesses and repeats the health probe loop, so the
+// 5 s default is too tight when the whole suite runs in parallel.
+const DEPLOY_LIVENESS_TIMEOUT_MS = 20_000;
 
 interface RunOptions {
   beforeMaintenance?: boolean;
@@ -258,7 +262,7 @@ describe("automatic web deployment", () => {
     } finally {
       run.cleanup();
     }
-  });
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
 
   it("rejects a configuration that retains the SESSION binding", () => {
     const run = runDeployment({ includeRetiredSessionBinding: true });
@@ -301,7 +305,27 @@ describe("automatic web deployment", () => {
     } finally {
       open.cleanup();
     }
-  });
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("keeps maintenance closed when the cutover redeploys the candidate", () => {
+    // The cutover deploys a maintenance-on candidate while the control plane is
+    // already closed, so both the before and target modes are maintenance.
+    const run = runDeployment({
+      beforeMaintenance: true,
+      targetMaintenance: true,
+    });
+    try {
+      expect(run.result.status).toBe(0);
+      expect(run.state).toBe(deployedVersionId);
+      expect(run.evidence).toMatchObject({
+        target_mode: "maintenance",
+        before_health: { expected_mode: "maintenance", healthy: true },
+        live_health_proven: true,
+      });
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
 
   it("does not restore the old version after an ambiguous deploy failure", () => {
     const run = runDeployment({ deploySucceeds: false });
@@ -326,5 +350,5 @@ describe("automatic web deployment", () => {
     } finally {
       run.cleanup();
     }
-  });
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
 });

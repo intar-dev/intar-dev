@@ -46,7 +46,7 @@ describe("scenario guest-tools promotion", () => {
       stable: {
         tools_disk_sha256: fixture.toolsDiskSha256,
         kino_sha256: fixture.kinoSha256,
-        bootstrap_abi: 1,
+        bootstrap_abi: 2,
       },
     });
     expect(desiredPins).toEqual([
@@ -133,7 +133,7 @@ async function guestToolsFixture() {
   const kinoSha256 = await sha256(kino);
   const pin = {
     schema_version: 1,
-    bootstrap_abi: 1,
+    bootstrap_abi: 2,
     tools_disk_sha256: toolsDiskSha256,
     tools_disk_size_bytes: 64 * 1024 * 1024,
     compressed_disk_sha256: await sha256(compressedDisk),

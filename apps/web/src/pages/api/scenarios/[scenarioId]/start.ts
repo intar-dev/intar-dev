@@ -10,6 +10,7 @@ import {
   courseLocationFromRunSnapshot,
   startScenarioRunForUser,
 } from "@/lib/scenario-runs";
+import { requireIdempotencyKey } from "@/lib/idempotency-key";
 import { resolveOrganizationId } from "@/lib/organizations";
 
 export const prerender = false;
@@ -21,9 +22,21 @@ interface StartScenarioBody {
   candidateBuildId?: unknown;
 }
 
-export const POST: APIRoute = async ({ request, params }) => {
+export const POST: APIRoute = async ({ request, params, locals }) => {
   const authz = await requireUserContext(request);
   if (!authz.ok) return authz.response;
+
+  // Validate the idempotency key after authentication so an unauthenticated
+  // caller sees the same 401 as any other protected route.
+  let idempotencyKey: string;
+  try {
+    idempotencyKey = requireIdempotencyKey(
+      request.headers.get("Idempotency-Key") ?? undefined,
+    );
+  } catch (error) {
+    const { status, body } = toErrorResponse(error, "invalid Idempotency-Key");
+    return jsonResponse(body, { status });
+  }
 
   const scenarioId = params.scenarioId?.trim() ?? "";
   if (!scenarioId) {
@@ -31,6 +44,21 @@ export const POST: APIRoute = async ({ request, params }) => {
   }
   if (!isSafeScenarioId(scenarioId)) {
     return jsonResponse({ error: "invalid scenarioId" }, { status: 400 });
+  }
+
+  // The dispatch hint runs under the request lifetime, so the execution
+  // context is a precondition of admission, not a detail of the response.
+  // Validate it here: a missing context is a deployment fault, and refusing
+  // before the commit never leaves a booting VM behind.
+  const cfContext = locals.cfContext;
+  if (!cfContext || typeof cfContext.waitUntil !== "function") {
+    return jsonResponse(
+      {
+        error: "the request execution context is unavailable",
+        code: "scenario_start_context_missing",
+      },
+      { status: 500 },
+    );
   }
 
   let hostId: string | undefined;
@@ -147,6 +175,7 @@ export const POST: APIRoute = async ({ request, params }) => {
       scenarioId,
       userId: authz.context.userId,
       betaAdmission: authz.context.betaAdmission,
+      idempotencyKey,
       ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
       ...(candidateRevision && candidateBuildId
@@ -155,12 +184,17 @@ export const POST: APIRoute = async ({ request, params }) => {
       ...(authz.context.isAdmin ? { allowDrainedAdminProof: true } : {}),
       ...(authz.context.isAdmin ? { allowSequenceBypass: true } : {}),
     });
+    // The dispatch hint is background work, so it never enters the response
+    // body and never delays it. The durable outbox sweep delivers the
+    // committed version when this process dies before the wake.
+    const { deliveryHint, ...accepted } = result;
+    cfContext.waitUntil(deliveryHint);
     return jsonResponse(
       {
-        ...result,
+        ...accepted,
         run: {
-          ...result.run,
-          courseLocation: courseLocationFromRunSnapshot(result.run),
+          ...accepted.run,
+          courseLocation: courseLocationFromRunSnapshot(accepted.run),
         },
       },
       {
@@ -175,8 +209,12 @@ export const POST: APIRoute = async ({ request, params }) => {
     const { status, body } = toErrorResponse(error, "failed to start scenario");
     return jsonResponse(body, {
       status,
-      ...(body.code === "boot_capacity_pending"
-        ? { headers: { "Retry-After": "2" } }
+      // A contended host is the one refusal that clears on its own: another
+      // admission published a desired-state version between this request's
+      // capacity read and its commit. The client retries the same idempotency
+      // key, so a retry can never create a second VM set.
+      ...(body.code === "scenario_host_capacity_contended"
+        ? { headers: { "Retry-After": "1" } }
         : {}),
     });
   }

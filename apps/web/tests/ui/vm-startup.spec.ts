@@ -175,6 +175,23 @@ test("the status socket closes in the background and reconnects once when visibl
       closed += 1;
     });
   });
+  // Hold the terminal target pending for the whole test. The run projection
+  // reports a pending terminal, so the shell must stay hidden: this test is
+  // about the status socket, and it must not depend on terminal visibility.
+  const pendingTerminals: WebSocketRoute[] = [];
+  await page.routeWebSocket("ws://terminal.example.test/terminal/**", (ws) => {
+    pendingTerminals.push(ws);
+    ws.onMessage((message) => {
+      if (typeof message !== "string") return;
+      try {
+        const control = JSON.parse(message) as TerminalControl;
+        // No ready answer is sent: the gateway handshake never completes.
+        if (control.type === "open") return;
+      } catch {
+        // Binary frames are terminal input and are ignored here.
+      }
+    });
+  });
   await ui.open({ ...routeCase("run-workspace"), runState: "launching" });
   await expect.poll(() => sockets.length).toBe(1);
 
@@ -204,7 +221,12 @@ test("the status socket closes in the background and reconnects once when visibl
   await acknowledgedStatus;
 
   expect(sockets).toHaveLength(2);
-  await expect(page.locator(".xterm")).toHaveCount(0);
+  // The background run keeps a hidden, pending transport mounted. The shell
+  // must never be revealed while the gateway has not reported the ready target,
+  // so the learner still sees the preparation screen.
+  await expect(page.locator('[data-scenario-terminal-ready]')).toHaveCount(0);
+  await expect(page.locator(".xterm")).not.toBeVisible();
+  expect(pendingTerminals.length).toBeGreaterThan(0);
 });
 
 test("a stalled web font does not block the terminal", async ({ page, ui }) => {
@@ -343,4 +365,192 @@ test("a failed status socket keeps the 750 ms startup poll active", async ({
 
   await expect(page.locator('[data-terminal-status="connected"]')).toBeVisible();
   expect(socketAttempts).toBe(1);
+});
+
+interface TerminalBinaryFrame {
+  bytes: Buffer;
+  /** Wall-clock time this mock received the frame. */
+  receivedAt: number;
+}
+
+interface BenchmarkTerminal {
+  binaryFrames: TerminalBinaryFrame[];
+  /** True once the page asked the gateway to open the shell. */
+  opened: () => boolean;
+  /** True while the gateway has not yet reported the ready target. */
+  pending: () => boolean;
+  /** Answers the handshake. Returns false when it was already answered. */
+  sendReady: () => boolean;
+}
+
+/**
+ * Captures the terminal socket of the run workspace without auto-answering the
+ * handshake, so the test decides exactly when the gateway becomes ready.
+ */
+async function captureBenchmarkTerminal(page: Page): Promise<BenchmarkTerminal> {
+  const binaryFrames: TerminalBinaryFrame[] = [];
+  let opened = false;
+  let readySent = false;
+  let socket: WebSocketRoute | null = null;
+  await page.routeWebSocket("ws://terminal.example.test/terminal/**", (ws) => {
+    socket = ws;
+    ws.onMessage((message) => {
+      if (typeof message === "string") {
+        try {
+          const control = JSON.parse(message) as TerminalControl;
+          if (control.type === "open") opened = true;
+        } catch {
+          // Binary terminal input is not parsed here.
+        }
+        return;
+      }
+      // The benchmark command is the only binary frame this client sends
+      // before the learner types, so any binary frame is measured here.
+      const bytes = Buffer.from(message);
+      binaryFrames.push({ bytes, receivedAt: Date.now() });
+      const nonce = decodeNonceCommand(bytes);
+      if (nonce) {
+        // Echo the nonce so the benchmark can complete and report its own
+        // timings through the console record.
+        ws.send(Buffer.from(`${nonce}\r\n`, "utf8"));
+      }
+    });
+  });
+  return {
+    binaryFrames,
+    opened: () => opened,
+    pending: () => !readySent,
+    sendReady: () => {
+      if (readySent || !socket) return false;
+      readySent = true;
+      const target = socket;
+      target.send(JSON.stringify({ type: "ready" }));
+      target.send(
+        Buffer.from("\r\nintar scenario shell\r\nroot@web:~# ", "utf8"),
+      );
+      return true;
+    },
+  };
+}
+
+/**
+ * Recovers the nonce from the octal-escaped printf command. The shell echo
+ * shows the escapes, so only the decoded form can complete the benchmark.
+ */
+function decodeNonceCommand(payload: Buffer): string | null {
+  const text = new TextDecoder().decode(payload);
+  const prefix = "printf '";
+  const suffix = "\\n'\r";
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) return null;
+  const octal = text.slice(prefix.length, text.length - suffix.length);
+  if (!octal || octal.length % 4 !== 0) return null;
+  const bytes: number[] = [];
+  for (let index = 0; index < octal.length; index += 4) {
+    if (octal[index] !== "\\") return null;
+    const value = Number.parseInt(octal.slice(index + 1, index + 4), 8);
+    if (!Number.isFinite(value)) return null;
+    bytes.push(value);
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+/**
+ * Seeds the opt-in benchmark evidence for the run the workspace route serves.
+ * This is the same record the real Start click writes.
+ */
+async function seedBenchmarkEvidence(page: Page) {
+  await page.addInitScript((startUnixMs: number) => {
+    try {
+      window.sessionStorage.setItem(
+        "intar:vm-boot:run-active",
+        JSON.stringify({
+          runId: "run-active",
+          scenarioId: "repair-nginx",
+          startUnixMs,
+          benchmark: true,
+          stages: { "start-click": startUnixMs },
+        }),
+      );
+    } catch {
+      // The opaque initial document has no storage; the real origin runs this
+      // script again before the application boots.
+    }
+  }, FIXED_NOW);
+}
+
+interface BootBenchmarkRecord {
+  runId: string;
+  startUnixMs: number;
+  terminalConnectedUnixMs: number;
+  firstCommand: { startedUnixMs: number; successUnixMs: number };
+  stages: Record<string, number>;
+}
+
+function captureBootBenchmark(page: Page): BootBenchmarkRecord[] {
+  const records: BootBenchmarkRecord[] = [];
+  page.on("console", (message) => {
+    const text = message.text();
+    if (!text.startsWith("intar:boot-benchmark ")) return;
+    try {
+      records.push(JSON.parse(text.slice("intar:boot-benchmark ".length)) as BootBenchmarkRecord);
+    } catch {
+      // A malformed record is a test failure, not a page failure.
+    }
+  });
+  return records;
+}
+
+test("the shell is revealed on the gateway ready frame, not on the status poll", async ({
+  page,
+  ui,
+}) => {
+  const benchmarks = captureBootBenchmark(page);
+  const terminal = await captureBenchmarkTerminal(page);
+  await seedBenchmarkEvidence(page);
+  // The projection reports a pending shell for the whole test, so a revealed
+  // shell can only come from the gateway handshake.
+  await ui.open({ ...routeCase("run-workspace"), runState: "launching" });
+
+  await expect.poll(() => terminal.opened()).toBe(true);
+  await expect(page.locator("[data-scenario-terminal-ready]")).toHaveCount(0);
+  // The transport now starts during VM boot and holds the socket pending, so a
+  // hidden .xterm tree may exist. Only the ready container must stay empty, and
+  // nothing may be visible to the learner yet.
+  await expect(page.locator("[data-scenario-terminal-ready] .xterm")).toHaveCount(0);
+  await expect(page.locator(".xterm")).not.toBeVisible();
+  expect(terminal.pending()).toBe(true);
+  // Nothing may be measured before the learner can see a terminal.
+  expect(terminal.binaryFrames).toHaveLength(0);
+
+  expect(terminal.sendReady()).toBe(true);
+
+  // The ready frame alone reveals the real, on-screen shell while the run
+  // projection still reports the pending terminal phase.
+  await expect(page.locator("[data-scenario-terminal-ready]")).toBeVisible();
+  await expect(page.locator("[data-scenario-terminal-ready] .xterm")).toBeVisible();
+
+  // The benchmark command leaves the client only after that reveal.
+  await expect.poll(() => terminal.binaryFrames.length).toBe(1);
+  expect(terminal.binaryFrames[0]!.receivedAt).toBeGreaterThanOrEqual(
+    await page.evaluate(() => {
+      const entry = performance
+        .getEntriesByType("mark")
+        .find((mark) => mark.name === "intar:vm-boot:terminal-visible");
+      return entry ? Math.round(performance.timeOrigin + entry.startTime) : 0;
+    }),
+  );
+
+  await expect.poll(() => benchmarks.length).toBe(1);
+  const record = benchmarks[0]!;
+  expect(record.runId).toBe("run-active");
+  // The primary interval starts at the click and is never reset by the reveal:
+  // only the first command is gated on visibility.
+  expect(record.startUnixMs).toBe(FIXED_NOW);
+  expect(record.stages["terminal-visible"]).toBeGreaterThanOrEqual(FIXED_NOW);
+  expect(record.firstCommand.startedUnixMs).toBeGreaterThanOrEqual(
+    record.stages["terminal-visible"]!,
+  );
+  expect(record.firstCommand.successUnixMs).toBeGreaterThanOrEqual(
+    record.firstCommand.startedUnixMs,
+  );
 });

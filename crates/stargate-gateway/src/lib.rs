@@ -5,6 +5,7 @@ mod runtime;
 mod session_registry;
 mod ssh;
 mod store;
+mod terminal_registry;
 mod webssh;
 mod workspace_app;
 
@@ -17,7 +18,9 @@ use axum::{
 };
 use http::StatusCode;
 use serde_json::json;
-use stargate_core::{AdminAuthSettings, Result, StargateError, TerminalTokenSettings};
+use stargate_core::{
+    AdminAuthSettings, Result, StargateError, TerminalTarget, TerminalTokenSettings,
+};
 
 use crate::outbound::WorkspaceAppTunnelPool;
 
@@ -25,7 +28,10 @@ pub use auth::AssertionValidator;
 pub use runtime::{load_settings, run};
 pub use session_registry::{SessionLease, SessionRegistry};
 pub use ssh::run_public_ssh_server;
-pub use store::SqliteRouteStore;
+pub use store::{ActivateOutcome, GenerationDeleteOutcome, SqliteRouteStore, StageOutcome};
+pub use terminal_registry::{
+    TerminalRouteTargetRegistry, TerminalSocketClaim, TerminalSocketRegistry,
+};
 
 const TERMINAL_WS_PATH: &str = "/v1/terminal/ws";
 
@@ -52,7 +58,19 @@ pub struct GatewayState {
     // Terminal route updates replace authorization as well as connection
     // details. Keep the read, replacement, and revocation together so two
     // concurrent issuers cannot decide from different previous records.
+    //
+    // Contract: this mutex serializes the stage and activate read-modify-write
+    // pair inside ONE gateway process, which is how the gateway is deployed.
+    // Two processes sharing one database file are not supported: SQLite can
+    // raise SQLITE_BUSY between the read and the write of a deferred
+    // transaction. The busy timeout on the connection bounds that wait, and it
+    // does not make the pair atomic across processes. A second process needs a
+    // real multi-writer design, not this lock.
     pub(crate) terminal_route_mutation: Arc<tokio::sync::Mutex<()>>,
+    // A pending browser route waits here for its attach, and one live browser
+    // socket holds each route generation.
+    pub(crate) terminal_route_targets: TerminalRouteTargetRegistry,
+    pub(crate) terminal_sockets: TerminalSocketRegistry,
     pub(crate) workspace_app_tunnels: WorkspaceAppTunnelPool,
     pub admin_auth: AssertionValidator,
     pub public_web: PublicGatewayState,
@@ -71,6 +89,8 @@ impl GatewayState {
             store,
             sessions: SessionRegistry::default(),
             terminal_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
+            terminal_route_targets: TerminalRouteTargetRegistry::default(),
+            terminal_sockets: TerminalSocketRegistry::default(),
             workspace_app_tunnels: WorkspaceAppTunnelPool::default(),
             admin_auth: AssertionValidator::new(admin_auth)?,
             public_web: PublicGatewayState {
@@ -96,12 +116,71 @@ impl GatewayState {
             },
         })
     }
+
+    /// Stage a target on a pending route. The call stores a validated target
+    /// and returns its attachment identifier. Nothing becomes visible: the
+    /// route is still not ready, no waiter wakes, and no socket dials. This is
+    /// what keeps the guest untouched until the control plane activates.
+    pub async fn stage_target(
+        &self,
+        route_username: &str,
+        run_id: &str,
+        vm_id: &str,
+        user_id: &str,
+        generation: &str,
+        target: TerminalTarget,
+    ) -> Result<StageOutcome> {
+        let _terminal_route_mutation = self.terminal_route_mutation.lock().await;
+        self.store
+            .stage_route_target(route_username, run_id, vm_id, user_id, generation, target)
+            .await
+    }
+
+    /// Activate the staged attachment that the control plane names. Only this
+    /// call makes the target ready, and only then does a waiter wake.
+    pub async fn activate_staged_target(
+        &self,
+        route_username: &str,
+        run_id: &str,
+        vm_id: &str,
+        user_id: &str,
+        generation: &str,
+        attachment_id: &str,
+    ) -> Result<ActivateOutcome> {
+        let _terminal_route_mutation = self.terminal_route_mutation.lock().await;
+        let outcome = self
+            .store
+            .activate_route_target(
+                route_username,
+                run_id,
+                vm_id,
+                user_id,
+                generation,
+                attachment_id,
+            )
+            .await?;
+        if matches!(
+            outcome,
+            ActivateOutcome::Activated | ActivateOutcome::AlreadyActive
+        ) {
+            self.terminal_route_targets.notify(route_username);
+        }
+        Ok(outcome)
+    }
 }
 
 pub fn build_admin_router(state: GatewayState) -> Router {
     Router::new()
         .route("/healthz", get(admin::healthz))
         .route("/v1/terminal-sessions", post(admin::issue_terminal_session))
+        .route(
+            "/v1/terminal-sessions/{route_username}/target",
+            post(admin::stage_terminal_target),
+        )
+        .route(
+            "/v1/terminal-sessions/{route_username}/activate",
+            post(admin::activate_terminal_target),
+        )
         .route(
             "/v1/workspace-app-sessions",
             post(admin::issue_workspace_app_session),
@@ -166,11 +245,13 @@ impl IntoResponse for GatewayHttpError {
         let status = match &self.0 {
             StargateError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             StargateError::RouteNotFound(_) => StatusCode::NOT_FOUND,
-            StargateError::WorkspaceAppRouteAlreadyExists(_) => StatusCode::CONFLICT,
+            StargateError::WorkspaceAppRouteAlreadyExists(_)
+            | StargateError::TerminalRouteConflict(_)
+            | StargateError::TerminalSocketAlreadyOpen => StatusCode::CONFLICT,
             StargateError::Unauthorized => StatusCode::UNAUTHORIZED,
-            StargateError::Database(_) | StargateError::Internal(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            StargateError::Database(_)
+            | StargateError::Internal(_)
+            | StargateError::TerminalTargetTimeout => StatusCode::INTERNAL_SERVER_ERROR,
             StargateError::Io(_)
             | StargateError::SshKey(_)
             | StargateError::PublicKey(_)
@@ -205,8 +286,12 @@ fn public_error_message(error: &StargateError) -> &'static str {
         StargateError::WorkspaceAppRouteAlreadyExists(_) => {
             "workspace application route already exists"
         }
+        StargateError::TerminalRouteConflict(_) => "terminal route target conflict",
+        StargateError::TerminalSocketAlreadyOpen => "terminal socket already open",
         StargateError::Unauthorized => "unauthorized",
-        StargateError::Database(_) | StargateError::Internal(_) => "internal server error",
+        StargateError::Database(_)
+        | StargateError::Internal(_)
+        | StargateError::TerminalTargetTimeout => "internal server error",
         StargateError::Io(_)
         | StargateError::SshKey(_)
         | StargateError::PublicKey(_)

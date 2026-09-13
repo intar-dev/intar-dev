@@ -1,5 +1,5 @@
 name: Website
-run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || format('Website deploy main @ {0}', github.sha) }}"
+run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || format('Website validate main @ {0}', github.sha) }}"
 
 on:
   push:
@@ -158,12 +158,3 @@ jobs:
             .tmp/website-playwright/test-results
           if-no-files-found: warn
           retention-days: 7
-
-  deploy:
-    name: Deploy production
-    if: github.event_name == 'push'
-    needs:
-      - validate
-      - ui
-    uses: ./.github/workflows/website-deploy.yml
-    secrets: inherit

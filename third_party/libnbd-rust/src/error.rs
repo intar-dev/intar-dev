@@ -106,9 +106,7 @@ impl Error {
     /// Get the errno value if any.
     pub fn errno(&self) -> Option<i32> {
         match self {
-            Self::Recoverable(e) | Self::Fatal(FatalErrorKind::Libnbd(e)) => {
-                e.errno()
-            }
+            Self::Recoverable(e) | Self::Fatal(FatalErrorKind::Libnbd(e)) => e.errno(),
             Self::Fatal(FatalErrorKind::Io(e)) => e.raw_os_error(),
         }
     }

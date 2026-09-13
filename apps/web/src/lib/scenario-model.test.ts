@@ -286,7 +286,7 @@ describe("scenario model", () => {
       imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
       chunkManifestSha256: "d".repeat(64),
-      guestBootstrapAbi: 1,
+      guestBootstrapAbi: 2,
       kernelSha256:
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
       initrdSha256:
@@ -297,7 +297,7 @@ describe("scenario model", () => {
       imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
       chunkManifestSha256: "d".repeat(64),
-      guestBootstrapAbi: 1,
+      guestBootstrapAbi: 2,
       kernelSha256:
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       initrdSha256:
@@ -312,7 +312,7 @@ describe("scenario model", () => {
       imageFormat: "raw_chunks_v1",
       imageVirtualSizeBytes: 2_147_483_648,
       chunkManifestSha256: "d".repeat(64),
-      guestBootstrapAbi: 1,
+      guestBootstrapAbi: 2,
       kernelSha256:
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       initrdSha256:
@@ -335,6 +335,10 @@ describe("scenario model", () => {
     expect(normalizeScenarioVmDirectBootMetadata({
       ...valid,
       imageFormat: "qcow2",
+    })).toBeNull();
+    expect(normalizeScenarioVmDirectBootMetadata({
+      ...valid,
+      guestBootstrapAbi: 1,
     })).toBeNull();
   });
 });
@@ -373,7 +377,7 @@ function vm(overrides: Partial<ScenarioVmRecord> = {}): ScenarioVmRecord {
     imageFormat: "raw_chunks_v1",
     imageVirtualSizeBytes: 2_147_483_648,
     chunkManifestSha256: "d".repeat(64),
-    guestBootstrapAbi: 1,
+    guestBootstrapAbi: 2,
     kernelSha256:
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     initrdSha256:

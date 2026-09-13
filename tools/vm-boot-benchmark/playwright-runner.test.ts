@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test";
 import {
   freshStartRunId,
   learnerStartRoutePath,
+  measureClientRttMs,
   nonEchoNonceCommand,
   observeRemoteTerminalFrames,
   parseRunnerArguments,
   parseStoredBootEvidence,
   scanRemoteTerminalFrame,
   sha256,
+  waitForVisibleTerminal,
 } from "./playwright-runner";
 
 class FakeEventEmitter {
@@ -45,6 +47,97 @@ class FakeWebSocket extends FakeEventEmitter {
 }
 
 describe("Playwright VM boot benchmark runner", () => {
+  test("measures the learner client round trip and keeps the fastest sample", async () => {
+    const samples = [41, 24, 30];
+    let index = 0;
+    const page = {
+      evaluate: async () => samples[index++] ?? 24,
+    };
+
+    const rtt = await measureClientRttMs(page as never, "https://intar.example");
+
+    expect(rtt).toBe(24);
+  });
+
+  test("refuses a missing client round trip measurement", async () => {
+    const page = { evaluate: async () => Number.NaN };
+
+    await expect(
+      measureClientRttMs(page as never, "https://intar.example"),
+    ).rejects.toThrow("could not measure the learner client round trip time");
+  });
+
+  test("waits for a visible, editable terminal before it reads the clock", async () => {
+    const waits: string[] = [];
+    let clockRead = false;
+    const page = {
+      locator: (selector: string) => ({
+        first: () => page.locator(selector),
+        waitFor: async (options: { state: string }) => {
+          waits.push(selector + ":" + options.state);
+        },
+      }),
+      getByRole: (role: string, options: { name: string }) => ({
+        waitFor: async (value: { state: string }) => {
+          waits.push(role + "[" + options.name + "]:" + value.state);
+        },
+        isEnabled: async () => true,
+      }),
+      evaluate: async () => {
+        clockRead = true;
+        return 1_757_700_000_222;
+      },
+    };
+
+    const visibleUnixMs = await waitForVisibleTerminal(
+      page as never,
+      Date.now() + 10_000,
+    );
+
+    expect(visibleUnixMs).toBe(1_757_700_000_222);
+    expect(clockRead).toBeTrue();
+    expect(waits).toContain("[data-scenario-terminal-ready]:visible");
+    expect(waits).toContain('[data-terminal-status="connected"]:visible');
+    expect(waits).toContain(".xterm:visible");
+    expect(waits).toContain("textbox[Terminal input]:visible");
+  });
+
+  test("refuses a terminal that is not editable", async () => {
+    const page = {
+      locator: (selector: string) => ({
+        first: () => page.locator(selector),
+        waitFor: async () => {},
+      }),
+      getByRole: () => ({
+        waitFor: async () => {},
+        isEnabled: async () => false,
+      }),
+      evaluate: async () => 1,
+    };
+
+    await expect(
+      waitForVisibleTerminal(page as never, Date.now() + 10_000),
+    ).rejects.toThrow("not editable");
+  });
+
+  test("refuses a visible mark that is not a browser clock reading", async () => {
+    const page = {
+      locator: (selector: string) => ({
+        first: () => page.locator(selector),
+        waitFor: async () => {},
+      }),
+      getByRole: () => ({
+        waitFor: async () => {},
+        isEnabled: async () => true,
+      }),
+      evaluate: async () => Number.NaN,
+    };
+
+    await expect(
+      waitForVisibleTerminal(page as never, Date.now() + 10_000),
+    ).rejects.toThrow("terminal-visible mark");
+  });
+
   test("encodes a nonce that terminal echo cannot satisfy", () => {
     const nonce = "intar-bench-abc123";
     const command = nonEchoNonceCommand(nonce);
@@ -80,22 +173,143 @@ describe("Playwright VM boot benchmark runner", () => {
     expect(second.matches).toBeTrue();
   });
 
-  test("requires a successful response that proves a fresh run", () => {
+  test("accepts the candidate's own reuse and refuses everything unclear", () => {
+    const attemptStart = 1_757_700_000_000;
+
+    // A fresh accept carries the durable acceptance time on the candidate.
     expect(
-      freshStartRunId(true, {
-        accepted: true,
-        reused: false,
-        runId: "fresh-run",
-      }),
-    ).toBe("fresh-run");
-    expect(freshStartRunId(true, { accepted: true, runId: "unknown" })).toBeNull();
+      freshStartRunId(
+        true,
+        { accepted: true, reused: false, runId: "fresh-run", acceptedAt: attemptStart + 120 },
+        attemptStart,
+        "candidate",
+      ),
+    ).toEqual({ runId: "fresh-run", acceptedUnixMs: attemptStart + 120, reused: false });
+
+    // An older release reports only the run creation time on a fresh accept.
     expect(
-      freshStartRunId(false, {
-        accepted: true,
-        reused: false,
-        runId: "not-ok",
-      }),
+      freshStartRunId(
+        true,
+        { accepted: true, reused: false, runId: "old-shape", createdAt: attemptStart + 7 },
+        attemptStart,
+        "candidate",
+      ),
+    ).toEqual({ runId: "old-shape", acceptedUnixMs: attemptStart + 7, reused: false });
+
+    // A fresh accept with no timestamp is still this attempt's run, so the page
+    // action attributes it and the runner falls back to the browser clock.
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: false, runId: "no-time-fresh" },
+        attemptStart,
+        "candidate",
+      ),
+    ).toEqual({ runId: "no-time-fresh", acceptedUnixMs: null, reused: false });
+
+    // A candidate transport retry returns reused: true for the run this attempt
+    // created. Its durable acceptance time is inside the attempt.
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: true, runId: "retry-run", acceptedAt: attemptStart + 5 },
+        attemptStart,
+        "candidate",
+      ),
+    ).toEqual({ runId: "retry-run", acceptedUnixMs: attemptStart + 5, reused: true });
+
+    // A run that existed before this attempt is not a fresh sample.
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: true, runId: "old-run", acceptedAt: attemptStart - 1 },
+        attemptStart,
+        "candidate",
+      ),
     ).toBeNull();
+
+    // A reused response without a durable acceptance time proves nothing.
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: true, runId: "no-time" },
+        attemptStart,
+        "candidate",
+      ),
+    ).toBeNull();
+
+    // A missing reused flag is "unknown", not "fresh", on both variants.
+    for (const variant of ["baseline", "candidate"] as const) {
+      expect(
+        freshStartRunId(true, { accepted: true, runId: "no-flag" }, attemptStart, variant),
+      ).toBeNull();
+      expect(
+        freshStartRunId(
+          true,
+          { accepted: true, reused: "false", runId: "string-flag", acceptedAt: attemptStart + 1 },
+          attemptStart,
+          variant,
+        ),
+      ).toBeNull();
+    }
+
+    expect(
+      freshStartRunId(true, { accepted: true, reused: false, runId: "u" }, attemptStart, "candidate"),
+    ).not.toBeNull();
+    expect(
+      freshStartRunId(
+        false,
+        { accepted: true, reused: false, runId: "not-ok", acceptedAt: attemptStart + 1 },
+        attemptStart,
+        "candidate",
+      ),
+    ).toBeNull();
+  });
+
+  test("refuses a reused run on the baseline, whose reuse clock is not durable", () => {
+    const attemptStart = 1_757_700_000_000;
+
+    // The baseline reuse path returns Date.now() in the same field, so a reused
+    // response looks recent even when the run is old. The variant refuses it.
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: true, runId: "baseline-old-run", acceptedAt: attemptStart + 40 },
+        attemptStart,
+        "baseline",
+      ),
+    ).toBeNull();
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: true, runId: "baseline-old-run", createdAt: attemptStart - 900 },
+        attemptStart,
+        "baseline",
+      ),
+    ).toBeNull();
+
+    // The baseline fresh path carries the durable creation time, so the normal
+    // path is accepted and attributed.
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: false, runId: "baseline-fresh", acceptedAt: attemptStart + 12 },
+        attemptStart,
+        "baseline",
+      ),
+    ).toEqual({ runId: "baseline-fresh", acceptedUnixMs: attemptStart + 12, reused: false });
+    expect(
+      freshStartRunId(
+        true,
+        { accepted: true, reused: false, runId: "baseline-fresh-old-shape", createdAt: attemptStart + 3 },
+        attemptStart,
+        "baseline",
+      ),
+    ).toEqual({
+      runId: "baseline-fresh-old-shape",
+      acceptedUnixMs: attemptStart + 3,
+      reused: false,
+    });
   });
 
   test("attaches the cached terminal socket after a fast SSH response", async () => {
