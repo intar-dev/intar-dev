@@ -64,6 +64,7 @@ jobs:
       BUCKET: intar-dev-vm-image-registry-20260709
     steps:
       - name: Validate cutover inputs
+        id: cutover-inputs
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = refs/heads/main
