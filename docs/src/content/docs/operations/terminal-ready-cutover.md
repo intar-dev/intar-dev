@@ -186,24 +186,25 @@ the maintenance page, so registry work cannot run in the middle of this step.
    worker with the ABI 2 static pin and maintenance `on`. The generated D1
    migration is applied after the maintenance fence is proven, inside the
    same run.
-4. Reachability check before you open the plane: confirm the agent still
-   reaches the bridge. Between steps 2 and 3 the agent runs the new runtime
-   against the old control plane, so a host manifest that the new agent
-   refuses would show as a disconnected or unhealthy host. The fleet gate is
-   drained for exactly this window, so no learner run is affected; if the
-   bridge is refused, stop and roll back rather than opening the plane.
+4. While the plane is fenced the bridge is closed by design: maintenance
+   answers every `/api/*` and `/agent/*` request with the JSON 503, so the
+   agent cannot reach the bridge and that is expected, not a failure. Run the
+   local doctor here as a hardware and configuration check only; the
+   platform-level bridge probe happens after the reopen in step 7.
 5. Open the plane: run `website-cutover.yml` with `operation=reopen`. The
    same `tools_run_id` rebuilds the same static pin, the live worker tag must
    still match the cutover revision, and the gate must still be `drained`.
    This is the step that returns the product to service, and the fleet stays
    drained.
 6. Registry work, now that the plane is open and the fleet gate is still
-   `drained`: publish the candidate image catalog with Kino ABI 2, promote it
-   while drained, and run `guest-tools-promote.yml`. Each call goes to
-   `/registry/*`, which the fence covered until step 5, so this is the first
-   point where they can run. The tools promotion warms every host and moves
-   the `candidate` objects to the `stable` channel. Publishing the catalog
-   replaces its scope, so use the live Course source and confirm the set.
+   `drained`. Publish the candidate image catalog with Kino ABI 2 and wait for
+   its builds to report ready, then run `guest-tools-promote.yml` with the
+   expected candidate digest to warm every host and move the tools to the
+   `stable` channel, and only then promote the image catalog, which requires
+   stable tools ready. Every call goes to `/registry/*`, which the fence
+   covered until step 5, so this is the first point where any of it can run.
+   Publishing the catalog replaces its scope, so use the live Course source
+   and confirm the set.
 7. Host-side proofs with the plane open: the jailerd self-test and the agent
    `--doctor` already ran in step 2; re-run them if any component changed.
    Then create the test VMs, run the proofs, and delete the VMs inside this
