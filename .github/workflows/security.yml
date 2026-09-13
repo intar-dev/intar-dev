@@ -63,11 +63,6 @@ jobs:
           bun test tools/ci/check-workflow-security.test.ts
           bun tools/ci/check-workflow-security.ts
 
-      - name: Parse every workflow shell block with the shell
-        run: |
-          bun test tools/ci/check-workflow-syntax.test.ts
-          bun tools/ci/check-workflow-syntax.ts
-
       - name: Audit JavaScript dependencies
         run: bun audit --audit-level=moderate
 
@@ -86,7 +81,16 @@ jobs:
           go-version: "1.27.0"
           cache: false
 
-      - name: Run actionlint
+      - name: Run actionlint with shellcheck
         run: |
+          set -euo pipefail
+          # actionlint runs shellcheck on every run block when shellcheck is on
+          # PATH, and silently skips it when it is not. The shell parse is what
+          # caught the quoting defect in the deploy workflow, so require the
+          # binary and fail instead of quietly losing that coverage.
+          command -v shellcheck >/dev/null 2>&1 || {
+            echo 'shellcheck is required for the workflow lint.' >&2
+            exit 1
+          }
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.10
           "$(go env GOPATH)/bin/actionlint" .github/workflows/*.yml
