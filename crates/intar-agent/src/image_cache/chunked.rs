@@ -59,9 +59,9 @@ pub(super) async fn ensure_cached_chunked_image_entry(
             .await
         }
     }))
-    // One chunk transfer in flight, so the cache entry leaves a global
-    // transfer slot free for a learner-visible download. A large manifest
-    // never queues hundreds of waiting futures either.
+    // Four chunk transfers in flight, so the cache entry leaves the last
+    // global transfer slot free for a learner-visible download. A large
+    // manifest never queues hundreds of waiting futures either.
     .buffer_unordered(budget::BACKGROUND_CHUNK_FANOUT)
     .collect::<Vec<_>>()
     .await;
