@@ -174,17 +174,17 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE",
     "CONFIG_NETFILTER_XT_MATCH_STATISTIC",
     "CONFIG_NETFILTER_XT_MATCH_RECENT",
+    // The default k3s network policy drops with a logged rate limit.
+    "CONFIG_NETFILTER_XT_MATCH_LIMIT",
+    "CONFIG_NETFILTER_XT_TARGET_NFLOG",
+    "CONFIG_NETFILTER_NETLINK_LOG",
     "CONFIG_NETFILTER_XT_TARGET_LOG",
     "CONFIG_NF_LOG_SYSLOG",
-    // IP sets for the default k3s network policy.
+    // IP sets for the default k3s network policy. kube-router 2.6.3-k3s1
+    // creates hash:ip and hash:net sets only.
     "CONFIG_IP_SET",
-    "CONFIG_IP_SET_BITMAP_IP",
-    "CONFIG_IP_SET_BITMAP_PORT",
     "CONFIG_IP_SET_HASH_IP",
     "CONFIG_IP_SET_HASH_NET",
-    "CONFIG_IP_SET_HASH_NETNET",
-    "CONFIG_IP_SET_HASH_IPPORT",
-    "CONFIG_IP_SET_HASH_NETPORT",
     "CONFIG_NETFILTER_XT_SET",
     "CONFIG_BRIDGE",
     "CONFIG_BRIDGE_NETFILTER",
@@ -834,15 +834,14 @@ mod tests {
             // endpoint randomisation and session affinity.
             "CONFIG_NETFILTER_XT_MATCH_STATISTIC",
             "CONFIG_NETFILTER_XT_MATCH_RECENT",
-            // IP sets for the default k3s network policy.
+            // The default k3s network policy drops with a logged rate limit.
+            "CONFIG_NETFILTER_XT_MATCH_LIMIT",
+            "CONFIG_NETFILTER_XT_TARGET_NFLOG",
+            // IP sets for the default k3s network policy. kube-router
+            // 2.6.3-k3s1 creates hash:ip and hash:net sets only.
             "CONFIG_IP_SET",
-            "CONFIG_IP_SET_BITMAP_IP",
-            "CONFIG_IP_SET_BITMAP_PORT",
             "CONFIG_IP_SET_HASH_IP",
             "CONFIG_IP_SET_HASH_NET",
-            "CONFIG_IP_SET_HASH_NETNET",
-            "CONFIG_IP_SET_HASH_IPPORT",
-            "CONFIG_IP_SET_HASH_NETPORT",
             "CONFIG_NETFILTER_XT_SET",
         ];
         for symbol in needed {
