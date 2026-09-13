@@ -187,13 +187,19 @@ jobs:
           printf '%s' "${GUEST_TOOLS_PIN_JSON}" > "${pin_file}"
           bun tools/deploy/guest-tools-pin.ts check --pin "${pin_file}" > "${pin_check}"
           jq -e '.status == "valid"' "${pin_check}" >/dev/null
+          # The Worker reads this variable as a JSON string and then parses it,
+          # so store the serialized form. The assertion checks the type and that
+          # parsing it returns the verified pin; an object is not accepted.
           jq --slurpfile pin "${pin_file}" \
-            '.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON = $pin[0]' \
+            '.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON = ($pin[0] | tojson)' \
             "${DEPLOYMENT_CONFIG}" > "${DEPLOYMENT_CONFIG}.pinned"
           mv "${DEPLOYMENT_CONFIG}.pinned" "${DEPLOYMENT_CONFIG}"
-          jq -e --slurpfile pin "${pin_file}" \
-            '.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON == $pin[0]' \
-            "${DEPLOYMENT_CONFIG}" >/dev/null
+          jq -e --slurpfile pin "${pin_file}" '
+            (.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON | type) == "string" and
+            (
+              .vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON | fromjson
+            ) == $pin[0]
+          ' "${DEPLOYMENT_CONFIG}" >/dev/null
           printf 'deployment pin sha256: %s\n' \
             "$(jq -er '.static_pin_sha256' "${pin_check}")"
           {
