@@ -156,6 +156,10 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     // networking and the Kubernetes data paths.
     "CONFIG_NETFILTER_ADVANCED",
     "CONFIG_NF_TABLES",
+    // xtables extensions over nf_tables. Debian's iptables defaults to the nft
+    // backend, so k3s rule programming needs this or every rule with an xt
+    // extension fails on the guest.
+    "CONFIG_NFT_COMPAT",
     "CONFIG_NFT_NAT",
     "CONFIG_NFT_MASQ",
     "CONFIG_NFT_REDIR",
@@ -168,8 +172,20 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_IP_NF_NAT",
     "CONFIG_NETFILTER_XT_NAT",
     "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE",
+    "CONFIG_NETFILTER_XT_MATCH_STATISTIC",
+    "CONFIG_NETFILTER_XT_MATCH_RECENT",
     "CONFIG_NETFILTER_XT_TARGET_LOG",
     "CONFIG_NF_LOG_SYSLOG",
+    // IP sets for the default k3s network policy.
+    "CONFIG_IP_SET",
+    "CONFIG_IP_SET_BITMAP_IP",
+    "CONFIG_IP_SET_BITMAP_PORT",
+    "CONFIG_IP_SET_HASH_IP",
+    "CONFIG_IP_SET_HASH_NET",
+    "CONFIG_IP_SET_HASH_NETNET",
+    "CONFIG_IP_SET_HASH_IPPORT",
+    "CONFIG_IP_SET_HASH_NETPORT",
+    "CONFIG_NETFILTER_XT_SET",
     "CONFIG_BRIDGE",
     "CONFIG_BRIDGE_NETFILTER",
     "CONFIG_VXLAN",
@@ -797,6 +813,61 @@ mod tests {
             assert!(
                 script.contains(&format!("\n{symbol}\n")),
                 "{symbol} must reach the required list in the rendered script"
+            );
+        }
+    }
+    /// The k3s netfilter surface must be built in, or the guest programs no
+    /// rules at all.
+    ///
+    /// This is the regression for the CoreDNS timeout: Debian's iptables
+    /// defaults to the nft backend, k3s programs rules through plain
+    /// "iptables", and every xt extension needs nft_compat to travel over
+    /// nf_tables. The guest reported "Extension comment ... not supported" and
+    /// RULE_APPEND failed on KUBE-FIREWALL, so the KUBE-* chains were empty and
+    /// service VIPs never translated. Each line below is one rule class the
+    /// cluster needs, so a missing one fails the build instead of the cluster.
+    #[test]
+    fn the_k3s_netfilter_surface_is_required_and_built_in() {
+        let needed = [
+            // xtables extensions over nf_tables: the root cause.
+            "CONFIG_NFT_COMPAT",
+            // endpoint randomisation and session affinity.
+            "CONFIG_NETFILTER_XT_MATCH_STATISTIC",
+            "CONFIG_NETFILTER_XT_MATCH_RECENT",
+            // IP sets for the default k3s network policy.
+            "CONFIG_IP_SET",
+            "CONFIG_IP_SET_BITMAP_IP",
+            "CONFIG_IP_SET_BITMAP_PORT",
+            "CONFIG_IP_SET_HASH_IP",
+            "CONFIG_IP_SET_HASH_NET",
+            "CONFIG_IP_SET_HASH_NETNET",
+            "CONFIG_IP_SET_HASH_IPPORT",
+            "CONFIG_IP_SET_HASH_NETPORT",
+            "CONFIG_NETFILTER_XT_SET",
+        ];
+        for symbol in needed {
+            assert!(
+                KERNEL_REQUIRED_BUILTINS.contains(&symbol),
+                "{symbol} must be gated: the build must fail when it is not built in"
+            );
+            assert!(
+                KERNEL_CONFIG_FRAGMENT.contains(&format!("\n{symbol}=y")),
+                "{symbol} must be built in by the profile"
+            );
+        }
+
+        // The gate itself must see them as present. A config that lacks one
+        // must report it, and a config that has every one must report nothing.
+        let mut config = String::new();
+        for symbol in KERNEL_REQUIRED_BUILTINS {
+            config.push_str(&format!("{symbol}=y\n"));
+        }
+        assert!(missing_required_builtins(&config).is_empty());
+        for symbol in needed {
+            let without = config.replace(&format!("{symbol}=y\n"), &format!("{symbol}=m\n"));
+            assert!(
+                missing_required_builtins(&without).contains(&symbol),
+                "a resolved-but-modular {symbol} must fail the build"
             );
         }
     }
