@@ -2,6 +2,7 @@ name: Website
 run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || format('Website validate main @ {0}', github.sha) }}"
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -102,7 +103,13 @@ jobs:
         run: bun run build
 
       - name: Upload tested deployment artifact
-        if: github.event_name == 'push'
+        # The release workflow pushes its version commit with GITHUB_TOKEN,
+        # and GitHub suppresses workflow triggers for that token, so a release
+        # SHA can reach main with no Website run. A manual dispatch of this
+        # same workflow on that same main revision is the supported way to
+        # produce the tested artifact, and the deploy lane accepts either
+        # event as long as the revision matches exactly.
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: website-dist-${{ github.sha }}
