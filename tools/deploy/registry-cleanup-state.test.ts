@@ -65,6 +65,7 @@ const sourceBody = [
 ].join("\r\n");
 
 interface RunOptions {
+  workflowStep?: boolean;
   scriptStatus?: string;
   scriptBody?: string;
   mode?: string;
@@ -154,6 +155,11 @@ function runProbe(options: RunOptions = {}) {
     MOCK_DEPLOYMENTS_BODY:
       options.deploymentsBody ??
       JSON.stringify({ versions: [{ version_id: activeVersionId, percentage: 100 }] }),
+    RUNNER_TEMP: root,
+    GITHUB_OUTPUT: join(root, "output"),
+    GITHUB_ENV: join(root, "environment"),
+    GITHUB_STEP_SUMMARY: join(root, "summary"),
+    REGISTRY_CLEANUP_INTENT: "preserve",
   };
   if (options.accountId === null) {
     delete env.CLOUDFLARE_ACCOUNT_ID;
@@ -166,7 +172,18 @@ function runProbe(options: RunOptions = {}) {
     env.CLOUDFLARE_API_TOKEN = options.apiToken ?? "token";
   }
 
-  const result = spawnSync("bash", [probePath, evidence, deployments, version], {
+  let args = [probePath, evidence, deployments, version];
+  if (options.workflowStep) {
+    const workflow = readFileSync(
+      join(repositoryRoot, ".github/workflows/website-deploy.yml"), "utf8",
+    );
+    const step = workflow.split("      - name: Inspect the image registry cleanup deployment\n")[1]
+      ?.split("\n      - name:")[0];
+    const body = step?.split("        run: |\n")[1];
+    if (!body) throw new Error("cleanup inspection step is missing");
+    args = ["-c", body.replace(/^          /gm, "")];
+  }
+  const result = spawnSync("bash", args, {
     cwd: repositoryRoot,
     encoding: "utf8",
     env,
@@ -175,10 +192,12 @@ function runProbe(options: RunOptions = {}) {
   // file, so an empty evidence file is read as no evidence at all; the
   // assertions then report the state problem instead of a parse error.
   const evidenceText = existsSync(evidence) ? readFileSync(evidence, "utf8").trim() : "";
+  const modePath = join(root, "registry-cleanup-mode.json");
   return {
     result,
     urls: existsSync(urlLog) ? readFileSync(urlLog, "utf8").trim().split("\n") : [],
     evidence: evidenceText === "" ? null : (JSON.parse(evidenceText) as Record<string, unknown>),
+    mode: existsSync(modePath) ? JSON.parse(readFileSync(modePath, "utf8")) : null,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -192,6 +211,41 @@ function expectSettingsProbe(urls: string[]) {
 }
 
 describe("registry cleanup live state probe", () => {
+  it.each(["delete", "report-only"])("the deployed workflow preserves a proven %s mode", (mode) => {
+    const run = runProbe({ workflowStep: true, mode });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.mode).toMatchObject({
+        resolved_mode: mode,
+        live_mode_proven: true,
+        probe: { active_version_id: activeVersionId },
+      });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("the deployed workflow defaults an absent collector to report mode", () => {
+    const run = runProbe({ workflowStep: true, scriptStatus: "404" });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.mode).toMatchObject({ resolved_mode: "report-only", child_present: false });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("the deployed workflow stops when a present collector has no proven mode", () => {
+    const run = runProbe({ workflowStep: true, mode: "none" });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.result.stderr).toContain("Cannot preserve the cleanup mode");
+      expect(run.mode).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  });
+
   it("reads the settings endpoint and reports a deployed collector", () => {
     const run = runProbe({ mode: "delete" });
     try {

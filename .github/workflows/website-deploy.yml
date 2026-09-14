@@ -441,7 +441,9 @@ jobs:
           # Only a confirmed 404 counts as no collector. An expired token, a
           # forbidden account, or a network failure is indeterminate, and this
           # step must not read it as a first rollout that skips the hold.
-          tools/deploy/registry-cleanup-state.sh "${state}"
+          tools/deploy/registry-cleanup-state.sh "${state}" \
+            "${RUNNER_TEMP}/registry-cleanup-active-deployment.json" \
+            "${RUNNER_TEMP}/registry-cleanup-active-version.json"
           child_present="$(jq -r '.script_present | tostring' "${state}")"
           live_mode="$(jq -er '.mode' "${state}")"
           mode_proven="$(jq -r '.mode_proven | tostring' "${state}")"
@@ -452,11 +454,13 @@ jobs:
           # default input.
           case "${REGISTRY_CLEANUP_INTENT}" in
             preserve)
-              if [ "${child_present}" = true ] && [ "${mode_proven}" = true ]; then
-                resolved="${live_mode}"
-              else
-                # Nothing deployed, or nothing readable: the least authority.
+              if [ "${child_present}" = false ]; then
                 resolved="report-only"
+              elif [ "${mode_proven}" != true ]; then
+                echo 'Cannot preserve the cleanup mode: the active version does not prove its mode.' >&2
+                exit 1
+              else
+                resolved="${live_mode}"
               fi
               ;;
             report-only|delete)
@@ -852,6 +856,8 @@ jobs:
             ${{ runner.temp }}/registry-cleanup-child.json
             ${{ runner.temp }}/registry-cleanup-deploy.json
             ${{ runner.temp }}/registry-cleanup-state.json
+            ${{ runner.temp }}/registry-cleanup-active-deployment.json
+            ${{ runner.temp }}/registry-cleanup-active-version.json
             ${{ runner.temp }}/registry-cleanup-mode.json
             ${{ runner.temp }}/web-bootstrap.json
             ${{ runner.temp }}/intar-registry-cleanup-deploy-${{ github.run_id }}/
