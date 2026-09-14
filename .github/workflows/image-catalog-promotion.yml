@@ -96,7 +96,7 @@ jobs:
           # retry true while that cleanup still runs. This lane repeats the call
           # until the endpoint reports completion, so the run that opens the
           # fleet gate afterwards never starts on unfinished cleanup.
-          for attempt in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             status="$(curl --silent --show-error \
               --request POST \
               --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
