@@ -9,6 +9,13 @@
 # and exits non-zero, so no caller can read it as "nothing is deployed" and skip
 # a hold it needed.
 #
+# The probe reads the script settings endpoint, which answers JSON. The bare
+# script endpoint answers the multipart JavaScript source of a present Worker,
+# and no JSON reader can confirm that. A 200 counts only when its body is one
+# Cloudflare success document, and a 404 counts only when its body carries the
+# worker-not-found code 10007 that the installed Wrangler treats as "this Worker
+# does not exist".
+#
 # The probe writes:
 #   script_present      true when a script with that name exists
 #   active_version_id   the single version at 100 percent, or null
@@ -28,7 +35,7 @@ readonly evidence="$1"
 readonly deployments="${2:-}"
 readonly version="${3:-}"
 readonly worker_name="${REGISTRY_CLEANUP_WORKER_NAME:-intar-dev-image-registry-cleanup}"
-readonly script_body="${evidence}.script.json"
+readonly settings_body="${evidence}.settings.json"
 
 test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || {
   echo "the registry cleanup probe needs CLOUDFLARE_ACCOUNT_ID" >&2
@@ -39,29 +46,39 @@ test -n "${CLOUDFLARE_API_TOKEN:-}" || {
   exit 1
 }
 
-script_status="$(curl --silent --show-error --max-time 60 \
+settings_status="$(curl --silent --show-error --max-time 60 \
   --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  --output "${script_body}" --write-out '%{http_code}' \
-  "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${worker_name}" \
+  --output "${settings_body}" --write-out '%{http_code}' \
+  "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${worker_name}/settings" \
   || true)"
 
-case "${script_status}" in
-  200|404) ;;
+# -s slurps the body into one array, so anything that is not exactly one JSON
+# document - the multipart source of the other endpoint, an HTML error page, an
+# empty file - fails the test instead of passing it by accident.
+case "${settings_status}" in
+  200)
+    jq -es 'length == 1 and (.[0].success == true)' "${settings_body}" >/dev/null || {
+      echo 'the registry cleanup probe read a 200 that is not a Cloudflare settings answer' >&2
+      echo 'An unreadable probe is not an absent worker, so the deployment stops here.' >&2
+      exit 1
+    }
+    script_present=true
+    ;;
+  404)
+    jq -es 'length == 1 and (.[0].success == false)
+      and (any(.[0].errors[]?; .code? == 10007))' "${settings_body}" >/dev/null || {
+      echo 'the registry cleanup probe read a 404 that is not a Cloudflare worker-not-found answer' >&2
+      echo 'An unreadable probe is not an absent worker, so the deployment stops here.' >&2
+      exit 1
+    }
+    script_present=false
+    ;;
   *)
-    echo "the registry cleanup probe could not read the worker: HTTP ${script_status:-none}" >&2
+    echo "the registry cleanup probe could not read the worker: HTTP ${settings_status:-none}" >&2
     echo 'An unreadable probe is not an absent worker, so the deployment stops here.' >&2
     exit 1
     ;;
 esac
-
-script_present=true
-if [ "${script_status}" = 404 ]; then
-  jq -e '.success == false' "${script_body}" >/dev/null || {
-    echo 'the registry cleanup probe read a 404 that is not a Cloudflare answer' >&2
-    exit 1
-  }
-  script_present=false
-fi
 
 active_version_id=""
 mode="absent"
@@ -121,13 +138,13 @@ fi
 
 jq -n \
   --arg worker_name "${worker_name}" \
-  --arg script_status "${script_status}" \
+  --arg script_status "${settings_status}" \
   --arg active_version_id "${active_version_id}" \
   --arg mode "${mode}" \
   --arg tag "${tag}" \
   --argjson script_present "${script_present}" \
   --argjson mode_proven "${mode_proven}" \
-  --slurpfile script "${script_body}" \
+  --slurpfile settings "${settings_body}" \
   '{
     schema_version: 1,
     operation: "registry-cleanup-state",
@@ -138,8 +155,8 @@ jq -n \
     mode: $mode,
     tag: (if $tag == "" then null else $tag end),
     mode_proven: $mode_proven,
-    script_response: (if ($script | length) == 0 then null else $script[0] end)
+    script_response: (if ($settings | length) == 0 then null else $settings[0] end)
   }' > "${evidence}"
 
-rm -f "${script_body}"
+rm -f "${settings_body}"
 exit 0

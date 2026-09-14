@@ -235,14 +235,25 @@ bun "${repository_root}/tools/deploy/wrangler-output.ts" \
 deployed_version_id="$(jq -er '.versionId' "${deploy_result}")"
 [[ "${deployed_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
 
-# The deploy event proves the tested source and the private surface: the tag
-# names this revision, and an empty target list means no route and no
-# workers.dev address was published.
+# The deploy invocation proves the tested source: the command line carries the
+# tag that names this revision. Wrangler 4.131.1 reports the deploy event with
+# worker_tag null even when --tag was passed, so the annotation on the deployed
+# version, read below, is the record of the tag.
 jq -s -e --arg tag "${deploy_tag}" '
+  [.[] | select((.type == "wrangler-session") and (.version == 1))] as $sessions |
+  (($sessions | length) == 1) and
+  ([$sessions[0].command_line_args |
+    indices("--tag")[] | . + 1 |
+    $sessions[0].command_line_args[.]] == [$tag])
+' "${deploy_output}" >/dev/null
+# The deploy event proves the private surface: this collector owns exactly the
+# cron schedule the built configuration declares, and no route and no
+# workers.dev address was published. An exact target list also rejects a public
+# target, such as an URL, that a length check would count as private.
+jq -s -e --arg cron "${cron_schedule}" '
   [.[] | select(.type == "deploy")] as $deploys |
   (($deploys | length) == 1) and
-  ($deploys[0].worker_tag == $tag) and
-  ((($deploys[0].targets // []) | length) == 0)
+  (($deploys[0].targets // []) == ["schedule: " + $cron])
 ' "${deploy_output}" >/dev/null
 
 active_version_proven=false
@@ -263,6 +274,7 @@ test "${active_version_proven}" = true
 bunx wrangler versions view "${deployed_version_id}" \
   --name "${worker_name}" --json > "${after_version}"
 jq -e \
+  --arg tag "${deploy_tag}" \
   --arg database_id "${database_id}" \
   --arg bucket_name "${bucket_name}" \
   --arg parent_worker_name "${parent_worker_name}" \
@@ -272,6 +284,7 @@ jq -e \
     ([.resources.bindings[] | select(.type == "r2_bucket" and .name == "VM_IMAGE_REGISTRY_BUCKET")]) as $buckets |
     ([.resources.bindings[] | select(.type == "service" and .name == "CONTROL_PLANE")]) as $services |
     ([.resources.bindings[] | select(.type == "plain_text" and .name == "REGISTRY_CLEANUP_MODE")]) as $modes |
+    ((.annotations["workers/tag"] // "") == $tag) and
     (($databases | length) == 1) and
     ($databases[0].id == $database_id) and
     (($buckets | length) == 1) and

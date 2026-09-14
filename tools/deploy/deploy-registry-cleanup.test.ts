@@ -41,6 +41,12 @@ interface RunOptions {
   parentBinding?: boolean;
   collectorAbsent?: boolean;
   schedule?: string;
+  /** Overrides the target list of the recorded deploy event. */
+  deployTargets?: string;
+  /** Overrides the tag annotation of the deployed version. */
+  versionTag?: string;
+  /** Drops the --tag argument from the recorded deploy invocation. */
+  deployTagArgument?: boolean;
   workersDevEnabled?: boolean;
   deploySucceeds?: boolean;
   liveChildMode?: string;
@@ -83,7 +89,7 @@ function fakeBunx(): string {
     "    exit 0",
     "  fi",
     '  if [ "$3" = "$DEPLOYED_VERSION_ID" ]; then mode="$MOCK_DEPLOYED_MODE"; else mode="$MOCK_LIVE_CHILD_MODE"; fi',
-    '  jq -cn --arg id "$3" --arg db "$DATABASE_ID" --arg bucket "$MOCK_DEPLOYED_BUCKET" --arg mode "$mode" \'{id:$id,annotations:{},resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"r2_bucket",name:"VM_IMAGE_REGISTRY_BUCKET",bucket_name:$bucket},{type:"service",name:"CONTROL_PLANE",service:"intar-dev",entrypoint:"MaintenanceState"},{type:"plain_text",name:"REGISTRY_CLEANUP_MODE",text:$mode}]}}\'',
+    '  jq -cn --arg id "$3" --arg tag "$MOCK_VERSION_TAG" --arg db "$DATABASE_ID" --arg bucket "$MOCK_DEPLOYED_BUCKET" --arg mode "$mode" \'{id:$id,annotations:{"workers/tag":$tag},resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"r2_bucket",name:"VM_IMAGE_REGISTRY_BUCKET",bucket_name:$bucket},{type:"service",name:"CONTROL_PLANE",service:"intar-dev",entrypoint:"MaintenanceState"},{type:"plain_text",name:"REGISTRY_CLEANUP_MODE",text:$mode}]}}\'',
     "  exit 0",
     "fi",
     'if [ "$1" = "deploy" ]; then',
@@ -95,10 +101,17 @@ function fakeBunx(): string {
     "  done",
     '  if [ "$MOCK_DEPLOY_SUCCEEDS" = true ]; then',
     '    printf "%s" "$DEPLOYED_VERSION_ID" > "$MOCK_STATE"',
-    '    jq -cn --arg id "$DEPLOYED_VERSION_ID" --arg tag "$tag" \'{type:"deploy",version:1,worker_name:"intar-dev-image-registry-cleanup",worker_name_overridden:false,worker_tag:$tag,version_id:$id,targets:[]}\' > "$WRANGLER_OUTPUT_FILE_PATH"',
+    "    args='[\"deploy\",\"--name\",\"intar-dev-image-registry-cleanup\"]'",
+    '    if [ "$MOCK_DEPLOY_TAG_ARGUMENT" = true ]; then',
+    '      args="$(jq -cn --argjson args "$args" --arg tag "$tag" \'$args + ["--tag",$tag]\')"',
+    "    fi",
+    "    jq -cn --argjson args \"$args\" --arg id \"$DEPLOYED_VERSION_ID\" '{type:\"wrangler-session\",version:1,command_line_args:$args}' > \"$WRANGLER_OUTPUT_FILE_PATH\"",
+    "    # Wrangler 4.131.1 records the deploy event with worker_tag null even",
+    "    # when --tag was passed, so the proof reads the version annotation.",
+    "    jq -cn --argjson targets \"$MOCK_DEPLOY_TARGETS\" --arg id \"$DEPLOYED_VERSION_ID\" '{type:\"deploy\",version:1,worker_name:\"intar-dev-image-registry-cleanup\",worker_tag:null,version_id:$id,targets:$targets}' >> \"$WRANGLER_OUTPUT_FILE_PATH\"",
     "    exit 0",
     "  fi",
-    '  jq -cn \'{type:"command-failed",version:1}\' > "$WRANGLER_OUTPUT_FILE_PATH"',
+    '  jq -cn \'{type:"command-failed\",version:1}\' > "$WRANGLER_OUTPUT_FILE_PATH"',
     "  exit 42",
     "fi",
     "exit 91",
@@ -261,10 +274,17 @@ function runDeployment(options: RunOptions = {}) {
         MOCK_PARENT_BINDING: String(options.parentBinding ?? true),
         MOCK_PARENT_LEARNER_FLAG: options.parentLearnerFlag ?? "",
         MOCK_DEPLOYED_BUCKET: options.deployedBucket ?? bucketName,
+        MOCK_VERSION_TAG:
+          options.versionTag ??
+          "cleanup-" + sourceSha.slice(0, 12) + "-" + mode,
         MOCK_DEPLOYED_MODE: options.configuredMode ?? mode,
         MOCK_LIVE_CHILD_MODE:
           options.liveChildMode ?? (options.collectorAbsent === true ? "absent" : "report-only"),
         MOCK_SCHEDULE: options.schedule ?? cleanupCron,
+        MOCK_DEPLOY_TARGETS:
+          options.deployTargets ??
+          JSON.stringify(["schedule: " + (options.schedule ?? cleanupCron)]),
+        MOCK_DEPLOY_TAG_ARGUMENT: String(options.deployTagArgument ?? true),
         MOCK_WORKERS_DEV_ENABLED: String(options.workersDevEnabled ?? false),
         PARENT_VERSION_ID: parentVersionId,
         DEPLOYED_VERSION_ID: deployedVersionId,
@@ -545,6 +565,73 @@ describe("image registry cleanup deployment", () => {
 
   it("refuses a schedule that is not the six-hourly cleanup tick", () => {
     const run = runDeployment({ schedule: "* * * * *" });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("accepts the deploy event of Wrangler 4.131.1: no worker_tag, the cron target", () => {
+    // Wrangler records worker_tag as null even when --tag was passed, and it
+    // reports the cron trigger as the sole target of this worker.
+    const run = runDeployment();
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.evidence).toMatchObject({
+        deploy_tag: "cleanup-" + sourceSha.slice(0, 12) + "-report-only",
+        tested_source_proven: true,
+      });
+      const deployEvent = String(run.evidence?.wrangler_deploy_ndjson).split("\n");
+      expect(deployEvent).toContainEqual(
+        expect.stringContaining('"worker_tag":null'),
+      );
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a deploy event that reports no cron target", () => {
+    const run = runDeployment({ deployTargets: "[]" });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a deploy event that reports a public workers.dev target", () => {
+    // A length check on the target list counts this target as private.
+    const run = runDeployment({
+      deployTargets: JSON.stringify([
+        "schedule: " + cleanupCron,
+        "https://intar-dev-image-registry-cleanup.example.workers.dev",
+      ]),
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a deployed version that carries a different tag annotation", () => {
+    const run = runDeployment({
+      versionTag: "cleanup-" + "b".repeat(12) + "-report-only",
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a recorded invocation without the --tag argument", () => {
+    const run = runDeployment({ deployTagArgument: false });
     try {
       expect(run.result.status).not.toBe(0);
       expect(run.evidence).toBeNull();
