@@ -9,6 +9,13 @@ export interface ScenarioStartAcceptedResponse {
   run: ScenarioRunRecord;
 }
 
+/**
+ * A refusal that is a known admission conflict rather than a failure. Known
+ * admission conflicts can clear while this call waits; the 60-second deadline
+ * still applies.
+ */
+export type ScenarioStartContention = "capacity" | "registry";
+
 const CAPACITY_WAIT_TIMEOUT_MS = 60_000;
 const DEFAULT_CAPACITY_RETRY_MS = 2_000;
 /** Bounded jitter for host capacity contention, to avoid a retry thundering herd. */
@@ -43,13 +50,13 @@ class ScenarioStartRequestError extends Error {
 
 export class ScenarioStartCancelledError extends Error {
   constructor() {
-    super("Stopped waiting for VM capacity.");
+    super("Stopped waiting for the start to be admitted.");
     this.name = "ScenarioStartCancelledError";
   }
 }
 
 /**
- * Starts one scenario run, waiting out host capacity contention.
+ * Starts one scenario run, waiting out a known admission conflict.
  *
  * The idempotency key is generated once for this call and reused by every
  * retry inside it, so a retry can never create a second VM set even when the
@@ -60,7 +67,7 @@ export async function requestScenarioStartWithCapacityWait(
   scenarioId: string,
   options: {
     signal: AbortSignal;
-    onCapacityWait: () => void;
+    onCapacityWait: (contention: ScenarioStartContention) => void;
     organizationId?: string | null;
     candidateRevision?: string;
     candidateBuildId?: string;
@@ -70,14 +77,13 @@ export async function requestScenarioStartWithCapacityWait(
   const idempotencyKey = crypto.randomUUID();
   let requested = false;
   let transportAttempts = 1;
+  let contention: ScenarioStartContention | null = null;
   while (true) {
     if (options.signal.aborted) {
       throw new ScenarioStartCancelledError();
     }
     if (requested && Date.now() - startedAt >= CAPACITY_WAIT_TIMEOUT_MS) {
-      throw new Error(
-        "VM capacity did not become available within 60 seconds. Try again shortly or choose another scenario.",
-      );
+      throw new Error(waitTimeoutMessage(contention));
     }
     try {
       requested = true;
@@ -106,13 +112,15 @@ export async function requestScenarioStartWithCapacityWait(
       const elapsedMs = Date.now() - startedAt;
       const remainingMs = CAPACITY_WAIT_TIMEOUT_MS - elapsedMs;
       if (remainingMs <= 0) {
-        throw new Error(
-          "VM capacity did not become available within 60 seconds. Try again shortly or choose another scenario.",
-        );
+        throw new Error(waitTimeoutMessage(contention));
       }
 
-      if (isCapacityContention(error.code)) {
-        options.onCapacityWait();
+      // Checked before the transport retry below: a conflict can outlast that
+      // three-attempt budget, so routing it there would end the wait early.
+      const recognized = contentionOf(error.code);
+      if (recognized) {
+        contention = recognized;
+        options.onCapacityWait(recognized);
         await waitForCapacityRetry(
           Math.min(capacityRetryMs(error.retryAfterMs), remainingMs),
           options.signal,
@@ -138,14 +146,31 @@ export async function requestScenarioStartWithCapacityWait(
   }
 }
 
-/** Host capacity contention is a wait, not a failure. */
-function isCapacityContention(code: string | null): boolean {
-  return code === "scenario_host_capacity_contended";
+/** A recognised contention refusal is a wait, not a failure. */
+function contentionOf(code: string | null): ScenarioStartContention | null {
+  if (code === "scenario_host_capacity_contended") return "capacity";
+  if (code === "registry_busy") return "registry";
+  return null;
 }
 
 /**
- * 5xx and unreachable responses carry no admission decision, so the request
- * may have committed. 4xx responses are decisions and are never retried.
+ * The wait is bounded, so the timeout names the refusal it was waiting on.
+ * A start that never reached a recognised refusal keeps the capacity wording,
+ * which is what an expiry before the first answer has always reported.
+ */
+function waitTimeoutMessage(
+  contention: ScenarioStartContention | null,
+): string {
+  return contention === "registry"
+    ? "The image registry stayed busy for 60 seconds. Try again shortly."
+    : "VM capacity did not become available within 60 seconds. Try again shortly or choose another scenario.";
+}
+
+/**
+ * An unconfirmed transport failure, or a 5xx with no recognised code, carries
+ * no admission decision, so the request may have committed and the same key
+ * makes a repeat call safe. A 4xx is a decision and is never retried here, and
+ * a recognised contention refusal above never reaches this budget.
  */
 function isRetryableTransportFailure(error: ScenarioStartRequestError): boolean {
   return error.code === "connectivity_failed" || error.retryable;

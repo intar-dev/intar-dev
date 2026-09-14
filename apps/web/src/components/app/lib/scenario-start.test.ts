@@ -5,13 +5,14 @@ import {
   ScenarioStartCancelledError,
 } from "./scenario-start";
 
-describe("scenario capacity waiting", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
+// One reset for every describe in this file: timers, globals, and spies.
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
+describe("scenario capacity waiting", () => {
   it("honors Retry-After before retrying a pending-capacity response", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
@@ -357,6 +358,121 @@ describe("scenario capacity waiting", () => {
   });
 });
 
+describe("scenario registry-busy waiting", () => {
+  it("waits out a busy image registry and starts on the same key", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(registryBusy())
+      .mockResolvedValueOnce(accepted());
+    vi.stubGlobal("fetch", fetchMock);
+    const onCapacityWait = vi.fn();
+
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait,
+    });
+    // No Retry-After on a busy registry, so the existing default delay applies.
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(result).resolves.toMatchObject({ runId: "run-1" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The caller is told which refusal it is waiting on, so the busy UI can
+    // name the registry instead of practice-machine capacity.
+    expect(onCapacityWait).toHaveBeenCalledTimes(1);
+    expect(onCapacityWait).toHaveBeenCalledWith("registry");
+    // One key across the wait: a busy refusal never creates a second run.
+    const keys = fetchMock.mock.calls.map(([, request]) =>
+      new Headers(request?.headers).get("Idempotency-Key"),
+    );
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  it("keeps waiting past the transport retry budget", async () => {
+    // Five refusals is deliberately more than the transport budget of three, so
+    // a client that routed this 503 there would stop early and fail here.
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(registryBusy())
+      .mockResolvedValueOnce(registryBusy())
+      .mockResolvedValueOnce(registryBusy())
+      .mockResolvedValueOnce(registryBusy())
+      .mockResolvedValueOnce(registryBusy())
+      .mockResolvedValueOnce(accepted());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await expect(result).resolves.toMatchObject({ runId: "run-1" });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    const keys = fetchMock.mock.calls.map(([, request]) =>
+      new Headers(request?.headers).get("Idempotency-Key"),
+    );
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  it("bounds a permanently busy registry at the wait budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => registryBusy());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: new AbortController().signal,
+      onCapacityWait: vi.fn(),
+    });
+    const rejection = expect(result).rejects.toThrow(
+      "The image registry stayed busy for 60 seconds. Try again shortly.",
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    await rejection;
+
+    // Bounded: far past the three-attempt transport budget, and finite.
+    const attempts = fetchMock.mock.calls.length;
+    expect(attempts).toBeGreaterThan(3);
+    expect(attempts).toBeLessThanOrEqual(31);
+    // And the loop has ended: no further request goes out.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock.mock.calls.length).toBe(attempts);
+    const keys = fetchMock.mock.calls.map(([, request]) =>
+      new Headers(request?.headers).get("Idempotency-Key"),
+    );
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  it("stops a registry wait when the user cancels", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => registryBusy());
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    const result = requestScenarioStartWithCapacityWait("pair-ping", {
+      signal: controller.signal,
+      onCapacityWait: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort();
+
+    await expect(result).rejects.toBeInstanceOf(ScenarioStartCancelledError);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("parseRetryAfterMs", () => {
   it("supports delta seconds", () => {
     expect(parseRetryAfterMs("2")).toBe(2_000);
@@ -373,6 +489,21 @@ function capacityPending(
       code,
     },
     { status: 409, headers: { "Retry-After": retryAfter } },
+  );
+}
+
+/**
+ * The refusal the control plane sends while a collector sweep holds the shared
+ * image-registry gate: HTTP 503 with the `registry_busy` code raised in
+ * begin.ts, and, unlike capacity contention, no Retry-After header.
+ */
+function registryBusy() {
+  return Response.json(
+    {
+      error: "the image registry is busy; retry the start",
+      code: "registry_busy",
+    },
+    { status: 503 },
   );
 }
 

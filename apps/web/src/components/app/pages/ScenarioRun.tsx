@@ -14,6 +14,7 @@ import { ArrowLeft } from "lucide-react";
 import {
   requestScenarioStartWithCapacityWait,
   ScenarioStartCancelledError,
+  type ScenarioStartContention,
 } from "@/components/app/lib/scenario-start";
 import {
   createScenarioStatusRefreshQueue,
@@ -133,6 +134,10 @@ export function ScenarioRunStart() {
     "requesting" | "waiting" | "failed"
   >("requesting");
   const [startError, setStartError] = useState<string | null>(null);
+  // Which refusal the wait is for, so the busy copy is accurate without
+  // naming backend internals.
+  const [startContention, setStartContention] =
+    useState<ScenarioStartContention | null>(null);
   const courseCatalog = useQuery({
     queryKey: courseCatalogQueryKey(organizationId),
     queryFn: () => fetchCourseCatalog(organizationId),
@@ -185,11 +190,15 @@ export function ScenarioRunStart() {
     markPendingScenarioRunBootStage(scenarioId, "start-request");
     setStartState("requesting");
     setStartError(null);
+    setStartContention(null);
 
     void requestScenarioStartWithCapacityWait(scenarioId, {
       signal: controller.signal,
       organizationId,
-      onCapacityWait: () => setStartState("waiting"),
+      onCapacityWait: (contention) => {
+        setStartContention(contention);
+        setStartState("waiting");
+      },
     })
       .then(async ({ runId, run, reused, acceptedAt }) => {
         markPendingScenarioRunBootStage(scenarioId, "start-accepted");
@@ -237,6 +246,10 @@ export function ScenarioRunStart() {
   usePageChrome({ title, fullscreen: true });
 
   const waitingForCapacity = startState === "waiting";
+  const waitingForRegistry =
+    waitingForCapacity && startContention === "registry";
+  // A registry wait is a wait on admission, not on a machine.
+  const waitingForMachineCapacity = waitingForCapacity && !waitingForRegistry;
   const failed = startState === "failed";
   const steps: ScenarioStatusStep[] = [
     {
@@ -245,13 +258,13 @@ export function ScenarioRunStart() {
       detail: failed
         ? "The scenario run could not be created."
         : "Creating a secure scenario run.",
-      state: failed ? "failed" : waitingForCapacity ? "done" : "active",
+      state: failed ? "failed" : waitingForMachineCapacity ? "done" : "active",
     },
     {
       id: "capacity",
       label: "Reserve capacity",
       detail: "Waiting for an available practice machine.",
-      state: waitingForCapacity ? "active" : "pending",
+      state: waitingForMachineCapacity ? "active" : "pending",
     },
     {
       id: "workspace",
@@ -270,9 +283,11 @@ export function ScenarioRunStart() {
           word={
             failed
               ? "Could not start"
-              : waitingForCapacity
-                ? "Waiting for capacity"
-                : "Starting"
+              : waitingForRegistry
+                ? "Waiting to start"
+                : waitingForCapacity
+                  ? "Waiting for capacity"
+                  : "Starting"
           }
           compactWord={
             failed ? "Failed" : waitingForCapacity ? "Waiting" : "Starting"
@@ -293,9 +308,11 @@ export function ScenarioRunStart() {
             description={
               failed
                 ? (startError ?? "Could not start the scenario.")
-                : waitingForCapacity
-                  ? "A practice machine is busy. We will retry for up to 60 seconds."
-                  : "Starting your scenario."
+                  : waitingForRegistry
+                    ? "Image maintenance is in progress. We will retry for up to 60 seconds."
+                    : waitingForCapacity
+                      ? "A practice machine is busy. We will retry for up to 60 seconds."
+                      : "Starting your scenario."
             }
             steps={steps}
             listLabel="Startup steps"
