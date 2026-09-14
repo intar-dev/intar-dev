@@ -37,6 +37,13 @@ readonly wait_ms="${REGISTRY_CLEANUP_WAIT_MS:-60000}"
 readonly run_max_passes="${REGISTRY_CLEANUP_RUN_PASSES:-64}"
 readonly run_deadline_ms="${REGISTRY_CLEANUP_RUN_DEADLINE_MS:-900000}"
 readonly run_sleep_s="${REGISTRY_CLEANUP_RUN_SLEEP_S:-5}"
+# The request ceiling follows the action. A pass scans the bucket and then
+# deletes what the scan listed, so it is not one read: run 34844622738 lost its
+# first pass to the 120 s ceiling while the plan of those 94,336 objects took
+# 87.2 s. A pass gets 10 minutes, so a 60-minute campaign can overrun by one pass
+# and still fit the 75-minute job; the other actions keep 120 s.
+readonly call_timeout_s=120
+readonly run_call_timeout_s=600
 # Key lists are evidence, not a data dump: every list in the record is capped.
 readonly max_evidence_keys=5000
 readonly runtime_root="${RUNNER_TEMP:-/tmp}/intar-registry-cleanup-gate-${GITHUB_RUN_ID:-local}"
@@ -132,12 +139,14 @@ call_gate() {
   # first `}`. The default is spelled out instead.
   local extra_json='{}'
   if [ "$#" -ge 3 ]; then extra_json="$3"; fi
-  local request_json call_status
+  local request_json call_status max_time_s
   request_json="$(BYPASS_SECRET="${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" \
     jq -cn --arg gateAction "${gate_action}" --argjson extra "${extra_json}" \
     '{secret: env.BYPASS_SECRET, action: $gateAction} + $extra')"
+  max_time_s="${call_timeout_s}"
+  if [ "${gate_action}" = run ]; then max_time_s="${run_call_timeout_s}"; fi
   call_status="$(printf '%s' "${request_json}" | curl --silent --show-error \
-    --max-time 120 \
+    --max-time "${max_time_s}" \
     --request POST \
     --header 'Content-Type: application/json' \
     --header "Origin: ${gate_origin}" \

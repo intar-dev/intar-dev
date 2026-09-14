@@ -384,6 +384,13 @@ function runGate(options: RunOptions = {}) {
   };
 }
 
+/** The `--max-time` value of the last call the gate made, as recorded. */
+function recordedMaxTime(curlArgs: string | null): string | null {
+  const lines = (curlArgs ?? "").split("\n").filter(Boolean);
+  const index = lines.indexOf("--max-time");
+  return index === -1 ? null : (lines[index + 1] ?? null);
+}
+
 describe("registry cleanup delete campaign", () => {
   it("runs bounded passes until the collector proves completion", () => {
     const run = runGate({
@@ -1529,12 +1536,64 @@ describe("registry cleanup deployment gate", () => {
   it("travels through the maintenance surface of the parent worker", () => {
     expect(script).toContain(gateUrl);
     expect(script).toContain("CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET");
-    expect(script).toContain("max-time 120");
+    expect(script).toContain('--max-time "${max_time_s}"');
     expect(script).toContain("--data-binary @-");
     expect(script).not.toContain("@${request}");
     expect(script).not.toContain("hold_ms");
     expect(script).toContain("chmod 700");
     expect(script).not.toContain("/registry/v1/cleanup");
+  });
+}, SPAWN_TIMEOUT_MS);
+
+describe("registry cleanup request ceiling", () => {
+  it("gives a campaign pass 10 minutes while every other action keeps 120 seconds", () => {
+    // Run 34844622738 lost its first delete pass to the 120 s ceiling with no
+    // bytes received, while the preflight plan of the same bucket took 87.2 s.
+    // One pass scans and then deletes, so only the run action gets the longer
+    // ceiling; a pass that ends the campaign leaves that call last, so the
+    // recorder holds its arguments.
+    const run = runGate({
+      action: "run",
+      targetMode: "delete",
+      liveMode: "delete",
+      runPasses: 1,
+      runBodies: [nestedEnvelope("run", runEnvelope("pending", { completed: false }))],
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(recordedMaxTime(run.curlArgs)).toBe("600");
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("bounds the actions that ask one question at 120 seconds", () => {
+    // A status, plan, or pause call is one collector question, and one read of
+    // this bucket fits the shorter ceiling.
+    const cases: { label: string; options: RunOptions }[] = [
+      { label: "hold", options: { liveMode: "delete" } },
+      {
+        label: "release",
+        options: {
+          action: "release",
+          liveMode: "delete",
+          body: '{"paused":false,"idle":true}',
+        },
+      },
+      {
+        label: "plan",
+        options: { action: "plan", liveMode: "report-only", planBody: reportEnvelope() },
+      },
+    ];
+    for (const testCase of cases) {
+      const run = runGate(testCase.options);
+      try {
+        expect(run.result.status, testCase.label).toBe(0);
+        expect(recordedMaxTime(run.curlArgs), testCase.label).toBe("120");
+      } finally {
+        run.cleanup();
+      }
+    }
   });
 }, SPAWN_TIMEOUT_MS);
 

@@ -196,6 +196,11 @@ minutes when the deployment lane runs the campaign, because a full plan is
 measured at roughly 90 seconds and a large backlog needs more than one pass.
 The script's own default is 15 minutes, which is what a manual call gets, and
 the deployment job allows 75 minutes so the campaign deadline fits inside it.
+One campaign pass has its own request ceiling of 10 minutes, because a pass
+scans the bucket and then deletes what the scan listed, while the other actions
+keep the 2-minute ceiling that one read needs. The two ceilings keep the worst
+case inside the job: 60 minutes of campaign plus one pass of at most 10 minutes
+is 70 minutes.
 It calls the collector with the `run` action and repeats only while a pass answers
 `pending` or `busy`. A pass that answers `core-failed`, `paused`,
 `fenced`, or anything unexpected stops the campaign as a failure. A
