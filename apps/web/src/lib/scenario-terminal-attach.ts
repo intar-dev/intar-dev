@@ -157,10 +157,10 @@ export async function attachReadyScenarioTerminalTargets(input: {
     return "not_ready";
   }
   if (confirmed.row.terminal_observed_at !== row.terminal_observed_at) {
-    // The guest endpoint changed while the target was staged, so the staged
-    // target is stale. Revoke this generation instead of waking a socket with
-    // an endpoint the guest no longer serves.
-    await deleteStargateTerminalRoute(routeUsername, routeGeneration);
+    // The guest reported again while the target was staged. This returns before
+    // activation, so the staged attachment stays inert. The route is kept: a
+    // report that only advances the observation must not delete a healthy
+    // route's live socket.
     return "not_ready";
   }
 

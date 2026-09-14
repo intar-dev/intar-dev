@@ -199,24 +199,60 @@ describe("scenario terminal attach", () => {
     await expect(attachRequest()).resolves.toBe("not_ready");
 
     // The stale target is never activated and never marked attached, so no
-    // shell can appear on an endpoint the guest no longer serves.
+    // shell can appear on an endpoint the guest no longer serves. The route is
+    // kept for now: this branch returns before activation, so the staged
+    // target is inert and the browser socket stays in its pending wait.
     expect(mocks.activateStargateTerminalTarget).not.toHaveBeenCalled();
     expect(await attachedAt()).toBeNull();
+    expect(mocks.deleteStargateTerminalRoute).not.toHaveBeenCalled();
+
+    // The replaced endpoint is still refused. The gateway rejects a second,
+    // different target for one route with 409, so the fence revokes the route
+    // rather than activating the endpoint the guest stopped serving.
+    mocks.stageStargateTerminalTarget.mockRejectedValue(
+      new mocks.StargateTerminalAttachError(409),
+    );
+    await expect(
+      reconcileScenarioTerminalRouteAttachments({ hostId: "host-1" }),
+    ).resolves.toEqual({ attempted: 1, attached: 0 });
     expect(mocks.deleteStargateTerminalRoute).toHaveBeenCalledWith(
       expect.any(String),
       `${RUN_ID}:1`,
     );
+    expect(mocks.activateStargateTerminalTarget).not.toHaveBeenCalled();
+    expect(await attachedAt()).toBeNull();
+  });
 
-    // The next pass stages and activates the endpoint the guest reports now.
+  it("keeps the route and the work pending when only the observation advanced", async () => {
+    // The agent re-reports the same endpoint while the stage is in flight. That
+    // advances terminal_observed_at without changing the target, which is the
+    // shape a busy route meets on every report interval.
+    mocks.stageStargateTerminalTarget.mockImplementation(async () => {
+      await observeNewEndpoint("10.0.0.10", NOW + 5_000);
+      return { attachmentId: "attachment-1" };
+    });
+
+    await expect(attachRequest()).resolves.toBe("not_ready");
+
+    // The route survives, so a live socket on it is not terminated, and no
+    // shell opens on the revision that was staged.
+    expect(mocks.deleteStargateTerminalRoute).not.toHaveBeenCalled();
+    expect(mocks.activateStargateTerminalTarget).not.toHaveBeenCalled();
+    expect(await attachedAt()).toBeNull();
+
+    // The target is still pending, so the next reconcile pass activates the
+    // observation the guest reports now: the wait is not permanent.
+    mocks.stageStargateTerminalTarget.mockResolvedValue({
+      attachmentId: "attachment-1",
+    });
     await expect(
       reconcileScenarioTerminalRouteAttachments({ hostId: "host-1" }),
     ).resolves.toEqual({ attempted: 1, attached: 1 });
-    expect(await attachedAt()).toBe(NOW + 5_000);
-    expect(mocks.stageStargateTerminalTarget).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        target: expect.objectContaining({ host: "10.0.0.11" }),
-      }),
+    expect(mocks.activateStargateTerminalTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ attachmentId: "attachment-1" }),
     );
+    expect(await attachedAt()).toBe(NOW + 5_000);
+    expect(mocks.deleteStargateTerminalRoute).not.toHaveBeenCalled();
   });
 
   it("refuses to attach when the host session was replaced", async () => {
