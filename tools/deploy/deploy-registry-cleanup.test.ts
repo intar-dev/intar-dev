@@ -43,6 +43,10 @@ interface RunOptions {
   schedule?: string;
   /** Overrides the target list of the recorded deploy event. */
   deployTargets?: string;
+  /** Overrides the body of the account API schedules response. */
+  schedulesBody?: string;
+  /** Overrides the body of the account API subdomain response. */
+  subdomainBody?: string;
   /** Overrides the tag annotation of the deployed version. */
   versionTag?: string;
   /** Drops the --tag argument from the recorded deploy invocation. */
@@ -134,12 +138,11 @@ function fakeCurl(): string {
     "done",
     'case "$url" in',
     "  */schedules)",
-    '    jq -cn --arg cron "$MOCK_SCHEDULE" \'{success:true,result:[{cron:$cron}]}\' > "$output"',
+    '    printf "%s" "$MOCK_SCHEDULES_BODY" > "$output"',
     "    printf '200'",
     "    ;;",
     "  */subdomain)",
-    '    if [ "$MOCK_WORKERS_DEV_ENABLED" = true ]; then enabled=true; else enabled=false; fi',
-    '    jq -cn --argjson enabled "$enabled" \'{success:true,result:{enabled:$enabled,previews_enabled:false}}\' > "$output"',
+    '    printf "%s" "$MOCK_SUBDOMAIN_BODY" > "$output"',
     "    printf '200'",
     "    ;;",
     "  */workers/scripts/*)",
@@ -281,11 +284,41 @@ function runDeployment(options: RunOptions = {}) {
         MOCK_LIVE_CHILD_MODE:
           options.liveChildMode ?? (options.collectorAbsent === true ? "absent" : "report-only"),
         MOCK_SCHEDULE: options.schedule ?? cleanupCron,
+        // The account API answers the Cron Trigger list as an object that
+        // wraps a schedules array, with created_on and modified_on beside the
+        // cron expression.
+        MOCK_SCHEDULES_BODY:
+          options.schedulesBody ??
+          JSON.stringify({
+            result: {
+              schedules: [
+                {
+                  cron: options.schedule ?? cleanupCron,
+                  created_on: "2026-09-14T10:15:48.827715Z",
+                  modified_on: "2026-09-14T10:57:28.009986Z",
+                },
+              ],
+            },
+            success: true,
+            errors: [],
+            messages: [],
+          }),
         MOCK_DEPLOY_TARGETS:
           options.deployTargets ??
           JSON.stringify(["schedule: " + (options.schedule ?? cleanupCron)]),
         MOCK_DEPLOY_TAG_ARGUMENT: String(options.deployTagArgument ?? true),
         MOCK_WORKERS_DEV_ENABLED: String(options.workersDevEnabled ?? false),
+        MOCK_SUBDOMAIN_BODY:
+          options.subdomainBody ??
+          JSON.stringify({
+            result: {
+              enabled: options.workersDevEnabled ?? false,
+              previews_enabled: false,
+            },
+            success: true,
+            errors: [],
+            messages: [],
+          }),
         PARENT_VERSION_ID: parentVersionId,
         DEPLOYED_VERSION_ID: deployedVersionId,
         DATABASE_ID: databaseId,
@@ -573,6 +606,36 @@ describe("image registry cleanup deployment", () => {
     }
   }, DEPLOY_LIVENESS_TIMEOUT_MS);
 
+  it("refuses a schedules body in the bare array shape the API does not return", () => {
+    // The account API answers {"result":{"schedules":[...]}}. A bare array
+    // under result is the shape this suite once invented, and reading it makes
+    // the proof fail after a successful deploy.
+    const run = runDeployment({
+      schedulesBody: JSON.stringify({ success: true, result: [{ cron: cleanupCron }] }),
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a schedules body without the cron trigger", () => {
+    const run = runDeployment({
+      schedulesBody: JSON.stringify({
+        success: true,
+        result: { schedules: [] },
+      }),
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
   it("accepts the deploy event of Wrangler 4.131.1: no worker_tag, the cron target", () => {
     // Wrangler records worker_tag as null even when --tag was passed, and it
     // reports the cron trigger as the sole target of this worker.
@@ -642,6 +705,35 @@ describe("image registry cleanup deployment", () => {
 
   it("refuses a worker that is reachable on workers.dev", () => {
     const run = runDeployment({ workersDevEnabled: true });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a subdomain response without the preview flag", () => {
+    // A missing boolean must not read as a private surface. The earlier form
+    // defaulted an absent field to false and passed.
+    const run = runDeployment({
+      subdomainBody: JSON.stringify({ success: true, result: { enabled: false } }),
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a subdomain response without the workers.dev flag", () => {
+    const run = runDeployment({
+      subdomainBody: JSON.stringify({
+        success: true,
+        result: { previews_enabled: false },
+      }),
+    });
     try {
       expect(run.result.status).not.toBe(0);
       expect(run.evidence).toBeNull();

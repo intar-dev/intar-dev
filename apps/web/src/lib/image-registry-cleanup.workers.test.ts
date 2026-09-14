@@ -404,6 +404,9 @@ async function seedObsoleteWarmIntents(input: {
           run_id: "run-warm",
           vm_name: WARM_FAMILY.vm,
           phase: "running",
+          // The agent reports the key it boots with, so the retention policy
+          // can resolve this VM to a registry family instead of guessing.
+          image_key: { ...WARM_FAMILY },
           image_id: imageIds[0]!,
         },
       ],
@@ -459,8 +462,10 @@ describe("image registry cleanup core", () => {
     expect(plan.details.projectedRetirements.trimmedHostCacheImageIds).toBe(
       WARM_INTENTS - 2,
     );
-    // The running VM's version stays: it is a reference, not an intent.
-    expect(plan.details.retainedByDigestOnly).toBe(1);
+    // The running VM's version stays, and now as a proven root rather than a
+    // digest coincidence: an operational host VM resolves through the same
+    // index an active run uses, so its object is retained by reference.
+    expect(plan.details.retainedByDigestOnly).toBe(0);
     expect(plan.candidateObjects.map((object) => object.key)).toContain(
       withdrawnKey,
     );
@@ -492,7 +497,16 @@ describe("image registry cleanup core", () => {
     const hostId = "host-warm-refused";
     // The document names another host, so the version-guarded write refuses
     // it. Deletion must not proceed against a live cache intent.
-    await seedObsoleteWarmIntents({ hostId, hostIdInDoc: "host-somebody-else" });
+    const imageIds = await seedObsoleteWarmIntents({
+      hostId,
+      hostIdInDoc: "host-somebody-else",
+    });
+    // The running VM is a root now, so its object must exist for the sweep to
+    // reach the trim guard this test is about.
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(
+      "images/warm-old-scenario-web-x86_64/" + imageIds[0] + ".raw.zst",
+      new Uint8Array([31]),
+    );
     await enforce();
     const core = createImageRegistryCleanupCore({});
 

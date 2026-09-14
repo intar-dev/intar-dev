@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   RegistryRetentionFault,
+  actualVmNeedsImage,
   bootArtifactObjectKey,
+  desiredVmNeedsImage,
   bundleObjectKey,
   evaluateHostImageReferences,
   imageChunkObjectKey,
@@ -475,6 +477,10 @@ describe("rollback snapshot retention", () => {
     expect(camel.imageClosures).toEqual([
       {
         identity: "nginx-web-x86_64:" + LIVE,
+        // The key and id travel with the closure, so a reader that only has an
+        // image id can still find it.
+        imageKey: { scenario: "nginx", vm: "web", arch: "x86_64" },
+        imageId: LIVE,
         closure: {
           chunkManifestSha256: PREVIOUS,
           kernelSha256: "1".repeat(64),
@@ -506,6 +512,8 @@ describe("rollback snapshot retention", () => {
     expect(legacy.imageClosures).toEqual([
       {
         identity: "nginx-web-aarch64:" + ANCIENT,
+        imageKey: { scenario: "nginx", vm: "web", arch: "aarch64" },
+        imageId: ANCIENT,
         closure: {
           chunkManifestSha256: null,
           kernelSha256: "3".repeat(64),
@@ -630,6 +638,8 @@ describe("host image references", () => {
       vms: imageIds.map((imageId, index) => ({
         vm_id: "vm-" + index,
         image_id: imageId,
+        // The contract requires a phase, and only a running VM blocks.
+        desired_phase: "running",
       })),
       builds: [],
       cached_images: cached.map((imageId, index) => ({
@@ -639,14 +649,33 @@ describe("host image references", () => {
     } as unknown as HostDesiredStateV2;
   }
 
-  function actual(entries: Array<{ imageId: string; phase: string }>): HostStateReportV2 {
+  /**
+   * `cached` feeds the host's cache report and `vms` its VM report, because
+   * the two carry different phase vocabularies and are read separately.
+   */
+  function actual(
+    cached: Array<{ imageId: string; phase: string }>,
+    vms: Array<{
+      imageId: string;
+      phase: string;
+      archive?: { phase: string };
+    }> = [],
+  ): HostStateReportV2 {
     return {
-      cached_images: entries.map((entry, index) => ({
+      cached_images: cached.map((entry, index) => ({
         image_key: { scenario: "nginx", vm: "vm-" + index, arch: "x86_64" },
         image_id: entry.imageId,
         phase: entry.phase,
         updated_at_unix_ms: 0,
       })),
+      vms: vms.map((entry, index) => ({
+        run_id: "run-" + index,
+        vm_name: "vm-" + index,
+        phase: entry.phase,
+        image_id: entry.imageId,
+        ...(entry.archive ? { archive: entry.archive } : {}),
+      })),
+      builds: [],
     } as unknown as HostStateReportV2;
   }
 
@@ -658,6 +687,64 @@ describe("host image references", () => {
         actual: actual([{ imageId: LIVE, phase: "ready" }]),
       }).blocking,
     ).toEqual([{ imageId: LIVE, reason: "active_vm" }]);
+  });
+
+  it("blocks on an actual VM when desired state only has a tombstone", () => {
+    // The lag case: desired state says the run ended, but the host is still
+    // running, stopping, or stuck in a failed delete. Replacing the image
+    // would break it.
+    const desiredState = desired([LIVE]);
+    desiredState.vms[0]!.desired_phase = "absent" as never;
+
+    for (const entry of [
+      { imageId: LIVE, phase: "running" },
+      { imageId: LIVE, phase: "stopping" },
+      { imageId: LIVE, phase: "failed", archive: { phase: "failed" } },
+    ]) {
+      const result = evaluateHostImageReferences({
+        outgoingImageIds: [LIVE],
+        desired: desiredState,
+        actual: actual([], [entry]),
+      });
+      expect(result.blocking).toEqual([{ imageId: LIVE, reason: "active_vm" }]);
+    }
+  });
+
+  it("allows the replacement when both sides say the VM is gone", () => {
+    const desiredState = desired([LIVE]);
+    desiredState.vms[0]!.desired_phase = "absent" as never;
+
+    const archived = evaluateHostImageReferences({
+      outgoingImageIds: [LIVE],
+      desired: desiredState,
+      // The archive completed, so the agent has removed the VM.
+      actual: actual([], [
+        { imageId: LIVE, phase: "stopping", archive: { phase: "complete" } },
+      ]),
+    });
+    expect(archived.blocking).toEqual([]);
+
+    const bothAbsent = evaluateHostImageReferences({
+      outgoingImageIds: [LIVE],
+      desired: desiredState,
+      actual: actual([], [{ imageId: LIVE, phase: "absent" }]),
+    });
+    expect(bothAbsent.blocking).toEqual([]);
+  });
+  it("does not block on an absent tombstone that still names the image", () => {
+    // The platform writes `absent` when a run ends. The agent pins nothing
+    // for it, so it must not hold a promotion either.
+    const desiredState = desired([LIVE]);
+    desiredState.vms[0]!.desired_phase = "absent" as never;
+
+    const result = evaluateHostImageReferences({
+      outgoingImageIds: [LIVE],
+      desired: desiredState,
+      actual: actual([{ imageId: LIVE, phase: "ready" }]),
+    });
+
+    expect(result.blocking).toEqual([]);
+    expect(result.leftover).toEqual([LIVE]);
   });
 
   it("blocks an unfinished transfer", () => {
@@ -692,6 +779,61 @@ describe("host image references", () => {
         actual: actual([{ imageId: LIVE, phase: "ready" }]),
       }),
     ).toEqual({ blocking: [], leftover: [] });
+  });
+});
+
+
+describe("host phase policy", () => {
+  it("roots a desired VM only while the platform wants it running", () => {
+    expect(desiredVmNeedsImage({ desired_phase: "running" })).toBe(true);
+    expect(desiredVmNeedsImage({ desired_phase: "absent" })).toBe(false);
+    // The stored document is a JSON cast with no runtime validation, so an
+    // unknown or missing phase is kept: only an explicit tombstone drops.
+    expect(desiredVmNeedsImage({})).toBe(true);
+    expect(desiredVmNeedsImage({ desired_phase: "something-new" })).toBe(true);
+  });
+
+  it("keeps every actual phase that can still need the image", () => {
+    for (const phase of [
+      "pending",
+      "pulling_image",
+      "creating_disks",
+      "booting",
+      "running",
+      "ready",
+      "solved",
+      "stopping",
+      // The contract allows it and nothing proves a stopped VM is gone.
+      "stopped",
+    ]) {
+      expect(actualVmNeedsImage({ phase, archive: null })).toBe(true);
+    }
+  });
+
+  it("keeps failed VMs only while a failed archive proves delete_failed", () => {
+    // report phase `failed` covers both Failed and DeleteFailed. The archive
+    // phase is what tells them apart, and only DeleteFailed is still present.
+    expect(actualVmNeedsImage({ phase: "failed", archive: { phase: "failed" } })).toBe(true);
+    expect(actualVmNeedsImage({ phase: "failed", archive: null })).toBe(false);
+    expect(actualVmNeedsImage({ phase: "failed", archive: { phase: "pending" } })).toBe(true);
+    expect(actualVmNeedsImage({ phase: "failed", archive: { phase: "uploading" } })).toBe(true);
+    expect(actualVmNeedsImage({ phase: "failed", archive: { phase: "complete" } })).toBe(false);
+  });
+
+  it("drops only VMs the report proves are gone", () => {
+    // A complete archive is the one unambiguous "the agent removed it".
+    expect(actualVmNeedsImage({ phase: "running", archive: { phase: "complete" } })).toBe(false);
+    // Host-confirmed absent with no unfinished archive.
+    expect(actualVmNeedsImage({ phase: "absent", archive: null })).toBe(false);
+    // An absent VM whose archive is still running is still being torn down.
+    expect(actualVmNeedsImage({ phase: "absent", archive: { phase: "uploading" } })).toBe(true);
+    expect(actualVmNeedsImage({ phase: "absent", archive: { phase: "failed" } })).toBe(true);
+  });
+
+  it("fails closed on an unknown phase or archive phase", () => {
+    expect(actualVmNeedsImage({ phase: "something-new", archive: null })).toBe(true);
+    expect(actualVmNeedsImage({})).toBe(true);
+    expect(actualVmNeedsImage({ phase: "stopping", archive: { phase: "unknown" } })).toBe(true);
   });
 });
 

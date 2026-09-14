@@ -37,6 +37,8 @@ import {
   enableRegistryDeletion,
   seedBootArtifact,
   seedChunkedImage,
+  seedLegacyImage,
+  sha256OfLabel,
   type SeededChunkedImage,
 } from "../control-plane/image-registry/registry-artifact-fixtures";
 
@@ -731,6 +733,9 @@ async function seedWarmCacheHost(now: number): Promise<WarmCacheFixture> {
           run_id: "run-warm",
           vm_name: WARM_VM,
           phase: "running",
+          // The agent reports the key it boots with, so the retention policy
+          // resolves this VM to a registry family instead of guessing.
+          image_key: warmImageKey(REMOVED_SCENARIO, WARM_VM, WARM_ARCH),
           image_id: runningImageId,
         },
       ],
@@ -1341,3 +1346,918 @@ describe("active run image references", () => {
     ).toBe(false);
   });
 });
+
+/**
+ * The production shape: many hosts keep an `absent` tombstone for a scenario
+ * whose artifacts are already deleted. That tombstone used to root the image,
+ * prove the family managed, and raise `retained_image_missing` per host.
+ */
+describe("host phase policy against real D1", () => {
+  beforeEach(async () => {
+    await resetD1Database();
+    await enableRegistryDeletion(env.DB);
+  });
+
+  it("does not fault on absent tombstones and still faults on a running VM", async () => {
+    const missingImageId = await sha256OfLabel("deleted-release");
+    await seedManyHostsWithTombstone({
+      hostCount: 40,
+      desiredPhase: "absent",
+      imageId: missingImageId,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    expect(projection.roots).toEqual([]);
+
+    const core = createImageRegistryCleanupCore({});
+    const plan = await core.plan(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(plan.details.faults).toEqual([]);
+    expect(plan.details.deleteAllowedByReferences).toBe(true);
+
+    await resetD1Database();
+    await enableRegistryDeletion(env.DB);
+    await seedManyHostsWithTombstone({
+      hostCount: 40,
+      desiredPhase: "running",
+      imageId: missingImageId,
+    });
+    const faulted = await core.plan(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(faulted.details.faults.map((fault) => fault.code)).toEqual(
+      Array.from({ length: 40 }, () => "retained_image_missing"),
+    );
+    expect(faulted.details.deleteAllowedByReferences).toBe(false);
+  });
+
+  it("roots a running, stopping, and failed-delete VM but not an archived one", async () => {
+    const running = await sha256OfLabel("vm-running");
+    const stopping = await sha256OfLabel("vm-stopping");
+    const deleteFailed = await sha256OfLabel("vm-delete-failed");
+    const archived = await sha256OfLabel("vm-archived-complete");
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await seedHostRow(db, { hostId: "host-phases", now });
+    await seedHostDesiredRow(db, { hostId: "host-phases", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-phases",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-phases",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        vms: [
+          phaseVm("run-live", "running", running, null),
+          // DeletingVm: present on disk, teardown can still fail.
+          phaseVm("run-stopping", "stopping", stopping, { phase: "pending", artifact_count: 0 }),
+          // DeleteFailed: still present, so its image stays required.
+          phaseVm("run-delete-failed", "failed", deleteFailed, { phase: "failed", artifact_count: 0 }),
+          // The agent removes the VM once its artifacts are archived.
+          phaseVm("run-archived", "stopping", archived, { phase: "complete", artifact_count: 9 }),
+        ],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    const rooted = new Set(projection.roots.map((root) => root.imageId));
+    expect(rooted.has(running)).toBe(true);
+    expect(rooted.has(stopping)).toBe(true);
+    expect(rooted.has(deleteFailed)).toBe(true);
+    expect(rooted.has(archived)).toBe(false);
+  });
+
+  it("pins the whole closure of a non-live image a running VM still uses", async () => {
+    // The image is not live, not a rollback, and not a candidate: only the
+    // build audit knows its manifest and boot artifacts. A running VM that
+    // names it must keep the chunks, the manifest, and both boot artifacts,
+    // and the audit must not fault on an image that is available.
+    const image = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "non-live-running",
+    });
+    const orphan = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "truly-orphan",
+    });
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await db.insert(imageBuildBundles).values({
+      rev: "audit-bundle",
+      r2Key: "builds/bundles/audit-bundle.tar.gz",
+      metaJson: {
+        buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+        catalogChannel: "live",
+        scenarios: [],
+      },
+    });
+    await db.insert(imageBuilds).values({
+      id: "audit-build",
+      scenarioId: "nonlive-scenario",
+      arch: "x86_64",
+      rev: "audit-bundle",
+      contentHash: "9".repeat(64),
+      status: "succeeded",
+      phase: "succeeded",
+      publishedManifestJson: {
+        scenario_id: "nonlive-scenario",
+        vms: [
+          {
+            name: "web",
+            image_key: { scenario: "nonlive-scenario", vm: "web", arch: "x86_64" },
+            image_id: image.imageId,
+            image_format: "raw_chunks_v1",
+            chunk_manifest_sha256: image.chunkManifestSha256,
+            boot: {
+              kernel_sha256: image.kernelSha256,
+              initrd_sha256: image.initrdSha256,
+            },
+          },
+        ],
+      } as never,
+      updatedAt: now,
+    });
+    await seedHostRow(db, { hostId: "host-non-live", now });
+    await seedHostDesiredRow(db, { hostId: "host-non-live", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-non-live",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-non-live",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        // No image key: the report carries only the id, so the closure has
+        // to come from the index.
+        vms: [
+          phaseVm("run-non-live", "running", image.imageId, null, null),
+        ],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    expect(projection.chunkManifestSha256s).toContain(image.chunkManifestSha256);
+    expect(projection.bootArtifactSha256s).toContain(image.kernelSha256);
+    expect(projection.bootArtifactSha256s).toContain(image.initrdSha256);
+
+    const core = createImageRegistryCleanupCore({});
+    const plan = await core.plan(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(plan.details.faults).toEqual([]);
+    const result = await core.run(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(result.error).toBeNull();
+
+    expect(await objectExists(image.objectKey)).toBe(true);
+    expect(await objectExists("image-chunks/v1/zstd6/" + image.chunkRawSha256)).toBe(true);
+    expect(await objectExists("artifacts/" + image.kernelSha256)).toBe(true);
+    expect(await objectExists("artifacts/" + image.initrdSha256)).toBe(true);
+    // Nothing references the orphan, so the sweep removes it.
+    expect(await objectExists(orphan.objectKey)).toBe(false);
+  });
+});
+
+/** One actual-state VM row, optionally with a key and an archive record. */
+describe("host operational closure against real D1", () => {
+  beforeEach(async () => {
+    await resetD1Database();
+    await enableRegistryDeletion(env.DB);
+  });
+
+  it("resolves an actual VM with no key against the retained rollback", async () => {
+    // Direct publish A then B: A survives only as the retained rollback, with
+    // no build and no candidate naming it. A host reports a running VM on A
+    // with no image key, so only the rollback closure can resolve it. Without
+    // that coverage, A's manifest and boot artifacts would go unpinned.
+    const previous = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "rollback-only-a",
+    });
+    const live = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "live-only-b",
+    });
+    const orphan = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "truly-orphan-rollback",
+    });
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await seedScenario(
+      { scenario: ROLLBACK_SCENARIO, vm: "web", arch: "x86_64" },
+      {
+        scenarioId: ROLLBACK_SCENARIO,
+        chunkManifestSha256: live.chunkManifestSha256,
+        imageId: live.imageId,
+        kernel: live.kernelSha256,
+        initrd: live.initrdSha256,
+        sourceRevision: "revision-live",
+      },
+    );
+    await db.insert(scenarioCatalogSnapshots).values({
+      id: "public:revision-live:pre-promotion",
+      revision: "revision-live:pre-promotion",
+      snapshotJson: {
+        schemaVersion: 1,
+        targetScenarioIds: [ROLLBACK_SCENARIO],
+        scenarios: [{ scenarioId: ROLLBACK_SCENARIO }],
+        vms: [
+          {
+            scenarioId: ROLLBACK_SCENARIO,
+            vmName: "web",
+            imageSha256: previous.imageId,
+            imageKeyJson: {
+              scenario: ROLLBACK_SCENARIO,
+              vm: "web",
+              arch: "x86_64",
+            },
+            imageFormat: "raw_chunks_v1",
+            chunkManifestSha256: previous.chunkManifestSha256,
+            kernelSha256: previous.kernelSha256,
+            initrdSha256: previous.initrdSha256,
+          },
+        ],
+        probes: [],
+      },
+      createdAt: now,
+    });
+    await seedHostRow(db, { hostId: "host-rollback-only", now });
+    await seedHostDesiredRow(db, { hostId: "host-rollback-only", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-rollback-only",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-rollback-only",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        // Only an id: the rollback is the only record that names it.
+        vms: [phaseVm("run-rollback", "running", previous.imageId, null, null)],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    expect(projection.chunkManifestSha256s).toContain(
+      previous.chunkManifestSha256,
+    );
+    expect(projection.bootArtifactSha256s).toContain(previous.kernelSha256);
+    expect(projection.bootArtifactSha256s).toContain(previous.initrdSha256);
+
+    const core = createImageRegistryCleanupCore({});
+    const plan = await core.plan(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(plan.details.faults).toEqual([]);
+    const result = await core.run(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(result.error).toBeNull();
+
+    // The rollback closure the running VM needs survives, the live release
+    // survives, and the image nothing names is reclaimed in the same pass.
+    expect(await objectExists(previous.objectKey)).toBe(true);
+    expect(
+      await objectExists("image-chunks/v1/zstd6/" + previous.chunkRawSha256),
+    ).toBe(true);
+    expect(await objectExists("artifacts/" + previous.kernelSha256)).toBe(true);
+    expect(await objectExists("artifacts/" + previous.initrdSha256)).toBe(true);
+    expect(await objectExists(live.objectKey)).toBe(true);
+    expect(await objectExists(orphan.objectKey)).toBe(false);
+  });
+
+  it("merges every boot variant that shares one image id", async () => {
+    // The same disk image, republished with a different kernel and initrd. One
+    // image id does not identify one boot variant, so an operational VM naming
+    // that id must keep both variants rather than the first one found.
+    // One real chunked image: a manifest that verifies, its chunk, and the
+    // boot artifacts of the current variant.
+    const bucket = env.VM_IMAGE_REGISTRY_BUCKET;
+    const image = await seedChunkedImage(bucket, { label: "shared-image" });
+    const imageId = image.imageId;
+    const manifestSha256 = image.chunkManifestSha256;
+    const oldKernel = await seedBootArtifact(bucket, "shared-image:old-kernel");
+    const oldInitrd = await seedBootArtifact(bucket, "shared-image:old-initrd");
+    const newKernel = image.kernelSha256;
+    const newInitrd = image.initrdSha256;
+    const imageKey = {
+      scenario: "shared-boot",
+      vm: "web",
+      arch: "x86_64" as const,
+    };
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    const variants = [
+      { rev: "shared-boot-a", kernel: oldKernel, initrd: oldInitrd },
+      { rev: "shared-boot-b", kernel: newKernel, initrd: newInitrd },
+    ];
+    for (const variant of variants) {
+      await db.insert(imageBuildBundles).values({
+        rev: variant.rev,
+        r2Key: "builds/bundles/" + variant.rev + ".tar.gz",
+        metaJson: {
+          buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+          catalogChannel: "live",
+          scenarios: [],
+        },
+      });
+      await db.insert(imageBuilds).values({
+        id: "shared-build-" + variant.rev,
+        scenarioId: imageKey.scenario,
+        arch: imageKey.arch,
+        rev: variant.rev,
+        contentHash: variant.rev.padEnd(64, "0").slice(0, 64),
+        status: "succeeded",
+        phase: "succeeded",
+        publishedManifestJson: {
+          scenario_id: imageKey.scenario,
+          vms: [
+            {
+              name: "web",
+              image_key: imageKey,
+              image_id: imageId,
+              image_format: "raw_chunks_v1",
+              chunk_manifest_sha256: manifestSha256,
+              boot: {
+                kernel_sha256: variant.kernel,
+                initrd_sha256: variant.initrd,
+              },
+            },
+          ],
+        } as never,
+        updatedAt: now,
+      });
+    }
+    await seedHostRow(db, { hostId: "host-variants", now });
+    await seedHostDesiredRow(db, { hostId: "host-variants", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-variants",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-variants",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        vms: [phaseVm("run-variant", "running", imageId, null, imageKey)],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    // Both variants survive: a running VM may boot either one.
+    for (const sha256 of [oldKernel, oldInitrd, newKernel, newInitrd]) {
+      expect(projection.bootArtifactSha256s).toContain(sha256);
+    }
+    expect(projection.chunkManifestSha256s).toContain(manifestSha256);
+
+    const core = createImageRegistryCleanupCore({});
+    const plan = await core.plan(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(plan.details.faults).toEqual([]);
+    const result = await core.run(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(result.error).toBeNull();
+    for (const sha256 of [oldKernel, oldInitrd, newKernel, newInitrd]) {
+      expect(await objectExists("artifacts/" + sha256)).toBe(true);
+    }
+  });
+
+  it("keeps historical boot artifacts unrooted on their own", async () => {
+    // A manifest nothing operational names must not pin its boot artifacts,
+    // even when another build with a different kernel is rooted.
+    const image = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "anchored-live",
+    });
+    const historicKernel = await sha256OfLabel("historic-only-kernel");
+    const historicInitrd = await sha256OfLabel("historic-only-initrd");
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(
+      "artifacts/" + historicKernel,
+      new Uint8Array([9]),
+    );
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(
+      "artifacts/" + historicInitrd,
+      new Uint8Array([9]),
+    );
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await db.insert(imageBuildBundles).values({
+      rev: "historic-bundle",
+      r2Key: "builds/bundles/historic-bundle.tar.gz",
+      metaJson: {
+        buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+        catalogChannel: "live",
+        scenarios: [],
+      },
+    });
+    await db.insert(imageBuilds).values({
+      id: "historic-build",
+      scenarioId: HISTORIC_SCENARIO,
+      arch: "x86_64",
+      rev: "historic-bundle",
+      contentHash: "h".repeat(64),
+      status: "succeeded",
+      phase: "succeeded",
+      publishedManifestJson: {
+        scenario_id: HISTORIC_SCENARIO,
+        vms: [
+          {
+            name: "web",
+            image_key: {
+              scenario: HISTORIC_SCENARIO,
+              vm: "web",
+              arch: "x86_64",
+            },
+            image_id: "1".repeat(64),
+            image_format: "raw_chunks_v1",
+            chunk_manifest_sha256: "2".repeat(64),
+            boot: {
+              kernel_sha256: historicKernel,
+              initrd_sha256: historicInitrd,
+            },
+          },
+        ],
+      } as never,
+      updatedAt: now,
+    });
+    // The live catalog publishes a different image, and one host runs it.
+    await seedScenario(
+      { scenario: ANCHORED_SCENARIO, vm: "web", arch: "x86_64" },
+      {
+        scenarioId: ANCHORED_SCENARIO,
+        chunkManifestSha256: image.chunkManifestSha256,
+        imageId: image.imageId,
+        kernel: image.kernelSha256,
+        initrd: image.initrdSha256,
+      },
+    );
+    await seedHostRow(db, { hostId: "host-anchored", now });
+    await seedHostDesiredRow(db, { hostId: "host-anchored", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-anchored",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-anchored",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        vms: [
+          phaseVm("run-anchored", "running", image.imageId, null, {
+            scenario: ANCHORED_SCENARIO,
+            vm: "web",
+            arch: "x86_64",
+          }),
+        ],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    // The rooted image keeps its own boot artifacts...
+    expect(projection.bootArtifactSha256s).toContain(image.kernelSha256);
+    expect(projection.bootArtifactSha256s).toContain(image.initrdSha256);
+    // ...and the historical manifest nothing operational names keeps nothing.
+    expect(projection.bootArtifactSha256s).not.toContain(historicKernel);
+    expect(projection.bootArtifactSha256s).not.toContain(historicInitrd);
+    expect(projection.chunkManifestSha256s).not.toContain("2".repeat(64));
+  });
+
+
+  it("stops the sweep when an operational VM carries no image id", async () => {
+    // An incomplete reference must not be ignored: dropping it would delete the
+    // image that VM boots. The tombstone beside it still drops, so the phase
+    // decides before the id does.
+    const reachable = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "reachable-orphan",
+    });
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await seedHostRow(db, { hostId: "host-missing-id", now });
+    await seedHostDesiredRow(db, { hostId: "host-missing-id", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-missing-id",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-missing-id",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        vms: [
+          // Operational but incomplete: this is the fault.
+          { run_id: "run-no-id", vm_name: "web", phase: "running" },
+          // A tombstone with no id is still a tombstone, not a fault.
+          {
+            run_id: "run-tombstone",
+            vm_name: "web",
+            phase: "absent",
+            image_key: { scenario: "tombstone", vm: "web", arch: "x86_64" },
+          },
+        ],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expect(
+      projectRegistryRetention(env, { nowUnixMs: Date.now() }),
+    ).rejects.toThrow(RegistryRetentionFault);
+
+    // The sweep deletes nothing at all, including the object it could reach.
+    const core = createImageRegistryCleanupCore({});
+    const result = await core.run(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(result.deletedObjects).toBe(0);
+    // A refused pass reports why it stopped, and it deletes nothing.
+    expect(result.error).toContain("reference verification stopped the sweep");
+    expect(await objectExists(reachable.objectKey)).toBe(true);
+    expect(
+      await objectExists("image-chunks/v1/zstd6/" + reachable.chunkRawSha256),
+    ).toBe(true);
+  });
+
+  it("keeps every boot variant for a keyless operational VM", async () => {
+    // The same image id with two boot variants, and an actual VM that reports
+    // only the id. Deduping the by-id index per key would keep the first
+    // variant and leave the other variant's kernel and initrd unpinned.
+    const bucket = env.VM_IMAGE_REGISTRY_BUCKET;
+    const image = await seedChunkedImage(bucket, { label: "keyless-variant" });
+    const imageId = image.imageId;
+    const manifestSha256 = image.chunkManifestSha256;
+    const oldKernel = await seedBootArtifact(bucket, "keyless-variant:old-kernel");
+    const oldInitrd = await seedBootArtifact(bucket, "keyless-variant:old-initrd");
+    const newKernel = image.kernelSha256;
+    const newInitrd = image.initrdSha256;
+    const imageKey = {
+      scenario: "keyless-boot",
+      vm: "web",
+      arch: "x86_64" as const,
+    };
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    const variants = [
+      { rev: "keyless-boot-a", kernel: oldKernel, initrd: oldInitrd },
+      { rev: "keyless-boot-b", kernel: newKernel, initrd: newInitrd },
+    ];
+    for (const variant of variants) {
+      await db.insert(imageBuildBundles).values({
+        rev: variant.rev,
+        r2Key: "builds/bundles/" + variant.rev + ".tar.gz",
+        metaJson: {
+          buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+          catalogChannel: "live",
+          scenarios: [],
+        },
+      });
+      await db.insert(imageBuilds).values({
+        id: "keyless-build-" + variant.rev,
+        scenarioId: imageKey.scenario,
+        arch: imageKey.arch,
+        rev: variant.rev,
+        contentHash: variant.rev.padEnd(64, "0").slice(0, 64),
+        status: "succeeded",
+        phase: "succeeded",
+        publishedManifestJson: {
+          scenario_id: imageKey.scenario,
+          vms: [
+            {
+              name: "web",
+              image_key: imageKey,
+              image_id: imageId,
+              image_format: "raw_chunks_v1",
+              chunk_manifest_sha256: manifestSha256,
+              boot: {
+                kernel_sha256: variant.kernel,
+                initrd_sha256: variant.initrd,
+              },
+            },
+          ],
+        } as never,
+        updatedAt: now,
+      });
+    }
+    await seedHostRow(db, { hostId: "host-keyless", now });
+    await seedHostDesiredRow(db, { hostId: "host-keyless", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-keyless",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-keyless",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        // No key at all: the by-id fallback has to supply both variants.
+        vms: [phaseVm("run-keyless", "running", imageId, null, null)],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    for (const sha256 of [oldKernel, oldInitrd, newKernel, newInitrd]) {
+      expect(projection.bootArtifactSha256s).toContain(sha256);
+    }
+
+    const core = createImageRegistryCleanupCore({});
+    const plan = await core.plan(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(plan.details.faults).toEqual([]);
+    const result = await core.run(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(result.error).toBeNull();
+    for (const sha256 of [oldKernel, oldInitrd, newKernel, newInitrd]) {
+      expect(await objectExists("artifacts/" + sha256)).toBe(true);
+    }
+  });
+
+});
+
+  it("keeps a legacy image's recorded boot artifacts and deletes unrelated ones", async () => {
+    // A legacy single-object image carries no chunk manifest, but it does record
+    // the kernel and initrd it boots. Those are references: a self-booting
+    // format must not lose them, and boot artifacts nothing references must
+    // still be reclaimed in the same pass.
+    const legacyImageId = await sha256OfLabel("legacy-operational-image");
+    await seedLegacyImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      scenario: LEGACY_SCENARIO,
+      vm: "web",
+      arch: "x86_64",
+      sha256: legacyImageId,
+    });
+    const bucket = env.VM_IMAGE_REGISTRY_BUCKET;
+    const legacyKernel = await seedBootArtifact(bucket, "legacy:kernel");
+    const legacyInitrd = await seedBootArtifact(bucket, "legacy:initrd");
+    // Boot artifacts that no record and no reference names.
+    const unusedKernel = await seedBootArtifact(bucket, "legacy:unused-kernel");
+    const unusedInitrd = await seedBootArtifact(bucket, "legacy:unused-initrd");
+    const imageKey = {
+      scenario: LEGACY_SCENARIO,
+      vm: "web",
+      arch: "x86_64" as const,
+    };
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await db.insert(imageBuildBundles).values({
+      rev: "legacy-bundle",
+      r2Key: "builds/bundles/legacy-bundle.tar.gz",
+      metaJson: {
+        buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+        catalogChannel: "live",
+        scenarios: [],
+      },
+    });
+    await db.insert(imageBuilds).values({
+      id: "legacy-build",
+      scenarioId: LEGACY_SCENARIO,
+      arch: "x86_64",
+      rev: "legacy-bundle",
+      contentHash: "l".repeat(64),
+      status: "succeeded",
+      phase: "succeeded",
+      publishedManifestJson: {
+        scenario_id: LEGACY_SCENARIO,
+        vms: [
+          {
+            name: "web",
+            image_key: imageKey,
+            image_id: legacyImageId,
+            image_format: "raw_zstd",
+            boot: {
+              kernel_sha256: legacyKernel,
+              initrd_sha256: legacyInitrd,
+            },
+          },
+        ],
+      } as never,
+      updatedAt: now,
+    });
+    await seedHostRow(db, { hostId: "host-legacy", now });
+    await seedHostDesiredRow(db, { hostId: "host-legacy", now });
+    await db.insert(hostActualState).values({
+      hostId: "host-legacy",
+      appliedDesiredVersion: 1,
+      observedAt: now,
+      reportJson: {
+        schema_version: 5,
+        host_id: "host-legacy",
+        observed_at_unix_ms: now,
+        applied_desired_version: 1,
+        cached_images: [],
+        builds: [],
+        // Keyless, so the resolution goes through the by-id fallback.
+        vms: [phaseVm("run-legacy", "running", legacyImageId, null, null)],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    // The legacy format's recorded boot artifacts are references.
+    expect(projection.bootArtifactSha256s).toContain(legacyKernel);
+    expect(projection.bootArtifactSha256s).toContain(legacyInitrd);
+    expect(projection.bootArtifactSha256s).not.toContain(unusedKernel);
+    expect(projection.bootArtifactSha256s).not.toContain(unusedInitrd);
+
+    const core = createImageRegistryCleanupCore({});
+    const plan = await core.plan(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(plan.details.faults).toEqual([]);
+    const result = await core.run(cleanupEnvForSweep(), {
+      mode: "delete",
+      nowMs: Date.now(),
+    });
+    expect(result.error).toBeNull();
+
+    expect(await objectExists("artifacts/" + legacyKernel)).toBe(true);
+    expect(await objectExists("artifacts/" + legacyInitrd)).toBe(true);
+    expect(await objectExists("artifacts/" + unusedKernel)).toBe(false);
+    expect(await objectExists("artifacts/" + unusedInitrd)).toBe(false);
+    // The legacy image object the running VM boots also survives.
+    expect(
+      await objectExists(
+        "images/" + LEGACY_SCENARIO + "-web-x86_64/" + legacyImageId + ".raw.zst",
+      ),
+    ).toBe(true);
+  });
+
+/** The scenario the rollback-only regression publishes. */
+const ROLLBACK_SCENARIO = "rollback-only-fixture";
+/** A scenario published in the legacy single-object image format. */
+const LEGACY_SCENARIO = "legacy-operational-fixture";
+/** A scenario whose only record is one historical build manifest. */
+const HISTORIC_SCENARIO = "historic-only-fixture";
+/** A scenario whose images a host actually boots. */
+const ANCHORED_SCENARIO = "anchored-fixture";
+
+function phaseVm(
+  runId: string,
+  phase: string,
+  imageId: string,
+  archive: { phase: string; artifact_count: number } | null,
+  imageKey: ImageKey | null = { scenario: "host-phase", vm: "web", arch: "x86_64" },
+) {
+  return {
+    run_id: runId,
+    vm_name: "web",
+    phase,
+    image_id: imageId,
+    ...(imageKey ? { image_key: imageKey } : {}),
+    ...(archive ? { archive } : {}),
+  };
+}
+
+function cleanupEnvForSweep(): {
+  DB: D1Database;
+  VM_IMAGE_REGISTRY_BUCKET: R2Bucket;
+} {
+  return {
+    DB: env.DB,
+    VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
+  };
+}
+
+/** A host with desired state but no desired VM: the actual report is all it has. */
+async function seedHostDesiredRow(
+  db: ReturnType<typeof drizzle>,
+  input: { hostId: string; now: number },
+): Promise<void> {
+  await db.insert(hostDesiredState).values({
+    hostId: input.hostId,
+    version: 1,
+    docJson: {
+      schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
+      host_id: input.hostId,
+      version: 1,
+      generated_at_unix_ms: input.now,
+      cached_images: [],
+      cached_guest_tools: [],
+      builds: [],
+      vms: [],
+    } as never,
+    createdAt: input.now,
+    updatedAt: input.now,
+  });
+}
+
+async function seedHostRow(
+  db: ReturnType<typeof drizzle>,
+  input: { hostId: string; now: number },
+): Promise<void> {
+  await db.insert(user).values({
+    id: "owner-" + input.hostId,
+    name: "Owner",
+    email: input.hostId + "@example.test",
+    emailVerified: true,
+    createdAt: new Date(input.now),
+    updatedAt: new Date(input.now),
+  });
+  await db.insert(agentHosts).values({
+    id: input.hostId,
+    userId: "owner-" + input.hostId,
+    name: input.hostId,
+    role: "agent",
+    scenarioEnabled: true,
+    disabled: false,
+  });
+}
+
+/** The production fan-out: many hosts, one deleted release, one tombstone. */
+async function seedManyHostsWithTombstone(input: {
+  hostCount: number;
+  desiredPhase: "running" | "absent";
+  imageId: string;
+}): Promise<void> {
+  const now = Date.now();
+  const db = drizzle(env.DB);
+  for (let index = 0; index < input.hostCount; index += 1) {
+    const hostId = "host-" + index;
+    await seedHostRow(db, { hostId, now });
+    await db.insert(hostDesiredState).values({
+      hostId,
+      version: 1,
+      docJson: {
+        schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
+        host_id: hostId,
+        version: 1,
+        generated_at_unix_ms: now,
+        cached_images: [],
+        cached_guest_tools: [],
+        builds: [],
+        vms: [
+          {
+            run_id: "run-" + index,
+            vm_name: "webserver",
+            desired_phase: input.desiredPhase,
+            image_key: {
+              scenario: "broken-nginx",
+              vm: "webserver",
+              arch: "x86_64",
+            },
+            image_id: input.imageId,
+          },
+        ],
+      } as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+}

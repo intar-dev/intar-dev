@@ -297,7 +297,11 @@ jq -e \
   ' "${after_version}" >/dev/null
 
 # Cron Triggers and the workers.dev subdomain are script settings, not version
-# settings, so they are read from the account API.
+# settings, so they are read from the account API. The Cron Trigger response
+# wraps the list: result.schedules[] carries the cron expression beside its
+# created_on and modified_on stamps. The subdomain response carries enabled and
+# previews_enabled as booleans directly under result, and both must be present
+# and false: a missing field must not read as a private surface.
 schedules_status="$(curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
   --output "${schedules}" --write-out '%{http_code}' \
@@ -305,8 +309,8 @@ schedules_status="$(curl --fail-with-body --silent --show-error \
 test "${schedules_status}" = 200
 jq -e --arg cron "${cron_schedule}" '
   .success == true and
-  ((.result | length) == 1) and
-  (.result[0].cron == $cron)
+  ((.result.schedules | length) == 1) and
+  (.result.schedules[0].cron == $cron)
 ' "${schedules}" >/dev/null
 subdomain_status="$(curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
@@ -315,8 +319,11 @@ subdomain_status="$(curl --fail-with-body --silent --show-error \
 test "${subdomain_status}" = 200
 jq -e '
   .success == true and
-  ((.result.enabled // false) == false) and
-  ((.result.previews_enabled // false) == false)
+  (.result | type == "object") and
+  (.result | has("enabled")) and
+  (.result.enabled == false) and
+  (.result | has("previews_enabled")) and
+  (.result.previews_enabled == false)
 ' "${subdomain}" >/dev/null
 
 jq -n \

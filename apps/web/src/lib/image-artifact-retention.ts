@@ -70,6 +70,7 @@ const ACTIVE_BUILD_STATUSES: ImageBuildStatus[] = [
 ];
 
 export type ImageRootSource =
+  | "host_actual"
   | "live_pointer"
   | "rollback_snapshot"
   | "candidate_intent"
@@ -642,6 +643,8 @@ export function snapshotArtifactRoots(
         registryImageKey({ scenario: scenarioId, vm: vmName, arch }) +
         ":" +
         imageId,
+      imageKey: { scenario: scenarioId, vm: vmName, arch },
+      imageId,
       closure: boot,
     });
   }
@@ -683,9 +686,19 @@ export function evaluateHostImageReferences(input: {
   for (const image of input.actual?.cached_images ?? []) {
     actualPhaseById.set(image.image_id, image.phase);
   }
-  const desiredVmImageIds = new Set(
-    (input.desired?.vms ?? []).map((vm) => vm.image_id),
-  );
+  // Only a running VM blocks from desired state: an absent tombstone is not a
+  // reference. An actual VM that can still need its image blocks too, because
+  // replacing it would break a VM that is running, stopping, or stuck in a
+  // failed delete, none of which desired state can see.
+  const activeVmImageIds = new Set<string>();
+  for (const vm of input.desired?.vms ?? []) {
+    if (!desiredVmNeedsImage(vm) || !vm.image_id) continue;
+    activeVmImageIds.add(vm.image_id);
+  }
+  for (const vm of input.actual?.vms ?? []) {
+    if (!actualVmNeedsImage(vm) || !vm.image_id) continue;
+    activeVmImageIds.add(vm.image_id);
+  }
   const desiredCacheIds = new Set(
     (input.desired?.cached_images ?? []).map((image) => image.image_id),
   );
@@ -693,7 +706,7 @@ export function evaluateHostImageReferences(input: {
   const blocking: HostImageReferenceEvaluation["blocking"] = [];
   const leftover: string[] = [];
   for (const imageId of outgoing) {
-    if (desiredVmImageIds.has(imageId)) {
+    if (activeVmImageIds.has(imageId)) {
       blocking.push({ imageId, reason: "active_vm" });
       continue;
     }
@@ -715,6 +728,67 @@ export function evaluateHostImageReferences(input: {
     ),
     leftover: leftover.sort(),
   };
+}
+
+/**
+ * True when the platform still wants the VM to run.
+ *
+ * This mirrors the agent exactly: `required_cache_pins` in
+ * crates/intar-agent/src/bridge.rs pins an image only for
+ * `DesiredVmPhase::Running`, and its test proves that flipping running to
+ * absent drops the pin. An `absent` entry is a tombstone the platform wrote
+ * when a run ended, so it is not a reference and must not prove a family.
+ *
+ * Only an explicit `absent` is a tombstone. The stored document is a JSON cast
+ * with no runtime validation, so an unknown or missing phase is kept: dropping
+ * an image on a phase this policy does not understand would delete live data.
+ */
+export function desiredVmNeedsImage(vm: { desired_phase?: unknown }): boolean {
+  return vm.desired_phase !== "absent";
+}
+
+/**
+ * True when a VM the host reports can still need its image.
+ *
+ * Every branch is grounded in the agent lifecycle:
+ *
+ *  - `pending`, `pulling_image`, `creating_disks`, `booting`, `running`
+ *    are pre-running or running, and `should_resume_live_vm_on_startup`
+ *    resumes `BootingVm` and `Running` across an agent restart.
+ *  - `ready` and `solved` are running states with passing probes.
+ *  - `stopping` covers `DeletingVm` and `ArchivingArtifacts`. Both are
+ *    present on disk and both take `StartupCleanupMode::Archive`, so the VM
+ *    is still there and the teardown can still fail back to `DeleteFailed`.
+ *  - `failed` is ambiguous by design: report phase `failed` maps from both
+ *    `Failed` and `DeleteFailed`. `DeleteFailed` carries an archive record, so
+ *    any archive evidence keeps the image. A `failed` VM with no archive
+ *    record at all is `Failed`, whose local state the agent has dropped.
+ *  - `stopped` is not emitted by the agent today but the contract allows it,
+ *    and nothing proves a stopped VM cannot still be read, so it is kept.
+ *
+ * Provably gone, and therefore not a reference: an `archive.phase` of
+ * `complete`, or host-confirmed `absent` with no unfinished archive.
+ */
+export function actualVmNeedsImage(vm: {
+  phase?: unknown;
+  archive?: { phase?: unknown } | null;
+}): boolean {
+  const archivePhase = vm.archive?.phase;
+  // The agent deletes the VM once its artifacts are archived, so a complete
+  // archive is the one unambiguous "this VM is gone" the contract carries.
+  if (archivePhase === "complete") return false;
+  const unfinishedArchive =
+    archivePhase === "pending" ||
+    archivePhase === "uploading" ||
+    archivePhase === "failed";
+  if (vm.phase === "absent") return unfinishedArchive;
+  // `failed` is the one ambiguous phase: the agent reports it for both
+  // `Failed` and `DeleteFailed`. DeleteFailed carries an archive record
+  // (`VMArchivePhase::Failed`), so any archive evidence keeps the image.
+  // Only a failed VM with no archive record at all proves local was dropped,
+  // and an unrecognised archive phase counts as evidence.
+  if (vm.phase === "failed") return archivePhase != null;
+  return true;
 }
 
 export interface CachedImageRetentionScope {
@@ -742,6 +816,24 @@ export function pruneSupersededCachedImages(
     );
     return !scope || scope.keepImageIds.includes(image.image_id);
   });
+}
+
+/**
+ * One VM a host can still need its image for: a VM the platform wants
+ * running, or a VM the host reports that has not been torn down.
+ *
+ * The image id alone proves nothing, because a chunked image is reachable
+ * only through its manifest and boot artifacts. Resolution happens against
+ * the same index the active runs use, so a host VM and an active run get
+ * exactly the same closure.
+ */
+export interface HostOperationalReference {
+  /** A label for a fault, naming the row that needs the image. */
+  reference: string;
+  imageId: string;
+  /** Null when the host state carries no unambiguous key for this image. */
+  imageKey: ImageKey | null;
+  source: "host_desired" | "host_actual";
 }
 
 export interface HostCacheIntentRow {
@@ -1080,6 +1172,12 @@ export async function projectRegistryRetention(
   // of the closure. Resolve every active runtime VM to the full reference of
   // the record that describes it, which after a direct publish is the retained
   // rollback and not the live pointer.
+  const imageIdIndex = buildImageIdIndex({
+    snapshotClosures,
+    liveRows,
+    candidateRows,
+    buildRows,
+  });
   const runImageIndex = buildRunImageIndex({
     liveRows,
     // Only retained rollbacks are references, and a trimmed row carries what
@@ -1098,30 +1196,33 @@ export async function projectRegistryRetention(
         "an active runtime VM has no usable image key",
       );
     }
-    const identity = registryImageKey(row.imageKey) + ":" + row.imageId;
-    const resolved = runImageIndex.get(identity);
+    // A run resolves through its own key, and every variant that key and id
+    // describe is merged: one id can carry several boot variants, and pinning
+    // one of them would delete the other.
+    const resolved = mergeImageClosures({
+      subject: "active run",
+      reference,
+      imageKey: row.imageKey,
+      imageId: row.imageId,
+      exact: runImageIndex,
+      byImageId: imageIdIndex,
+      allowIdFallback: false,
+    });
     if (!resolved) {
       throw new RegistryRetentionFault(
         reference,
         "the image of an active run resolves to no live, rollback, candidate, " +
           "or build record: " +
-          identity,
+          registryImageKey(row.imageKey) +
+          ":" +
+          row.imageId,
       );
     }
-    // A VM that boots needs both boot artifacts, so an incomplete manifest is
-    // an unresolved run: pinning half of the closure would delete the rest.
-    for (const key of ["kernelSha256", "initrdSha256"] as const) {
-      const sha256 = resolved[key];
-      if (!sha256) {
-        throw new RegistryRetentionFault(
-          reference,
-          "the manifest of an active run has no " + key,
-        );
-      }
-      bootArtifactSha256s.add(sha256);
+    for (const sha256 of resolved.chunkManifestSha256s) {
+      chunkManifestSha256s.add(sha256);
     }
-    if (resolved.chunkManifestSha256) {
-      chunkManifestSha256s.add(resolved.chunkManifestSha256);
+    for (const sha256 of resolved.bootArtifactSha256s) {
+      bootArtifactSha256s.add(sha256);
     }
     runRoots.push({
       scenarioId: row.imageKey.scenario,
@@ -1133,12 +1234,65 @@ export async function projectRegistryRetention(
   }
 
   const hostReferences = await loadHostImageReferences(db);
+  // A host VM is resolved exactly like an active run, because it needs the
+  // same closure: its manifest, its chunks, and both boot artifacts. Every
+  // matching variant is merged, an unresolvable image is a fault rather than a
+  // guess, and the merged closure is pinned for this reference only, so a
+  // historical manifest nothing operational names stays unrooted.
+  const hostOperationalRoots: ImageRoot[] = [];
+  for (const reference of hostReferences.operational) {
+    const resolved = mergeImageClosures({
+      subject: "operational host VM",
+      reference: reference.reference,
+      imageKey: reference.imageKey,
+      imageId: reference.imageId,
+      exact: runImageIndex,
+      byImageId: imageIdIndex,
+      allowIdFallback: true,
+    });
+    if (!resolved) {
+      // No record describes this image. A vm_keyed host still proves its slot,
+      // and the verifier then fails the sweep unless the object is really
+      // there: a chunked image with no record reaches neither a legacy object
+      // nor a verified manifest, so it faults rather than being dropped.
+      // Without a key there is no slot to prove, so that is a fault here.
+      if (!reference.imageKey) {
+        throw new RegistryRetentionFault(
+          reference.reference,
+          "the image of an operational host VM resolves to no live, rollback, " +
+            "candidate, or build record: " +
+            reference.imageId,
+        );
+      }
+      hostOperationalRoots.push({
+        scenarioId: reference.imageKey.scenario,
+        vmName: reference.imageKey.vm,
+        arch: reference.imageKey.arch,
+        imageId: reference.imageId,
+        source: reference.source,
+      });
+      continue;
+    }
+    for (const sha256 of resolved.chunkManifestSha256s) {
+      chunkManifestSha256s.add(sha256);
+    }
+    for (const sha256 of resolved.bootArtifactSha256s) {
+      bootArtifactSha256s.add(sha256);
+    }
+    hostOperationalRoots.push({
+      scenarioId: resolved.imageKey.scenario,
+      vmName: resolved.imageKey.vm,
+      arch: resolved.imageKey.arch,
+      imageId: reference.imageId,
+      source: reference.source,
+    });
+  }
   const roots = [
     ...liveRoots,
     ...rollbackRoots,
     ...candidateRoots,
     ...runRoots,
-    ...hostReferences.roots,
+    ...hostOperationalRoots,
   ];
   const buildInputs = buildRows.map((row) => ({
     buildId: row.id,
@@ -1197,6 +1351,26 @@ export async function projectRegistryRetention(
     for (const image of host.cachedImages) {
       if (!image?.image_id || trimmedImageIds.has(image.image_id)) continue;
       objectOnlyImageIds.add(image.image_id);
+      // A retained intent that is a chunked image needs its whole closure, not
+      // only its image id: the id alone would leave the manifest and chunks
+      // unpinned. An id the index cannot resolve stays on the legacy path the
+      // verifier proves, which is the pre-chunked behaviour.
+      const resolved = mergeImageClosures({
+        subject: "retained cache intent",
+        reference: "host_cached_image:" + host.hostId,
+        imageKey: isImageKey(image.image_key) ? image.image_key : null,
+        imageId: image.image_id,
+        exact: runImageIndex,
+        byImageId: imageIdIndex,
+        allowIdFallback: true,
+      });
+      if (!resolved) continue;
+      for (const sha256 of resolved.chunkManifestSha256s) {
+        chunkManifestSha256s.add(sha256);
+      }
+      for (const sha256 of resolved.bootArtifactSha256s) {
+        bootArtifactSha256s.add(sha256);
+      }
     }
   }
   const imageIds = new Set<string>([...keepImageIds, ...objectOnlyImageIds]);
@@ -1229,7 +1403,7 @@ export async function projectRegistryRetention(
  * actually need and the transfers already under way.
  */
 async function loadHostImageReferences(db: DrizzleD1Database): Promise<{
-  roots: ImageRoot[];
+  operational: HostOperationalReference[];
   hosts: HostCacheIntentRow[];
 }> {
   const rows = await db
@@ -1242,26 +1416,54 @@ async function loadHostImageReferences(db: DrizzleD1Database): Promise<{
     .innerJoin(agentHosts, eq(agentHosts.id, hostDesiredState.hostId))
     .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(and(eq(agentHosts.role, "agent"), eq(agentHosts.disabled, false)));
-  const roots: ImageRoot[] = [];
+  const operational: HostOperationalReference[] = [];
   const hosts: HostCacheIntentRow[] = [];
   for (const row of rows) {
     const neededImageIds = new Set<string>();
     for (const vm of row.desired?.vms ?? []) {
-      const imageKey = vm.image_key;
-      if (!imageKey || !vm.image_id) continue;
-      roots.push({
-        scenarioId: imageKey.scenario,
-        vmName: imageKey.vm,
-        arch: imageKey.arch,
+      // A tombstone is not a reference. Requiring the running phase here
+      // matches the agent cache pins and stops an ended run from rooting an
+      // image, or from proving its family managed, forever.
+      if (!desiredVmNeedsImage(vm)) continue;
+      // The phase decides first, so a tombstone without an id still drops.
+      // Once the VM is operational, a missing id is an incomplete reference:
+      // an incomplete collection stops deletion instead of being ignored.
+      if (!vm.image_id) {
+        throw new RegistryRetentionFault(
+          "host_desired:" + row.hostId + ":" + vm.vm_name,
+          "an operational desired VM has no image id",
+        );
+      }
+      neededImageIds.add(vm.image_id);
+      operational.push({
+        reference: "host_desired:" + row.hostId + ":" + vm.vm_name,
         imageId: vm.image_id,
+        imageKey: isImageKey(vm.image_key) ? vm.image_key : null,
         source: "host_desired",
       });
-      neededImageIds.add(vm.image_id);
     }
     // A VM the host reports is a reference in its own right: desired state can
     // lag a boot, and withdrawing its image would break a running VM.
     for (const vm of row.actual?.vms ?? []) {
-      if (vm.image_id) neededImageIds.add(vm.image_id);
+      // A live report covers the lag. A torn-down VM does not: an archived
+      // VM keeps its last report forever, so counting it would pin its image
+      // for good. See actualVmNeedsImage for the evidence behind each branch.
+      if (!actualVmNeedsImage(vm)) continue;
+      // Phase first, for the same reason as desired state, and a missing id on
+      // a VM that can still boot is an incomplete reference, not a tombstone.
+      if (!vm.image_id) {
+        throw new RegistryRetentionFault(
+          "host_actual:" + row.hostId + ":" + vm.vm_name,
+          "an operational actual VM has no image id",
+        );
+      }
+      neededImageIds.add(vm.image_id);
+      operational.push({
+        reference: "host_actual:" + row.hostId + ":" + vm.vm_name,
+        imageId: vm.image_id,
+        imageKey: isImageKey(vm.image_key) ? vm.image_key : null,
+        source: "host_actual",
+      });
     }
     const inFlightImageIds = new Set<string>();
     for (const image of row.actual?.cached_images ?? []) {
@@ -1276,7 +1478,7 @@ async function loadHostImageReferences(db: DrizzleD1Database): Promise<{
       inFlightImageIds: [...inFlightImageIds].sort(),
     });
   }
-  return { roots, hosts };
+  return { operational, hosts };
 }
 
 /**
@@ -1309,7 +1511,95 @@ export interface RunImageClosure {
 /** One image of a record, by the identity a registry reader resolves it with. */
 export interface ImageClosureByIdentity {
   identity: string;
+  imageKey: ImageKey;
+  imageId: string;
   closure: RunImageClosure;
+}
+
+/** One record that describes an image, by the identity a reader resolves it with. */
+export interface ImageClosureCandidate {
+  imageKey: ImageKey;
+  closure: RunImageClosure;
+}
+
+/**
+ * Every closure that could describe one image, merged conservatively.
+ *
+ * One image id does not identify one boot variant: a later revision can
+ * republish the same disk image with a different kernel or initrd, and the
+ * registry keeps both. Merging every matching closure pins all of them;
+ * picking the first would pin one variant and delete the other.
+ *
+ * An ambiguous image id (two distinct registry keys) is a fault, and so is a
+ * chunked closure whose manifest names no boot artifact: half a manifest is
+ * not a usable image, and guessing which half to drop is how a live VM breaks.
+ *
+ * Nothing is merged into a global keep-set: the caller decides what to do with
+ * the result, so a historical closure that no operational reference names stays
+ * unrooted.
+ */
+function mergeImageClosures(input: {
+  subject: string;
+  reference: string;
+  imageKey: ImageKey | null;
+  imageId: string;
+  exact: ReadonlyMap<string, readonly ImageClosureCandidate[]>;
+  byImageId: ReadonlyMap<string, readonly ImageClosureCandidate[]>;
+  /** A run resolves through its own key only; a host VM may resolve by id. */
+  allowIdFallback: boolean;
+}): { imageKey: ImageKey; chunkManifestSha256s: string[]; bootArtifactSha256s: string[] } | null {
+  const candidates: ImageClosureCandidate[] = [];
+  if (input.imageKey) {
+    const identity = registryImageKey(input.imageKey) + ":" + input.imageId;
+    candidates.push(...(input.exact.get(identity) ?? []));
+  }
+  if (!candidates.length && (!input.imageKey || input.allowIdFallback)) {
+    candidates.push(...(input.byImageId.get(input.imageId) ?? []));
+  }
+  if (!candidates.length) return null;
+  const distinctKeys = new Set(
+    candidates.map((candidate) => registryImageKey(candidate.imageKey)),
+  );
+  if (distinctKeys.size > 1) {
+    throw new RegistryRetentionFault(
+      input.reference,
+      "the image id resolves to more than one registry image key: " +
+        input.imageId,
+    );
+  }
+  const chunkManifestSha256s = new Set<string>();
+  const bootArtifactSha256s = new Set<string>();
+  for (const candidate of candidates) {
+    const manifestSha256 = candidate.closure.chunkManifestSha256;
+    if (manifestSha256) {
+      chunkManifestSha256s.add(manifestSha256);
+      // A chunked image boots through its manifest and both boot artifacts, so
+      // half a manifest is an unresolved reference and not a reason to delete.
+      for (const field of ["kernelSha256", "initrdSha256"] as const) {
+        const sha256 = candidate.closure[field];
+        if (!sha256) {
+          throw new RegistryRetentionFault(
+            input.reference,
+            "the manifest of an " + input.subject + " has no " + field,
+          );
+        }
+        bootArtifactSha256s.add(sha256);
+      }
+      continue;
+    }
+    // A legacy, single-object image is self-booting, so nothing is required of
+    // it. Every boot artifact it does record is still a reference: skipping
+    // them because there is no chunk manifest would delete them.
+    for (const field of ["kernelSha256", "initrdSha256"] as const) {
+      const sha256 = candidate.closure[field];
+      if (sha256) bootArtifactSha256s.add(sha256);
+    }
+  }
+  return {
+    imageKey: candidates[0]!.imageKey,
+    chunkManifestSha256s: [...chunkManifestSha256s].sort(),
+    bootArtifactSha256s: [...bootArtifactSha256s].sort(),
+  };
 }
 
 /**
@@ -1335,21 +1625,29 @@ function buildRunImageIndex(input: {
   snapshotClosures: readonly ImageClosureByIdentity[];
   candidateRows: ReadonlyArray<{ manifest: ScenarioManifestV4 }>;
   buildRows: ReadonlyArray<{ manifest: ScenarioManifestV4 | null }>;
-}): Map<string, RunImageClosure> {
-  const index = new Map<string, RunImageClosure>();
-  const add = (identity: string, closure: RunImageClosure): void => {
-    if (!index.has(identity)) index.set(identity, closure);
+}): Map<string, ImageClosureCandidate[]> {
+  // Multi-valued: one identity can carry several boot variants, and every one
+  // of them is kept.
+  const index = new Map<string, ImageClosureCandidate[]>();
+  const add = (
+    identity: string,
+    imageKey: ImageKey,
+    closure: RunImageClosure,
+  ): void => {
+    const entries = index.get(identity) ?? [];
+    entries.push({ imageKey, closure });
+    index.set(identity, entries);
   };
   for (const row of input.liveRows) {
     if (!isImageKey(row.imageKey) || !row.imageId) continue;
-    add(registryImageKey(row.imageKey) + ":" + row.imageId, {
+    add(registryImageKey(row.imageKey) + ":" + row.imageId, row.imageKey, {
       chunkManifestSha256: row.chunkManifestSha256,
       kernelSha256: row.kernelSha256,
       initrdSha256: row.initrdSha256,
     });
   }
   for (const entry of input.snapshotClosures) {
-    add(entry.identity, entry.closure);
+    add(entry.identity, entry.imageKey, entry.closure);
   }
   for (const row of input.candidateRows) addManifestClosures(index, row.manifest);
   for (const row of input.buildRows) {
@@ -1358,8 +1656,88 @@ function buildRunImageIndex(input: {
   return index;
 }
 
+/**
+ * The same closures, indexed by image id alone.
+ *
+ * An actual VM report often carries only an image id, so this is how such a
+ * VM reaches its manifest and boot artifacts. Only sources that carry a full
+ * image key contribute: a live pointer row, a staged candidate manifest, and
+ * a build manifest. Two different keys for one id stay two entries, and the
+ * caller fails closed on that ambiguity instead of guessing.
+ */
+function buildImageIdIndex(input: {
+  snapshotClosures: readonly ImageClosureByIdentity[];
+  liveRows: ReadonlyArray<{
+    imageKey: unknown;
+    imageId: string | null;
+    chunkManifestSha256: string | null;
+    kernelSha256: string | null;
+    initrdSha256: string | null;
+  }>;
+  candidateRows: ReadonlyArray<{ manifest: ScenarioManifestV4 }>;
+  buildRows: ReadonlyArray<{ manifest: ScenarioManifestV4 | null }>;
+}): Map<string, Array<{ imageKey: ImageKey; closure: RunImageClosure }>> {
+  const index = new Map<
+    string,
+    Array<{ imageKey: ImageKey; closure: RunImageClosure }>
+  >();
+  const add = (
+    imageKey: ImageKey,
+    imageId: string,
+    closure: RunImageClosure,
+  ): void => {
+    const entries = index.get(imageId) ?? [];
+    // Only an exact closure is a duplicate. One key and one image id can
+    // describe several boot variants, so deduping by key would drop the
+    // second variant and leave the kernel and initrd a VM boots unpinned.
+    const identity = registryImageKey(imageKey);
+    const duplicate = entries.some(
+      (entry) =>
+        registryImageKey(entry.imageKey) === identity &&
+        entry.closure.chunkManifestSha256 === closure.chunkManifestSha256 &&
+        entry.closure.kernelSha256 === closure.kernelSha256 &&
+        entry.closure.initrdSha256 === closure.initrdSha256,
+    );
+    if (duplicate) return;
+    entries.push({ imageKey: { ...imageKey }, closure });
+    index.set(imageId, entries);
+  };
+  for (const entry of input.snapshotClosures) {
+    // A retained rollback is a reason to keep a whole closure: a direct publish
+    // whose previous release exists only as a snapshot is what a host still
+    // boots when its report carries no key.
+    add(entry.imageKey, entry.imageId, entry.closure);
+  }
+  for (const row of input.liveRows) {
+    if (!isImageKey(row.imageKey) || !row.imageId) continue;
+    add(row.imageKey, row.imageId, {
+      chunkManifestSha256: row.chunkManifestSha256,
+      kernelSha256: row.kernelSha256,
+      initrdSha256: row.initrdSha256,
+    });
+  }
+  const manifestRows: Array<{ manifest: ScenarioManifestV4 | null }> = [
+    ...input.candidateRows,
+    ...input.buildRows,
+  ];
+  for (const row of manifestRows) {
+    const vms = row.manifest?.vms;
+    if (!Array.isArray(vms)) continue;
+    for (const vm of vms) {
+      if (!isImageKey(vm?.image_key)) continue;
+      const imageId = typeof vm.image_id === "string" ? vm.image_id.trim() : "";
+      if (!imageId) continue;
+      add(vm.image_key, imageId, {
+        chunkManifestSha256: readString(vm.chunk_manifest_sha256),
+        kernelSha256: readString(vm.boot?.kernel_sha256),
+        initrdSha256: readString(vm.boot?.initrd_sha256),
+      });
+    }
+  }
+  return index;
+}
 function addManifestClosures(
-  index: Map<string, RunImageClosure>,
+  index: Map<string, ImageClosureCandidate[]>,
   manifest: ScenarioManifestV4,
 ): void {
   const vms = manifest?.vms;
@@ -1369,12 +1747,16 @@ function addManifestClosures(
     const imageId = typeof vm.image_id === "string" ? vm.image_id.trim() : "";
     if (!imageId) continue;
     const identity = registryImageKey(vm.image_key) + ":" + imageId;
-    if (index.has(identity)) continue;
-    index.set(identity, {
-      chunkManifestSha256: readString(vm.chunk_manifest_sha256),
-      kernelSha256: readString(vm.boot?.kernel_sha256),
-      initrdSha256: readString(vm.boot?.initrd_sha256),
+    const entries = index.get(identity) ?? [];
+    entries.push({
+      imageKey: vm.image_key,
+      closure: {
+        chunkManifestSha256: readString(vm.chunk_manifest_sha256),
+        kernelSha256: readString(vm.boot?.kernel_sha256),
+        initrdSha256: readString(vm.boot?.initrd_sha256),
+      },
     });
+    index.set(identity, entries);
   }
 }
 
