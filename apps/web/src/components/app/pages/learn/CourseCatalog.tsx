@@ -38,6 +38,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
+import { LectureScenarioLabel } from "./LectureScenarioLabel";
 import {
   compactCatalogSearch,
   normalizeCatalogSearch,
@@ -571,7 +572,10 @@ function LectureListItem({
               <MetaDifficulty key="difficulty" difficulty={lecture.difficulty} />
             ) : null,
             lecture.estimatedMinutes ? `~${lecture.estimatedMinutes} min` : null,
-            lecture.scenarioId ? "Scenario" : "Theory",
+            <LectureScenarioLabel
+              key="scenario"
+              scenarioId={lecture.scenarioId}
+            />,
           ]}
         />
         {lecture.state === "locked" && lecture.blockedBy ? (

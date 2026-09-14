@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
+import { LectureScenarioLabel } from "./LectureScenarioLabel";
 import {
   lectureStatePresentation,
   type CourseCatalogCourse,
@@ -152,7 +153,7 @@ function CourseOutlineItem({
         <span className="block text-sm font-medium leading-5 [overflow-wrap:anywhere]">
           {lecture.title}
         </span>
-        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
           {lecture.state === "completed" ? (
             <CheckCircle2 className="size-3.5 text-success" aria-hidden="true" />
           ) : lecture.state === "locked" ? (
@@ -166,7 +167,9 @@ function CourseOutlineItem({
               aria-hidden="true"
             />
           )}
-          {current ? `Current · ${state.word}` : state.word}
+          <span>{current ? `Current · ${state.word}` : state.word}</span>
+          <span aria-hidden="true">·</span>
+          <LectureScenarioLabel scenarioId={lecture.scenarioId} />
         </span>
       </span>
     </>

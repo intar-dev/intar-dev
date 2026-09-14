@@ -27,6 +27,7 @@ import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
 import { CourseOutlineMobile, CourseOutlineRail } from "./CourseOutline";
+import { LectureScenarioLabel } from "./LectureScenarioLabel";
 import {
   CourseLectureLockedError,
   completeCourseLecture,
@@ -269,7 +270,10 @@ function LectureMeta({ lecture }: { lecture: CourseLectureDetail }) {
           <MetaDifficulty key="difficulty" difficulty={lecture.difficulty} />
         ) : null,
         lecture.estimatedMinutes ? `~${lecture.estimatedMinutes} min` : null,
-        lecture.scenarioId ? "Lecture and scenario" : "Theory lecture",
+        <LectureScenarioLabel
+          key="scenario"
+          scenarioId={lecture.scenarioId}
+        />,
       ]}
     />
   );

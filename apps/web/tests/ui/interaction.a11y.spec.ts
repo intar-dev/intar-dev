@@ -370,6 +370,9 @@ test("a theory-only lecture completes and exposes the next unit", async ({
   await expect(
     page.getByRole("navigation", { name: `${course.title} lectures` }),
   ).toBeVisible();
+  await expect(
+    page.getByText("Lecture only", { exact: true }).first(),
+  ).toHaveAttribute("title", "This lecture does not include a scenario.");
   await page.getByRole("button", { name: "Complete lecture" }).click();
 
   await expect(page.getByRole("link", { name: next.title })).toBeVisible();
@@ -698,6 +701,12 @@ test.describe("lecture reading flow", () => {
       name: /Repair a broken nginx service.*Run again/i,
     });
     await expect(courseAction).toBeVisible();
+    await expect(
+      courseAction.getByText("Scenario", { exact: true }),
+    ).toHaveAttribute("title", "This lecture includes a scenario.");
+    await expect(
+      page.getByRole("link", { name: /Operating model.*Lecture only/i }),
+    ).toBeVisible();
     await courseAction.click();
 
     const theory = page.getByRole("heading", { name: "Service recovery" });
