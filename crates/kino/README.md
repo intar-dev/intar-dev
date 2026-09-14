@@ -20,7 +20,9 @@ probe "hosts_file" {
 }
 EOF
 
-cargo run -p kino -- --config /tmp/kino.hcl
+# The pinned libnbd bindings are not committed, so Cargo runs through the
+# preparation wrapper.
+tools/image-build/with-libnbd-env.sh --rust-only -- cargo run -p kino -- --config /tmp/kino.hcl
 ```
 
 In another shell:

@@ -10,6 +10,8 @@ readonly LIBNBD_SIGNATURE_SHA256='0dd24ca3252c16365c52b1232946f078e5278698694133
 readonly LIBNBD_KEYRING_URL='https://download.libguestfs.org/libguestfs.keyring'
 readonly LIBNBD_KEYRING_SHA256='827d8fa129e8ae59d750001c3ebe551aea74343b3786147ae551032405e86ee3'
 readonly LIBNBD_SIGNING_FINGERPRINT='F7774FB1AD074A7E8C8767EA91738F73E1B768A0'
+# The pinned Rust bindings for this same release are prepared by
+# prepare-libnbd-rust.sh, which repeats the download pins below.
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PKGCONFIG_PATCH="${SCRIPT_DIR}/libnbd-1.22.2-static-pkgconfig.patch"
 
@@ -375,4 +377,4 @@ fi
 mv "$install_prefix" "$prefix"
 staging_prefix=''
 write_env_file "$target" "$prefix" "$pkgconf" "$env_file"
-printf 'prepared static libnbd %s for %s at %s\n' "$LIBNBD_VERSION" "$target" "$prefix"
+printf 'prepared static libnbd %s for %s at %s\n' "$LIBNBD_VERSION" "$target" "$prefix" >&2

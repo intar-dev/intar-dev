@@ -66,6 +66,12 @@ Keep the artifact's `third-party/libnbd` directory with the release record. It
 contains the libnbd source, license, verification record, and relink material.
 It is not a host runtime dependency.
 
+Source builds do not commit the libnbd Rust bindings. Run Cargo through
+`tools/image-build/with-libnbd-env.sh`, which prepares the pinned bindings in
+the ignored `target/libnbd-rust/1.22.2/rust` tree before Cargo resolves the
+workspace. The preparation needs outbound HTTPS access and a writable `target/`
+directory.
+
 ```bash
 sudo install -d /usr/local/bin /etc/intar-builder /var/lib/intar-builder/work /var/cache/intar-builder
 sudo install -m 0755 ./intar-builder /usr/local/bin/intar-builder

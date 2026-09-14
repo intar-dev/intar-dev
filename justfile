@@ -5,7 +5,7 @@ install-js:
     bun install --frozen-lockfile
 
 fmt:
-    cargo fmt
+    tools/image-build/with-libnbd-env.sh --rust-only -- cargo fmt
 
 check-rust:
     tools/image-build/with-libnbd-env.sh -- cargo check --workspace
@@ -16,6 +16,9 @@ check-js:
     bun run check:database-migrations
     bun run --cwd apps/web types:cf:check
     bun run --cwd apps/web db:schema:check
+
+check-libnbd:
+    tools/image-build/test-libnbd-rust-preparation.sh
 
 check: check-rust check-js
 
@@ -39,22 +42,23 @@ build-js:
 build: build-rust build-js
 
 verify:
+    tools/image-build/test-libnbd-rust-preparation.sh
     sh crates/intar-jailerd/tests/install-process-audit.sh crates/intar-jailerd/deploy/install.sh
-    cargo fmt -- --check
+    tools/image-build/with-libnbd-env.sh --rust-only -- cargo fmt -- --check
     tools/image-build/with-libnbd-env.sh -- cargo clippy --workspace --all-targets -- -D warnings
     tools/image-build/with-libnbd-env.sh -- cargo nextest run --workspace
 
 security:
     bun audit --audit-level=moderate
-    cargo audit --deny warnings
+    tools/image-build/with-libnbd-env.sh --rust-only -- cargo audit --deny warnings
 
 generate-contracts:
-    cargo run -p intar-contracts-typegen
+    tools/image-build/with-libnbd-env.sh --rust-only -- cargo run -p intar-contracts-typegen
 
 generate: generate-contracts
 
 check-generated-contracts:
-    cargo run -p intar-contracts-typegen
+    tools/image-build/with-libnbd-env.sh --rust-only -- cargo run -p intar-contracts-typegen
     git diff --exit-code -- apps/web/src/generated
 
 check-generated: generate
@@ -64,7 +68,7 @@ clean-generated:
     bun run clean:generated
 
 build-kino-guest:
-    cargo zigbuild --profile guest -p kino --target x86_64-unknown-linux-musl
+    tools/image-build/with-libnbd-env.sh --rust-only -- cargo zigbuild --profile guest -p kino --target x86_64-unknown-linux-musl
 
 validate-images:
     tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- validate

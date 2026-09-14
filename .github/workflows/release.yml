@@ -392,7 +392,7 @@ jobs:
           updated = text[:match.start()] + f'version = "{version}"' + text[match.end():]
           manifest.write_text(updated)
           PY
-          cargo update -p "${PACKAGE}" --precise "${VERSION}"
+          tools/image-build/with-libnbd-env.sh --rust-only -- cargo update -p "${PACKAGE}" --precise "${VERSION}"
 
       - name: Set up Bun for pinned content hydration
         if: steps.next.outputs.resume != 'true'
@@ -434,7 +434,11 @@ jobs:
                 tools/image-build/with-libnbd-env.sh --target "${target}" \
                   cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
             else
-              CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
+              # This package does not link libnbd, but Cargo still has to
+              # resolve the workspace path dependency, so prepare first.
+              CARGO_TARGET_DIR="${target_dir}" \
+                tools/image-build/with-libnbd-env.sh --rust-only \
+                  cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
             fi
             file "${binary}"
             workdir="$(mktemp -d)"
@@ -462,8 +466,12 @@ jobs:
                 echo "Jailed scenario hosts currently support x86_64 only." >&2
                 exit 1
               fi
-              CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p intar-jailer --bin intar-jailer --target "${target}"
-              CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p intar-jailerd --bin intar-jailerd --target "${target}"
+              CARGO_TARGET_DIR="${target_dir}" \
+                tools/image-build/with-libnbd-env.sh --rust-only \
+                  cargo zigbuild --locked --release -p intar-jailer --bin intar-jailer --target "${target}"
+              CARGO_TARGET_DIR="${target_dir}" \
+                tools/image-build/with-libnbd-env.sh --rust-only \
+                  cargo zigbuild --locked --release -p intar-jailerd --bin intar-jailerd --target "${target}"
               cp "${target_dir}/${target}/release/intar-jailer" "${workdir}/intar-jailer"
               cp "${target_dir}/${target}/release/intar-jailerd" "${workdir}/intar-jailerd"
               chmod +x "${workdir}/intar-jailer" "${workdir}/intar-jailerd"
@@ -496,7 +504,7 @@ jobs:
               rm -rf "${license_extract}" "${ch_source}"
 
               metadata="$(mktemp)"
-              cargo metadata --locked --format-version 1 > "${metadata}"
+              tools/image-build/with-libnbd-env.sh --rust-only -- cargo metadata --locked --format-version 1 > "${metadata}"
               python3 crates/intar-jailerd/scripts/generate-dependency-inventory.py \
                 "${metadata}" \
                 "${workdir}/deploy/intar-rust-dependencies.json"

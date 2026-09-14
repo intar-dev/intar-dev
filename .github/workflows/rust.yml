@@ -11,7 +11,6 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "justfile"
-      - "third_party/**"
       - "tools/image-build/**"
       - "package.json"
       - "bun.lock"
@@ -29,7 +28,6 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "justfile"
-      - "third_party/**"
       - "tools/image-build/**"
       - "package.json"
       - "bun.lock"
@@ -84,7 +82,7 @@ jobs:
           tool: cargo-audit@0.22.2
 
       - name: Audit dependencies
-        run: cargo audit --deny warnings
+        run: tools/image-build/with-libnbd-env.sh --rust-only -- cargo audit --deny warnings
 
       - name: Compile kino guest
         run: just build-kino-guest

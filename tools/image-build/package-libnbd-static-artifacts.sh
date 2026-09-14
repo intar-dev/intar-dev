@@ -3,7 +3,9 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly BINDINGS_DIR="${SCRIPT_DIR}/../../third_party/libnbd-rust"
+# Prepared cache written by prepare-libnbd-rust.sh. Keep the version in step
+# with the pin in that script and in crates/intar-image-build/Cargo.toml.
+readonly BINDINGS_DIR="${SCRIPT_DIR}/../../target/libnbd-rust/1.22.2/rust"
 readonly BUILD_SCRIPT="${SCRIPT_DIR}/build-libnbd-static.sh"
 
 usage() {
@@ -43,12 +45,15 @@ done
 [ -n "$destination" ] || die '--destination is required'
 
 source_dir="${prefix}/share/intar-libnbd"
+if [ ! -d "$BINDINGS_DIR" ]; then
+    die "missing prepared libnbd Rust bindings at '$BINDINGS_DIR'; run tools/image-build/prepare-libnbd-rust.sh first"
+fi
 test -f "${prefix}/lib/libnbd.a" || die "missing static archive under '$prefix'"
 test -f "${prefix}/include/libnbd.h" || die "missing libnbd header under '$prefix'"
 test -f "${prefix}/lib/pkgconfig/libnbd.pc" || die "missing libnbd pkg-config metadata under '$prefix'"
 test -f "${source_dir}/PROVENANCE" || die "missing libnbd provenance under '$prefix'"
-test -f "${BINDINGS_DIR}/PROVENANCE.md" || die "missing vendored bindings provenance"
-test -f "${BINDINGS_DIR}/COPYING.LIB" || die "missing vendored bindings license"
+test -f "${BINDINGS_DIR}/PROVENANCE.md" || die "missing prepared libnbd bindings provenance"
+test -f "${BINDINGS_DIR}/COPYING.LIB" || die "missing prepared libnbd bindings license"
 test -x "$BUILD_SCRIPT" || die "missing libnbd static build script"
 if [ -e "$destination" ] || [ -L "$destination" ]; then
     die "refusing to replace existing destination '$destination'"

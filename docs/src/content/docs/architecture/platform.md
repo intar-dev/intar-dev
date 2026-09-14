@@ -290,7 +290,7 @@ Stargate uses `russh` in process:
 
 Local verification should include:
 
-- `cargo test --workspace`
+- `tools/image-build/with-libnbd-env.sh -- cargo test --workspace`
 - `bun run --cwd apps/web test`
 - `bun run --cwd apps/web build`
 

@@ -10,7 +10,6 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
-      - "third_party/**"
       - "tools/image-build/**"
       - "**/package.json"
       - "bun.lock"
@@ -25,7 +24,6 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
-      - "third_party/**"
       - "tools/image-build/**"
       - "**/package.json"
       - "bun.lock"
@@ -73,7 +71,7 @@ jobs:
           fallback: none
 
       - name: Audit Rust dependencies
-        run: cargo audit --deny warnings
+        run: tools/image-build/with-libnbd-env.sh --rust-only -- cargo audit --deny warnings
 
       - name: Set up Go for actionlint
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
