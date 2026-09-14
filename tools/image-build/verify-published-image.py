@@ -32,6 +32,9 @@ ENABLED_UNITS = {
     "acpid.service": "/usr/lib/systemd/system/acpid.service",
     "intar-scenario.path": "/etc/systemd/system/intar-scenario.path",
 }
+# This image ships a custom initramfs containing static busybox, static e2fsck,
+# and its init script; it does not use initramfs-tools resume configuration.
+INITRAMFS_FILES = ("init", "bin/busybox", "sbin/e2fsck.static")
 
 
 class CheckFailure(RuntimeError):
@@ -103,12 +106,6 @@ def path_missing(evidence: Evidence, executable: Path, disk: Path, path: str, na
     evidence.check(name, "absent", "absent" if missing else "present", missing)
 
 
-def path_content(evidence: Evidence, executable: Path, disk: Path, path: str) -> str:
-    lines = debugfs(evidence, executable, disk, f"cat {path}").splitlines()
-    lines = [line for line in lines if not line.startswith("debugfs ")]
-    return "\n".join(lines) + ("\n" if lines else "")
-
-
 def enabled_unit(
     evidence: Evidence, executable: Path, disk: Path, unit: str, target: str
 ) -> None:
@@ -146,12 +143,8 @@ def check_initrd(evidence: Evidence, unmkinitramfs: Path, initrd: Path, report_r
     work = Path(tempfile.mkdtemp(prefix=".initrd-check-", dir=report_root))
     try:
         evidence.run([str(unmkinitramfs), str(initrd), str(work)])
-        resume = work / "conf" / "conf.d" / "resume"
-        if resume.is_file():
-            actual = resume.read_text(encoding="utf-8").strip()
-        else:
-            actual = "missing"
-        evidence.check("initrd resume configuration", "RESUME=none", actual, actual == "RESUME=none")
+        missing = [name for name in INITRAMFS_FILES if not (work / name).is_file()]
+        evidence.check("initramfs carries busybox, e2fsck, and init", [], missing, not missing)
     finally:
         shutil.rmtree(work)
 
@@ -229,8 +222,7 @@ def main() -> int:
             report["initrd"]["sha256"] == vm["boot"]["initrd_sha256"],
         )
 
-        resume = path_content(evidence, args.debugfs, args.disk, "/etc/initramfs-tools/conf.d/resume").strip()
-        evidence.check("rootfs resume configuration", "RESUME=none", resume, resume == "RESUME=none")
+        path_missing(evidence, args.debugfs, args.disk, "/etc/initramfs-tools", "rootfs has no distribution initramfs tooling")
         check_initrd(evidence, args.unmkinitramfs, args.initrd, args.report_root)
 
         for path in BUILD_CREDENTIAL_PATHS:
