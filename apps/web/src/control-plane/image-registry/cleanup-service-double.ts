@@ -64,6 +64,8 @@ export function createCleanupServiceDouble(
         configuredMode: mode,
         maintenance: "off",
         maintenanceSource: "control-plane",
+        enforcement: "report_only",
+        sessionRequired: false,
         paused,
         pauseReason: null,
         sweepActive: false,

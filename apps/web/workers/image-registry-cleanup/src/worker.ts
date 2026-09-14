@@ -38,6 +38,8 @@ async function readStatus(env: CleanupEnv): Promise<CleanupStatusReport> {
     configuredMode: mode.configured,
     maintenance: maintenance.maintenance,
     maintenanceSource: maintenance.source,
+    enforcement: gate.enforcement,
+    sessionRequired: gate.sessionRequired,
     paused: gate.paused,
     pauseReason: gate.pauseReason,
     sweepActive: gate.sweepActive,

@@ -3,6 +3,7 @@ import {
   REGISTRY_ADMISSION_PROTOCOL_VERSION,
   readRegistryAdmissionState,
 } from "@/lib/image-registry-admission";
+import type { ImageRegistryEnforcementMode } from "@/db/schema";
 import {
   createImageRegistryCleanupCore,
   type ImageRegistryCleanupEnv,
@@ -52,6 +53,10 @@ export interface CleanupGate {
   sweepStalled: boolean;
   activeSessions: number;
   activeWriters: number;
+  /** The shared row's upload admission enforcement. */
+  enforcement: ImageRegistryEnforcementMode;
+  /** True only when that enforcement requires an upload session. */
+  sessionRequired: boolean;
 }
 
 /**
@@ -102,6 +107,10 @@ export async function readCleanupGate(
     sweepStalled: state.sweep.stalled,
     activeSessions: state.counts.openSessions,
     activeWriters: state.counts.pendingWriters,
+    // The deployment gate decides whether deletes may run on these two, so
+    // they travel from the same read as the rest of the gate.
+    enforcement: state.enforcement,
+    sessionRequired: state.enforcement === "enforce",
   };
 }
 

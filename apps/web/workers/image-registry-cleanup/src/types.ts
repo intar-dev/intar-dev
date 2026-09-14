@@ -2,6 +2,7 @@ import type {
   ImageRegistryCleanupPlan,
   ImageRegistryCleanupRunResult,
 } from "@/lib/image-registry-cleanup";
+import type { ImageRegistryEnforcementMode } from "@/db/schema";
 
 /**
  * Request and response contract of the image registry cleanup worker.
@@ -70,6 +71,10 @@ export interface CleanupStatusReport {
   configuredMode: string;
   maintenance: "on" | "off";
   maintenanceSource: "control-plane" | "unavailable";
+  /** The shared admission row's enforcement, read live from D1. */
+  enforcement: ImageRegistryEnforcementMode;
+  /** True only when that enforcement requires an upload session. */
+  sessionRequired: boolean;
   paused: boolean;
   pauseReason: string | null;
   sweepActive: boolean;

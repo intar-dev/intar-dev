@@ -191,8 +191,12 @@ A release that turns deletes on does not wait for the six-hourly tick. After
 the collector is released, the lane runs one delete campaign.
 
 The campaign runs inside `tools/deploy/registry-cleanup-gate.sh`, and it is
-bounded twice: by 64 passes and by 15 minutes of wall clock. It calls the
-collector with the `run` action and repeats only while a pass answers
+bounded twice: by 64 passes and by wall clock. The wall-clock deadline is 60
+minutes when the deployment lane runs the campaign, because a full plan is
+measured at roughly 90 seconds and a large backlog needs more than one pass.
+The script's own default is 15 minutes, which is what a manual call gets, and
+the deployment job allows 75 minutes so the campaign deadline fits inside it.
+It calls the collector with the `run` action and repeats only while a pass answers
 `pending` or `busy`. A pass that answers `core-failed`, `paused`,
 `fenced`, or anything unexpected stops the campaign as a failure. A
 `report-only` collector is refused before the first pass, because a run

@@ -777,6 +777,56 @@ describe("image registry cleanup worker", () => {
     });
   });
 
+  it("reports the D1 admission enforcement the parent gate decides deletes on", async () => {
+    await resetD1Database();
+    await resetCollectorFixture();
+
+    // The parent holds no database binding here, so both values can only come
+    // from the child reading the shared D1 row.
+    const parentEnv = parentEnvWithoutDatabase({ REGISTRY_CLEANUP: child() });
+    const report = async (): Promise<Record<string, unknown>> => {
+      const response = await handleRegistryCleanupGateRequest(
+        gateRequest({ secret: GATE_SECRET, action: "status" }),
+        parentEnv,
+      );
+      expect(response?.status).toBe(200);
+      return (await response?.json()) as Record<string, unknown>;
+    };
+
+    // The default row: deletes stay refused, and the refusal is explicit.
+    await expect(report()).resolves.toMatchObject({
+      result: { enforcement: "report_only", sessionRequired: false },
+    });
+
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO image_registry_admission
+         (key, protocol_version, enforcement, epoch, state, updated_at)
+       VALUES (?1, ?2, 'enforce', 0, 'open', ?3)
+       ON CONFLICT(key) DO UPDATE SET
+         enforcement = excluded.enforcement,
+         updated_at = excluded.updated_at`,
+    )
+      .bind(REGISTRY_ADMISSION_KEY, REGISTRY_ADMISSION_PROTOCOL_VERSION, now)
+      .run();
+
+    // A later status call reads the fresh row, so an activation reaches the
+    // gate that decides without a collector redeploy.
+    await expect(report()).resolves.toMatchObject({
+      result: { enforcement: "enforce", sessionRequired: true },
+    });
+
+    // Back to the default in the same row: the pair follows D1 both ways.
+    await env.DB.prepare(
+      "UPDATE image_registry_admission SET enforcement = 'report_only' WHERE key = ?1",
+    )
+      .bind(REGISTRY_ADMISSION_KEY)
+      .run();
+    await expect(report()).resolves.toMatchObject({
+      result: { enforcement: "report_only", sessionRequired: false },
+    });
+  });
+
   it("reaches neither the collector nor D1 while maintenance is on", async () => {
     const calls: string[] = [];
     const fencedEnv = parentEnvWithoutDatabase({

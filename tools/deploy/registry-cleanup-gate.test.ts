@@ -430,6 +430,64 @@ describe("registry cleanup delete campaign", () => {
     }
   });
 
+  it("records claimed and verified bytes per pass and as a campaign total", () => {
+    // Reclaimed bytes are the operator's number, and the core reports both the
+    // bytes the delete calls claimed and the bytes a re-read proved absent.
+    // Two passes with different values prove the per-pass fields and the sum.
+    const run = runGate({
+      action: "run",
+      targetMode: "delete",
+      liveMode: "delete",
+      runBodies: [
+        nestedEnvelope(
+          "run",
+          runEnvelope("pending", {
+            completed: false,
+            resumeRequired: true,
+            deletedObjects: 3,
+            deletedBytes: 300,
+            verifiedDeletedObjects: 2,
+            verifiedDeletedBytes: 200,
+          }),
+        ),
+        nestedEnvelope(
+          "run",
+          runEnvelope("ok", {
+            deletedObjects: 4,
+            deletedBytes: 450,
+            verifiedDeletedObjects: 4,
+            verifiedDeletedBytes: 450,
+          }),
+        ),
+      ],
+      planBody: JSON.stringify(nestedEnvelope("plan", zeroCandidateReport())),
+    });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      const campaign = (run.evidence as { run: { campaign: Record<string, unknown>[] } })
+        .run.campaign;
+      expect(campaign).toHaveLength(2);
+      expect(campaign).toMatchObject([
+        { pass: 1, status: "pending", deleted_objects: 3, deleted_bytes: 300,
+          verified_deleted_objects: 2, verified_deleted_bytes: 200 },
+        { pass: 2, status: "ok", completed: true, deleted_objects: 4, deleted_bytes: 450,
+          verified_deleted_objects: 4, verified_deleted_bytes: 450 },
+      ]);
+      expect(run.evidence).toMatchObject({
+        run: {
+          ok: true,
+          passes: 2,
+          deleted_objects_total: 7,
+          deleted_bytes_total: 750,
+          verified_deleted_objects_total: 6,
+          verified_deleted_bytes_total: 650,
+        },
+      });
+    } finally {
+      run.cleanup();
+    }
+  });
+
   it("refuses a run while the serving collector is report-only", () => {
     const run = runGate({
       action: "run",

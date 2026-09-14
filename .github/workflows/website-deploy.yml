@@ -37,7 +37,9 @@ jobs:
     environment:
       name: production
       url: https://intar.dev
-    timeout-minutes: 30
+    # The delete campaign below can outlast a normal deploy: a full plan takes
+    # roughly 90 seconds, so a large backlog needs the campaign's 60 minutes.
+    timeout-minutes: 75
 
     steps:
       - name: Checkout exact main revision
@@ -807,6 +809,11 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          # A full plan takes roughly 90 seconds plus its post-scan, so the
+          # script's 15-minute manual default can not finish a large backlog.
+          # CI gets 60 minutes here, inside the job's 75. Early completion still
+          # returns immediately.
+          REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
         run: |
           set -euo pipefail
           # The control plane serves again at this point, so the gate answers

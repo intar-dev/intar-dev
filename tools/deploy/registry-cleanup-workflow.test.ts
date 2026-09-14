@@ -122,6 +122,11 @@ describe("registry cleanup deployment lane", () => {
     expect(step).toContain("registry-cleanup-run.json");
     // The run step must not carry the learner-run CLI rollout variable.
     expect(step).not.toContain("LEARNER_RUN_CLI_V1_ENFORCEMENT");
+    // CI needs more wall clock than the script's 15-minute default: a full plan
+    // is measured at roughly 90 seconds, so a large backlog can not finish in
+    // one bound. The campaign gets 60 minutes, inside a 75-minute job.
+    expect(step).toContain('REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"');
+    expect(deploy).toContain("timeout-minutes: 75");
   });
 
   it("activates the D1 admission switch only for an explicit delete release", () => {
