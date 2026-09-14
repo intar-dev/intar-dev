@@ -144,6 +144,11 @@ describe("image registry cleanup operator workflow", () => {
     // No public surface and nothing beyond the existing secrets.
     expect(workflow).toContain("contents: read");
     expect(workflow).not.toContain("pull_request_target");
+    // status must stay readable while a campaign runs, so it takes its own
+    // concurrency group; plan, run, and resolve share the mutating one.
+    expect(workflow).toContain(
+      "group: ${{ inputs.action == 'status' && 'intar-image-registry-cleanup-status' || 'intar-image-registry-cleanup' }}",
+    );
   });
 
   it("keeps status and resolve curl-only and installs locked dependencies for plan and run", () => {

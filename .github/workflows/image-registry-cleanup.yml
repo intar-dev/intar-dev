@@ -39,9 +39,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Serialises this lane against itself only. The collector's own admission gate
-  # is what protects it from a concurrent promotion, and that gate is fail-closed.
-  group: intar-image-registry-cleanup
+  # plan, run, and resolve serialise in one group; status reads only, so it takes
+  # its own group and stays readable during a campaign. The collector's admission
+  # gate is what protects it from a concurrent promotion, and it is fail-closed.
+  group: ${{ inputs.action == 'status' && 'intar-image-registry-cleanup-status' || 'intar-image-registry-cleanup' }}
   cancel-in-progress: false
 
 jobs:
