@@ -22,6 +22,22 @@ export type RuntimeExecutionState =
   | "archiving"
   | "archived"
   | "failed";
+/**
+ * Execution states whose run still needs its image from the registry.
+ *
+ * This is the single authority for every "is this run live" question: the
+ * retention root set, the outgoing-reference policy shared by promotion and
+ * the direct live publish, and the candidate staging guard all read it. A run
+ * that has not finished can start, resume, or boot its VM again, so the image
+ * it was admitted with must outlive every catalog pointer that named it.
+ */
+export const ACTIVE_RUNTIME_EXECUTION_STATES = [
+  "queued",
+  "provisioning",
+  "ready",
+  "archiving",
+] as const satisfies readonly RuntimeExecutionState[];
+
 export type HostResourceReservationState = "pending" | "committed" | "released";
 
 export const runtimeExecutions = sqliteTable(

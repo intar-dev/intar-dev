@@ -16,6 +16,41 @@ export interface ScenarioRunHintSnapshot {
 }
 
 export type AgentHostRole = "agent" | "builder";
+export type ImageRegistryEnforcementMode = "report_only" | "enforce";
+export type ImageRegistryGateState = "open" | "sweeping";
+export type ImageRegistrySessionOwnerKind = "publish_token" | "builder";
+export type ImageRegistrySessionState =
+  | "open"
+  | "completed"
+  | "abandoned"
+  | "reaped";
+export type ImageRegistryWriterOutcome = "pending" | "ok" | "error" | "unknown";
+export type ImageRegistryGcRunState =
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted";
+/**
+ * Registry operations that create or mutate objects. Every one of them takes a
+ * shared writer lease so an exclusive collector sweep cannot overlap it.
+ */
+export type ImageRegistryOperationKind =
+  | "chunk_exists"
+  | "chunk_put"
+  | "manifest_put"
+  | "multipart_create"
+  | "multipart_part"
+  | "multipart_complete"
+  | "bundle_put"
+  | "publish"
+  | "pointer_mutation"
+  | "guest_tools"
+  /**
+   * An internal parent-Worker window: a learner run start registers it before
+   * it reads a scenario image reference and releases it after its admission
+   * batch commits. No HTTP route admits this kind.
+   */
+  | "run_start";
 export type HostCpuReservationState = "pending" | "committed";
 export type HostCpuReservationQuotaPhase = "boot" | "steady";
 export type ImageBuildStatus =

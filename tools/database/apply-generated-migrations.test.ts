@@ -17,8 +17,8 @@ import {
 
 /** Every committed generated migration, in journal order. */
 const COMMITTED_COUNT = expectedGeneratedD1Schema().committedMigrationCount;
-/** The migration that drops the retired domain tables. */
-const APPENDED_IDX = REMOVAL_MIGRATION_IDX + 1;
+/** The newest committed migration, which is the one production still lacks. */
+const APPENDED_IDX = COMMITTED_COUNT - 1;
 
 describe("generated migration apply", () => {
   test("plans every committed migration after the observed ledger", async () => {
@@ -30,13 +30,14 @@ describe("generated migration apply", () => {
       expect(plan.pending.map(({ tag }) => tag)).toEqual([
         "0013_amused_kinsey_walden",
         "0014_public_sentry",
+        "0015_parched_captain_marvel",
       ]);
     } finally {
       fixture.database.close(false);
     }
   });
 
-  test("applies the actual production step: 14 applied, 15 pending, with populated data", async () => {
+  test("applies the actual production step: the newest migration with populated data", async () => {
     const fixture = prefixDatabase(APPENDED_IDX);
     try {
       const client = fixture.client;
@@ -69,10 +70,12 @@ describe("generated migration apply", () => {
 
       const plan = await planGeneratedMigrations(client);
       expect(plan.appliedMigrationCount).toBe(APPENDED_IDX);
-      expect(plan.pending.map(({ tag }) => tag)).toEqual(["0014_public_sentry"]);
+      expect(plan.pending.map(({ tag }) => tag)).toEqual([
+        "0015_parched_captain_marvel",
+      ]);
 
       const evidence = await applyGeneratedMigrations(client);
-      expect(evidence.appliedTags).toEqual(["0014_public_sentry"]);
+      expect(evidence.appliedTags).toEqual(["0015_parched_captain_marvel"]);
       expect(evidence.appliedMigrationCount).toBe(COMMITTED_COUNT);
       expect(evidence.foreignKeyViolations).toBe(0);
       // One migration, one batch, and that batch carries the marker last.
@@ -277,4 +280,3 @@ function prefixDatabase(appliedCount: number): {
   }
   return { database, client: new BunSqliteD1WriteClient(database) };
 }
-

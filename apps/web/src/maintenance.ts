@@ -1,3 +1,9 @@
+import type {
+  CleanupPauseResult,
+  CleanupRunRequest,
+} from "../workers/image-registry-cleanup/src/types";
+import type { RegistryCleanup } from "../workers/image-registry-cleanup/src/worker";
+
 const BYPASS_COOKIE = "__Host-intar-maintenance";
 const BYPASS_TTL_MS = 2 * 60 * 60 * 1000;
 export const MAX_MAINTENANCE_BYPASS_JSON_BYTES = 64 * 1024;
@@ -29,6 +35,223 @@ export async function handleMaintenanceMode(
     return maintenanceJsonResponse();
   }
   return maintenancePage();
+}
+
+export const REGISTRY_CLEANUP_GATE_PATH = "/api/maintenance/registry-cleanup";
+const REGISTRY_CLEANUP_GATE_MAX_WAIT_MS = 10 * 60 * 1000;
+
+/**
+ * The collector RPC surface, reached through the REGISTRY_CLEANUP binding. The
+ * type comes from the child entrypoint itself, so a changed method signature is
+ * a compile error here instead of a runtime surprise.
+ */
+type RegistryCleanupGateBinding = Pick<
+  RegistryCleanup,
+  "status" | "plan" | "run" | "pause" | "resume"
+>;
+
+/**
+ * The deployment gate for the image registry collector.
+ *
+ * The collector publishes no route and no workers.dev address, so a deployment
+ * reaches it here, through the parent that holds the service binding. This
+ * handler is registered after `handleMaintenanceMode`, so the maintenance fence
+ * stays in front of it: while maintenance is on, this path answers 503 under
+ * the fence and the collector cannot be reached at all. A deployment holds the
+ * collector before it enables maintenance, and releases it only after the
+ * parent serves traffic again.
+ *
+ * Authorization is the maintenance bypass secret, which is a machine caller's
+ * credential. This is not the operator cookie ceremony, and it grants nothing
+ * beyond these five collector methods. The handler reads no database of its
+ * own, and it reaches the child only after the secret is verified.
+ */
+export async function handleRegistryCleanupGateRequest(
+  request: Request,
+  workerEnv: Cloudflare.Env,
+): Promise<Response | null> {
+  if (new URL(request.url).pathname !== REGISTRY_CLEANUP_GATE_PATH) return null;
+  if (request.method !== "POST") {
+    return registryCleanupGateResponse(405, { error: "method not allowed" });
+  }
+
+  // A present Origin must match the canonical origin, and a browser that sends
+  // Sec-Fetch-Site from another site is refused, so this surface cannot be
+  // driven as a confused deputy. The deployment itself calls with curl, which
+  // sends neither header; the secret is what authorizes that call.
+  const expectedOrigin = safeOrigin(workerEnv.BETTER_AUTH_URL);
+  const suppliedOrigin = request.headers.get("origin")?.trim();
+  const fetchSite = request.headers.get("sec-fetch-site")?.trim().toLowerCase();
+  const contentType = request.headers.get("content-type")?.trim() ?? "";
+  if (
+    !expectedOrigin ||
+    (suppliedOrigin !== undefined && suppliedOrigin !== expectedOrigin) ||
+    (fetchSite && fetchSite !== "same-origin") ||
+    !/^application\/json(?:\s*;|$)/iu.test(contentType)
+  ) {
+    return registryCleanupGateDenied();
+  }
+
+  const configuredSecret = workerEnv.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET;
+  if (
+    typeof configuredSecret !== "string" ||
+    encoder.encode(configuredSecret).byteLength < 32
+  ) {
+    return registryCleanupGateResponse(503, {
+      code: "registry_cleanup_gate_unconfigured",
+      error: "the deployment gate has no usable secret",
+    });
+  }
+
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null) {
+    if (!/^(?:0|[1-9]\d*)$/u.test(declaredLength)) {
+      return registryCleanupGateDenied();
+    }
+    if (Number(declaredLength) > MAX_MAINTENANCE_BYPASS_JSON_BYTES) {
+      return registryCleanupGateResponse(413, { error: "request body too large" });
+    }
+  }
+
+  const encodedBody = await readBoundedBody(
+    request.body,
+    MAX_MAINTENANCE_BYPASS_JSON_BYTES,
+  );
+  if (!encodedBody) {
+    return registryCleanupGateResponse(413, { error: "request body too large" });
+  }
+  const body = parseJson(encodedBody) as {
+    secret?: unknown;
+    action?: unknown;
+    reason?: unknown;
+    wait_ms?: unknown;
+    plan_only?: unknown;
+  } | null;
+  const suppliedSecret = typeof body?.secret === "string" ? body.secret : "";
+  // Authorization settles before any child access, so an unauthenticated caller
+  // never learns whether a collector is deployed.
+  if (!(await equalSecrets(suppliedSecret, configuredSecret))) {
+    return registryCleanupGateDenied();
+  }
+
+  const binding = registryCleanupGateBinding(workerEnv);
+  if (!binding) {
+    // No collector version answers yet. This is a clear refusal, not a fence:
+    // the distinct code tells the deployment which of the two it is looking at.
+    return registryCleanupGateResponse(503, {
+      code: "registry_cleanup_unavailable",
+      error: "the parent has no image registry cleanup worker binding",
+    });
+  }
+
+  const action = typeof body?.action === "string" ? body.action.trim() : "";
+  try {
+    if (action === "pause") {
+      const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
+      const paused = await binding.pause({
+        ...(reason ? { reason } : {}),
+        waitMs: registryCleanupGateWaitMs(body?.wait_ms),
+      });
+      return registryCleanupGatePauseResponse(action, paused);
+    }
+    if (action === "resume") {
+      return registryCleanupGatePauseResponse(action, await binding.resume());
+    }
+    if (action === "status") {
+      return registryCleanupGateResponse(200, {
+        action,
+        result: await binding.status(),
+      });
+    }
+    if (action === "plan" || action === "run") {
+      const input: CleanupRunRequest = { planOnly: body?.plan_only === true };
+      return registryCleanupGateResponse(200, {
+        action,
+        result:
+          action === "plan"
+            ? await binding.plan(input)
+            : await binding.run(input),
+      });
+    }
+    return registryCleanupGateResponse(400, {
+      error: "action must be pause, resume, status, plan, or run",
+    });
+  } catch (error) {
+    return registryCleanupGateResponse(502, {
+      code: "registry_cleanup_gate_failed",
+      error:
+        error instanceof Error ? error.message : "the collector did not answer",
+    });
+  }
+}
+
+/**
+ * The hold and the release answer under `result`, which is the field the
+ * deployment gate reads. An unreadable answer stays unreadable: a deployment
+ * must see a missing flag, not a flag it can mistake for a proven state.
+ */
+function registryCleanupGatePauseResponse(
+  action: "pause" | "resume",
+  result: CleanupPauseResult | undefined,
+): Response {
+  return registryCleanupGateResponse(200, {
+    action,
+    result: {
+      paused: gateFlag(result?.paused),
+      pauseReason:
+        typeof result?.pauseReason === "string" ? result.pauseReason : null,
+      idle: gateFlag(result?.idle),
+      stalled: gateFlag(result?.stalled),
+    },
+  });
+}
+
+function registryCleanupGateBinding(
+  workerEnv: Cloudflare.Env,
+): RegistryCleanupGateBinding | null {
+  const binding = workerEnv.REGISTRY_CLEANUP as unknown as
+    | RegistryCleanupGateBinding
+    | undefined;
+  if (
+    !binding ||
+    typeof binding.pause !== "function" ||
+    typeof binding.resume !== "function" ||
+    typeof binding.status !== "function" ||
+    typeof binding.plan !== "function" ||
+    typeof binding.run !== "function"
+  ) {
+    return null;
+  }
+  return binding;
+}
+
+function registryCleanupGateWaitMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.min(
+    Math.max(Math.trunc(value), 0),
+    REGISTRY_CLEANUP_GATE_MAX_WAIT_MS,
+  );
+}
+
+function gateFlag(value: unknown): boolean | null {
+  return value === true ? true : value === false ? false : null;
+}
+
+/** Every refusal reads the same, so a caller cannot probe the gate's state. */
+function registryCleanupGateDenied(): Response {
+  return registryCleanupGateResponse(403, {
+    error: "registry cleanup gate denied",
+  });
+}
+
+function registryCleanupGateResponse(
+  status: number,
+  body: Record<string, unknown>,
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: maintenanceHeaders("application/json; charset=utf-8"),
+  });
 }
 
 async function establishMaintenanceBypass(

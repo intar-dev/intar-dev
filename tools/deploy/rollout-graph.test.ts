@@ -52,9 +52,24 @@ const PHASES: Phase[] = [
     marks: ["CUTOVER WEB RELEASE", "maintenance=on"],
   },
   {
+    // The cutover lane deploys the collector and the parent that binds it. The
+    // bootstrap order inside that lane is: the parent with MaintenanceState and
+    // no binding, the collector, the parent with the binding. Promotion waits
+    // for the lane because its endpoint deletes retired registry artifacts
+    // through the collector service binding.
+    id: "registry-cleanup-deploy",
+    workflow: "website-deploy.yml",
+    requires: ["web-cutover"],
+    plane: "required",
+    marks: [
+      "Deploy the parent revision for the first cleanup rollout",
+      "Deploy the image registry cleanup worker",
+    ],
+  },
+  {
     id: "tools-promote",
     workflow: "guest-tools-promote.yml",
-    requires: ["web-cutover"],
+    requires: ["registry-cleanup-deploy"],
     plane: "required",
     marks: ["PROMOTE GUEST TOOLS", "guest-tools/promote"],
   },

@@ -16,6 +16,7 @@ import type {
   ImageKey,
   ScenarioManifestV4,
 } from "@/generated/catalog";
+import { loadRetiredBuildIds } from "@/lib/image-artifact-retention";
 import {
   loadPublishedScenarioGuestToolsPin,
   type ScenarioGuestToolsChannel,
@@ -80,6 +81,10 @@ export async function handleImageBuildRevisionStatus(
         .from(imageBuilds)
         .where(inArray(imageBuilds.contentHash, contentHashes))
     : [];
+  const retiredBuildIds = await loadRetiredBuildIds(
+    db,
+    candidates.map((candidate) => candidate.id),
+  );
   const builds = expected.map((scenario) => {
     const build = candidates.find(
       (candidate) =>
@@ -87,21 +92,28 @@ export async function handleImageBuildRevisionStatus(
         candidate.arch === scenario.arch &&
         candidate.contentHash === scenario.contentHash,
     );
+    // A retired build keeps its audit row but has no artifacts left, so it is
+    // never "ready". Reporting it as stale tells the caller to rebuild instead
+    // of pinning a revision that can no longer be fetched.
+    const artifactsRetired = Boolean(
+      build && retiredBuildIds.has(build.id),
+    );
     return {
       scenario_id: scenario.scenarioId,
       arch: scenario.arch,
       content_hash: scenario.contentHash,
       build_id: build?.id ?? null,
       host_id: build?.hostId ?? null,
-      status: build?.status ?? "queued",
-      phase: build?.phase ?? "queued",
+      status: artifactsRetired ? "stale" : (build?.status ?? "queued"),
+      phase: artifactsRetired ? "failed" : (build?.phase ?? "queued"),
       error: build?.error ?? null,
+      artifacts_retired: artifactsRetired,
       updated_at_unix_ms: build?.updatedAt ?? null,
-      manifest: build?.manifest ?? null,
+      manifest: artifactsRetired ? null : (build?.manifest ?? null),
     };
   });
   const requiredImages = builds.flatMap((build) =>
-    build.status === "succeeded" && build.manifest
+    build.status === "succeeded" && build.manifest && !build.artifacts_retired
       ? requiredImagesFromManifest(build.manifest)
       : [],
   );
@@ -146,7 +158,12 @@ export async function handleImageBuildRevisionStatus(
   );
   const buildsReady =
     builds.length === expected.length &&
-    builds.every((build) => build.status === "succeeded" && build.manifest);
+    builds.every(
+      (build) =>
+        build.status === "succeeded" &&
+        build.manifest &&
+        !build.artifacts_retired,
+    );
   const hostsReady =
     expected.length === 0 ||
     (cacheReports.length > 0 && cacheReports.every((host) => host.ready));

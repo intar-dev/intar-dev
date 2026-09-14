@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "bun run types:cf:check && astro check && astro build",
+    "build": "bun run types:cf:check && bun run types:cf:cleanup:check && astro check && astro build",
     "build:deploy": "astro build",
     "ui:bundle:check": "bun scripts/check-ui-bundle.ts",
     "test": "vitest run && vitest run --config vitest.workers.config.ts",
@@ -24,6 +24,8 @@
     "test:ui:smoke": "playwright test tests/ui/smoke.spec.ts",
     "types:cf": "wrangler types worker-configuration.d.ts --env-interface WorkerEnv --include-runtime false --env-file .env.types",
     "types:cf:check": "wrangler types worker-configuration.d.ts --env-interface WorkerEnv --include-runtime false --env-file .env.types --check",
+    "types:cf:cleanup": "wrangler types workers/image-registry-cleanup/worker-configuration.d.ts --config workers/image-registry-cleanup/wrangler.jsonc --env-interface CleanupWorkerEnv --include-runtime false --env-file workers/image-registry-cleanup/.env.types",
+    "types:cf:cleanup:check": "wrangler types workers/image-registry-cleanup/worker-configuration.d.ts --config workers/image-registry-cleanup/wrangler.jsonc --env-interface CleanupWorkerEnv --include-runtime false --env-file workers/image-registry-cleanup/.env.types --check",
     "preview": "astro preview",
     "astro": "astro",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts && bun ../../tools/database/prune-drizzle-snapshots.ts",

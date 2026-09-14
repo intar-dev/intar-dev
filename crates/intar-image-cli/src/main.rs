@@ -486,7 +486,14 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
         args.token.as_deref(),
         args.no_upload,
     )? {
-        let receipt = upload_bundle(&target, &output_path, &rev, &meta)?;
+        let uploader = match publish_url_from_bundle_url(&target.url) {
+            Some(publish_url) => Some(ImageUploader::new(ImageUploadConfig::new(
+                publish_url,
+                target.token.clone(),
+            ))?),
+            None => None,
+        };
+        let receipt = upload_bundle(uploader.as_ref(), &target, &output_path, &rev, &meta)?;
         println!(
             "uploaded bundle {rev} -> {} ({} queued, {} assigned)",
             target.url, receipt.queued, receipt.assigned

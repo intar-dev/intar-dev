@@ -1,0 +1,40 @@
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "name": "intar-dev-image-registry-cleanup-local",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    // Local development runs the collector in report-only mode. Turning this to
+    // "delete" locally is safe: the local bucket is a Miniflare bucket.
+    "REGISTRY_CLEANUP_MODE": "report-only"
+  },
+  "triggers": {
+    "crons": ["17 */6 * * *"]
+  },
+  "d1_databases": [
+    {
+      // The names and the id match apps/web/wrangler.local.jsonc on purpose.
+      // A collector that reads a different local database would prove nothing
+      // about the parent it cleans up after.
+      "binding": "DB",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "database_name": "intar-dev-local"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "VM_IMAGE_REGISTRY_BUCKET",
+      "bucket_name": "intar-dev-local-vm-image-registry"
+    }
+  ],
+  "services": [
+    {
+      "binding": "CONTROL_PLANE",
+      "service": "intar-dev-local",
+      "entrypoint": "MaintenanceState"
+    }
+  ]
+}

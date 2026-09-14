@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { aliasedTable } from "drizzle-orm/alias";
 import {
@@ -30,6 +30,19 @@ const sourceBundles = aliasedTable(
   "candidate_proof_source_bundles",
 );
 
+/**
+ * A candidate launch source plus the exact stored text of the candidate
+ * manifest it was read from.
+ *
+ * The text is the start's commit fingerprint: the run insert compares it with
+ * the row, so a republish that rewrote the row inside the read-to-commit window
+ * refuses the run instead of committing the spec that only this read saw. It is
+ * never persisted, so run state keeps carrying the identity alone.
+ */
+export interface CandidateScenarioRunSource extends ScenarioRunLaunchSource {
+  candidateManifestText: string;
+}
+
 export async function loadCandidateScenarioRunSource(
   db: DrizzleD1Database,
   input: {
@@ -38,7 +51,7 @@ export async function loadCandidateScenarioRunSource(
     scenarioId: string;
     organizationId: string | null;
   },
-): Promise<ScenarioRunLaunchSource | null> {
+): Promise<CandidateScenarioRunSource | null> {
   const scope = input.organizationId
     ? and(
         eq(scenarioCatalogCandidates.organizationId, input.organizationId),
@@ -55,6 +68,9 @@ export async function loadCandidateScenarioRunSource(
   const [candidate] = await db
     .select({
       manifest: scenarioCatalogCandidates.manifestJson,
+      // The stored text, not the parsed value: the commit anchor of a start
+      // compares the candidate row with the exact bytes this read returned.
+      manifestText: sql<string>`${scenarioCatalogCandidates.manifestJson}`,
       candidateBuildId: scenarioCatalogCandidates.buildId,
       candidateCreatedAt: scenarioCatalogCandidates.createdAt,
       candidateUpdatedAt: scenarioCatalogCandidates.updatedAt,
@@ -114,6 +130,7 @@ export async function loadCandidateScenarioRunSource(
 
   return candidateSourceFromManifest({
     manifest: candidate.manifest,
+    manifestText: candidate.manifestText,
     organizationId: input.organizationId,
     createdAt: candidate.candidateCreatedAt,
     updatedAt: candidate.candidateUpdatedAt,
@@ -197,11 +214,12 @@ function isReadyCandidateManifest(
 
 function candidateSourceFromManifest(input: {
   manifest: typeof scenarioCatalogCandidates.$inferSelect["manifestJson"];
+  manifestText: string;
   organizationId: string | null;
   createdAt: number;
   updatedAt: number;
   candidateSource: NonNullable<ScenarioRunLaunchSource["candidateSource"]>;
-}): ScenarioRunLaunchSource | null {
+}): CandidateScenarioRunSource | null {
   const { manifest } = input;
   const difficulty = parseScenarioDifficulty(manifest.difficulty);
   if (!difficulty) return null;
@@ -288,6 +306,7 @@ function candidateSourceFromManifest(input: {
   return {
     ...scenarioRunLaunchSourceFromDetail(scenario),
     candidateSource: input.candidateSource,
+    candidateManifestText: input.manifestText,
   };
 }
 

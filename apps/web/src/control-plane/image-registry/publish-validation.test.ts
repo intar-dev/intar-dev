@@ -19,6 +19,7 @@ const {
   imageBuildLockMock,
   catalogManifestMock,
   candidateCatalogMock,
+  catalogRollbackMock,
 } = imageRegistryMocks();
 
 describe("image registry publish validation", () => {
@@ -219,6 +220,11 @@ describe("image registry publish validation", () => {
     );
     expect(imageBuildLockMock.assertHeld).toHaveBeenCalledOnce();
     expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
+    // A candidate publish replaces no live catalog, so it must not record a
+    // rollback either: the live pointers it warms are still the live ones.
+    expect(
+      catalogRollbackMock.replaceScenarioCatalogWithRollback,
+    ).not.toHaveBeenCalled();
     expect(candidateCatalogMock.stageCandidateScenarioManifest).toHaveBeenCalledOnce();
     expect(candidateCatalogMock.warmCandidateScenarioManifest).toHaveBeenCalledOnce();
   });
@@ -972,6 +978,14 @@ describe("image registry publish validation", () => {
       expect.anything(),
     );
     expect(bucketPut).not.toHaveBeenCalled();
-    expect(catalogManifestMock.seedScenarioManifest).toHaveBeenCalledOnce();
+    // A live publish installs the catalog through the shared replacement that
+    // also records the rollback; it no longer writes rows on its own. A
+    // trusted-token publish takes the per-family lock itself, because its
+    // previous-state read and its catalog write must not interleave with
+    // another live replacement.
+    expect(catalogRollbackMock.replaceScenarioCatalogWithRollback).toHaveBeenCalledOnce();
+    expect(
+      imageBuildLockMock.withImageBuildCoordinationLocks,
+    ).toHaveBeenCalledOnce();
   });
 });

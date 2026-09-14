@@ -34,6 +34,15 @@
       "service_id": "019cfe24-0643-7f91-baa3-cd890fdb8af4",
     },
   ],
+  "services": [
+    {
+      // The image registry cleanup worker has no public route, so this binding
+      // is the only path to its RPC surface.
+      "binding": "REGISTRY_CLEANUP",
+      "service": "intar-dev-image-registry-cleanup",
+      "entrypoint": "RegistryCleanup",
+    },
+  ],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

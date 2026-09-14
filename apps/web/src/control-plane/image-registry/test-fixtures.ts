@@ -27,6 +27,7 @@ const courseCatalogMock = vi.hoisted(() => ({
 
 const imageBuildLockMock = vi.hoisted(() => ({
   withImageBuildCoordinationLock: vi.fn(),
+  withImageBuildCoordinationLocks: vi.fn(),
   assertHeld: vi.fn(),
 }));
 
@@ -42,10 +43,15 @@ const candidateCatalogMock = vi.hoisted(() => ({
   stageCandidateScenarioManifest: vi.fn(),
   stageReusableCandidateManifests: vi.fn(),
   warmCandidateScenarioManifest: vi.fn(),
+  isCandidateSourceLocked: vi.fn(),
 }));
 
 const hostRuntimeWakeMock = vi.hoisted(() => ({
   tryWakeHostRuntime: vi.fn(),
+}));
+
+const catalogRollbackMock = vi.hoisted(() => ({
+  replaceScenarioCatalogWithRollback: vi.fn(),
 }));
 
 const scenarioImageCacheMock = vi.hoisted(() => ({
@@ -54,8 +60,34 @@ const scenarioImageCacheMock = vi.hoisted(() => ({
   tryReconcileScenarioImagesForPublicationScope: vi.fn(),
 }));
 
+/**
+ * Registry admission is a D1-backed boundary that these handler tests do not
+ * exercise; the Workers tests cover it against real D1. The stub keeps the same
+ * credential rules so the auth assertions in the handler tests stay meaningful.
+ */
+const registryAdmissionMock = vi.hoisted(() => ({
+  REGISTRY_SESSION_HEADER: "x-intar-registry-session",
+  REGISTRY_ADMISSION_PROTOCOL_VERSION: 1,
+  REGISTRY_SESSION_LEASE_MS: 600_000,
+  REGISTRY_OPERATION_LEASE_MS: 300_000,
+  REGISTRY_SWEEP_LEASE_MS: 300_000,
+  REGISTRY_HEARTBEAT_INTERVAL_MS: 30_000,
+  readRegistrySessionId: vi.fn(),
+  readRegistryAuth: vi.fn(),
+  admitRegistryOperation: vi.fn(),
+  createRegistryWriterGuard: vi.fn(),
+  readRegistryAdmissionState: vi.fn(),
+  createRegistryUploadSession: vi.fn(),
+  heartbeatRegistryUploadSession: vi.fn(),
+  completeRegistryUploadSession: vi.fn(),
+  reapRegistryAdmission: vi.fn(),
+  registryAdmissionBlockedReason: vi.fn(),
+  setRegistryEnforcement: vi.fn(),
+}));
+
 export function imageRegistryMocks() {
   return {
+    catalogRollbackMock,
     authMock,
     dbMock,
     schedulerMock,
@@ -66,6 +98,7 @@ export function imageRegistryMocks() {
     candidateCatalogMock,
     hostRuntimeWakeMock,
     scenarioImageCacheMock,
+    registryAdmissionMock,
   };
 }
 
@@ -89,10 +122,49 @@ vi.mock("@/lib/host-runtime-wake", () => hostRuntimeWakeMock);
 
 vi.mock("@/lib/scenario-image-cache", () => scenarioImageCacheMock);
 
+vi.mock("@/lib/scenario-catalog-rollback", () => ({
+  replaceScenarioCatalogWithRollback: (...args: unknown[]) =>
+    catalogRollbackMock.replaceScenarioCatalogWithRollback(...args),
+}));
+
+vi.mock("@/lib/image-registry-admission", () => ({
+  REGISTRY_SESSION_HEADER: registryAdmissionMock.REGISTRY_SESSION_HEADER,
+  REGISTRY_ADMISSION_PROTOCOL_VERSION:
+    registryAdmissionMock.REGISTRY_ADMISSION_PROTOCOL_VERSION,
+  REGISTRY_SESSION_LEASE_MS: registryAdmissionMock.REGISTRY_SESSION_LEASE_MS,
+  REGISTRY_OPERATION_LEASE_MS: registryAdmissionMock.REGISTRY_OPERATION_LEASE_MS,
+  REGISTRY_SWEEP_LEASE_MS: registryAdmissionMock.REGISTRY_SWEEP_LEASE_MS,
+  REGISTRY_HEARTBEAT_INTERVAL_MS:
+    registryAdmissionMock.REGISTRY_HEARTBEAT_INTERVAL_MS,
+  readRegistrySessionId: (...args: unknown[]) =>
+    registryAdmissionMock.readRegistrySessionId(...args),
+  readRegistryAuth: (...args: unknown[]) =>
+    registryAdmissionMock.readRegistryAuth(...args),
+  admitRegistryOperation: (...args: unknown[]) =>
+    registryAdmissionMock.admitRegistryOperation(...args),
+  createRegistryWriterGuard: (...args: unknown[]) =>
+    registryAdmissionMock.createRegistryWriterGuard(...args),
+  readRegistryAdmissionState: (...args: unknown[]) =>
+    registryAdmissionMock.readRegistryAdmissionState(...args),
+  createRegistryUploadSession: (...args: unknown[]) =>
+    registryAdmissionMock.createRegistryUploadSession(...args),
+  heartbeatRegistryUploadSession: (...args: unknown[]) =>
+    registryAdmissionMock.heartbeatRegistryUploadSession(...args),
+  completeRegistryUploadSession: (...args: unknown[]) =>
+    registryAdmissionMock.completeRegistryUploadSession(...args),
+  reapRegistryAdmission: (...args: unknown[]) =>
+    registryAdmissionMock.reapRegistryAdmission(...args),
+  registryAdmissionBlockedReason: (...args: unknown[]) =>
+    registryAdmissionMock.registryAdmissionBlockedReason(...args),
+  setRegistryEnforcement: (...args: unknown[]) =>
+    registryAdmissionMock.setRegistryEnforcement(...args),
+}));
+
 vi.mock("cloudflare:workers", () => ({ env: {} }));
 
 export function resetImageRegistryMocks(): void {
   authMock.requireVerifiedAgentRequest.mockReset();
+  resetRegistryAdmissionMock();
   dbMock.drizzle.mockReset();
   dbMock.drizzle.mockImplementation(() => defaultAgentVisibilityDb());
   schedulerMock.assignQueuedImageBuilds.mockReset();
@@ -114,6 +186,15 @@ export function resetImageRegistryMocks(): void {
       }) => Promise<unknown>,
     ) => operation({ assertHeld: imageBuildLockMock.assertHeld }),
   );
+  // The trusted-token live publish serializes on the per-family locks.
+  imageBuildLockMock.withImageBuildCoordinationLocks.mockReset();
+  imageBuildLockMock.withImageBuildCoordinationLocks.mockImplementation(
+    async (
+      _db: unknown,
+      _identities: unknown,
+      operation: () => Promise<unknown>,
+    ) => operation(),
+  );
   catalogManifestMock.seedScenarioManifest.mockReset();
   desiredStateStoreMock.mutateStoredHostDesiredState.mockReset();
   candidateCatalogMock.stageCandidateScenarioManifest.mockReset();
@@ -124,6 +205,10 @@ export function resetImageRegistryMocks(): void {
   candidateCatalogMock.stageReusableCandidateManifests.mockResolvedValue([]);
   candidateCatalogMock.warmCandidateScenarioManifest.mockReset();
   candidateCatalogMock.warmCandidateScenarioManifest.mockResolvedValue([]);
+  // Default: a generic failure is not a candidate-source refusal. A test that
+  // exercises the refusal path opts in explicitly.
+  candidateCatalogMock.isCandidateSourceLocked.mockReset();
+  candidateCatalogMock.isCandidateSourceLocked.mockReturnValue(false);
   hostRuntimeWakeMock.tryWakeHostRuntime.mockReset();
   scenarioImageCacheMock.isRuntimeImageCacheHost.mockReset();
   scenarioImageCacheMock.isRuntimeImageCacheHost.mockImplementation(
@@ -146,6 +231,159 @@ export function resetImageRegistryMocks(): void {
       failedHostIds: [],
     },
   );
+  catalogRollbackMock.replaceScenarioCatalogWithRollback.mockReset();
+  catalogRollbackMock.replaceScenarioCatalogWithRollback.mockResolvedValue({
+    rows: { scenario: { scenarioId: "broken-nginx" }, vms: [], probes: [] },
+    previous: {
+      schemaVersion: 1,
+      targetScenarioIds: [],
+      scenarios: [],
+      vms: [],
+      probes: [],
+    },
+    previousImageIds: [],
+    outgoingImageIds: [],
+    transitionId: null,
+    transitionAtUnixMs: 0,
+    blocked: null,
+  });
+}
+
+function resetRegistryAdmissionMock(): void {
+  for (const fn of [
+    registryAdmissionMock.readRegistrySessionId,
+    registryAdmissionMock.readRegistryAuth,
+    registryAdmissionMock.admitRegistryOperation,
+    registryAdmissionMock.createRegistryWriterGuard,
+    registryAdmissionMock.readRegistryAdmissionState,
+    registryAdmissionMock.createRegistryUploadSession,
+    registryAdmissionMock.heartbeatRegistryUploadSession,
+    registryAdmissionMock.completeRegistryUploadSession,
+    registryAdmissionMock.reapRegistryAdmission,
+    registryAdmissionMock.registryAdmissionBlockedReason,
+    registryAdmissionMock.setRegistryEnforcement,
+  ]) {
+    fn.mockReset();
+  }
+  registryAdmissionMock.readRegistrySessionId.mockImplementation(
+    (request: Request) =>
+      request.headers.get("x-intar-registry-session")?.trim() || null,
+  );
+  registryAdmissionMock.readRegistryAuth.mockImplementation(
+    async (request: Request, env: Cloudflare.Env) => {
+      const expected = env.REGISTRY_PUBLISH_TOKEN?.trim();
+      const header = request.headers.get("authorization") ?? "";
+      const bearer = header.startsWith("Bearer ")
+        ? header.slice("Bearer ".length).trim()
+        : "";
+      if (expected && bearer === expected) {
+        return {
+          ok: true,
+          owner: { kind: "publish_token", id: "publish-token" },
+        };
+      }
+      const verified = await authMock.requireVerifiedAgentRequest(request, env);
+      if (verified?.ok) {
+        if (verified.agent.role === "builder") {
+          return { ok: true, owner: { kind: "builder", id: verified.agent.hostId } };
+        }
+        return { ok: false, response: jsonResponseForTest(403, "builder role required") };
+      }
+      return { ok: false, response: jsonResponseForTest(401, "unauthorized") };
+    },
+  );
+  registryAdmissionMock.admitRegistryOperation.mockImplementation(
+    async () => ({
+      ok: true,
+      lease: {
+        operationId: "test-registry-operation",
+        sessionId: null,
+        epoch: 0,
+        complete: async () => {},
+      },
+    }),
+  );
+  // Mirrors the real factory: a settled release is idempotent, and a path that
+  // never released records an inconclusive end once a write may have started.
+  registryAdmissionMock.createRegistryWriterGuard.mockImplementation(
+    (lease: { complete: (outcome: string) => Promise<void> }) => {
+      let writeStarted = false;
+      let released = false;
+      const release = async (outcome: string) => {
+        if (released) return;
+        released = true;
+        writeStarted = true;
+        await lease.complete(outcome);
+      };
+      return {
+        markWriteStarted: () => {
+          writeStarted = true;
+        },
+        release,
+        finish: async () => {
+          if (released) return;
+          await release(writeStarted ? "unknown" : "error");
+        },
+      };
+    },
+  );
+  registryAdmissionMock.readRegistryAdmissionState.mockImplementation(
+    async () => ({
+      protocolVersion: registryAdmissionMock.REGISTRY_ADMISSION_PROTOCOL_VERSION,
+      enforcement: "report_only",
+      epoch: 0,
+      state: "open",
+      sweep: {
+        active: false,
+        token: null,
+        owner: null,
+        startedAtMs: null,
+        heartbeatAtMs: null,
+        expiresAtMs: null,
+      },
+      counts: {
+        openSessions: 0,
+        staleOpenSessions: 0,
+        pendingWriters: 0,
+        stalePendingWriters: 0,
+        unknownWriters: 0,
+      },
+    }),
+  );
+  registryAdmissionMock.registryAdmissionBlockedReason.mockImplementation(
+    () => null,
+  );
+  registryAdmissionMock.createRegistryUploadSession.mockImplementation(
+    async () => ({
+      ok: true,
+      sessionId: "test-registry-session",
+      expiresAtMs: Date.now() + registryAdmissionMock.REGISTRY_SESSION_LEASE_MS,
+      epoch: 0,
+    }),
+  );
+  registryAdmissionMock.heartbeatRegistryUploadSession.mockImplementation(
+    async () => ({
+      ok: true,
+      expiresAtMs: Date.now() + registryAdmissionMock.REGISTRY_SESSION_LEASE_MS,
+      epoch: 0,
+    }),
+  );
+  registryAdmissionMock.completeRegistryUploadSession.mockImplementation(
+    async () => ({ ok: true, state: "completed", releasedWriters: 0 }),
+  );
+  registryAdmissionMock.reapRegistryAdmission.mockImplementation(
+    async () => ({ reapedSessions: [], reapedWriters: [] }),
+  );
+  registryAdmissionMock.setRegistryEnforcement.mockImplementation(
+    async () => {},
+  );
+}
+
+function jsonResponseForTest(status: number, error: string): Response {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
 
 export function buildLogDb(input: {

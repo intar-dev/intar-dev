@@ -161,6 +161,13 @@ export interface ScenarioLaunchSpec {
   image: string;
   imageKey: ImageKey | null;
   imageSha256: string | null;
+  /**
+   * The image identity of this VM, from the same catalog read that produced
+   * the spec. A live run start captures it and re-checks it at commit time, so
+   * a source that changed inside the start window refuses the run instead of
+   * launching a VM whose image the read never saw.
+   */
+  imageRef: ScenarioVmImageRef | null;
   hostname: string;
   resources: {
     cpuMillis: number;
@@ -170,6 +177,23 @@ export interface ScenarioLaunchSpec {
   };
   leaseDurationSeconds: number;
   summary: ScenarioLaunchSummary;
+}
+
+/**
+ * The identity of the catalog row a launch spec came from, flattened so one
+ * JSON entry can describe it. Every field mirrors a `vm_scenario_vms` column.
+ * `chunkManifestSha256` is null for a legacy `raw_zstd` image, which has no
+ * chunk manifest.
+ */
+export interface ScenarioVmImageRef {
+  vmName: string;
+  keyScenario: string | null;
+  keyVm: string | null;
+  keyArch: string | null;
+  imageSha256: string | null;
+  chunkManifestSha256: string | null;
+  kernelSha256: string;
+  initrdSha256: string;
 }
 
 const DEFAULT_VM_LEASE_DURATION_SECONDS = 3600;
@@ -243,6 +267,18 @@ export function buildScenarioLaunchSpecs(input: {
       image: vm.image.trim(),
       imageKey: vm.imageKey,
       imageSha256: vm.imageSha256,
+      // The raw row name, not the slugified display name: the ref must match
+      // the catalog row it describes, byte for byte.
+      imageRef: {
+        vmName: vm.name,
+        keyScenario: vm.imageKey?.scenario ?? null,
+        keyVm: vm.imageKey?.vm ?? null,
+        keyArch: vm.imageKey?.arch ?? null,
+        imageSha256: vm.imageSha256,
+        chunkManifestSha256: vm.chunkManifestSha256,
+        kernelSha256: vm.kernelSha256,
+        initrdSha256: vm.initrdSha256,
+      },
       hostname: scenarioVmName,
       resources: {
         cpuMillis: vm.cpuMillis,

@@ -23,7 +23,7 @@ import {
 } from "@/db/schema";
 import type { ScenarioStartRequestScope } from "@/db/schema/runs";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
-import { appError, errorChainMatches } from "@/lib/app-error";
+import { appError, type AppError, errorChainMatches } from "@/lib/app-error";
 import {
   applyLectureBriefingPresentation,
   assertCourseScenarioStartAllowed,
@@ -40,6 +40,10 @@ import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId } from "@/lib/id";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
+import {
+  admitInternalRegistryOperation,
+  type RegistryOperationLease,
+} from "@/lib/image-registry-admission";
 import { assertAgentKvmRunsOpen } from "@/lib/run-admission-gate";
 import {
   availableRuntimeHostResources,
@@ -58,7 +62,9 @@ import {
   type RunVmStateDocument,
 } from "@/lib/run-state";
 import type { RuntimeVmSpec } from "@/lib/runtime-executions";
+import { candidateScenarioId } from "@/lib/scenario-catalog-candidates";
 import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
+import type { ScenarioLaunchSpec } from "@/lib/scenario-model";
 import {
   generateScenarioRunSshKeyDraft,
   prepareScenarioRunSshKeyRows,
@@ -141,9 +147,68 @@ export interface BeginScenarioRunResult {
 
 export const ADMISSION_CAS_ATTEMPTS = 3;
 
-interface CandidateProof {
+/** The candidate identity one start asks for. */
+interface CandidateRequest {
   revision: string;
   buildId: string;
+}
+
+/**
+ * The proof the commit anchors on: the requested identity plus the exact
+ * stored text of the candidate manifest the start read.
+ */
+interface CandidateProof extends CandidateRequest {
+  /**
+   * The exact stored text of the candidate manifest the start read. The commit
+   * batch compares it with the candidate row, so a republish that rewrote the
+   * row inside the read-to-commit window refuses the run instead of committing
+   * the spec it was built from.
+   */
+  manifestText: string;
+}
+
+/**
+ * The live-catalog image identity one start read, as one JSON array of the
+ * per-VM refs plus the VM count of that read. It travels into the commit batch
+ * so the run insert compares the catalog rows against the exact read the run
+ * was built from, without a database column of its own.
+ */
+interface LiveSourceFingerprint {
+  json: string;
+  vmCount: number;
+}
+
+/**
+ * Captures the image identity of a live source read. A live start has no
+ * candidate row to anchor on, so this is what proves at commit time that the
+ * catalog still describes the images the run was built from. Only identity is
+ * captured: presentation, probe, and resource metadata may change inside the
+ * window, because the run carries the values it reserved.
+ */
+function liveSourceFingerprint(
+  launchSpecs: readonly ScenarioLaunchSpec[],
+): LiveSourceFingerprint {
+  const refs = launchSpecs.map((spec) => {
+    const ref = spec.imageRef;
+    if (!ref) {
+      throw appError(
+        500,
+        "scenario_catalog_invalid",
+        "scenario VM " + spec.scenarioVmName + " has no image identity",
+      );
+    }
+    return {
+      name: ref.vmName,
+      keyScenario: ref.keyScenario,
+      keyVm: ref.keyVm,
+      keyArch: ref.keyArch,
+      imageId: ref.imageSha256,
+      manifest: ref.chunkManifestSha256,
+      kernel: ref.kernelSha256,
+      initrd: ref.initrdSha256,
+    };
+  });
+  return { json: JSON.stringify(refs), vmCount: refs.length };
 }
 
 export async function beginScenarioRun(
@@ -159,84 +224,165 @@ export async function beginScenarioRun(
       });
       const idempotencyKey = requireIdempotencyKey(input.idempotencyKey);
       const organizationId = input.organizationId ?? null;
-      const candidateProof = candidateProofFromInput(input);
-      const scope = scenarioStartRequestScope(input, input.scenarioId);
-      const db = drizzle(env.DB);
-      const [scenario, active] = await Promise.all([
-        loadScenarioForStart({
-          db,
-          scenarioId: input.scenarioId,
+      const candidateRequest = candidateRequestFromInput(input);
+      // The run start is a shared registry writer for its whole read-to-commit
+      // window: it reads a scenario image reference and then commits the run
+      // and the desired VMs that point at that image. Without the writer a
+      // collector sweep could retire the candidate and delete the image objects
+      // in between, and the committed run would reference an image that no
+      // longer exists. The writer also refuses the start while a sweep holds
+      // the gate, so the two can never overlap in either direction.
+      const registryGuard = await openRunStartRegistryGuard(input.userId);
+      let outcome: "ok" | "error" = "error";
+      try {
+        const result = await admitScenarioStart(input, {
+          idempotencyKey,
           organizationId,
-          candidateProof,
-        }),
-        loadActiveRunRow(input.userId),
-      ]);
-      if (!scenario) {
-        if (candidateProof) {
-          throw appError(
-            409,
-            "scenario_candidate_not_ready",
-            "candidate scenario is unavailable or not ready",
-          );
-        }
-        throw appError(404, "scenario_not_found", "scenario not found");
+          candidateRequest,
+        });
+        outcome = "ok";
+        return result;
+      } finally {
+        // The window ends with the commit batch, and a release that fails
+        // leaves the row as a hold for the operator reap. Neither may change
+        // the answer the caller already has.
+        await registryGuard.complete(outcome);
       }
-      // Resolve the V2 unit before any reuse can return, so an old direct
-      // request cannot revive an unlinked scenario around the course gate.
-      const courseLecture = await assertCourseScenarioStartAllowed({
-        db,
-        userId: input.userId,
-        organizationId,
-        scenarioId: scenario.scenarioId,
-        ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
-      });
-      await assertAdmissionActive(input.userId, input.betaAdmission);
-
-      const replayed = await loadRunByIdempotencyKey(
-        db,
-        input.userId,
-        idempotencyKey,
-      );
-      if (replayed) {
-        assertReplayMatchesScope(replayed.requestScopeJson, scope);
-        return {
-          accepted: true,
-          runId: replayed.runId,
-          scenarioId: replayed.scenarioId,
-          // The original acceptance, and a replay is not a fresh admission.
-          acceptedAt: replayed.acceptedAt,
-          reused: true,
-          hostId: replayed.hostId,
-          deliveryHint: deliveryHint(replayed.hostId),
-        };
-      }
-
-      if (active) {
-        // An active run never stands in for a new start. Returning it here
-        // would answer a new idempotency key with another request's run, and a
-        // later retry of that key would create a second VM set once the first
-        // run ended. Only an exact replay of the admitting request returns the
-        // stored run, which the idempotency lookup above already handled.
-        throw activeRunConflictError(active.title);
-      }
-
-      return admitNewRun({
-        input,
-        scenario,
-        organizationId,
-        courseLecture,
-        idempotencyKey,
-        candidateProof,
-        scope,
-      });
     },
     { "intar.scenario.id": input.scenarioId },
   );
 }
 
-function candidateProofFromInput(
+/**
+ * Opens the shared registry writer that guards one run start. A refusal is
+ * retryable: the gate is closed only while a collector sweep runs or while the
+ * registry is paused, and the caller's idempotency key makes the retry safe.
+ */
+async function openRunStartRegistryGuard(
+  userId: string,
+): Promise<RegistryOperationLease> {
+  const admitted = await admitInternalRegistryOperation(env, {
+    operation: "run_start",
+    owner: { kind: "system", id: userId },
+  });
+  if (!admitted.ok) {
+    throw appError(
+      503,
+      "registry_busy",
+      "the image registry is busy; retry the start",
+    );
+  }
+  return admitted.lease;
+}
+
+/**
+ * The admission itself. The registry writer of the caller holds the image
+ * references this function reads from the first scenario read to the commit.
+ */
+async function admitScenarioStart(
   input: BeginScenarioRunInput,
-): CandidateProof | null {
+  prelude: {
+    idempotencyKey: string;
+    organizationId: string | null;
+    candidateRequest: CandidateRequest | null;
+  },
+): Promise<BeginScenarioRunResult> {
+  const { idempotencyKey, organizationId, candidateRequest } = prelude;
+  const scope = scenarioStartRequestScope(input, input.scenarioId);
+  const db = drizzle(env.DB);
+  const [source, active] = await Promise.all([
+    loadScenarioForStart({
+      db,
+      scenarioId: input.scenarioId,
+      organizationId,
+      candidateRequest,
+    }),
+    loadActiveRunRow(input.userId),
+  ]);
+  if (!source) {
+    if (candidateRequest) {
+      throw scenarioCandidateNotReady();
+    }
+    throw appError(404, "scenario_not_found", "scenario not found");
+  }
+  const scenario = source.scenario;
+  // Resolve the V2 unit before any reuse can return, so an old direct
+  // request cannot revive an unlinked scenario around the course gate.
+  const courseLecture = await assertCourseScenarioStartAllowed({
+    db,
+    userId: input.userId,
+    organizationId,
+    scenarioId: scenario.scenarioId,
+    ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
+  });
+  await assertAdmissionActive(input.userId, input.betaAdmission);
+
+  const replayed = await loadRunByIdempotencyKey(
+    db,
+    input.userId,
+    idempotencyKey,
+  );
+  if (replayed) {
+    assertReplayMatchesScope(replayed.requestScopeJson, scope);
+    return {
+      accepted: true,
+      runId: replayed.runId,
+      scenarioId: replayed.scenarioId,
+      // The original acceptance, and a replay is not a fresh admission.
+      acceptedAt: replayed.acceptedAt,
+      reused: true,
+      hostId: replayed.hostId,
+      deliveryHint: deliveryHint(replayed.hostId),
+    };
+  }
+
+  if (active) {
+    // An active run never stands in for a new start. Returning it here
+    // would answer a new idempotency key with another request's run, and a
+    // later retry of that key would create a second VM set once the first
+    // run ended. Only an exact replay of the admitting request returns the
+    // stored run, which the idempotency lookup above already handled.
+    throw activeRunConflictError(active.title);
+  }
+
+  return admitNewRun({
+    input,
+    scenario,
+    organizationId,
+    courseLecture,
+    idempotencyKey,
+    // The commit anchors on the source this start really read, never on the
+    // proof the caller asked for.
+    candidateProof: source.candidateProof,
+    scope,
+  });
+}
+
+function scenarioCandidateNotReady() {
+  return appError(
+    409,
+    "scenario_candidate_not_ready",
+    "candidate scenario is unavailable or not ready",
+  );
+}
+
+/**
+ * The live catalog changed inside the read-to-commit window, so this request
+ * would launch an image the catalog no longer describes. It is a decision on
+ * this request only: a start against fresh reads is a new admission.
+ */
+function scenarioSourceChanged() {
+  return appError(
+    409,
+    "scenario_source_changed",
+    "the scenario image changed while the run was starting; start it again",
+  );
+}
+
+/** Validates the candidate identity one caller asks for, before any read. */
+function candidateRequestFromInput(
+  input: BeginScenarioRunInput,
+): CandidateRequest | null {
   const revision =
     input.candidateRevision === undefined
       ? null
@@ -352,21 +498,41 @@ async function loadScenarioForStart(input: {
   db: DrizzleD1Database;
   scenarioId: string;
   organizationId: string | null;
-  candidateProof: CandidateProof | null;
-}): Promise<ScenarioRunLaunchSource | null> {
-  if (input.candidateProof) {
-    return loadCandidateScenarioRunSource(input.db, {
-      revision: input.candidateProof.revision,
-      buildId: input.candidateProof.buildId,
+  candidateRequest: CandidateRequest | null;
+}): Promise<ScenarioStartSource | null> {
+  if (input.candidateRequest) {
+    const scenario = await loadCandidateScenarioRunSource(input.db, {
+      revision: input.candidateRequest.revision,
+      buildId: input.candidateRequest.buildId,
       scenarioId: input.scenarioId,
       organizationId: input.organizationId,
     });
+    if (!scenario) return null;
+    return {
+      scenario,
+      // The proof gains the manifest text of this read, which is what makes the
+      // commit anchor exact instead of a check of the row identity alone.
+      candidateProof: {
+        ...input.candidateRequest,
+        manifestText: scenario.candidateManifestText,
+      },
+    };
   }
   const [scenario] = await loadEnabledScenarioRows(
     input.scenarioId,
     input.organizationId,
   );
-  return scenario ?? null;
+  return scenario ? { scenario, candidateProof: null } : null;
+}
+
+/**
+ * One start source read, with the proof its commit must anchor on. A live
+ * catalog start has no proof; a candidate start carries the manifest text its
+ * read returned.
+ */
+interface ScenarioStartSource {
+  scenario: ScenarioRunLaunchSource;
+  candidateProof: CandidateProof | null;
 }
 
 async function assertAdmissionActive(
@@ -592,6 +758,11 @@ async function admitNewRun(context: {
   const runId = createAppId();
   const createdAt = Date.now();
   const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
+  // A candidate start anchors on its candidate proof; a live start anchors on
+  // the image identity of the catalog rows it just read.
+  const sourceAnchor = context.candidateProof
+    ? null
+    : liveSourceFingerprint(scenario.launchSpecs);
   const steadyCpuMillisByVm = scenario.launchSpecs.map(
     (spec) => spec.resources.cpuMillis,
   );
@@ -837,6 +1008,8 @@ async function admitNewRun(context: {
       reservationResources,
       leaseExpiresAt,
       betaAdmission: input.betaAdmission,
+      candidateProof: context.candidateProof,
+      sourceAnchor,
       ...(input.allowDrainedAdminProof
         ? { allowDrainedAdminProof: true }
         : {}),
@@ -908,6 +1081,17 @@ async function admitNewRun(context: {
           ? { allowDrainedAdminProof: true }
           : {}),
       });
+      // A refused candidate anchor reports itself as the same lost
+      // compare-and-set, because the abort sentinel rolls the batch back the
+      // same way. Name it here: no retry can pass a candidate that a promotion
+      // already retired or a live row that a publish already replaced.
+      const refusal = await sourceAnchorRefusal({
+        candidateProof: context.candidateProof,
+        sourceAnchor,
+        organizationId,
+        scenarioId: scenario.scenarioId,
+      });
+      if (refusal) throw refusal;
       if (attempt < ADMISSION_CAS_ATTEMPTS) {
         continue;
       }
@@ -1160,6 +1344,10 @@ export interface AdmissionCommitInput {
   betaAdmission: BetaAdmissionEpoch;
   /** Administrative proof may admit a run while the cut-over gate is drained. */
   allowDrainedAdminProof?: boolean;
+  /** The candidate proof this run was built from, or null for a live start. */
+  candidateProof?: CandidateProof | null;
+  /** The live-catalog image identity the source read returned, if any. */
+  sourceAnchor?: LiveSourceFingerprint | null;
   now: number;
 }
 
@@ -1206,9 +1394,9 @@ async function commitAdmissionBatch(
   }
   if (rowCount(results[batch.runGateIndex]) === 0) {
     // The run insert selects through the live admission epoch, the enabled
-    // host, the idempotency guard, and the cut-over gate. Zero rows means an
-    // anchor refused and D1 rolled the whole batch back, so report the anchor
-    // that actually refused instead of a generic error.
+    // host, the idempotency guard, the cut-over gate, and the candidate anchor.
+    // Zero rows means an anchor refused and D1 rolled the whole batch back, so
+    // report the anchor that actually refused instead of a generic error.
     return { ok: false, reason: "error", error: await admissionRefusal(input) };
   }
   return { ok: true };
@@ -1231,11 +1419,21 @@ async function runExistsForIdempotencyKey(
 }
 
 /**
- * Names the anchor that refused the run insert. A still-active admission epoch
- * is the only refusal without its own error, so it means the cut-over gate
- * drained inside the commit window.
+ * Names the anchor that refused the run insert. The candidate anchor is the
+ * one refusal that is not about the admission epoch: the candidate row or the
+ * build's artifacts left the read-to-commit window, so the run is refused with
+ * the same error the candidate source read raises. A still-active admission
+ * epoch is the remaining refusal, and it means the cut-over gate drained inside
+ * the commit window.
  */
 async function admissionRefusal(input: AdmissionCommitInput) {
+  const refusal = await sourceAnchorRefusal({
+    candidateProof: input.candidateProof ?? null,
+    sourceAnchor: input.sourceAnchor ?? null,
+    organizationId: input.run.organizationId ?? null,
+    scenarioId: input.run.scenarioId,
+  });
+  if (refusal) throw refusal;
   await assertAdmissionRefusalPriority({
     userId: input.run.userId,
     betaAdmission: input.betaAdmission,
@@ -1244,6 +1442,89 @@ async function admissionRefusal(input: AdmissionCommitInput) {
       : {}),
   });
   return scenarioStartAdmissionChanged();
+}
+
+/**
+ * Names the source anchor that refused the run insert, or null when the source
+ * this start read is still the source its commit would publish. A refused
+ * candidate proof and a replaced live catalog row are both final for this
+ * request: no retry with the same reads can pass, so the caller starts again
+ * against fresh reads.
+ */
+async function sourceAnchorRefusal(input: {
+  candidateProof: CandidateProof | null;
+  sourceAnchor: LiveSourceFingerprint | null;
+  organizationId: string | null;
+  scenarioId: string;
+}): Promise<AppError | null> {
+  if (input.candidateProof) {
+    const holds = await candidateAnchorHolds({
+      organizationId: input.organizationId,
+      scenarioId: input.scenarioId,
+      proof: input.candidateProof,
+    });
+    return holds ? null : scenarioCandidateNotReady();
+  }
+  const anchor = input.sourceAnchor;
+  if (!anchor) return null;
+  const holds = await liveSourceAnchorHolds({
+    scenarioId: input.scenarioId,
+    anchor,
+  });
+  return holds ? null : scenarioSourceChanged();
+}
+
+/**
+ * True when the live catalog still describes the images this start read. It
+ * runs the same SQL condition as the commit batch anchor, so a refusal can
+ * never name a different reason than the one that refused the run insert.
+ */
+async function liveSourceAnchorHolds(input: {
+  scenarioId: string;
+  anchor: LiveSourceFingerprint;
+}): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT " +
+      liveSourceAnchorCondition({
+        scenarioParam: 1,
+        fingerprintParam: 2,
+        countParam: 3,
+      }) +
+      " AS anchored",
+  )
+    .bind(input.scenarioId, input.anchor.json, input.anchor.vmCount)
+    .first<{ anchored: number }>();
+  return row?.anchored === 1;
+}
+
+/**
+ * True when the candidate row and the build of a candidate start are still in
+ * the state the start read from. It runs the same SQL condition as the commit
+ * batch anchor, so a refusal can never name a different reason than the one
+ * that refused the run insert.
+ */
+async function candidateAnchorHolds(
+  input: {
+    organizationId: string | null;
+    scenarioId: string;
+    proof: CandidateProof;
+  },
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT " + candidateAnchorCondition(1) + " AS anchored",
+  )
+    .bind(
+      candidateScenarioId(
+        input.organizationId,
+        input.proof.revision,
+        input.scenarioId,
+      ),
+      input.proof.revision,
+      input.proof.buildId,
+      input.proof.manifestText,
+    )
+    .first<{ anchored: number }>();
+  return row?.anchored === 1;
 }
 
 /**
@@ -1360,6 +1641,96 @@ function drainGateCondition(allowDrainedAdminProof: boolean | undefined) {
         " WHERE gate.key = 'image_cutover' AND gate.state = 'drained')";
 }
 
+/**
+ * The commit anchor of a candidate start, as one SQL condition on four bound
+ * values (candidate id, revision, build id, manifest text) that start at
+ * `startIndex`.
+ *
+ * The shared registry writer of the start serializes the start against the
+ * exclusive collector sweep, but it cannot serialize it against another shared
+ * writer: a promotion that lands between the candidate read and the commit can
+ * retire the candidate row or retire the build's objects, and a republish can
+ * rewrite the manifest of the same candidate row. All three changes make the
+ * committed run launch an image, or a spec, that no reader describes any more,
+ * so the batch re-checks the exact candidate, build, and manifest text it read
+ * from and refuses the run instead.
+ */
+function candidateAnchorCondition(startIndex: number): string {
+  const candidateId = "?" + String(startIndex);
+  const revision = "?" + String(startIndex + 1);
+  const buildId = "?" + String(startIndex + 2);
+  const manifestText = "?" + String(startIndex + 3);
+  return (
+    "EXISTS (SELECT 1 FROM scenario_catalog_candidates candidate" +
+    " WHERE candidate.id = " +
+    candidateId +
+    " AND candidate.revision = " +
+    revision +
+    " AND candidate.build_id = " +
+    buildId +
+    " AND candidate.manifest_json = " +
+    manifestText +
+    " AND EXISTS (SELECT 1 FROM image_builds build" +
+    " WHERE build.id = " +
+    buildId +
+    " AND build.status = 'succeeded'" +
+    " AND build.artifacts_retired_at IS NULL))"
+  );
+}
+
+/**
+ * The commit anchor of a live start, as one SQL condition on three bound values
+ * (scenario id, the fingerprint JSON array, the expected VM count) that start
+ * at the given parameter indices.
+ *
+ * A live catalog row can change under the same scenario id, and the shared
+ * registry writer of the start does not serialize the start against another
+ * shared writer. The anchor therefore re-checks, row for row, that the catalog
+ * still describes the images this run was built from - the image key, the image
+ * id, the chunk manifest, and the boot artifacts - and that the scenario has
+ * the same number of VMs, so a replaced, added, or removed VM refuses the run
+ * instead of committing a launch spec no catalog row describes any more.
+ *
+ * `IS` is SQLite's null-safe comparison, so a legacy image whose chunk manifest
+ * is absent matches an absent manifest instead of failing against NULL.
+ */
+function liveSourceAnchorCondition(input: {
+  scenarioParam: number;
+  fingerprintParam: number;
+  countParam: number;
+}): string {
+  const scenario = "?" + String(input.scenarioParam);
+  const fingerprint = "?" + String(input.fingerprintParam);
+  const count = "?" + String(input.countParam);
+  return (
+    "(SELECT COUNT(*) FROM vm_scenario_vms vm" +
+    " WHERE vm.scenario_id = " +
+    scenario +
+    " AND EXISTS (SELECT 1 FROM json_each(" +
+    fingerprint +
+    ") expected" +
+    " WHERE json_extract(expected.value, '$.name') IS vm.vm_name" +
+    " AND json_extract(expected.value, '$.keyScenario')" +
+    " IS json_extract(vm.image_key_json, '$.scenario')" +
+    " AND json_extract(expected.value, '$.keyVm')" +
+    " IS json_extract(vm.image_key_json, '$.vm')" +
+    " AND json_extract(expected.value, '$.keyArch')" +
+    " IS json_extract(vm.image_key_json, '$.arch')" +
+    " AND json_extract(expected.value, '$.imageId') IS vm.image_sha256" +
+    " AND json_extract(expected.value, '$.manifest')" +
+    " IS vm.chunk_manifest_sha256" +
+    " AND json_extract(expected.value, '$.kernel') IS vm.kernel_sha256" +
+    " AND json_extract(expected.value, '$.initrd') IS vm.initrd_sha256))" +
+    " = " +
+    count +
+    " AND (SELECT COUNT(*) FROM vm_scenario_vms vm" +
+    " WHERE vm.scenario_id = " +
+    scenario +
+    ") = " +
+    count
+  );
+}
+
 function insertRunStatement(
   run: typeof scenarioRuns.$inferInsert & { hostId: string },
   input: AdmissionCommitInput,
@@ -1415,6 +1786,34 @@ function insertRunStatement(
   const inviteParam = values.length + 4;
   const leaseParam = values.length + 5;
   const grantedAtParam = values.length + 6;
+  const candidateParam = values.length + 7;
+  const candidateProof = input.candidateProof;
+  const sourceAnchor = input.sourceAnchor ?? null;
+  const anchorCondition = candidateProof
+    ? candidateAnchorCondition(candidateParam)
+    : sourceAnchor
+      ? liveSourceAnchorCondition({
+          // The scenario id is already bound for the insert's own columns, so
+          // the anchor reuses that parameter instead of adding a copy.
+          scenarioParam: RUN_INSERT_COLUMNS.indexOf("scenario_id") + 1,
+          fingerprintParam: candidateParam,
+          countParam: candidateParam + 1,
+        })
+      : null;
+  const anchorParams: Array<string | number> = candidateProof
+    ? [
+        candidateScenarioId(
+          run.organizationId ?? null,
+          candidateProof.revision,
+          run.scenarioId,
+        ),
+        candidateProof.revision,
+        candidateProof.buildId,
+        candidateProof.manifestText,
+      ]
+    : sourceAnchor
+      ? [sourceAnchor.json, sourceAnchor.vmCount]
+      : [];
   // host_id is the fifth column and takes the host row id, so the host join
   // supplies that one expression and the bound values supply the rest.
   const hostIdColumnIndex = RUN_INSERT_COLUMNS.indexOf("host_id");
@@ -1438,6 +1837,7 @@ function insertRunStatement(
     String(organizationParam) +
     ")" +
     drainGateCondition(input.allowDrainedAdminProof) +
+    (anchorCondition ? " AND " + anchorCondition : "") +
     " AND EXISTS (SELECT 1 FROM access_allowlist access" +
     " WHERE access.user_id = ?" +
     String(userParam) +
@@ -1458,6 +1858,7 @@ function insertRunStatement(
     betaAdmission.sourceInviteId,
     betaAdmission.sourceLeaseId,
     betaAdmission.grantedAt,
+    ...anchorParams,
   );
 }
 

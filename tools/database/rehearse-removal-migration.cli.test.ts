@@ -27,7 +27,7 @@ describe("rehearsal entrypoint", () => {
           fakeApi,
           entrypoint,
           "--applied",
-          "14",
+          "15",
           "--evidence",
           evidencePath,
         ],
@@ -57,10 +57,10 @@ describe("rehearsal entrypoint", () => {
         foreignKeyViolations: number;
         scenarioCounts: number[];
       };
-      expect(evidence.appliedTags).toEqual(["0014_public_sentry"]);
-      expect(evidence.baselineTags).toHaveLength(14);
-      expect(evidence.appliedMigrationCount).toBe(15);
-      expect(evidence.committedMigrationCount).toBe(15);
+      expect(evidence.appliedTags).toEqual(["0015_parched_captain_marvel"]);
+      expect(evidence.baselineTags).toHaveLength(15);
+      expect(evidence.appliedMigrationCount).toBe(16);
+      expect(evidence.committedMigrationCount).toBe(16);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.scenarioCounts).toEqual([1, 1, 1]);
 
@@ -73,7 +73,7 @@ describe("rehearsal entrypoint", () => {
       // The disposable database is deleted in the entrypoint's finally block,
       // so the run leaves nothing behind.
       expect(log.requests.some((entry) => entry.startsWith("DELETE"))).toBe(true);
-      expect(log.ledgerRows).toBe(15);
+      expect(log.ledgerRows).toBe(16);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

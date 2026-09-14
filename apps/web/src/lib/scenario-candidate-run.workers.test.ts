@@ -420,14 +420,13 @@ describe("candidate scenario proof runs", () => {
       buildCatalogChannel: "live",
     });
 
-    await expect(
-      loadCandidateScenarioRunSource(db, {
-        revision: CANDIDATE_REVISION,
-        buildId: CANDIDATE_BUILD_ID,
-        scenarioId: "broken-nginx",
-        organizationId: null,
-      }),
-    ).resolves.toMatchObject({
+    const source = await loadCandidateScenarioRunSource(db, {
+      revision: CANDIDATE_REVISION,
+      buildId: CANDIDATE_BUILD_ID,
+      scenarioId: "broken-nginx",
+      organizationId: null,
+    });
+    expect(source).toMatchObject({
       candidateSource: {
         revision: CANDIDATE_REVISION,
         buildId: CANDIDATE_BUILD_ID,
@@ -438,6 +437,11 @@ describe("candidate scenario proof runs", () => {
         },
       ],
     });
+    // The commit anchor compares the candidate row with this text, so the read
+    // must hand back the stored bytes and not the parsed manifest.
+    expect(source?.candidateManifestText).toBe(
+      JSON.stringify(candidateManifest()),
+    );
   });
 
   it("rejects a reusable candidate when its source bundle tuple differs", async () => {

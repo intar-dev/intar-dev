@@ -41,6 +41,13 @@
       "bucket_name": "intar-dev-local-run-artifacts",
     },
   ],
+  "services": [
+    {
+      "binding": "REGISTRY_CLEANUP",
+      "service": "intar-dev-image-registry-cleanup-local",
+      "entrypoint": "RegistryCleanup",
+    },
+  ],
   "flagship": [
     {
       "binding": "FLAGS",

@@ -1,23 +1,40 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
+  ACTIVE_RUNTIME_EXECUTION_STATES,
   agentHosts,
   hostActualState,
   imageBuilds,
-  scenarioCatalogCandidates,
 } from "@/db/schema";
 import type { ImageBuildBundleMeta } from "@/db/schema";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
+import { AppError, appError } from "@/lib/app-error";
 import {
   loadOrCreateHostDesiredState,
   mutateStoredHostDesiredState,
 } from "@/lib/desired-state-store";
+import { loadRetiredBuildIds } from "@/lib/image-artifact-retention";
 import { upsertDesiredCachedImage } from "@/lib/desired-state";
 import {
   applyLecturePresentation,
   findCourseLecturePresentation,
 } from "@/lib/course-catalogs";
 
+/**
+ * Stages one candidate scenario row.
+ *
+ * The row is not only the publish intent: it is the manifest reader of a
+ * candidate start and the retention root of the build objects that start
+ * launches. A rewrite of the row for the same id therefore changes what a run
+ * in flight reads and what the artifact collector keeps for it.
+ *
+ * The refusal is part of the write, not a read before it: a start commits its
+ * runtime execution and its run row in one batch, so a row that looks free
+ * before this statement can be read by a run again after it. The statement
+ * inserts only while no run in an active execution state reads the row, and it
+ * updates only a row whose payload really differs. An identical replay writes
+ * nothing, so it neither changes the reader nor moves the staged timestamp.
+ */
 export async function stageCandidateScenarioManifest(
   db: DrizzleD1Database,
   input: {
@@ -33,26 +50,81 @@ export async function stageCandidateScenarioManifest(
     input.revision,
     input.manifest.scenario_id,
   );
-  await db
-    .insert(scenarioCatalogCandidates)
-    .values({
-      id,
-      revision: input.revision,
-      organizationId: input.organizationId,
-      scenarioId: input.manifest.scenario_id,
-      buildId: input.buildId,
-      manifestJson: input.manifest,
-      createdAt: input.nowUnixMs,
-      updatedAt: input.nowUnixMs,
-    })
-    .onConflictDoUpdate({
-      target: scenarioCatalogCandidates.id,
-      set: {
-        buildId: input.buildId,
-        manifestJson: input.manifest,
-        updatedAt: input.nowUnixMs,
-      },
-    });
+  const scenarioId = input.manifest.scenario_id;
+  const manifestJson = JSON.stringify(input.manifest);
+  // The same authority the retention policy and the outgoing-reference check
+  // read, rendered as bound values so the guard and the policy cannot drift.
+  const activeExecutionStates = sql.join(
+    ACTIVE_RUNTIME_EXECUTION_STATES.map((state) => sql`${state}`),
+    sql`, `,
+  );
+  const written = await db.all<{ id: string }>(sql`
+    INSERT INTO scenario_catalog_candidates (
+      id, revision, organization_id, scenario_id, build_id, manifest_json,
+      created_at, updated_at
+    )
+    SELECT ${id}, ${input.revision}, ${input.organizationId}, ${scenarioId},
+           ${input.buildId}, ${manifestJson}, ${input.nowUnixMs}, ${input.nowUnixMs}
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM scenario_runs run
+      JOIN runtime_executions execution
+        ON execution.id = run.runtime_execution_id
+      WHERE run.scenario_id = ${scenarioId}
+        AND run.organization_id IS ${input.organizationId}
+        AND json_extract(run.request_scope_json, '$.candidateRevision') = ${input.revision}
+        AND execution.state IN (${activeExecutionStates})
+        AND NOT EXISTS (
+          SELECT 1
+          FROM scenario_catalog_candidates staged
+          WHERE staged.id = ${id}
+            AND staged.build_id IS ${input.buildId}
+            AND staged.manifest_json IS ${manifestJson}
+        )
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      build_id = excluded.build_id,
+      manifest_json = excluded.manifest_json,
+      updated_at = excluded.updated_at
+    WHERE scenario_catalog_candidates.build_id IS NOT excluded.build_id
+       OR scenario_catalog_candidates.manifest_json IS NOT excluded.manifest_json
+    RETURNING id
+  `);
+  if (written.length > 0) return;
+  // Nothing was written: the row either already holds this exact payload, which
+  // is an identical replay, or the guard refused a change while a run still
+  // reads the row.
+  const staged = await db.get<{ buildId: string; manifestJson: string }>(sql`
+    SELECT build_id AS buildId, manifest_json AS manifestJson
+    FROM scenario_catalog_candidates
+    WHERE id = ${id}
+  `);
+  if (
+    staged?.buildId !== input.buildId ||
+    staged.manifestJson !== manifestJson
+  ) {
+    // The refused publish fails instead of reporting a success that did not
+    // land: the row keeps the manifest the active run reads, and the caller can
+    // stage the same revision again once that run has finished.
+    throw appError(
+      409,
+      "candidate_source_locked",
+      "an active run still reads this candidate scenario; the staged manifest was not changed",
+    );
+  }
+}
+
+/**
+ * True when the error is the refusal of a candidate source rewrite.
+ *
+ * It is a settled refusal and never an unknown write: one conditional
+ * statement proved that no row changed, so the caller answers this exact 409
+ * and settles its registry writer. Left as a hold instead, the row would block
+ * every destructive sweep until an operator reap, for a refusal that no retry
+ * can change.
+ */
+export function isCandidateSourceLocked(error: unknown): boolean {
+  return error instanceof AppError && error.code === "candidate_source_locked";
 }
 
 export async function warmCandidateScenarioManifest(
@@ -199,6 +271,12 @@ export async function stageReusableCandidateManifests(
     })
     .from(imageBuilds)
     .where(inArray(imageBuilds.contentHash, hashes));
+  // A retired build keeps its audit row but has no artifacts left, so it must
+  // never be staged as a reusable candidate. The next bundle queues a rebuild.
+  const retiredBuildIds = await loadRetiredBuildIds(
+    db,
+    builds.map((build) => build.id),
+  );
   const staged: string[] = [];
   const manifests: ScenarioManifestV4[] = [];
   for (const expected of input.meta.scenarios) {
@@ -208,6 +286,7 @@ export async function stageReusableCandidateManifests(
         candidate.arch === expected.arch &&
         candidate.contentHash === expected.contentHash &&
         candidate.status === "succeeded" &&
+        !retiredBuildIds.has(candidate.id) &&
         candidate.manifest,
     );
     if (!build?.manifest) continue;

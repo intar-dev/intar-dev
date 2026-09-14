@@ -24,6 +24,13 @@ import {
   type ImageBuildBundleMeta,
   type ImageBuildStatus,
   type ImageBuildTimings,
+  type ImageRegistryEnforcementMode,
+  type ImageRegistryGateState,
+  type ImageRegistryGcRunState,
+  type ImageRegistryOperationKind,
+  type ImageRegistrySessionOwnerKind,
+  type ImageRegistrySessionState,
+  type ImageRegistryWriterOutcome,
   jsonText,
   nowMsDefault,
 } from "./shared";
@@ -122,6 +129,11 @@ export const imageBuilds = sqliteTable(
     publishedManifestJson: jsonText<ScenarioManifestV4>(
       "published_manifest_json",
     ),
+    /**
+     * Set when the catalog policy retires this build's objects. A build whose
+     * artifacts are retired is no longer a reason to keep its R2 objects.
+     */
+    artifactsRetiredAt: integer("artifacts_retired_at"),
     timingsJson: jsonText<ImageBuildTimings>("timings_json")
       .default({})
       .notNull(),
@@ -258,5 +270,142 @@ export const agentBootstrapTokens = sqliteTable(
   (table) => [
     index("agent_bootstrap_tokens_host_idx").on(table.hostId),
     index("agent_bootstrap_tokens_hash_idx").on(table.tokenHash),
+  ],
+);
+
+/**
+ * Single gate row for the image registry. Shared writers (uploads, publishes,
+ * catalog pointer mutations) and one exclusive collector sweep cannot overlap.
+ * The epoch moves every time a sweep starts, so a request that was already in
+ * flight when the sweep began is rejected instead of continuing.
+ */
+export const imageRegistryAdmission = sqliteTable("image_registry_admission", {
+  key: text("key").primaryKey(),
+  protocolVersion: integer("protocol_version").notNull(),
+  enforcement: text("enforcement")
+    .$type<ImageRegistryEnforcementMode>()
+    .default("report_only")
+    .notNull(),
+  epoch: integer("epoch").default(0).notNull(),
+  state: text("state").$type<ImageRegistryGateState>().default("open").notNull(),
+  sweepToken: text("sweep_token"),
+  sweepOwner: text("sweep_owner"),
+  sweepStartedAt: integer("sweep_started_at"),
+  sweepHeartbeatAt: integer("sweep_heartbeat_at"),
+  sweepExpiresAt: integer("sweep_expires_at"),
+  pauseReason: text("pause_reason"),
+  pausedAt: integer("paused_at"),
+  updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+});
+
+/**
+ * Upload session: the protection window that starts at the first
+ * `image-chunks/exists` probe and ends when the uploader publishes or gives up.
+ * An open session blocks a destructive sweep until it is completed, abandoned
+ * or deliberately reaped by an operator.
+ */
+export const imageRegistryUploadSessions = sqliteTable(
+  "image_registry_upload_sessions",
+  {
+    id: text("id").primaryKey(),
+    ownerKind: text("owner_kind")
+      .$type<ImageRegistrySessionOwnerKind>()
+      .notNull(),
+    ownerId: text("owner_id").notNull(),
+    intent: text("intent"),
+    epoch: integer("epoch").notNull(),
+    state: text("state")
+      .$type<ImageRegistrySessionState>()
+      .default("open")
+      .notNull(),
+    createdAt: integer("created_at").notNull(),
+    heartbeatAt: integer("heartbeat_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    closedAt: integer("closed_at"),
+    closeReason: text("close_reason"),
+  },
+  (table) => [
+    index("image_registry_upload_sessions_state_idx").on(
+      table.state,
+      table.expiresAt,
+    ),
+    index("image_registry_upload_sessions_owner_idx").on(
+      table.ownerKind,
+      table.ownerId,
+      table.state,
+    ),
+  ],
+);
+
+/**
+ * One row per admitted registry operation. A row that is never released cannot
+ * be resolved by a timeout: it blocks the destructive sweep until an operator
+ * reaps it, so an interrupted write can never be silently ignored.
+ */
+export const imageRegistryOperationWriters = sqliteTable(
+  "image_registry_operation_writers",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").references(
+      () => imageRegistryUploadSessions.id,
+      { onDelete: "set null" },
+    ),
+    ownerKind: text("owner_kind")
+      // A writer row is either a credential holder (the same kinds an upload
+      // session uses) or the trusted `system` identity of an internal
+      // parent-Worker window such as a learner run start.
+      .$type<ImageRegistrySessionOwnerKind | "system">()
+      .notNull(),
+    ownerId: text("owner_id").notNull(),
+    operation: text("operation").$type<ImageRegistryOperationKind>().notNull(),
+    epoch: integer("epoch").notNull(),
+    outcome: text("outcome")
+      .$type<ImageRegistryWriterOutcome>()
+      .default("pending")
+      .notNull(),
+    createdAt: integer("created_at").notNull(),
+    heartbeatAt: integer("heartbeat_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    releasedAt: integer("released_at"),
+  },
+  (table) => [
+    index("image_registry_operation_writers_open_idx").on(
+      table.releasedAt,
+      table.expiresAt,
+    ),
+    index("image_registry_operation_writers_session_idx").on(table.sessionId),
+    index("image_registry_operation_writers_operation_idx").on(
+      table.operation,
+      table.createdAt,
+    ),
+  ],
+);
+
+/**
+ * Collector run progress. Exactly one run is `running` per active sweep; the
+ * counters only move forward so a retried progress report cannot lose work.
+ */
+export const imageRegistryGcRuns = sqliteTable(
+  "image_registry_gc_runs",
+  {
+    id: text("id").primaryKey(),
+    owner: text("owner").notNull(),
+    sweepToken: text("sweep_token").notNull(),
+    state: text("state").$type<ImageRegistryGcRunState>().default("running").notNull(),
+    startedAt: integer("started_at").notNull(),
+    heartbeatAt: integer("heartbeat_at").notNull(),
+    finishedAt: integer("finished_at"),
+    scannedObjects: integer("scanned_objects").default(0).notNull(),
+    deletedObjects: integer("deleted_objects").default(0).notNull(),
+    blockedObjects: integer("blocked_objects").default(0).notNull(),
+    bytesReclaimed: integer("bytes_reclaimed").default(0).notNull(),
+    error: text("error"),
+    detailJson: jsonText<Record<string, unknown>>("detail_json"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("image_registry_gc_runs_sweep_uidx").on(table.sweepToken),
+    index("image_registry_gc_runs_state_idx").on(table.state, table.startedAt),
   ],
 );

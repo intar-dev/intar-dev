@@ -4,6 +4,68 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/host-runtime-wake", () => ({
   tryWakeHostRuntime: vi.fn().mockResolvedValue(undefined),
 }));
+// Admission is a D1 boundary covered by the Workers tests. This file checks the
+// chunk protocol, so it stubs the same credential rules and admits every write.
+vi.mock("@/lib/image-registry-admission", () => ({
+  REGISTRY_SESSION_HEADER: "x-intar-registry-session",
+  REGISTRY_ADMISSION_PROTOCOL_VERSION: 1,
+  REGISTRY_SESSION_LEASE_MS: 600_000,
+  REGISTRY_OPERATION_LEASE_MS: 300_000,
+  REGISTRY_SWEEP_LEASE_MS: 300_000,
+  REGISTRY_HEARTBEAT_INTERVAL_MS: 30_000,
+  readRegistrySessionId: () => null,
+  readRegistryAuth: async (request: Request, env: Cloudflare.Env) => {
+    const expected = env.REGISTRY_PUBLISH_TOKEN?.trim();
+    const header = request.headers.get("authorization") ?? "";
+    const bearer = header.startsWith("Bearer ")
+      ? header.slice("Bearer ".length).trim()
+      : "";
+    return expected && bearer === expected
+      ? { ok: true, owner: { kind: "publish_token", id: "publish-token" } }
+      : {
+          ok: false,
+          response: new Response(JSON.stringify({ error: "unauthorized" }), {
+            status: 401,
+          }),
+        };
+  },
+  admitRegistryOperation: async () => ({
+    ok: true,
+    lease: {
+      operationId: "test-registry-operation",
+      sessionId: null,
+      epoch: 0,
+      complete: async () => {},
+    },
+  }),
+  readRegistryAdmissionState: async () => ({
+    protocolVersion: 1,
+    enforcement: "report_only",
+    epoch: 0,
+    state: "open",
+    sweep: {
+      active: false,
+      token: null,
+      owner: null,
+      startedAtMs: null,
+      heartbeatAtMs: null,
+      expiresAtMs: null,
+    },
+    counts: {
+      openSessions: 0,
+      staleOpenSessions: 0,
+      pendingWriters: 0,
+      stalePendingWriters: 0,
+      unknownWriters: 0,
+    },
+  }),
+  createRegistryUploadSession: vi.fn(),
+  heartbeatRegistryUploadSession: vi.fn(),
+  completeRegistryUploadSession: vi.fn(),
+  reapRegistryAdmission: vi.fn(),
+  registryAdmissionBlockedReason: () => null,
+  setRegistryEnforcement: vi.fn(),
+}));
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 
 describe("chunked image registry", () => {

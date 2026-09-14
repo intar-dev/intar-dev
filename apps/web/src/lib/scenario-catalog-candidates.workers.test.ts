@@ -10,6 +10,7 @@ import {
   hostDesiredState,
   imageBuildBundles,
   imageBuilds,
+  organization,
   scenarioCatalogCandidates,
   user,
   type ImageBuildBundleMeta,
@@ -18,7 +19,11 @@ import type { HostStateReportV2 } from "@/generated/bridge";
 import type { ScenarioManifestV4 } from "@/generated/catalog";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
-import { stageReusableCandidateManifests } from "@/lib/scenario-catalog-candidates";
+import {
+  candidateScenarioId,
+  stageCandidateScenarioManifest,
+  stageReusableCandidateManifests,
+} from "@/lib/scenario-catalog-candidates";
 import { resetD1Database } from "@/test/d1-migrations";
 
 const contentHash = "a".repeat(64);
@@ -154,6 +159,298 @@ describe("reused candidate presentation", () => {
     expect(desired?.state.cached_images).toHaveLength(13);
   });
 });
+
+const GUARD_SCENARIO_ID = "guarded-task";
+const GUARD_REVISION = "guarded-revision";
+const GUARD_BUILD_ID = "guarded-build";
+const OTHER_ORGANIZATION_ID = "guarded-other-organization";
+/** The staged timestamp the guard must leave alone when it refuses or replays. */
+const STAGED_AT = 1_000;
+
+describe("candidate source guard", () => {
+  beforeEach(resetD1Database);
+
+  it("refuses a changed manifest while an active run reads the row", async () => {
+    const db = drizzle(env.DB);
+    const manifest = technicalManifest(GUARD_SCENARIO_ID);
+    await seedStagedCandidate({ revision: GUARD_REVISION, manifest });
+    await seedCandidateRun({
+      revision: GUARD_REVISION,
+      scenarioId: GUARD_SCENARIO_ID,
+      organizationId: null,
+      executionState: "provisioning",
+    });
+
+    await expect(
+      stageCandidateScenarioManifest(db, {
+        revision: GUARD_REVISION,
+        organizationId: null,
+        buildId: GUARD_BUILD_ID,
+        manifest: { ...manifest, title: "Changed title" },
+        nowUnixMs: STAGED_AT + 1,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "candidate_source_locked",
+    });
+
+    // The reader and the retention root of the run are byte for byte what the
+    // run read: a refused publish changes neither the manifest nor its stamp.
+    await expect(loadStagedCandidate(GUARD_REVISION)).resolves.toMatchObject({
+      buildId: GUARD_BUILD_ID,
+      manifestJson: manifest,
+      updatedAt: STAGED_AT,
+    });
+  });
+
+  it("allows an identical replay and leaves the row untouched", async () => {
+    const db = drizzle(env.DB);
+    const manifest = technicalManifest(GUARD_SCENARIO_ID);
+    await seedStagedCandidate({ revision: GUARD_REVISION, manifest });
+    await seedCandidateRun({
+      revision: GUARD_REVISION,
+      scenarioId: GUARD_SCENARIO_ID,
+      organizationId: null,
+      executionState: "ready",
+    });
+
+    await expect(
+      stageCandidateScenarioManifest(db, {
+        revision: GUARD_REVISION,
+        organizationId: null,
+        buildId: GUARD_BUILD_ID,
+        manifest,
+        nowUnixMs: STAGED_AT + 1,
+      }),
+    ).resolves.toBeUndefined();
+
+    await expect(loadStagedCandidate(GUARD_REVISION)).resolves.toMatchObject({
+      buildId: GUARD_BUILD_ID,
+      manifestJson: manifest,
+      updatedAt: STAGED_AT,
+    });
+  });
+
+  it("allows a changed manifest when no active run reads the row", async () => {
+    const db = drizzle(env.DB);
+    await seedOrganization(OTHER_ORGANIZATION_ID);
+    const cases: Array<{
+      name: string;
+      run: null | {
+        executionState: string;
+        revision?: string;
+        scenarioId: string;
+        organizationId: string | null;
+      };
+    }> = [
+      { name: "no run", run: null },
+      {
+        name: "another candidate revision",
+        run: {
+          executionState: "provisioning",
+          revision: "other-revision",
+          scenarioId: GUARD_SCENARIO_ID,
+          organizationId: null,
+        },
+      },
+      {
+        name: "another scenario",
+        run: {
+          executionState: "provisioning",
+          scenarioId: "other-scenario",
+          organizationId: null,
+        },
+      },
+      {
+        name: "another organization",
+        run: {
+          executionState: "provisioning",
+          scenarioId: GUARD_SCENARIO_ID,
+          organizationId: OTHER_ORGANIZATION_ID,
+        },
+      },
+      {
+        name: "a run that already finished archiving",
+        run: {
+          executionState: "archived",
+          scenarioId: GUARD_SCENARIO_ID,
+          organizationId: null,
+        },
+      },
+      {
+        name: "a failed run",
+        run: {
+          executionState: "failed",
+          scenarioId: GUARD_SCENARIO_ID,
+          organizationId: null,
+        },
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const revision = `${GUARD_REVISION}-${index}`;
+      const manifest = technicalManifest(GUARD_SCENARIO_ID);
+      await seedStagedCandidate({ revision, manifest });
+      const run = testCase.run;
+      if (run) {
+        await seedCandidateRun({
+          executionState: run.executionState,
+          revision: run.revision ?? revision,
+          scenarioId: run.scenarioId,
+          organizationId: run.organizationId,
+        });
+      }
+
+      const changed = { ...manifest, title: `changed-${index}` };
+      await expect(
+        stageCandidateScenarioManifest(db, {
+          revision,
+          organizationId: null,
+          buildId: `${GUARD_BUILD_ID}-${index}`,
+          manifest: changed,
+          nowUnixMs: STAGED_AT + 1,
+        }),
+        testCase.name,
+      ).resolves.toBeUndefined();
+
+      await expect(loadStagedCandidate(revision)).resolves.toMatchObject({
+        buildId: `${GUARD_BUILD_ID}-${index}`,
+        manifestJson: changed,
+        updatedAt: STAGED_AT + 1,
+      });
+    }
+  });
+
+  it("leaves no row behind when a run appears before the first stage", async () => {
+    const db = drizzle(env.DB);
+    await seedCandidateRun({
+      revision: GUARD_REVISION,
+      scenarioId: GUARD_SCENARIO_ID,
+      organizationId: null,
+      executionState: "queued",
+    });
+
+    await expect(
+      stageCandidateScenarioManifest(db, {
+        revision: GUARD_REVISION,
+        organizationId: null,
+        buildId: GUARD_BUILD_ID,
+        manifest: technicalManifest(GUARD_SCENARIO_ID),
+        nowUnixMs: STAGED_AT,
+      }),
+    ).rejects.toMatchObject({ code: "candidate_source_locked" });
+
+    await expect(loadStagedCandidate(GUARD_REVISION)).resolves.toBeUndefined();
+  });
+});
+
+/** The staged row as the guard's comparison and the callers read it. */
+async function loadStagedCandidate(revision: string) {
+  const rows = await drizzle(env.DB)
+    .select({
+      buildId: scenarioCatalogCandidates.buildId,
+      manifestJson: scenarioCatalogCandidates.manifestJson,
+      updatedAt: scenarioCatalogCandidates.updatedAt,
+    })
+    .from(scenarioCatalogCandidates)
+    .where(
+      eq(
+        scenarioCatalogCandidates.id,
+        candidateScenarioId(null, revision, GUARD_SCENARIO_ID),
+      ),
+    );
+  return rows[0];
+}
+
+async function seedOrganization(organizationId: string): Promise<void> {
+  await drizzle(env.DB).insert(organization).values({
+    id: organizationId,
+    name: organizationId,
+    slug: organizationId,
+    createdAt: new Date(STAGED_AT),
+  });
+}
+
+async function seedStagedCandidate(input: {
+  revision: string;
+  manifest: ScenarioManifestV4;
+}): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO scenario_catalog_candidates (id, revision, organization_id, scenario_id, build_id, manifest_json, created_at, updated_at)" +
+      " VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?6)",
+  )
+    .bind(
+      candidateScenarioId(null, input.revision, input.manifest.scenario_id),
+      input.revision,
+      input.manifest.scenario_id,
+      GUARD_BUILD_ID,
+      JSON.stringify(input.manifest),
+      STAGED_AT,
+    )
+    .run();
+}
+
+/**
+ * Seeds one run of a candidate revision in the runtime execution state the
+ * guard reads. The run, its execution, its host, and its user are all required:
+ * the retention policy resolves an active candidate from the same rows.
+ */
+async function seedCandidateRun(input: {
+  revision: string;
+  scenarioId: string;
+  organizationId: string | null;
+  executionState: string;
+}): Promise<void> {
+  const now = Date.now();
+  const suffix = `${input.executionState}:${input.organizationId ?? "public"}:${input.scenarioId}:${input.revision}`;
+  const userId = `guard-user:${suffix}`;
+  const hostId = `guard-host:${suffix}`;
+  const executionId = `guard-execution:${suffix}`;
+  const runId = `guard-run:${suffix}`;
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO \"user\" (id, name, email, email_verified, created_at, updated_at)" +
+        " VALUES (?1, ?1, ?1 || '@example.test', 1, ?2, ?2)",
+    ).bind(userId, now),
+    env.DB.prepare(
+      "INSERT INTO agent_hosts (id, user_id, name, created_at, updated_at)" +
+        " VALUES (?1, ?2, ?1, ?3, ?3)",
+    ).bind(hostId, userId, now),
+    env.DB.prepare(
+      "INSERT INTO runtime_executions (id, user_id, organization_id, host_id, provider_kind, domain_kind, domain_id, generation, state, created_at, updated_at)" +
+        " VALUES (?1, ?2, ?3, ?4, 'agent_kvm', 'scenario', ?5, 1, ?6, ?7, ?7)",
+    ).bind(
+      executionId,
+      userId,
+      input.organizationId,
+      hostId,
+      runId,
+      input.executionState,
+      now,
+    ),
+    env.DB.prepare(
+      "INSERT INTO scenario_runs (run_id, user_id, organization_id, runtime_execution_id, host_id, scenario_id, scenario_name, title, tagline, briefing_markdown, objectives_json, difficulty, estimated_minutes, tags_json, hints_json, solution_markdown, vm_count, state, state_rank, request_scope_json, state_json, created_at, updated_at)" +
+        " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, '', '', '[]', 'easy', 10, '[]', '[]', '', 1, 'provisioning', 1, ?7, '{}', ?8, ?8)",
+    ).bind(
+      runId,
+      userId,
+      input.organizationId,
+      executionId,
+      hostId,
+      input.scenarioId,
+      JSON.stringify({
+        scenarioId: input.scenarioId,
+        organizationId: input.organizationId,
+        hostId: null,
+        candidateRevision: input.revision,
+        candidateBuildId: GUARD_BUILD_ID,
+        allowDrainedAdminProof: true,
+        allowSequenceBypass: false,
+      }),
+      now,
+    ),
+  ]);
+}
 
 async function seedReusedBuilds(
   db: ReturnType<typeof drizzle>,

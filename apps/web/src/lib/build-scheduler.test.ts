@@ -521,6 +521,8 @@ function queueSchedulerDb(input: {
   const cleanupReturning = vi.fn(() => ({ kind: "cleanup-desired" }));
   const cleanupWhere = vi.fn(() => ({ returning: cleanupReturning }));
   const retireWhere = vi.fn(() => ({ kind: "retire-builds" }));
+  // The revival clears a retirement marker after the queue batch commits.
+  const reactivateWhere = vi.fn(() => ({ kind: "reactivate-builds" }));
   const update = vi
     .fn()
     .mockReturnValueOnce({
@@ -528,6 +530,9 @@ function queueSchedulerDb(input: {
     })
     .mockReturnValueOnce({
       set: vi.fn(() => ({ where: retireWhere })),
+    })
+    .mockReturnValue({
+      set: vi.fn(() => ({ where: reactivateWhere })),
     });
   const batch = vi
     .fn()

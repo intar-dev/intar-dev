@@ -1,5 +1,5 @@
 import { traceOperation } from "./tracing";
-import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   agentHosts,
@@ -115,6 +115,9 @@ async function queueImageBuildScenario(
     lastReportAt: null,
   };
   const cleanupBuildIds = supersessionCleanupBuildIds(input);
+  // A retired row keeps its audit history but holds no artifacts. A bundle that
+  // names the same content hash again must rebuild it, not report it as done.
+  const retiredPredicate = sql`${imageBuilds.artifactsRetiredAt} is not null`;
   const cleanedBuilds = sql`coalesce(
     (
       select json_group_array(json(desired_build.value))
@@ -215,13 +218,30 @@ async function queueImageBuildScenario(
           timingsJson: timings,
           updatedAt: input.nowUnixMs,
         },
-        setWhere: inArray(imageBuilds.status, ["failed", "stale"]),
+        setWhere:
+          or(inArray(imageBuilds.status, ["failed", "stale"]), retiredPredicate) ??
+          retiredPredicate,
       })
       .returning({ id: imageBuilds.id }),
   ]);
 
+  const queuedIds = queuedRows.map(({ id }) => id);
+  // A revived row must be an active pointer again: its artifacts may have been
+  // deleted when an earlier generation retired it.
+  if (queuedIds.length) {
+    await db
+      .update(imageBuilds)
+      .set({ artifactsRetiredAt: null, updatedAt: input.nowUnixMs })
+      .where(
+        and(
+          inArray(imageBuilds.id, queuedIds),
+          isNotNull(imageBuilds.artifactsRetiredAt),
+        ),
+      );
+  }
+
   return {
-    queued: queuedRows.length,
+    queued: queuedIds.length,
     cleanedHostIds: cleanedHosts.map(({ hostId }) => hostId),
   };
 }

@@ -91,13 +91,48 @@ jobs:
         run: |
           set -euo pipefail
           response="${RUNNER_TEMP}/catalog-promotion.json"
-          curl --fail --silent --show-error --retry 3 \
-            --request POST \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            --header "x-intar-drained: true" \
-            "https://intar.dev/registry/v1/catalog/promote/${REVISION}" \
-            > "${response}"
-          jq -e '.ok == true and .revision == env.REVISION' "${response}" >/dev/null
+          # The promotion endpoint deletes the retired registry artifacts before
+          # it reports success, and it answers 503 with catalog_promoted true and
+          # retry true while that cleanup still runs. This lane repeats the call
+          # until the endpoint reports completion, so the run that opens the
+          # fleet gate afterwards never starts on unfinished cleanup.
+          for attempt in $(seq 1 60); do
+            status="$(curl --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              --header "x-intar-drained: true" \
+              --output "${response}" --write-out '%{http_code}' \
+              "https://intar.dev/registry/v1/catalog/promote/${REVISION}" || true)"
+            if [ "${status}" = 200 ] && \
+              jq -e --arg revision "${REVISION}" \
+                '.ok == true and .revision == $revision' "${response}" >/dev/null; then
+              jq -c '{revision, cleanup}' "${response}"
+              exit 0
+            fi
+            if [ "${status}" = 503 ] && \
+              jq -e '.catalog_promoted == true and .retry == true' \
+                "${response}" >/dev/null; then
+              echo "the catalog is promoted and the registry cleanup is still running"
+              jq -c '{cleanup}' "${response}"
+              sleep 15
+              continue
+            fi
+            echo "catalog promotion failed with HTTP ${status}" >&2
+            cat "${response}" >&2
+            exit 1
+          done
+          echo "The registry cleanup did not finish within fifteen minutes." >&2
+          exit 1
+
+      - name: Require the promoted catalog and no pending registry cleanup
+        run: |
+          set -euo pipefail
+          # The promotion above only returns once the retired artifacts are
+          # gone, so a successful promotion is the cleanup proof. This step
+          # records the deleted objects in the run summary.
+          response="${RUNNER_TEMP}/catalog-promotion.json"
+          jq -c '{revision, retired_build_ids: (.retired_build_ids // []), cleanup}' \
+            "${response}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Require promoted catalog and stable tool cache within 60 seconds
         run: |

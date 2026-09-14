@@ -1,19 +1,30 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   imageBuilds,
   type ImageBuildStatus,
 } from "@/db/schema";
-import type { ImageArchitecture } from "@/generated/catalog";
-import { seedScenarioManifest } from "@/lib/catalog-manifest";
+import type {
+  ImageArchitecture,
+  ScenarioManifestV4,
+} from "@/generated/catalog";
 import {
+  isCandidateSourceLocked,
   stageCandidateScenarioManifest,
   warmCandidateScenarioManifest,
 } from "@/lib/scenario-catalog-candidates";
+import { toErrorResponse } from "@/lib/app-error";
 import {
   withImageBuildCoordinationLock,
+  withImageBuildCoordinationLocks,
   type ImageBuildCoordinationLease,
 } from "@/lib/image-build-lock";
+import type { CachedImageRetentionScope } from "@/lib/image-artifact-retention";
+import { pruneSupersededHostCachedImages } from "@/lib/registry-host-cache-eviction";
+import {
+  replaceScenarioCatalogWithRollback,
+  type LiveCatalogReplacement,
+} from "@/lib/scenario-catalog-rollback";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import {
@@ -28,6 +39,11 @@ import {
   storePreparedVmImages,
 } from "./publish-payload";
 import { requireBuilderAgentRequest } from "./agent";
+import {
+  admitRegistryOperation,
+  createRegistryWriterGuard,
+  type RegistryWriterGuard,
+} from "@/lib/image-registry-admission";
 import {
   jsonResponse,
   normalizeSha256,
@@ -49,6 +65,50 @@ export async function handlePublish(
   const authorization = await authorizeManifestPublish(request, env);
   if (!authorization.ok) return authorization.response;
 
+  // A publish is a registry write: it stores images and boot artifacts, then
+  // commits live catalog pointers. It holds a shared writer guard for every one
+  // of those writes, and releases it before the cleanup request below, so the
+  // collector can still take its exclusive sweep while this request finishes.
+  const admitted = await admitRegistryOperation(request, env, {
+    operation: "publish",
+  });
+  if (!admitted.ok) return admitted.response;
+  const writer = createRegistryWriterGuard(admitted.lease);
+  try {
+    const response = await publishManifest(request, env, authorization, writer);
+    // A publish that ends in a known refusal is settled, exactly like the
+    // thrown candidate refusal below. Every store it started was awaited, and
+    // the statement that refused it decided from the same committed state: an
+    // inactive build assignment, or a live catalog whose images an active run
+    // or host transfer still reads. Left unresolved, the row would block every
+    // destructive sweep until an operator reap. A 5xx keeps its hold, because
+    // part of the write may have landed.
+    if (response.status >= 400 && response.status < 500) {
+      await writer.release("ok");
+    }
+    return response;
+  } catch (error) {
+    // A refused candidate source is a settled write, not an unknown one: the
+    // conditional stage proved that no catalog row changed, and every write of
+    // this publish was awaited before it. Settling the guard here is what keeps
+    // the collector reachable; an unresolved row would instead block every
+    // destructive sweep until an operator reap, for a refusal that no retry can
+    // pass while the run that reads the candidate is still active.
+    if (!isCandidateSourceLocked(error)) throw error;
+    await writer.release("ok");
+    const refusal = toErrorResponse(error, "candidate publish refused", 409);
+    return jsonResponse(refusal.body, refusal.status);
+  } finally {
+    await writer.finish();
+  }
+}
+
+async function publishManifest(
+  request: Request,
+  env: Cloudflare.Env,
+  authorization: Extract<ManifestPublishAuthorization, { ok: true }>,
+  writer: RegistryWriterGuard,
+): Promise<Response> {
   let form: FormData;
   try {
     form = await request.formData();
@@ -95,11 +155,20 @@ export async function handlePublish(
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
         catalogChannel: "candidate" | "live";
+        transitionId: string | null;
+        evictedHostIds: string[];
       }
     | { ok: false; response: Response }
   > => {
     let organizationId: string | null = null;
     let catalogChannel: "candidate" | "live" = "live";
+    let liveReplacement:
+      | { ok: true; transitionId: string | null; evictedHostIds: string[] }
+      | { ok: false; response: Response } = {
+      ok: true,
+      transitionId: null,
+      evictedHostIds: [],
+    };
     if (buildFence) {
       const assignment = await loadPublishBuildAssignment(
         db,
@@ -118,6 +187,9 @@ export async function handlePublish(
     const images = await prepareVmImages(env, manifest.value);
     if (!images.ok) return images;
 
+    // Every path that reaches this line can store an object, so a later throw
+    // is a hold rather than a settled end.
+    writer.markWriteStarted();
     await storePreparedBootArtifacts(env, artifacts.prepared);
     const uploaded = await storePreparedVmImages(
       env,
@@ -140,6 +212,8 @@ export async function handlePublish(
 
     const now = Date.now();
     if (buildFence && catalogChannel === "candidate") {
+      // A candidate publish replaces no live catalog, so it records no
+      // rollback: the live pointers it warms are still the live ones.
       await stageCandidateScenarioManifest(db, {
         revision: buildFence.rev,
         organizationId,
@@ -148,12 +222,66 @@ export async function handlePublish(
         nowUnixMs: now,
       });
     } else {
-      await seedScenarioManifest(db, normalizedManifest, {
-        enabled: true,
-        ...(organizationId ? { organizationId } : {}),
-        sourceRevision: buildFence?.rev ?? null,
-        nowUnixMs: now,
-      });
+      // A live publish replaces the catalog pointers. The previous-state read,
+      // the reference policy, the rollback record, the catalog rows, and the
+      // host cache update all run under one per-family lock, so two concurrent
+      // live replacements cannot both capture the same previous state and lose
+      // the release in between.
+      const families = [
+        ...new Set(normalizedManifest.vms.map((vm) => vm.image_key.arch)),
+      ].map((arch) => ({
+        scenarioId: normalizedManifest.scenario_id,
+        arch,
+      }));
+      const applyLiveReplacement = async () => {
+        const replacement = await replaceScenarioCatalogWithRollback(
+          db,
+          env.DB,
+          {
+            manifest: normalizedManifest,
+            organizationId,
+            sourceRevision: buildFence?.rev ?? null,
+            nowUnixMs: now,
+          },
+        );
+        if (replacement.blocked) {
+          return {
+            ok: false as const,
+            response: jsonResponse(
+              {
+                error: "image publish is blocked by active image use",
+                blocking_execution_ids: replacement.blocked.executionIds,
+                blocking_host_ids: replacement.blocked.hostIds,
+                outgoing_image_ids: replacement.outgoingImageIds,
+              },
+              409,
+            ),
+          };
+        }
+        const evicted = await pruneSupersededHostCachedImages(db, {
+          organizationId,
+          scenarios: retentionScopesForReplacement(
+            normalizedManifest,
+            replacement,
+          ),
+          nowUnixMs: now,
+          wakeHost: tryWakeHostRuntime,
+        });
+        return {
+          ok: true as const,
+          transitionId: replacement.transitionId,
+          evictedHostIds: evicted.changedHostIds,
+        };
+      };
+      // The builder path already holds the family lock for its one arch.
+      liveReplacement = lease
+        ? await applyLiveReplacement()
+        : await withImageBuildCoordinationLocks(
+            db,
+            families,
+            applyLiveReplacement,
+          );
+      if (!liveReplacement.ok) return liveReplacement;
     }
     if (buildFence) {
       await db
@@ -175,6 +303,8 @@ export async function handlePublish(
       uploaded,
       artifacts: artifacts.uploaded,
       catalogChannel,
+      transitionId: liveReplacement.ok ? liveReplacement.transitionId : null,
+      evictedHostIds: liveReplacement.ok ? liveReplacement.evictedHostIds : [],
     };
   };
 
@@ -185,6 +315,8 @@ export async function handlePublish(
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
         catalogChannel: "candidate" | "live";
+        transitionId: string | null;
+        evictedHostIds: string[];
       }
     | { ok: false; response: Response };
   if (buildFence) {
@@ -215,6 +347,15 @@ export async function handlePublish(
   }
   if (!published.ok) return published.response;
 
+  // The pointer marker is settled outside the family lock: the batch above is
+  // committed with its rollback record, so the family already has one live
+  // pointer set and one recoverable previous state.
+  const retention = await finishPublishCommit(db, {
+    buildId: buildFence?.buildId ?? null,
+    nowUnixMs: Date.now(),
+    releaseWriter: () => writer.release("ok"),
+  });
+
   if (published.catalogChannel === "candidate") {
     await warmCandidateScenarioManifest(db, {
       organizationId: published.organizationId,
@@ -238,10 +379,94 @@ export async function handlePublish(
       images: published.uploaded,
       artifacts: published.artifacts,
       catalog_channel: published.catalogChannel,
-      pruned: [],
+      transition_id: published.transitionId,
+      evicted_host_ids: published.evictedHostIds,
+      cleanup: retention.cleanup,
     },
     201,
   );
+}
+
+/**
+ * The last step of a publish: a rebuilt content hash becomes an active pointer
+ * again, and the registry writer ends. The family lock is already released, so
+ * the collector can take its exclusive sweep while this request finishes.
+ */
+async function finishPublishCommit(
+  db: DrizzleD1Database,
+  input: {
+    buildId: string | null;
+    nowUnixMs: number;
+    releaseWriter: () => Promise<void>;
+  },
+): Promise<{
+  cleanup: {
+    state: string;
+    deleted_objects: number;
+    deleted_bytes: number;
+    pending: boolean;
+  };
+}> {
+  if (input.buildId) {
+    // Its artifacts may have been deleted when an earlier generation retired
+    // this content hash.
+    await db
+      .update(imageBuilds)
+      .set({ artifactsRetiredAt: null, updatedAt: input.nowUnixMs })
+      .where(
+        and(
+          inArray(imageBuilds.id, [input.buildId]),
+          isNotNull(imageBuilds.artifactsRetiredAt),
+        ),
+      );
+  }
+  await input.releaseWriter();
+  // No sweep is attempted here. The uploader holds its upload session until
+  // this response arrives and the collector refuses its exclusive lease while
+  // any session is open, so a waited sweep would deadlock. The scheduled pass
+  // removes whatever this publish replaced.
+  return {
+    cleanup: {
+      state: "deferred",
+      deleted_objects: 0,
+      deleted_bytes: 0,
+      pending: true,
+    },
+  };
+}
+
+/**
+ * Host cache scopes of one live replacement: keep the incoming live images and
+ * the single rollback image the transition recorded.
+ */
+function retentionScopesForReplacement(
+  manifest: ScenarioManifestV4,
+  replacement: LiveCatalogReplacement,
+): CachedImageRetentionScope[] {
+  const incomingByArch = new Map<string, string[]>();
+  for (const vm of manifest.vms) {
+    const arch = vm.image_key.arch;
+    incomingByArch.set(arch, [...(incomingByArch.get(arch) ?? []), vm.image_id]);
+  }
+  const previousByArch = new Map<string, string[]>();
+  for (const vm of replacement.previous.vms) {
+    const arch = vm.imageKeyJson?.arch;
+    const imageId = vm.imageSha256;
+    if (!arch || !imageId) continue;
+    previousByArch.set(arch, [...(previousByArch.get(arch) ?? []), imageId]);
+  }
+  const scopes: CachedImageRetentionScope[] = [];
+  for (const [arch, incoming] of incomingByArch) {
+    if (!isImageArchitecture(arch)) continue;
+    scopes.push({
+      scenarioId: manifest.scenario_id,
+      arch,
+      keepImageIds: [
+        ...new Set([...incoming, ...(previousByArch.get(arch) ?? [])]),
+      ].sort(),
+    });
+  }
+  return scopes;
 }
 
 export { isRuntimeImageCacheHost } from "@/lib/scenario-image-cache";

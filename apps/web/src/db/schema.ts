@@ -18,6 +18,10 @@ export {
   imageBuildBundles,
   imageBuildCoordinationLocks,
   imageBuilds,
+  imageRegistryAdmission,
+  imageRegistryGcRuns,
+  imageRegistryOperationWriters,
+  imageRegistryUploadSessions,
   runtimeOperationGates,
 } from "./schema/platform";
 export {
@@ -77,6 +81,13 @@ export type {
   ImageBuildBundleMeta,
   ImageBuildStatus,
   ImageBuildTimings,
+  ImageRegistryEnforcementMode,
+  ImageRegistryGateState,
+  ImageRegistryGcRunState,
+  ImageRegistryOperationKind,
+  ImageRegistrySessionOwnerKind,
+  ImageRegistrySessionState,
+  ImageRegistryWriterOutcome,
   CourseCatalogCourseV2,
   CourseCatalogLectureV2,
   CourseCatalogSnapshotV2,
@@ -88,3 +99,4 @@ export type {
   RuntimeExecutionState,
   RuntimeProviderKind,
 } from "./schema/runtime";
+export { ACTIVE_RUNTIME_EXECUTION_STATES } from "./schema/runtime";

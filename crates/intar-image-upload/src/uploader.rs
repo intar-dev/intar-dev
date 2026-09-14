@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use intar_contracts::catalog::{
     ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ScenarioManifestV4,
@@ -13,6 +14,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::config::ImageUploadConfig;
 use crate::error::{Error, Result};
+use crate::session::{
+    BeatFailure, SESSION_COMPLETE_ACTION, SESSION_HEADER, SESSION_HEARTBEAT_ACTION, SESSION_ROUTE,
+    SessionHeartbeat, classify_beat_failure, heartbeat_interval, session_code,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishImageChunkFile {
@@ -133,6 +138,41 @@ impl ImageUploader {
         self.publish_manifest_with_optional_identity(manifest, images, artifacts, Some(identity))
     }
 
+    /// Publish inside the caller-owned session that covered the reusable-chunk
+    /// probe, without restarting it. The caller completes the session itself.
+    /// When the registry stops admitting that session the publish fails with
+    /// the session named, because only the caller can re-probe its own reuse
+    /// decisions.
+    pub fn publish_build_manifest_with_session(
+        &self,
+        manifest: &ScenarioManifestV4,
+        images: &[PublishChunkedImage],
+        artifacts: &[PublishArtifactFile],
+        identity: &PublishBuildIdentity,
+        session: &RegistryUploadSession,
+    ) -> Result<PublishReceipt> {
+        validate_build_identity(identity)?;
+        self.publish_with_session(manifest, images, artifacts, Some(identity), session)
+    }
+
+    fn publish_with_session(
+        &self,
+        manifest: &ScenarioManifestV4,
+        images: &[PublishChunkedImage],
+        artifacts: &[PublishArtifactFile],
+        identity: Option<&PublishBuildIdentity>,
+        session: &RegistryUploadSession,
+    ) -> Result<PublishReceipt> {
+        if images.is_empty() {
+            return Err(Error::InvalidConfig("publish requires at least one image"));
+        }
+        for image in images {
+            validate_chunked_image(manifest, image)?;
+        }
+        let result = self.upload_and_publish(manifest, images, artifacts, identity, session);
+        shared_session_result(session, result)
+    }
+
     fn publish_manifest_with_optional_identity(
         &self,
         manifest: &ScenarioManifestV4,
@@ -146,7 +186,26 @@ impl ImageUploader {
 
         for image in images {
             validate_chunked_image(manifest, image)?;
-            self.upload_chunked_image(image)?;
+        }
+
+        // One session covers the whole upload: the first registry call is the
+        // chunk-existence probe and the last is the stored manifest, so a
+        // concurrent cleanup cannot delete an object this publish still needs.
+        self.with_upload_session("image-publish", |session| {
+            self.upload_and_publish(manifest, images, artifacts, identity, session)
+        })
+    }
+
+    fn upload_and_publish(
+        &self,
+        manifest: &ScenarioManifestV4,
+        images: &[PublishChunkedImage],
+        artifacts: &[PublishArtifactFile],
+        identity: Option<&PublishBuildIdentity>,
+        session: &RegistryUploadSession,
+    ) -> Result<PublishReceipt> {
+        for image in images {
+            self.upload_chunked_image(image, session)?;
         }
         for artifact in artifacts {
             let sha256 = normalize_sha256(&artifact.sha256)?;
@@ -154,9 +213,10 @@ impl ImageUploader {
                 "kind": "artifact",
                 "sha256": sha256,
             });
-            self.upload_blob(&create_body, &artifact.source_path)?;
+            self.upload_blob(&create_body, &artifact.source_path, session)?;
         }
 
+        require_live_session(session)?;
         let mut form = Form::new().text("manifest", serde_json::to_string(manifest)?);
         if let Some(identity) = identity {
             form = form
@@ -172,6 +232,7 @@ impl ImageUploader {
             .client
             .post(self.endpoint.clone())
             .bearer_auth(self.config.token.trim())
+            .header(SESSION_HEADER, &session.id)
             .multipart(form)
             .send()?;
         let status = response.status();
@@ -183,7 +244,11 @@ impl ImageUploader {
         Ok(serde_json::from_str(&body)?)
     }
 
-    fn upload_chunked_image(&self, image: &PublishChunkedImage) -> Result<()> {
+    fn upload_chunked_image(
+        &self,
+        image: &PublishChunkedImage,
+        session: &RegistryUploadSession,
+    ) -> Result<()> {
         let lookups = image
             .chunks
             .iter()
@@ -192,7 +257,7 @@ impl ImageUploader {
                 raw_size_bytes: chunk.raw_size_bytes,
             })
             .collect::<Vec<_>>();
-        let existing = self.find_existing_image_chunks(&lookups)?;
+        let existing = self.find_existing_image_chunks_in_session(&lookups, session)?;
 
         let mut missing_by_hash = BTreeMap::<&str, &PublishImageChunkFile>::new();
         for chunk in &image.chunks {
@@ -216,7 +281,7 @@ impl ImageUploader {
             std::thread::scope(|scope| {
                 let handles = batch
                     .iter()
-                    .map(|chunk| scope.spawn(|| self.upload_image_chunk(chunk)))
+                    .map(|chunk| scope.spawn(|| self.upload_image_chunk(chunk, session)))
                     .collect::<Vec<_>>();
                 for handle in handles {
                     handle.join().map_err(|_| {
@@ -227,6 +292,7 @@ impl ImageUploader {
             })?;
         }
 
+        require_live_session(session)?;
         let manifest_bytes = std::fs::read(&image.chunk_manifest_path).map_err(Error::Io)?;
         let mut url = sibling_endpoint(&self.endpoint, "image-manifests")?;
         url.path_segments_mut()
@@ -238,15 +304,20 @@ impl ImageUploader {
             .bearer_auth(self.config.token.trim())
             .header("content-type", "application/json")
             .header("x-intar-manifest-sha256", &image.chunk_manifest_sha256)
+            .header(SESSION_HEADER, &session.id)
             .body(manifest_bytes)
             .send()?;
         require_success(response)?;
         Ok(())
     }
 
-    pub fn find_existing_image_chunks(
+    /// Probe the chunks the registry already stores inside a caller-owned
+    /// session. Passing the same session to the session-aware publish keeps
+    /// every chunk this probe answered for out of a concurrent cleanup.
+    pub fn find_existing_image_chunks_in_session(
         &self,
         chunks: &[ImageChunkLookup],
+        session: &RegistryUploadSession,
     ) -> Result<BTreeMap<String, ExistingImageChunk>> {
         let mut expected = BTreeMap::new();
         for chunk in chunks {
@@ -269,6 +340,7 @@ impl ImageUploader {
             let response: ExistingChunksResponse = self.post_json(
                 sibling_endpoint(&self.endpoint, "image-chunks/exists")?,
                 &serde_json::json!({ "raw_sha256": batch }),
+                session,
             )?;
             for mut chunk in response.existing {
                 chunk.raw_sha256 = normalize_sha256(&chunk.raw_sha256)?;
@@ -292,15 +364,24 @@ impl ImageUploader {
         Ok(existing)
     }
 
-    fn upload_image_chunk(&self, chunk: &PublishImageChunkFile) -> Result<()> {
+    fn upload_image_chunk(
+        &self,
+        chunk: &PublishImageChunkFile,
+        session: &RegistryUploadSession,
+    ) -> Result<()> {
+        require_live_session(session)?;
         let _permit = CHUNK_UPLOAD_GATE.acquire();
         let mut url = sibling_endpoint(&self.endpoint, "image-chunks")?;
         url.path_segments_mut()
             .map_err(|()| Error::InvalidConfig("publish url cannot be a base URL"))?
             .push(&chunk.raw_sha256);
-        let source_path = chunk.source_path.as_ref().ok_or(Error::InvalidConfig(
-            "missing image chunk has no local payload",
-        ))?;
+        let source_path =
+            chunk
+                .source_path
+                .as_ref()
+                .ok_or_else(|| Error::MissingImageChunkPayload {
+                    raw_sha256: chunk.raw_sha256.clone(),
+                })?;
         let body = std::fs::read(source_path).map_err(Error::Io)?;
         if body.len() as u64 != chunk.encoded_size_bytes {
             return Err(Error::InvalidPath(format!(
@@ -319,14 +400,21 @@ impl ImageUploader {
             .header("x-intar-encoded-sha256", &chunk.encoded_sha256)
             .header("x-intar-raw-size", chunk.raw_size_bytes)
             .header("x-intar-encoded-size", chunk.encoded_size_bytes)
+            .header(SESSION_HEADER, &session.id)
             .body(body)
             .send()?;
         require_success(response)
     }
 
-    fn upload_blob(&self, create_body: &serde_json::Value, source_path: &Path) -> Result<()> {
+    fn upload_blob(
+        &self,
+        create_body: &serde_json::Value,
+        source_path: &Path,
+        session: &RegistryUploadSession,
+    ) -> Result<()> {
         let uploads_url = sibling_endpoint(&self.endpoint, "uploads")?;
-        let create: UploadCreateResponse = self.post_json(uploads_url.clone(), create_body)?;
+        let create: UploadCreateResponse =
+            self.post_json(uploads_url.clone(), create_body, session)?;
         if create.already_exists {
             return Ok(());
         }
@@ -355,6 +443,7 @@ impl ImageUploader {
                 .client
                 .put(part_url)
                 .bearer_auth(self.config.token.trim())
+                .header(SESSION_HEADER, &session.id)
                 .body(chunk)
                 .send()?;
             let status = response.status();
@@ -382,6 +471,7 @@ impl ImageUploader {
                 "upload_id": upload_id,
                 "parts": parts,
             }),
+            session,
         )?;
         Ok(())
     }
@@ -390,11 +480,14 @@ impl ImageUploader {
         &self,
         url: url::Url,
         body: &serde_json::Value,
+        session: &RegistryUploadSession,
     ) -> Result<T> {
+        require_live_session(session)?;
         let response = self
             .client
             .post(url)
             .bearer_auth(self.config.token.trim())
+            .header(SESSION_HEADER, &session.id)
             .json(body)
             .send()?;
         let status = response.status();
@@ -404,6 +497,335 @@ impl ImageUploader {
         }
         Ok(serde_json::from_str(&text)?)
     }
+
+    /// Run one registry upload under a single admission session.
+    ///
+    /// A superseded session protects nothing: the upload is discarded, a fresh
+    /// session is opened, and the work starts again so the chunk-exists probe
+    /// runs before any write. That restart is cheap, because chunks the
+    /// registry already stores come back as existing on the second attempt.
+    fn with_upload_session<T>(
+        &self,
+        intent: &str,
+        work: impl Fn(&RegistryUploadSession) -> Result<T>,
+    ) -> Result<T> {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let session = self.open_upload_session(intent)?;
+            let result = work(&session);
+            let beat = session.heartbeat.stop();
+            let superseded = matches!(beat, Some(BeatFailure::Superseded))
+                || matches!(&result, Err(error) if reports_lost_session(error));
+
+            let outcome = if result.is_ok() {
+                UploadOutcome::Published
+            } else {
+                UploadOutcome::Abandoned
+            };
+            let session_id = session.id.clone();
+            let finish = session.complete(outcome);
+
+            if superseded && result.is_err() && attempt <= SESSION_RESTARTS {
+                continue;
+            }
+            return self.settle_upload_session(session_id, result, beat, finish);
+        }
+    }
+
+    /// Terminate the session and keep the primary result. A failed close is
+    /// reported as its own error, and on the failure path it wraps the upload
+    /// error instead of replacing it.
+    fn settle_upload_session<T>(
+        &self,
+        session_id: String,
+        result: Result<T>,
+        beat: Option<BeatFailure>,
+        finish: Result<()>,
+    ) -> Result<T> {
+        let result = match (result, beat) {
+            (Ok(_), Some(failure)) => Err(stopped_protecting(&session_id, &failure)),
+            (result, _) => result,
+        };
+        match (result, finish) {
+            (result, Ok(())) => result,
+            (Ok(_), Err(termination)) => Err(Error::SessionBroken {
+                session_id,
+                detail: format!(
+                    "the registry accepted the publish but did not complete the upload session ({termination}); re-run the publish to close it"
+                ),
+                cause: None,
+            }),
+            (Err(primary), Err(termination)) => Err(Error::SessionBroken {
+                session_id,
+                detail: format!("the registry did not complete the upload session ({termination})"),
+                cause: Some(Box::new(primary)),
+            }),
+        }
+    }
+
+    /// Start an admission session for a registry upload.
+    ///
+    /// A caller that writes to the registry itself starts a session, sends
+    /// REGISTRY_SESSION_HEADER on every call, and completes it when the upload
+    /// ends.
+    pub fn start_session(&self, intent: &str) -> Result<RegistryUploadSession> {
+        self.open_upload_session(intent)
+    }
+
+    fn open_upload_session(&self, intent: &str) -> Result<RegistryUploadSession> {
+        let url = self.session_url(None)?;
+        let body = serde_json::json!({ "intent": intent });
+        let mut attempt: u32 = 1;
+        loop {
+            let response = self
+                .client
+                .post(url.clone())
+                .bearer_auth(self.config.token.trim())
+                .json(&body)
+                .send()?;
+            let status = response.status();
+            let retry_after = retry_after_delay(response.headers());
+            let text = response.text()?;
+            if status.is_success() {
+                let opened: SessionOpenResponse = serde_json::from_str(&text)?;
+                let session_id = opened.session_id.trim().to_owned();
+                if session_id.is_empty() {
+                    return Err(Error::InvalidConfig(
+                        "registry opened an upload session without a usable id",
+                    ));
+                }
+                if opened
+                    .protocol
+                    .as_ref()
+                    .is_some_and(|protocol| protocol.version != REGISTRY_ADMISSION_PROTOCOL_VERSION)
+                {
+                    return Err(Error::InvalidConfig(
+                        "registry admission protocol version does not match this uploader",
+                    ));
+                }
+                let interval = heartbeat_interval(opened.heartbeat_interval_ms);
+                let heartbeat = self.start_heartbeat(
+                    &session_id,
+                    self.session_url(Some(SESSION_HEARTBEAT_ACTION))?,
+                    interval,
+                );
+                return Ok(RegistryUploadSession {
+                    id: session_id,
+                    heartbeat,
+                    complete_url: self.session_url(Some(SESSION_COMPLETE_ACTION))?,
+                    client: self.client.clone(),
+                    token: self.config.token.trim().to_owned(),
+                });
+            }
+            if attempt >= SESSION_OPEN_ATTEMPTS || !is_retryable_session_status(status) {
+                return Err(Error::HttpStatus { status, body: text });
+            }
+            std::thread::sleep(
+                retry_after.unwrap_or_else(|| {
+                    (SESSION_OPEN_BACKOFF * attempt).min(SESSION_OPEN_BACKOFF_CAP)
+                }),
+            );
+            attempt += 1;
+        }
+    }
+
+    fn start_heartbeat(
+        &self,
+        session_id: &str,
+        url: url::Url,
+        interval: Duration,
+    ) -> SessionHeartbeat {
+        let client = self.client.clone();
+        let token = self.config.token.trim().to_owned();
+        let session_id = session_id.to_owned();
+        SessionHeartbeat::start(interval, move || {
+            beat_session(&client, &url, &token, &session_id)
+        })
+    }
+
+    fn session_url(&self, action: Option<&str>) -> Result<url::Url> {
+        let mut url = sibling_endpoint(&self.endpoint, SESSION_ROUTE)?;
+        if let Some(action) = action {
+            url.path_segments_mut()
+                .map_err(|()| Error::InvalidConfig("publish url cannot be a base URL"))?
+                .push(action);
+        }
+        Ok(url)
+    }
+}
+
+/// An error body that carries a registry session code means the session no
+/// longer protected the work that produced it.
+fn reports_lost_session(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::HttpStatus { status, body } if session_code(*status, body).is_some()
+    )
+}
+
+/// The registry stopped admitting this session, so the upload did not reach a
+/// protected end. The unresolved writer row keeps blocking deletion until an
+/// operator resolves it, which is why the client reports this instead of
+/// letting the caller read a success.
+fn stopped_protecting(session_id: &str, failure: &BeatFailure) -> Error {
+    Error::SessionBroken {
+        session_id: session_id.to_owned(),
+        detail: format!(
+            "the registry stopped admitting the session ({}); the upload did not run to a protected end",
+            failure.detail()
+        ),
+        cause: None,
+    }
+}
+
+/// A caller-owned session is never replaced behind the caller's back: the
+/// reuse decisions taken under it must be re-probed by the caller before the
+/// upload continues.
+fn shared_session_result<T>(session: &RegistryUploadSession, result: Result<T>) -> Result<T> {
+    let lost = session.heartbeat.failure().or_else(|| match &result {
+        Err(error) if reports_lost_session(error) => Some(BeatFailure::Superseded),
+        _ => None,
+    });
+    match (result, lost) {
+        (Ok(_), Some(failure)) => Err(stopped_protecting(&session.id, &failure)),
+        (Err(primary), Some(failure)) => Err(Error::SessionBroken {
+            session_id: session.id.clone(),
+            detail: format!(
+                "the registry stopped admitting the session ({}); restart the upload from its chunk-exists probe",
+                failure.detail()
+            ),
+            cause: Some(Box::new(primary)),
+        }),
+        (result, None) => result,
+    }
+}
+
+/// A failed heartbeat means the registry no longer protects this upload, so
+/// the caller stops instead of writing against a stale session.
+fn require_live_session(session: &RegistryUploadSession) -> Result<()> {
+    match session.heartbeat.failure() {
+        Some(failure) => Err(Error::SessionBroken {
+            session_id: session.id.clone(),
+            detail: format!(
+                "the registry stopped admitting the session ({}); the upload stopped before its next registry call",
+                failure.detail()
+            ),
+            cause: None,
+        }),
+        None => Ok(()),
+    }
+}
+
+fn beat_session(
+    client: &reqwest::blocking::Client,
+    url: &url::Url,
+    token: &str,
+    session_id: &str,
+) -> std::result::Result<(), BeatFailure> {
+    let response = client
+        .post(url.clone())
+        .bearer_auth(token)
+        .header(SESSION_HEADER, session_id)
+        .timeout(HEARTBEAT_REQUEST_TIMEOUT)
+        .send()
+        .map_err(|error| BeatFailure::Fatal(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| BeatFailure::Fatal(error.to_string()))?;
+    if status.is_success() {
+        return Ok(());
+    }
+    Err(classify_beat_failure(status, &body))
+}
+
+/// A cleanup sweep in progress refuses new writers with a retryable status.
+fn is_retryable_session_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 409 | 423 | 429 | 503)
+}
+
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let seconds = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(Duration::from_secs(seconds.min(RETRY_AFTER_CAP_SECONDS)))
+}
+
+/// Header that carries the admission session on every registry write.
+pub const REGISTRY_SESSION_HEADER: &str = SESSION_HEADER;
+
+/// Outcome recorded when an upload session ends. Published releases the session
+/// as completed; Abandoned records that the upload did not finish.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UploadOutcome {
+    Published,
+    Abandoned,
+}
+
+impl UploadOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// An open registry admission session.
+///
+/// Uploads this crate performs hold one internally. A caller that writes to the
+/// registry itself, such as the image CLI uploading a bundle with its own
+/// request, starts a session, sends REGISTRY_SESSION_HEADER on every registry
+/// call, and completes the session with the outcome of the upload.
+pub struct RegistryUploadSession {
+    id: String,
+    heartbeat: SessionHeartbeat,
+    complete_url: url::Url,
+    client: reqwest::blocking::Client,
+    token: String,
+}
+
+impl RegistryUploadSession {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Close the session. The heartbeat stops first, so nothing keeps the
+    /// session admitted after the caller has finished.
+    pub fn complete(&self, outcome: UploadOutcome) -> Result<()> {
+        // Stopping twice is harmless: the second call sees a stopped heartbeat.
+        self.heartbeat.stop();
+        let response = self
+            .client
+            .post(self.complete_url.clone())
+            .bearer_auth(self.token.trim())
+            .header(SESSION_HEADER, &self.id)
+            .json(&serde_json::json!({ "outcome": outcome.as_str() }))
+            .send()?;
+        require_success(response)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SessionOpenResponse {
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    heartbeat_interval_ms: Option<u64>,
+    #[serde(default)]
+    protocol: Option<SessionProtocol>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SessionProtocol {
+    #[serde(default)]
+    version: u32,
 }
 
 fn validate_chunked_image(
@@ -522,6 +944,19 @@ const fn architecture_name(architecture: &ImageArchitecture) -> &'static str {
 /// R2 multipart parts must share one size (only the final part may be
 /// smaller); 64 MiB stays comfortably under Cloudflare request body limits.
 const UPLOAD_PART_BYTES: u64 = 64 * 1024 * 1024;
+/// A sweep in progress refuses new sessions, so registration retries before
+/// the upload gives up. The registry's `retry-after` wins when it sends one.
+const SESSION_OPEN_ATTEMPTS: u32 = 6;
+const SESSION_OPEN_BACKOFF: Duration = Duration::from_millis(500);
+const SESSION_OPEN_BACKOFF_CAP: Duration = Duration::from_secs(5);
+/// A superseded session makes the upload restart from its chunk-exists probe.
+/// The budget is small: a lease that lapses twice is an operator problem, not
+/// something a third attempt will fix.
+const SESSION_RESTARTS: u32 = 2;
+/// The admission protocol this uploader speaks.
+const REGISTRY_ADMISSION_PROTOCOL_VERSION: u32 = 1;
+const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const RETRY_AFTER_CAP_SECONDS: u64 = 30;
 const CHUNK_EXISTS_BATCH_SIZE: usize = 512;
 const CHUNK_UPLOAD_CONCURRENCY: usize = 8;
 static CHUNK_UPLOAD_GATE: ChunkUploadGate = ChunkUploadGate::new(CHUNK_UPLOAD_CONCURRENCY);

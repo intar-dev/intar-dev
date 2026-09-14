@@ -1,0 +1,71 @@
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "name": "intar-dev-image-registry-cleanup",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  // The collector has no public surface. The control plane reaches it through
+  // the REGISTRY_CLEANUP service binding and nothing else reaches it.
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    // Report-only until the production rollout proves a run. A run in this
+    // mode lists candidates and writes no delete.
+    "REGISTRY_CLEANUP_MODE": "report-only"
+  },
+  "triggers": {
+    // Every six hours at minute 17 UTC: 00:17, 06:17, 12:17, 18:17. A publish
+    // still sweeps immediately through the promotion RPC; this is the recovery
+    // tick that catches what a failed run left behind.
+    "crons": ["17 */6 * * *"]
+  },
+  "d1_databases": [
+    {
+      // The parent owns the schema and the migrations directory. The collector
+      // reads reference state from the same database and never migrates it.
+      "binding": "DB",
+      "database_id": "c53ff120-c555-4702-b3a1-eaab44fd76f6",
+      "database_name": "intar-dev-control-plane-v3-20260813-r2",
+      // The parent owns this database's schema and its migrations directory
+      // (apps/web/migrations, two levels above this file). The path is stated
+      // so the resolved configuration is truthful; the control plane, not this
+      // collector, runs the migrations.
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "VM_IMAGE_REGISTRY_BUCKET",
+      "bucket_name": "intar-dev-vm-image-registry-20260709",
+      "jurisdiction": "eu"
+    }
+  ],
+  "services": [
+    {
+      // The live maintenance flag has one source of truth: the parent version
+      // that currently serves traffic. A copied variable would drift.
+      "binding": "CONTROL_PLANE",
+      "service": "intar-dev",
+      "entrypoint": "MaintenanceState"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    // No redact_query_string here: the Wrangler that the Astro adapter resolves
+    // for the build (4.125.0) does not know that field and warns about it. The
+    // parent config still carries it, which is outside this worker's scope.
+    "logs": {
+      "enabled": true,
+      "persist": false,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "destinations": ["intar-grafana-logs"]
+    },
+    "traces": {
+      "enabled": true,
+      "persist": false,
+      "head_sampling_rate": 1,
+      "destinations": ["intar-grafana-traces"]
+    }
+  }
+}

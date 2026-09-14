@@ -7,7 +7,7 @@ import {
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 
-const { dbMock, catalogManifestMock } = imageRegistryMocks();
+const { dbMock, catalogRollbackMock } = imageRegistryMocks();
 
 describe("image registry uploads", () => {
   beforeEach(resetImageRegistryMocks);
@@ -228,6 +228,8 @@ describe("image registry uploads", () => {
       ],
     });
     expect(bucketPut).not.toHaveBeenCalled();
-    expect(catalogManifestMock.seedScenarioManifest).toHaveBeenCalledOnce();
+    // The live publish installs the catalog through the shared replacement
+    // that records the rollback of the rows it replaces.
+    expect(catalogRollbackMock.replaceScenarioCatalogWithRollback).toHaveBeenCalledOnce();
   });
 });

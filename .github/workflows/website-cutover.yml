@@ -36,6 +36,11 @@ on:
         description: Exact 40-hex commit SHA of the cutover revision; must equal the dispatch revision and the live deployed tag
         required: true
         type: string
+      registry_cleanup_mode:
+        description: Image registry cleanup worker mode for this release; preserve keeps a deployed collector's proven mode, report-only lists candidates, delete removes objects
+        required: false
+        default: preserve
+        type: string
       confirmation:
         description: Type the confirmation for the selected operation
         required: true
@@ -60,6 +65,7 @@ jobs:
       static_pin_json: ${{ steps.pin.outputs.static_pin_json }}
       website_dist_run_id: ${{ steps.website-artifact.outputs.website_dist_run_id }}
       maintenance: ${{ steps.cutover-inputs.outputs.maintenance }}
+      registry_cleanup_mode: ${{ steps.cutover-inputs.outputs.registry_cleanup_mode }}
     env:
       BUCKET: intar-dev-vm-image-registry-20260709
     steps:
@@ -101,10 +107,29 @@ jobs:
               exit 1
               ;;
           esac
+          # The registry cleanup mode is a release decision, so it is validated
+          # with the other inputs. Preserve keeps the mode a deployed collector
+          # already proves, so a routine cutover can not silently downgrade a
+          # delete-capable collector to a report-only one; the deploy lane
+          # resolves that against live state. Delete mode itself is gated there
+          # too: the collector must have listed the delete set in a report
+          # inventory, and admission enforcement must be on.
+          REGISTRY_CLEANUP_MODE="${REGISTRY_CLEANUP_MODE:-preserve}"
+          case "${REGISTRY_CLEANUP_MODE}" in
+            preserve|report-only|delete) ;;
+            *)
+              echo 'registry_cleanup_mode must be preserve, report-only, or delete' >&2
+              exit 1
+              ;;
+          esac
+          {
+            printf 'registry_cleanup_mode=%s\n' "${REGISTRY_CLEANUP_MODE}"
+          } >> "${GITHUB_OUTPUT}"
         env:
           OPERATION: ${{ inputs.operation }}
           TOOLS_RUN_ID: ${{ inputs.tools_run_id }}
           CUTOVER_SHA: ${{ inputs.cutover_sha }}
+          REGISTRY_CLEANUP_MODE: ${{ inputs.registry_cleanup_mode }}
           CONFIRMATION: ${{ inputs.confirmation }}
 
       - name: Verify the runtime cutover gate is drained
@@ -161,6 +186,31 @@ jobs:
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
+
+      - name: Activate the D1 upload admission switch for a delete release
+        # The prerequisite of a delete-mode release, and an explicit one: this
+        # runs only when the operator asked for delete, so the default preserve
+        # never turns the switch on and an emergency D1 disable stays in force.
+        # It belongs to this job because two conditions hold here and nowhere
+        # else: the control plane still serves, which the drained check above
+        # proved by reading the registry through it, and this lane already holds
+        # the registry credential. The deploy job that follows closes the plane,
+        # so it can not call the registry after that point.
+        #
+        # A reopen never activates: the cutover that preceded it already did,
+        # and its request would be fenced. The builder host must already run the
+        # verified session-aware uploader; that is the operator's attestation,
+        # and the reason this switch is explicit rather than automatic.
+        if: inputs.operation == 'cutover' && inputs.registry_cleanup_mode == 'delete'
+        env:
+          REGISTRY_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          tools/deploy/registry-cleanup-activation.sh enforce \
+            "${RUNNER_TEMP}/registry-cleanup-activation.json"
+          jq -c '{ok, requested_mode, http_status, problem}' \
+            "${RUNNER_TEMP}/registry-cleanup-activation.json" \
+            >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify the guest tools release run
         env:
@@ -376,6 +426,7 @@ jobs:
           name: website-cutover-${{ github.sha }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/cutover-gate.json
+            ${{ runner.temp }}/registry-cleanup-activation.json
             ${{ runner.temp }}/guest-tools-run.json
             ${{ runner.temp }}/guest-tools-artifacts.json
             ${{ runner.temp }}/release-static-pin.json
@@ -390,9 +441,14 @@ jobs:
       - verify-release
     uses: ./.github/workflows/website-deploy.yml
     with:
+      # The reopen returns the release to service, and the deploy lane then
+      # releases the collector the cutover held. A paused collector retires
+      # nothing and refuses no learner, so the release needs no step before the
+      # control plane serves again.
       guest_tools_static_pin_json: ${{ needs.verify-release.outputs.static_pin_json }}
       # cutover holds the plane closed; reopen returns the same release to
       # service with the fleet gate still drained.
       maintenance: ${{ needs.verify-release.outputs.maintenance }}
+      registry_cleanup_mode: ${{ needs.verify-release.outputs.registry_cleanup_mode }}
       website_dist_run_id: ${{ needs.verify-release.outputs.website_dist_run_id }}
     secrets: inherit

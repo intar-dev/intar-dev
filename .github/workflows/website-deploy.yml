@@ -12,6 +12,11 @@ on:
         required: false
         default: auto
         type: string
+      registry_cleanup_mode:
+        description: Image registry cleanup worker mode; preserve keeps a deployed collector's proven mode, report-only lists candidates, delete removes objects
+        required: false
+        default: preserve
+        type: string
       website_dist_run_id:
         description: Run ID of the successful Website validate run that produced website-dist-<sha>
         required: true
@@ -160,6 +165,36 @@ jobs:
             ' "${config}" >/dev/null
           test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/favicon.svg"
           test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"
+          # The image registry cleanup worker is an auxiliary worker of this
+          # site. Its built configuration travels in the same tested artifact,
+          # so this lane refuses an artifact that lost it.
+          cleanup_config="${GITHUB_WORKSPACE}/apps/web/dist/intar_dev_image_registry_cleanup/wrangler.json"
+          test -f "${cleanup_config}"
+          jq -e \
+            --arg database_id "${database_id}" \
+            --arg bucket_name "$(jq -er '
+              [.r2_buckets[] | select(.binding == "VM_IMAGE_REGISTRY_BUCKET")] |
+              select(length == 1) | .[0].bucket_name
+            ' "${config}")" \
+            --arg cron "17 */6 * * *" \
+            '
+              ([.d1_databases[]? | select(.binding == "DB")]) as $databases |
+              ([.r2_buckets[]? | select(.binding == "VM_IMAGE_REGISTRY_BUCKET")]) as $buckets |
+              (.name == "intar-dev-image-registry-cleanup") and
+              (($databases | length) == 1) and
+              ($databases[0].database_id == $database_id) and
+              (($buckets | length) == 1) and
+              ($buckets[0].bucket_name == $bucket_name) and
+              ($buckets[0].jurisdiction == "eu") and
+              (.triggers.crons == [$cron]) and
+              (.vars.REGISTRY_CLEANUP_MODE == "report-only") and
+              (((.routes // []) | length) == 0) and
+              ((.workers_dev // false) == false) and
+              ((.preview_urls // false) == false) and
+              (.assets == null) and
+              ((((.migrations // []) | length) == 0)) and
+              ((((.durable_objects.bindings // []) | length) == 0))
+            ' "${cleanup_config}" >/dev/null
           {
             printf 'DATABASE_ID=%s\n' "${database_id}"
             printf 'DEPLOYMENT_CONFIG=%s\n' "${config}"
@@ -386,6 +421,93 @@ jobs:
             ORDER BY scope_key, scenario_id;"
           d1_readonly_query "${enabled_scenarios_sql}" "${enabled_scenarios}"
 
+      - name: Inspect the image registry cleanup deployment
+        id: registry-cleanup-state
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REGISTRY_CLEANUP_INTENT: ${{ inputs.registry_cleanup_mode }}
+        run: |
+          set -euo pipefail
+          # The rollout order depends on live state, not on an assumption. A
+          # first rollout has no collector, so the parent deploy must omit the
+          # REGISTRY_CLEANUP binding; a binding to a service that does not exist
+          # yet fails the deploy. A later rollout has one, and the binding
+          # resolves.
+          state="${RUNNER_TEMP}/registry-cleanup-state.json"
+          # Only a confirmed 404 counts as no collector. An expired token, a
+          # forbidden account, or a network failure is indeterminate, and this
+          # step must not read it as a first rollout that skips the hold.
+          tools/deploy/registry-cleanup-state.sh "${state}"
+          child_present="$(jq -r '.script_present | tostring' "${state}")"
+          live_mode="$(jq -er '.mode' "${state}")"
+          mode_proven="$(jq -r '.mode_proven | tostring' "${state}")"
+          # The mode is a release decision, so it is resolved once, here, and
+          # the later steps read the answer instead of the raw input. Preserve
+          # keeps what a deployed collector already proves, and it never
+          # downgrades a delete-capable collector because a lane ran with the
+          # default input.
+          case "${REGISTRY_CLEANUP_INTENT}" in
+            preserve)
+              if [ "${child_present}" = true ] && [ "${mode_proven}" = true ]; then
+                resolved="${live_mode}"
+              else
+                # Nothing deployed, or nothing readable: the least authority.
+                resolved="report-only"
+              fi
+              ;;
+            report-only|delete)
+              resolved="${REGISTRY_CLEANUP_INTENT}"
+              ;;
+            *)
+              echo "registry_cleanup_mode must be preserve, report-only, or delete" >&2
+              exit 1
+              ;;
+          esac
+          jq -n \
+            --arg intent "${REGISTRY_CLEANUP_INTENT}" \
+            --arg resolved "${resolved}" \
+            --arg live_mode "${live_mode}" \
+            --argjson child_present "${child_present}" \
+            --argjson mode_proven "${mode_proven}" \
+            --slurpfile probe "${state}" \
+            '{
+              schema_version: 1,
+              operation: "registry-cleanup-mode",
+              intent: $intent,
+              resolved_mode: $resolved,
+              live_mode: $live_mode,
+              child_present: $child_present,
+              live_mode_proven: $mode_proven,
+              probe: $probe[0]
+            }' > "${RUNNER_TEMP}/registry-cleanup-mode.json"
+          {
+            printf 'child_present=%s\n' "${child_present}"
+            printf 'resolved_mode=%s\n' "${resolved}"
+            printf 'REGISTRY_CLEANUP_MODE=%s\n' "${resolved}"
+          } >> "${GITHUB_OUTPUT}"
+          printf 'REGISTRY_CLEANUP_MODE=%s\n' "${resolved}" >> "${GITHUB_ENV}"
+          printf 'registry cleanup worker present: %s; intent: %s; resolved mode: %s; live mode: %s\n' \
+            "${child_present}" "${REGISTRY_CLEANUP_INTENT}" "${resolved}" "${live_mode}" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Prepare the parent bootstrap configuration
+        if: steps.registry-cleanup-state.outputs.child_present != 'true'
+        run: |
+          set -euo pipefail
+          # The parent phase that runs before the collector exists omits the
+          # binding to it. Everything else is the tested configuration.
+          bootstrap="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-bootstrap.json"
+          test ! -e "${bootstrap}"
+          jq '(.services // []) |= map(select(.binding != "REGISTRY_CLEANUP"))' \
+            "${DEPLOYMENT_CONFIG}" > "${bootstrap}"
+          jq -e '[.services[]? | select(.binding == "REGISTRY_CLEANUP")] | length == 0' \
+            "${bootstrap}" >/dev/null
+          jq -e '.name == "intar-dev"' "${bootstrap}" >/dev/null
+          printf 'BOOTSTRAP_DEPLOYMENT_CONFIG=%s\n' "${bootstrap}" \
+            >> "${GITHUB_ENV}"
+
       - name: Prepare maintenance configuration
         if: steps.migrations.outputs.pending == 'true' || inputs.maintenance == 'on'
         run: |
@@ -393,19 +515,65 @@ jobs:
           config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"
           maintenance_config="${config_dir}/wrangler-maintenance.json"
           test ! -e "${maintenance_config}"
+          # The maintenance deploy is also the phase that runs before the
+          # collector exists, so it starts from the bootstrap configuration when
+          # this rollout is a first rollout.
           jq '.vars.CONTROL_PLANE_MAINTENANCE = "on"' \
-            "${DEPLOYMENT_CONFIG}" > "${maintenance_config}"
+            "${BOOTSTRAP_DEPLOYMENT_CONFIG:-${DEPLOYMENT_CONFIG}}" > "${maintenance_config}"
           jq -e '.vars.CONTROL_PLANE_MAINTENANCE == "on"' \
             "${maintenance_config}" >/dev/null
+          # The candidate deploy at the end of the lane runs after the collector
+          # exists, so it carries the binding to it. Only the maintenance
+          # variable changes from the tested configuration.
+          full_maintenance_config="${config_dir}/wrangler-maintenance-full.json"
+          test ! -e "${full_maintenance_config}"
+          jq '.vars.CONTROL_PLANE_MAINTENANCE = "on"' \
+            "${DEPLOYMENT_CONFIG}" > "${full_maintenance_config}"
+          jq -e '.vars.CONTROL_PLANE_MAINTENANCE == "on"' \
+            "${full_maintenance_config}" >/dev/null
           printf 'MAINTENANCE_DEPLOYMENT_CONFIG=%s\n' "${maintenance_config}" \
             >> "${GITHUB_ENV}"
+          printf 'MAINTENANCE_FULL_DEPLOYMENT_CONFIG=%s\n' \
+            "${full_maintenance_config}" >> "${GITHUB_ENV}"
           if [ "${MAINTENANCE_MODE}" = on ]; then
             # The cutover holds the control plane closed for the whole window.
             # The candidate deploy must not reopen it: the runtime gates reopen
-            # in order, and only then does a maintenance-off deploy run.
-            printf 'DEPLOYMENT_CONFIG=%s\n' "${maintenance_config}" \
+            # in order, and only then does a maintenance-off deploy run. The
+            # candidate still carries the binding to the collector.
+            printf 'DEPLOYMENT_CONFIG=%s\n' "${full_maintenance_config}" \
               >> "${GITHUB_ENV}"
           fi
+
+      - name: Hold the image registry collector before the migration
+        # A reopen already holds a paused collector, and the control plane is
+        # still closed at this point, so its hold would travel to a fenced
+        # route. The release step below is what the reopen needs.
+        if: inputs.maintenance != 'off'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # The collector has no public route: the parent worker holds the
+          # service binding, and the gate route on that worker is the only path
+          # to it. The route sits behind the maintenance fence, so the hold
+          # happens here, while the control plane still serves. A no-op when no
+          # collector version is deployed yet.
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          case "${REGISTRY_CLEANUP_MODE}" in
+            report-only|delete) ;;
+            *) echo "registry_cleanup_mode must be report-only or delete" >&2; exit 1 ;;
+          esac
+          # The resolved mode comes from the inspect step, never from the raw
+          # input: a preserved delete mode must not be downgraded here.
+          # The hold writes the shared admission row, so it stops a sweep of any
+          # isolate and refuses the next upload session. A collector that
+          # deletes must be held and idle before the migration touches D1, and
+          # it stays held until this run, or the reopen that returns the release
+          # to service, proves otherwise.
+          tools/deploy/registry-cleanup-gate.sh hold "${REGISTRY_CLEANUP_MODE}" \
+            "${RUNNER_TEMP}/registry-cleanup-hold.json"
 
       - name: Enable maintenance for pending migrations
         if: steps.migrations.outputs.pending == 'true' || inputs.maintenance == 'on'
@@ -451,6 +619,26 @@ jobs:
           test "${probe_status}" = 503
           test "$(jq -er '.code' "${probe}")" = maintenance
 
+      - name: Deploy the parent revision for the first cleanup rollout
+        if: steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && inputs.maintenance == 'auto'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WEB_DEPLOY_LABEL: bootstrap
+        run: |
+          set -euo pipefail
+          # Nothing else deploys the parent on this path, and the collector needs
+          # a parent version that exports MaintenanceState before it can read the
+          # maintenance fence. This deploy carries the bootstrap configuration:
+          # everything from the tested artifact except the binding to the
+          # collector, which does not exist yet.
+          tools/deploy/deploy-web.sh \
+            "${BOOTSTRAP_DEPLOYMENT_CONFIG}" \
+            "${DATABASE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/web-bootstrap.json"
+
       - name: Apply pending D1 migrations
         if: steps.migrations.outputs.pending == 'true'
         working-directory: ${{ github.workspace }}
@@ -485,6 +673,73 @@ jobs:
             .views == 0
           ' "${evidence}" >/dev/null
 
+      - name: Verify the deployed image registry cleanup worker
+        # The reopen operation runs with the control plane already closed and in
+        # a fresh runner, so the hold evidence that a delete-capable child
+        # deploy requires can never exist here. This gate decides instead: when
+        # the collector that serves is already this revision in this mode, the
+        # reopen keeps it, releases it, and lets the campaign prove the delete
+        # authority from the open parent. When it would have to replace a
+        # delete-capable collector, it refuses with the operation to run instead
+        # of deadlocking on evidence the fenced control plane can not produce.
+        id: registry-cleanup-child
+        if: inputs.maintenance == 'off'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REGISTRY_CLEANUP_OPERATION: reopen
+        run: |
+          set -euo pipefail
+          tools/deploy/registry-cleanup-child-gate.sh "${REGISTRY_CLEANUP_OPERATION}" \
+            "${REGISTRY_CLEANUP_MODE}" "${GITHUB_SHA:0:12}" \
+            "${RUNNER_TEMP}/registry-cleanup-child.json" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Deploy the image registry cleanup worker
+        # A reopen verifies the deployed collector instead of replacing it: the
+        # verification step above sets skip, and the reopen then only reopens
+        # the parent, releases the collector, and runs the campaign. A skipped
+        # verification step leaves skip empty, so every other path still deploys.
+        if: steps.registry-cleanup-child.outputs.skip != 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Astro builds this auxiliary worker next to the parent configuration,
+          # and the tested artifact carries both. The parent deploy above is the
+          # first half of the rollout: the collector reads the live maintenance
+          # flag from the version that serves traffic, and the parent binding to
+          # the collector becomes usable only once this step has run.
+          case "${REGISTRY_CLEANUP_MODE}" in
+            report-only|delete) ;;
+            *) echo "the resolved registry cleanup mode must be report-only or delete" >&2; exit 1 ;;
+          esac
+          cleanup_config="${GITHUB_WORKSPACE}/apps/web/dist/intar_dev_image_registry_cleanup/wrangler.json"
+          test -f "${cleanup_config}"
+          bucket_name="$(jq -er '
+            [.r2_buckets[] | select(.binding == "VM_IMAGE_REGISTRY_BUCKET")] |
+            select(length == 1) | .[0].bucket_name
+          ' "${DEPLOYMENT_CONFIG}")"
+          # The tested artifact pins report-only. Delete mode is a deployment
+          # decision, so this lane derives its own configuration from the tested
+          # one, exactly as the maintenance deploy does, and deploys that.
+          cleanup_deploy_config="$(dirname "${cleanup_config}")/wrangler-${REGISTRY_CLEANUP_MODE}.json"
+          test ! -e "${cleanup_deploy_config}"
+          jq --arg mode "${REGISTRY_CLEANUP_MODE}" \
+            '.vars.REGISTRY_CLEANUP_MODE = $mode' \
+            "${cleanup_config}" > "${cleanup_deploy_config}"
+          jq -e --arg mode "${REGISTRY_CLEANUP_MODE}" \
+            '.vars.REGISTRY_CLEANUP_MODE == $mode' \
+            "${cleanup_deploy_config}" >/dev/null
+          tools/deploy/deploy-registry-cleanup.sh \
+            "${cleanup_deploy_config}" \
+            "${DATABASE_ID}" \
+            "${bucket_name}" \
+            "${REGISTRY_CLEANUP_MODE}" \
+            "${RUNNER_TEMP}/registry-cleanup-deploy.json"
+
       - name: Deploy production at 100 percent
         working-directory: ${{ github.workspace }}
         env:
@@ -498,6 +753,66 @@ jobs:
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-production.json"
 
+      - name: Release the image registry collector
+        # A cutover keeps the control plane closed, so the collector stays held
+        # and the reopen operation releases it after its maintenance-off deploy.
+        # A paused collector can not retire anything, and it can not refuse a
+        # learner either.
+        if: always() && inputs.maintenance != 'on'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          # The hold lives in the shared admission row and does not expire, so
+          # this step runs after the parent reopened with the binding and must
+          # prove that no hold survives the rollout. A gate that can not be
+          # reached fails the step when this run placed a hold, and records an
+          # absent gate when it did not.
+          tools/deploy/registry-cleanup-gate.sh release report-only \
+            "${RUNNER_TEMP}/registry-cleanup-release.json"
+
+      - name: Verify the report-only collector through the parent binding
+        # The rollout verification of the report-only phase: the parent now
+        # serves with maintenance off and the collector has been released, so
+        # one plan call proves the first report child binding. The collector
+        # must report that it read the maintenance flag from the control plane
+        # version that serves traffic, and that version must be open, and the
+        # plan must be complete and fault free. That is the evidence a later
+        # delete release needs from the report-only rollout before it turns
+        # deletes on. A plan is a read, so it deletes nothing.
+        if: always() && inputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          tools/deploy/registry-cleanup-gate.sh plan report-only \
+            "${RUNNER_TEMP}/registry-cleanup-preview.json"
+
+      - name: Run the image registry cleanup to completion
+        # The release that turns deletes on, and the reopen that follows a
+        # cutover, clear the backlog in the same rollout: a report-only
+        # collector never deletes, so this step runs only in delete mode. The
+        # campaign is bounded by passes and by wall clock inside the script,
+        # and it proves the result with a fresh report whose keyset digest is
+        # the one the finished campaign recorded.
+        if: always() && inputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete'
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          # The control plane serves again at this point, so the gate answers
+          # the run action as well as the release above it.
+          tools/deploy/registry-cleanup-gate.sh run delete \
+            "${RUNNER_TEMP}/registry-cleanup-run.json"
       - name: Remove runtime secret file
         if: always() && steps.runtime-secrets.outcome != 'skipped'
         working-directory: ${{ github.workspace }}
@@ -523,6 +838,17 @@ jobs:
             ${{ runner.temp }}/maintenance-after-drain.json
             ${{ runner.temp }}/web-maintenance.json
             ${{ runner.temp }}/web-production.json
+            ${{ runner.temp }}/registry-cleanup-hold.json
+            ${{ runner.temp }}/registry-cleanup-release.json
+            ${{ runner.temp }}/registry-cleanup-run.json
+            ${{ runner.temp }}/registry-cleanup-preview.json
+            ${{ runner.temp }}/registry-cleanup-child.json
+            ${{ runner.temp }}/registry-cleanup-deploy.json
+            ${{ runner.temp }}/registry-cleanup-state.json
+            ${{ runner.temp }}/registry-cleanup-mode.json
+            ${{ runner.temp }}/web-bootstrap.json
+            ${{ runner.temp }}/intar-registry-cleanup-deploy-${{ github.run_id }}/
+            ${{ runner.temp }}/intar-registry-cleanup-gate-${{ github.run_id }}/
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-maintenance/
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/
           if-no-files-found: warn

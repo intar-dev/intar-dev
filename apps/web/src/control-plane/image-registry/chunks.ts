@@ -488,6 +488,51 @@ function hexToBytes(value: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * The canonical manifest for a list of ordered raw chunk digests.
+ *
+ * The header, the descriptor sizes, and the image_id all match what
+ * validateImageChunkManifest recomputes, so a registry fixture that builds its
+ * body here cannot carry an invented identity and drift from the bytes the sweep
+ * verifies. The chunk set may be sparse (fewer digests than chunks), which is how
+ * a manifest represents all-zero chunks as holes.
+ */
+export async function canonicalImageChunkManifest(input: {
+  virtualSizeBytes: number;
+  chunkRawSha256s: readonly string[];
+}): Promise<ImageChunkManifestV1> {
+  const virtualSizeBytes = input.virtualSizeBytes;
+  const chunkCount = Math.ceil(virtualSizeBytes / CHUNK_SIZE_BYTES);
+  const finalChunkSize =
+    virtualSizeBytes % CHUNK_SIZE_BYTES || CHUNK_SIZE_BYTES;
+  const finalZeroSha256 =
+    finalChunkSize === CHUNK_SIZE_BYTES
+      ? FULL_ZERO_CHUNK_SHA256
+      : await sha256Hex(new Uint8Array(finalChunkSize).buffer);
+  const chunks: ImageChunkV1[] = input.chunkRawSha256s.map(
+    (rawSha256, position) => ({
+      index: position,
+      raw_size_bytes:
+        position === chunkCount - 1 ? finalChunkSize : CHUNK_SIZE_BYTES,
+      raw_sha256: rawSha256,
+      encoded_size_bytes: 1,
+      encoded_sha256: rawSha256,
+    }),
+  );
+  const manifest: ImageChunkManifestV1 = {
+    schema_version: 1,
+    image_id: "",
+    virtual_size_bytes: virtualSizeBytes,
+    chunk_size_bytes: CHUNK_SIZE_BYTES,
+    encoding: IMAGE_CHUNK_ENCODING,
+    chunks,
+  };
+  return {
+    ...manifest,
+    image_id: await computeImageId(manifest, finalZeroSha256),
+  };
+}
+
 function batches<T>(values: T[], size: number): T[][] {
   const result: T[][] = [];
   for (let index = 0; index < values.length; index += size) {

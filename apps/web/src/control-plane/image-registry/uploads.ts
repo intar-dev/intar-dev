@@ -1,4 +1,4 @@
-import { requireVerifiedAgentRequest } from "@/control-plane/auth";
+import { readRegistryAuth } from "@/lib/image-registry-admission";
 import {
   readString,
   normalizeSha256,
@@ -8,7 +8,6 @@ import {
   isSafeRegistrySlug,
   imageObjectKey,
   isRecord,
-  hasRegistryPublishToken,
 } from "./shared";
 
 // Cloudflare caps request bodies well below typical image sizes, so images
@@ -267,17 +266,8 @@ export async function requireBlobUploadAuth(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response | null> {
-  if (await hasRegistryPublishToken(request, env)) {
-    return null;
-  }
-
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (verified.ok) {
-    if (verified.agent.role === "builder") {
-      return null;
-    }
-    return jsonResponse({ error: "builder role required" }, 403);
-  }
-
-  return jsonResponse({ error: "unauthorized" }, 401);
+  // Reuses the verification the router admission already performed for this
+  // request, so a builder upload verifies its token once per request.
+  const auth = await readRegistryAuth(request, env);
+  return auth.ok ? null : auth.response;
 }

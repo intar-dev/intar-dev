@@ -17,13 +17,36 @@ import type { ScenarioManifestV4 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
+import { createCleanupServiceDouble } from "./cleanup-service-double";
+import {
+  enableRegistryDeletion,
+  seedChunkedImage,
+  seedLegacyImage,
+} from "./registry-artifact-fixtures";
 
 const CONTENT_HASH = "a".repeat(64);
-const IMAGE_ID = "b".repeat(64);
-
 describe("candidate scenario catalog promotion", () => {
+  let promoted: Awaited<ReturnType<typeof seedChunkedImage>>;
+
   beforeEach(async () => {
     await resetD1Database();
+    await enableRegistryDeletion(env.DB);
+    promoted = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "promoted",
+    });
+    await seedLegacyImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      scenario: "broken-nginx",
+      vm: "web",
+      arch: "x86_64",
+      sha256: "c".repeat(64),
+    });
+    // The catalog row the promotion replaces names its own boot artifacts.
+    for (const sha256 of ["d".repeat(64), "e".repeat(64)]) {
+      await env.VM_IMAGE_REGISTRY_BUCKET.put(
+        "artifacts/" + sha256,
+        new Uint8Array([1]),
+      );
+    }
     const db = drizzle(env.DB);
     await db.insert(imageBuildBundles).values({
       rev: "revision-1",
@@ -53,14 +76,14 @@ describe("candidate scenario catalog promotion", () => {
       catalogChannel: "candidate",
       status: "succeeded",
       phase: "succeeded",
-      publishedManifestJson: manifest(),
+      publishedManifestJson: manifest(promoted),
     });
     await db.insert(scenarioCatalogCandidates).values({
       id: "public:revision-1:broken-nginx",
       revision: "revision-1",
       scenarioId: "broken-nginx",
       buildId: "build-1",
-      manifestJson: manifest(),
+      manifestJson: manifest(promoted),
     });
     await db.insert(vmScenarios).values({
       scenarioId: "broken-nginx",
@@ -99,6 +122,8 @@ describe("candidate scenario catalog promotion", () => {
   });
 
   it("switches every catalog row in one D1 batch after the drain gate", async () => {
+    // Promotion deletes retired artifacts through the collector, so the test
+    // reaches the collector the same way production does: a bound service.
     const response = await handleImageRegistryRequest(
       new Request(
         "https://intar.test/registry/v1/catalog/promote/revision-1",
@@ -110,7 +135,13 @@ describe("candidate scenario catalog promotion", () => {
           },
         },
       ),
-      env,
+      {
+        ...env,
+        REGISTRY_CLEANUP: createCleanupServiceDouble({
+          DB: env.DB,
+          VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
+        }),
+      } as unknown as Cloudflare.Env,
     );
     expect(response?.status).toBe(200);
     await expect(response?.json()).resolves.toMatchObject({
@@ -135,7 +166,9 @@ describe("candidate scenario catalog promotion", () => {
     });
     expect(vms).toHaveLength(1);
     expect(vms[0]).toMatchObject({
-      imageSha256: IMAGE_ID,
+      // The promoted row carries the fixture's derived identity, the same one the
+      // manifest names and the sweep verifies.
+      imageSha256: promoted.imageId,
       imageFormat: "raw_chunks_v1",
       guestBootstrapAbi: 2,
     });
@@ -210,7 +243,7 @@ describe("candidate scenario catalog promotion", () => {
   });
 });
 
-function manifest(): ScenarioManifestV4 {
+function manifest(image: Awaited<ReturnType<typeof seedChunkedImage>>): ScenarioManifestV4 {
   return {
     schema_version: 4,
     scenario_id: "broken-nginx",
@@ -228,14 +261,14 @@ function manifest(): ScenarioManifestV4 {
       {
         name: "web",
         image_key: { scenario: "broken-nginx", vm: "web", arch: "x86_64" },
-        image_id: IMAGE_ID,
+        image_id: image.imageId,
         image_format: "raw_chunks_v1",
-        image_virtual_size_bytes: 1,
-        chunk_manifest_sha256: "f".repeat(64),
+        image_virtual_size_bytes: 4_096,
+        chunk_manifest_sha256: image.chunkManifestSha256,
         guest_bootstrap_abi: 2,
         boot: {
-          kernel_sha256: "d".repeat(64),
-          initrd_sha256: "e".repeat(64),
+          kernel_sha256: image.kernelSha256,
+          initrd_sha256: image.initrdSha256,
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,

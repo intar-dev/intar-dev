@@ -1,6 +1,57 @@
 use super::*;
+use intar_image_upload::{RegistryUploadSession, UploadOutcome};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const PUBLICATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Admission session shared by one build's preparation probe and the publish
+/// that follows it.
+///
+/// The preparation and publication phases are separate tasks in this process,
+/// so the session is held by build id. The publish takes it and closes it; a
+/// build that ends while no publication runs closes it as abandoned, so a
+/// canceled build cannot keep cleanup blocked. A session that outlives the
+/// process releases nothing on its own: its unresolved writer row keeps
+/// blocking every destructive sweep until an operator reaps it.
+static ADMISSION_SESSIONS: OnceLock<Mutex<HashMap<String, Arc<RegistryUploadSession>>>> =
+    OnceLock::new();
+
+fn admission_sessions() -> &'static Mutex<HashMap<String, Arc<RegistryUploadSession>>> {
+    ADMISSION_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The admission session of this build, opened on first use.
+fn build_admission_session(
+    uploader: &ImageUploader,
+    build_id: &str,
+) -> Result<Arc<RegistryUploadSession>> {
+    let mut sessions = admission_sessions()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(session) = sessions.get(build_id) {
+        return Ok(Arc::clone(session));
+    }
+    let session = Arc::new(uploader.start_session("image_build")?);
+    sessions.insert(build_id.to_owned(), Arc::clone(&session));
+    Ok(session)
+}
+
+fn take_admission_session(build_id: &str) -> Option<Arc<RegistryUploadSession>> {
+    admission_sessions()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(build_id)
+}
+
+/// Close a session this build no longer needs, keeping any caller error.
+fn close_admission_session(build_id: &str, outcome: UploadOutcome) -> Option<String> {
+    let session = take_admission_session(build_id)?;
+    session
+        .complete(outcome)
+        .err()
+        .map(|error| error.to_string())
+}
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -180,6 +231,11 @@ pub(super) async fn run_claimed_build_job(
 ) -> Result<()> {
     let mut log_files = Vec::new();
     let result = run_claimed_build_job_inner(cfg, job, report_tx, &mut log_files).await;
+    // A publication that is already running takes the session; anything else
+    // means no one will close it.
+    if !publication_is_running(cfg, &job.build_id) {
+        close_admission_session(&job.build_id, UploadOutcome::Abandoned);
+    }
     if result.is_err() {
         upload_build_logs_with_fresh_token_best_effort(
             cfg,
@@ -298,7 +354,7 @@ async fn run_claimed_build_job_inner(
             })
             .collect::<Vec<_>>();
         let reused = reused_chunks_or_empty(
-            lookup_reused_chunks(cfg, lookups).await,
+            lookup_reused_chunks(cfg, &job.build_id, lookups).await,
             &job.build_id,
             &vm.name,
         );
@@ -343,16 +399,22 @@ async fn run_claimed_build_job_inner(
 
 async fn lookup_reused_chunks(
     cfg: &config::BuilderConfig,
+    build_id: &str,
     lookups: Vec<ImageChunkLookup>,
 ) -> Result<BTreeMap<String, ReusedEncodedImageChunk>> {
     let lookup_token = bridge::bootstrap_builder_access_token(&cfg.bridge)
         .await
         .context("failed to authenticate before image chunk lookup")?;
     let lookup_cfg = cfg.clone();
+    let build_id = build_id.to_owned();
     tokio::task::spawn_blocking(move || {
         let uploader = image_uploader(&lookup_cfg, &lookup_token)?;
+        // The probe opens the build's admission session, and the publish that
+        // follows reuses it, so a cleanup cannot delete a reused chunk in
+        // between.
+        let session = build_admission_session(&uploader, &build_id)?;
         let reused = uploader
-            .find_existing_image_chunks(&lookups)?
+            .find_existing_image_chunks_in_session(&lookups, &session)?
             .into_iter()
             .map(|(raw_sha256, chunk)| {
                 (
@@ -537,6 +599,37 @@ async fn wait_for_publication_claim(cfg: &config::BuilderConfig, build_id: &str)
     }
 }
 
+/// Whether a publication worker has already claimed this build, in which case
+/// it owns the admission session of the build.
+fn publication_is_running(cfg: &config::BuilderConfig, build_id: &str) -> bool {
+    let Ok(db) = db::BuilderDb::open(&cfg.builder.state_db) else {
+        return false;
+    };
+    matches!(
+        db.load_build_job(build_id),
+        Ok(Some(row)) if row.publish_state == "running"
+    )
+}
+
+/// The chunk a publication failed on because it is neither stored by the
+/// registry nor present locally.
+///
+/// A publication reaches that state when a reused chunk disappears between the
+/// probe and the manifest write, for example after a builder restart lost the
+/// admission session and an operator reaped it, letting cleanup delete the
+/// chunk. The uploader names the chunk, directly or inside the session error
+/// that wraps it.
+fn missing_reused_chunk_payload(error: &anyhow::Error) -> Option<String> {
+    error.chain().find_map(
+        |cause| match cause.downcast_ref::<intar_image_upload::Error>() {
+            Some(intar_image_upload::Error::MissingImageChunkPayload { raw_sha256 }) => {
+                Some(raw_sha256.clone())
+            }
+            _ => None,
+        },
+    )
+}
+
 async fn process_next_publication(
     cfg: &config::BuilderConfig,
     report_tx: &mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
@@ -572,6 +665,19 @@ async fn process_next_publication(
     if let Err(error) = result {
         let error_message = format!("{error:#}");
         let now = now_unix_ms();
+        // A reused chunk that is gone from the registry has no payload
+        // anywhere, so retrying this completed output can never publish it.
+        // The registry reports that chunk by name; rebuild instead of
+        // spending the publication attempts on a lost cause.
+        if let Some(raw_sha256) = missing_reused_chunk_payload(&error) {
+            warn!(
+                build_id = %job.build_id,
+                chunk = %raw_sha256,
+                "reused image chunk is gone from the registry and has no local payload; rebuilding the image"
+            );
+            requeue_damaged_completed_output(cfg, &job, report_tx, &error).await?;
+            return Ok(true);
+        }
         let terminal = {
             let db = db::BuilderDb::open(&cfg.builder.state_db)?;
             if should_retry_build_error(&error, job.publish_attempt, cfg.jobs.max_attempts) {
@@ -817,9 +923,35 @@ fn publish_persisted_build_outputs(
         build.arch.clone(),
     )
     .map_err(anyhow::Error::from)?;
-    let receipt = uploader
-        .publish_build_manifest_with_artifacts(&manifest, &images, &artifacts, &identity)
-        .map_err(classify_publish_error)?;
+    // The preparation probe opened this build's session; publish under it so
+    // the chunks it reported as reusable stay protected until the manifest is
+    // stored.
+    let session = take_admission_session(&build.build_id);
+    let receipt = match &session {
+        Some(session) => uploader.publish_build_manifest_with_session(
+            &manifest, &images, &artifacts, &identity, session,
+        ),
+        None => uploader
+            .publish_build_manifest_with_artifacts(&manifest, &images, &artifacts, &identity),
+    };
+    if let Some(session) = &session {
+        let outcome = if receipt.is_ok() {
+            UploadOutcome::Published
+        } else {
+            UploadOutcome::Abandoned
+        };
+        if let Err(error) = session.complete(outcome) {
+            // The publish result decides the build. An unclosed session is not
+            // released on a timer: its unresolved writer row blocks every
+            // destructive sweep until an operator resolves it.
+            warn!(
+                build_id = %build.build_id,
+                error = %error,
+                "builder daemon did not complete the registry upload session"
+            );
+        }
+    }
+    let receipt = receipt.map_err(classify_publish_error)?;
     info!(
         scenario = %receipt.scenario_id,
         images = receipt.images.len(),
@@ -1045,17 +1177,129 @@ pub(super) async fn optional_builder_access_token(
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::collections::BTreeMap;
-    use std::path::Path;
-
     use intar_contracts::catalog::{
         GUEST_BOOTSTRAP_ABI_V2, IMAGE_CHUNK_ENCODING, IMAGE_CHUNK_MANIFEST_SCHEMA_VERSION,
         IMAGE_CHUNK_SIZE_BYTES, ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ImageFormat,
         ImageKey, Mib, ScenarioDifficulty, ScenarioManifestV4, ScenarioVmBootManifestV4,
         ScenarioVmManifestV4,
     };
+    use std::collections::BTreeMap;
+    use std::path::Path;
 
     use super::{PersistedBuildOutput, PersistedEncodedImageChunk, reused_chunks_or_empty};
+    use super::{
+        classify_publish_error, missing_reused_chunk_payload, requeue_damaged_completed_output,
+    };
+    use crate::{config, db, now_unix_ms};
+
+    /// A publication whose reused chunk is gone from the registry and has no
+    /// local payload cannot be retried: the bytes exist nowhere. The builder
+    /// must queue a rebuild and drop the completed-output metadata, exactly
+    /// like any other damaged retained output.
+    #[tokio::test]
+    async fn a_lost_reused_chunk_requeues_a_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = rebuild_test_config(temp.path());
+        let build = intar_contracts::bridge::DesiredBuildV1 {
+            build_id: "build-1".to_string(),
+            scenario_id: "broken-nginx".to_string(),
+            arch: ImageArchitecture::X86_64,
+            rev: "abc123".to_string(),
+            content_hash: "f".repeat(64),
+            bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
+        };
+        let db = db::BuilderDb::open(&cfg.builder.state_db).unwrap();
+        db.upsert_build_job(&build, "building", 1, None, 1000)
+            .unwrap();
+        db.save_completed_build_outputs("build-1", "[]", 1000)
+            .unwrap();
+        let job = db.load_build_job("build-1").unwrap().unwrap();
+        assert_eq!(job.publish_state, "waiting");
+
+        // The publication maps the uploader error the way production does and
+        // names the chunk it cannot upload.
+        let direct = classify_publish_error(intar_image_upload::Error::MissingImageChunkPayload {
+            raw_sha256: "c".repeat(64),
+        });
+        assert_eq!(
+            missing_reused_chunk_payload(&direct).as_deref(),
+            Some("c".repeat(64).as_str())
+        );
+
+        let (report_tx, _report_rx) = tokio::sync::mpsc::channel(4);
+        let requeued_at = now_unix_ms();
+        requeue_damaged_completed_output(&cfg, &job, &report_tx, &direct)
+            .await
+            .unwrap();
+
+        let rebuilt = db.load_build_job("build-1").unwrap().unwrap();
+        assert_eq!(rebuilt.phase, "queued");
+        assert_eq!(rebuilt.publish_state, "none");
+        assert_eq!(rebuilt.completed_outputs_json, None);
+        assert!(
+            rebuilt
+                .next_attempt_at_ms
+                .is_some_and(|at| at >= requeued_at),
+            "the rebuild must be due immediately: {:?}",
+            rebuilt.next_attempt_at_ms
+        );
+        assert!(rebuilt.publish_attempt == 0);
+        assert!(
+            rebuilt
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("will be rebuilt")),
+            "the job must record why it is rebuilding: {:?}",
+            rebuilt.error
+        );
+    }
+
+    /// Only the specific missing payload triggers a rebuild. Transient
+    /// failures keep their bounded publication retries, and a registry refusal
+    /// stays non-retryable rather than becoming a rebuild loop.
+    #[test]
+    fn only_a_missing_reused_chunk_payload_triggers_a_rebuild() {
+        let wrapped = anyhow::Error::from(intar_image_upload::Error::SessionBroken {
+            session_id: "session-1".to_owned(),
+            detail: "the registry stopped admitting the session".to_owned(),
+            cause: Some(Box::new(
+                intar_image_upload::Error::MissingImageChunkPayload {
+                    raw_sha256: "d".repeat(64),
+                },
+            )),
+        });
+        assert_eq!(
+            missing_reused_chunk_payload(&wrapped).as_deref(),
+            Some("d".repeat(64).as_str())
+        );
+
+        let unavailable = anyhow::Error::from(intar_image_upload::Error::HttpStatus {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            body: "try again".to_owned(),
+        });
+        assert!(missing_reused_chunk_payload(&unavailable).is_none());
+
+        let rejected = anyhow::Error::from(intar_image_upload::Error::HttpStatus {
+            status: reqwest::StatusCode::CONFLICT,
+            body: "build is not active for this builder".to_owned(),
+        });
+        assert!(missing_reused_chunk_payload(&rejected).is_none());
+
+        assert!(
+            missing_reused_chunk_payload(&anyhow::anyhow!(
+                "image chunk compression worker panicked"
+            ))
+            .is_none()
+        );
+    }
+
+    fn rebuild_test_config(root: &Path) -> config::BuilderConfig {
+        let mut cfg = config::BuilderConfig::default();
+        cfg.builder.state_db = root.join("state.sqlite3");
+        cfg.builder.cache_root = root.join("cache");
+        cfg.builder.work_root = root.join("work");
+        cfg
+    }
 
     #[test]
     fn reuse_lookup_failure_encodes_every_chunk_locally() {

@@ -150,6 +150,22 @@ describe("scenario model", () => {
         },
         imageSha256:
           "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+        // The row identity of the spec's own read. A live run start captures it
+        // and re-checks it at commit time, so it must follow the record it came
+        // from, including the raw row name rather than the slugified one.
+        imageRef: {
+          vmName: "Web Server",
+          keyScenario: "broken-nginx",
+          keyVm: "web",
+          keyArch: "x86_64",
+          imageSha256:
+            "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+          chunkManifestSha256: "d".repeat(64),
+          kernelSha256:
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          initrdSha256:
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        },
         hostname: "web-server",
         resources: {
           cpuMillis: 2_000,

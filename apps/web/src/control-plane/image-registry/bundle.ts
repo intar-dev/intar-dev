@@ -9,13 +9,17 @@ import {
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
+import { toErrorResponse } from "@/lib/app-error";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
   syncCourseCatalogSnapshot,
   validateCourseCatalogReferences,
 } from "@/lib/course-catalogs";
 import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
-import { stageReusableCandidateManifests } from "@/lib/scenario-catalog-candidates";
+import {
+  isCandidateSourceLocked,
+  stageReusableCandidateManifests,
+} from "@/lib/scenario-catalog-candidates";
 import {
   jsonResponse,
   bundleObjectKey,
@@ -165,6 +169,14 @@ export async function handleBundleUpload(
       202,
     );
   } catch (error) {
+    // A refused reused candidate is a settled outcome, exactly as on the
+    // publish route: the conditional stage proved that no candidate row
+    // changed. It must answer its own 409, because the router holds any 5xx as
+    // an unsettled write that blocks the collector until an operator reap.
+    if (isCandidateSourceLocked(error)) {
+      const refusal = toErrorResponse(error, "bundle processing failed", 409);
+      return jsonResponse(refusal.body, refusal.status);
+    }
     console.error(
       JSON.stringify({
         message: "bundle processing failed",

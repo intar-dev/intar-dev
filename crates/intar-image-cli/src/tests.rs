@@ -8,9 +8,28 @@ use flate2::read::GzDecoder;
 
 use super::{
     BUNDLE_BASE_IMAGES_PATH, Cli, Command, PreparedBundleScenario, collect_bundle_source_files,
-    default_bundle_output_path, write_bundle_archive,
+    default_bundle_output_path, publish_url_from_bundle_url, write_bundle_archive,
 };
 use crate::curriculum::{CURRICULUM_CATALOG_ARCHIVE_PATH, load_curriculum};
+
+#[test]
+fn derives_the_admission_route_from_a_bundle_target() {
+    // A registry bundle target holds an admission session, so the uploader is
+    // built from its sibling publish route.
+    assert_eq!(
+        publish_url_from_bundle_url("https://intar.dev/registry/v1/bundles").as_deref(),
+        Some("https://intar.dev/registry/v1/publish")
+    );
+    assert_eq!(
+        publish_url_from_bundle_url(" https://intar.dev/registry/v1/bundles/ ").as_deref(),
+        Some("https://intar.dev/registry/v1/publish")
+    );
+    // Any other target has no admission to hold and uploads as before.
+    assert_eq!(
+        publish_url_from_bundle_url("https://mirror.example/upload"),
+        None
+    );
+}
 
 #[test]
 fn exposes_package_version_from_root_cli() {

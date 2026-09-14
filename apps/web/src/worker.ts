@@ -6,7 +6,11 @@ import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifac
 import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
-import { handleMaintenanceMode } from "@/maintenance";
+import {
+  handleMaintenanceMode,
+  handleRegistryCleanupGateRequest,
+} from "@/maintenance";
+import { MaintenanceState } from "@/maintenance-state";
 import { hardenJoinResponse } from "@/lib/join-security";
 import { sweepUndeliveredHostDesiredState } from "@/lib/host-runtime-dispatch-outbox";
 import {
@@ -26,6 +30,16 @@ export default {
 
     const maintenanceResponse = await traceOperation("request.maintenance", () => handleMaintenanceMode(request, env));
     if (maintenanceResponse) return respond(maintenanceResponse);
+
+    // The image registry deployment gate sits behind the fence on purpose: it
+    // is unreachable while maintenance is on, so a deployment holds the
+    // collector before the fence closes and releases it after the parent
+    // serves again. It registers before the application so this path never
+    // reaches Astro.
+    const cleanupGateResponse = await traceOperation("registry.cleanup.gate", () =>
+      handleRegistryCleanupGateRequest(request, env),
+    );
+    if (cleanupGateResponse) return respond(cleanupGateResponse);
 
     const url = new URL(request.url);
 
@@ -98,4 +112,4 @@ export default {
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 
-export { HostRuntimeDO };
+export { HostRuntimeDO, MaintenanceState };

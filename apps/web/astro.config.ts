@@ -16,6 +16,15 @@ export default defineConfig({
     configPath: isLocalDevelopment
       ? "./wrangler.local.jsonc"
       : "./wrangler.jsonc",
+    auxiliaryWorkers: [
+      {
+        // The image registry cleanup worker builds and deploys with this site.
+        // It keeps its own bindings, its own cron, and its own type file.
+        configPath: isLocalDevelopment
+          ? "./workers/image-registry-cleanup/wrangler.local.jsonc"
+          : "./workers/image-registry-cleanup/wrangler.jsonc",
+      },
+    ],
     persistState: isLocalDevelopment
       ? process.env.PLAYWRIGHT_UI === "1"
         ? false
