@@ -350,6 +350,12 @@ jobs:
             # run. A completed row is the record of an earlier pass and is kept.
             [.gc_runs[] | select(.state == "running")] as $running |
             ($running[0] // {}) as $sweep |
+            (.admission // {}) as $admission |
+            # jq orders null below every number, so an unreadable stamp would
+            # satisfy the lease test below instead of failing it.
+            (($sweep.heartbeat_at | type) == "number") and
+            (($admission.sweep_heartbeat_at | type) == "number") and
+            (($admission.sweep_expires_at | type) == "number") and
             (.collector_http_status == 200) and
             (.collector_problem == null) and
             (.ledger_problem == null) and
@@ -367,11 +373,17 @@ jobs:
               (.pending_writers == 0)) and
             (($running | length) == 1) and
             ($sweep.id == $id) and
-            (.admission.admission_state == "sweeping") and
-            (.admission.sweep_started_at == $sweep.started_at) and
-            (.admission.sweep_heartbeat_at == $sweep.heartbeat_at) and
+            ($admission.admission_state == "sweeping") and
+            # Acquisition writes both rows from one clock reading.
+            ($admission.sweep_started_at == $sweep.started_at) and
+            # A recorded batch advances the row heartbeat alone, so the row is
+            # legitimately at or ahead of the gate heartbeat.
+            ($sweep.heartbeat_at >= $admission.sweep_heartbeat_at) and
+            # Both heartbeats, and the lease, must be past the grace window: the
+            # same two stamps the reap statement itself tests.
             ((.observed_at_ms - $sweep.heartbeat_at) > $stale) and
-            ((.observed_at_ms - .admission.sweep_expires_at) > $stale)
+            ((.observed_at_ms - $admission.sweep_heartbeat_at) > $stale) and
+            ((.observed_at_ms - $admission.sweep_expires_at) > $stale)
           ' "${state_file}" >/dev/null || {
             echo 'the stalled-sweep preconditions do not hold for that gc run id.' >&2
             jq -c '{counts, running_gc_runs: [.gc_runs[] | select(.state == "running") | {id, heartbeat_at}], admission: {admission_state: .admission.admission_state, sweep_heartbeat_at: .admission.sweep_heartbeat_at, sweep_expires_at: .admission.sweep_expires_at}, observed_at_ms, collector: {mode: .collector.mode, enforcement: .collector.enforcement, maintenance: .collector.maintenance}}' "${state_file}" >&2

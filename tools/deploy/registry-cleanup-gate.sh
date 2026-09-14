@@ -38,10 +38,10 @@ readonly run_max_passes="${REGISTRY_CLEANUP_RUN_PASSES:-64}"
 readonly run_deadline_ms="${REGISTRY_CLEANUP_RUN_DEADLINE_MS:-900000}"
 readonly run_sleep_s="${REGISTRY_CLEANUP_RUN_SLEEP_S:-5}"
 # The request ceiling follows the action. A pass scans the bucket and then
-# deletes what the scan listed, so it is not one read: run 34844622738 lost its
-# first pass to the 120 s ceiling while the plan of those 94,336 objects took
-# 87.2 s. A pass gets 10 minutes, so a 60-minute campaign can overrun by one pass
-# and still fit the 75-minute job; the other actions keep 120 s.
+# deletes what the scan listed, so it is not one read: a plan of about 94,000
+# objects already measures at 87 s. A pass gets 10 minutes, so a 60-minute
+# campaign can overrun by one pass and still fit the 75-minute job; the other
+# actions keep 120 s.
 readonly call_timeout_s=120
 readonly run_call_timeout_s=600
 # Key lists are evidence, not a data dump: every list in the record is capped.
@@ -54,6 +54,12 @@ readonly plan_response="${runtime_root}/plan-response.json"
 readonly status_response="${runtime_root}/status-response.json"
 readonly pass_response="${runtime_root}/pass-response.json"
 readonly final_report_response="${runtime_root}/final-report.json"
+# The campaign journal and its record live on disk, never in a shell variable:
+# one pass carries up to max_evidence_keys keys, which is far past the 128 KiB
+# a Linux argument may hold.
+readonly campaign_passes="${runtime_root}/campaign-passes.json"
+readonly campaign_record="${runtime_root}/campaign-record.json"
+readonly final_report_proof_json="${runtime_root}/final-report-proof.json"
 readonly state="${runtime_root}/state.json"
 readonly hold_evidence="${RUNNER_TEMP:-/tmp}/registry-cleanup-hold.json"
 
@@ -82,6 +88,13 @@ scrub_secret_files() {
   return 0
 }
 
+# A raw header dump holds whatever the answer carried, cookies included, so it
+# never survives an exit. The names end in -headers.dump; only the traced copy
+# of four named headers stays.
+scrub_header_dumps() {
+  rm -f "${runtime_root}"/*-headers.dump
+}
+
 # The evidence must not carry the credential the calls were authorized with.
 require_clean_evidence() {
   if ! scrub_secret_files; then
@@ -92,6 +105,7 @@ require_clean_evidence() {
 
 on_exit_scrub() {
   local status=$?
+  scrub_header_dumps
   if ! scrub_secret_files; then
     echo 'the deployment gate removed files that reflected the bypass secret before it exited.' >&2
     exit 1
@@ -108,6 +122,8 @@ chmod 700 "${runtime_root}"
 # skipped gate makes no call at all.
 touch "${deployment}" "${response}" "${plan_response}" "${status_response}"
 touch "${pass_response}" "${final_report_response}"
+# The record starts as null, so the evidence build always has a file to read.
+printf 'null\n' > "${campaign_record}"
 test ! -e "${evidence}"
 test -n "${GITHUB_SHA:-}"
 test -n "${gate_origin}"
@@ -129,6 +145,24 @@ case "${target_mode}" in
     ;;
 esac
 
+# The four response headers a failed call is traced with. Each field is read by
+# name, so a cookie, an authorization header, or anything else the answer
+# carried can not reach the artifact.
+write_traced_headers() {
+  local dump="$1" out="$2" status="$3"
+  [ -f "${dump}" ] || return 1
+  jq -cn --rawfile headers "${dump}" --arg http_status "${status}" \
+    '($headers | split("\n")) as $lines |
+     def field($name):
+       [$lines[] | select(test("^" + $name + ":"; "i"))
+                | sub("^[^:]*:[ ]*"; "") | sub("\r$"; "")] | last;
+     {http_status: ($http_status | tonumber? // null),
+      server: field("server"),
+      cf_ray: field("cf-ray"),
+      content_type: field("content-type"),
+      date: field("date")}' > "${out}"
+}
+
 # One authenticated call to the gate. The secret reaches jq through the
 # environment, never through an argument list and never through a file.
 # Prints the HTTP status and writes the body to the given file.
@@ -139,20 +173,32 @@ call_gate() {
   # first `}`. The default is spelled out instead.
   local extra_json='{}'
   if [ "$#" -ge 3 ]; then extra_json="$3"; fi
-  local request_json call_status max_time_s
+  local request_json call_status max_time_s headers_dump traced_file
   request_json="$(BYPASS_SECRET="${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" \
     jq -cn --arg gateAction "${gate_action}" --argjson extra "${extra_json}" \
     '{secret: env.BYPASS_SECRET, action: $gateAction} + $extra')"
   max_time_s="${call_timeout_s}"
   if [ "${gate_action}" = run ]; then max_time_s="${run_call_timeout_s}"; fi
+  # The dump is a working file: it is read for the four traced names and then
+  # deleted, so the answer's own bytes never reach the upload.
+  headers_dump="${body_file%.json}-headers.dump"
+  traced_file="${body_file%.json}-headers.json"
+  rm -f "${headers_dump}"
   call_status="$(printf '%s' "${request_json}" | curl --silent --show-error \
     --max-time "${max_time_s}" \
     --request POST \
     --header 'Content-Type: application/json' \
     --header "Origin: ${gate_origin}" \
     --data-binary @- \
+    --dump-header "${headers_dump}" \
     --output "${body_file}" --write-out '%{http_code}' \
     "${gate_url}" || true)"
+  # A trace that can not be read is not a reason to fail the call, but it must
+  # never leave a half-written file behind.
+  if ! write_traced_headers "${headers_dump}" "${traced_file}" "${call_status}"; then
+    rm -f "${traced_file}"
+  fi
+  rm -f "${headers_dump}"
   unset request_json
   printf '%s' "${call_status}"
 }
@@ -341,15 +387,74 @@ run_refusal() {
     post_state_digest: null, final_report: null, preflight: null, campaign: []}'
 }
 
+# The campaign journal is replaced atomically, so a jq that fails leaves every
+# pass already recorded in place. Only paths and small scalars reach the
+# argument list; pass data always arrives through a file.
+append_failed_pass() {
+  local pass="$1" status="$2" class="$3" error="$4"
+  jq -cn --slurpfile passes "${campaign_passes}" \
+    --argjson pass "${pass}" --arg status "${status}" --arg class "${class}" \
+    --arg error "${error}" \
+    '$passes[0] + [{pass: $pass, http_status: ($status | tonumber? // null),
+                    gate_class: $class, status: null, completed: false,
+                    error: $error}]' \
+    > "${campaign_passes}.next" && mv -f "${campaign_passes}.next" "${campaign_passes}"
+}
+
+# Appends the record of one served pass, with its capped key lists.
+append_served_pass() {
+  local pass="$1" status="$2" class="$3" body="$4"
+  jq -cn --slurpfile passes "${campaign_passes}" --slurpfile response "${body}" \
+    --argjson pass "${pass}" --arg status "${status}" --arg class "${class}" \
+    --argjson cap "${max_evidence_keys}" \
+    '$passes[0] + [($response[0] // {}) as $outer |
+      ($outer.result // $outer) as $envelope | ($envelope.result // {}) as $result |
+      {pass: $pass, http_status: ($status | tonumber? // null), gate_class: $class,
+       status: ($envelope.status // null), completed: ($result.completed // false),
+       error: ($envelope.error // $result.error // null),
+       deleted_objects: ($result.deletedObjects // 0),
+       deleted_bytes: ($result.deletedBytes // 0),
+       verified_deleted_objects: ($result.verifiedDeletedObjects // 0),
+       verified_deleted_bytes: ($result.verifiedDeletedBytes // 0),
+       failed_objects: ($result.failedObjects // 0),
+       blocked_objects: ($result.blockedObjects // 0),
+       resume_required: ($result.resumeRequired // false),
+       candidate_total: ($result.planSummary.details.candidateTotal // null),
+       post_state_unchanged: ($result.postState.unchanged // false),
+       post_state_digest: ($result.postState.scanned.digest // null),
+       deleted_keys: (($result.deletedKeys // [])[0:$cap]),
+       deleted_keys_retained: ((($result.deletedKeys // []) | length) | if . > $cap then $cap else . end),
+       deleted_keys_truncated: (($result.deletedKeysTruncated // false) or ((($result.deletedKeys // []) | length) > $cap)),
+       unverified_keys: (($result.unverifiedKeys // [])[0:$cap]),
+       unverified_keys_truncated: ((($result.unverifiedKeys // []) | length) > $cap)}]' \
+    > "${campaign_passes}.next" && mv -f "${campaign_passes}.next" "${campaign_passes}"
+}
+
+# Replaces the campaign record with one merged field, read and written through
+# files so the record never becomes an argument.
+replace_campaign_record() {
+  local program="$1"
+  shift
+  jq -cn "$program" "$@" > "${campaign_record}.next" \
+    && mv -f "${campaign_record}.next" "${campaign_record}"
+}
+
 # One bounded delete campaign, then the proof that the backlog is gone.
 #
-# Prints a JSON record and never exits: the caller writes the evidence and
-# decides the exit code, so a refused or unfinished campaign is still an
-# artifact. A pass that fails is never retried as though it were contention.
+# Writes the campaign record to campaign_record and never exits: the caller
+# writes the evidence and decides the exit code, so a refused or unfinished
+# campaign is still an artifact. A pass that fails is never retried as though
+# it were contention.
+#
+# Every pass journals itself before the next one starts: an attempt row before
+# the request, the raw body as it arrives, and its record once it is read. A
+# pass carries up to max_evidence_keys keys, so no pass data may travel on an
+# argument list.
 run_cleanup_to_completion() {
-  local passes='[]'
   local pass=0 pass_status pass_class envelope_status completed=true
   local reason='' deadline_ms now_ms post_digest='' finished=false ok=false
+  local pass_raw='' pass_attempt=''
+  printf '[]' > "${campaign_passes}"
   deadline_ms=$(( $(date +%s) * 1000 + run_deadline_ms ))
   while [ "${pass}" -lt "${run_max_passes}" ]; do
     now_ms=$(( $(date +%s) * 1000 ))
@@ -359,49 +464,34 @@ run_cleanup_to_completion() {
       break
     fi
     pass=$(( pass + 1 ))
-    pass_status="$(call_gate run "${pass_response}")"
+    pass_raw="${runtime_root}/pass-${pass}-response.json"
+    pass_attempt="${runtime_root}/pass-${pass}-attempt.json"
+    # The attempt row is written before the request: a pass that never answers
+    # can still have deleted, so the attempt outlives a body that never came.
+    jq -cn --argjson pass "${pass}" --argjson started_ms "${now_ms}" \
+      '{pass: $pass, started_at_ms: $started_ms}' > "${pass_attempt}"
+    pass_status="$(call_gate run "${pass_raw}")"
+    # The latest body keeps its old name, which the lane reads as evidence.
+    cp -f "${pass_raw}" "${pass_response}"
     pass_class="$(classify_gate_response "${pass_status}" "${pass_response}")"
     if [ "${pass_class}" != ok ]; then
-      passes="$(jq -c --argjson pass "${pass}" --arg status "${pass_status}" --arg class "${pass_class}" \
-        '. + [{pass: $pass, http_status: ($status | tonumber? // null), gate_class: $class, status: null, completed: false, error: $class}]' \
-        <<<"${passes}")"
+      append_failed_pass "${pass}" "${pass_status}" "${pass_class}" "${pass_class}"
       reason="pass ${pass} reached the gate with HTTP ${pass_status:-none} (${pass_class})"
       completed=false
       break
     fi
-    envelope_status="$(jq -r '((.result // .) | .status) // empty' "${pass_response}")"
-    completed="$(jq -r '((.result // .) | .result.completed) // false | tostring' "${pass_response}")"
-    passes="$(jq -c --argjson pass "${pass}" --arg status "${pass_status}" --arg class "${pass_class}" \
-      --argjson cap "${max_evidence_keys}" \
-      --slurpfile response "${pass_response}" \
-      '. + [($response[0] // {}) as $outer |
-        ($outer.result // $outer) as $envelope | ($envelope.result // {}) as $result |
-        {pass: $pass, http_status: ($status | tonumber? // null), gate_class: $class,
-         status: ($envelope.status // null), completed: ($result.completed // false),
-         error: ($envelope.error // $result.error // null),
-         deleted_objects: ($result.deletedObjects // 0),
-         deleted_bytes: ($result.deletedBytes // 0),
-         verified_deleted_objects: ($result.verifiedDeletedObjects // 0),
-         verified_deleted_bytes: ($result.verifiedDeletedBytes // 0),
-         failed_objects: ($result.failedObjects // 0),
-         blocked_objects: ($result.blockedObjects // 0),
-         resume_required: ($result.resumeRequired // false),
-         candidate_total: ($result.planSummary.details.candidateTotal // null),
-         post_state_unchanged: ($result.postState.unchanged // false),
-         post_state_digest: ($result.postState.scanned.digest // null),
-         deleted_keys: (($result.deletedKeys // [])[0:$cap]),
-         deleted_keys_retained: ((($result.deletedKeys // []) | length) | if . > $cap then $cap else . end),
-         deleted_keys_truncated: (($result.deletedKeysTruncated // false) or ((($result.deletedKeys // []) | length) > $cap)),
-         unverified_keys: (($result.unverifiedKeys // [])[0:$cap]),
-         unverified_keys_truncated: ((($result.unverifiedKeys // []) | length) > $cap)}]' \
-      <<<"${passes}")"
     # A body that does not parse is not contention, and the campaign must not
-    # continue on an answer it could not read.
-    if ! jq -e . >/dev/null 2>&1 <<<"${passes}"; then
+    # continue on an answer it could not read. The raw body stays on disk as it
+    # arrived, so the operator can read what answered.
+    if ! jq -e . >/dev/null 2>&1 < "${pass_raw}"; then
+      append_failed_pass "${pass}" "${pass_status}" "${pass_class}" unparsed_body
       reason="pass ${pass} answered a body this lane could not parse"
       completed=false
       break
     fi
+    envelope_status="$(jq -r '((.result // .) | .status) // empty' "${pass_raw}")"
+    completed="$(jq -r '((.result // .) | .result.completed) // false | tostring' "${pass_raw}")"
+    append_served_pass "${pass}" "${pass_status}" "${pass_class}" "${pass_raw}"
     if [ "${completed}" = true ]; then
       reason=''
       finished=true
@@ -424,30 +514,30 @@ run_cleanup_to_completion() {
     reason="the campaign reached its ${run_max_passes} pass limit"
   fi
   if [ "${finished}" = true ]; then ok=true; fi
-  post_digest="$(jq -r '[.[] | .post_state_digest] | map(select(. != null)) | last // empty' <<<"${passes}")"
+  post_digest="$(jq -r '[.[] | .post_state_digest] | map(select(. != null)) | last // empty' "${campaign_passes}")"
   jq -cn \
     --argjson ok "${ok}" \
     --arg reason "${reason}" \
-    --argjson passes "${passes}" \
-    --argjson pass_count "${pass}" \
+    --slurpfile passes "${campaign_passes}" \
     --argjson max_passes "${run_max_passes}" \
     --argjson deadline_ms "${run_deadline_ms}" \
     --arg post_digest "${post_digest}" \
-    '{ok: $ok, reason: (if ($reason | length) == 0 then null else $reason end),
-      passes: $pass_count, max_passes: $max_passes, deadline_ms: $deadline_ms,
+    '($passes[0] // []) as $passes |
+     {ok: $ok, reason: (if ($reason | length) == 0 then null else $reason end),
+      passes: ($passes | length), max_passes: $max_passes, deadline_ms: $deadline_ms,
       deleted_objects_total: ([$passes[].deleted_objects] | add // 0),
       deleted_bytes_total: ([$passes[].deleted_bytes] | add // 0),
       verified_deleted_objects_total: ([$passes[].verified_deleted_objects] | add // 0),
       verified_deleted_bytes_total: ([$passes[].verified_deleted_bytes] | add // 0),
       post_state_digest: (if ($post_digest | length) == 0 then null else $post_digest end),
       final_report: null,
-      campaign: $passes}'
+      campaign: $passes}' > "${campaign_record}"
 }
 
 # The exact proof that the backlog is gone: a fresh report whose candidate set
 # is empty and whose scanned keyset digest is the one the finished campaign
 # proved. Counts alone cannot tell one key from another, so the digest is what
-# this compares.
+# this compares. Writes final_report_proof_json, never an argument.
 final_report_proof() {
   local expected_json report_status report_class reason_text
   expected_json="$(jq -cn --arg digest "${1:-}" 'if ($digest | length) == 0 then null else $digest end')"
@@ -456,7 +546,8 @@ final_report_proof() {
   if [ "${report_class}" != ok ]; then
     reason_text="the final report reached the gate with HTTP ${report_status:-none} (${report_class})"
     jq -cn --arg reason "${reason_text}" --arg status "${report_status}" --arg class "${report_class}" \
-      '{ok: false, reason: $reason, http_status: ($status | tonumber? // null), gate_class: $class}'
+      '{ok: false, reason: $reason, http_status: ($status | tonumber? // null), gate_class: $class}' \
+      > "${final_report_proof_json}"
     return 0
   fi
   jq -cn \
@@ -494,7 +585,8 @@ final_report_proof() {
       retained_objects: ($plan.retainedObjects // null),
       keysets: {scanned: ($keysets.scanned // null), retained: ($keysets.retained // null), candidates: ($keysets.candidates // null)},
       expected_scanned_digest: $expected,
-      post_digest_match: (($keysets.scanned.digest // null) == $expected)}'
+      post_digest_match: (($keysets.scanned.digest // null) == $expected)}' \
+    > "${final_report_proof_json}"
 }
 
 # Live state selects the transport. A collector that does not exist can not
@@ -523,7 +615,9 @@ idle=null
 skipped_reason=""
 inventory_json="null"
 admission_json="null"
-run_json="null"
+# The campaign record starts as null in its own file, and every later state of
+# it is written there as well: the record carries the pass key lists, which are
+# far larger than an argument may be.
 preview_json="null"
 preview_problem=""
 
@@ -565,7 +659,8 @@ else
     # delete set again and finish with nothing done, so it is refused as a
     # caller error instead of being reported as a finished campaign.
     if [ "${live_mode}" != delete ]; then
-      run_json="$(run_refusal "the serving collector mode is ${live_mode}, and a run would not delete")"
+      run_refusal "the serving collector mode is ${live_mode}, and a run would not delete" \
+        > "${campaign_record}"
     else
       # The delete authority is proven here, from the serving parent, right
       # before the first delete. A reopen cannot reuse the hold evidence of
@@ -573,22 +668,32 @@ else
       # campaign takes the same proof itself.
       take_admission_proof
       if [ "${admission_problem}" != ok ]; then
-        run_json="$(run_refusal "the delete campaign needs the D1 admission state, but ${admission_problem}.")"
+        run_refusal "the delete campaign needs the D1 admission state, but ${admission_problem}." \
+          > "${campaign_record}"
       else
         take_inventory_proof
         if [ "${inventory_problem}" != ok ]; then
-          run_json="$(run_refusal "the delete campaign needs a completed, fault-free report inventory, but ${inventory_problem}.")"
+          run_refusal "the delete campaign needs a completed, fault-free report inventory, but ${inventory_problem}." \
+            > "${campaign_record}"
         else
-          run_json="$(run_cleanup_to_completion)"
-          if [ "$(jq -r '.ok' <<<"${run_json}")" = true ]; then
-            final_json="$(final_report_proof "$(jq -r '.post_state_digest // empty' <<<"${run_json}")")"
-            run_json="$(jq -cn --argjson run "${run_json}" --argjson final "${final_json}" \
-              '$run + {final_report: $final, ok: ($run.ok and $final.ok)}')"
+          run_cleanup_to_completion
+          if [ "$(jq -r '.ok' "${campaign_record}")" = true ]; then
+            final_report_proof "$(jq -r '.post_state_digest // empty' "${campaign_record}")"
+            # The jq program is single-quoted on purpose; $run[0] is a jq
+            # array subscript, not a shell expansion.
+            # shellcheck disable=SC2016
+            replace_campaign_record \
+              '$run[0] + {final_report: $final[0], ok: ($run[0].ok and $final[0].ok)}' \
+              --slurpfile run "${campaign_record}" --slurpfile final "${final_report_proof_json}"
           fi
-          run_json="$(jq -cn --argjson run "${run_json}" \
+          # The preflight summaries are counts and short codes, so they stay
+          # small enough to travel as values.
+          # shellcheck disable=SC2016
+          replace_campaign_record \
+            '$run[0] + {preflight: {admission: $admission, inventory: $inventory}}' \
+            --slurpfile run "${campaign_record}" \
             --argjson admission "${admission_json}" \
-            --argjson inventory "${inventory_json}" \
-            '$run + {preflight: {admission: $admission, inventory: $inventory}}')"
+            --argjson inventory "${inventory_json}"
         fi
       fi
     fi
@@ -708,7 +813,7 @@ jq -n \
   --argjson child_present "${child_present}" \
   --argjson inventory "${inventory_json}" \
   --argjson admission "${admission_json}" \
-  --argjson run "${run_json}" \
+  --slurpfile run "${campaign_record}" \
   --argjson preview "${preview_json}" \
   --slurpfile response "${response}" \
   --slurpfile deployment "${deployment}" \
@@ -734,7 +839,7 @@ jq -n \
     hold_leave: $hold_leave,
     inventory: $inventory,
     admission: $admission,
-    run: $run,
+    run: ($run[0] // null),
     preview: $preview,
     paused: $paused,
     idle: $idle,

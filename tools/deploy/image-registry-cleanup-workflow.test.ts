@@ -372,6 +372,23 @@ describe("image registry cleanup stalled-sweep resolution", () => {
     }
   });
 
+  it("resolves when a recorded batch advanced the gc row heartbeat", () => {
+    // The shape of run 34854920843. A progress write advances the gc row
+    // heartbeat alone, so the row is legitimately ahead of the gate heartbeat,
+    // and the two stamps are never equal again after the first recorded batch.
+    const state = withLiveState((draft) => {
+      draft.gc_runs[0].heartbeat_at =
+        draft.admission.sweep_heartbeat_at + 1_395;
+      draft.gc_runs[0].updated_at = draft.gc_runs[0].heartbeat_at;
+    });
+    const run = runResolve({ state });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+    } finally {
+      run.cleanup();
+    }
+  });
+
   it("sends each machine credential only to its own endpoint", () => {
     const run = runResolve();
     try {
@@ -510,6 +527,49 @@ describe("image registry cleanup stalled-sweep resolution", () => {
         state: withLiveState((state) => {
           state.collector_http_status = 503;
           state.collector_problem = "unreadable";
+        }),
+      },
+      {
+        // The gc row is behind the gate row, which no write path produces: a
+        // progress write moves the row forward and a sweep heartbeat moves both.
+        label: "a row heartbeat behind the admission heartbeat",
+        state: withLiveState((state) => {
+          state.gc_runs[0].heartbeat_at =
+            state.admission.sweep_heartbeat_at - 1_395;
+        }),
+      },
+      {
+        label: "an admission heartbeat inside the grace window",
+        state: withLiveState((state) => {
+          state.admission.sweep_heartbeat_at = state.observed_at_ms - 300_000;
+        }),
+      },
+      {
+        // Both heartbeats are stale and correctly ordered here, so the lease is
+        // the only refusal: the lease must have been expired for the full grace
+        // window, not merely expired.
+        label: "a lease that expired less than the grace window ago",
+        state: withLiveState((state) => {
+          state.admission.sweep_expires_at = state.observed_at_ms - 1_000;
+        }),
+      },
+      {
+        // Acquisition writes the same stamp to both rows, so a differing start
+        // stamp means the gate row belongs to a different sweep.
+        label: "a start stamp that is not the acquisition stamp",
+        state: withLiveState((state) => {
+          state.admission.sweep_started_at = state.gc_runs[0].started_at + 1;
+        }),
+      },
+      {
+        // The ledger window itself must hold exactly one in-flight sweep, even
+        // when the counts query disagrees.
+        label: "two running rows with an understated count",
+        state: withLiveState((state) => {
+          state.gc_runs.push({
+            ...state.gc_runs[0],
+            id: "9d3e1f70-0000-4000-8000-000000000000",
+          });
         }),
       },
     ];

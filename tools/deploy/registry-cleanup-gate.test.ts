@@ -25,6 +25,22 @@ const gateUrl = "https://intar.dev/api/maintenance/registry-cleanup";
 // the default timeout is too tight when the whole suite runs in parallel.
 const SPAWN_TIMEOUT_MS = 30_000;
 const scannedDigest = "1".repeat(64);
+// A healthy hop, and the answer a traced 502 is measured against. Real curl
+// writes CRLF line endings, so this block carries them and the parser must
+// strip them.
+const headersOk = [
+  "HTTP/2 200",
+  "server: cloudflare",
+  "cf-ray: 8a1b2c3d4e5f-WAW",
+  "content-type: application/json",
+  "date: Sun, 14 Sep 2026 14:16:27 GMT",
+].join("\r\n");
+// Linux caps one argument at MAX_ARG_STRLEN (128 KiB) and answers E2BIG past
+// it. The real jq is resolved before the harness rewrites PATH.
+const maxArgumentBytes = 131_072;
+const realJq =
+  spawnSync("sh", ["-c", "command -v jq"], { encoding: "utf8" }).stdout.trim() ||
+  "/usr/bin/jq";
 
 /** The controller envelope: {action, result:{...}}, never a flattened copy. */
 function nestedEnvelope(action: string, result: unknown): Record<string, unknown> {
@@ -157,6 +173,10 @@ interface RunOptions {
   planStatus?: string;
   /** One body per delete pass; the last one answers every later pass. */
   runBodies?: string[];
+  /** One HTTP status per delete pass; the last one answers every later pass. */
+  runStatuses?: string[];
+  /** One header block per delete pass; the last one answers every later pass. */
+  runHeaders?: string[];
   runPasses?: number;
 }
 
@@ -196,6 +216,11 @@ function fakeCurl(): string {
     "set -u",
     'output=""',
     'url=""',
+    'dump=""',
+    'write_headers() {',
+    '  [ -n "$dump" ] || return 0',
+    '  printf "%s\\n" "$1" > "$dump"',
+    '}',
     'printf "%s\\n" "$@" > "$MOCK_CURL_ARGS"',
     // The gate call carries its action in the body, so the fake answers the
     // action it was actually asked for.
@@ -205,6 +230,7 @@ function fakeCurl(): string {
     'while [ "$#" -gt 0 ]; do',
     '  case "$1" in',
     '    --output) output="$2"; shift 2 ;;',
+    '    --dump-header) dump="$2"; shift 2 ;;',
     '    --data-binary) shift 2 ;;',
     "    http*) url=\"$1\"; shift ;;",
     "    *) shift ;;",
@@ -212,6 +238,7 @@ function fakeCurl(): string {
     "done",
     'case "$url" in',
     "  */workers/scripts/*)",
+    '    write_headers "$MOCK_HEADERS"',
     '    printf "%s" "$MOCK_SCRIPT_BODY" > "$output"',
     '    printf "%s" "$MOCK_SCRIPT_STATUS"',
     "    ;;",
@@ -219,23 +246,33 @@ function fakeCurl(): string {
     '    printf "gate\\n" >> "$MOCK_CURL_GATE"',
     '    case "$call_action" in',
     '      status)',
+    '        write_headers "$MOCK_HEADERS"',
     '        printf "%s" "$MOCK_STATUS_BODY" > "$output"',
     '        printf "%s" "$MOCK_STATUS_STATUS"',
     '        ;;',
     '      plan)',
+    '        write_headers "$MOCK_HEADERS"',
     '        printf "%s" "$MOCK_PLAN_BODY" > "$output"',
     '        printf "%s" "$MOCK_PLAN_STATUS"',
     '        ;;',
-    '      run)',
-    '        index="$(cat "$MOCK_RUN_COUNTER" 2>/dev/null || echo 0)"',
-    '        count="$(jq -r "length" "$MOCK_RUN_BODIES")"',
-    '        next=$(( index + 1 ))',
-    '        printf "%s" "$next" > "$MOCK_RUN_COUNTER"',
-    '        if [ "$index" -ge "$count" ]; then index=$(( count - 1 )); fi',
-    '        jq -c ".[$index]" "$MOCK_RUN_BODIES" > "$output"',
-    '        printf "%s" "$MOCK_RUN_STATUS"',
-    '        ;;',
+      '      run)',
+      '        index="$(cat "$MOCK_RUN_COUNTER" 2>/dev/null || echo 0)"',
+      '        count="$(jq -r "length" "$MOCK_RUN_BODIES")"',
+      '        statuses="$(jq -r "length" "$MOCK_RUN_STATUSES")"',
+      '        next=$(( index + 1 ))',
+      '        printf "%s" "$next" > "$MOCK_RUN_COUNTER"',
+      '        if [ "$index" -ge "$count" ]; then index=$(( count - 1 )); fi',
+      // A body that is a JSON string is written raw, the way a gateway answer
+      // such as "error code: 502" arrives, not as a quoted JSON string and not
+      // with an added newline: the lane stores the exact bytes it received.
+      '        jq -jr ".[$index]" "$MOCK_RUN_BODIES" > "$output"',
+      '        status_index="$index"',
+      '        if [ "$status_index" -ge "$statuses" ]; then status_index=$(( statuses - 1 )); fi',
+      '        write_headers "$(jq -jr ".[$status_index]" "$MOCK_RUN_HEADERS")"',
+      '        jq -r ".[$status_index]" "$MOCK_RUN_STATUSES"',
+      '        ;;',
     '      *)',
+    '        write_headers "$MOCK_HEADERS"',
     '        printf "%s" "$MOCK_GATE_BODY" > "$output"',
     '        printf "%s" "$MOCK_GATE_STATUS"',
     '        ;;',
@@ -243,6 +280,25 @@ function fakeCurl(): string {
     "    ;;",
     "  *) exit 92 ;;",
     "esac",
+    "",
+  ].join("\n");
+}
+
+function fakeJq(): string {
+  return [
+    "#!/usr/bin/env bash",
+    "# Linux rejects one argument longer than MAX_ARG_STRLEN with E2BIG, and that",
+    "# is how run 34852054022 lost its campaign record. This wrapper applies the",
+    "# limit on every host, so a lane that puts pass data on an argument list",
+    "# fails here instead of on the runner.",
+    "set -u",
+    'for argument in "$@"; do',
+    "  if [ \"${#argument}\" -gt 131072 ]; then",
+    '    echo "jq: Argument list too long" >&2',
+    "    exit 126",
+    "  fi",
+    "done",
+    "exec \"${MOCK_REAL_JQ}\" \"$@\"",
     "",
   ].join("\n");
 }
@@ -256,6 +312,8 @@ function runGate(options: RunOptions = {}) {
   const curlStdin = join(root, "curl-stdin");
   const curlGate = join(root, "curl-gate");
   const runBodies = join(root, "run-bodies.json");
+  const runStatuses = join(root, "run-statuses.json");
+  const runHeaders = join(root, "run-headers.json");
   const runCounter = join(root, "run-counter");
   mkdirSync(bin, { recursive: true });
   mkdirSync(runnerTemp, { recursive: true });
@@ -263,7 +321,9 @@ function runGate(options: RunOptions = {}) {
   writeFileSync(bunx, fakeBunx());
   const curl = join(bin, "curl");
   writeFileSync(curl, fakeCurl());
-  for (const executable of [bunx, curl]) chmodSync(executable, 0o755);
+  const jq = join(bin, "jq");
+  writeFileSync(jq, fakeJq());
+  for (const executable of [bunx, curl, jq]) chmodSync(executable, 0o755);
 
   if (options.holdEvidence === "held") {
     writeFileSync(
@@ -303,6 +363,9 @@ function runGate(options: RunOptions = {}) {
       ],
     ),
   );
+  writeFileSync(runStatuses, JSON.stringify(options.runStatuses ?? ["200"]));
+  // One header block per delete pass, in the same order as the statuses.
+  writeFileSync(runHeaders, JSON.stringify(options.runHeaders ?? [headersOk]));
 
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -336,8 +399,12 @@ function runGate(options: RunOptions = {}) {
       // deletes by reference.
       '{"action":"plan","status":"report-only","plan":{"candidateObjects":[{"key":"image-chunks/v1/zstd6/aa"}],"objectsScanned":42,"truncated":false,"details":{"faults":[],"deleteAllowedByReferences":true,"candidateTotal":1}}}',
     MOCK_RUN_BODIES: runBodies,
+    MOCK_RUN_STATUSES: runStatuses,
+    MOCK_RUN_HEADERS: runHeaders,
+    MOCK_HEADERS: headersOk,
+    // The wrapper applies the Linux argument limit and then runs the real jq.
+    MOCK_REAL_JQ: realJq,
     MOCK_RUN_COUNTER: runCounter,
-    MOCK_RUN_STATUS: "200",
     REGISTRY_CLEANUP_RUN_PASSES: String(options.runPasses ?? 64),
     REGISTRY_CLEANUP_RUN_SLEEP_S: "0",
     MOCK_CURL_ARGS: curlArgs,
@@ -1597,6 +1664,197 @@ describe("registry cleanup request ceiling", () => {
   });
 }, SPAWN_TIMEOUT_MS);
 
+describe("registry cleanup campaign at the real key volume", () => {
+  // One pass at the real cap: 5000 keys with their byte counts is far past the
+  // 128 KiB a Linux argument holds. Run 34852054022 recorded two such passes in
+  // a shell variable, read a 502 on the third, and lost everything but the 502
+  // body. The fake jq in this harness applies that argument limit on every host,
+  // so a lane that puts pass data on an argument list fails here.
+  const passKeys = (prefix: string): Record<string, unknown>[] =>
+    Array.from({ length: 5000 }, (_, index) => ({
+      key: `image-chunks/v1/zstd6/${prefix}${String(index).padStart(60, "0")}`,
+      bytes: 882495,
+      category: "chunk",
+      image_key: null,
+    }));
+
+  it("keeps two served passes and the 502 that followed them", () => {
+    const firstKeys = passKeys("0a");
+    const secondKeys = passKeys("0b");
+    const run = runGate({
+      action: "run",
+      targetMode: "delete",
+      liveMode: "delete",
+      runPasses: 8,
+      runStatuses: ["200", "200", "502"],
+      runBodies: [
+        nestedEnvelope(
+          "run",
+          runEnvelope("pending", {
+            completed: false,
+            deletedObjects: 5000,
+            deletedBytes: 6384903433,
+            verifiedDeletedObjects: 5000,
+            verifiedDeletedBytes: 6384903433,
+            deletedKeys: firstKeys,
+          }),
+        ),
+        nestedEnvelope(
+          "run",
+          runEnvelope("pending", {
+            completed: false,
+            deletedObjects: 5000,
+            deletedBytes: 6293164547,
+            verifiedDeletedObjects: 5000,
+            verifiedDeletedBytes: 6293164547,
+            deletedKeys: secondKeys,
+          }),
+        ),
+        // A gateway body, not JSON: this arrives as the raw bytes of the answer.
+        "error code: 502",
+      ],
+    });
+    try {
+      // The 502 is not contention, so the campaign stops and reports failure.
+      expect(run.result.status, run.result.stderr).not.toBe(0);
+      expect(run.result.stderr).toContain("the cleanup campaign did not finish");
+      expect(run.result.stderr).not.toContain("Argument list too long");
+
+      // The report exists, which the failed run could not produce at all.
+      expect(run.evidence).not.toBeNull();
+      const record = (run.evidence as { run: { campaign: Record<string, unknown>[] } }).run;
+      expect(record.campaign).toHaveLength(3);
+      expect(run.evidence).toMatchObject({
+        run: {
+          ok: false,
+          passes: 3,
+          deleted_objects_total: 10000,
+          verified_deleted_objects_total: 10000,
+          verified_deleted_bytes_total: 12678067980,
+        },
+      });
+
+      // Both served passes keep every key, as the CI artifact must.
+      const [first, second, failed] = record.campaign;
+      expect(first).toMatchObject({
+        pass: 1,
+        gate_class: "ok",
+        status: "pending",
+        completed: false,
+        deleted_objects: 5000,
+        verified_deleted_objects: 5000,
+        verified_deleted_bytes: 6384903433,
+        deleted_keys_retained: 5000,
+        deleted_keys_truncated: false,
+      });
+      expect((first.deleted_keys as unknown[]).length).toBe(5000);
+      expect((first.deleted_keys as Record<string, unknown>[])[4999]).toMatchObject({
+        key: firstKeys[4999].key,
+      });
+      expect(second).toMatchObject({
+        pass: 2,
+        gate_class: "ok",
+        verified_deleted_bytes: 6293164547,
+      });
+      expect((second.deleted_keys as unknown[]).length).toBe(5000);
+      // The failed pass records the class that answered, not a served body.
+      expect(failed).toMatchObject({
+        pass: 3,
+        http_status: 502,
+        gate_class: "failed",
+        status: null,
+        completed: false,
+        error: "failed",
+      });
+
+      // The 502 body stays exactly as it arrived, and reaches no retry.
+      expect(readFileSync(join(run.runtimeRoot, "pass-3-response.json"), "utf8")).toBe(
+        "error code: 502",
+      );
+      expect(readFileSync(join(run.runtimeRoot, "pass-response.json"), "utf8")).toBe(
+        "error code: 502",
+      );
+      // Each pass kept its own body and its attempt row.
+      for (const pass of [1, 2, 3]) {
+        expect(
+          existsSync(join(run.runtimeRoot, `pass-${pass}-response.json`)),
+          `pass ${pass} body`,
+        ).toBe(true);
+        expect(
+          existsSync(join(run.runtimeRoot, `pass-${pass}-attempt.json`)),
+          `pass ${pass} attempt`,
+        ).toBe(true);
+      }
+      // The journal on disk is the record, row for row.
+      const journal = JSON.parse(
+        readFileSync(join(run.runtimeRoot, "campaign-passes.json"), "utf8"),
+      ) as Record<string, unknown>[];
+      expect(journal).toHaveLength(3);
+      expect(journal.map((row) => row.pass)).toEqual([1, 2, 3]);
+      expect((journal[0].deleted_keys as unknown[]).length).toBe(5000);
+      // One status call, one plan call, then exactly three passes: the lane
+      // stops at the 502 with no retry of it and no fourth pass, and it asks
+      // for no final report because the campaign never finished.
+      expect(run.gateCalls).toBe(5);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+});
+describe("registry cleanup campaign response tracing", () => {
+  it("traces a 502 with four named headers and keeps no header dump", () => {
+    // The answer carries a cookie and an authorization header. Neither may
+    // reach the artifact: the traced file is built from four named fields, and
+    // the raw dump is deleted.
+    const badHop = [
+      "HTTP/2 502",
+      "server: cloudflare",
+      "cf-ray: 8a1b2c3d4e5f-WAW",
+      "content-type: text/plain",
+      "date: Sun, 14 Sep 2026 14:16:27 GMT",
+      "set-cookie: session=keep-out; Path=/; HttpOnly",
+      "authorization: Bearer keep-out",
+    ].join("\n");
+    const run = runGate({
+      action: "run",
+      targetMode: "delete",
+      liveMode: "delete",
+      runPasses: 4,
+      runStatuses: ["200", "502"],
+      runHeaders: [headersOk, badHop],
+      runBodies: [
+        nestedEnvelope("run", runEnvelope("pending", { completed: false })),
+        "error code: 502",
+      ],
+    });
+   try {
+     expect(run.result.status, run.result.stderr).not.toBe(0);
+      // The failed hop is traceable without the body being JSON.
+      expect(
+        JSON.parse(readFileSync(join(run.runtimeRoot, "pass-2-response-headers.json"), "utf8")),
+      ).toEqual({
+        http_status: 502,
+        server: "cloudflare",
+        cf_ray: "8a1b2c3d4e5f-WAW",
+        content_type: "text/plain",
+        date: "Sun, 14 Sep 2026 14:16:27 GMT",
+      });
+      const tracedText = readFileSync(
+        join(run.runtimeRoot, "pass-2-response-headers.json"),
+        "utf8",
+      );
+      expect(tracedText).not.toContain("keep-out");
+      // No raw dump survives, on this path or any other.
+      const entries = readdirSync(run.runtimeRoot);
+      expect(entries.filter((entry) => entry.endsWith("-headers.dump"))).toEqual([]);
+      // The served pass kept its own trace of the healthy hop.
+      expect(JSON.parse(readFileSync(join(run.runtimeRoot, "pass-1-response-headers.json"), "utf8")))
+        .toMatchObject({ http_status: 200, server: "cloudflare" });
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+});
 describe("registry cleanup report preview", () => {
   it("proves the report child binding with one plan call", () => {
     // The report-only rollout verification: the parent serves with maintenance
