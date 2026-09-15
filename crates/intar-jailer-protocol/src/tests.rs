@@ -307,6 +307,23 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         launch,
     };
     request.validate().expect("valid v3 launch");
+    request
+        .launch
+        .validate_persisted()
+        .expect("persisted v3 launch");
+    assert!(
+        request.launch.validate().is_err(),
+        "raw launch must still reject tools"
+    );
+    let mut unhashed_tools = request.clone();
+    unhashed_tools
+        .launch
+        .artifacts
+        .tools_disk
+        .as_mut()
+        .expect("tools disk")
+        .sha256 = None;
+    assert!(unhashed_tools.launch.validate_persisted().is_err());
     let mut writable_tools = request;
     writable_tools
         .launch
@@ -316,6 +333,7 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         .expect("tools disk")
         .access = ArtifactAccess::ReadWrite;
     assert!(writable_tools.validate().is_err());
+    assert!(writable_tools.launch.validate_persisted().is_err());
 }
 
 #[test]

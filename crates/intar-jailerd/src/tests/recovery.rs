@@ -618,6 +618,52 @@ fn recovery_reattaches_a_matching_drained_generation() {
 }
 
 #[test]
+fn recovery_accepts_persisted_v2_and_v3_template_launches() {
+    for with_tools in [false, true] {
+        let directory = tempfile::tempdir().expect("recovery directory");
+        let mut config = test_config();
+        config.jail_root = directory.path().to_path_buf();
+        config.cpu_reserved_millis = 0;
+        let mut record = recovered_record(&config);
+        let image = Sha256Digest::parse("a".repeat(64)).expect("image digest");
+        record.request.artifacts.root_disk =
+            template_artifact_source(&image, "root.raw", &image, ArtifactAccess::ReadWrite);
+        record.request.artifacts.kernel =
+            template_artifact_source(&image, "kernel", &image, ArtifactAccess::ReadOnly);
+        if with_tools {
+            let root = generation_directory(&config, &record.generation).join("root");
+            std::fs::create_dir_all(root.join("disks")).expect("tools directory");
+            std::fs::write(root.join("disks/tools.ext4"), b"tools").expect("tools fixture");
+            record.request.artifacts.tools_disk =
+                Some(source("tools.ext4", ArtifactAccess::ReadOnly));
+            record.paths = jail_paths(&root, record.request.artifacts.initrd.is_some());
+        }
+        record.request_fingerprint = request_fingerprint(&record.request).expect("fingerprint");
+        let record = decode_vm_record_v2(&serde_json::to_vec(&record).expect("persist record"))
+            .expect("decode persisted template launch");
+        let mut backend = FakeBackend::default();
+        backend
+            .units
+            .insert(record.unit_name.clone(), recovered_inspection(&record));
+        let core = JailerdCore::new_with_readiness(
+            config,
+            backend,
+            RecoverPreparer {
+                records: vec![record.clone()],
+                ..RecoverPreparer::default()
+            },
+            1_000,
+            ready_readiness(),
+        )
+        .expect("recover template launch");
+        assert!(core.records.contains_key(&record.generation));
+        assert_eq!(core.capabilities().committed_cpu_millis, 125);
+        assert!(core.backend.stopped_units.is_empty());
+        assert!(core.preparer.quarantined.is_empty());
+    }
+}
+
+#[test]
 fn recovery_derives_unit_name_before_draining_tampered_metadata() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;

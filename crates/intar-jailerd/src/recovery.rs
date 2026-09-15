@@ -155,7 +155,7 @@ pub(super) fn validate_recovered_record(config: &JailerdConfig, record: &VmRecor
     }
     let request_quota = record
         .request
-        .validate()
+        .validate_persisted()
         .context("validate persisted VM request")?;
     config
         .validate_run_network_request(&record.run_network.request)

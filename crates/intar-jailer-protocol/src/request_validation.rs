@@ -8,6 +8,21 @@ impl VmLaunchRequest {
         self.validate_inner(false)
     }
 
+    /// Recheck a persisted launch after its V2/V3 wrapper was validated.
+    /// Prepared boot sources and verified tools remain valid during recovery;
+    /// incoming requests must still use their complete launch wrapper.
+    pub fn validate_persisted(&self) -> Result<CpuQuota, ValidationError> {
+        if self
+            .artifacts
+            .tools_disk
+            .as_ref()
+            .is_some_and(|source| source.sha256.is_none())
+        {
+            return Err(ValidationError::InvalidToolsDisk);
+        }
+        self.validate_inner(true)
+    }
+
     pub(super) fn validate_inner(
         &self,
         allow_prepared_boot_artifacts: bool,

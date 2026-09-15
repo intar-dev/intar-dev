@@ -261,7 +261,8 @@ impl JailPreparer for FileSystemJailPreparer {
             })();
             match recovered {
                 Ok(record) => records.push(record),
-                Err(_) => {
+                Err(error) => {
+                    tracing::warn!(generation = %generation, error = %format_args!("{error:#}"), "cannot read recovered jail metadata");
                     stop_orphan_generation(&generation)?;
                     if let Some((uid, gid)) = infer_generation_identity_at(&generation_fd, config) {
                         self.reserve_identity(config, &generation, uid, gid)?;

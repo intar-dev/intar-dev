@@ -37,7 +37,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let mut unresolved_recoveries = BTreeMap::new();
         let mut recovery_clean = true;
         for mut record in preparer.recover(&config)? {
-            if validate_recovered_record(&config, &record).is_err() {
+            if let Err(error) = validate_recovered_record(&config, &record) {
+                tracing::warn!(generation = %record.generation, error = %format_args!("{error:#}"), "cannot validate recovered VM metadata");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -51,6 +52,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 continue;
             }
             if record.host_boot_id.as_deref() != current_boot_id.as_deref() {
+                tracing::warn!(generation = %record.generation, "recovered VM belongs to another host boot");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -65,7 +67,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             }
             let inspection = match backend.inspect_unit(&record.unit_name) {
                 Ok(inspection) => inspection,
-                Err(_) => {
+                Err(error) => {
+                    tracing::warn!(generation = %record.generation, error = %format_args!("{error:#}"), "cannot inspect recovered VM unit");
                     contain_or_retain_recovered_record(
                         &config,
                         &mut backend,
@@ -86,6 +89,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 || (inspection.health == SandboxHealth::Healthy
                     && !live_api_ping(&record.paths.host_api_socket))
             {
+                tracing::warn!(generation = %record.generation, ?inspection, "recovered VM identity or API verification failed");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -100,6 +104,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             }
             match run_networks.get(&record.request.run_id) {
                 Some(existing) if existing != &record.run_network => {
+                    tracing::warn!(generation = %record.generation, "recovered VM run network identities conflict");
                     contain_or_retain_recovered_record(
                         &config,
                         &mut backend,
@@ -116,7 +121,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 None => {
                     let actual = match backend.ensure_run_network(&record.run_network.request) {
                         Ok(actual) => actual,
-                        Err(_) => {
+                        Err(error) => {
+                            tracing::warn!(generation = %record.generation, error = %format_args!("{error:#}"), "cannot restore recovered run network");
                             contain_or_retain_recovered_record(
                                 &config,
                                 &mut backend,
@@ -131,6 +137,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                         }
                     };
                     if actual != record.run_network.result {
+                        tracing::warn!(generation = %record.generation, ?actual, "recovered run network identity changed");
                         contain_or_retain_recovered_record(
                             &config,
                             &mut backend,
@@ -147,6 +154,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 }
             }
             let Some(cgroup_path) = record.cgroup_path.as_deref() else {
+                tracing::warn!(generation = %record.generation, "recovered VM has no cgroup path");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -162,10 +170,10 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             // Verify the unchanged CPU limit after restart. Ingress is
             // still absent at this point, and is restored only for a record
             // that had durably completed finalization before the restart.
-            if backend
-                .verify_unit_cpu_quota(&record.unit_name, cgroup_path, record.quota)
-                .is_err()
+            if let Err(error) =
+                backend.verify_unit_cpu_quota(&record.unit_name, cgroup_path, record.quota)
             {
+                tracing::warn!(generation = %record.generation, error = %format_args!("{error:#}"), "cannot verify recovered VM CPU quota");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -179,7 +187,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 continue;
             }
             record.quota_attestation = Some(quota_attestation(record.quota)?);
-            if preparer.persist(&config, &record).is_err() {
+            if let Err(error) = preparer.persist(&config, &record) {
+                tracing::warn!(generation = %record.generation, error = %format_args!("{error:#}"), "cannot persist recovered VM metadata");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -192,16 +201,14 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 recovery_clean = false;
                 continue;
             }
-            if backend
-                .recover_vm_network(
-                    &record.run_network.request,
-                    &record.request,
-                    &record.generation,
-                    record.uid,
-                    record.gid,
-                )
-                .is_err()
-            {
+            if let Err(error) = backend.recover_vm_network(
+                &record.run_network.request,
+                &record.request,
+                &record.generation,
+                record.uid,
+                record.gid,
+            ) {
+                tracing::warn!(generation = %record.generation, error = %format_args!("{error:#}"), "cannot restore recovered VM network attachment");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -219,6 +226,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     .set_vm_ssh_forwarding(&record.request.run_id, &record.generation, true)
                     .is_err()
             {
+                tracing::warn!(generation = %record.generation, "cannot restore recovered VM SSH forwarding");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
@@ -232,6 +240,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 continue;
             }
             if !active_identities.insert(record.uid) {
+                tracing::warn!(generation = %record.generation, "recovered VM UID is already allocated");
                 contain_or_retain_recovered_record(
                     &config,
                     &mut backend,
