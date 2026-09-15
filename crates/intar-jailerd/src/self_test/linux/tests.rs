@@ -510,7 +510,7 @@ fn saturation_smoke_requests_have_unique_typed_topology() {
             .expect("saturation smoke request")
         })
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 9);
+    assert_eq!(requests.len(), 3);
     assert!(
         requests
             .iter()
