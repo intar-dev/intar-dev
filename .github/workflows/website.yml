@@ -1,15 +1,53 @@
 name: Website
-run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || format('Website validate main @ {0}', github.sha) }}"
+run-name: >-
+  ${{ github.event_name == 'pull_request'
+      && format('Website validate PR #{0}', github.event.pull_request.number)
+      || format('Website release main @ {0}', github.sha) }}
+
+# One lane for the website: validate and smoke on every change, then release
+# the tested artifact. A push to main deploys it. A manual dispatch may deploy
+# deliberately (maintenance on or off, or the registry delete campaign) or
+# validate only, which is what the default operation does.
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: validate runs the checks only, deploy releases this revision
+        required: false
+        default: validate
+        type: choice
+        options:
+          - validate
+          - deploy
+      maintenance:
+        description: auto follows pending migrations, on holds the control plane closed for a deliberate release, off returns the release to service
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - on
+          - off
+      registry_cleanup_mode:
+        description: Image registry cleanup worker mode for this release
+        required: false
+        default: preserve
+        type: choice
+        options:
+          - preserve
+          - report-only
+          - delete
+      confirmation:
+        description: Type DEPLOY WEB RELEASE to deploy from a manual dispatch
+        required: false
+        type: string
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/website-deploy.yml"
-      - ".github/workflows/website-release.yml"
+    paths: &website_paths
       - ".github/workflows/website.yml"
+      - ".github/actions/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -20,50 +58,32 @@ on:
       - "tools/check-import-boundaries.ts"
       - "tools/database/**"
       - "tools/deploy/**"
-      - "tools/flagship/**"
       - "tools/vm-boot-benchmark/**"
       - "tools/vm-boot-benchmark.py"
       - "tools/test_vm_boot_benchmark.py"
       - "crates/intar-image-scenario/**"
       - "apps/web/**"
   pull_request:
-    paths:
-      - ".github/workflows/website-deploy.yml"
-      - ".github/workflows/website-release.yml"
-      - ".github/workflows/website.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "justfile"
-      - "package.json"
-      - "bun.lock"
-      - "tsconfig.base.json"
-      - "tools/check-import-boundaries.ts"
-      - "tools/database/**"
-      - "tools/deploy/**"
-      - "tools/flagship/**"
-      - "tools/vm-boot-benchmark/**"
-      - "tools/vm-boot-benchmark.py"
-      - "tools/test_vm_boot_benchmark.py"
-      - "crates/intar-image-scenario/**"
-      - "apps/web/**"
+    paths: *website_paths
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: "website-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}"
+  # Validation never shares a group with the deploy job, which waits for this
+  # run: one shared group could deadlock both.
+  group: "website-validate-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-defaults:
-  run:
-    working-directory: apps/web
-
 jobs:
+
   validate:
     name: Test and build
     runs-on: namespace-profile-intar-dev
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact_id }}
+      artifact_digest: ${{ steps.artifact.outputs.artifact_digest }}
 
     steps:
       - name: Checkout
@@ -71,15 +91,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version-file: apps/web/.node-version
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.14
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
 
       - name: Set up Bun cache
         uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
@@ -87,11 +100,9 @@ jobs:
           path: ~/.bun/install/cache
 
       - name: Install dependencies
-        working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
 
       - name: Check web contracts
-        working-directory: ${{ github.workspace }}
         run: |
           bun run check:imports
           bun run check:deploy
@@ -99,13 +110,14 @@ jobs:
           bun run check:database-migrations
 
       - name: Test
+        working-directory: apps/web
         run: bun run test
 
       - name: Build
+        working-directory: apps/web
         run: bun run build
 
       - name: Verify the image registry cleanup worker artifact
-        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
           # The site build emits an auxiliary worker for the image registry
@@ -159,6 +171,41 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Record the tested artifact identity
+        id: artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifact_name="website-dist-${GITHUB_SHA}"
+          artifacts_json="${RUNNER_TEMP}/website-artifact.json"
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?name=${artifact_name}" \
+            > "${artifacts_json}"
+          # The artifact must belong to THIS run and this revision: the deploy
+          # job consumes it from the same run, so a green conclusion is not the
+          # proof any more, identity is.
+          jq -e \
+            --arg run "${GITHUB_RUN_ID}" \
+            --arg name "${artifact_name}" '
+            [.artifacts[] | select(.name == $name and .expired == false)] as $found |
+            if ($found | length) == 1 then
+              $found[0] as $artifact |
+              ($artifact.id | type == "number") and
+              ($artifact.digest |
+                type == "string" and test("^sha256:[0-9a-f]{64}$"))
+            else false end
+          ' "${artifacts_json}" >/dev/null
+          jq -r '[.artifacts[] | select(.name == $name)] | .[0].id' \
+            --arg name "${artifact_name}" "${artifacts_json}" \
+            > "${RUNNER_TEMP}/artifact-id.txt"
+          {
+            printf 'artifact_id=%s\n' "$(cat "${RUNNER_TEMP}/artifact-id.txt")"
+            printf 'artifact_digest=%s\n' \
+              "$(jq -r --arg name "${artifact_name}" '[.artifacts[] | select(.name == $name)] | .[0].digest' "${artifacts_json}")"
+          } >> "${GITHUB_OUTPUT}"
+
   ui:
     name: Chromium smoke
     runs-on: namespace-profile-intar-dev
@@ -178,6 +225,7 @@ jobs:
           node-version-file: apps/web/.node-version
 
       - name: Install Bun setup prerequisite
+        working-directory: apps/web
         run: apt-get update && apt-get install --yes --no-install-recommends unzip=6.0-28ubuntu4.1
 
       - name: Set up Bun
@@ -186,10 +234,10 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install dependencies
-        working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
 
       - name: Run Chromium smoke
+        working-directory: apps/web
         env:
           CI: "true"
           HOME: /root
@@ -205,3 +253,1036 @@ jobs:
             .tmp/website-playwright/test-results
           if-no-files-found: warn
           retention-days: 7
+
+  plan:
+    name: Plan the release
+    needs:
+      - validate
+      - ui
+    # A push to main releases the revision its tests proved. A manual dispatch
+    # deploys only when it asked for the deploy operation.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))
+    runs-on: namespace-profile-intar-dev
+    env:
+      BUCKET: intar-dev-vm-image-registry-20260709
+    environment:
+      name: production
+      url: https://intar.dev
+    timeout-minutes: 30
+    outputs:
+      static_pin_json: ${{ steps.pin.outputs.static_pin_json }}
+      maintenance: ${{ steps.request.outputs.maintenance }}
+      registry_cleanup_mode: ${{ steps.request.outputs.registry_cleanup_mode }}
+      artifact_id: ${{ needs.validate.outputs.artifact_id }}
+      artifact_digest: ${{ needs.validate.outputs.artifact_digest }}
+    steps:
+
+      - name: Validate the release request
+        id: request
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REQUESTED_MAINTENANCE: ${{ inputs.maintenance || 'auto' }}
+          REQUESTED_CLEANUP_MODE: ${{ inputs.registry_cleanup_mode || 'preserve' }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main
+          case "${EVENT_NAME}" in
+            push)
+              # A push releases what the tests proved. It never closes the
+              # plane on its own and never asks for the delete campaign, so an
+              # unattended release can not change the runtime contract or
+              # remove registry objects.
+              test "${REQUESTED_MAINTENANCE}" = auto
+              test "${REQUESTED_CLEANUP_MODE}" = preserve
+              ;;
+            workflow_dispatch)
+              test "${CONFIRMATION}" = 'DEPLOY WEB RELEASE'
+              ;;
+            *)
+              echo "unsupported release event: ${EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+          case "${REQUESTED_MAINTENANCE}" in
+            auto|on|off) ;;
+            *) echo 'maintenance must be auto, on, or off' >&2; exit 1 ;;
+          esac
+          case "${REQUESTED_CLEANUP_MODE}" in
+            preserve|report-only|delete) ;;
+            *) echo 'registry_cleanup_mode must be preserve, report-only, or delete' >&2; exit 1 ;;
+          esac
+          {
+            printf 'maintenance=%s\n' "${REQUESTED_MAINTENANCE}"
+            printf 'registry_cleanup_mode=%s\n' "${REQUESTED_CLEANUP_MODE}"
+          } >> "${GITHUB_OUTPUT}"
+          printf 'maintenance=%s registry_cleanup_mode=%s\n' \
+            "${REQUESTED_MAINTENANCE}" "${REQUESTED_CLEANUP_MODE}"
+
+      - name: Checkout exact main revision
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
+
+      - name: Install locked workspace tools
+        run: bun install --frozen-lockfile
+
+      - name: Resolve the verified guest-tools pin
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAINTENANCE_MODE: ${{ steps.request.outputs.maintenance }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_dir="${RUNNER_TEMP}/guest-tools-release"
+          mkdir -p "${release_dir}"
+          tools_run_id=""
+          if [ "${MAINTENANCE_MODE}" = auto ]; then
+            # A routine release changes no runtime contract, so it keeps the
+            # promoted stable pin and reads no tools build at all. The published
+            # objects are still verified against that pin below.
+            bunx wrangler r2 object get \
+              "${BUCKET}/guest-tools/scenario/stable.json" \
+              --remote --jurisdiction eu --file "${release_dir}/manifest.json"
+            pin_source=stable
+          else
+            # A deliberate release changes the runtime contract, so its pin must
+            # come from a tools build of this exact revision.
+            runs_json="${RUNNER_TEMP}/image-ops-runs.json"
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/image-ops.yml/runs?branch=main&status=success&per_page=20" \
+              > "${runs_json}"
+            # A successful image-ops run can be a cleanup status read, so the
+            # run must also carry a successful tools-build job. The newest such
+            # run for this revision is the one whose candidate this release pins.
+            jobs_json="${RUNNER_TEMP}/image-ops-jobs.json"
+            tools_run_id=""
+            for candidate in $(jq -r --arg sha "${GITHUB_SHA}" '
+              [ .workflow_runs[]
+                | select(
+                    .conclusion == "success" and
+                    .head_branch == "main" and
+                    .head_sha == $sha and
+                    .event == "workflow_dispatch"
+                  )
+              ] | .[].id' "${runs_json}"); do
+              gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/jobs" \
+                > "${jobs_json}"
+              if jq -e '
+                [ .jobs[]
+                  | select(.name == "Build and verify tools" and .conclusion == "success")
+                ] | length > 0
+              ' "${jobs_json}" >/dev/null 2>&1; then
+                tools_run_id="${candidate}"
+                break
+              fi
+            done
+            test -n "${tools_run_id}"
+            pin_source="run-${tools_run_id}"
+            artifact_name="guest-tools-deployment-${tools_run_id}"
+            artifacts_json="${RUNNER_TEMP}/guest-tools-artifacts.json"
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${tools_run_id}/artifacts" \
+              > "${artifacts_json}"
+            jq -e --arg name "${artifact_name}" '
+              [.artifacts[] | select(.name == $name and .expired == false)] |
+              if length == 1 then
+                .[0] as $artifact |
+                ($artifact.id | type == "number") and
+                ($artifact.digest |
+                  type == "string" and test("^sha256:[0-9a-f]{64}$"))
+              else false end
+            ' "${artifacts_json}" >/dev/null
+            artifact_id="$(jq -er --arg name "${artifact_name}" \
+              '[.artifacts[] | select(.name == $name)] | .[0].id' "${artifacts_json}")"
+            expected_digest="$(jq -er --arg name "${artifact_name}" \
+              '[.artifacts[] | select(.name == $name)] | .[0].digest' \
+              "${artifacts_json}" | cut -d: -f2)"
+            artifact_zip="${RUNNER_TEMP}/guest-tools-release.zip"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              > "${artifact_zip}"
+            test "$(sha256sum "${artifact_zip}" | cut -d ' ' -f 1)" = "${expected_digest}"
+            python3 - "${artifact_zip}" "${release_dir}" <<'PY'
+          import sys, zipfile
+          archive_path, destination = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(archive_path) as archive:
+              for name in archive.namelist():
+                  if name.startswith("/") or ".." in name.split("/"):
+                      sys.exit("unsafe artifact member: " + name)
+              archive.extractall(destination)
+          PY
+            test -f "${release_dir}/candidate.json"
+            jq -e '.schema_version == 1 and .bootstrap_abi == 2' \
+              "${release_dir}/candidate.json" >/dev/null
+            mv "${release_dir}/candidate.json" "${release_dir}/manifest.json"
+          fi
+          manifest="${release_dir}/manifest.json"
+          # The pin is generated from the published release objects, never from
+          # a declared digest, and the verifier needs these two readers to
+          # decompress the disk and read the embedded files.
+          for tool in zstd debugfs; do
+            command -v "${tool}" >/dev/null 2>&1 || {
+              echo "missing required release verification tool: ${tool}" >&2
+              exit 1
+            }
+          done
+          disk="$(jq -er .tools_disk_sha256 "${manifest}")"
+          kino="$(jq -er .kino_sha256 "${manifest}")"
+          (
+            cd apps/web
+            bunx wrangler r2 object get \
+              "${BUCKET}/guest-tools/scenario/disks/${disk}.ext4.zst" \
+              --remote --jurisdiction eu --file "${release_dir}/tools.ext4.zst"
+            bunx wrangler r2 object get \
+              "${BUCKET}/guest-tools/scenario/kino/${kino}/kino" \
+              --remote --jurisdiction eu --file "${release_dir}/kino"
+          )
+          pin_file="${RUNNER_TEMP}/release-static-pin.json"
+          evidence_file="${RUNNER_TEMP}/release-static-pin-evidence.json"
+          bun tools/deploy/guest-tools-pin.ts release \
+            --manifest "${manifest}" \
+            --disk "${release_dir}/tools.ext4.zst" \
+            --kino "${release_dir}/kino" \
+            --out "${pin_file}" > "${evidence_file}"
+          jq -e '.status == "verified"' "${evidence_file}" >/dev/null
+          bun tools/deploy/guest-tools-pin.ts check --pin "${pin_file}" >/dev/null
+          printf 'static_pin_json=%s\n' "$(jq -c . "${pin_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'pin_source=%s\n' "${pin_source}" >> "${GITHUB_OUTPUT}"
+          printf 'Resolved the runtime pin from %s.\n' "${pin_source}" >> "${GITHUB_STEP_SUMMARY}"
+          jq -c '{static_pin_sha256, compressed_disk_sha256, tools_disk_sha256, kino_sha256}' \
+            "${evidence_file}" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Activate the D1 upload admission switch for a delete release
+        # An explicit prerequisite: only a dispatch that asked for delete turns
+        # this on. It runs before the deploy job closes the plane, because the
+        # registry sits behind the maintenance fence.
+        if: steps.request.outputs.registry_cleanup_mode == 'delete'
+        env:
+          REGISTRY_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          tools/deploy/registry-cleanup-activation.sh enforce \
+            "${RUNNER_TEMP}/registry-cleanup-activation.json"
+          jq -c '{ok, requested_mode, http_status, problem}' \
+            "${RUNNER_TEMP}/registry-cleanup-activation.json" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Retain release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: website-release-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/release-static-pin.json
+            ${{ runner.temp }}/release-static-pin-evidence.json
+            ${{ runner.temp }}/registry-cleanup-activation.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  deploy:
+    name: Deploy production
+    needs:
+      - plan
+    runs-on: namespace-profile-intar-dev
+    environment:
+      name: production
+      url: https://intar.dev
+    # Preparation is the plan job now, so this bound covers the deployment
+    # phases plus the delete campaign's sixty minutes.
+    timeout-minutes: 90
+    concurrency:
+      group: website-production
+      cancel-in-progress: false
+    steps:
+
+      - name: Checkout exact main revision
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+
+      - name: Verify exact-main deployment revision
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
+          test "${GITHUB_REF}" = refs/heads/main
+          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+          # Deployment is deliberate in this file: a push to main, or a manual
+          # dispatch that named the deploy operation and the confirmation. The
+          # plan job validated that request before this job started.
+          case "${GITHUB_EVENT_NAME}" in
+            push|workflow_dispatch) ;;
+            *)
+              echo "unsupported deploy event: ${GITHUB_EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Download tested deployment artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TESTED_ARTIFACT_ID: ${{ needs.plan.outputs.artifact_id }}
+          TESTED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          [[ "${TESTED_ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${TESTED_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          expected_digest="${TESTED_ARTIFACT_DIGEST#sha256:}"
+          artifact_name="website-dist-${GITHUB_SHA}"
+          artifact_json="${RUNNER_TEMP}/website-dist-artifact.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${TESTED_ARTIFACT_ID}" \
+            > "${artifact_json}"
+          # The artifact must be this run's, for this revision, unexpired, and
+          # carry the digest the validate job recorded.
+          jq -e \
+            --arg run "${GITHUB_RUN_ID}" \
+            --arg name "${artifact_name}" \
+            --arg expected "${expected_digest}" '
+            .name == $name and
+            ((.workflow_run.id | tostring) == $run) and
+            (.expired == false) and
+            (.digest == ("sha256:" + $expected))
+          ' "${artifact_json}" >/dev/null
+          test "$(jq -r .digest "${artifact_json}")" = "sha256:${expected_digest}"
+          artifact_zip="${RUNNER_TEMP}/website-dist.zip"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${TESTED_ARTIFACT_ID}/zip" \
+            > "${artifact_zip}"
+          measured_digest="$(sha256sum "${artifact_zip}" | cut -d ' ' -f 1)"
+          test "${measured_digest}" = "${expected_digest}"
+          mkdir -p apps/web/dist
+          python3 - "${artifact_zip}" "${GITHUB_WORKSPACE}/apps/web/dist" <<'PY'
+          import sys, zipfile
+          archive_path, destination = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(archive_path) as archive:
+              for name in archive.namelist():
+                  if name.startswith("/") or ".." in name.split("/"):
+                      sys.exit("unsafe artifact member: " + name)
+              archive.extractall(destination)
+          PY
+          test -f "${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
+
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
+
+      - name: Set up Bun cache
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install deployment dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Pin and verify production configuration
+        working-directory: apps/web
+        run: |
+          set -euo pipefail
+          config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
+          test -f "${config}"
+          database_id="$(jq -er '
+            [.d1_databases[] | select(.binding == "DB")] |
+            select(length == 1) | .[0].database_id
+          ' "${config}")"
+          [[ "${database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          jq -e \
+            --arg database_id "${database_id}" '
+              ([.d1_databases[] | select(.binding == "DB")]) as $databases |
+              .name == "intar-dev" and
+              .vars.CONTROL_PLANE_MAINTENANCE == "off" and
+              ($databases | length) == 1 and
+              $databases[0].database_id == $database_id and
+              ([.kv_namespaces[]? | select(.binding == "SESSION")] | length) == 0 and
+              .assets.directory == "../client" and
+              .assets.run_worker_first == ["/api/*"]
+            ' "${config}" >/dev/null
+          test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/favicon.svg"
+          test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"
+          # The image registry cleanup worker is an auxiliary worker of this
+          # site. Its built configuration travels in the same tested artifact,
+          # so this lane refuses an artifact that lost it.
+          cleanup_config="${GITHUB_WORKSPACE}/apps/web/dist/intar_dev_image_registry_cleanup/wrangler.json"
+          test -f "${cleanup_config}"
+          jq -e \
+            --arg database_id "${database_id}" \
+            --arg bucket_name "$(jq -er '
+              [.r2_buckets[] | select(.binding == "VM_IMAGE_REGISTRY_BUCKET")] |
+              select(length == 1) | .[0].bucket_name
+            ' "${config}")" \
+            --arg cron "17 */6 * * *" \
+            '
+              ([.d1_databases[]? | select(.binding == "DB")]) as $databases |
+              ([.r2_buckets[]? | select(.binding == "VM_IMAGE_REGISTRY_BUCKET")]) as $buckets |
+              (.name == "intar-dev-image-registry-cleanup") and
+              (($databases | length) == 1) and
+              ($databases[0].database_id == $database_id) and
+              (($buckets | length) == 1) and
+              ($buckets[0].bucket_name == $bucket_name) and
+              ($buckets[0].jurisdiction == "eu") and
+              (.triggers.crons == [$cron]) and
+              (.vars.REGISTRY_CLEANUP_MODE == "report-only") and
+              (((.routes // []) | length) == 0) and
+              ((.workers_dev // false) == false) and
+              ((.preview_urls // false) == false) and
+              (.assets == null) and
+              ((((.migrations // []) | length) == 0)) and
+              ((((.durable_objects.bindings // []) | length) == 0))
+            ' "${cleanup_config}" >/dev/null
+          {
+            printf 'DATABASE_ID=%s\n' "${database_id}"
+            printf 'DEPLOYMENT_CONFIG=%s\n' "${config}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Inject the verified ABI 2 guest-tools pin
+        env:
+          GUEST_TOOLS_PIN_JSON: ${{ needs.plan.outputs.static_pin_json }}
+          MAINTENANCE_MODE: ${{ needs.plan.outputs.maintenance }}
+        run: |
+          set -euo pipefail
+          case "${MAINTENANCE_MODE}" in
+            auto|on|off) ;;
+            *) echo "maintenance input must be auto, on, or off" >&2; exit 1 ;;
+          esac
+          if [ -z "${GUEST_TOOLS_PIN_JSON}" ]; then
+            echo 'SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON is not set.' >&2
+            echo 'The ABI 2 release has no dynamic channel fallback, so the' >&2
+            echo 'verified release pin must come from the release bundle.' >&2
+            exit 1
+          fi
+          pin_file="${RUNNER_TEMP}/release-static-pin.json"
+          pin_check="${RUNNER_TEMP}/release-static-pin-check.json"
+          printf '%s' "${GUEST_TOOLS_PIN_JSON}" > "${pin_file}"
+          bun tools/deploy/guest-tools-pin.ts check --pin "${pin_file}" > "${pin_check}"
+          jq -e '.status == "valid"' "${pin_check}" >/dev/null
+          # The Worker reads this variable as a JSON string and then parses it,
+          # so store the serialized form. The assertion checks the type and that
+          # parsing it returns the verified pin; an object is not accepted.
+          jq --slurpfile pin "${pin_file}" \
+            '.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON = ($pin[0] | tojson)' \
+            "${DEPLOYMENT_CONFIG}" > "${DEPLOYMENT_CONFIG}.pinned"
+          mv "${DEPLOYMENT_CONFIG}.pinned" "${DEPLOYMENT_CONFIG}"
+          jq -e --slurpfile pin "${pin_file}" '
+            (.vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON | type) == "string" and
+            (
+              .vars.SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON | fromjson
+            ) == $pin[0]
+          ' "${DEPLOYMENT_CONFIG}" >/dev/null
+          printf 'deployment pin sha256: %s\n' \
+            "$(jq -er '.static_pin_sha256' "${pin_check}")"
+          {
+            printf 'MAINTENANCE_MODE=%s\n' "${MAINTENANCE_MODE}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Prepare runtime secrets
+        id: runtime-secrets
+        env:
+          ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1: ${{ secrets.ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1 }}
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
+          STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
+        run: |
+          set -euo pipefail
+          [[ "${ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1}" =~ ^[A-Za-z0-9_-]{43}$ ]]
+          bun -e 'const value = process.env.ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1 ?? ""; const decoded = Buffer.from(value, "base64url"); if (decoded.byteLength !== 32 || decoded.toString("base64url") !== value) process.exit(1)'
+          test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
+          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
+          test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
+          secrets_file="${RUNNER_TEMP}/website-runtime-secrets.json"
+          jq -n '{
+            ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1: env.ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1,
+            CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: env.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET,
+            OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: env.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1,
+            STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS
+          }' > "${secrets_file}"
+          chmod 600 "${secrets_file}"
+          printf 'ACTIVATION_SECRETS_FILE=%s\n' "${secrets_file}" \
+            >> "${GITHUB_ENV}"
+
+      - name: Plan production D1 migrations
+        id: migrations
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/production-d1-plan.json"
+          bun tools/database/verify-generated-d1-schema.ts \
+            --database-id "${DATABASE_ID}" \
+            --expect observed-ledger-prefix \
+            --evidence "${evidence}"
+          applied="$(jq -er '.appliedMigrationCount' "${evidence}")"
+          committed="$(jq -er '.committedMigrationCount' "${evidence}")"
+          [[ "${applied}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${committed}" =~ ^[1-9][0-9]*$ ]]
+          test "${applied}" -le "${committed}"
+          if [ "${applied}" -lt "${committed}" ]; then
+            pending=true
+          else
+            pending=false
+          fi
+          {
+            printf 'pending=%s\n' "${pending}"
+            printf 'applied=%s\n' "${applied}"
+            printf 'committed=%s\n' "${committed}"
+          } >> "${GITHUB_OUTPUT}"
+          printf 'd1_applied=%s d1_committed=%s d1_pending=%s\n' \
+            "${applied}" "${committed}" "${pending}" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Rehearse pending migrations on disposable D1
+        if: steps.migrations.outputs.pending == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Step outputs travel through the environment, never interpolated
+          # into the command line.
+          APPLIED_MIGRATION_COUNT: ${{ steps.migrations.outputs.applied }}
+        run: |
+          bun tools/database/rehearse-removal-migration.ts \
+            --applied "$APPLIED_MIGRATION_COUNT" \
+            --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
+
+      - name: Capture pre-migration D1 evidence
+        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Both cutover operations, the pin deploy and the return to service,
+          # require the drained gate and a whole-fleet zero state. The normal
+          # migration path keeps only its original run and artifact checks.
+          REQUIRE_DRAINED_GATE: ${{ needs.plan.outputs.maintenance != 'auto' }}
+        run: |
+          set -euo pipefail
+          d1_info="${RUNNER_TEMP}/production-d1-info.json"
+          bookmark="${RUNNER_TEMP}/production-d1-bookmark.json"
+          run_drain_audit="${RUNNER_TEMP}/pre-migration-run-drain-audit.json"
+          assignment_counts="${RUNNER_TEMP}/pre-migration-assignment-counts.json"
+          enabled_scenarios="${RUNNER_TEMP}/pre-migration-enabled-scenarios.json"
+          query_request="${RUNNER_TEMP}/pre-migration-d1-query-request.json"
+
+          curl --fail-with-body --silent --show-error \
+            --request GET \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}" \
+            > "${d1_info}"
+          jq -e --arg database_id "${DATABASE_ID}" '
+            .success == true and
+            .result.uuid == $database_id and
+            (.result.name | type == "string" and length > 0) and
+            .result.version == "production"
+          ' "${d1_info}" >/dev/null
+
+          curl --fail-with-body --silent --show-error \
+            --request GET \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/time_travel/bookmark" \
+            > "${bookmark}"
+          jq -e '
+            .success == true and
+            (.result.bookmark | type == "string" and
+            test("^[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{32}$")
+            )
+          ' "${bookmark}" >/dev/null
+
+          d1_readonly_query() {
+            local sql="$1"
+            local evidence="$2"
+            jq -cn --arg sql "${sql}" '{sql: $sql, params: []}' \
+              > "${query_request}"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              --header "Content-Type: application/json" \
+              --data-binary "@${query_request}" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/query" \
+              > "${evidence}"
+            jq -e '
+              .success == true and
+              (.result | type == "array" and length == 1) and
+              .result[0].success == true and
+              (.result[0].results | type == "array")
+            ' "${evidence}" >/dev/null
+          }
+
+          run_drain_sql="SELECT
+              -- Evidence only for the enabled-host count: the cutover keeps the
+              -- host enabled while the fleet gate is drained, so an admin proof
+              -- run can be placed. The gate state and the two zero counts are
+              -- the enforced conditions.
+              (SELECT COUNT(*) FROM scenario_runs
+                WHERE hidden_at IS NULL AND
+                  (active_key IS NOT NULL OR state NOT IN ('completed', 'failed')))
+                AS active_scenario_run_count,
+              (SELECT COUNT(*) FROM scenario_run_artifacts
+                WHERE upload_status <> 'uploaded')
+                AS non_uploaded_run_artifact_count,
+              (SELECT COUNT(*) FROM agent_hosts
+                WHERE role = 'agent' AND disabled = 0)
+                AS enabled_agent_host_count,
+              (SELECT state FROM runtime_operation_gates
+                WHERE key = 'image_cutover')
+                AS cutover_gate_state;"
+          d1_readonly_query "${run_drain_sql}" "${run_drain_audit}"
+          jq -e --argjson require_drained "${REQUIRE_DRAINED_GATE}" '
+            (.result[0].results | length == 1) and
+            .result[0].results[0].active_scenario_run_count == 0 and
+            .result[0].results[0].non_uploaded_run_artifact_count == 0 and
+            (if $require_drained then
+              .result[0].results[0].cutover_gate_state == "drained"
+            else true end)
+          ' "${run_drain_audit}" >/dev/null
+
+          assignment_counts_sql='SELECT organization_id, scenario_id,
+              COUNT(*) AS assignment_count
+            FROM scenario_assignments
+            GROUP BY organization_id, scenario_id
+            ORDER BY organization_id, scenario_id;'
+          d1_readonly_query "${assignment_counts_sql}" "${assignment_counts}"
+
+          enabled_scenarios_sql="SELECT scenario_id,
+              CASE
+                WHEN organization_id IS NULL THEN 'public'
+                ELSE 'organization:' || organization_id
+              END AS scope_key
+            FROM vm_scenarios
+            WHERE enabled = 1
+            ORDER BY scope_key, scenario_id;"
+          d1_readonly_query "${enabled_scenarios_sql}" "${enabled_scenarios}"
+
+      - name: Inspect the image registry cleanup deployment
+        id: registry-cleanup-state
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REGISTRY_CLEANUP_INTENT: ${{ needs.plan.outputs.registry_cleanup_mode }}
+        run: |
+          set -euo pipefail
+          # The rollout order depends on live state, not on an assumption. A
+          # first rollout has no collector, so the parent deploy must omit the
+          # REGISTRY_CLEANUP binding; a binding to a service that does not exist
+          # yet fails the deploy. A later rollout has one, and the binding
+          # resolves.
+          state="${RUNNER_TEMP}/registry-cleanup-state.json"
+          # Only a confirmed 404 counts as no collector. An expired token, a
+          # forbidden account, or a network failure is indeterminate, and this
+          # step must not read it as a first rollout that skips the hold.
+          tools/deploy/registry-cleanup-state.sh "${state}" \
+            "${RUNNER_TEMP}/registry-cleanup-active-deployment.json" \
+            "${RUNNER_TEMP}/registry-cleanup-active-version.json"
+          child_present="$(jq -r '.script_present | tostring' "${state}")"
+          live_mode="$(jq -er '.mode' "${state}")"
+          mode_proven="$(jq -r '.mode_proven | tostring' "${state}")"
+          # The mode is a release decision, so it is resolved once, here, and
+          # the later steps read the answer instead of the raw input. Preserve
+          # keeps what a deployed collector already proves, and it never
+          # downgrades a delete-capable collector because a lane ran with the
+          # default input.
+          case "${REGISTRY_CLEANUP_INTENT}" in
+            preserve)
+              if [ "${child_present}" = false ]; then
+                resolved="report-only"
+              elif [ "${mode_proven}" != true ]; then
+                echo 'Cannot preserve the cleanup mode: the active version does not prove its mode.' >&2
+                exit 1
+              else
+                resolved="${live_mode}"
+              fi
+              ;;
+            report-only|delete)
+              resolved="${REGISTRY_CLEANUP_INTENT}"
+              ;;
+            *)
+              echo "registry_cleanup_mode must be preserve, report-only, or delete" >&2
+              exit 1
+              ;;
+          esac
+          jq -n \
+            --arg intent "${REGISTRY_CLEANUP_INTENT}" \
+            --arg resolved "${resolved}" \
+            --arg live_mode "${live_mode}" \
+            --argjson child_present "${child_present}" \
+            --argjson mode_proven "${mode_proven}" \
+            --slurpfile probe "${state}" \
+            '{
+              schema_version: 1,
+              operation: "registry-cleanup-mode",
+              intent: $intent,
+              resolved_mode: $resolved,
+              live_mode: $live_mode,
+              child_present: $child_present,
+              live_mode_proven: $mode_proven,
+              probe: $probe[0]
+            }' > "${RUNNER_TEMP}/registry-cleanup-mode.json"
+          {
+            printf 'child_present=%s\n' "${child_present}"
+            printf 'resolved_mode=%s\n' "${resolved}"
+            printf 'REGISTRY_CLEANUP_MODE=%s\n' "${resolved}"
+          } >> "${GITHUB_OUTPUT}"
+          printf 'REGISTRY_CLEANUP_MODE=%s\n' "${resolved}" >> "${GITHUB_ENV}"
+          printf 'registry cleanup worker present: %s; intent: %s; resolved mode: %s; live mode: %s\n' \
+            "${child_present}" "${REGISTRY_CLEANUP_INTENT}" "${resolved}" "${live_mode}" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Prepare the parent bootstrap configuration
+        working-directory: apps/web
+        if: steps.registry-cleanup-state.outputs.child_present != 'true'
+        run: |
+          set -euo pipefail
+          # The parent phase that runs before the collector exists omits the
+          # binding to it. Everything else is the tested configuration.
+          bootstrap="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-bootstrap.json"
+          test ! -e "${bootstrap}"
+          jq '(.services // []) |= map(select(.binding != "REGISTRY_CLEANUP"))' \
+            "${DEPLOYMENT_CONFIG}" > "${bootstrap}"
+          jq -e '[.services[]? | select(.binding == "REGISTRY_CLEANUP")] | length == 0' \
+            "${bootstrap}" >/dev/null
+          jq -e '.name == "intar-dev"' "${bootstrap}" >/dev/null
+          printf 'BOOTSTRAP_DEPLOYMENT_CONFIG=%s\n' "${bootstrap}" \
+            >> "${GITHUB_ENV}"
+
+      - name: Prepare maintenance configuration
+        working-directory: apps/web
+        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
+        run: |
+          set -euo pipefail
+          config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"
+          maintenance_config="${config_dir}/wrangler-maintenance.json"
+          test ! -e "${maintenance_config}"
+          # The maintenance deploy is also the phase that runs before the
+          # collector exists, so it starts from the bootstrap configuration when
+          # this rollout is a first rollout.
+          jq '.vars.CONTROL_PLANE_MAINTENANCE = "on"' \
+            "${BOOTSTRAP_DEPLOYMENT_CONFIG:-${DEPLOYMENT_CONFIG}}" > "${maintenance_config}"
+          jq -e '.vars.CONTROL_PLANE_MAINTENANCE == "on"' \
+            "${maintenance_config}" >/dev/null
+          # The candidate deploy at the end of the lane runs after the collector
+          # exists, so it carries the binding to it. Only the maintenance
+          # variable changes from the tested configuration.
+          full_maintenance_config="${config_dir}/wrangler-maintenance-full.json"
+          test ! -e "${full_maintenance_config}"
+          jq '.vars.CONTROL_PLANE_MAINTENANCE = "on"' \
+            "${DEPLOYMENT_CONFIG}" > "${full_maintenance_config}"
+          jq -e '.vars.CONTROL_PLANE_MAINTENANCE == "on"' \
+            "${full_maintenance_config}" >/dev/null
+          printf 'MAINTENANCE_DEPLOYMENT_CONFIG=%s\n' "${maintenance_config}" \
+            >> "${GITHUB_ENV}"
+          printf 'MAINTENANCE_FULL_DEPLOYMENT_CONFIG=%s\n' \
+            "${full_maintenance_config}" >> "${GITHUB_ENV}"
+          if [ "${MAINTENANCE_MODE}" = on ]; then
+            # The cutover holds the control plane closed for the whole window.
+            # The candidate deploy must not reopen it: the runtime gates reopen
+            # in order, and only then does a maintenance-off deploy run. The
+            # candidate still carries the binding to the collector.
+            printf 'DEPLOYMENT_CONFIG=%s\n' "${full_maintenance_config}" \
+              >> "${GITHUB_ENV}"
+          fi
+
+      - name: Hold the image registry collector before the migration
+        # A reopen already holds a paused collector, and the control plane is
+        # still closed at this point, so its hold would travel to a fenced
+        # route. The release step below is what the reopen needs.
+        if: needs.plan.outputs.maintenance != 'off'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # The collector has no public route: the parent worker holds the
+          # service binding, and the gate route on that worker is the only path
+          # to it. The route sits behind the maintenance fence, so the hold
+          # happens here, while the control plane still serves. A no-op when no
+          # collector version is deployed yet.
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          case "${REGISTRY_CLEANUP_MODE}" in
+            report-only|delete) ;;
+            *) echo "registry_cleanup_mode must be report-only or delete" >&2; exit 1 ;;
+          esac
+          # The resolved mode comes from the inspect step, never from the raw
+          # input: a preserved delete mode must not be downgraded here.
+          # The hold writes the shared admission row, so it stops a sweep of any
+          # isolate and refuses the next upload session. A collector that
+          # deletes must be held and idle before the migration touches D1, and
+          # it stays held until this run, or the reopen that returns the release
+          # to service, proves otherwise.
+          tools/deploy/registry-cleanup-gate.sh hold "${REGISTRY_CLEANUP_MODE}" \
+            "${RUNNER_TEMP}/registry-cleanup-hold.json"
+
+      - name: Enable maintenance for pending migrations
+        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WEB_DEPLOY_LABEL: maintenance
+        run: |
+          tools/deploy/deploy-web.sh \
+            "${MAINTENANCE_DEPLOYMENT_CONFIG}" \
+            "${DATABASE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/web-maintenance.json"
+
+      - name: Drain and recheck maintenance
+        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          sleep 30
+          expected_version_id="$(jq -er '.deployed_version_id' \
+            "${RUNNER_TEMP}/web-maintenance.json")"
+          deployment="${RUNNER_TEMP}/maintenance-after-drain-deployment.json"
+          bunx wrangler deployments status --name intar-dev --json \
+            > "${deployment}"
+          jq -e --arg expected_version_id "${expected_version_id}" '
+            .versions | length == 1 and
+            .[0].version_id == $expected_version_id and
+            .[0].percentage == 100
+          ' "${deployment}" >/dev/null
+          root_status="$(curl --silent --show-error --output /dev/null \
+            --write-out '%{http_code}' https://intar.dev/)"
+          probe="${RUNNER_TEMP}/maintenance-after-drain.json"
+          probe_status="$(curl --silent --show-error \
+            --header 'Accept: application/json' --output "${probe}" \
+            --write-out '%{http_code}' \
+            https://intar.dev/api/control-plane-maintenance-probe)"
+          test "${root_status}" = 503
+          test "${probe_status}" = 503
+          test "$(jq -er '.code' "${probe}")" = maintenance
+
+      - name: Deploy the parent revision for the first cleanup rollout
+        if: steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WEB_DEPLOY_LABEL: bootstrap
+        run: |
+          set -euo pipefail
+          # Nothing else deploys the parent on this path, and the collector needs
+          # a parent version that exports MaintenanceState before it can read the
+          # maintenance fence. This deploy carries the bootstrap configuration:
+          # everything from the tested artifact except the binding to the
+          # collector, which does not exist yet.
+          tools/deploy/deploy-web.sh \
+            "${BOOTSTRAP_DEPLOYMENT_CONFIG}" \
+            "${DATABASE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/web-bootstrap.json"
+
+      - name: Apply pending D1 migrations
+        if: steps.migrations.outputs.pending == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
+          MIGRATION_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-migrate.json
+        run: |
+          set -euo pipefail
+          bun tools/database/apply-generated-migrations.ts 2>&1 | \
+            tee "${RUNNER_TEMP}/production-d1-migrate.log"
+
+      - name: Verify production D1 schema
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/production-d1-verified.json"
+          bun tools/database/verify-generated-d1-schema.ts \
+            --database-id "${DATABASE_ID}" \
+            --expect full \
+            --evidence "${evidence}"
+          jq -e '
+            .status == "exact_generated_schema_verified" and
+            .expectation == "full" and
+            .appliedMigrationCount == .committedMigrationCount and
+            .foreignKeyViolations == 0 and
+            .triggers == 0 and
+            .views == 0
+          ' "${evidence}" >/dev/null
+
+      - name: Verify the deployed image registry cleanup worker
+        # The reopen operation runs with the control plane already closed and in
+        # a fresh runner, so the hold evidence that a delete-capable child
+        # deploy requires can never exist here. This gate decides instead: when
+        # the collector that serves is already this revision in this mode, the
+        # reopen keeps it, releases it, and lets the campaign prove the delete
+        # authority from the open parent. When it would have to replace a
+        # delete-capable collector, it refuses with the operation to run instead
+        # of deadlocking on evidence the fenced control plane can not produce.
+        id: registry-cleanup-child
+        if: needs.plan.outputs.maintenance == 'off'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REGISTRY_CLEANUP_OPERATION: reopen
+        run: |
+          set -euo pipefail
+          tools/deploy/registry-cleanup-child-gate.sh "${REGISTRY_CLEANUP_OPERATION}" \
+            "${REGISTRY_CLEANUP_MODE}" "${GITHUB_SHA:0:12}" \
+            "${RUNNER_TEMP}/registry-cleanup-child.json" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Deploy the image registry cleanup worker
+        # A reopen verifies the deployed collector instead of replacing it: the
+        # verification step above sets skip, and the reopen then only reopens
+        # the parent, releases the collector, and runs the campaign. A skipped
+        # verification step leaves skip empty, so every other path still deploys.
+        if: steps.registry-cleanup-child.outputs.skip != 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Astro builds this auxiliary worker next to the parent configuration,
+          # and the tested artifact carries both. The parent deploy above is the
+          # first half of the rollout: the collector reads the live maintenance
+          # flag from the version that serves traffic, and the parent binding to
+          # the collector becomes usable only once this step has run.
+          case "${REGISTRY_CLEANUP_MODE}" in
+            report-only|delete) ;;
+            *) echo "the resolved registry cleanup mode must be report-only or delete" >&2; exit 1 ;;
+          esac
+          cleanup_config="${GITHUB_WORKSPACE}/apps/web/dist/intar_dev_image_registry_cleanup/wrangler.json"
+          test -f "${cleanup_config}"
+          bucket_name="$(jq -er '
+            [.r2_buckets[] | select(.binding == "VM_IMAGE_REGISTRY_BUCKET")] |
+            select(length == 1) | .[0].bucket_name
+          ' "${DEPLOYMENT_CONFIG}")"
+          # The tested artifact pins report-only. Delete mode is a deployment
+          # decision, so this lane derives its own configuration from the tested
+          # one, exactly as the maintenance deploy does, and deploys that.
+          cleanup_deploy_config="$(dirname "${cleanup_config}")/wrangler-${REGISTRY_CLEANUP_MODE}.json"
+          test ! -e "${cleanup_deploy_config}"
+          jq --arg mode "${REGISTRY_CLEANUP_MODE}" \
+            '.vars.REGISTRY_CLEANUP_MODE = $mode' \
+            "${cleanup_config}" > "${cleanup_deploy_config}"
+          jq -e --arg mode "${REGISTRY_CLEANUP_MODE}" \
+            '.vars.REGISTRY_CLEANUP_MODE == $mode' \
+            "${cleanup_deploy_config}" >/dev/null
+          tools/deploy/deploy-registry-cleanup.sh \
+            "${cleanup_deploy_config}" \
+            "${DATABASE_ID}" \
+            "${bucket_name}" \
+            "${REGISTRY_CLEANUP_MODE}" \
+            "${RUNNER_TEMP}/registry-cleanup-deploy.json"
+
+      - name: Deploy production at 100 percent
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WEB_DEPLOY_LABEL: standard
+        run: |
+          tools/deploy/deploy-web.sh \
+            "${DEPLOYMENT_CONFIG}" \
+            "${DATABASE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/web-production.json"
+
+      - name: Release the image registry collector
+        # A cutover keeps the control plane closed, so the collector stays held
+        # and the reopen operation releases it after its maintenance-off deploy.
+        # A paused collector can not retire anything, and it can not refuse a
+        # learner either.
+        if: always() && needs.plan.outputs.maintenance != 'on'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          # The hold lives in the shared admission row and does not expire, so
+          # this step runs after the parent reopened with the binding and must
+          # prove that no hold survives the rollout. A gate that can not be
+          # reached fails the step when this run placed a hold, and records an
+          # absent gate when it did not.
+          tools/deploy/registry-cleanup-gate.sh release report-only \
+            "${RUNNER_TEMP}/registry-cleanup-release.json"
+
+      - name: Verify the report-only collector through the parent binding
+        # The rollout verification of the report-only phase: the parent now
+        # serves with maintenance off and the collector has been released, so
+        # one plan call proves the first report child binding. The collector
+        # must report that it read the maintenance flag from the control plane
+        # version that serves traffic, and that version must be open, and the
+        # plan must be complete and fault free. That is the evidence a later
+        # delete release needs from the report-only rollout before it turns
+        # deletes on. A plan is a read, so it deletes nothing.
+        if: always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          tools/deploy/registry-cleanup-gate.sh plan report-only \
+            "${RUNNER_TEMP}/registry-cleanup-preview.json"
+
+      - name: Run the image registry cleanup to completion
+        # The release that turns deletes on, and the reopen that follows a
+        # cutover, clear the backlog in the same rollout: a report-only
+        # collector never deletes, so this step runs only in delete mode. The
+        # campaign is bounded by passes and by wall clock inside the script,
+        # and it proves the result with a fresh report whose keyset digest is
+        # the one the finished campaign recorded.
+        if: always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          # A full plan takes roughly 90 seconds plus its post-scan, so the
+          # script's 15-minute manual default can not finish a large backlog.
+          # CI gets 60 minutes here, inside the job's 75. Early completion still
+          # returns immediately.
+          REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
+        run: |
+          set -euo pipefail
+          # The control plane serves again at this point, so the gate answers
+          # the run action as well as the release above it.
+          tools/deploy/registry-cleanup-gate.sh run delete \
+            "${RUNNER_TEMP}/registry-cleanup-run.json"
+      - name: Remove runtime secret file
+        if: always() && steps.runtime-secrets.outcome != 'skipped'
+        run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
+
+      - name: Retain deployment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: website-production-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/production-d1-plan.json
+            ${{ runner.temp }}/d1-removal-rehearsal.json
+            ${{ runner.temp }}/production-d1-info.json
+            ${{ runner.temp }}/production-d1-bookmark.json
+            ${{ runner.temp }}/pre-migration-run-drain-audit.json
+            ${{ runner.temp }}/pre-migration-assignment-counts.json
+            ${{ runner.temp }}/pre-migration-enabled-scenarios.json
+            ${{ runner.temp }}/production-d1-migrate.log
+            ${{ runner.temp }}/production-d1-migrate.json
+            ${{ runner.temp }}/production-d1-verified.json
+            ${{ runner.temp }}/maintenance-after-drain-deployment.json
+            ${{ runner.temp }}/maintenance-after-drain.json
+            ${{ runner.temp }}/web-maintenance.json
+            ${{ runner.temp }}/web-production.json
+            ${{ runner.temp }}/registry-cleanup-hold.json
+            ${{ runner.temp }}/registry-cleanup-release.json
+            ${{ runner.temp }}/registry-cleanup-run.json
+            ${{ runner.temp }}/registry-cleanup-preview.json
+            ${{ runner.temp }}/registry-cleanup-child.json
+            ${{ runner.temp }}/registry-cleanup-deploy.json
+            ${{ runner.temp }}/registry-cleanup-state.json
+            ${{ runner.temp }}/registry-cleanup-active-deployment.json
+            ${{ runner.temp }}/registry-cleanup-active-version.json
+            ${{ runner.temp }}/registry-cleanup-mode.json
+            ${{ runner.temp }}/web-bootstrap.json
+            ${{ runner.temp }}/intar-registry-cleanup-deploy-${{ github.run_id }}/
+            ${{ runner.temp }}/intar-registry-cleanup-gate-${{ github.run_id }}/
+            ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-maintenance/
+            ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/
+          if-no-files-found: warn
+          retention-days: 14

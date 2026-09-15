@@ -51,8 +51,8 @@ cutover lane closes the plane itself, as the first action of step 4.
 # 1. Runtime cutover gate: block new scenario placement fleet-wide. The lane
 #    sets the state and polls until the registry reports drained with
 #    active_desired_vms zero.
-gh workflow run image-gate.yml --ref main \
-  -f state=drained -f confirmation='SET IMAGE GATE DRAINED'
+gh workflow run image-ops.yml --ref main \
+  -f operation=gate-drained -f confirmation='SET IMAGE GATE DRAINED'
 curl -sS -H "Authorization: Bearer <registry-publish-token>" \
   https://intar.dev/registry/v1/cutover/gate
 
@@ -137,8 +137,8 @@ already drained, so a learner start answers `503 runtime_cutover_drained` and
 no learner run is placed. Nothing in this step changes what the product
 serves; it stages the release.
 
-1. Guest tools: `image-gate` is already `drained`. Run the build lane
-   `guest-tools-deploy.yml`. It builds the Kino binary and the tools disk,
+1. Guest tools: the run gate is already `drained`. Run the `tools-build`
+   operation of `image-ops.yml`. It builds the Kino binary and the tools disk,
    uploads the three immutable objects, and byte-verifies them by
    re-downloading. It makes no control-plane call, so it succeeds against the
    old ABI 2-rejecting plane. It leaves the `candidate` channel in R2, which
@@ -165,8 +165,9 @@ opens, because the release has no compatibility path. While maintenance is
 `on`, `/api/*` and `/agent/*` answer the JSON 503 and `/registry/*` answers
 the maintenance page, so registry work cannot run in the middle of this step.
 
-1. Web: run `website-release.yml` with `maintenance=on` and confirmation
-   `DEPLOY WEB RELEASE`. Its plan job runs while the plane is still open, so
+1. Web: run `website.yml` with `operation=deploy`, `maintenance=on`, and
+   confirmation `DEPLOY WEB RELEASE`. Its plan job runs while the plane is
+   still open, so
    it takes the pin from a guest-tools build of this exact revision and
    enforces the fleet drain gate, and the deploy job then installs the worker
    with the ABI 2 static pin and maintenance `on`, which closes the fence. The
@@ -198,12 +199,13 @@ the maintenance page, so registry work cannot run in the middle of this step.
    agent cannot reach the bridge and that is expected, not a failure. Run the
    local doctor here as a hardware and configuration check only; the
    platform-level bridge probe happens after the reopen in step 7.
-5. Open the plane: run `website-release.yml` with `maintenance=off` and the
-   same confirmation. It releases the revision main names and returns the
+5. Open the plane: run `website.yml` with `operation=deploy`,
+   `maintenance=off`, and the same confirmation. It releases the revision main names and returns the
    product to service, and the fleet stays drained.
 6. Registry work, now that the plane is open and the fleet gate is still
    `drained`. Publish the candidate image catalog with Kino ABI 2 and wait for
-   its builds to report ready, then run `guest-tools-promote.yml` with the
+   its builds to report ready, then run the `tools-promote` operation of
+   `image-ops.yml` with the
    expected candidate digest to warm every host and move the tools to the
    `stable` channel, and only then promote the image catalog, which requires
    stable tools ready. Every call goes to `/registry/*`, which the fence
@@ -226,9 +228,10 @@ the maintenance page, so registry work cannot run in the middle of this step.
 9. Only then reopen the fleet: set the cutover gate to `open`, then confirm
    the host reports healthy and the fleet accepts a normal start.
 
-Do not start a web-worker deploy from a branch push. The automatic website
-lane validates and uploads a tested artifact only; the cutover lane is the
-only deploy path, so the worker cannot move without this window.
+Do not push to `main` while this window is open. A `main` push releases
+through the deploy job of the website lane, so a push during the window would
+release that revision outside this sequence. The `deploy` operation is the
+deliberate path, and it is the only one that may close or reopen the plane.
 
 ## Step 5: roll back with matching state
 
@@ -245,10 +248,10 @@ only deploy path, so the worker cannot move without this window.
 
 ## Web release lane
 
-`.github/workflows/website-release.yml` releases the web part of this
-sequence. It is also the lane that releases every routine `main` commit: a
-push waits for the website run of that revision to conclude green, and then
-deploys the artifact that run proved.
+`.github/workflows/website.yml` releases the web part of this sequence
+through its `deploy` operation. It is also the lane that releases every
+routine `main` commit: a push waits for that run's own checks, and the deploy
+job then installs the artifact those checks produced.
 
 A `workflow_dispatch` is the deliberate path, and it is the only path that
 may ask for more than a routine release:
@@ -264,11 +267,10 @@ may ask for more than a routine release:
 
 Both paths release the revision that `main` names when the run starts, so a
 release never names a revision other than the one the lane runs on. The
-runtime pin follows the same split: a routine release takes the newest
-verified guest-tools build on `main`, because the pin describes the objects
-the fleet already runs, while a deliberate closed release takes the tools
-built from this exact revision, because that release changes the runtime
-contract.
+runtime pin follows the same split: a routine release keeps the promoted pin
+from `guest-tools/scenario/stable.json`, because that is what the fleet is
+already running, while a deliberate closed release takes the tools built from
+this exact revision, because that release changes the runtime contract.
 
 Before the deploy it refuses to continue while a gate it can read is still
 open:

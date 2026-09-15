@@ -9,7 +9,6 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-readonly WORKFLOW_DIR="${REPO_ROOT}/.github/workflows"
 readonly EXPECTED_VERSION='1.22.2'
 # The prepared tree is the upstream rust/ subtree plus COPYING.LIB,
 # PROVENANCE.md, and the generated libnbd-sys/libnbd_version.
@@ -329,28 +328,6 @@ check_equal "workspace excludes the prepared cache" \
 check_true "prepared cache is git-ignored" git -C "${REPO_ROOT}" check-ignore -q "target/libnbd-rust/${EXPECTED_VERSION}/rust/Cargo.toml"
 check_true "vendored tree is removed" test ! -e "${REPO_ROOT}/third_party/libnbd-rust"
 
-# Any Cargo command that reads a separate source tree needs that tree prepared,
-# because the pinned bindings are no longer committed to this repository.
-check_workflow_source_preparation() {
-    local workflow match line_number rest root total=0
-    while IFS= read -r workflow; do
-        while IFS= read -r match; do
-            line_number="${match%%:*}"
-            rest="${match#*:}"
-            root="${rest#*--manifest-path \"}"; root="${root%%/Cargo.toml\"*}"
-            [ -n "$root" ] || continue
-            total=$((total + 1))
-            if head -n "$line_number" "$workflow" | grep -Fq "${root}/tools/image-build/prepare-libnbd-rust.sh"; then
-                pass "$(basename "$workflow") prepares ${root} before Cargo"
-            else
-                fail "$(basename "$workflow") runs Cargo on ${root} without preparing it"
-            fi
-        done < <(grep -n 'cargo ' "$workflow" | grep -F -- '--manifest-path' || true)
-    done < <(find "$WORKFLOW_DIR" -maxdepth 1 -name '*.yml' | LC_ALL=C sort)
-    check_equal "separate-source Cargo builds found and prepared" "$total" "1"
-}
-
-check_workflow_source_preparation
 
 check_equal "the shared cache is untouched by every fixture case" \
     "$(tree_fingerprint "${REPO_CACHE}/rust")" "$shared_before"

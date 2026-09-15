@@ -1,0 +1,12 @@
+# Action pins are the supply-chain boundary for CI. Dependabot proposes the
+# next pinned revision, and a human reviews the version comment with it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

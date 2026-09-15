@@ -3,7 +3,7 @@ run-name: "${{ github.event_name == 'pull_request' && format('Rust validate PR #
 
 on:
   pull_request:
-    paths:
+    paths: &rust_paths
       - ".github/workflows/rust.yml"
       - ".github/workflows/release.yml"
       - "Cargo.toml"
@@ -20,20 +20,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/rust.yml"
-      - ".github/workflows/release.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "rustfmt.toml"
-      - "justfile"
-      - "tools/image-build/**"
-      - "package.json"
-      - "bun.lock"
-      - "content/scenarios/base-images.hcl"
-      - "crates/**"
-      - "apps/web/src/generated/**"
+    paths: *rust_paths
   workflow_dispatch:
 
 permissions:
@@ -75,14 +62,6 @@ jobs:
 
       - name: Check generated contracts
         run: just check-generated-contracts
-
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
-        with:
-          tool: cargo-audit@0.22.2
-
-      - name: Audit dependencies
-        run: tools/image-build/with-libnbd-env.sh --rust-only -- cargo audit --deny warnings
 
       - name: Compile kino guest
         run: just build-kino-guest

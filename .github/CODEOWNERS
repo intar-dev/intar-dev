@@ -1,0 +1,14 @@
+# Owners for the surfaces that control production behaviour. This file only
+# routes review: a ruleset on main must require these owners for the review to
+# be enforced.
+
+# Continuous integration and the policy that constrains it.
+/.github/ @icepuma
+/tools/ci/ @icepuma
+
+# Deployment helpers and database tooling run against production.
+/tools/deploy/ @icepuma
+/tools/database/ @icepuma
+
+# Host deployment scripts run as root on the gateway.
+/deploy/stargate/ @icepuma

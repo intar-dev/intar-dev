@@ -1,9 +1,12 @@
 #!/usr/bin/env bun
 
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
-const WORKFLOW_DIRECTORY = ".github/workflows";
+// Composite actions are scanned next to the workflows: an action pin in
+// .github/actions is as reachable as one in a workflow, and actionlint does not
+// follow a `uses:` reference into the composite it names.
+const POLICY_DIRECTORIES = [".github/workflows", ".github/actions"] as const;
 const PINNED_TAIKI_TOOLS = new Map([
   ["just", "1.58.0"],
   ["cargo-nextest", "0.9.143"],
@@ -28,10 +31,9 @@ const WORKER_COMPATIBILITY_FILES = [
 ] as const;
 
 export function checkWorkflowSecurity(repositoryRoot: string): string[] {
-  const workflowRoot = resolve(repositoryRoot, WORKFLOW_DIRECTORY);
   const violations: string[] = [];
 
-  for (const workflowPath of workflowPaths(workflowRoot)) {
+  for (const workflowPath of policyPaths(repositoryRoot)) {
     const source = readFileSync(workflowPath, "utf8");
     const name = relative(repositoryRoot, workflowPath);
     const lines = source.split("\n");
@@ -192,13 +194,17 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
   return violations;
 }
 
-function workflowPaths(root: string): string[] {
+function policyPaths(repositoryRoot: string): string[] {
   const paths: string[] = [];
-  visit(root, paths);
+  for (const directory of POLICY_DIRECTORIES) {
+    visit(resolve(repositoryRoot, directory), paths);
+  }
   return paths.sort();
 }
 
 function visit(directory: string, paths: string[]): void {
+  // A repository without a composite action has no such directory.
+  if (!existsSync(directory)) return;
   for (const name of readdirSync(directory).sort()) {
     const path = join(directory, name);
     const metadata = lstatSync(path);

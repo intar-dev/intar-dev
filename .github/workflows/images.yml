@@ -6,7 +6,7 @@ on:
   push:
     branches:
       - main
-    paths:
+    paths: &image_paths
       - ".github/workflows/images.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -33,32 +33,7 @@ on:
       - "apps/web/src/db/schema.ts"
       - "apps/web/src/pages/api/agent/hosts.ts"
   pull_request:
-    paths:
-      - ".github/workflows/images.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "justfile"
-      - "tools/image-build/**"
-      - "crates/intar-builder/**"
-      - "crates/intar-contracts/**"
-      - "crates/intar-contracts-typegen/**"
-      - "crates/intar-image-*/**"
-      - "content/scenarios/base-images.hcl"
-      - "builder.*.hcl"
-      - "content/courses/**"
-      - "apps/web/migrations/**"
-      - "apps/web/src/control-plane/auth.ts"
-      - "apps/web/src/control-plane/bridge-v8.ts"
-      - "apps/web/src/control-plane/host-runtime-do.ts"
-      - "apps/web/src/control-plane/image-registry.ts"
-      - "apps/web/src/generated/**"
-      - "apps/web/src/lib/build-scheduler*.ts"
-      - "apps/web/src/lib/desired-state*.ts"
-      - "apps/web/src/lib/host-runtime-wake.ts"
-      - "apps/web/src/lib/scenario-hosts.ts"
-      - "apps/web/src/db/schema.ts"
-      - "apps/web/src/pages/api/agent/hosts.ts"
+    paths: *image_paths
 permissions:
   contents: read
 
