@@ -492,6 +492,9 @@ jobs:
     needs:
       - plan
     runs-on: namespace-profile-intar-dev
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     environment:
       name: production
       url: https://intar.dev
@@ -706,9 +709,6 @@ jobs:
 
       - name: Plan production D1 migrations
         id: migrations
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/production-d1-plan.json"
@@ -738,8 +738,6 @@ jobs:
       - name: Rehearse pending migrations on disposable D1
         if: steps.migrations.outputs.pending == 'true'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # Step outputs travel through the environment, never interpolated
           # into the command line.
           APPLIED_MIGRATION_COUNT: ${{ steps.migrations.outputs.applied }}
@@ -751,8 +749,6 @@ jobs:
       - name: Capture pre-migration D1 evidence
         if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # Both cutover operations, the pin deploy and the return to service,
           # require the drained gate and a whole-fleet zero state. The normal
           # migration path keeps only its original run and artifact checks.
@@ -858,8 +854,6 @@ jobs:
       - name: Inspect the image registry cleanup deployment
         id: registry-cleanup-state
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           REGISTRY_CLEANUP_INTENT: ${{ needs.plan.outputs.registry_cleanup_mode }}
         run: |
           set -euo pipefail
@@ -989,8 +983,6 @@ jobs:
         # route. The release step below is what the reopen needs.
         if: needs.plan.outputs.maintenance != 'off'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # The collector has no public route: the parent worker holds the
           # service binding, and the gate route on that worker is the only path
           # to it. The route sits behind the maintenance fence, so the hold
@@ -1016,8 +1008,6 @@ jobs:
       - name: Enable maintenance for pending migrations
         if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WEB_DEPLOY_LABEL: maintenance
         run: |
           tools/deploy/deploy-web.sh \
@@ -1028,9 +1018,6 @@ jobs:
 
       - name: Drain and recheck maintenance
         if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           sleep 30
@@ -1058,8 +1045,6 @@ jobs:
       - name: Deploy the parent revision for the first cleanup rollout
         if: steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WEB_DEPLOY_LABEL: bootstrap
         run: |
           set -euo pipefail
@@ -1077,8 +1062,6 @@ jobs:
       - name: Apply pending D1 migrations
         if: steps.migrations.outputs.pending == 'true'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
           MIGRATION_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-migrate.json
         run: |
@@ -1087,9 +1070,6 @@ jobs:
             tee "${RUNNER_TEMP}/production-d1-migrate.log"
 
       - name: Verify production D1 schema
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/production-d1-verified.json"
@@ -1118,8 +1098,6 @@ jobs:
         id: registry-cleanup-child
         if: needs.plan.outputs.maintenance == 'off'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           REGISTRY_CLEANUP_OPERATION: reopen
         run: |
           set -euo pipefail
@@ -1133,9 +1111,6 @@ jobs:
         # the parent, releases the collector, and runs the campaign. A skipped
         # verification step leaves skip empty, so every other path still deploys.
         if: steps.registry-cleanup-child.outputs.skip != 'true'
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           # Astro builds this auxiliary worker next to the parent configuration,
@@ -1173,8 +1148,6 @@ jobs:
 
       - name: Deploy production at 100 percent
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WEB_DEPLOY_LABEL: standard
         run: |
           tools/deploy/deploy-web.sh \
@@ -1190,8 +1163,6 @@ jobs:
         # learner either.
         if: always() && needs.plan.outputs.maintenance != 'on'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: |
           set -euo pipefail
@@ -1214,8 +1185,6 @@ jobs:
         # deletes on. A plan is a read, so it deletes nothing.
         if: always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: |
           set -euo pipefail
@@ -1231,8 +1200,6 @@ jobs:
         # the one the finished campaign recorded.
         if: always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete'
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
           # A full plan takes roughly 90 seconds plus its post-scan, so the
           # script's 15-minute manual default can not finish a large backlog.
