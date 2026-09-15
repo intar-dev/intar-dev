@@ -387,7 +387,7 @@ fn publish_fixture() -> PublishFixture {
     std::fs::write(&artifact_path, b"kernel-image").unwrap();
 
     let manifest = ScenarioManifestV5 {
-        schema_version: 4,
+        schema_version: 5,
         scenario_id: "scenario-1".to_owned(),
         name: "Scenario One".to_owned(),
         title: "Scenario One".to_owned(),

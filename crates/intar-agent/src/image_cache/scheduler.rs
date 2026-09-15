@@ -392,7 +392,7 @@ mod tests {
         use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib};
 
         HostDesiredStateV2 {
-            schema_version: 4,
+            schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "host-1".to_owned(),
             version: 1,
             generated_at_unix_ms: 0,

@@ -335,7 +335,7 @@ mod tests {
         let running_sha256 = "b".repeat(64);
         let absent_sha256 = "c".repeat(64);
         let desired = HostDesiredStateV2 {
-            schema_version: 4,
+            schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "host-1".to_owned(),
             version: 1,
             generated_at_unix_ms: 0,

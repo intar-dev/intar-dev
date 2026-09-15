@@ -367,7 +367,6 @@ fn guest_address_rejects_gateway_network_broadcast_and_prefix_drift() {
         run_id: run.run_id.clone(),
         vm_id: ValidatedId::parse("vm").unwrap(),
         cpu_millis: 125,
-        vcpu_count: 1,
         memory_mib: 512,
         root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
         tap_name: "tap0".to_owned(),

@@ -115,7 +115,7 @@ mod tests {
 
     fn desired_state(images: Vec<(&str, &str)>, running: Vec<(&str, &str)>) -> HostDesiredStateV2 {
         HostDesiredStateV2 {
-            schema_version: 4,
+            schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "host-1".to_owned(),
             version: 1,
             generated_at_unix_ms: 0,
