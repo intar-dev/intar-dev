@@ -82,6 +82,8 @@ jobs:
   plan:
     name: Plan the release
     runs-on: namespace-profile-intar-dev
+    env:
+      BUCKET: intar-dev-vm-image-registry-20260709
     environment:
       name: production
       url: https://intar.dev
@@ -203,6 +205,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MAINTENANCE_MODE: ${{ steps.request.outputs.maintenance }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           runs_json="${RUNNER_TEMP}/guest-tools-runs.json"
@@ -270,6 +274,26 @@ jobs:
           test -f "${release_dir}/candidate.json"
           jq -e '.schema_version == 1 and .bootstrap_abi == 2' \
             "${release_dir}/candidate.json" >/dev/null
+          # The pin is generated from the published release objects, never from
+          # a declared digest, and the verifier needs these two readers to
+          # decompress the disk and read the embedded files.
+          for tool in zstd debugfs; do
+            command -v "${tool}" >/dev/null 2>&1 || {
+              echo "missing required release verification tool: ${tool}" >&2
+              exit 1
+            }
+          done
+          disk="$(jq -er .tools_disk_sha256 "${release_dir}/candidate.json")"
+          kino="$(jq -er .kino_sha256 "${release_dir}/candidate.json")"
+          (
+            cd apps/web
+            bunx wrangler r2 object get \
+              "${BUCKET}/guest-tools/scenario/disks/${disk}.ext4.zst" \
+              --remote --jurisdiction eu --file "${release_dir}/tools.ext4.zst"
+            bunx wrangler r2 object get \
+              "${BUCKET}/guest-tools/scenario/kino/${kino}/kino" \
+              --remote --jurisdiction eu --file "${release_dir}/kino"
+          )
           pin_file="${RUNNER_TEMP}/release-static-pin.json"
           evidence_file="${RUNNER_TEMP}/release-static-pin-evidence.json"
           bun tools/deploy/guest-tools-pin.ts release \
