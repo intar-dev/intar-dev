@@ -141,7 +141,7 @@ failure) stops the lane. It is never a first rollout.
 
 ## The mode of a release
 
-The `registry_cleanup_mode` input of the **Website cutover** workflow has
+The `registry_cleanup_mode` input of the **Website release** workflow has
 three values:
 
 | Value | Effect |
@@ -166,7 +166,7 @@ true, or the release stops before it closes the control plane. Every other mode
 leaves the switch as it was found, so an emergency switch-off stays in force.
 Evidence: `registry-cleanup-activation.json` (no credential).
 
-Run the **Website cutover** workflow, set `registry_cleanup_mode` to
+Run the **Website release** workflow, set `registry_cleanup_mode` to
 `preserve`, `report-only`, or `delete`, and start it.
 
 Three live conditions gate delete mode. A first rollout cannot delete at all. A
@@ -236,13 +236,13 @@ conflict instead.
 
 ## Reopen the control plane
 
-The **Website cutover** workflow has two operations. The `cutover` operation
-closes the control plane. The `reopen` operation returns the release to
-service.
+The **Website release** workflow closes and opens the control plane through
+its `maintenance` input. `maintenance=on` closes it for a deliberate release,
+and `maintenance=off` returns the release to service.
 
-A cutover keeps the collector held for the whole window. The reopen returns the
-release to service, and the lane then releases the collector and proves that no
-hold survives. A paused collector deletes nothing and refuses no learner, so a
+A closed release keeps the collector held for the whole window. The return to
+service releases the collector after its maintenance-off deploy and proves that
+no hold survives. A paused collector deletes nothing and refuses no learner, so a
 held collector is safe in both directions.
 
 ## Read the collector state

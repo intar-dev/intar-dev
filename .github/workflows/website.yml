@@ -8,6 +8,7 @@ on:
       - main
     paths:
       - ".github/workflows/website-deploy.yml"
+      - ".github/workflows/website-release.yml"
       - ".github/workflows/website.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -28,6 +29,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/website-deploy.yml"
+      - ".github/workflows/website-release.yml"
       - ".github/workflows/website.yml"
       - "Cargo.toml"
       - "Cargo.lock"

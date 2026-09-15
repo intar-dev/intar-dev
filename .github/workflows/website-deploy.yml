@@ -54,12 +54,19 @@ jobs:
           test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
-          # Only the coordinated cutover lane may deploy. The automatic
-          # website lane validates and uploads a tested artifact, and it must
-          # never deploy: a push deploy would bypass the cutover gates.
+          # Only the release lane may deploy. The website lane validates and
+          # uploads a tested artifact and never deploys by itself: the release
+          # lane waits for that run to conclude green, refuses a red one, and
+          # names it as the artifact source below.
           case "${GITHUB_WORKFLOW_REF}" in
-            intar-dev/intar-dev/.github/workflows/website-cutover.yml@refs/heads/main)
-              test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+            intar-dev/intar-dev/.github/workflows/website-release.yml@refs/heads/main)
+              case "${GITHUB_EVENT_NAME}" in
+                push|workflow_dispatch) ;;
+                *)
+                  echo "unexpected release event: ${GITHUB_EVENT_NAME}" >&2
+                  exit 1
+                  ;;
+              esac
               ;;
             *)
               echo "unexpected calling workflow: ${GITHUB_WORKFLOW_REF}" >&2

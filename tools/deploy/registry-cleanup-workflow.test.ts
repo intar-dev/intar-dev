@@ -16,7 +16,7 @@ function stepIndex(source: string, name: string): number {
 }
 
 const deploy = workflow("website-deploy.yml");
-const cutover = workflow("website-cutover.yml");
+const release = workflow("website-release.yml");
 const website = workflow("website.yml");
 const promotion = workflow("image-catalog-promotion.yml");
 
@@ -130,34 +130,33 @@ describe("registry cleanup deployment lane", () => {
   });
 
   it("activates the D1 admission switch only for an explicit delete release", () => {
-    const drained = stepIndex(cutover, "Verify the runtime cutover gate is drained");
-    const checkout = stepIndex(cutover, "Checkout cutover revision");
+    const checkout = stepIndex(release, "Checkout exact main revision");
     const activation = stepIndex(
-      cutover,
+      release,
       "Activate the D1 upload admission switch for a delete release",
     );
-    const deployJob = cutover.indexOf("uses: ./.github/workflows/website-deploy.yml");
+    const deployJob = release.indexOf("uses: ./.github/workflows/website-deploy.yml");
     // The registry API sits behind the maintenance fence, so the activation
-    // belongs to the verify job: the drained check proves the plane still
-    // serves there, and the deploy job is what closes it.
-    expect(activation).toBeGreaterThan(drained);
-    // It also needs the checkout, because it runs a repository script.
+    // belongs to the plan job: it needs the checkout, because it runs a
+    // repository script, and the deploy job is what closes the plane after it.
     expect(activation).toBeGreaterThan(checkout);
     expect(deployJob).toBeGreaterThan(activation);
-    const step = cutover.slice(activation, stepIndex(cutover, "Verify the guest tools release run"));
+    const step = release.slice(
+      activation,
+      stepIndex(release, "Retain release evidence"),
+    );
     // Explicit mode only: the caller's input, never the resolved mode, so the
     // default preserve can not turn the switch on.
     expect(step).toContain(
-      "if: inputs.operation == 'cutover' && inputs.registry_cleanup_mode == 'delete'",
+      "if: steps.request.outputs.registry_cleanup_mode == 'delete'",
     );
     expect(step).toContain("tools/deploy/registry-cleanup-activation.sh enforce");
     expect(step).toContain("REGISTRY_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}");
     expect(step).toContain("registry-cleanup-activation.json");
     expect(step).not.toContain("LEARNER_RUN_CLI_V1_ENFORCEMENT");
-    // A reopen runs after the cutover already activated the switch, and its
-    // request would be fenced, so no reopen path carries the step.
-    expect(step).toContain("inputs.operation == 'cutover'");
-    expect(cutover).toContain("registry-cleanup-activation.json");
+    // Only one lane carries the step: a return to service runs after the
+    // release that activated the switch, and its request would be fenced.
+    expect(release).toContain("registry-cleanup-activation.json");
     // The web deploy workflow keeps no registry credential of its own.
     expect(deploy).not.toContain("INTAR_IMAGE_PUBLISH_TOKEN");
   });
@@ -165,9 +164,9 @@ describe("registry cleanup deployment lane", () => {
   it("reports a report-only release as unchanged", () => {
     // The initial report-only deploy takes no activation: nothing there
     // deletes, and the step is scoped to an explicit delete release alone.
-    const step = cutover.slice(
-      stepIndex(cutover, "Activate the D1 upload admission switch for a delete release"),
-      stepIndex(cutover, "Verify the guest tools release run"),
+    const step = release.slice(
+      stepIndex(release, "Activate the D1 upload admission switch for a delete release"),
+      stepIndex(release, "Retain release evidence"),
     );
     const condition = step
       .split("\n")
@@ -184,7 +183,7 @@ describe("registry cleanup deployment lane", () => {
     // The learner-run CLI variable selects an unrelated feature and stays off.
     // The only upload admission authority for this lane is the shared D1 row,
     // which the collector reports through its own status.
-    for (const source of [deploy, cutover, website]) {
+    for (const source of [deploy, release, website]) {
       expect(source).not.toContain("LEARNER_RUN_CLI_V1_ENFORCEMENT");
       expect(source).not.toContain("learner_run_cli");
     }
@@ -222,42 +221,41 @@ describe("registry cleanup deployment lane", () => {
   });
 });
 
-describe("cutover and reopen with the registry cleanup worker", () => {
-  it("validates the cleanup mode with the other cutover inputs", () => {
-    const validate = stepIndex(cutover, "Validate cutover inputs");
-    const step = cutover.slice(
+describe("release and return to service with the registry cleanup worker", () => {
+  it("validates the cleanup mode with the other release inputs", () => {
+    const validate = stepIndex(release, "Validate the release request");
+    const step = release.slice(
       validate,
-      stepIndex(cutover, "Verify the runtime cutover gate is drained"),
+      stepIndex(release, "Checkout exact main revision"),
     );
     expect(step).toContain(
       "registry_cleanup_mode must be preserve, report-only, or delete",
     );
     // A routine cutover must not silently downgrade a delete-capable collector.
     expect(step).toContain("preserve|report-only|delete");
-    expect(step).toContain('REGISTRY_CLEANUP_MODE="${REGISTRY_CLEANUP_MODE:-preserve}"');
-    expect(step).not.toContain("ENABLE IMAGE REGISTRY CLEANUP DELETES");
-    expect(cutover).not.toContain("registry_cleanup_confirmation");
-    expect(step).toContain("printf 'registry_cleanup_mode=%s");
-    expect(cutover).toContain(
-      "registry_cleanup_mode: ${{ steps.cutover-inputs.outputs.registry_cleanup_mode }}",
+    expect(step).toContain(
+      "REQUESTED_CLEANUP_MODE: ${{ inputs.registry_cleanup_mode || 'preserve' }}",
     );
-    expect(cutover).toContain(
-      "registry_cleanup_mode: ${{ needs.verify-release.outputs.registry_cleanup_mode }}",
+    expect(step).not.toContain("ENABLE IMAGE REGISTRY CLEANUP DELETES");
+    expect(release).not.toContain("registry_cleanup_confirmation");
+    expect(step).toContain("printf 'registry_cleanup_mode=%s");
+    expect(release).toContain(
+      "registry_cleanup_mode: ${{ needs.plan.outputs.registry_cleanup_mode }}",
     );
   });
 
-  it("does not reopen while a registry cleanup run still holds the collector", () => {
+  it("does not return to service while a cleanup run still holds the collector", () => {
     // A paused collector retires nothing and refuses no learner, so the reopen
     // does not hold it before the control plane serves again. The cutover lane
     // calls no gate script at all; the deploy lane releases the collector after
     // its maintenance-off deploy and proves no hold survives.
-    expect(cutover).not.toContain("tools/deploy/registry-cleanup-gate.sh");
-    expect(cutover).not.toContain("reopen-registry-cleanup.json");
-    expect(cutover).not.toContain("intar-registry-cleanup-gate-");
-    const deployJob = cutover.indexOf("uses: ./.github/workflows/website-deploy.yml");
+    expect(release).not.toContain("tools/deploy/registry-cleanup-gate.sh");
+    expect(release).not.toContain("reopen-registry-cleanup.json");
+    expect(release).not.toContain("intar-registry-cleanup-gate-");
+    const deployJob = release.indexOf("uses: ./.github/workflows/website-deploy.yml");
     expect(deployJob).toBeGreaterThan(-1);
-    expect(cutover.slice(deployJob)).toContain(
-      "registry_cleanup_mode: ${{ needs.verify-release.outputs.registry_cleanup_mode }}",
+    expect(release.slice(deployJob)).toContain(
+      "registry_cleanup_mode: ${{ needs.plan.outputs.registry_cleanup_mode }}",
     );
   });
 });

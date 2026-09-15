@@ -165,9 +165,11 @@ opens, because the release has no compatibility path. While maintenance is
 `on`, `/api/*` and `/agent/*` answer the JSON 503 and `/registry/*` answers
 the maintenance page, so registry work cannot run in the middle of this step.
 
-1. Web: run `website-cutover.yml` with `operation=cutover`. It runs its
-   preflight while the plane is still open, then deploys the worker with the
-   ABI 2 static pin and maintenance `on`, which closes the fence. The
+1. Web: run `website-release.yml` with `maintenance=on` and confirmation
+   `DEPLOY WEB RELEASE`. Its plan job runs while the plane is still open, so
+   it takes the pin from a guest-tools build of this exact revision and
+   enforces the fleet drain gate, and the deploy job then installs the worker
+   with the ABI 2 static pin and maintenance `on`, which closes the fence. The
    generated D1 migration is applied after the maintenance fence is proven,
    inside the same run.
    Before the production apply, the same run rehearses every pending generated
@@ -196,11 +198,9 @@ the maintenance page, so registry work cannot run in the middle of this step.
    agent cannot reach the bridge and that is expected, not a failure. Run the
    local doctor here as a hardware and configuration check only; the
    platform-level bridge probe happens after the reopen in step 7.
-5. Open the plane: run `website-cutover.yml` with `operation=reopen`. The
-   same `tools_run_id` rebuilds the same static pin, the live worker tag must
-   still match the cutover revision, and the gate must still be `drained`.
-   This is the step that returns the product to service, and the fleet stays
-   drained.
+5. Open the plane: run `website-release.yml` with `maintenance=off` and the
+   same confirmation. It releases the revision main names and returns the
+   product to service, and the fleet stays drained.
 6. Registry work, now that the plane is open and the fleet gate is still
    `drained`. Publish the candidate image catalog with Kino ABI 2 and wait for
    its builds to report ready, then run `guest-tools-promote.yml` with the
@@ -243,35 +243,48 @@ only deploy path, so the worker cannot move without this window.
    from the archive, then reinstall the previous package if the runtime moved.
 5. Reopen in the step 4 order and repeat the verification.
 
-## Web cutover lane
+## Web release lane
 
-`.github/workflows/website-cutover.yml` is the manual lane that performs the
-web part of this sequence. It runs only on `workflow_dispatch` against `main`
-and takes two operations, which is exactly the split step 4 uses:
+`.github/workflows/website-release.yml` releases the web part of this
+sequence. It is also the lane that releases every routine `main` commit: a
+push waits for the website run of that revision to conclude green, and then
+deploys the artifact that run proved.
 
-- `operation=cutover` (confirmation `CUTOVER WEB RELEASE`) closes the plane
-  and deploys the candidate with the ABI 2 static pin.
-- `operation=reopen` (confirmation `REOPEN WEB RELEASE`) returns the same
-  release to service with the fleet gate still drained.
+A `workflow_dispatch` is the deliberate path, and it is the only path that
+may ask for more than a routine release:
 
-Both operations must name the cutover revision in `cutover_sha`, and it must
-equal the dispatch revision, so a reopen returns the revision that was cut
-over and never a later `main`. Before the deploy it refuses to continue while
-a gate it can read is still open:
+- `maintenance=auto` follows pending migrations. A push can ask for nothing
+  else: it can not close the plane and it can not ask for the delete
+  campaign.
+- `maintenance=on` closes the plane for a deliberate runtime release, and
+  `maintenance=off` returns the release to service. Both require the
+  confirmation `DEPLOY WEB RELEASE`.
+- `registry_cleanup_mode` selects the collector mode, and `delete` is
+  dispatch-only.
 
-1. For `cutover`, the fleet-wide runtime cutover gate must answer `drained`
-   with `active_desired_vms` zero. The lane reads
+Both paths release the revision that `main` names when the run starts, so a
+release never names a revision other than the one the lane runs on. The
+runtime pin follows the same split: a routine release takes the newest
+verified guest-tools build on `main`, because the pin describes the objects
+the fleet already runs, while a deliberate closed release takes the tools
+built from this exact revision, because that release changes the runtime
+contract.
+
+Before the deploy it refuses to continue while a gate it can read is still
+open:
+
+1. When maintenance is not `auto`, the fleet-wide runtime cutover gate must
+   answer `drained` with `active_desired_vms` zero. The deploy lane reads
    `/registry/v1/cutover/gate` before it downloads anything. This read only
    works while the plane is open, because the registry sits behind the
    maintenance fence, and the lane says so when the answer is fenced.
-2. For `reopen`, the live worker must still answer the maintenance probe with
-   `503` and code `maintenance`. The gate itself is unreadable behind the
-   fence, so the enforced release binding is the `cutover_sha` equality plus
-   the live worker tag check: the active version's `workers/tag` must carry
-   the named revision.
+2. The deployed revision is proven live: the active version's `workers/tag`
+   must carry the release revision, so a return to service can not open the
+   plane on an older worker.
 3. The D1 drain audit must report zero active scenario runs, zero non-uploaded
-   run artifacts, and the `image_cutover` gate state `drained` for both
-   operations. The enabled-host count is recorded as evidence, not enforced:
+   run artifacts, and the `image_cutover` gate state `drained`, for a release
+   that holds the plane closed and for the return to service. The enabled-host
+   count is recorded as evidence, not enforced:
    the host stays enabled on purpose so the administrator proof can be placed.
 
 What the lane cannot read, and what an operator therefore confirms by hand:

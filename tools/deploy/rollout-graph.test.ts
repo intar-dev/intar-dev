@@ -18,6 +18,8 @@ interface Phase {
   workflow: string;
   requires: string[];
   plane: "none" | "required";
+  /** The workflow that talks to the plane, when the phase delegates. */
+  planeWorkflow?: string;
   marks: string[];
 }
 
@@ -45,11 +47,13 @@ const PHASES: Phase[] = [
     marks: ["Upload candidate objects", "Verify uploaded objects by re-download"],
   },
   {
-    id: "web-cutover",
-    workflow: "website-cutover.yml",
+    id: "web-release-closed",
+    workflow: "website-release.yml",
     requires: ["tools-build"],
     plane: "required",
-    marks: ["CUTOVER WEB RELEASE", "maintenance=on"],
+    // The release lane delegates every plane call to the deploy lane.
+    planeWorkflow: "website-deploy.yml",
+    marks: ["DEPLOY WEB RELEASE", "on holds the control plane closed"],
   },
   {
     // The cutover lane deploys the collector and the parent that binds it. The
@@ -59,7 +63,7 @@ const PHASES: Phase[] = [
     // through the collector service binding.
     id: "registry-cleanup-deploy",
     workflow: "website-deploy.yml",
-    requires: ["web-cutover"],
+    requires: ["web-release-closed"],
     plane: "required",
     marks: [
       "Deploy the parent revision for the first cleanup rollout",
@@ -74,16 +78,17 @@ const PHASES: Phase[] = [
     marks: ["PROMOTE GUEST TOOLS", "guest-tools/promote"],
   },
   {
-    id: "web-reopen",
-    workflow: "website-cutover.yml",
+    id: "web-release-open",
+    workflow: "website-release.yml",
     requires: ["tools-promote"],
     plane: "required",
-    marks: ["REOPEN WEB RELEASE", "maintenance=off"],
+    planeWorkflow: "website-deploy.yml",
+    marks: ["off returns the release to service"],
   },
   {
     id: "gate-open",
     workflow: "image-gate.yml",
-    requires: ["web-reopen"],
+    requires: ["web-release-open"],
     plane: "required",
     marks: ["SET IMAGE GATE OPEN"],
   },
@@ -107,7 +112,7 @@ describe("no-compatibility rollout graph", () => {
 
   it("keeps every plane-free phase free of control-plane calls", () => {
     for (const phase of PHASES.filter((entry) => entry.plane === "none")) {
-      const source = workflow(phase.workflow);
+      const source = workflow(phase.planeWorkflow ?? phase.workflow);
       for (const endpoint of PLANE_ENDPOINTS) {
         expect(
           source.includes(endpoint),
@@ -123,7 +128,7 @@ describe("no-compatibility rollout graph", () => {
 
   it("requires the plane for every phase that mutates published state", () => {
     for (const phase of PHASES.filter((entry) => entry.plane === "required")) {
-      const source = workflow(phase.workflow);
+      const source = workflow(phase.planeWorkflow ?? phase.workflow);
       expect(
         PLANE_ENDPOINTS.some((endpoint) => source.includes(endpoint)),
         phase.id + " must call the control plane",
@@ -140,15 +145,18 @@ describe("no-compatibility rollout graph", () => {
     }
   });
 
-  it("binds the cutover to the tested artifact of the tools build run", () => {
-    const cutover = workflow("website-cutover.yml");
+  it("binds the release to a completed website run and a tools build", () => {
+    const release = workflow("website-release.yml");
     const toolsBuild = workflow("guest-tools-deploy.yml");
-    // The cutover reads a successful guest-tools run on the same revision and
-    // takes the pin from that run, so it cannot build a pin from an unverified
-    // upload.
-    expect(cutover).toContain("guest-tools-deploy.yml");
-    expect(cutover).toContain("guest-tools-deployment-");
-    expect(cutover).toContain(".conclusion == \"success\"");
+    // The release refuses an artifact from a run that has not concluded, waits
+    // for the website run of its own revision, and takes the pin from a
+    // successful guest-tools build, so it cannot build a pin from an
+    // unverified upload.
+    expect(release).toContain("guest-tools-deploy.yml");
+    expect(release).toContain("guest-tools-deployment-");
+    expect(release).toContain(".conclusion == \"success\"");
+    expect(release).toContain("website.yml/runs?head_sha=");
+    expect(release).toContain('if [ "${conclusion}" != success ]');
     expect(toolsBuild).toContain("guest-tools-deployment-");
   });
 
