@@ -115,6 +115,10 @@ pub const KERNEL_SOURCE_FILES: &[KernelSourceFile] = &[
 /// A missing symbol fails the build. Do not trim this list without checking the
 /// guest contract in docs/src/content/docs/operations/scenario-host-jailer.md.
 pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
+    // Cloud Hypervisor CPU enumeration uses x2APIC MADT entries.
+    "CONFIG_SMP",
+    "CONFIG_HYPERVISOR_GUEST",
+    "CONFIG_X86_X2APIC",
     // virtio and vsock, for disks, network, console, and Kino.
     "CONFIG_VIRTIO_PCI",
     "CONFIG_VIRTIO_BLK",
@@ -439,6 +443,15 @@ mod tests {
 
         let absent = config.replace("CONFIG_VXLAN=y\n", "# CONFIG_VXLAN is not set\n");
         assert_eq!(missing_required_builtins(&absent), vec!["CONFIG_VXLAN"]);
+
+        // Without x2APIC, Linux ignores Cloud Hypervisor's CPU entries and
+        // boots only the bootstrap CPU even when the VMM configures more.
+        let single_cpu =
+            config.replace("CONFIG_X86_X2APIC=y\n", "# CONFIG_X86_X2APIC is not set\n");
+        assert_eq!(
+            missing_required_builtins(&single_cpu),
+            vec!["CONFIG_X86_X2APIC"]
+        );
 
         let as_module = config.replace("CONFIG_VFAT_FS=y\n", "CONFIG_VFAT_FS=m\n");
         assert_eq!(

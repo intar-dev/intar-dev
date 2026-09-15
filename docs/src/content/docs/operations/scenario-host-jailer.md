@@ -24,6 +24,11 @@ count as `ceil(cpu)`, with a minimum of one. For limits up to one CPU, the
 Cloud Hypervisor API configuration omits `cpus` and uses its one-vCPU default.
 Larger limits set the derived guest CPU count internally.
 
+The guest kernel must build in `CONFIG_SMP`, `CONFIG_HYPERVISOR_GUEST`, and
+`CONFIG_X86_X2APIC`. Cloud Hypervisor uses x2APIC entries to advertise guest
+CPUs. The image build rejects kernels missing these flags. During rollout,
+verify the online CPU count inside the guest as well as the VMM configuration.
+
 Jailerd applies one hard limit to the complete VMM process group before VM
 boot. With a 100 ms period, `cpu = 0.5` gives `cpu.max = 50000 100000` and
 `cpu.max.burst = 0`. The same limit applies until shutdown. There is no extra
