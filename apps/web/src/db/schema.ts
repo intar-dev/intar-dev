@@ -15,6 +15,7 @@ export {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
+  hostGeoLocations,
   imageBuildBundles,
   imageBuildCoordinationLocks,
   imageBuilds,

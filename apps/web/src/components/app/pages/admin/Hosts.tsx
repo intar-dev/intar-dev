@@ -21,6 +21,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import {
   Dialog,
   DialogContent,
@@ -42,6 +43,12 @@ import {
 import { formatRelativeTime } from "@/components/app/lib/format";
 import { useHostFleet } from "@/components/app/admin/hosts/useHostFleet";
 import type { AgentHostApi } from "@/components/app/admin/hosts/types";
+import type { HostProvider } from "@/db/schema/shared";
+import {
+  HOST_PROVIDER_LABELS,
+  HOST_PROVIDERS,
+  isHostProvider,
+} from "@/lib/host-provider";
 
 // The host fleet: one calm card per host, with onboarding behind an explicit
 // action instead of ambient panels. Scenario runs launch from the scenario
@@ -60,6 +67,41 @@ export function AdminHosts() {
   const activeHostRecords = hostRecords.filter(
     ({ host }) => !host.disabled && !removedHostIds.has(host.id),
   );
+
+  // The fleet map shows one sponsor mark for each host, so the operator picks
+  // the sponsor here. The map itself never learns a host name or an address.
+  const setProvider = useMutation({
+    mutationFn: async ({
+      hostId,
+      provider,
+    }: {
+      hostId: string;
+      provider: HostProvider | null;
+    }) => {
+      const response = await fetch(
+        `/api/agent/hosts/${encodeURIComponent(hostId)}`,
+        {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ provider }),
+        },
+      );
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(body?.error ?? `Update failed (${response.status})`);
+      }
+      return (await response.json()) as {
+        hostId: string;
+        provider: HostProvider | null;
+      };
+    },
+    onSuccess: () => {
+      void hosts.refetch();
+    },
+  });
 
   const removeHost = useMutation({
     mutationFn: async (hostId: string) => {
@@ -139,6 +181,16 @@ export function AdminHosts() {
               {removeHost.error instanceof Error
                 ? removeHost.error.message
                 : "Remove failed"}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {setProvider.error ? (
+          <Alert variant="destructive">
+            <AlertTitle>Sponsor update failed</AlertTitle>
+            <AlertDescription>
+              {setProvider.error instanceof Error
+                ? setProvider.error.message
+                : "Update failed"}
             </AlertDescription>
           </Alert>
         ) : null}
@@ -291,6 +343,37 @@ export function AdminHosts() {
                         detail={capacity?.primary_ipv6 ?? "No IPv6 reported"}
                       />
                     </dl>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <label className="flex items-center gap-2">
+                        <span className="text-label">Sponsor</span>
+                        <NativeSelect
+                          value={host.provider ?? ""}
+                          onChange={(event) =>
+                            setProvider.mutate({
+                              hostId: host.id,
+                              provider: isHostProvider(event.target.value)
+                                ? event.target.value
+                                : null,
+                            })
+                          }
+                          disabled={
+                            setProvider.isPending &&
+                            setProvider.variables?.hostId === host.id
+                          }
+                          aria-label={`Sponsor for ${host.name}`}
+                        >
+                          <option value="">Not set</option>
+                          {HOST_PROVIDERS.map((provider) => (
+                            <option key={provider} value={provider}>
+                              {HOST_PROVIDER_LABELS[provider]}
+                            </option>
+                          ))}
+                        </NativeSelect>
+                      </label>
+                      <p className="text-caption">
+                        The sponsor mark on the fleet map.
+                      </p>
+                    </div>
                   </article>
                 );
               })}

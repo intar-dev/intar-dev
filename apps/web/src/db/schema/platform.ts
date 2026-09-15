@@ -3,6 +3,7 @@ import {
   check,
   index,
   integer,
+  real,
   sqliteTable,
   text,
   uniqueIndex,
@@ -19,7 +20,9 @@ import type {
 import { organization, user } from "./core";
 import {
   type AgentHostRole,
+  type HostGeoLocationStatus,
   type HostCpuReservationState,
+  type HostProvider,
   type ImageBuildBundleMeta,
   type ImageBuildStatus,
   type ImageBuildTimings,
@@ -46,6 +49,11 @@ export const agentHosts = sqliteTable(
     }),
     name: text("name").notNull(),
     role: text("role").$type<AgentHostRole>().default("agent").notNull(),
+    /**
+     * The sponsor that pays for this host. Null means nobody set it, and the
+     * fleet map omits the sponsor mark for that host.
+     */
+    provider: text("provider").$type<HostProvider>(),
     scenarioEnabled: integer("scenario_enabled", { mode: "boolean" })
       .default(true)
       .notNull(),
@@ -207,6 +215,37 @@ export const hostActualState = sqliteTable(
       table.appliedDesiredVersion,
     ),
     index("host_actual_state_observed_idx").on(table.observedAt),
+  ],
+);
+
+/**
+ * Cached IP geolocation for the fleet map. One row per address, not per host:
+ * a replaced host usually reports a new address, and the cache must outlive the
+ * host row it was first collected for. An `unresolved` row stops one failing
+ * address from reaching the upstream service on every page load.
+ */
+export const hostGeoLocations = sqliteTable(
+  "host_geo_locations",
+  {
+    ip: text("ip").primaryKey(),
+    status: text("status").$type<HostGeoLocationStatus>().notNull(),
+    latitude: real("latitude"),
+    longitude: real("longitude"),
+    city: text("city"),
+    country: text("country"),
+    resolvedAt: integer("resolved_at").notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    check(
+      "host_geo_locations_status_valid",
+      sql`"status" in ('resolved', 'unresolved')`,
+    ),
+    check(
+      "host_geo_locations_shape_valid",
+      sql`("status" = 'resolved' and "latitude" is not null and "longitude" is not null) or ("status" = 'unresolved' and "latitude" is null and "longitude" is null)`,
+    ),
+    index("host_geo_locations_resolved_idx").on(table.resolvedAt),
   ],
 );
 

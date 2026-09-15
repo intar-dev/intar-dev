@@ -109,6 +109,17 @@ const appLayoutRoute = createRoute({
   notFoundComponent: AppRouteNotFound,
 });
 
+const fleetRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "fleet",
+  head: () =>
+    routeHead(
+      "Fleet",
+      "Where the platform runs: one map pin for each agent host.",
+    ),
+  component: lazyRouteComponent(() => import("./pages/Fleet"), "Fleet"),
+});
+
 const courseCatalogRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "courses",
@@ -409,6 +420,7 @@ const routeTree = rootRoute.addChildren([
     organizationPublicCourseLectureRoute,
     organizationPrivateCourseLectureRoute,
     profileRoute,
+    fleetRoute,
     adminOverviewRoute,
     adminHostsRoute,
     adminBuildsRoute,

@@ -16,6 +16,12 @@ export interface ScenarioRunHintSnapshot {
 }
 
 export type AgentHostRole = "agent" | "builder";
+/**
+ * The sponsor that pays for a host. `other` records a provider without a
+ * committed logo, so the fleet map can still name the host honestly.
+ */
+export type HostProvider = "hetzner" | "namespace" | "other";
+export type HostGeoLocationStatus = "resolved" | "unresolved";
 export type ImageRegistryEnforcementMode = "report_only" | "enforce";
 export type ImageRegistryGateState = "open" | "sweeping";
 export type ImageRegistrySessionOwnerKind = "publish_token" | "builder";

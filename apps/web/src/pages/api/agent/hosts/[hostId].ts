@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { and, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
+  agentHosts,
   hostActualState,
   hostDesiredState,
   imageBuilds,
@@ -24,7 +25,10 @@ import {
   accessInviteError,
   accessInviteJson,
   accessInviteNoStore,
+  readJsonObject,
 } from "@/lib/access-invite-http";
+import type { HostProvider } from "@/db/schema/shared";
+import { isHostProvider } from "@/lib/host-provider";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
 import { retireHostRuntime } from "@/lib/host-runtime-wake";
 import { retirePersonalHost } from "@/lib/personal-host-retirement";
@@ -84,6 +88,41 @@ export const GET: APIRoute = async ({ request, params }) => {
       status: buildStoredBridgeStatus(host),
     },
   });
+};
+
+export const PATCH: APIRoute = async ({ request, params }) => {
+  try {
+    const authz = await requireAdminUserContext(request);
+    if (!authz.ok) return accessInviteNoStore(authz.response);
+
+    const hostId = params.hostId?.trim() ?? "";
+    if (!hostId) {
+      return accessInviteJson({ error: "hostId is required" }, { status: 400 });
+    }
+    const body = await readJsonObject(request);
+    const provider = parseHostProvider(body.provider);
+    if (provider === undefined) {
+      return accessInviteJson(
+        { error: "provider must be hetzner, namespace, other, or null" },
+        { status: 400 },
+      );
+    }
+
+    const host = await loadHostForUser(hostId, authz.context.userId);
+    if (!host) {
+      return accessInviteJson({ error: "host not found" }, { status: 404 });
+    }
+
+    const db = drizzle(env.DB);
+    await db
+      .update(agentHosts)
+      .set({ provider, updatedAt: Date.now() })
+      .where(eq(agentHosts.id, host.id));
+
+    return accessInviteJson({ hostId: host.id, provider });
+  } catch (error) {
+    return accessInviteError(error, "the host provider could not be stored");
+  }
 };
 
 export const DELETE: APIRoute = async ({ request, params }) => {
@@ -157,6 +196,11 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     return accessInviteError(error, "the host could not be removed");
   }
 };
+
+function parseHostProvider(value: unknown): HostProvider | null | undefined {
+  if (value === null) return null;
+  return isHostProvider(value) ? value : undefined;
+}
 
 function hostMustDisconnectResponse(hostId: string): Response {
   return accessInviteJson(

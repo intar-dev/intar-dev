@@ -4,11 +4,14 @@
 import type { AgentBridgeStatus } from "@/lib/agent-bridge";
 import type { HostHealth } from "@/lib/host-health";
 import type { HostCapacityV2, VmActualStateV2 } from "@/generated/bridge";
+import type { HostProvider } from "@/db/schema/shared";
 
 export interface AgentHostApi {
   id: string;
   name: string;
   role: "agent" | "builder";
+  /** The sponsor that pays for this host. Null means nobody set it. */
+  provider: HostProvider | null;
   disabled: boolean;
   scenarioEnabled: boolean;
   createdAt: number;
