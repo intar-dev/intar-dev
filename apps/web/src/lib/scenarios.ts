@@ -146,7 +146,6 @@ export async function loadScenario(
           : null,
       ...directBoot,
       cpuMillis: vm.cpuMillis,
-      vcpuCount: vm.vcpuCount,
       memoryMib: vm.memoryMib,
       diskMib: vm.diskMib,
     };

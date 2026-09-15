@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "BridgeMessageV7",
+  "title": "BridgeMessageV8",
   "oneOf": [
     {
       "type": "object",
@@ -10,7 +10,7 @@
           "const": "client_hello"
         }
       },
-      "$ref": "#/$defs/ClientHelloV7",
+      "$ref": "#/$defs/ClientHelloV8",
       "required": [
         "type"
       ]
@@ -23,7 +23,7 @@
           "const": "server_hello"
         }
       },
-      "$ref": "#/$defs/ServerHelloV7",
+      "$ref": "#/$defs/ServerHelloV8",
       "required": [
         "type"
       ]
@@ -36,7 +36,7 @@
           "const": "desired_state"
         }
       },
-      "$ref": "#/$defs/DesiredStateV7",
+      "$ref": "#/$defs/DesiredStateV8",
       "required": [
         "type"
       ]
@@ -49,7 +49,7 @@
           "const": "state_report"
         }
       },
-      "$ref": "#/$defs/StateReportV7",
+      "$ref": "#/$defs/StateReportV8",
       "required": [
         "type"
       ]
@@ -62,7 +62,7 @@
           "const": "vm_report"
         }
       },
-      "$ref": "#/$defs/VmReportV7",
+      "$ref": "#/$defs/VmReportV8",
       "required": [
         "type"
       ]
@@ -75,7 +75,7 @@
           "const": "build_report"
         }
       },
-      "$ref": "#/$defs/BuildReportV7",
+      "$ref": "#/$defs/BuildReportV8",
       "required": [
         "type"
       ]
@@ -88,7 +88,7 @@
           "const": "sync_request"
         }
       },
-      "$ref": "#/$defs/SyncRequestV7",
+      "$ref": "#/$defs/SyncRequestV8",
       "required": [
         "type"
       ]
@@ -179,7 +179,7 @@
         "attempt"
       ]
     },
-    "BuildReportV7": {
+    "BuildReportV8": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -188,8 +188,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 7,
-          "minimum": 7
+          "maximum": 8,
+          "minimum": 8
         },
         "report": {
           "$ref": "#/$defs/BuildReportV1"
@@ -273,7 +273,7 @@
         "updated_at_unix_ms"
       ]
     },
-    "ClientHelloV7": {
+    "ClientHelloV8": {
       "type": "object",
       "properties": {
         "agent_version": {
@@ -296,8 +296,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 7,
-          "minimum": 7
+          "maximum": 8,
+          "minimum": 8
         },
         "role": {
           "$ref": "#/$defs/HostRoleV1"
@@ -386,7 +386,7 @@
         "bootstrap_abi"
       ]
     },
-    "DesiredStateV7": {
+    "DesiredStateV8": {
       "type": "object",
       "properties": {
         "desired_state": {
@@ -398,8 +398,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 7,
-          "minimum": 7
+          "maximum": 8,
+          "minimum": 8
         }
       },
       "required": [
@@ -435,7 +435,7 @@
           "format": "int64"
         },
         "resources": {
-          "$ref": "#/$defs/VmResourcesV2"
+          "$ref": "#/$defs/VmResourcesV3"
         },
         "run_id": {
           "type": "string"
@@ -468,33 +468,14 @@
         "arch": {
           "$ref": "#/$defs/ImageArchitecture"
         },
-        "boot_cpu_lease_ms": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        },
-        "boot_cpu_millis": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
         "cloud_hypervisor_sha256": {
-          "description": "Root-owned runtime identity and lease policy. `None` means the host has\nno live jailerd attestation and is never performance-ready.",
+          "description": "Root-owned runtime identity. `None` means the host has\nno live jailerd attestation and is never performance-ready.",
           "type": [
             "string",
             "null"
           ]
         },
         "fast_template_store": {
-          "type": "boolean"
-        },
-        "supports_boot_cpu_lease": {
           "type": "boolean"
         },
         "supports_cgroup_v2": {
@@ -554,7 +535,6 @@
         "supports_reflink",
         "supports_nftables",
         "supports_jailer_v2",
-        "supports_boot_cpu_lease",
         "supports_template_backed_launch",
         "fast_template_store",
         "supports_hard_cpu_quota",
@@ -686,8 +666,8 @@
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 4,
-          "minimum": 4
+          "maximum": 5,
+          "minimum": 5
         },
         "version": {
           "type": "integer",
@@ -760,8 +740,8 @@
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 5,
-          "minimum": 5
+          "maximum": 6,
+          "minimum": 6
         },
         "vms": {
           "type": "array",
@@ -825,7 +805,7 @@
         "scenario"
       ]
     },
-    "ServerHelloV7": {
+    "ServerHelloV8": {
       "type": "object",
       "properties": {
         "desired_version": {
@@ -839,8 +819,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 7,
-          "minimum": 7
+          "maximum": 8,
+          "minimum": 8
         }
       },
       "required": [
@@ -849,7 +829,7 @@
         "desired_version"
       ]
     },
-    "StateReportV7": {
+    "StateReportV8": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -858,8 +838,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 7,
-          "minimum": 7
+          "maximum": 8,
+          "minimum": 8
         },
         "report": {
           "$ref": "#/$defs/HostStateReportV2"
@@ -880,7 +860,7 @@
         "operator_requested"
       ]
     },
-    "SyncRequestV7": {
+    "SyncRequestV8": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -889,8 +869,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 7,
-          "minimum": 7
+          "maximum": 8,
+          "minimum": 8
         },
         "reason": {
           "$ref": "#/$defs/SyncRequestReason"
@@ -977,7 +957,7 @@
         "resource_state": {
           "anyOf": [
             {
-              "$ref": "#/$defs/VmResourceStateV2"
+              "$ref": "#/$defs/VmResourceStateV3"
             },
             {
               "type": "null"
@@ -991,7 +971,7 @@
           "description": "Live CPU-boundary evidence for the VM process tree. This is distinct\nfrom the guest vCPU topology and from periodic usage accounting.",
           "anyOf": [
             {
-              "$ref": "#/$defs/VmRuntimeConstraintsV1"
+              "$ref": "#/$defs/VmRuntimeConstraintsV2"
             },
             {
               "type": "null"
@@ -1256,7 +1236,7 @@
         "resource_state": {
           "anyOf": [
             {
-              "$ref": "#/$defs/VmResourceStateV2"
+              "$ref": "#/$defs/VmResourceStateV3"
             },
             {
               "type": "null"
@@ -1269,7 +1249,7 @@
         "runtime_constraints": {
           "anyOf": [
             {
-              "$ref": "#/$defs/VmRuntimeConstraintsV1"
+              "$ref": "#/$defs/VmRuntimeConstraintsV2"
             },
             {
               "type": "null"
@@ -1289,8 +1269,8 @@
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 4,
-          "minimum": 4
+          "maximum": 5,
+          "minimum": 5
         },
         "ssh_host_keys_openssh": {
           "type": "array",
@@ -1317,7 +1297,7 @@
         "probes"
       ]
     },
-    "VmReportV7": {
+    "VmReportV8": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -1326,8 +1306,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 7,
-          "minimum": 7
+          "maximum": 8,
+          "minimum": 8
         },
         "report": {
           "$ref": "#/$defs/VmReportV2"
@@ -1339,7 +1319,7 @@
         "report"
       ]
     },
-    "VmResourceStateV2": {
+    "VmResourceStateV3": {
       "type": "object",
       "properties": {
         "cpu_millis": {
@@ -1386,17 +1366,10 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "vcpu_count": {
-          "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1
         }
       },
       "required": [
         "cpu_millis",
-        "vcpu_count",
         "cpu_quota_us",
         "cpu_period_us",
         "cpu_usage_usec",
@@ -1407,7 +1380,7 @@
         "cpu_throttled_usec"
       ]
     },
-    "VmResourcesV2": {
+    "VmResourcesV3": {
       "type": "object",
       "properties": {
         "cpu_millis": {
@@ -1424,32 +1397,18 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
-        },
-        "vcpu_count": {
-          "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1
         }
       },
       "required": [
         "cpu_millis",
-        "vcpu_count",
         "memory_mib",
         "disk_mib"
       ]
     },
-    "VmRuntimeConstraintPhaseV1": {
-      "type": "string",
-      "enum": [
-        "boot_burst",
-        "steady"
-      ]
-    },
-    "VmRuntimeConstraintsV1": {
+    "VmRuntimeConstraintsV2": {
       "type": "object",
       "properties": {
-        "effective_cpu_millis": {
+        "cpu_millis": {
           "type": "integer",
           "format": "uint32",
           "minimum": 1
@@ -1458,35 +1417,18 @@
           "description": "Jailer-owned generation to which every quota and ingress attestation\nin this object applies. The breaking v2 contract never accepts\ngeneration-less quota evidence.",
           "type": "string"
         },
-        "lease_expires_at_unix_ms": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
-        },
-        "phase": {
-          "$ref": "#/$defs/VmRuntimeConstraintPhaseV1"
-        },
         "quota_verified_at_unix_ms": {
-          "description": "Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a `steady` runtime can expose a terminal.",
+          "description": "Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a verified runtime can expose a terminal.",
           "type": [
             "integer",
             "null"
           ],
           "format": "int64"
-        },
-        "steady_cpu_millis": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 1
         }
       },
       "required": [
         "generation",
-        "phase",
-        "steady_cpu_millis",
-        "effective_cpu_millis"
+        "cpu_millis"
       ]
     },
     "VmSandboxStateV1": {

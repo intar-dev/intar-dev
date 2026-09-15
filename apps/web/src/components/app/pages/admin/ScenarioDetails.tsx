@@ -683,7 +683,6 @@ function VmRecord({ vm }: { vm: ScenarioVmRecord }) {
         <Badge variant="outline">{vm.image}</Badge>
         <div className="flex flex-wrap gap-x-4 text-sm text-muted-foreground">
           <span>{formatCpu(vm.cpuMillis)} CPU</span>
-          <span>{vm.vcpuCount} vCPU</span>
           <span>{formatMemory(vm.memoryMib)}</span>
           <span>{formatDisk(vm.diskMib)}</span>
         </div>

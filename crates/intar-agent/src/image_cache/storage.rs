@@ -322,7 +322,7 @@ mod tests {
 
     use intar_contracts::{
         bridge::{
-            DesiredGuestToolsV1, DesiredVmPhase, DesiredVmV2, HostDesiredStateV2, VmResourcesV2,
+            DesiredGuestToolsV1, DesiredVmPhase, DesiredVmV2, HostDesiredStateV2, VmResourcesV3,
         },
         catalog::{ImageArchitecture, ImageKey, Mib},
     };
@@ -421,9 +421,8 @@ mod tests {
             },
             image_id: "e".repeat(64),
             guest_tools: guest_tools(tools_disk_sha256),
-            resources: VmResourcesV2 {
+            resources: VmResourcesV3 {
                 cpu_millis: 1,
-                vcpu_count: 1,
                 memory_mib: Mib(1),
                 disk_mib: Mib(1),
             },

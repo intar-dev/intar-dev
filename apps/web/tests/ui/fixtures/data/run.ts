@@ -246,7 +246,7 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
           image: "debian-13",
           imageKey: scenarioVm.imageKey,
           imageSha256: sha,
-          resources: { vcpus: 2, memoryMib: 2048, diskMib: 8192 },
+          resources: { cpuMillis: 2000, memoryMib: 2048, diskMib: 8192 },
           leaseDurationSeconds: 7200,
           groupName: "learner",
           groupId: "group-learner",

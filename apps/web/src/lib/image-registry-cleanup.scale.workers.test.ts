@@ -290,7 +290,6 @@ async function seedRetainedReference(ref: RetainedReference): Promise<void> {
     initrdSha256: ref.initrdSha256,
     bootCmdline: "root=/dev/vda rw",
     cpuMillis: 125,
-    vcpuCount: 1,
     memoryMib: 512,
     diskMib: 4_096,
   });

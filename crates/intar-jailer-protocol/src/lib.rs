@@ -21,7 +21,7 @@ use thiserror::Error;
 use tokio::io::unix::AsyncFd;
 
 /// Current on-wire protocol version.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 /// Maximum request or response packet, including its JSON envelope.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Reserved source-root selector for artifacts in jailerd's root-owned image
@@ -29,10 +29,6 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const PREPARED_IMAGE_SOURCE_ROOT: u16 = u16::MAX;
 /// Fixed cgroup-v2 CPU period used by Intar VM units.
 pub const CPU_PERIOD_MICROS: u64 = 100_000;
-/// Root-owned default aggregate VMM quota while a VM boots.
-pub const DEFAULT_BOOT_CPU_MILLIS: u32 = 2_000;
-/// Root-owned maximum duration of a boot CPU lease.
-pub const DEFAULT_BOOT_CPU_LEASE_MS: u64 = 45_000;
 /// Root-owned default pool reserved for per-run guest networks.
 pub const DEFAULT_GUEST_NETWORK_POOL: &str = "10.77.0.0/16";
 /// Prefix allocated to each run by the unprivileged agent.
@@ -158,6 +154,7 @@ impl CpuQuota {
         if cpu_millis == 0 {
             return Err(ValidationError::ZeroCpu);
         }
+        u16::try_from(cpu_millis.div_ceil(1_000)).map_err(|_| ValidationError::CpuOverflow)?;
         let quota_micros = u64::from(cpu_millis)
             .checked_mul(CPU_PERIOD_MICROS)
             .and_then(|value| value.checked_div(1_000))
@@ -171,6 +168,11 @@ impl CpuQuota {
 
     pub fn cpu_max(&self) -> String {
         format!("{} {}", self.quota_micros, self.period_micros)
+    }
+
+    /// Guest topology is derived from the limit; it does not reserve host CPUs.
+    pub fn vcpu_count(&self) -> u16 {
+        self.cpu_millis.div_ceil(1_000) as u16
     }
 }
 
@@ -427,7 +429,6 @@ pub struct VmLaunchRequest {
     pub run_id: ValidatedId,
     pub vm_id: ValidatedId,
     pub cpu_millis: u32,
-    pub vcpu_count: u16,
     pub memory_mib: u32,
     /// Exact size of the mutable generation root disk. For V2 launches this
     /// may exceed the immutable prepared image size, but it may never shrink
@@ -684,9 +685,6 @@ pub struct JailerCapabilities {
     pub supports_template_backed_launch: bool,
     pub fast_template_store: bool,
     pub supports_hard_cpu_quota: bool,
-    pub supports_boot_cpu_lease: bool,
-    pub boot_cpu_millis: u32,
-    pub boot_cpu_lease_ms: u64,
     pub supports_landlock: bool,
     pub supports_cgroup_v2: bool,
     pub uid_gid_start: u32,
@@ -712,14 +710,6 @@ pub struct JailerCapabilities {
     pub ssh_public_port_end: u16,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VmCpuPhase {
-    BootBurst,
-    #[default]
-    Steady,
-}
-
 /// Live cgroup readback produced only by the privileged daemon.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -733,10 +723,7 @@ pub struct CpuQuotaAttestation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmCpuRuntimeState {
-    pub phase: VmCpuPhase,
-    pub steady_quota: CpuQuota,
-    pub effective_quota: CpuQuota,
-    pub boot_deadline_unix_ms: Option<u64>,
+    pub quota: CpuQuota,
     pub attestation: Option<CpuQuotaAttestation>,
 }
 
@@ -942,10 +929,6 @@ pub struct JailerdConfig {
     pub agent_gid: u32,
     pub allow_uid_gid_collisions: bool,
     pub cpu_reserved_millis: u64,
-    /// Aggregate VMM-process quota used only during the bounded boot phase.
-    pub boot_cpu_millis: u32,
-    /// Maximum boot phase duration before jailerd seals the VM to steady CPU.
-    pub boot_cpu_lease_ms: u64,
     pub vmm_file_size_limit_bytes: Option<u64>,
     pub uid_gid_start: u32,
     pub uid_gid_end: u32,
@@ -974,8 +957,6 @@ impl Default for JailerdConfig {
             agent_gid: 0,
             allow_uid_gid_collisions: false,
             cpu_reserved_millis: 1_000,
-            boot_cpu_millis: DEFAULT_BOOT_CPU_MILLIS,
-            boot_cpu_lease_ms: DEFAULT_BOOT_CPU_LEASE_MS,
             vmm_file_size_limit_bytes: None,
             uid_gid_start: 200_000,
             uid_gid_end: 265_535,
@@ -1057,10 +1038,6 @@ pub enum ValidationError {
     ZeroCpu,
     #[error("CPU quota arithmetic overflow")]
     CpuOverflow,
-    #[error("vCPU count must be positive")]
-    ZeroVcpus,
-    #[error("CPU entitlement exceeds the selected vCPU topology")]
-    QuotaExceedsTopology,
     #[error("memory must be positive")]
     ZeroMemory,
     #[error("generation root disk size must be positive")]
@@ -1139,8 +1116,6 @@ pub enum ValidationError {
     InvalidNofileLimit,
     #[error("configured RLIMIT_FSIZE must be positive")]
     InvalidFileSizeLimit,
-    #[error("boot CPU lease duration must be within 1..=45000 milliseconds")]
-    InvalidBootCpuLease,
     #[error("template/chunk store garbage-collection limits must be positive")]
     InvalidStoreGcPolicy,
 }

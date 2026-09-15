@@ -146,7 +146,6 @@ async function seedScenario(
       initrdSha256: `${sha256.slice(0, 63)}e`,
       bootCmdline: "console=ttyS0 root=/dev/vda rw",
       cpuMillis: 1_000,
-      vcpuCount: 1,
       memoryMib: 512,
       diskMib: 1_024,
     }),

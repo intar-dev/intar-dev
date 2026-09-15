@@ -17,9 +17,7 @@ use cloud_hypervisor_client::{
 };
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
-use intar_contracts::bridge::{
-    DesiredGuestToolsV1, VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1,
-};
+use intar_contracts::bridge::{DesiredGuestToolsV1, VmRuntimeConstraintsV2};
 use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, BACKGROUND_PREPARE_BYTES_PER_SECOND,
@@ -27,8 +25,8 @@ use intar_jailer_protocol::{
     JailPathMap, JailerCapabilities, LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT,
     PrepareChunkedImageV3Request, PreparedImageV3Result, Request as JailerRequest, RequestClass,
     Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
-    TrustedDirectorySource, ValidatedId, VmCpuPhase, VmCpuRuntimeState, VmIdentityRequest,
-    VmInspection, VmLaunchRequest, VmLaunchResult,
+    TrustedDirectorySource, ValidatedId, VmCpuRuntimeState, VmIdentityRequest, VmInspection,
+    VmLaunchRequest, VmLaunchResult,
 };
 use reqwest::Client as HttpClient;
 use russh::{
@@ -62,7 +60,6 @@ use super::{mac, replay_media, runtime_disk};
 #[serde(deny_unknown_fields)]
 pub struct CreateVmResources {
     pub cpu_millis: u32,
-    pub vcpus: u32,
     pub memory_mib: u32,
     pub disk_mib: Option<u32>,
 }
@@ -154,7 +151,6 @@ pub struct VmDetails {
     pub spool_dir: Option<String>,
     pub mac: String,
     pub cpu_millis: Option<u32>,
-    pub vcpu_count: Option<u16>,
     pub guest_ip: Option<String>,
     pub guest_ip_cidr: Option<String>,
     pub gateway: Option<String>,
@@ -268,11 +264,6 @@ impl VmStatusResponse {
                 .details
                 .as_ref()
                 .and_then(|d| d.cpu_millis)
-                .map(i64::from),
-            vcpu_count: self
-                .details
-                .as_ref()
-                .and_then(|d| d.vcpu_count)
                 .map(i64::from),
             lease_duration_seconds: self.lease_duration_seconds.map(|v| v as i64),
             guest_ip: self.details.as_ref().and_then(|d| d.guest_ip.clone()),
@@ -460,8 +451,8 @@ struct LeaseExpiryErrorLogState {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("jailerd boot capacity is temporarily unavailable: {message}")]
-struct BootCapacityPending {
+#[error("jailerd CPU capacity is temporarily unavailable: {message}")]
+struct CpuCapacityPending {
     message: String,
 }
 
@@ -563,7 +554,7 @@ pub struct VmTerminalState {
     pub terminal_target: Option<VmTerminalTarget>,
     pub reason: Option<String>,
     pub observed_at: i64,
-    pub runtime_constraints: Option<VmRuntimeConstraintsV1>,
+    pub runtime_constraints: Option<VmRuntimeConstraintsV2>,
 }
 
 impl VmTerminalState {

@@ -7,7 +7,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use intar_contracts::catalog::{
-    ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ScenarioManifestV4,
+    ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ScenarioManifestV5,
 };
 use reqwest::blocking::multipart::Form;
 use sha2::{Digest as _, Sha256};
@@ -120,7 +120,7 @@ impl ImageUploader {
     /// payloads is rejected with 413.
     pub fn publish_manifest_with_artifacts(
         &self,
-        manifest: &ScenarioManifestV4,
+        manifest: &ScenarioManifestV5,
         images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
     ) -> Result<PublishReceipt> {
@@ -129,7 +129,7 @@ impl ImageUploader {
 
     pub fn publish_build_manifest_with_artifacts(
         &self,
-        manifest: &ScenarioManifestV4,
+        manifest: &ScenarioManifestV5,
         images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
         identity: &PublishBuildIdentity,
@@ -145,7 +145,7 @@ impl ImageUploader {
     /// decisions.
     pub fn publish_build_manifest_with_session(
         &self,
-        manifest: &ScenarioManifestV4,
+        manifest: &ScenarioManifestV5,
         images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
         identity: &PublishBuildIdentity,
@@ -157,7 +157,7 @@ impl ImageUploader {
 
     fn publish_with_session(
         &self,
-        manifest: &ScenarioManifestV4,
+        manifest: &ScenarioManifestV5,
         images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
         identity: Option<&PublishBuildIdentity>,
@@ -175,7 +175,7 @@ impl ImageUploader {
 
     fn publish_manifest_with_optional_identity(
         &self,
-        manifest: &ScenarioManifestV4,
+        manifest: &ScenarioManifestV5,
         images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
         identity: Option<&PublishBuildIdentity>,
@@ -198,7 +198,7 @@ impl ImageUploader {
 
     fn upload_and_publish(
         &self,
-        manifest: &ScenarioManifestV4,
+        manifest: &ScenarioManifestV5,
         images: &[PublishChunkedImage],
         artifacts: &[PublishArtifactFile],
         identity: Option<&PublishBuildIdentity>,
@@ -829,7 +829,7 @@ struct SessionProtocol {
 }
 
 fn validate_chunked_image(
-    scenario_manifest: &ScenarioManifestV4,
+    scenario_manifest: &ScenarioManifestV5,
     image: &PublishChunkedImage,
 ) -> Result<()> {
     let vm = scenario_manifest

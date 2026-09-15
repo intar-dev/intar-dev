@@ -66,7 +66,7 @@
     "resource_state": {
       "anyOf": [
         {
-          "$ref": "#/$defs/VmResourceStateV2"
+          "$ref": "#/$defs/VmResourceStateV3"
         },
         {
           "type": "null"
@@ -79,7 +79,7 @@
     "runtime_constraints": {
       "anyOf": [
         {
-          "$ref": "#/$defs/VmRuntimeConstraintsV1"
+          "$ref": "#/$defs/VmRuntimeConstraintsV2"
         },
         {
           "type": "null"
@@ -99,8 +99,8 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 4,
-      "minimum": 4
+      "maximum": 5,
+      "minimum": 5
     },
     "ssh_host_keys_openssh": {
       "type": "array",
@@ -288,7 +288,7 @@
         "fail"
       ]
     },
-    "VmResourceStateV2": {
+    "VmResourceStateV3": {
       "type": "object",
       "properties": {
         "cpu_millis": {
@@ -335,17 +335,10 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "vcpu_count": {
-          "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1
         }
       },
       "required": [
         "cpu_millis",
-        "vcpu_count",
         "cpu_quota_us",
         "cpu_period_us",
         "cpu_usage_usec",
@@ -356,17 +349,10 @@
         "cpu_throttled_usec"
       ]
     },
-    "VmRuntimeConstraintPhaseV1": {
-      "type": "string",
-      "enum": [
-        "boot_burst",
-        "steady"
-      ]
-    },
-    "VmRuntimeConstraintsV1": {
+    "VmRuntimeConstraintsV2": {
       "type": "object",
       "properties": {
-        "effective_cpu_millis": {
+        "cpu_millis": {
           "type": "integer",
           "format": "uint32",
           "minimum": 1
@@ -375,35 +361,18 @@
           "description": "Jailer-owned generation to which every quota and ingress attestation\nin this object applies. The breaking v2 contract never accepts\ngeneration-less quota evidence.",
           "type": "string"
         },
-        "lease_expires_at_unix_ms": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
-        },
-        "phase": {
-          "$ref": "#/$defs/VmRuntimeConstraintPhaseV1"
-        },
         "quota_verified_at_unix_ms": {
-          "description": "Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a `steady` runtime can expose a terminal.",
+          "description": "Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a verified runtime can expose a terminal.",
           "type": [
             "integer",
             "null"
           ],
           "format": "int64"
-        },
-        "steady_cpu_millis": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 1
         }
       },
       "required": [
         "generation",
-        "phase",
-        "steady_cpu_millis",
-        "effective_cpu_millis"
+        "cpu_millis"
       ]
     },
     "VmSandboxStateV1": {

@@ -21,8 +21,8 @@ tap = "tap"
 work_dir = "/var/cache/intar-agent"
 
 [vm_defaults.resources]
-# Fallback only. Scheduled scenarios use catalog V3 cpu_millis/vcpu_count.
-vcpus = 1
+# Fallback only. Scheduled scenarios use catalog V5 cpu_millis.
+cpu_millis = 1000
 memory_mib = 512
 
 [vm_defaults.network]

@@ -30,7 +30,7 @@ import type {
   HostDesiredStateV2,
   HostStateReportV2,
 } from "@/generated/bridge";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 
 const LIVE = "a".repeat(64);
 const PREVIOUS = "b".repeat(64);
@@ -605,7 +605,7 @@ describe("manifest image members", () => {
         { name: "web", image_key: { arch: "x86_64" }, image_id: LIVE },
         { name: "db", image_key: { arch: "aarch64" }, image_id: PREVIOUS },
       ],
-    } as unknown as ScenarioManifestV4;
+    } as unknown as ScenarioManifestV5;
 
     expect(manifestImageMembers(manifest, "candidate_intent")).toEqual([
       {

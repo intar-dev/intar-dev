@@ -56,7 +56,6 @@ fn test_vm_row() -> VmRow {
         recording_disk_path: Some("/tmp/recording.raw".to_string()),
         spool_dir: Some("/tmp/spool".to_string()),
         cpu_millis: Some(125),
-        vcpu_count: Some(1),
         ch_executable_sha256: Some("b".repeat(64)),
     }
 }

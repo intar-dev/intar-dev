@@ -159,11 +159,11 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 recovery_clean = false;
                 continue;
             };
-            // Daemon restart ends every boot lease conservatively. Ingress is
+            // Verify the unchanged CPU limit after restart. Ingress is
             // still absent at this point, and is restored only for a record
             // that had durably completed finalization before the restart.
             if backend
-                .update_unit_cpu_quota(&record.unit_name, cgroup_path, record.quota)
+                .verify_unit_cpu_quota(&record.unit_name, cgroup_path, record.quota)
                 .is_err()
             {
                 contain_or_retain_recovered_record(
@@ -178,9 +178,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 recovery_clean = false;
                 continue;
             }
-            record.cpu_phase = VmCpuPhase::Steady;
-            record.effective_quota = record.quota;
-            record.boot_deadline_unix_ms = None;
             record.quota_attestation = Some(quota_attestation(record.quota)?);
             if preparer.persist(&config, &record).is_err() {
                 contain_or_retain_recovered_record(
@@ -447,9 +444,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             supports_template_backed_launch: ready && fast_template_store,
             fast_template_store,
             supports_hard_cpu_quota: ready,
-            supports_boot_cpu_lease: ready,
-            boot_cpu_millis: self.config.boot_cpu_millis,
-            boot_cpu_lease_ms: self.config.boot_cpu_lease_ms,
             supports_landlock: ready,
             supports_cgroup_v2: self.readiness.supports_cgroup_v2,
             uid_gid_start: self.config.uid_gid_start,
@@ -548,9 +542,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         self.config
             .validate_ssh_public_port(launch.ssh_public_port)
             .context("validate root-owned SSH public port policy")?;
-        let effective_quota =
-            CpuQuota::from_millis(launch.cpu_millis.max(self.config.boot_cpu_millis))
-                .context("derive root-owned boot CPU quota")?;
         let fingerprint = request_fingerprint(launch)?;
 
         if let Some(existing) = self.records.values().find(|record| {
@@ -574,10 +565,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             if existing.request_fingerprint != fingerprint {
                 bail!("logical VM launch already exists with a different launch request")
             }
-            return Err(BootCapacityPendingError {
+            return Err(CpuCapacityExhaustedError {
                 committed: self.committed_cpu_millis(),
-                requested: existing.effective_quota.cpu_millis,
-                steady: existing.quota.cpu_millis,
+                requested: existing.quota.cpu_millis,
                 schedulable: self
                     .total_cpu_millis
                     .saturating_sub(self.config.cpu_reserved_millis),
@@ -595,13 +585,12 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .saturating_sub(self.config.cpu_reserved_millis);
         let committed = self.committed_cpu_millis();
         let after_launch = committed
-            .checked_add(u64::from(effective_quota.cpu_millis))
+            .checked_add(u64::from(quota.cpu_millis))
             .context("CPU admission arithmetic overflow")?;
         if after_launch > schedulable {
-            return Err(BootCapacityPendingError {
+            return Err(CpuCapacityExhaustedError {
                 committed,
-                requested: effective_quota.cpu_millis,
-                steady: launch.cpu_millis,
+                requested: quota.cpu_millis,
                 schedulable,
             }
             .into());
@@ -617,13 +606,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 break candidate;
             }
         };
-        let admitted_at_monotonic = Instant::now();
-        let boot_deadline_monotonic = admitted_at_monotonic
-            .checked_add(Duration::from_millis(self.config.boot_cpu_lease_ms))
-            .context("monotonic boot CPU lease deadline overflow")?;
-        let boot_deadline_unix_ms = unix_time_millis()?
-            .checked_add(self.config.boot_cpu_lease_ms)
-            .context("boot CPU lease deadline overflow")?;
         let identity = self.allocate_identity()?;
         let reservation = LaunchReservation {
             generation: generation.clone(),
@@ -633,26 +615,20 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             uid: identity,
             gid: identity,
             quota,
-            effective_quota,
-            boot_deadline_unix_ms,
-            boot_deadline_monotonic,
         };
 
         // The reservation and its charge enter the lifecycle state in the same
         // critical section. Every concurrent admission therefore observes the
-        // boot quota even though the expensive work runs after this lock drops.
+        // declared quota even though the expensive work runs after this lock drops.
         self.pending_cpu_reservations
-            .insert(generation.clone(), effective_quota);
+            .insert(generation.clone(), quota);
         self.inflight_launches
             .insert(generation.clone(), reservation.clone());
         // Publish the boot window inside the same critical section. Background
         // image preparation requeues while it is live, so a boot never shares
         // the disk or the template store with an import. Every terminal path
         // closes it again; the window also self-expires after one lease.
-        open_boot_window(
-            &generation,
-            Duration::from_millis(self.config.boot_cpu_lease_ms),
-        );
+        open_boot_window(&generation, BACKGROUND_BOOT_WINDOW);
 
         Ok(DetachedLaunchAdmission::Reserved(Box::new(
             DetachedLaunchTask {
@@ -675,7 +651,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         };
         if self.inflight_launches.get(&reservation.generation) != Some(reservation)
             || self.pending_cpu_reservations.get(&reservation.generation)
-                != Some(&reservation.effective_quota)
+                != Some(&reservation.quota)
         {
             self.readiness.privileged_self_test_passed = false;
             self.readiness.kvm_accounting_proven = false;
@@ -821,10 +797,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     ));
                 }
                 let fence_matches = detached_existing_identity_matches(&record, &current);
-                let conservative_quota = CpuQuota::from_millis(
-                    self.config.boot_cpu_millis.max(record.request.cpu_millis),
-                )
-                .context("derive conservative CPU charge for mismatched generation")?;
+                let conservative_quota = CpuQuota::from_millis(record.request.cpu_millis)
+                    .context("derive conservative CPU charge for mismatched generation")?;
                 let recovery = unresolved_recovery_for_record(&record);
 
                 if fence_matches {

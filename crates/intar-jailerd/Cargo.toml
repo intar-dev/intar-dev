@@ -29,6 +29,7 @@ zbus.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cloud-hypervisor-client = { path = "../cloud-hypervisor-client" }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 kvm-ioctls = "=0.25.0"
 landlock = "=0.4.5"
 libc = "=0.2.186"

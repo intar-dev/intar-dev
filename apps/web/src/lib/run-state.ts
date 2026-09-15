@@ -1,6 +1,6 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
 import type { ImageKey } from "@/generated/catalog";
-import type { VmResourceStateV2 } from "@/generated/bridge";
+import type { VmResourceStateV3 } from "@/generated/bridge";
 import { isVerificationPassed } from "@/lib/verification-copy";
 
 export type RunPhase =
@@ -74,11 +74,8 @@ export interface TerminalTarget {
 
 export interface RuntimeConstraintsEvidence {
   generation: string;
-  phase: "boot_burst" | "steady";
-  steadyCpuMillis: number;
-  effectiveCpuMillis: number;
+  cpuMillis: number;
   quotaVerifiedAt: number | null;
-  leaseExpiresAt: number | null;
 }
 
 export interface RunVmProvisioningSpec {
@@ -87,7 +84,6 @@ export interface RunVmProvisioningSpec {
   imageSha256: string | null;
   resources: {
     cpuMillis: number;
-    vcpuCount: number;
     memoryMib: number;
     diskMib: number;
   } | null;
@@ -129,7 +125,7 @@ export interface RunVmStateDocument {
   runtimeConstraints?: RuntimeConstraintsEvidence | null;
   /// Latest periodic cgroup counters when the host inventory includes them.
   /// Their absence must not trigger an InspectVm call during launch.
-  resourceState?: VmResourceStateV2 | null;
+  resourceState?: VmResourceStateV3 | null;
   /// Generations superseded by a newer runtime report. Optional for stored
   /// documents written before generation-fenced projection.
   retiredRuntimeGenerations?: string[];

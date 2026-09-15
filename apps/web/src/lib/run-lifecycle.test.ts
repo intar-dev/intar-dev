@@ -346,10 +346,7 @@ describe("run lifecycle", () => {
         observedAt: 2_001,
         runtimeConstraints: {
           generation: "generation-2",
-          phase: "boot_burst",
-          steady_cpu_millis: 1_000,
-          effective_cpu_millis: 2_000,
-          lease_expires_at_unix_ms: 47_001,
+          cpu_millis: 1_000,
         },
       }),
     });
@@ -360,7 +357,8 @@ describe("run lifecycle", () => {
       terminalTarget: { host: null, hostKeyOpenssh: null },
       runtimeConstraints: {
         generation: "generation-2",
-        phase: "boot_burst",
+        cpuMillis: 1_000,
+        quotaVerifiedAt: null,
       },
       resourceState: null,
       retiredRuntimeGenerations: ["generation-1"],
@@ -475,9 +473,7 @@ describe("run lifecycle", () => {
         },
         runtimeConstraints: {
           generation: "generation-1",
-          phase: "steady",
-          steady_cpu_millis: 1_000,
-          effective_cpu_millis: 1_000,
+          cpu_millis: 1_000,
           quota_verified_at_unix_ms: 1_999,
         },
       }),
@@ -511,9 +507,7 @@ describe("run lifecycle", () => {
         },
         runtimeConstraints: {
           generation: "generation-1",
-          phase: "steady",
-          steady_cpu_millis: 1_000,
-          effective_cpu_millis: 1_000,
+          cpu_millis: 1_000,
           quota_verified_at_unix_ms: 1_999,
         },
       }),
@@ -581,17 +575,14 @@ describe("run lifecycle", () => {
         }).terminal,
         runtimeConstraints: {
           generation: "generation-1",
-          phase: "boot_burst",
-          steady_cpu_millis: 1_000,
-          effective_cpu_millis: 2_000,
-          lease_expires_at_unix_ms: 47_000,
+          cpu_millis: 1_000,
         },
       }),
     });
     expect(unsealed.vms[0]).toMatchObject({
       terminalPhase: "pending",
       canOpenTerminal: false,
-      terminalReason: "Waiting for verified steady CPU quota.",
+      terminalReason: "Waiting for CPU limit verification.",
     });
 
     const wrongQuota = applyVmReportToRunState({
@@ -609,9 +600,7 @@ describe("run lifecycle", () => {
         }).terminal,
         runtimeConstraints: {
           generation: "generation-1",
-          phase: "steady",
-          steady_cpu_millis: 1_000,
-          effective_cpu_millis: 2_000,
+          cpu_millis: 2_000,
           quota_verified_at_unix_ms: 1_999,
         },
       }),
@@ -758,7 +747,6 @@ function initialRunState(): RunStateDocument {
   if (vm) {
     vm.provisioning.resources = {
       cpuMillis: 1_000,
-      vcpuCount: 1,
       memoryMib: 512,
       diskMib: 4_096,
     };
@@ -780,7 +768,7 @@ function vmReport(input: {
   observedAt?: number;
 }): VmReportV2 {
   return {
-    schema_version: 3,
+    schema_version: 5,
     host_id: "host-alpha",
     run_id: input.runId,
     vm_name: input.vmName,
@@ -828,9 +816,7 @@ function readyTerminalEvidence(input: {
     },
     runtimeConstraints: {
       generation: input.generation ?? "generation-1",
-      phase: "steady",
-      steady_cpu_millis: 1_000,
-      effective_cpu_millis: 1_000,
+      cpu_millis: 1_000,
       quota_verified_at_unix_ms: input.observedAt - 1,
     },
   };
@@ -839,7 +825,6 @@ function readyTerminalEvidence(input: {
 function vmResourceState(): NonNullable<VmReportV2["resource_state"]> {
   return {
     cpu_millis: 1_000,
-    vcpu_count: 1,
     cpu_quota_us: 100_000,
     cpu_period_us: 100_000,
     cpu_usage_usec: 1,
@@ -853,7 +838,7 @@ function vmResourceState(): NonNullable<VmReportV2["resource_state"]> {
 
 function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
   return {
-    schema_version: 4,
+    schema_version: 6,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 42,
@@ -872,8 +857,6 @@ function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
       arch: "x86_64",
       cloud_hypervisor_sha256:
         "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      boot_cpu_millis: 2_000,
-      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
@@ -882,7 +865,6 @@ function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
       supports_jailer_v3: true,
       supports_raw_chunks_v1: true,
       supports_scenario_guest_tools_v1: true,
-      supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
       supports_hard_cpu_quota: true,

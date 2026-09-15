@@ -559,7 +559,6 @@ fn generationless_v6_cleanup_uses_only_typed_logical_identity() {
     let mut historical = test_vm_status("vm-historical", Some("run-1"));
     let details = historical.details.as_mut().expect("details");
     details.cpu_millis = None;
-    details.vcpu_count = None;
     assert!(
         generationless_v6_launch_cleanup_selector(&historical)
             .expect("historical selector check")

@@ -10,7 +10,7 @@ import type {
 import {
   admissionCpuQuotaStatement,
   admissionResourceReservationStatement,
-  bootCpuReservationForSteadyVms,
+  cpuReservationForVms,
   loadHostCpuReservationCapacity,
 } from "@/control-plane/host-cpu-reservations";
 import {
@@ -763,20 +763,9 @@ async function admitNewRun(context: {
   const sourceAnchor = context.candidateProof
     ? null
     : liveSourceFingerprint(scenario.launchSpecs);
-  const steadyCpuMillisByVm = scenario.launchSpecs.map(
+  const cpuMillisByVm = scenario.launchSpecs.map(
     (spec) => spec.resources.cpuMillis,
   );
-  const steadyCpuMillis = steadyCpuMillisByVm.reduce(
-    (total, cpuMillis) => total + cpuMillis,
-    0,
-  );
-  if (!Number.isSafeInteger(steadyCpuMillis) || steadyCpuMillis <= 0) {
-    throw appError(
-      500,
-      "scenario_catalog_invalid",
-      "scenario CPU entitlement is invalid",
-    );
-  }
   const runVmStates = scenario.launchSpecs.map((spec, index) => {
     const vmId = createAppId();
     const runtimeVmName = deterministicRuntimeVmName(
@@ -872,14 +861,14 @@ async function admitNewRun(context: {
     leaseDurationSeconds > 0 ? createdAt + leaseDurationSeconds * 1_000 : null;
   const reservationResources = scenarioRuntimeReservationResources(
     runtimeVms,
-    steadyCpuMillisByVm,
+    cpuMillisByVm,
   );
-  const bootCpuMillis = bootCpuReservationForSteadyVms(steadyCpuMillisByVm);
-  if (bootCpuMillis !== reservationResources.cpuMillis) {
+  const cpuMillis = cpuReservationForVms(cpuMillisByVm);
+  if (cpuMillis !== reservationResources.cpuMillis) {
     throw appError(
       500,
       "scenario_catalog_invalid",
-      "scenario boot CPU reservation is inconsistent",
+      "scenario CPU reservation is inconsistent",
     );
   }
 
@@ -983,7 +972,7 @@ async function admitNewRun(context: {
       ...(input.hostId ? { requestedHostId: input.hostId } : {}),
       requiredImages,
       reservationResources,
-      bootCpuMillis,
+      cpuMillis,
       now: Date.now(),
       desiredVms,
       guestTools,
@@ -1003,8 +992,7 @@ async function admitNewRun(context: {
       accessKeys,
       desiredVms,
       desired: allocated,
-      bootCpuMillis,
-      steadyCpuMillis,
+      cpuMillis,
       reservationResources,
       leaseExpiresAt,
       betaAdmission: input.betaAdmission,
@@ -1159,7 +1147,7 @@ async function allocateAdmissionHost(input: {
   requestedHostId?: string;
   requiredImages: RequiredScenarioImage[];
   reservationResources: RuntimeResourceDemand;
-  bootCpuMillis: number;
+  cpuMillis: number;
   now: number;
   desiredVms: DesiredVmV2[];
   guestTools: DesiredGuestToolsV1;
@@ -1216,7 +1204,7 @@ async function allocateAdmissionHost(input: {
     const allocation = await planAdmissionHost({
       candidateHostIds,
       now: input.now,
-      bootCpuMillis: input.bootCpuMillis,
+      cpuMillis: input.cpuMillis,
       reservationResources: input.reservationResources,
       desiredVms: input.desiredVms,
       guestTools: input.guestTools,
@@ -1242,7 +1230,7 @@ async function allocateAdmissionHost(input: {
  *
  * 1. the desired-state version (the compare-and-set anchor);
  * 2. the reported capacity and the reservation ledger for that host;
- * 3. the boot-quota check and the generic resource check;
+ * 3. the CPU-quota check and the generic resource check;
  * 4. the desired-state draft that carries this run's VMs.
  *
  * A candidate that fails any check is skipped without writing anything, so a
@@ -1252,7 +1240,7 @@ async function allocateAdmissionHost(input: {
 async function planAdmissionHost(input: {
   candidateHostIds: readonly string[];
   now: number;
-  bootCpuMillis: number;
+  cpuMillis: number;
   reservationResources: RuntimeResourceDemand;
   desiredVms: DesiredVmV2[];
   guestTools: DesiredGuestToolsV1;
@@ -1264,7 +1252,7 @@ async function planAdmissionHost(input: {
     if (!capacity) {
       continue;
     }
-    if (input.bootCpuMillis > capacity.availableCpuMillis) {
+    if (input.cpuMillis > capacity.availableCpuMillis) {
       continue;
     }
     const report = await loadHostReportOrNull(hostId);
@@ -1337,8 +1325,7 @@ export interface AdmissionCommitInput {
   accessKeys: Array<{ ciphertextB64: string; ivB64: string }>;
   desiredVms: DesiredVmV2[];
   desired: AdmissionHostAllocation;
-  bootCpuMillis: number;
-  steadyCpuMillis: number;
+  cpuMillis: number;
   reservationResources: RuntimeResourceDemand;
   leaseExpiresAt: number | null;
   betaAdmission: BetaAdmissionEpoch;
@@ -1903,7 +1890,7 @@ function cpuQuotaStatement(
   run: typeof scenarioRuns.$inferInsert & { hostId: string },
   input: AdmissionCommitInput,
 ): D1PreparedStatement {
-  // The boot quota is the strict-isolation record for this run. It is written
+  // The CPU quota is the strict-isolation record for this run. It is written
   // under the same desired-state version fence as the run, so a lost
   // compare-and-set leaves neither the run nor the quota behind.
   return admissionCpuQuotaStatement({
@@ -1911,8 +1898,7 @@ function cpuQuotaStatement(
     runId: run.runId,
     userId: run.userId,
     hostId: run.hostId,
-    bootCpuMillis: input.bootCpuMillis,
-    steadyCpuMillis: input.steadyCpuMillis,
+    cpuMillis: input.cpuMillis,
     desiredVersion: input.desired.nextVersion,
     nowUnixMs: input.now,
   });

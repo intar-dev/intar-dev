@@ -543,26 +543,7 @@ fn push_jailerd_capabilities_check(
         "jailerd advertises aggregate hard CPU quotas",
         "jailerd does not advertise aggregate hard CPU quotas",
     );
-    checks.push(
-        if capabilities.supports_jailer_v2
-            && capabilities.supports_boot_cpu_lease
-            && capabilities.boot_cpu_millis >= 1_000
-            && capabilities.boot_cpu_lease_ms > 0
-        {
-            pass(
-                "boot CPU lease capability",
-                format!(
-                    "jailerd advertises a capacity-accounted {}m / {}ms boot lease",
-                    capabilities.boot_cpu_millis, capabilities.boot_cpu_lease_ms
-                ),
-            )
-        } else {
-            fail(
-                "boot CPU lease capability",
-                "jailerd does not attest the mandatory capacity-accounted boot CPU lease",
-            )
-        },
-    );
+
     checks.push(
         if capabilities.supports_jailer_v2
             && capabilities.supports_template_backed_launch

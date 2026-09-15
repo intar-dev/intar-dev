@@ -39,7 +39,7 @@ import {
   vmScenarioVms,
   runtimeOperationGates,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
 import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
@@ -255,7 +255,6 @@ const SECOND_SCENARIO_ID = "scenario-two";
 const THIRD_SCENARIO_ID = "scenario-three";
 const RUNNER_USER_ID = "admission-user";
 const FIRST_VM_CPU_MILLIS = 1_000;
-const BOOT_CPU_MILLIS = 2_000;
 const VM_MEMORY_MIB = 512;
 const VM_DISK_MIB = 4_096;
 const HOST_CPU_MILLIS = 8_000;
@@ -334,7 +333,7 @@ describe("scenario admission batch", () => {
       runtimeVms: 1,
       accessKeys: 1,
       cpuReservations: 1,
-      cpuMillis: BOOT_CPU_MILLIS,
+      cpuMillis: FIRST_VM_CPU_MILLIS,
       resourceReservations: 1,
       activeSlots: 1,
       desiredVersion: 1,
@@ -406,7 +405,7 @@ describe("scenario admission batch", () => {
       runtimeExecutions: 1,
       runtimeVms: 1,
       cpuReservations: 1,
-      cpuMillis: BOOT_CPU_MILLIS,
+      cpuMillis: FIRST_VM_CPU_MILLIS,
       resourceReservations: 1,
       activeSlots: 1,
       desiredVersion: 1,
@@ -437,7 +436,7 @@ describe("scenario admission batch", () => {
     expect(accepted.length).toBeGreaterThan(0);
     expect(accepted.length).toBeLessThanOrEqual(4);
     const snapshot = await admissionSnapshot();
-    expect(snapshot.cpuMillis).toBe(accepted.length * BOOT_CPU_MILLIS);
+    expect(snapshot.cpuMillis).toBe(accepted.length * FIRST_VM_CPU_MILLIS);
     expect(snapshot.cpuMillis).toBeLessThanOrEqual(HOST_CPU_MILLIS);
     // Every admitted run must own a desired VM. A run that commits without
     // publishing its VM never launches, and its CPU quota stays charged.
@@ -471,9 +470,23 @@ describe("scenario admission batch", () => {
     expect((await desiredDocument()).vms).toHaveLength(accepted.length);
   });
 
+  it("admits two half-CPU VMs into one CPU from startup", async () => {
+    const fixture = await seedAdmissionFixture({ userIds: ["half-a", "half-b"], hostCpuMillis: 1000 });
+    await drizzle(env.DB).update(vmScenarioVms).set({ cpuMillis: 500 })
+      .where(eq(vmScenarioVms.scenarioId, SCENARIO_ID));
+    for (const userId of ["half-a", "half-b"]) {
+      const result = await beginScenarioRun(fixture.input(userId));
+      await result.deliveryHint;
+    }
+    await expect(admissionSnapshot()).resolves.toMatchObject({ runs: 2, cpuReservations: 2, cpuMillis: 1000 });
+    const overflow = await fixture.addUser("half-c");
+    await expect(beginScenarioRun(overflow)).rejects.toMatchObject({ code: "scenario_host_unavailable" });
+    await expect(admissionSnapshot()).resolves.toMatchObject({ runs: 2, cpuReservations: 2, cpuMillis: 1000 });
+  });
+
   it("fills the host capacity exactly and then rejects the next start", async () => {
     const userIds = ["fill-user-1", "fill-user-2", "fill-user-3", "fill-user-4"];
-    const fixture = await seedAdmissionFixture({ userIds });
+    const fixture = await seedAdmissionFixture({ userIds, hostCpuMillis: 4 * FIRST_VM_CPU_MILLIS });
 
     for (const userId of userIds) {
       const result = await beginScenarioRun(fixture.input(userId));
@@ -482,7 +495,7 @@ describe("scenario admission batch", () => {
     await expect(admissionSnapshot()).resolves.toMatchObject({
       runs: 4,
       cpuReservations: 4,
-      cpuMillis: HOST_CPU_MILLIS,
+      cpuMillis: 4 * FIRST_VM_CPU_MILLIS,
       desiredVersion: 4,
     });
 
@@ -496,7 +509,7 @@ describe("scenario admission batch", () => {
       runtimeExecutions: 4,
       runtimeVms: 4,
       cpuReservations: 4,
-      cpuMillis: HOST_CPU_MILLIS,
+      cpuMillis: 4 * FIRST_VM_CPU_MILLIS,
       resourceReservations: 4,
       activeSlots: 4,
       desiredVersion: 4,
@@ -754,7 +767,7 @@ describe("scenario admission batch", () => {
       runtimeExecutions: 1,
       runtimeVms: 1,
       cpuReservations: 1,
-      cpuMillis: BOOT_CPU_MILLIS,
+      cpuMillis: FIRST_VM_CPU_MILLIS,
       resourceReservations: 1,
       activeSlots: 1,
       desiredVersion: 3,
@@ -793,7 +806,7 @@ describe("scenario admission batch", () => {
     // start could otherwise commit a run that no host can hold. The refusal
     // must be the resource error and must leave no row behind.
     const fixture = await seedAdmissionFixture({
-      hostCpuMillis: FIRST_VM_CPU_MILLIS,
+      hostCpuMillis: FIRST_VM_CPU_MILLIS - 1,
     });
     await expect(
       beginScenarioRun(fixture.input(RUNNER_USER_ID, { hostId: HOST_ID })),
@@ -1130,7 +1143,7 @@ describe("scenario admission batch", () => {
         runtimeVms: 1,
         accessKeys: 1,
         cpuReservations: 1,
-        cpuMillis: BOOT_CPU_MILLIS,
+        cpuMillis: FIRST_VM_CPU_MILLIS,
         resourceReservations: 1,
         activeSlots: 1,
         desiredVersion: 1,
@@ -1239,7 +1252,6 @@ describe("scenario admission batch", () => {
             initrdSha256: "b".repeat(64),
             bootCmdline: "root=/dev/vda rw",
             cpuMillis: FIRST_VM_CPU_MILLIS,
-            vcpuCount: 1,
             memoryMib: VM_MEMORY_MIB,
             diskMib: VM_DISK_MIB,
           });
@@ -1428,9 +1440,9 @@ async function seedCandidateProof(input: {
 function candidateProofManifest(
   scenarioId: string,
   imageSha256: string,
-): ScenarioManifestV4 {
+): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: scenarioId,
     name: scenarioId,
     title: scenarioId,
@@ -1457,7 +1469,6 @@ function candidateProofManifest(
           cmdline: "console=hvc0 root=/dev/vda rw",
         },
         cpu_millis: FIRST_VM_CPU_MILLIS,
-        vcpu_count: 1,
         memory_mib: VM_MEMORY_MIB,
         disk_mib: VM_DISK_MIB,
         probes: [],
@@ -1778,7 +1789,6 @@ async function insertScenario(
     initrdSha256: SCENARIO_VM_INITRD_SHA,
     bootCmdline: "root=/dev/vda rw",
     cpuMillis: FIRST_VM_CPU_MILLIS,
-    vcpuCount: 1,
     memoryMib: VM_MEMORY_MIB,
     diskMib: VM_DISK_MIB,
   });
@@ -1876,8 +1886,6 @@ function hostReport(input: {
       arch: "x86_64",
       cloud_hypervisor_sha256:
         "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      boot_cpu_millis: 2_000,
-      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
@@ -1886,7 +1894,6 @@ function hostReport(input: {
       supports_jailer_v3: true,
       supports_raw_chunks_v1: true,
       supports_scenario_guest_tools_v1: true,
-      supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
       supports_hard_cpu_quota: true,

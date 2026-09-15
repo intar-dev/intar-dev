@@ -88,8 +88,8 @@ export async function loadActiveRuntimeResourceSnapshot(
 /**
  * Combines the live host report with the shared reservation ledger. CPU uses a
  * reservation top-up so a reported VM is not double counted, while a
- * scenario's larger boot quota remains fenced until its generic reservation
- * is reduced to steady state. Memory and disk remain conservatively charged
+ * scenario's declared quota remains charged until teardown is proven.
+ * Memory and disk remain conservatively charged
  * at their declared worst cases because host availability cannot distinguish
  * lazy guest memory or sparse/COW disk growth from unrelated host usage.
  */
@@ -178,7 +178,7 @@ export function runtimeResourcesFit(
 }
 
 function reportedEffectiveCpuMillis(vm: VmActualStateV2): number | null {
-  const effective = vm.runtime_constraints?.effective_cpu_millis;
+  const effective = vm.runtime_constraints?.cpu_millis;
   if (Number.isSafeInteger(effective) && (effective ?? 0) > 0) {
     return effective ?? null;
   }

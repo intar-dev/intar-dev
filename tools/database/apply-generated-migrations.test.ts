@@ -31,6 +31,7 @@ describe("generated migration apply", () => {
         "0013_amused_kinsey_walden",
         "0014_public_sentry",
         "0015_parched_captain_marvel",
+        "0016_salty_shiver_man",
       ]);
     } finally {
       fixture.database.close(false);
@@ -68,16 +69,24 @@ describe("generated migration apply", () => {
         )
         .run();
 
+      client.database.query("INSERT INTO host_cpu_reservations (run_id, host_id, cpu_millis, steady_cpu_millis, boot_cpu_millis, quota_phase, state) VALUES ('run-1', 'h1', 500, 500, 2000, 'steady', 'committed')").run();
+
       const plan = await planGeneratedMigrations(client);
       expect(plan.appliedMigrationCount).toBe(APPENDED_IDX);
       expect(plan.pending.map(({ tag }) => tag)).toEqual([
-        "0015_parched_captain_marvel",
+        "0016_salty_shiver_man",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);
-      expect(evidence.appliedTags).toEqual(["0015_parched_captain_marvel"]);
+      expect(evidence.appliedTags).toEqual(["0016_salty_shiver_man"]);
       expect(evidence.appliedMigrationCount).toBe(COMMITTED_COUNT);
       expect(evidence.foreignKeyViolations).toBe(0);
+      expect(client.database.query("SELECT cpu_millis FROM host_cpu_reservations WHERE run_id = 'run-1'").get()).toEqual({ cpu_millis: 500 });
+      const columns = client.database.query("SELECT name FROM pragma_table_info('host_cpu_reservations')").all() as { name: string }[];
+      expect(columns.map((column) => column.name)).not.toContain("boot_cpu_millis");
+      expect(columns.map((column) => column.name)).not.toContain("steady_cpu_millis");
+      expect(columns.map((column) => column.name)).not.toContain("quota_phase");
+      expect(client.database.query("SELECT count(*) AS count FROM pragma_table_info('vm_scenario_vms') WHERE name = 'vcpu_count'").get()).toEqual({ count: 0 });
       // One migration, one batch, and that batch carries the marker last.
       expect(client.batches).toHaveLength(1);
       expect(client.batches[0]?.at(-1)?.sql).toBe(

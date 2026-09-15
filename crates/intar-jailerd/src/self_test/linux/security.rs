@@ -104,7 +104,16 @@ pub(super) async fn start_smoke_vm(
     let deadline = tokio::time::Instant::now() + SATURATION_VM_TRANSITION_TIMEOUT;
     loop {
         match client.vm_info().await {
-            Ok(info) if matches!(info.state, VmState::Running) => return Ok(()),
+            Ok(info) if matches!(info.state, VmState::Running) => {
+                ensure!(
+                    info.config
+                        .cpus
+                        .as_ref()
+                        .is_some_and(|cpus| cpus.boot_vcpus == 1 && cpus.max_vcpus == 1),
+                    "Cloud Hypervisor did not use its one-vCPU default"
+                );
+                return Ok(());
+            }
             Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -259,7 +268,7 @@ pub(super) fn assert_saturation_vm_isolation(
 ) -> Result<()> {
     ensure!(
         inspections.len() == SELF_TEST_SATURATION_VM_COUNT,
-        "saturation package proof requires exactly eight running VMs"
+        "saturation package proof requires exactly two running VMs"
     );
     let generations = inspections
         .iter()
@@ -361,11 +370,11 @@ pub(super) fn assert_saturation_vm_isolation(
     }
     ensure!(
         prove_cloud_hypervisor_accounting(tasks_before, &units, &cgroups)?,
-        "could not prove all eight jailed Cloud Hypervisor KVM task trees are independently accounted"
+        "could not prove all two jailed Cloud Hypervisor KVM task trees are independently accounted"
     );
 
     // Exclude VMM/guest setup from the measured window. The package guest
-    // has a respawned BusyBox loop, so all eight aggregate process trees
+    // has a respawned BusyBox loop, so all two aggregate process trees
     // remain continuously busy during one shared 30-second window.
     thread::sleep(Duration::from_secs(2));
     let before = cgroups
@@ -403,7 +412,7 @@ pub(super) fn assert_saturation_vm_isolation(
     let elapsed_usec = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
     let aggregate_maximum = elapsed_usec
         .checked_mul(
-            14_u64
+            55_u64
                 .checked_mul(u64::try_from(SELF_TEST_SATURATION_VM_COUNT)?)
                 .context("aggregate saturation percentage overflow")?,
         )
@@ -411,11 +420,11 @@ pub(super) fn assert_saturation_vm_isolation(
         .context("aggregate saturation CPU ceiling overflow")?;
     ensure!(
         aggregate_usage_usec <= aggregate_maximum,
-        "eight busy VMs exceeded the aggregate quota tolerance: usage={aggregate_usage_usec}us elapsed={elapsed_usec}us maximum={aggregate_maximum}us"
+        "two busy VMs exceeded the aggregate quota tolerance: usage={aggregate_usage_usec}us elapsed={elapsed_usec}us maximum={aggregate_maximum}us"
     );
     ensure!(
         prove_cloud_hypervisor_accounting(tasks_before, &units, &cgroups)?,
-        "late Cloud Hypervisor/KVM helper escaped one of the eight VM cgroups during the busy sample"
+        "late Cloud Hypervisor/KVM helper escaped one of the two VM cgroups during the busy sample"
     );
     Ok(())
 }
@@ -658,7 +667,7 @@ pub(super) fn validate_busy_guest_cpu_sample(
         .context("cpu.stat usage counter moved backwards")?;
     let elapsed_usec = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
     let maximum_usage = elapsed_usec
-        .checked_mul(14)
+        .checked_mul(55)
         .and_then(|value| value.checked_div(100))
         .context("busy-guest usage ceiling overflow")?;
     ensure!(
@@ -666,8 +675,12 @@ pub(super) fn validate_busy_guest_cpu_sample(
         "busy guest did not increase cpu.stat nr_throttled"
     );
     ensure!(
+        usage_delta >= elapsed_usec * 40 / 100,
+        "busy guest received less than 40% CPU time on the shared test CPU"
+    );
+    ensure!(
         usage_delta <= maximum_usage,
-        "busy guest exceeded the 14% ceiling: usage_delta={usage_delta}us elapsed={}us maximum={maximum_usage}us",
+        "busy guest exceeded the 55% ceiling: usage_delta={usage_delta}us elapsed={}us maximum={maximum_usage}us",
         elapsed_usec
     );
     Ok(())
@@ -680,7 +693,7 @@ pub(super) fn prove_cloud_hypervisor_accounting(
 ) -> Result<bool> {
     ensure!(
         units.len() == SELF_TEST_SATURATION_VM_COUNT && cgroups.len() == units.len(),
-        "Cloud Hypervisor accounting proof requires eight units and cgroups"
+        "Cloud Hypervisor accounting proof requires two units and cgroups"
     );
     let mut thread_sets = Vec::with_capacity(cgroups.len());
     let mut all_threads = BTreeSet::new();

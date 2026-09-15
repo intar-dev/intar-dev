@@ -17,20 +17,17 @@ describe("scenario model", () => {
       aggregateScenarioRequiredResources([
         {
           cpuMillis: 1_000,
-          vcpuCount: 1,
           memoryMib: 1_024,
           diskMib: 8_192,
         },
         {
           cpuMillis: 2_500,
-          vcpuCount: 2,
           memoryMib: 2_048,
           diskMib: 16_384,
         },
       ]),
     ).toEqual({
       cpuMillis: 3_500,
-      vcpuCount: 3,
       memoryMib: 3_072,
       diskMib: 24_576,
     });
@@ -169,7 +166,6 @@ describe("scenario model", () => {
         hostname: "web-server",
         resources: {
           cpuMillis: 2_000,
-          vcpuCount: 2,
           memoryMib: 2048,
           diskMib: 8192,
         },
@@ -400,7 +396,6 @@ function vm(overrides: Partial<ScenarioVmRecord> = {}): ScenarioVmRecord {
       "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     bootCmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4",
     cpuMillis: 2_000,
-    vcpuCount: 2,
     memoryMib: 2048,
     diskMib: 8192,
     ...overrides,

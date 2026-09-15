@@ -161,7 +161,7 @@ tar -xzf "${alpine_download}" \
   --no-same-permissions
 
 # Emit a deterministic boot marker, then keep one vCPU continuously busy so
-# the privileged proof can observe eight independently throttled 125m VMs for
+# the privileged proof can observe two independently throttled 500m VMs for
 # one shared 30-second saturation window.
 printf '%s\n' \
   '::sysinit:/bin/mount -t proc proc /proc' \
@@ -254,4 +254,4 @@ systemd-run \
   --recording-disk-sha256 "${recording_sha256}"
 self_test_unit=
 
-echo "intar-jailerd self-test: eight-VM 125m saturation, ninth-admission rejection, and jailed Cloud Hypervisor lifecycle passed"
+echo "intar-jailerd self-test: two-VM 500m sharing, third-admission rejection, and jailed Cloud Hypervisor lifecycle passed"

@@ -528,7 +528,7 @@ describe("image registry agent routes", () => {
         [
           {
             docJson: {
-              schema_version: 4,
+              schema_version: 5,
               host_id: "agent-1",
               version: 1,
               generated_at_unix_ms: 1,
@@ -542,7 +542,7 @@ describe("image registry agent routes", () => {
         [
           {
             manifest: {
-              schema_version: 4,
+              schema_version: 5,
               scenario_id: "broken-nginx",
               name: "broken-nginx",
               title: "Broken nginx",
@@ -569,7 +569,6 @@ describe("image registry agent routes", () => {
                     cmdline: "root=/dev/vda rw console=ttyS0",
                   },
                   cpu_millis: 1_000,
-                  vcpu_count: 1,
                   memory_mib: 512,
                   disk_mib: 4_096,
                   probes: [],
@@ -786,7 +785,7 @@ describe("image registry agent routes", () => {
         [
           {
             docJson: {
-              schema_version: 4,
+              schema_version: 5,
               host_id: "agent-1",
               version: 1,
               generated_at_unix_ms: 1,
@@ -800,7 +799,7 @@ describe("image registry agent routes", () => {
         [
           {
             manifest: {
-              schema_version: 4,
+              schema_version: 5,
               scenario_id: "broken-nginx",
               name: "broken-nginx",
               title: "Broken nginx",
@@ -827,7 +826,6 @@ describe("image registry agent routes", () => {
                     cmdline: "root=/dev/vda rw console=ttyS0",
                   },
                   cpu_millis: 1_000,
-                  vcpu_count: 1,
                   memory_mib: 512,
                   disk_mib: 4_096,
                   probes: [],

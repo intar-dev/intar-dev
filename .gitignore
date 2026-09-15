@@ -3,6 +3,7 @@
 .stardrive/
 target/
 node_modules/
+__pycache__/
 .gocache/
 .tmp/
 .work/

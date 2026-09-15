@@ -3,7 +3,7 @@ import type {
   VmActualStateV2,
   VmPhase as BridgeVmPhase,
   VmReportV2,
-  VmRuntimeConstraintsV1,
+  VmRuntimeConstraintsV2,
   VmTerminalStateV1,
 } from "@/generated/bridge";
 import {
@@ -196,7 +196,7 @@ function applyReportedVmState(input: {
     ((currentGeneration && currentGeneration !== reportedGeneration) ||
       (!currentGeneration &&
         input.vm.terminalPhase === "ready" &&
-        input.report.runtime_constraints?.phase === "boot_burst")),
+        !input.report.runtime_constraints?.quota_verified_at_unix_ms)),
   );
   const generationBase = generationChanged
     ? resetVmForRuntimeGeneration(input.vm)
@@ -323,7 +323,7 @@ function hasTerminalEndpoint(
 
 function mergeRuntimeConstraints(
   current: RunVmStateDocument["runtimeConstraints"],
-  reported: VmRuntimeConstraintsV1 | null | undefined,
+  reported: VmRuntimeConstraintsV2 | null | undefined,
 ): RuntimeConstraintsEvidence | null {
   if (!reported) {
     return current ?? null;
@@ -335,18 +335,16 @@ function mergeRuntimeConstraints(
     !current?.generation || current.generation === generation;
   if (
     sameGeneration &&
-    current?.phase === "steady" &&
-    reported.phase === "boot_burst"
+    current?.quotaVerifiedAt != null &&
+    current.cpuMillis === reported.cpu_millis &&
+    reported.quota_verified_at_unix_ms == null
   ) {
     return current;
   }
   return {
     generation,
-    phase: reported.phase,
-    steadyCpuMillis: reported.steady_cpu_millis,
-    effectiveCpuMillis: reported.effective_cpu_millis,
+    cpuMillis: reported.cpu_millis,
     quotaVerifiedAt: reported.quota_verified_at_unix_ms ?? null,
-    leaseExpiresAt: reported.lease_expires_at_unix_ms ?? null,
   };
 }
 
@@ -420,9 +418,7 @@ function projectTerminalReadiness(
     expectedCpuMillis !== null &&
     expectedCpuMillis > 0 &&
     Boolean(runtimeConstraints?.generation?.trim()) &&
-    runtimeConstraints?.phase === "steady" &&
-    runtimeConstraints.steadyCpuMillis === expectedCpuMillis &&
-    runtimeConstraints.effectiveCpuMillis === expectedCpuMillis &&
+    runtimeConstraints?.cpuMillis === expectedCpuMillis &&
     typeof runtimeConstraints.quotaVerifiedAt === "number" &&
     Number.isInteger(runtimeConstraints.quotaVerifiedAt) &&
     runtimeConstraints.quotaVerifiedAt > 0 &&
@@ -469,7 +465,7 @@ function projectTerminalReadiness(
       reported.state === "ready"
         ? quotaReady
           ? "Waiting for a complete verified SSH target."
-          : "Waiting for verified steady CPU quota."
+          : "Waiting for CPU limit verification."
         : (reported.reason?.trim() ?? null),
     observedAt: reported.observed_at_unix_ms,
     target: clearedTerminalTarget(current),

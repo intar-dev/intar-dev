@@ -12,7 +12,7 @@ import {
   user,
   vmScenarioVms,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import { createImageRegistryCleanupCore } from "@/lib/image-registry-cleanup";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -38,9 +38,9 @@ const ARCH = "x86_64" as const;
 const HOST_ID = "host-1";
 const OWNER_USER_ID = "publisher-owner";
 
-function manifestFor(image: SeededChunkedImage): ScenarioManifestV4 {
+function manifestFor(image: SeededChunkedImage): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: SCENARIO_ID,
     name: SCENARIO_ID,
     title: "Broken Nginx",
@@ -67,13 +67,12 @@ function manifestFor(image: SeededChunkedImage): ScenarioManifestV4 {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
       },
     ],
-  } as ScenarioManifestV4;
+  } as ScenarioManifestV5;
 }
 
 async function publish(image: SeededChunkedImage): Promise<Response> {

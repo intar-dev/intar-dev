@@ -44,6 +44,7 @@ build: build-rust build-js
 verify:
     tools/image-build/test-libnbd-rust-preparation.sh
     sh crates/intar-jailerd/tests/install-process-audit.sh crates/intar-jailerd/deploy/install.sh
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s crates/intar-jailerd/tests -p 'test_*.py'
     tools/image-build/with-libnbd-env.sh --rust-only -- cargo fmt -- --check
     tools/image-build/with-libnbd-env.sh -- cargo clippy --workspace --all-targets -- -D warnings
     tools/image-build/with-libnbd-env.sh -- cargo nextest run --workspace

@@ -209,7 +209,6 @@ async function insertScenario(
       initrdSha256: "c".repeat(64),
       bootCmdline: "console=ttyS0 root=/dev/vda rw",
       cpuMillis: 1_000,
-      vcpuCount: 1,
       memoryMib: 512,
       diskMib: 1_024,
     }),

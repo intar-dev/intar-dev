@@ -6,7 +6,7 @@ import {
 } from "@/db/schema";
 import type {
   ImageArchitecture,
-  ScenarioManifestV4,
+  ScenarioManifestV5,
 } from "@/generated/catalog";
 import {
   isCandidateSourceLocked,
@@ -440,7 +440,7 @@ async function finishPublishCommit(
  * the single rollback image the transition recorded.
  */
 function retentionScopesForReplacement(
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
   replacement: LiveCatalogReplacement,
 ): CachedImageRetentionScope[] {
   const incomingByArch = new Map<string, string[]>();

@@ -201,7 +201,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
 
     sendBridge(ws, {
       type: "client_hello",
-      protocol_version: 7,
+      protocol_version: 8,
       host_id: hostId,
       agent_version: "test-agent",
       role: "agent",
@@ -209,8 +209,6 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
         arch: "x86_64",
         cloud_hypervisor_sha256:
           "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-        boot_cpu_millis: 2_000,
-        boot_cpu_lease_ms: 45_000,
         supports_kvm: true,
         supports_vsock: true,
         supports_reflink: true,
@@ -219,7 +217,6 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       supports_jailer_v3: true,
       supports_raw_chunks_v1: true,
       supports_scenario_guest_tools_v1: true,
-        supports_boot_cpu_lease: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
         supports_hard_cpu_quota: true,

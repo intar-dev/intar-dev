@@ -112,7 +112,7 @@ fn cpu_stat_parser_is_exact() {
 }
 
 #[test]
-fn busy_guest_sample_accepts_each_independent_125_millicore_ceiling() {
+fn busy_guest_sample_accepts_each_independent_500_millicore_ceiling() {
     let elapsed = Duration::from_secs(30);
     for usage_offset in [0, 500_000] {
         validate_busy_guest_cpu_sample(
@@ -121,7 +121,7 @@ fn busy_guest_sample_accepts_each_independent_125_millicore_ceiling() {
                 nr_throttled: 10,
             },
             BusyGuestCpuSample {
-                usage_usec: usage_offset + 3_750_000,
+                usage_usec: usage_offset + 15_000_000,
                 nr_throttled: 11,
             },
             elapsed,
@@ -141,7 +141,7 @@ fn busy_guest_sample_rejects_overuse_missing_throttle_and_counter_rollback() {
         validate_busy_guest_cpu_sample(
             before,
             BusyGuestCpuSample {
-                usage_usec: before.usage_usec + 4_200_001,
+                usage_usec: before.usage_usec + 16_500_001,
                 nr_throttled: 11,
             },
             elapsed,
@@ -152,7 +152,7 @@ fn busy_guest_sample_rejects_overuse_missing_throttle_and_counter_rollback() {
         validate_busy_guest_cpu_sample(
             before,
             BusyGuestCpuSample {
-                usage_usec: before.usage_usec + 3_750_000,
+                usage_usec: before.usage_usec + 15_000_000,
                 nr_throttled: before.nr_throttled,
             },
             elapsed,
@@ -571,13 +571,13 @@ fn saturation_smoke_requests_have_unique_typed_topology() {
     );
     assert!(
         smoke_launch_request(&config, &artifacts, &prepared_image, &run_id, suffix, 9,).is_err(),
-        "only the eight saturation VMs and ninth rejection probe are valid"
+        "only the two saturation VMs and third rejection probe are valid"
     );
 }
 
 #[test]
 fn attestation_requires_every_proof() {
-    let mut attestation = SelfTestAttestationV2 {
+    let mut attestation = SelfTestAttestationV3 {
         version: ATTESTATION_VERSION,
         config_runtime_fingerprint_sha256: "a".repeat(64),
         cloud_hypervisor_sha256: "b".repeat(64),
@@ -589,7 +589,7 @@ fn attestation_requires_every_proof() {
         landlock_abi: 3,
         quota_verified: true,
         burst_verified: true,
-        boot_quota_transition_verified: true,
+        startup_quota_verified: true,
         network_verified: true,
         landlock_negative_access: true,
         kvm_accounting_proven: true,
@@ -597,9 +597,9 @@ fn attestation_requires_every_proof() {
         passed_at_unix_s: 1,
     };
     validate_attestation(&attestation).expect("complete attestation");
-    attestation.boot_quota_transition_verified = false;
+    attestation.startup_quota_verified = false;
     assert!(validate_attestation(&attestation).is_err());
-    attestation.boot_quota_transition_verified = true;
+    attestation.startup_quota_verified = true;
     attestation.kvm_accounting_proven = false;
     assert!(validate_attestation(&attestation).is_err());
 }

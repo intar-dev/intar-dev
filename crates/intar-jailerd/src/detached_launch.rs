@@ -57,7 +57,7 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
                 .context("prepare VM TAP and forwarding policy")?;
 
             let unit_name = vm_unit_name(&self.reservation.generation);
-            let mut unit_spec = UnitLaunchSpec {
+            let unit_spec = UnitLaunchSpec {
                 generation: self.reservation.generation.clone(),
                 unit_name: unit_name.clone(),
                 description: format!(
@@ -67,9 +67,7 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
                 jailer_binary: self.config.jailer_binary.clone(),
                 jail_spec_path: prepared.spec_path.clone(),
                 api_socket_path: prepared.paths.host_api_socket.clone(),
-                cpu_quota: self.reservation.effective_quota,
-                steady_cpu_quota: self.reservation.quota,
-                boot_cpu_lease_ms: Some(self.config.boot_cpu_lease_ms),
+                cpu_quota: self.reservation.quota,
                 vmm_executable_identity: prepared.vmm_executable_identity,
                 uid: self.reservation.uid,
                 gid: self.reservation.gid,
@@ -85,13 +83,8 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
                 uid: self.reservation.uid,
                 gid: self.reservation.gid,
                 quota: self.reservation.quota,
-                effective_quota: self.reservation.effective_quota,
-                cpu_phase: VmCpuPhase::BootBurst,
-                boot_deadline_unix_ms: Some(self.reservation.boot_deadline_unix_ms),
-                boot_deadline_monotonic: Some(self.reservation.boot_deadline_monotonic),
                 quota_attestation: None,
                 ssh_forward_active: false,
-                vcpu_count: self.reservation.request.vcpu_count,
                 paths: prepared.paths.clone(),
                 cgroup_path: None,
                 netns_name: self.reservation.run_network.result.namespace_name.clone(),
@@ -103,14 +96,6 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
             self.preparer
                 .persist(&self.config, &record)
                 .context("persist pre-launch VM intent")?;
-
-            // Admission owns the lease start. Every operation before the unit
-            // exists consumes part of the same 45-second budget rather than
-            // granting a fresh lease when StartTransientUnit finally runs.
-            unit_spec.boot_cpu_lease_ms = Some(remaining_boot_cpu_lease_ms(
-                self.reservation.boot_deadline_monotonic,
-                Instant::now(),
-            )?);
 
             progress.unit_start_attempted = true;
             let started = self
@@ -133,10 +118,8 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
             record.cgroup_path.clone_from(&started.cgroup_path);
             record.host_boot_id.clone_from(&started.host_boot_id);
             record.pid_start_time_ticks = started.pid_start_time_ticks;
-            record.quota_attestation = Some(
-                quota_attestation(self.reservation.effective_quota)
-                    .context("attest boot CPU quota")?,
-            );
+            record.quota_attestation =
+                Some(quota_attestation(self.reservation.quota).context("attest boot CPU quota")?);
             self.preparer
                 .persist(&self.config, &record)
                 .context("persist VM sandbox identity")?;
@@ -335,7 +318,6 @@ pub(super) fn detached_existing_identity_matches(expected: &VmRecord, current: &
         && expected.uid == current.uid
         && expected.gid == current.gid
         && expected.quota == current.quota
-        && expected.vcpu_count == current.vcpu_count
         && expected.paths == current.paths
         && expected.cgroup_path == current.cgroup_path
         && expected.netns_name == current.netns_name

@@ -7,7 +7,7 @@ import {
   imageBuilds,
 } from "@/db/schema";
 import type { ImageBuildBundleMeta } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { AppError, appError } from "@/lib/app-error";
 import {
   loadOrCreateHostDesiredState,
@@ -41,7 +41,7 @@ export async function stageCandidateScenarioManifest(
     revision: string;
     organizationId: string | null;
     buildId: string;
-    manifest: ScenarioManifestV4;
+    manifest: ScenarioManifestV5;
     nowUnixMs: number;
   },
 ): Promise<void> {
@@ -131,7 +131,7 @@ export async function warmCandidateScenarioManifest(
   db: DrizzleD1Database,
   input: {
     organizationId: string | null;
-    manifest: ScenarioManifestV4;
+    manifest: ScenarioManifestV5;
     nowUnixMs: number;
     wakeHost: (hostId: string) => Promise<void>;
   },
@@ -166,7 +166,7 @@ async function warmReusableCandidateManifests(
   db: DrizzleD1Database,
   input: {
     organizationId: string | null;
-    manifests: ScenarioManifestV4[];
+    manifests: ScenarioManifestV5[];
     nowUnixMs: number;
     wakeHost: (hostId: string) => Promise<void>;
   },
@@ -278,7 +278,7 @@ export async function stageReusableCandidateManifests(
     builds.map((build) => build.id),
   );
   const staged: string[] = [];
-  const manifests: ScenarioManifestV4[] = [];
+  const manifests: ScenarioManifestV5[] = [];
   for (const expected of input.meta.scenarios) {
     const build = builds.find(
       (candidate) =>

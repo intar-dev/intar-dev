@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "scenario_id": "broken-nginx",
   "name": "broken-nginx",
   "title": "Broken Nginx",
@@ -7,7 +7,11 @@
   "description": "Repair the nginx service.",
   "difficulty": "easy",
   "estimated_minutes": 15,
-  "tags": ["nginx", "systemd", "linux"],
+  "tags": [
+    "nginx",
+    "systemd",
+    "linux"
+  ],
   "briefing_markdown": "The web server should serve the default site, but nginx was disabled during cleanup.",
   "solution_markdown": "Enable nginx and restore the default site symlink.",
   "hints": [
@@ -36,7 +40,6 @@
         "cmdline": "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
       },
       "cpu_millis": 125,
-      "vcpu_count": 1,
       "memory_mib": 2048,
       "disk_mib": 8192,
       "probes": [

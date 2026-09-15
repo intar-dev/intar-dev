@@ -38,14 +38,13 @@ export interface ScenarioVmRecord {
   initrdSha256: string;
   bootCmdline: string;
   cpuMillis: number;
-  vcpuCount: number;
   memoryMib: number;
   diskMib: number;
 }
 
 export type ScenarioRequiredResources = Pick<
   ScenarioVmRecord,
-  "cpuMillis" | "vcpuCount" | "memoryMib" | "diskMib"
+  "cpuMillis" | "memoryMib" | "diskMib"
 >;
 
 /** Total configured VM resources for one scenario. */
@@ -55,11 +54,10 @@ export function aggregateScenarioRequiredResources(
   return vms.reduce<ScenarioRequiredResources>(
     (total, vm) => ({
       cpuMillis: total.cpuMillis + vm.cpuMillis,
-      vcpuCount: total.vcpuCount + vm.vcpuCount,
       memoryMib: total.memoryMib + vm.memoryMib,
       diskMib: total.diskMib + vm.diskMib,
     }),
-    { cpuMillis: 0, vcpuCount: 0, memoryMib: 0, diskMib: 0 },
+    { cpuMillis: 0, memoryMib: 0, diskMib: 0 },
   );
 }
 
@@ -171,7 +169,6 @@ export interface ScenarioLaunchSpec {
   hostname: string;
   resources: {
     cpuMillis: number;
-    vcpuCount: number;
     memoryMib: number;
     diskMib: number;
   };
@@ -282,7 +279,6 @@ export function buildScenarioLaunchSpecs(input: {
       hostname: scenarioVmName,
       resources: {
         cpuMillis: vm.cpuMillis,
-        vcpuCount: vm.vcpuCount,
         memoryMib: vm.memoryMib,
         diskMib: vm.diskMib,
       },

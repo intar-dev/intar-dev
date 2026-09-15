@@ -3,29 +3,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
 
-pub const BRIDGE_PROTOCOL_VERSION: u16 = 7;
-pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 4;
-pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 5;
+pub const BRIDGE_PROTOCOL_VERSION: u16 = 8;
+pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 5;
+pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 6;
 pub const BUILD_REPORT_SCHEMA_VERSION: u16 = 1;
-pub const VM_REPORT_SCHEMA_VERSION: u16 = 4;
+pub const VM_REPORT_SCHEMA_VERSION: u16 = 5;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
-pub enum BridgeMessageV7 {
-    ClientHello(ClientHelloV7),
-    ServerHello(ServerHelloV7),
-    DesiredState(DesiredStateV7),
-    StateReport(StateReportV7),
-    VmReport(VmReportV7),
-    BuildReport(BuildReportV7),
-    SyncRequest(SyncRequestV7),
+pub enum BridgeMessageV8 {
+    ClientHello(ClientHelloV8),
+    ServerHello(ServerHelloV8),
+    DesiredState(DesiredStateV8),
+    StateReport(StateReportV8),
+    VmReport(VmReportV8),
+    BuildReport(BuildReportV8),
+    SyncRequest(SyncRequestV8),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ClientHelloV7 {
-    #[schemars(range(min = 7, max = 7))]
+pub struct ClientHelloV8 {
+    #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub agent_version: String,
@@ -37,8 +37,8 @@ pub struct ClientHelloV7 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ServerHelloV7 {
-    #[schemars(range(min = 7, max = 7))]
+pub struct ServerHelloV8 {
+    #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub desired_version: u64,
@@ -46,8 +46,8 @@ pub struct ServerHelloV7 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct DesiredStateV7 {
-    #[schemars(range(min = 7, max = 7))]
+pub struct DesiredStateV8 {
+    #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub desired_state: HostDesiredStateV2,
@@ -55,8 +55,8 @@ pub struct DesiredStateV7 {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct StateReportV7 {
-    #[schemars(range(min = 7, max = 7))]
+pub struct StateReportV8 {
+    #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub report: HostStateReportV2,
@@ -64,8 +64,8 @@ pub struct StateReportV7 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct VmReportV7 {
-    #[schemars(range(min = 7, max = 7))]
+pub struct VmReportV8 {
+    #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub report: VmReportV2,
@@ -73,8 +73,8 @@ pub struct VmReportV7 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct BuildReportV7 {
-    #[schemars(range(min = 7, max = 7))]
+pub struct BuildReportV8 {
+    #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub report: BuildReportV1,
@@ -82,8 +82,8 @@ pub struct BuildReportV7 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct SyncRequestV7 {
-    #[schemars(range(min = 7, max = 7))]
+pub struct SyncRequestV8 {
+    #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub reason: SyncRequestReason,
@@ -108,7 +108,7 @@ pub enum SyncRequestReason {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HostDesiredStateV2 {
-    #[schemars(range(min = 4, max = 4))]
+    #[schemars(range(min = 5, max = 5))]
     pub schema_version: u16,
     pub host_id: String,
     pub version: u64,
@@ -147,7 +147,7 @@ pub struct DesiredVmV2 {
     pub image_key: ImageKey,
     pub image_id: String,
     pub guest_tools: DesiredGuestToolsV1,
-    pub resources: VmResourcesV2,
+    pub resources: VmResourcesV3,
     pub ssh_authorized_keys_openssh: Vec<String>,
     pub lease_expires_at_unix_ms: i64,
 }
@@ -170,11 +170,9 @@ pub enum DesiredVmPhase {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct VmResourcesV2 {
+pub struct VmResourcesV3 {
     #[schemars(range(min = 1))]
     pub cpu_millis: u32,
-    #[schemars(range(min = 1))]
-    pub vcpu_count: u16,
     pub memory_mib: Mib,
     pub disk_mib: Mib,
 }
@@ -182,7 +180,7 @@ pub struct VmResourcesV2 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HostStateReportV2 {
-    #[schemars(range(min = 5, max = 5))]
+    #[schemars(range(min = 6, max = 6))]
     pub schema_version: u16,
     pub host_id: String,
     pub observed_at_unix_ms: i64,
@@ -225,17 +223,14 @@ pub struct HostCapacityV2 {
 #[serde(rename_all = "snake_case")]
 pub struct HostCapabilitiesV2 {
     pub arch: ImageArchitecture,
-    /// Root-owned runtime identity and lease policy. `None` means the host has
+    /// Root-owned runtime identity. `None` means the host has
     /// no live jailerd attestation and is never performance-ready.
     pub cloud_hypervisor_sha256: Option<String>,
-    pub boot_cpu_millis: Option<u32>,
-    pub boot_cpu_lease_ms: Option<u64>,
     pub supports_kvm: bool,
     pub supports_vsock: bool,
     pub supports_reflink: bool,
     pub supports_nftables: bool,
     pub supports_jailer_v2: bool,
-    pub supports_boot_cpu_lease: bool,
     pub supports_template_backed_launch: bool,
     pub fast_template_store: bool,
     pub supports_hard_cpu_quota: bool,
@@ -260,11 +255,9 @@ pub struct HostCapabilitiesV2 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct VmResourceStateV2 {
+pub struct VmResourceStateV3 {
     #[schemars(range(min = 1))]
     pub cpu_millis: u32,
-    #[schemars(range(min = 1))]
-    pub vcpu_count: u16,
     #[schemars(range(min = 1))]
     pub cpu_quota_us: u64,
     #[schemars(range(min = 1))]
@@ -347,9 +340,9 @@ pub struct VmActualStateV2 {
     /// Live CPU-boundary evidence for the VM process tree. This is distinct
     /// from the guest vCPU topology and from periodic usage accounting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_constraints: Option<VmRuntimeConstraintsV1>,
+    pub runtime_constraints: Option<VmRuntimeConstraintsV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resource_state: Option<VmResourceStateV2>,
+    pub resource_state: Option<VmResourceStateV3>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<VmSandboxStateV1>,
     pub ssh_host_keys_openssh: Vec<String>,
@@ -433,29 +426,17 @@ pub struct VmTerminalStateV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VmRuntimeConstraintPhaseV1 {
-    BootBurst,
-    Steady,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct VmRuntimeConstraintsV1 {
+pub struct VmRuntimeConstraintsV2 {
     /// Jailer-owned generation to which every quota and ingress attestation
     /// in this object applies. The breaking v2 contract never accepts
     /// generation-less quota evidence.
     pub generation: String,
-    pub phase: VmRuntimeConstraintPhaseV1,
     #[schemars(range(min = 1))]
-    pub steady_cpu_millis: u32,
-    #[schemars(range(min = 1))]
-    pub effective_cpu_millis: u32,
+    pub cpu_millis: u32,
     /// Timestamp of the authoritative live cgroup readback. Required by the
-    /// control plane before a `steady` runtime can expose a terminal.
+    /// control plane before a verified runtime can expose a terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_verified_at_unix_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lease_expires_at_unix_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -501,7 +482,7 @@ pub enum VmArchivePhase {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct VmReportV2 {
-    #[schemars(range(min = 4, max = 4))]
+    #[schemars(range(min = 5, max = 5))]
     pub schema_version: u16,
     pub host_id: String,
     pub run_id: String,
@@ -516,9 +497,9 @@ pub struct VmReportV2 {
     pub network: Option<VmNetworkStateV1>,
     pub terminal: VmTerminalStateV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_constraints: Option<VmRuntimeConstraintsV1>,
+    pub runtime_constraints: Option<VmRuntimeConstraintsV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resource_state: Option<VmResourceStateV2>,
+    pub resource_state: Option<VmResourceStateV3>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<VmSandboxStateV1>,
     pub ssh_host_keys_openssh: Vec<String>,
@@ -569,7 +550,7 @@ mod tests {
 
     #[test]
     fn sync_request_message_uses_flat_snake_case_tag() {
-        let message = BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        let message = BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "host-1".to_owned(),
             reason: SyncRequestReason::Reconnect,
@@ -581,7 +562,7 @@ mod tests {
             actual,
             serde_json::json!({
                 "type": "sync_request",
-                "protocol_version": 7,
+                "protocol_version": 8,
                 "host_id": "host-1",
                 "reason": "reconnect",
             })

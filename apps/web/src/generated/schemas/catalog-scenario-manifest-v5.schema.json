@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ScenarioManifestV4",
+  "title": "ScenarioManifestV5",
   "type": "object",
   "properties": {
     "briefing_markdown": {
@@ -35,8 +35,8 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 4,
-      "minimum": 4
+      "maximum": 5,
+      "minimum": 5
     },
     "solution_markdown": {
       "type": "string"
@@ -53,7 +53,7 @@
     "vms": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/ScenarioVmManifestV4"
+        "$ref": "#/$defs/ScenarioVmManifestV5"
       }
     }
   },
@@ -192,7 +192,7 @@
         "hints"
       ]
     },
-    "ScenarioVmBootManifestV4": {
+    "ScenarioVmBootManifestV5": {
       "type": "object",
       "properties": {
         "cmdline": {
@@ -211,11 +211,11 @@
         "cmdline"
       ]
     },
-    "ScenarioVmManifestV4": {
+    "ScenarioVmManifestV5": {
       "type": "object",
       "properties": {
         "boot": {
-          "$ref": "#/$defs/ScenarioVmBootManifestV4"
+          "$ref": "#/$defs/ScenarioVmBootManifestV5"
         },
         "chunk_manifest_sha256": {
           "type": "string"
@@ -263,12 +263,6 @@
           "items": {
             "$ref": "#/$defs/ScenarioProbeManifestV3"
           }
-        },
-        "vcpu_count": {
-          "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1
         }
       },
       "required": [
@@ -281,7 +275,6 @@
         "guest_bootstrap_abi",
         "boot",
         "cpu_millis",
-        "vcpu_count",
         "memory_mib",
         "disk_mib",
         "probes"

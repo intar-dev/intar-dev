@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result, bail};
 use intar_contracts::catalog::{
     CourseCatalogLectureV2, GUEST_BOOTSTRAP_ABI_V2, ImageArchitecture, ImageFormat, ImageKey, Mib,
-    ProbePhase as CatalogProbePhase, ScenarioHintManifestV3, ScenarioManifestV4,
-    ScenarioProbeManifestV3, ScenarioVmBootManifestV4, ScenarioVmManifestV4,
+    ProbePhase as CatalogProbePhase, ScenarioHintManifestV3, ScenarioManifestV5,
+    ScenarioProbeManifestV3, ScenarioVmBootManifestV5, ScenarioVmManifestV5,
 };
 use intar_image_scenario::{ScenarioHint, VmDefinition};
 
@@ -19,7 +19,7 @@ pub fn build_direct_manifest_json(
     chunk_manifest_sha256: &str,
     kernel_sha256: &str,
     initrd_sha256: &str,
-) -> Result<ScenarioManifestV4> {
+) -> Result<ScenarioManifestV5> {
     build_manifest(ManifestInput {
         scenario: &rendered.scenario,
         scenario_name: &rendered.scenario_name,
@@ -41,8 +41,8 @@ pub fn build_direct_manifest_json(
 /// Returns an error when the input set is empty or when any non-VM manifest field
 /// differs between inputs.
 pub fn combine_scenario_manifests<'a>(
-    manifests: impl IntoIterator<Item = &'a ScenarioManifestV4>,
-) -> Result<ScenarioManifestV4> {
+    manifests: impl IntoIterator<Item = &'a ScenarioManifestV5>,
+) -> Result<ScenarioManifestV5> {
     let mut manifests = manifests.into_iter();
     let Some(first) = manifests.next() else {
         bail!("cannot combine an empty manifest set");
@@ -59,8 +59,8 @@ pub fn combine_scenario_manifests<'a>(
 }
 
 fn append_manifest_if_header_matches(
-    combined: &mut ScenarioManifestV4,
-    manifest: &ScenarioManifestV4,
+    combined: &mut ScenarioManifestV5,
+    manifest: &ScenarioManifestV5,
 ) -> Result<()> {
     let mut header = manifest.clone();
     header.vms.clear();
@@ -87,7 +87,7 @@ struct ManifestInput<'a> {
     boot_cmdline: &'a str,
 }
 
-fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV4> {
+fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV5> {
     let derived = input
         .scenario
         .derive_kino_config_for_vm(&input.vm.name)
@@ -120,8 +120,8 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV4> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(ScenarioManifestV4 {
-        schema_version: 4,
+    Ok(ScenarioManifestV5 {
+        schema_version: 5,
         scenario_id: input.scenario_name.to_string(),
         name: input.scenario_name.to_string(),
         title: input.lecture.title.clone(),
@@ -143,7 +143,7 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV4> {
             .body
             .clone(),
         hints: catalog_hints(&input.scenario.hints),
-        vms: vec![ScenarioVmManifestV4 {
+        vms: vec![ScenarioVmManifestV5 {
             name: input.vm.name.clone(),
             image_key: ImageKey {
                 scenario: input.scenario_name.to_string(),
@@ -155,13 +155,12 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV4> {
             image_virtual_size_bytes: input.image_virtual_size_bytes,
             chunk_manifest_sha256: input.chunk_manifest_sha256.to_string(),
             guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
-            boot: ScenarioVmBootManifestV4 {
+            boot: ScenarioVmBootManifestV5 {
                 kernel_sha256: input.kernel_sha256.to_string(),
                 initrd_sha256: input.initrd_sha256.to_string(),
                 cmdline: input.boot_cmdline.to_string(),
             },
             cpu_millis: input.vm.cpu_millis,
-            vcpu_count: input.vm.vcpu_count,
             memory_mib: Mib(input.vm.memory),
             disk_mib: Mib(input.vm.disk * 1024),
             probes,
@@ -280,7 +279,7 @@ base_image "trixie" {
         assert_eq!(vm.boot.kernel_sha256, "c".repeat(64));
         assert_eq!(vm.boot.initrd_sha256, "d".repeat(64));
         assert_eq!(vm.boot.cmdline, PUBLISHED_BOOT_CMDLINE);
-        assert_eq!(manifest.schema_version, 4);
+        assert_eq!(manifest.schema_version, 5);
         assert_eq!(manifest.title, "Lecture title");
         assert_eq!(manifest.description, "Lecture summary");
         assert_eq!(manifest.category, "lecture-category");
@@ -291,7 +290,6 @@ base_image "trixie" {
             intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2
         );
         assert_eq!(vm.cpu_millis, 1_000);
-        assert_eq!(vm.vcpu_count, 1);
     }
 
     #[test]
@@ -321,9 +319,9 @@ base_image "trixie" {
     fn manifest_fixture(
         vm_name: &str,
         image_sha: &str,
-    ) -> intar_contracts::catalog::ScenarioManifestV4 {
-        intar_contracts::catalog::ScenarioManifestV4 {
-            schema_version: 4,
+    ) -> intar_contracts::catalog::ScenarioManifestV5 {
+        intar_contracts::catalog::ScenarioManifestV5 {
+            schema_version: 5,
             scenario_id: "broken-nginx".to_string(),
             name: "broken-nginx".to_string(),
             title: "Broken Nginx".to_string(),
@@ -335,7 +333,7 @@ base_image "trixie" {
             briefing_markdown: "Restore nginx.".to_string(),
             solution_markdown: "Start nginx.".to_string(),
             hints: Vec::new(),
-            vms: vec![intar_contracts::catalog::ScenarioVmManifestV4 {
+            vms: vec![intar_contracts::catalog::ScenarioVmManifestV5 {
                 name: vm_name.to_string(),
                 image_key: intar_contracts::catalog::ImageKey {
                     scenario: "broken-nginx".to_string(),
@@ -347,13 +345,12 @@ base_image "trixie" {
                 image_virtual_size_bytes: 1024,
                 chunk_manifest_sha256: "c".repeat(64),
                 guest_bootstrap_abi: intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2,
-                boot: intar_contracts::catalog::ScenarioVmBootManifestV4 {
+                boot: intar_contracts::catalog::ScenarioVmBootManifestV5 {
                     kernel_sha256: "k".repeat(64),
                     initrd_sha256: "i".repeat(64),
                     cmdline: PUBLISHED_BOOT_CMDLINE.to_string(),
                 },
                 cpu_millis: 1_000,
-                vcpu_count: 1,
                 memory_mib: intar_contracts::catalog::Mib(512),
                 disk_mib: intar_contracts::catalog::Mib(2048),
                 probes: Vec::new(),

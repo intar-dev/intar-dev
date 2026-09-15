@@ -49,7 +49,6 @@ pub struct VmRow {
     pub recording_disk_path: Option<String>,
     pub spool_dir: Option<String>,
     pub cpu_millis: Option<i64>,
-    pub vcpu_count: Option<i64>,
     pub ch_executable_sha256: Option<String>,
 }
 

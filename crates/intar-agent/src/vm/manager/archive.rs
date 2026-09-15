@@ -642,10 +642,7 @@ pub(super) fn generationless_v6_launch_cleanup_selector(
     let Some(details) = vm.details.as_ref() else {
         return Ok(None);
     };
-    if details.jail_generation.is_some()
-        || details.cpu_millis.is_none()
-        || details.vcpu_count.is_none()
-    {
+    if details.jail_generation.is_some() || details.cpu_millis.is_none() {
         return Ok(None);
     }
 

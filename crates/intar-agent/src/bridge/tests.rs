@@ -23,9 +23,8 @@ fn desired_vm() -> DesiredVmV2 {
             kino_sha256: "2".repeat(64),
             bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
         },
-        resources: VmResourcesV2 {
+        resources: VmResourcesV3 {
             cpu_millis: 125,
-            vcpu_count: 1,
             memory_mib: Mib(512),
             disk_mib: Mib(4096),
         },
@@ -71,8 +70,8 @@ fn char_device_probe_accepts_openable_char_devices() {
 }
 
 #[test]
-fn parses_only_v7_bridge_messages() {
-    let message = BridgeMessageV7::SyncRequest(SyncRequestV7 {
+fn parses_only_v8_bridge_messages() {
+    let message = BridgeMessageV8::SyncRequest(SyncRequestV8 {
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         host_id: "host-1".to_string(),
         reason: SyncRequestReason::Connect,
@@ -81,9 +80,9 @@ fn parses_only_v7_bridge_messages() {
 
     assert!(parse_bridge_json(&raw).is_ok());
 
-    let raw_v6 = raw.replace("\"protocol_version\":7", "\"protocol_version\":6");
+    let raw_v6 = raw.replace("\"protocol_version\":8", "\"protocol_version\":6");
     let error = parse_bridge_json(&raw_v6).expect_err("v6 should fail");
-    assert!(error.to_string().contains("expected v7"));
+    assert!(error.to_string().contains("expected v8"));
 }
 
 #[tokio::test]
@@ -105,13 +104,10 @@ async fn terminal_subscription_retains_transition_during_initial_snapshot() {
         }),
         reason: None,
         observed_at: 2_000,
-        runtime_constraints: Some(VmRuntimeConstraintsV1 {
+        runtime_constraints: Some(VmRuntimeConstraintsV2 {
             generation: "generation-1".to_string(),
-            phase: VmRuntimeConstraintPhaseV1::Steady,
-            steady_cpu_millis: 1_000,
-            effective_cpu_millis: 1_000,
+            cpu_millis: 1_000,
             quota_verified_at_unix_ms: Some(1_999),
-            lease_expires_at_unix_ms: None,
         }),
     };
 
@@ -164,7 +160,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
     let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
     let (normal_tx, mut normal_rx) = mpsc::channel(1);
     normal_tx
-        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "normal".to_string(),
             reason: SyncRequestReason::Connect,
@@ -172,7 +168,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
         .await
         .expect("queue normal message");
     inventory_tx
-        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "inventory".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -180,7 +176,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
         .await
         .expect("queue inventory message");
     urgent_tx
-        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "terminal".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -205,7 +201,7 @@ async fn outbound_writer_prioritizes_inventory_reports() {
     let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
     let (normal_tx, mut normal_rx) = mpsc::channel(1);
     normal_tx
-        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "normal".to_string(),
             reason: SyncRequestReason::Connect,
@@ -213,7 +209,7 @@ async fn outbound_writer_prioritizes_inventory_reports() {
         .await
         .expect("queue normal message");
     inventory_tx
-        .send(BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "inventory".to_string(),
             reason: SyncRequestReason::Reconnect,

@@ -18,7 +18,7 @@ import type {
   HostDesiredStateV2,
   HostStateReportV2,
 } from "@/generated/bridge";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -235,7 +235,7 @@ async function status(): Promise<Response> {
 
 function desiredState(): HostDesiredStateV2 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     host_id: "agent-1",
     version: 7,
     generated_at_unix_ms: Date.now(),
@@ -253,7 +253,7 @@ function desiredState(): HostDesiredStateV2 {
 
 function hostReport(): HostStateReportV2 {
   return {
-    schema_version: 5,
+    schema_version: 6,
     host_id: "agent-1",
     observed_at_unix_ms: Date.now(),
     applied_desired_version: 7,
@@ -271,14 +271,11 @@ function hostReport(): HostStateReportV2 {
     capabilities: {
       arch: "x86_64",
       cloud_hypervisor_sha256: "d".repeat(64),
-      boot_cpu_millis: 2_000,
-      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
       supports_jailer_v2: true,
-      supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
       supports_hard_cpu_quota: true,
@@ -310,9 +307,9 @@ function hostReport(): HostStateReportV2 {
   };
 }
 
-function manifest(): ScenarioManifestV4 {
+function manifest(): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: "broken-nginx",
     name: "broken-nginx",
     title: "Broken Nginx",
@@ -339,7 +336,6 @@ function manifest(): ScenarioManifestV4 {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],

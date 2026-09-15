@@ -82,7 +82,7 @@ pub(super) fn start_worker_unit(
     allowed_dir: &Path,
     denied_path: &Path,
     netns_path: &Path,
-    boot_cpu_millis: u32,
+    cpu_millis: u32,
 ) -> Result<()> {
     let connection = zbus::blocking::Connection::system()?;
     let manager = systemd_manager(&connection)?;
@@ -114,7 +114,7 @@ pub(super) fn start_worker_unit(
         ("CPUAccounting", Value::new(true)),
         (
             "CPUQuotaPerSecUSec",
-            Value::new(u64::from(boot_cpu_millis) * 1_000),
+            Value::new(u64::from(cpu_millis) * 1_000),
         ),
         ("CPUQuotaPeriodUSec", Value::new(SELF_TEST_CPU_PERIOD_US)),
         ("KillMode", Value::new("control-group")),
@@ -137,22 +137,6 @@ pub(super) fn start_worker_unit(
         "StartTransientUnit",
         &(unit_name, "fail", properties, auxiliary),
     )?;
-    Ok(())
-}
-
-pub(super) fn update_worker_cpu_quota(unit_name: &str, cpu_millis: u32) -> Result<()> {
-    let connection = zbus::blocking::Connection::system()?;
-    let manager = systemd_manager(&connection)?;
-    let properties = vec![
-        (
-            "CPUQuotaPerSecUSec",
-            Value::new(u64::from(cpu_millis) * 1_000),
-        ),
-        ("CPUQuotaPeriodUSec", Value::new(SELF_TEST_CPU_PERIOD_US)),
-    ];
-    let _: () = manager
-        .call("SetUnitProperties", &(unit_name, true, properties))
-        .with_context(|| format!("set self-test CPU quota for {unit_name}"))?;
     Ok(())
 }
 

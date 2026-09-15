@@ -213,7 +213,6 @@ async function seedCatalog(input: {
     initrdSha256: INITRD_SHA,
     bootCmdline: "root=/dev/vda rw",
     cpuMillis: 125,
-    vcpuCount: 1,
     memoryMib: 512,
     diskMib: 4_096,
   });
@@ -237,7 +236,6 @@ async function seedCatalog(input: {
     initrdSha256: INITRD_SHA,
     bootCmdline: "root=/dev/vda rw",
     cpuMillis: 125,
-    vcpuCount: 1,
     memoryMib: 512,
     diskMib: 4_096,
   });

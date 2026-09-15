@@ -78,6 +78,7 @@ for command in \
   nsenter python3 sed setfacl sha256sum stat sysctl systemctl systemd-run systemd-tmpfiles tr; do
   command -v "${command}" >/dev/null 2>&1 || die "required host command is missing: ${command}"
 done
+python3 -c 'import tomllib' || die "Python 3.11 or newer is required for configuration upgrades"
 systemctl show --property=Version >/dev/null 2>&1 || die "cannot communicate with systemd"
 
 # Verify the complete extracted archive before freezing or mutating the host.
@@ -253,6 +254,10 @@ fi
 
 mutated=true
 
+# Convert only removed CPU settings. The helper preserves other values and
+# writes root-only rollback copies before replacing either configuration.
+python3 "${archive_dir}/deploy/migrate-cpu-config.py"
+
 # Remove legacy direct KVM/TUN group access from the unprivileged agent.
 for group in kvm netdev; do
   if getent group "${group}" >/dev/null 2>&1 && \
@@ -320,7 +325,8 @@ publish_file "${archive_dir}/deploy/intar-jailerd.sysctl.conf" /etc/sysctl.d/90-
 
 # Any binary/config change invalidates the boot-bound proof.
 rm -f -- \
-  /var/lib/intar/jails/self-test-attestation-v2.json
+  /var/lib/intar/jails/self-test-attestation-v2.json \
+  /var/lib/intar/jails/self-test-attestation-v3.json
 systemd-tmpfiles --create /etc/tmpfiles.d/intar-jailerd.conf
 for directory in \
   /var/cache/intar-agent \

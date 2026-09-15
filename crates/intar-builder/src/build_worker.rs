@@ -63,7 +63,7 @@ struct PersistedEncodedImageChunk {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedBuildOutput {
-    manifest: intar_contracts::catalog::ScenarioManifestV4,
+    manifest: intar_contracts::catalog::ScenarioManifestV5,
     vm_name: String,
     image_id: String,
     chunk_manifest_sha256: String,
@@ -478,7 +478,7 @@ impl PersistedBuildOutput {
     }
 
     fn validate_local_files(&self) -> Result<()> {
-        if self.manifest.schema_version != 4 || self.manifest.vms.len() != 1 {
+        if self.manifest.schema_version != 5 || self.manifest.vms.len() != 1 {
             bail!("completed builder output has an invalid scenario manifest");
         }
         let vm = &self.manifest.vms[0];
@@ -1180,8 +1180,8 @@ mod tests {
     use intar_contracts::catalog::{
         GUEST_BOOTSTRAP_ABI_V2, IMAGE_CHUNK_ENCODING, IMAGE_CHUNK_MANIFEST_SCHEMA_VERSION,
         IMAGE_CHUNK_SIZE_BYTES, ImageArchitecture, ImageChunkManifestV1, ImageChunkV1, ImageFormat,
-        ImageKey, Mib, ScenarioDifficulty, ScenarioManifestV4, ScenarioVmBootManifestV4,
-        ScenarioVmManifestV4,
+        ImageKey, Mib, ScenarioDifficulty, ScenarioManifestV5, ScenarioVmBootManifestV5,
+        ScenarioVmManifestV5,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -1384,8 +1384,8 @@ mod tests {
         let chunk_manifest_sha256 = intar_image_build::sha256_bytes_hex(&chunk_manifest_bytes);
         let vm_name = "web".to_string();
         PersistedBuildOutput {
-            manifest: ScenarioManifestV4 {
-                schema_version: 4,
+            manifest: ScenarioManifestV5 {
+                schema_version: 5,
                 scenario_id: "broken-nginx".to_string(),
                 name: "broken-nginx".to_string(),
                 title: "Broken Nginx".to_string(),
@@ -1397,7 +1397,7 @@ mod tests {
                 briefing_markdown: "Restore nginx".to_string(),
                 solution_markdown: "Start nginx".to_string(),
                 hints: Vec::new(),
-                vms: vec![ScenarioVmManifestV4 {
+                vms: vec![ScenarioVmManifestV5 {
                     name: vm_name.clone(),
                     image_key: ImageKey {
                         scenario: "broken-nginx".to_string(),
@@ -1409,13 +1409,12 @@ mod tests {
                     image_virtual_size_bytes: u64::from(IMAGE_CHUNK_SIZE_BYTES),
                     chunk_manifest_sha256: chunk_manifest_sha256.clone(),
                     guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
-                    boot: ScenarioVmBootManifestV4 {
+                    boot: ScenarioVmBootManifestV5 {
                         kernel_sha256: kernel_sha256_hex.clone(),
                         initrd_sha256: initrd_sha256_hex.clone(),
                         cmdline: "console=ttyS0".to_string(),
                     },
                     cpu_millis: 1_000,
-                    vcpu_count: 1,
                     memory_mib: Mib(512),
                     disk_mib: Mib(2048),
                     probes: Vec::new(),

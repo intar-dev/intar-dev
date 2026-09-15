@@ -14,7 +14,7 @@ import type {
 } from "@/generated/bridge";
 import type {
   ImageKey,
-  ScenarioManifestV4,
+  ScenarioManifestV5,
 } from "@/generated/catalog";
 import { loadRetiredBuildIds } from "@/lib/image-artifact-retention";
 import {
@@ -199,7 +199,7 @@ interface RequiredImage {
   image_id: string;
 }
 
-function requiredImagesFromManifest(manifest: ScenarioManifestV4): RequiredImage[] {
+function requiredImagesFromManifest(manifest: ScenarioManifestV5): RequiredImage[] {
   return manifest.vms.map((vm) => ({
     image_key: vm.image_key,
     image_id: vm.image_id,

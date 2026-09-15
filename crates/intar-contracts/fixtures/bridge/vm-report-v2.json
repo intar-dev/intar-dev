@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "host_id": "host-alpha",
   "run_id": "run-20260702-a",
   "vm_name": "webserver",
@@ -31,14 +31,11 @@
   },
   "runtime_constraints": {
     "generation": "vm-01jz8w5pjcr7xz6j8p8q2c49ds",
-    "phase": "steady",
-    "steady_cpu_millis": 125,
-    "effective_cpu_millis": 125,
-    "quota_verified_at_unix_ms": 1762041658000
+    "quota_verified_at_unix_ms": 1762041658000,
+    "cpu_millis": 125
   },
   "resource_state": {
     "cpu_millis": 125,
-    "vcpu_count": 1,
     "cpu_quota_us": 12500,
     "cpu_period_us": 100000,
     "cpu_usage_usec": 3125000,

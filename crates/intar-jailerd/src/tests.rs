@@ -21,13 +21,13 @@ struct FakeBackend {
     fail_destroy_unit: bool,
     fail_destroy_vm_network: bool,
     returned_unit_name: Option<String>,
-    quota_updates: Vec<(String, CpuQuota)>,
+    quota_verifications: Vec<(String, CpuQuota)>,
     run_network_repairs: Vec<ValidatedId>,
     active_ssh_forwards: BTreeSet<(ValidatedId, ValidatedId)>,
     ssh_forward_updates: Vec<(ValidatedId, ValidatedId, bool)>,
     boundary_operations: Vec<String>,
-    fail_quota_update: bool,
-    fail_quota_update_units: BTreeSet<String>,
+    fail_quota_verification: bool,
+    fail_quota_verification_units: BTreeSet<String>,
     fail_ssh_forward_update: bool,
     fail_ssh_forward_disable: bool,
 }
@@ -81,21 +81,27 @@ impl HostBackend for FakeBackend {
             .cloned()
             .context("missing fake unit")
     }
-    fn update_unit_cpu_quota(
+    fn verify_unit_cpu_quota(
         &mut self,
         unit_name: &str,
         cgroup_path: &Path,
         quota: CpuQuota,
     ) -> Result<()> {
-        if self.fail_quota_update || self.fail_quota_update_units.contains(unit_name) {
+        if self.fail_quota_verification || self.fail_quota_verification_units.contains(unit_name) {
             bail!("injected CPU quota readback failure")
         }
         let unit = self.units.get(unit_name).context("missing fake unit")?;
         if unit.cgroup_path.as_deref() != Some(cgroup_path) {
             bail!("fake cgroup identity mismatch")
         }
-        self.quota_updates.push((unit_name.to_owned(), quota));
-        self.unit_quotas.insert(unit_name.to_owned(), quota);
+        self.quota_verifications.push((unit_name.to_owned(), quota));
+        if self
+            .unit_quotas
+            .get(unit_name)
+            .is_some_and(|actual| actual != &quota)
+        {
+            bail!("CPU quota readback mismatch")
+        }
         self.boundary_operations
             .push(format!("quota:{}", quota.cpu_millis));
         Ok(())
@@ -278,7 +284,7 @@ impl HostBackend for BlockingSharedBackend {
             .inspect_unit(unit_name)
     }
 
-    fn update_unit_cpu_quota(
+    fn verify_unit_cpu_quota(
         &mut self,
         unit_name: &str,
         cgroup_path: &Path,
@@ -287,7 +293,7 @@ impl HostBackend for BlockingSharedBackend {
         self.state
             .lock()
             .expect("backend state")
-            .update_unit_cpu_quota(unit_name, cgroup_path, quota)
+            .verify_unit_cpu_quota(unit_name, cgroup_path, quota)
     }
 
     fn stop_unit(&mut self, unit_name: &str) -> Result<bool> {
@@ -724,7 +730,6 @@ fn test_config() -> JailerdConfig {
         agent_gid: 501,
         // Existing lifecycle tests isolate steady-capacity behavior. Boot
         // lease tests override this with the production 2000m default.
-        boot_cpu_millis: 125,
         ..JailerdConfig::default()
     }
 }
@@ -806,7 +811,6 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
         run_id: ValidatedId::parse("run").expect("run ID"),
         vm_id: ValidatedId::parse(format!("vm-{index}")).expect("VM ID"),
         cpu_millis,
-        vcpu_count: 1,
         memory_mib: 512,
         root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
         tap_name: format!("tap{index}"),
@@ -917,13 +921,8 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         uid: config.uid_gid_start,
         gid: config.uid_gid_start,
         quota,
-        effective_quota: quota,
-        cpu_phase: VmCpuPhase::Steady,
-        boot_deadline_unix_ms: None,
-        boot_deadline_monotonic: None,
         quota_attestation: None,
         ssh_forward_active: true,
-        vcpu_count: request.vcpu_count,
         paths: jail_paths(&root, request.artifacts.initrd.is_some()),
         cgroup_path: Some(
             format!("/intar.slice/intar-vms.slice/intar-vm-{generation}.service").into(),

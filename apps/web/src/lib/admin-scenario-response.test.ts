@@ -16,7 +16,6 @@ describe("admin scenario response serialization", () => {
     expect(serialized.scenarioHintCount).toBe(1);
     expect(serialized.requiredResources).toEqual({
       cpuMillis: 1_000,
-      vcpuCount: 1,
       memoryMib: 1_024,
       diskMib: 2_048,
     });
@@ -61,7 +60,6 @@ const scenario: ScenarioDetailRecord = {
   vmCount: 1,
   requiredResources: {
     cpuMillis: 1_000,
-    vcpuCount: 1,
     memoryMib: 1_024,
     diskMib: 2_048,
   },
@@ -105,7 +103,6 @@ const scenario: ScenarioDetailRecord = {
       initrdSha256: "c".repeat(64),
       bootCmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4",
       cpuMillis: 1_000,
-      vcpuCount: 1,
       memoryMib: 1024,
       diskMib: 2048,
     },

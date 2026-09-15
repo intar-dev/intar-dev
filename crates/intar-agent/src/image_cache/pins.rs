@@ -109,7 +109,7 @@ mod tests {
 
     use intar_contracts::bridge::{
         DesiredCachedImageV1, DesiredGuestToolsV1, DesiredVmPhase, DesiredVmV2, HostDesiredStateV2,
-        VmResourcesV2,
+        VmResourcesV3,
     };
     use intar_contracts::catalog::Mib;
 
@@ -146,9 +146,8 @@ mod tests {
                         kino_sha256: "f".repeat(64),
                         bootstrap_abi: 1,
                     },
-                    resources: VmResourcesV2 {
+                    resources: VmResourcesV3 {
                         cpu_millis: 1,
-                        vcpu_count: 1,
                         memory_mib: Mib(1),
                         disk_mib: Mib(1),
                     },

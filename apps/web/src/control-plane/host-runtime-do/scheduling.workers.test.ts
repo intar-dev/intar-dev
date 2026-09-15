@@ -76,7 +76,7 @@ async function seedOtherUserActiveReservation(input: {
     runtimeVmName: "runtime-web",
     imageKeyJson: {},
     imageSha256: "2".repeat(64),
-    cpuMillis: 125,
+    cpuMillis: 2_000,
     memoryMib: input.memoryMib,
     diskMib: input.worstCaseDiskMib,
     createdAt: input.now,
@@ -85,7 +85,7 @@ async function seedOtherUserActiveReservation(input: {
   await db.insert(hostResourceReservations).values({
     executionId: input.executionId,
     hostId: input.hostId,
-    cpuMillis: 125,
+    cpuMillis: 2_000,
     memoryMib: input.memoryMib,
     worstCaseDiskMib: input.worstCaseDiskMib,
     state: "pending",
@@ -104,17 +104,13 @@ async function seedOtherUserActiveReservation(input: {
 async function seedCommittedCpuReservation(input: {
   hostId: string;
   runId: string;
-  steadyCpuMillis: number;
-  bootCpuMillis: number;
+  cpuMillis: number;
   now: number;
 }): Promise<void> {
   await drizzle(env.DB).insert(hostCpuReservations).values({
     runId: input.runId,
     hostId: input.hostId,
-    cpuMillis: input.bootCpuMillis,
-    steadyCpuMillis: input.steadyCpuMillis,
-    bootCpuMillis: input.bootCpuMillis,
-    quotaPhase: "boot",
+    cpuMillis: input.cpuMillis,
     state: "committed",
     expiresAt: null,
     createdAt: input.now,
@@ -199,15 +195,14 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       hostId,
       (row) => row.observedAt === now,
     );
-    // Admission charges a committed boot quota for every run it admits, so a
+    // Admission charges a committed CPU quota for every run it admits, so a
     // host whose quota is fully committed has no room for another start. The
     // reservation row is the same row the admission batch writes; there is no
     // legacy reservation endpoint left to call.
     await seedCommittedCpuReservation({
       hostId,
       runId: "capacity-fill",
-      steadyCpuMillis: 125,
-      bootCpuMillis: 2_000,
+      cpuMillis: 2_000,
       now,
     });
 
@@ -301,7 +296,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       stateReport(secondHostId, {
         observedAt: now,
         appliedDesiredVersion: 0,
-        schedulableCpuMillis: 2_000,
+        schedulableCpuMillis: 125,
         cachedImages: [
           {
             image_key: testImageKey,
@@ -341,13 +336,12 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       ),
     ]);
 
-    // The first host carries a committed boot quota equal to its whole
+    // The first host carries a committed CPU quota equal to its whole
     // schedulable CPU, so the ranked selection must move to the second host.
     await seedCommittedCpuReservation({
       hostId: firstHostId,
       runId: "first-host-fill",
-      steadyCpuMillis: 2_000,
-      bootCpuMillis: 2_000,
+      cpuMillis: 2_000,
       now,
     });
 
@@ -498,7 +492,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
 
     sendBridge(ws, {
       type: "sync_request",
-      protocol_version: 7,
+      protocol_version: 8,
       host_id: hostId,
       reason: "operator_requested",
     });

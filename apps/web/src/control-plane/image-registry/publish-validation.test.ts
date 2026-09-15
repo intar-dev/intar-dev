@@ -11,7 +11,7 @@ import {
 } from "./test-fixtures";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 
 const {
   authMock,
@@ -523,7 +523,7 @@ describe("image registry publish validation", () => {
       imageSha256: "a".repeat(64),
       artifactSha256: "b".repeat(64),
     });
-    delete (manifest as Partial<ScenarioManifestV4>).title;
+    delete (manifest as Partial<ScenarioManifestV5>).title;
     const form = new FormData();
     form.set("manifest", JSON.stringify(manifest));
 
@@ -650,13 +650,13 @@ describe("image registry publish validation", () => {
 
   it.each([
     ["zero CPU", { cpu_millis: 0 }],
-    ["u32-overflow CPU", { cpu_millis: 0x1_0000_0000, vcpu_count: 0xffff }],
-    ["u16-overflow vCPU count", { vcpu_count: 0x1_0000 }],
+    ["u32-overflow CPU", { cpu_millis: 0x1_0000_0000 }],
+    ["removed vCPU setting", { vcpu_count: 1 }],
     ["u32-overflow memory", { memory_mib: 0x1_0000_0000 }],
     ["u32-overflow disk", { disk_mib: 0x1_0000_0000 }],
     [
       "unsafe integer CPU",
-      { cpu_millis: Number.MAX_SAFE_INTEGER + 1, vcpu_count: 0xffff },
+      { cpu_millis: Number.MAX_SAFE_INTEGER + 1 },
     ],
   ])(
     "rejects publish manifests with invalid vm resources: %s",

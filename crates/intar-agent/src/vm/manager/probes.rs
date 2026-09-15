@@ -131,9 +131,13 @@ pub(super) async fn apply_kino_ready_snapshot(
                 details.run_id.as_deref() == Some(run_id)
                     && details.jail_generation.as_deref() == Some(jail_generation)
                     && details.cpu_runtime.as_ref().is_some_and(|runtime| {
-                        runtime.phase == VmCpuPhase::Steady
-                            && runtime.effective_quota == runtime.steady_quota
-                            && runtime.attestation.is_some()
+                        Some(runtime.quota.cpu_millis) == details.cpu_millis
+                            && runtime.attestation.as_ref().is_some_and(|proof| {
+                                proof.quota == runtime.quota
+                                    && proof.cpu_max == runtime.quota.cpu_max()
+                                    && proof.cpu_max_burst == 0
+                                    && proof.verified_at_unix_ms > 0
+                            })
                     })
             });
         if committed {

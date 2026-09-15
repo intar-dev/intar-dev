@@ -1,5 +1,5 @@
 import type {
-  BridgeMessageV7,
+  BridgeMessageV8,
   BuildPhase,
   DesiredVmPhase,
   HostRoleV1,
@@ -8,7 +8,6 @@ import type {
   VmArchivePhase,
   VmPhase,
   VmProbeStatus,
-  VmRuntimeConstraintPhaseV1,
   VmTerminalStateKindV1,
 } from "@/generated/bridge";
 import type { ImageArchitecture, ProbePhase } from "@/generated/catalog";
@@ -22,7 +21,7 @@ import {
 
 const textDecoder = new TextDecoder();
 
-const MESSAGE_TYPES = new Set<BridgeMessageV7["type"]>([
+const MESSAGE_TYPES = new Set<BridgeMessageV8["type"]>([
   "client_hello",
   "server_hello",
   "desired_state",
@@ -70,10 +69,6 @@ const VM_TERMINAL_STATES = new Set<VmTerminalStateKindV1>([
   "failed",
 ]);
 
-const VM_RUNTIME_CONSTRAINT_PHASES = new Set<VmRuntimeConstraintPhaseV1>([
-  "boot_burst",
-  "steady",
-]);
 
 const VM_ARCHIVE_PHASES = new Set<VmArchivePhase>([
   "none",
@@ -103,9 +98,9 @@ const SYNC_REQUEST_REASONS = new Set<SyncRequestReason>([
 
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/i;
 
-export function parseBridgeMessageV7(
+export function parseBridgeMessageV8(
   input: string | ArrayBuffer,
-): BridgeMessageV7 | null {
+): BridgeMessageV8 | null {
   const value = parseJson(input);
   if (!isRecord(value)) {
     return null;
@@ -138,7 +133,7 @@ export function parseBridgeMessageV7(
   }
 }
 
-export function serializeBridgeMessageV7(message: BridgeMessageV7): string {
+export function serializeBridgeMessageV8(message: BridgeMessageV8): string {
   return JSON.stringify(message);
 }
 
@@ -161,7 +156,7 @@ function hasV7Envelope(value: Record<string, unknown>): boolean {
 
 function isClientHello(
   value: unknown,
-): value is Extract<BridgeMessageV7, { type: "client_hello" }> {
+): value is Extract<BridgeMessageV8, { type: "client_hello" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -177,7 +172,7 @@ function isClientHello(
 
 function isServerHello(
   value: unknown,
-): value is Extract<BridgeMessageV7, { type: "server_hello" }> {
+): value is Extract<BridgeMessageV8, { type: "server_hello" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -186,7 +181,7 @@ function isServerHello(
 
 function isDesiredState(
   value: unknown,
-): value is Extract<BridgeMessageV7, { type: "desired_state" }> {
+): value is Extract<BridgeMessageV8, { type: "desired_state" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -212,7 +207,7 @@ function isDesiredState(
 
 function isStateReport(
   value: unknown,
-): value is Extract<BridgeMessageV7, { type: "state_report" }> {
+): value is Extract<BridgeMessageV8, { type: "state_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -240,7 +235,7 @@ function isStateReport(
 
 function isVmReport(
   value: unknown,
-): value is Extract<BridgeMessageV7, { type: "vm_report" }> {
+): value is Extract<BridgeMessageV8, { type: "vm_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -251,7 +246,7 @@ function isVmReport(
 
 function isBuildReport(
   value: unknown,
-): value is Extract<BridgeMessageV7, { type: "build_report" }> {
+): value is Extract<BridgeMessageV8, { type: "build_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -265,7 +260,7 @@ function isBuildReport(
 
 function isSyncRequest(
   value: unknown,
-): value is Extract<BridgeMessageV7, { type: "sync_request" }> {
+): value is Extract<BridgeMessageV8, { type: "sync_request" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -275,8 +270,8 @@ function isSyncRequest(
   );
 }
 
-function isBridgeMessageType(value: string): value is BridgeMessageV7["type"] {
-  return MESSAGE_TYPES.has(value as BridgeMessageV7["type"]);
+function isBridgeMessageType(value: string): value is BridgeMessageV8["type"] {
+  return MESSAGE_TYPES.has(value as BridgeMessageV8["type"]);
 }
 
 function isOptionalNumber(value: unknown): boolean {
@@ -351,7 +346,6 @@ function isVmResourcesPayload(value: unknown): boolean {
   return (
     isRecord(value) &&
     isPositiveInteger(value.cpu_millis) &&
-    isPositiveInteger(value.vcpu_count) &&
     isNonNegativeInteger(value.memory_mib) &&
     isNonNegativeInteger(value.disk_mib)
   );
@@ -462,16 +456,11 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
     IMAGE_ARCHITECTURES.has(arch as ImageArchitecture) &&
     (value.cloud_hypervisor_sha256 === null ||
       isSha256Hex(value.cloud_hypervisor_sha256)) &&
-    (value.boot_cpu_millis === null ||
-      isPositiveInteger(value.boot_cpu_millis)) &&
-    (value.boot_cpu_lease_ms === null ||
-      isPositiveInteger(value.boot_cpu_lease_ms)) &&
     typeof value.supports_kvm === "boolean" &&
     typeof value.supports_vsock === "boolean" &&
     typeof value.supports_reflink === "boolean" &&
     typeof value.supports_nftables === "boolean" &&
     typeof value.supports_jailer_v2 === "boolean" &&
-    typeof value.supports_boot_cpu_lease === "boolean" &&
     typeof value.supports_template_backed_launch === "boolean" &&
     typeof value.fast_template_store === "boolean" &&
     typeof value.supports_hard_cpu_quota === "boolean" &&
@@ -494,8 +483,8 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
 }
 
 function withCapabilityDefaults(
-  value: Extract<BridgeMessageV7, { type: "client_hello" | "state_report" }>,
-): Extract<BridgeMessageV7, { type: "client_hello" | "state_report" }> {
+  value: Extract<BridgeMessageV8, { type: "client_hello" | "state_report" }>,
+): Extract<BridgeMessageV8, { type: "client_hello" | "state_report" }> {
   if (value.type === "client_hello") {
     if (
       value.capabilities.supports_run_cli_v1 !== undefined &&
@@ -617,24 +606,10 @@ function isVmTerminalStatePayload(value: unknown): boolean {
 }
 
 function isVmRuntimeConstraintsPayload(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const phase = readString(value.phase);
-  if (
-    phase === null ||
-    !VM_RUNTIME_CONSTRAINT_PHASES.has(phase as VmRuntimeConstraintPhaseV1) ||
-    readString(value.generation) === null ||
-    !isPositiveInteger(value.steady_cpu_millis) ||
-    !isPositiveInteger(value.effective_cpu_millis) ||
-    !isOptionalInteger(value.quota_verified_at_unix_ms) ||
-    !isOptionalInteger(value.lease_expires_at_unix_ms)
-  ) {
-    return false;
-  }
-  return (
-    phase !== "steady" || isPositiveInteger(value.quota_verified_at_unix_ms)
-  );
+  return isRecord(value) &&
+    readString(value.generation) !== null &&
+    isPositiveInteger(value.cpu_millis) &&
+    (value.quota_verified_at_unix_ms == null || isPositiveInteger(value.quota_verified_at_unix_ms));
 }
 
 function isOptionalVmRuntimeConstraintsPayload(value: unknown): boolean {
@@ -649,7 +624,11 @@ function hasRequiredRuntimeConstraints(
   value: unknown,
   phase: VmPhase,
 ): boolean {
-  return ["booting", "running", "ready"].includes(phase)
+  if (["ready", "solved"].includes(phase)) {
+    return isVmRuntimeConstraintsPayload(value) && isRecord(value) &&
+      isPositiveInteger(value.quota_verified_at_unix_ms);
+  }
+  return ["booting", "running"].includes(phase)
     ? isVmRuntimeConstraintsPayload(value)
     : isOptionalVmRuntimeConstraintsPayload(value);
 }
@@ -658,7 +637,6 @@ function isVmResourceStatePayload(value: unknown): boolean {
   return (
     isRecord(value) &&
     isPositiveInteger(value.cpu_millis) &&
-    isPositiveInteger(value.vcpu_count) &&
     isPositiveInteger(value.cpu_quota_us) &&
     isPositiveInteger(value.cpu_period_us) &&
     isNonNegativeInteger(value.cpu_usage_usec) &&
@@ -800,7 +778,7 @@ function isVmReportPayload(value: unknown, hostId: string): boolean {
 function isBuildReportPayload(
   value: unknown,
   hostId: string,
-): value is Extract<BridgeMessageV7, { type: "build_report" }>["report"] {
+): value is Extract<BridgeMessageV8, { type: "build_report" }>["report"] {
   if (!isRecord(value)) {
     return false;
   }

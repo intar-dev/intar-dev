@@ -84,7 +84,6 @@ function vm(
       imageSha256: null,
       resources: {
         cpuMillis: 1_000,
-        vcpuCount: 1,
         memoryMib: 512,
         diskMib: 8_192,
       },

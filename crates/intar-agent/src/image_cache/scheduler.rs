@@ -387,7 +387,7 @@ mod tests {
 
     fn running_only_state() -> intar_contracts::bridge::HostDesiredStateV2 {
         use intar_contracts::bridge::{
-            DesiredGuestToolsV1, DesiredVmPhase, DesiredVmV2, HostDesiredStateV2, VmResourcesV2,
+            DesiredGuestToolsV1, DesiredVmPhase, DesiredVmV2, HostDesiredStateV2, VmResourcesV3,
         };
         use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib};
 
@@ -414,9 +414,8 @@ mod tests {
                     kino_sha256: "b".repeat(64),
                     bootstrap_abi: 1,
                 },
-                resources: VmResourcesV2 {
+                resources: VmResourcesV3 {
                     cpu_millis: 1,
-                    vcpu_count: 1,
                     memory_mib: Mib(1),
                     disk_mib: Mib(1),
                 },

@@ -15,7 +15,7 @@ import {
   scenarioRuns,
   user,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import {
   acquireRegistrySweep,
@@ -339,18 +339,18 @@ async function bootstrapBuilderToken(): Promise<string> {
 }
 
 /** The manifest this release publishes. */
-function publishedManifest(): ScenarioManifestV4 {
+function publishedManifest(): ScenarioManifestV5 {
   return manifestFor("Published after the lock");
 }
 
 /** The manifest the staged row already holds and the active run reads. */
-function stagedManifest(): ScenarioManifestV4 {
+function stagedManifest(): ScenarioManifestV5 {
   return manifestFor("Staged before the lock");
 }
 
-function manifestFor(title: string): ScenarioManifestV4 {
+function manifestFor(title: string): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: SCENARIO_ID,
     name: SCENARIO_ID,
     title,
@@ -377,18 +377,17 @@ function manifestFor(title: string): ScenarioManifestV4 {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
       },
     ],
-  } as ScenarioManifestV4;
+  } as ScenarioManifestV5;
 }
 
 async function publishRequest(input: {
   token: string;
-  manifest: ScenarioManifestV4;
+  manifest: ScenarioManifestV5;
   sessionId?: string;
 }): Promise<Response | null> {
   const form = new FormData();

@@ -9,9 +9,9 @@ import {
 import { and, eq, exists, isNull, sql } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
-  parseBridgeMessageV7,
-  serializeBridgeMessageV7,
-} from "@/control-plane/bridge-v7";
+  parseBridgeMessageV8,
+  serializeBridgeMessageV8,
+} from "@/control-plane/bridge-v8";
 import {
   accessAllowlist,
   agentHosts,
@@ -45,7 +45,7 @@ import {
   resolveScenarioEnabledForHostRole,
 } from "@/lib/scenario-hosts";
 import type {
-  BridgeMessageV7,
+  BridgeMessageV8,
   HostCapabilitiesV2,
   HostDesiredStateV2,
   HostStateReportV2,
@@ -155,9 +155,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    const bridgeMessage = parseBridgeMessageV7(message);
+    const bridgeMessage = parseBridgeMessageV8(message);
     if (bridgeMessage) {
-      await traceOperation("host.bridge.message", () => this.handleBridgeMessageV7(ws, attachment, bridgeMessage), { "intar.bridge.message_type": bridgeMessage.type });
+      await traceOperation("host.bridge.message", () => this.handleBridgeMessageV8(ws, attachment, bridgeMessage), { "intar.bridge.message_type": bridgeMessage.type });
       return;
     }
 
@@ -472,10 +472,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
   }
 
-  private async handleBridgeMessageV7(
+  private async handleBridgeMessageV8(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: BridgeMessageV7,
+    message: BridgeMessageV8,
   ): Promise<void> {
     if (message.type === "client_hello") {
       await this.withClientHelloLock(() =>
@@ -568,7 +568,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
   private async handleBridgeClientHello(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: Extract<BridgeMessageV7, { type: "client_hello" }>,
+    message: Extract<BridgeMessageV8, { type: "client_hello" }>,
   ): Promise<void> {
     if (message.host_id !== attachment.hostId) {
       try {
@@ -766,7 +766,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       // server_hello must be the first server message on a v6 connection.
       ws.serializeAttachment(nextAttachment);
       ws.send(
-        serializeBridgeMessageV7({
+        serializeBridgeMessageV8({
           type: "server_hello",
           protocol_version: message.protocol_version,
           host_id: message.host_id,
@@ -818,9 +818,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string,
     state: HostDesiredStateV2,
   ): Promise<void> {
-    const serialized = serializeBridgeMessageV7({
+    const serialized = serializeBridgeMessageV8({
       type: "desired_state",
-      protocol_version: 7,
+      protocol_version: 8,
       host_id: hostId,
       desired_state: state,
     });
@@ -835,7 +835,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
   private async applyBridgeStateReport(
     hostId: string,
-    report: Extract<BridgeMessageV7, { type: "state_report" }>["report"],
+    report: Extract<BridgeMessageV8, { type: "state_report" }>["report"],
     expectedSessionId: string,
   ): Promise<void> {
     const db = drizzle(this.env.DB);
@@ -978,7 +978,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
   private async applyBridgeVmReport(
     hostId: string,
-    report: Extract<BridgeMessageV7, { type: "vm_report" }>["report"],
+    report: Extract<BridgeMessageV8, { type: "vm_report" }>["report"],
     expectedSessionId: string,
   ): Promise<void> {
     const projectionOutcome = await this.withRunProjectionLock(
@@ -1221,7 +1221,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
   private async applyBridgeBuildReport(
     hostId: string,
-    report: Extract<BridgeMessageV7, { type: "build_report" }>["report"],
+    report: Extract<BridgeMessageV8, { type: "build_report" }>["report"],
     expectedSessionId: string,
   ): Promise<void> {
     const db = drizzle(this.env.DB);

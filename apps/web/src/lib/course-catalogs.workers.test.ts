@@ -18,7 +18,7 @@ import {
   type CourseCatalogLectureV2,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import type { ScenarioBriefing } from "@/lib/scenario-model";
 import {
   applyLectureBriefingPresentation,
@@ -628,7 +628,7 @@ describe("V2 course catalogs", () => {
       estimatedMinutes: 42,
     });
     const manifest = {
-      schema_version: 4,
+      schema_version: 5,
       scenario_id: "task",
       name: "task",
       title: "Technical title",
@@ -641,7 +641,7 @@ describe("V2 course catalogs", () => {
       solution_markdown: "Technical solution",
       hints: [],
       vms: [],
-    } satisfies ScenarioManifestV4;
+    } satisfies ScenarioManifestV5;
     const scenarioPresentation = {
       title: "Technical title",
       tagline: "Technical description",

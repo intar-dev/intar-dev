@@ -275,16 +275,33 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
     };
 
     let cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
+        cpu_millis: 2_000,
         name: "vm-demo",
         cmdline,
         paths: &paths,
-        vcpus: 2,
         memory_mib: 768,
         tap: "intar-tap0",
         mac: "02:00:00:00:00:01",
         kino_vsock_cid: 10_042,
     })
     .expect("vm config should render");
+
+    for (cpu_millis, expected) in [(125, None), (500, None), (1000, None), (1500, Some(2))] {
+        let config = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
+            cpu_millis,
+            name: "vm-demo",
+            cmdline,
+            paths: &paths,
+            memory_mib: 768,
+            tap: "intar-tap0",
+            mac: "02:00:00:00:00:01",
+            kino_vsock_cid: 10_042,
+        })
+        .expect("CPU configuration");
+        assert_eq!(config.cpus.as_ref().map(|cpus| cpus.boot_vcpus), expected);
+        let json = serde_json::to_value(config).expect("serialize CPU configuration");
+        assert_eq!(json.get("cpus").is_some(), expected.is_some());
+    }
 
     assert_eq!(cfg.landlock_enable, Some(true));
     assert_eq!(cfg.payload.firmware, None);

@@ -13,18 +13,17 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use futures_util::{Sink, SinkExt, StreamExt, future::join_all};
 use intar_contracts::bridge::{
-    BRIDGE_PROTOCOL_VERSION, BridgeMessageV7, CachedGuestToolsStateV1, CachedImageStateV1,
-    ClientHelloV7, DesiredStateV7, DesiredVmPhase, DesiredVmV2, HOST_DESIRED_STATE_SCHEMA_VERSION,
+    BRIDGE_PROTOCOL_VERSION, BridgeMessageV8, CachedGuestToolsStateV1, CachedImageStateV1,
+    ClientHelloV8, DesiredStateV8, DesiredVmPhase, DesiredVmV2, HOST_DESIRED_STATE_SCHEMA_VERSION,
     HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
-    HostRoleV1, HostStateReportV2, ImageCachePhase, StateReportV7, SyncRequestReason,
-    SyncRequestV7, VM_REPORT_SCHEMA_VERSION, VmActualStateV2, VmArchivePhase, VmArchiveStateV1,
+    HostRoleV1, HostStateReportV2, ImageCachePhase, StateReportV8, SyncRequestReason,
+    SyncRequestV8, VM_REPORT_SCHEMA_VERSION, VmActualStateV2, VmArchivePhase, VmArchiveStateV1,
     VmGuestToolsStateV1, VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV2,
-    VmReportV7, VmResourceStateV2, VmResourcesV2, VmRuntimeConstraintPhaseV1,
-    VmRuntimeConstraintsV1, VmSandboxStateV1, VmTerminalStateKindV1, VmTerminalStateV1,
-    VmTerminalTargetV1,
+    VmReportV8, VmResourceStateV3, VmResourcesV3, VmRuntimeConstraintsV2, VmSandboxStateV1,
+    VmTerminalStateKindV1, VmTerminalStateV1, VmTerminalTargetV1,
 };
 use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
-use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmCpuPhase, VmInspection};
+use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmInspection};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc, watch};
@@ -87,9 +86,9 @@ impl BridgeReportCache {
 
 #[derive(Clone)]
 struct BridgeOutbound {
-    urgent: mpsc::Sender<BridgeMessageV7>,
-    inventory: mpsc::Sender<BridgeMessageV7>,
-    normal: mpsc::Sender<BridgeMessageV7>,
+    urgent: mpsc::Sender<BridgeMessageV8>,
+    inventory: mpsc::Sender<BridgeMessageV8>,
+    normal: mpsc::Sender<BridgeMessageV8>,
 }
 
 #[derive(Clone)]
@@ -201,7 +200,7 @@ async fn connect_once(
     let hello_capabilities = collect_host_capabilities(hello_jailer.as_ref());
     send_bridge_message(
         &mut write,
-        &BridgeMessageV7::ClientHello(ClientHelloV7 {
+        &BridgeMessageV8::ClientHello(ClientHelloV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.host_id.clone(),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -221,7 +220,7 @@ async fn connect_once(
             if let Some(message) = parse_bridge_message(message)? {
                 validate_bridge_message(&message, &cfg.host_id)?;
                 match message {
-                    BridgeMessageV7::ServerHello(server_hello) => break Ok(server_hello),
+                    BridgeMessageV8::ServerHello(server_hello) => break Ok(server_hello),
                     other => {
                         anyhow::bail!("expected server_hello, got {}", bridge_message_type(&other))
                     }
@@ -448,17 +447,17 @@ async fn connect_once(
 }
 
 async fn handle_server_message(
-    outbound: &mpsc::Sender<BridgeMessageV7>,
+    outbound: &mpsc::Sender<BridgeMessageV8>,
     sources: &BridgeReportSources,
     current_desired_state: &mut Option<HostDesiredStateV2>,
     desired_state_tx: &watch::Sender<Option<HostDesiredStateV2>>,
-    message: BridgeMessageV7,
+    message: BridgeMessageV8,
 ) -> Result<()> {
     let cfg = &sources.cfg;
     let vm = &sources.vm;
     let db = &sources.db;
     match message {
-        BridgeMessageV7::DesiredState(message) => {
+        BridgeMessageV8::DesiredState(message) => {
             let desired_state = message.desired_state.clone();
             if desired_state_is_stale(current_desired_state.as_ref(), &desired_state) {
                 let current_version = current_desired_state
@@ -488,16 +487,16 @@ async fn handle_server_message(
             }
             send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV7::SyncRequest(_) => {
+        BridgeMessageV8::SyncRequest(_) => {
             send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV7::ServerHello(_) => {
+        BridgeMessageV8::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
         }
-        BridgeMessageV7::ClientHello(_)
-        | BridgeMessageV7::StateReport(_)
-        | BridgeMessageV7::VmReport(_)
-        | BridgeMessageV7::BuildReport(_) => {
+        BridgeMessageV8::ClientHello(_)
+        | BridgeMessageV8::StateReport(_)
+        | BridgeMessageV8::VmReport(_)
+        | BridgeMessageV8::BuildReport(_) => {
             anyhow::bail!("server sent agent-originated bridge message");
         }
     }
@@ -621,7 +620,7 @@ async fn apply_cached_desired_state(
     let failure_reports = apply_desired_state(
         cfg,
         vm,
-        &DesiredStateV7 {
+        &DesiredStateV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.host_id.clone(),
             desired_state,
@@ -657,7 +656,7 @@ async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV2) -> Res
 async fn apply_desired_state(
     cfg: &BridgeConfig,
     vm: &VmManager,
-    message: &DesiredStateV7,
+    message: &DesiredStateV8,
 ) -> Result<Vec<VmReportV2>> {
     validate_desired_state(&cfg.host_id, &message.desired_state)?;
     let desired = &message.desired_state;

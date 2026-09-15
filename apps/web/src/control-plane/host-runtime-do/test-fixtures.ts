@@ -20,7 +20,7 @@ import {
 import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import type {
-  BridgeMessageV7,
+  BridgeMessageV8,
   DesiredVmV2,
   HostStateReportV2,
   VmActualStateV2,
@@ -68,7 +68,7 @@ export {
   startScenarioRunForUser,
 };
 export type {
-  BridgeMessageV7,
+  BridgeMessageV8,
   DesiredVmV2,
   HostStateReportV2,
   VmActualStateV2,
@@ -109,7 +109,6 @@ export function desiredRunningVm(
     guest_tools: testGuestTools,
     resources: {
       cpu_millis: 1_000,
-      vcpu_count: 1,
       memory_mib: 512,
       disk_mib: 4_096,
     },
@@ -152,7 +151,7 @@ export async function connectHost(
   hostId: string,
   options?: { lastAppliedDesiredVersion?: number | null },
 ): Promise<{
-  messages: BridgeMessageV7[];
+  messages: BridgeMessageV8[];
   stub: DurableObjectStub;
   ws: WebSocket;
 }> {
@@ -210,11 +209,11 @@ export async function connectHost(
   if (!ws) {
     throw new Error("missing websocket");
   }
-  const messages: BridgeMessageV7[] = [];
+  const messages: BridgeMessageV8[] = [];
   ws.accept();
   ws.addEventListener("message", (event) => {
     if (typeof event.data === "string") {
-      messages.push(JSON.parse(event.data) as BridgeMessageV7);
+      messages.push(JSON.parse(event.data) as BridgeMessageV8);
     }
   });
   ws.send(JSON.stringify(clientHello(hostId, options)));
@@ -259,10 +258,10 @@ export async function betaAdmissionForHostFixture(
 export function clientHello(
   hostId: string,
   options?: { lastAppliedDesiredVersion?: number | null },
-): Extract<BridgeMessageV7, { type: "client_hello" }> {
-  const message: Extract<BridgeMessageV7, { type: "client_hello" }> = {
+): Extract<BridgeMessageV8, { type: "client_hello" }> {
+  const message: Extract<BridgeMessageV8, { type: "client_hello" }> = {
     type: "client_hello",
-    protocol_version: 7,
+    protocol_version: 8,
     host_id: hostId,
     agent_version: "test-agent",
     role: "agent",
@@ -270,8 +269,6 @@ export function clientHello(
       arch: "x86_64",
       cloud_hypervisor_sha256:
         "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      boot_cpu_millis: 2_000,
-      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
@@ -280,7 +277,6 @@ export function clientHello(
       supports_jailer_v3: true,
       supports_raw_chunks_v1: true,
       supports_scenario_guest_tools_v1: true,
-      supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
       supports_hard_cpu_quota: true,
@@ -297,15 +293,15 @@ export function clientHello(
   return message;
 }
 
-export function sendBridge(ws: WebSocket, message: BridgeMessageV7): void {
+export function sendBridge(ws: WebSocket, message: BridgeMessageV8): void {
   ws.send(JSON.stringify(message));
 }
 
 export async function waitForBridgeMessage(
-  messages: BridgeMessageV7[],
-  predicate: (message: BridgeMessageV7) => boolean,
+  messages: BridgeMessageV8[],
+  predicate: (message: BridgeMessageV8) => boolean,
   timeoutMs = 1_000,
-): Promise<BridgeMessageV7> {
+): Promise<BridgeMessageV8> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
     const match = messages.find(predicate);
@@ -334,8 +330,8 @@ export async function runNextScheduledAlarm(
 }
 
 export async function waitForMessageCount(
-  messages: BridgeMessageV7[],
-  predicate: (message: BridgeMessageV7) => boolean,
+  messages: BridgeMessageV8[],
+  predicate: (message: BridgeMessageV8) => boolean,
   expected: number,
   timeoutMs = 1_000,
 ): Promise<number> {
@@ -451,7 +447,6 @@ export async function seedRun(input: {
         imageSha256: "2".repeat(64),
         resources: {
           cpuMillis: 1_000,
-          vcpuCount: 1,
           memoryMib: 512,
           diskMib: 4096,
         },
@@ -564,7 +559,6 @@ export async function seedEnabledScenario(
     initrdSha256: "b".repeat(64),
     bootCmdline: "root=/dev/vda rw",
     cpuMillis: 125,
-    vcpuCount: 1,
     memoryMib: 512,
     diskMib: 4096,
   });
@@ -579,10 +573,10 @@ export function stateReport(
     vms?: HostStateReportV2["vms"];
     schedulableCpuMillis?: number;
   },
-): BridgeMessageV7 {
+): BridgeMessageV8 {
   return {
     type: "state_report",
-    protocol_version: 7,
+    protocol_version: 8,
     host_id: hostId,
     report: {
       schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
@@ -604,8 +598,6 @@ export function stateReport(
         arch: "x86_64",
         cloud_hypervisor_sha256:
           "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-        boot_cpu_millis: 2_000,
-        boot_cpu_lease_ms: 45_000,
         supports_kvm: true,
         supports_vsock: true,
         supports_reflink: true,
@@ -614,7 +606,6 @@ export function stateReport(
         supports_jailer_v3: true,
         supports_raw_chunks_v1: true,
         supports_scenario_guest_tools_v1: true,
-        supports_boot_cpu_lease: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
         supports_hard_cpu_quota: true,
@@ -645,9 +636,7 @@ export function actualVm(
     },
     runtime_constraints: {
       generation: `generation-${vmName}`,
-      phase: "steady",
-      steady_cpu_millis: 1_000,
-      effective_cpu_millis: 1_000,
+      cpu_millis: 1_000,
       quota_verified_at_unix_ms: observedAt,
     },
     ssh_host_keys_openssh: [],
@@ -664,15 +653,15 @@ export function vmReport(
   observedAt: number,
   sshHostPort: number,
   guestIp: string,
-): BridgeMessageV7 {
+): BridgeMessageV8 {
   const terminalReady = phase === "ready" || phase === "solved";
   const terminalFailed = phase === "failed";
   return {
     type: "vm_report",
-    protocol_version: 7,
+    protocol_version: 8,
     host_id: hostId,
     report: {
-      schema_version: 4,
+      schema_version: 5,
       host_id: hostId,
       run_id: runId,
       vm_name: vmName,
@@ -703,12 +692,10 @@ export function vmReport(
       },
       runtime_constraints: {
         generation: `generation-${vmName}`,
-        phase: terminalReady ? "steady" : "boot_burst",
-        steady_cpu_millis: 1_000,
-        effective_cpu_millis: terminalReady ? 1_000 : 2_000,
+        cpu_millis: 1_000,
         ...(terminalReady
           ? { quota_verified_at_unix_ms: observedAt - 1 }
-          : { lease_expires_at_unix_ms: observedAt + 45_000 }),
+          : {}),
       },
       ssh_host_keys_openssh: [
         `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${vmName} host-key`,

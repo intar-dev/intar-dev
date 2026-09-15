@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use cloud_hypervisor_client::{
-    Client as CloudHypervisorClient, ConsoleConfig, CpusConfig, DiskConfig, DiskImageType,
+    Client as CloudHypervisorClient, ConsoleConfig, DiskConfig, DiskImageType,
     Error as CloudHypervisorError, MemoryConfig, NetConfig, PayloadConfig, SerialConfig, VmConfig,
     VmInfo, VmState, VsockConfig,
 };
@@ -39,7 +39,7 @@ use super::{
     ATTESTATION_FILE, ATTESTATION_VERSION, SELF_TEST_CPU_MILLIS, SELF_TEST_CPU_PERIOD_US,
     SELF_TEST_CPU_QUOTA_US, SELF_TEST_RESOURCE_HEADROOM_MIB, SELF_TEST_SATURATION_CPU_MILLIS,
     SELF_TEST_SATURATION_VM_COUNT, SELF_TEST_VM_MEMORY_MIB, SelfTestArtifacts,
-    SelfTestAttestationV2, VerifiedArtifact,
+    SelfTestAttestationV3, VerifiedArtifact,
 };
 use crate::network::{
     add_host_visible_namespace, checked_host_mount_ip, delete_host_visible_namespace,
@@ -127,7 +127,7 @@ impl Drop for Cleanup {
 pub(super) fn run(
     config: &JailerdConfig,
     artifacts: &SelfTestArtifacts,
-) -> Result<SelfTestAttestationV2> {
+) -> Result<SelfTestAttestationV3> {
     // Artifact hashing is performed even before the disposable host proof
     // so a release job cannot accidentally attest a different smoke image.
     let artifact_root = verify_artifacts(artifacts)?;
@@ -138,17 +138,13 @@ fn run_inner(
     config: &JailerdConfig,
     artifacts: &SelfTestArtifacts,
     artifact_root: &Path,
-) -> Result<SelfTestAttestationV2> {
+) -> Result<SelfTestAttestationV3> {
     require_root()?;
     crate::require_supervisor_process_inspection_capability()
         .context("prove cross-UID VMM executable inspection capability")?;
     config
         .validate()
         .context("validate jailerd configuration")?;
-    ensure!(
-        config.boot_cpu_millis > SELF_TEST_CPU_MILLIS,
-        "privileged self-test requires a boot CPU quota above the 125m steady quota"
-    );
     ensure!(
         config.netns_root == Path::new("/run/netns"),
         "self-test requires netns_root=/run/netns"
@@ -274,7 +270,7 @@ fn run_inner(
         &allowed_dir,
         &denied_path,
         &config.netns_root.join(&namespace_name),
-        config.boot_cpu_millis,
+        SELF_TEST_CPU_MILLIS,
     )?;
     cleanup.unit_name = Some(unit_name.clone());
 
@@ -298,10 +294,8 @@ fn run_inner(
     );
 
     let cgroup_directory = cgroup_directory(&unit.control_group)?;
-    assert_cpu_quota_millis(&cgroup_directory, config.boot_cpu_millis)
+    assert_cpu_quota_millis(&cgroup_directory, SELF_TEST_CPU_MILLIS)
         .context("verify privileged self-test boot CPU quota")?;
-    update_worker_cpu_quota(&unit_name, SELF_TEST_CPU_MILLIS)
-        .context("lower privileged self-test to steady CPU quota")?;
     assert_cpu_quota(&cgroup_directory)?;
     wait_for_throttling(&cgroup_directory, Duration::from_secs(5))?;
     ensure_unit_tasks_accounted(&unit, &cgroup_directory)?;
@@ -343,7 +337,7 @@ fn run_inner(
         }
     }
 
-    let attestation = SelfTestAttestationV2 {
+    let attestation = SelfTestAttestationV3 {
         version: ATTESTATION_VERSION,
         config_runtime_fingerprint_sha256,
         cloud_hypervisor_sha256: actual_runtime_sha256,
@@ -355,7 +349,7 @@ fn run_inner(
         landlock_abi: worker_report.landlock_abi,
         quota_verified: true,
         burst_verified: true,
-        boot_quota_transition_verified: true,
+        startup_quota_verified: true,
         network_verified: true,
         landlock_negative_access: true,
         kvm_accounting_proven: true,
@@ -370,7 +364,7 @@ fn run_inner(
     Ok(attestation)
 }
 
-pub(super) fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV2>> {
+pub(super) fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV3>> {
     config
         .validate()
         .context("validate jailerd configuration")?;
@@ -394,7 +388,7 @@ pub(super) fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAtt
         bytes.len() as u64 <= MAX_ATTESTATION_BYTES,
         "self-test attestation exceeds 64 KiB"
     );
-    let attestation: SelfTestAttestationV2 =
+    let attestation: SelfTestAttestationV3 =
         serde_json::from_slice(&bytes).context("parse self-test attestation")?;
     validate_attestation(&attestation)?;
 
@@ -528,7 +522,7 @@ pub(super) fn worker(report: &Path, allowed_dir: &Path, denied_path: &Path) -> R
 
     // Keep the KVM VM and vCPU descriptors alive while the parent proves
     // cgroup membership.  A deterministic busy loop must trigger the hard
-    // 125-millicore throttle before the worker exits.
+    // 500-millicore throttle before the worker exits.
     let deadline = Instant::now() + Duration::from_secs(WORKER_SECONDS);
     let mut accumulator = 0_u64;
     while Instant::now() < deadline {

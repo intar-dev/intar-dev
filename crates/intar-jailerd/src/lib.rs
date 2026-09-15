@@ -22,7 +22,7 @@ use intar_jailer_protocol::{
     LaunchVmV2Request, LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT,
     PROTOCOL_VERSION, PrepareChunkedImageV3Request, PrepareImageV2Request, PreparedImageV2Result,
     PreparedImageV3Result, ProtocolError, Request, RequestClass, Response, RunNetworkResult,
-    SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase, VmCpuRuntimeState,
+    SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuRuntimeState,
     VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use rustix::fs::{Mode, OFlags, open};
@@ -44,8 +44,6 @@ pub mod self_test;
 const CAP_SYS_PTRACE_BIT: u32 = 19;
 #[cfg(target_os = "linux")]
 const VMM_START_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(target_os = "linux")]
-const BOOT_CPU_GUARDIAN_START_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A launch description which maps directly to a systemd transient service.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,8 +55,6 @@ pub struct UnitLaunchSpec {
     pub jail_spec_path: PathBuf,
     pub api_socket_path: PathBuf,
     pub cpu_quota: CpuQuota,
-    pub steady_cpu_quota: CpuQuota,
-    pub boot_cpu_lease_ms: Option<u64>,
     /// Exact identity of the template-backed Cloud Hypervisor clone. V2
     /// launches use this for the one launch-time process check; recovery and
     /// periodic inspection deliberately retain full digest verification.
@@ -66,53 +62,6 @@ pub struct UnitLaunchSpec {
     pub uid: u32,
     pub gid: u32,
     pub device_allow: Vec<&'static str>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BootCpuGuardianRequest {
-    generation: ValidatedId,
-    unit_name: String,
-    steady_quota: CpuQuota,
-    deadline_uptime_millis: u64,
-}
-
-impl BootCpuGuardianRequest {
-    pub fn new(
-        generation: ValidatedId,
-        unit_name: String,
-        steady_quota: CpuQuota,
-        deadline_uptime_millis: u64,
-    ) -> Result<Self> {
-        let expected_unit_name = vm_unit_name(&generation);
-        if unit_name != expected_unit_name {
-            bail!("boot CPU guardian unit mismatch: expected {expected_unit_name}, got {unit_name}")
-        }
-        if deadline_uptime_millis == 0 {
-            bail!("boot CPU guardian deadline must be positive")
-        }
-        Ok(Self {
-            generation,
-            unit_name,
-            steady_quota,
-            deadline_uptime_millis,
-        })
-    }
-
-    pub fn generation(&self) -> &ValidatedId {
-        &self.generation
-    }
-
-    pub fn unit_name(&self) -> &str {
-        &self.unit_name
-    }
-
-    pub fn steady_quota(&self) -> CpuQuota {
-        self.steady_quota
-    }
-
-    pub fn deadline_uptime_millis(&self) -> u64 {
-        self.deadline_uptime_millis
-    }
 }
 
 mod systemd_backend;
@@ -136,7 +85,7 @@ impl UnitLaunchSpec {
     /// Properties required on the transient unit. Backends must apply all of
     /// them atomically or fail the launch.
     pub fn required_properties(&self) -> BTreeMap<&'static str, String> {
-        let mut properties = BTreeMap::from([
+        BTreeMap::from([
             ("Slice", "intar-vms.slice".to_owned()),
             (
                 "CPUQuotaPerSecUSec",
@@ -153,11 +102,7 @@ impl UnitLaunchSpec {
             ("LimitRTPRIO", "0".to_owned()),
             ("DevicePolicy", "closed".to_owned()),
             ("NoNewPrivileges", "no".to_owned()),
-        ]);
-        if self.boot_cpu_lease_ms.is_some() {
-            properties.insert("BindsTo", boot_cpu_guardian_unit_name(&self.generation));
-        }
-        properties
+        ])
     }
 }
 
@@ -196,7 +141,7 @@ pub trait HostBackend: Send {
     fn inspect_unit(&mut self, unit_name: &str) -> Result<BackendInspection>;
     /// Atomically update the unit quota and read back both `cpu.max` and
     /// `cpu.max.burst`. Success is a privileged live attestation.
-    fn update_unit_cpu_quota(
+    fn verify_unit_cpu_quota(
         &mut self,
         unit_name: &str,
         cgroup_path: &Path,
@@ -259,13 +204,10 @@ pub struct SystemdHostBackend {
     network: Arc<Mutex<NetworkManager>>,
     system_bus: zbus::blocking::Connection,
     cloud_hypervisor_sha256: Sha256Digest,
-    guardian_binary: PathBuf,
     landlock_attested: bool,
 }
 
 mod host_validation;
-#[cfg(target_os = "linux")]
-pub use host_validation::run_boot_cpu_guardian;
 #[cfg(any(target_os = "linux", test))]
 use host_validation::*;
 #[derive(Clone, Debug)]
@@ -397,7 +339,7 @@ pub struct FileSystemJailPreparer {
 
 mod jail_preparer;
 use jail_preparer::*;
-const VM_RECORD_METADATA_VERSION: u16 = 2;
+const VM_RECORD_METADATA_VERSION: u16 = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -410,21 +352,10 @@ pub struct VmRecord {
     unit_name: String,
     uid: u32,
     gid: u32,
-    #[serde(rename = "steady_quota")]
     quota: CpuQuota,
-    effective_quota: CpuQuota,
-    cpu_phase: VmCpuPhase,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    boot_deadline_unix_ms: Option<u64>,
-    /// Same-daemon hard deadline for live lease enforcement. This is runtime
-    /// state only: the Unix deadline remains the durable/reporting identity,
-    /// while recovery seals every reattached boot-phase record immediately.
-    #[serde(skip)]
-    boot_deadline_monotonic: Option<Instant>,
     #[serde(deserialize_with = "deserialize_required_option")]
     quota_attestation: Option<CpuQuotaAttestation>,
     ssh_forward_active: bool,
-    vcpu_count: u16,
     paths: JailPathMap,
     cgroup_path: Option<PathBuf>,
     netns_name: String,
@@ -436,55 +367,21 @@ pub struct VmRecord {
 
 #[derive(Debug, Error)]
 #[error(
-    "boot CPU capacity pending: committed={committed} requested={requested} steady={steady} schedulable={schedulable}"
+    "CPU capacity exhausted: committed={committed} requested={requested} schedulable={schedulable}"
 )]
-struct BootCapacityPendingError {
+struct CpuCapacityExhaustedError {
     committed: u64,
     requested: u32,
-    steady: u32,
     schedulable: u64,
 }
 
 impl VmRecord {
-    fn effective_quota(&self) -> CpuQuota {
-        self.effective_quota
-    }
-
     fn cpu_runtime(&self) -> VmCpuRuntimeState {
         VmCpuRuntimeState {
-            phase: self.cpu_phase,
-            steady_quota: self.quota,
-            effective_quota: self.effective_quota(),
-            boot_deadline_unix_ms: self.boot_deadline_unix_ms,
+            quota: self.quota,
             attestation: self.quota_attestation.clone(),
         }
     }
-}
-
-fn remaining_boot_cpu_lease_ms(deadline: Instant, now: Instant) -> Result<u64> {
-    let remaining = deadline
-        .checked_duration_since(now)
-        .filter(|remaining| !remaining.is_zero())
-        .context("boot CPU lease expired before transient unit start")?;
-    let remaining_ms = u64::try_from(remaining.as_millis())
-        .context("remaining boot CPU lease milliseconds overflow")?;
-    ensure!(
-        remaining_ms > 0,
-        "boot CPU lease expired before transient unit start"
-    );
-    Ok(remaining_ms)
-}
-
-fn boot_cpu_lease_expired(
-    monotonic_deadline: Option<Instant>,
-    unix_deadline_ms: Option<u64>,
-    monotonic_now: Instant,
-    unix_now_ms: u64,
-) -> bool {
-    monotonic_deadline.map_or_else(
-        || unix_deadline_ms.is_some_and(|deadline| deadline <= unix_now_ms),
-        |deadline| deadline <= monotonic_now,
-    )
 }
 
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -536,9 +433,6 @@ struct LaunchReservation {
     uid: u32,
     gid: u32,
     quota: CpuQuota,
-    effective_quota: CpuQuota,
-    boot_deadline_unix_ms: u64,
-    boot_deadline_monotonic: Instant,
 }
 
 pub struct JailerdCore<B, P> {
@@ -704,7 +598,7 @@ impl HostReadiness {
             privileged_self_test_passed: self_test.as_ref().is_some_and(|value| {
                 value.quota_verified
                     && value.burst_verified
-                    && value.boot_quota_transition_verified
+                    && value.startup_quota_verified
                     && value.network_verified
                     && value.landlock_negative_access
                     && value.cloud_hypervisor_lifecycle_verified
@@ -727,7 +621,7 @@ mod core_lifecycle;
 /// Execute a V2 launch without holding the lifecycle-state mutex across
 /// template validation, generation staging, networking, systemd activation,
 /// or VMM readiness polling. Admission and completion remain short,
-/// generation-fenced critical sections, and the boot quota is charged for the
+/// generation-fenced critical sections, and the declared quota is charged for the
 /// entire unlocked interval.
 #[tracing::instrument(name = "vm.launch_v2", skip_all)]
 pub fn launch_vm_v2_response<B, P>(
@@ -1032,8 +926,8 @@ fn validate_protocol_request(request: &Request) -> Result<()> {
 }
 
 fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str {
-    if error.downcast_ref::<BootCapacityPendingError>().is_some() {
-        "boot_capacity_pending"
+    if error.downcast_ref::<CpuCapacityExhaustedError>().is_some() {
+        "cpu_capacity_exhausted"
     } else if error.downcast_ref::<PrepareDeferred>().is_some() {
         // The coordinator requeues this work. It is not a failure.
         "image_prepare_requeued"

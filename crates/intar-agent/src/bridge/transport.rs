@@ -49,7 +49,7 @@ pub(super) fn default_ws_url(base_url: &str, host_id: &str) -> String {
     format!("{ws_base}/api/agent/bridge/{host_id}")
 }
 
-pub(super) async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV7) -> Result<()>
+pub(super) async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV8) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
@@ -61,7 +61,7 @@ where
         .context("failed to send bridge websocket message")
 }
 
-pub(super) fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV7>> {
+pub(super) fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV8>> {
     match message {
         Message::Text(raw) => parse_bridge_json(&raw).map(Some),
         Message::Binary(raw) => {
@@ -75,18 +75,18 @@ pub(super) fn parse_bridge_message(message: Message) -> Result<Option<BridgeMess
     }
 }
 
-pub(super) fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV7> {
+pub(super) fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV8> {
     let message =
-        serde_json::from_str::<BridgeMessageV7>(raw).context("invalid bridge v7 JSON message")?;
+        serde_json::from_str::<BridgeMessageV8>(raw).context("invalid bridge v7 JSON message")?;
     if !message_has_v7_protocol(&message) {
-        anyhow::bail!("invalid bridge protocol version; expected v7");
+        anyhow::bail!("invalid bridge protocol version; expected v8");
     }
     Ok(message)
 }
 
-pub(super) fn validate_bridge_message(message: &BridgeMessageV7, host_id: &str) -> Result<()> {
+pub(super) fn validate_bridge_message(message: &BridgeMessageV8, host_id: &str) -> Result<()> {
     if !message_has_v7_protocol(message) {
-        anyhow::bail!("invalid bridge protocol version; expected v7");
+        anyhow::bail!("invalid bridge protocol version; expected v8");
     }
     let message_host_id = bridge_message_host_id(message);
     if message_host_id != host_id {
@@ -118,51 +118,51 @@ pub(super) fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2
     Ok(())
 }
 
-pub(super) fn message_has_v7_protocol(message: &BridgeMessageV7) -> bool {
+pub(super) fn message_has_v7_protocol(message: &BridgeMessageV8) -> bool {
     match message {
-        BridgeMessageV7::ClientHello(message) => {
+        BridgeMessageV8::ClientHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::ServerHello(message) => {
+        BridgeMessageV8::ServerHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::DesiredState(message) => {
+        BridgeMessageV8::DesiredState(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::StateReport(message) => {
+        BridgeMessageV8::StateReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
-        BridgeMessageV7::BuildReport(message) => {
+        BridgeMessageV8::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
+        BridgeMessageV8::BuildReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::SyncRequest(message) => {
+        BridgeMessageV8::SyncRequest(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
     }
 }
 
-pub(super) fn bridge_message_host_id(message: &BridgeMessageV7) -> &str {
+pub(super) fn bridge_message_host_id(message: &BridgeMessageV8) -> &str {
     match message {
-        BridgeMessageV7::ClientHello(message) => &message.host_id,
-        BridgeMessageV7::ServerHello(message) => &message.host_id,
-        BridgeMessageV7::DesiredState(message) => &message.host_id,
-        BridgeMessageV7::StateReport(message) => &message.host_id,
-        BridgeMessageV7::VmReport(message) => &message.host_id,
-        BridgeMessageV7::BuildReport(message) => &message.host_id,
-        BridgeMessageV7::SyncRequest(message) => &message.host_id,
+        BridgeMessageV8::ClientHello(message) => &message.host_id,
+        BridgeMessageV8::ServerHello(message) => &message.host_id,
+        BridgeMessageV8::DesiredState(message) => &message.host_id,
+        BridgeMessageV8::StateReport(message) => &message.host_id,
+        BridgeMessageV8::VmReport(message) => &message.host_id,
+        BridgeMessageV8::BuildReport(message) => &message.host_id,
+        BridgeMessageV8::SyncRequest(message) => &message.host_id,
     }
 }
 
-pub(super) fn bridge_message_type(message: &BridgeMessageV7) -> &'static str {
+pub(super) fn bridge_message_type(message: &BridgeMessageV8) -> &'static str {
     match message {
-        BridgeMessageV7::ClientHello(_) => "client_hello",
-        BridgeMessageV7::ServerHello(_) => "server_hello",
-        BridgeMessageV7::DesiredState(_) => "desired_state",
-        BridgeMessageV7::StateReport(_) => "state_report",
-        BridgeMessageV7::VmReport(_) => "vm_report",
-        BridgeMessageV7::BuildReport(_) => "build_report",
-        BridgeMessageV7::SyncRequest(_) => "sync_request",
+        BridgeMessageV8::ClientHello(_) => "client_hello",
+        BridgeMessageV8::ServerHello(_) => "server_hello",
+        BridgeMessageV8::DesiredState(_) => "desired_state",
+        BridgeMessageV8::StateReport(_) => "state_report",
+        BridgeMessageV8::VmReport(_) => "vm_report",
+        BridgeMessageV8::BuildReport(_) => "build_report",
+        BridgeMessageV8::SyncRequest(_) => "sync_request",
     }
 }
 
@@ -223,10 +223,9 @@ pub(super) fn terminal_identities_match(
     }
 }
 
-pub(super) fn resources_from_desired(resources: &VmResourcesV2) -> CreateVmResources {
+pub(super) fn resources_from_desired(resources: &VmResourcesV3) -> CreateVmResources {
     CreateVmResources {
         cpu_millis: resources.cpu_millis,
-        vcpus: u32::from(resources.vcpu_count),
         memory_mib: resources.memory_mib.0,
         disk_mib: Some(resources.disk_mib.0),
     }

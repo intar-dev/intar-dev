@@ -31,7 +31,7 @@ import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import type {
   ImageArchitecture,
   ImageKey,
-  ScenarioManifestV4,
+  ScenarioManifestV5,
 } from "@/generated/catalog";
 
 /**
@@ -123,7 +123,7 @@ export function bundleObjectKey(rev: string): string {
 
 /** Root members of one published manifest, one per VM. */
 export function manifestImageMembers(
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
   source: ImageRootSource = "live_pointer",
 ): ImageRoot[] {
   const scenarioId = manifest.scenario_id.trim();
@@ -136,12 +136,12 @@ export function manifestImageMembers(
   }));
 }
 
-export function manifestImageIds(manifest: ScenarioManifestV4): string[] {
+export function manifestImageIds(manifest: ScenarioManifestV5): string[] {
   return [...new Set(manifest.vms.map((vm) => vm.image_id))].sort();
 }
 
 export function manifestBootArtifactSha256s(
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
 ): string[] {
   const shas = new Set<string>();
   for (const vm of manifest.vms) {
@@ -152,7 +152,7 @@ export function manifestBootArtifactSha256s(
 }
 
 export function manifestChunkManifestSha256s(
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
 ): string[] {
   return [
     ...new Set(
@@ -1623,8 +1623,8 @@ function buildRunImageIndex(input: {
     initrdSha256: string | null;
   }>;
   snapshotClosures: readonly ImageClosureByIdentity[];
-  candidateRows: ReadonlyArray<{ manifest: ScenarioManifestV4 }>;
-  buildRows: ReadonlyArray<{ manifest: ScenarioManifestV4 | null }>;
+  candidateRows: ReadonlyArray<{ manifest: ScenarioManifestV5 }>;
+  buildRows: ReadonlyArray<{ manifest: ScenarioManifestV5 | null }>;
 }): Map<string, ImageClosureCandidate[]> {
   // Multi-valued: one identity can carry several boot variants, and every one
   // of them is kept.
@@ -1674,8 +1674,8 @@ function buildImageIdIndex(input: {
     kernelSha256: string | null;
     initrdSha256: string | null;
   }>;
-  candidateRows: ReadonlyArray<{ manifest: ScenarioManifestV4 }>;
-  buildRows: ReadonlyArray<{ manifest: ScenarioManifestV4 | null }>;
+  candidateRows: ReadonlyArray<{ manifest: ScenarioManifestV5 }>;
+  buildRows: ReadonlyArray<{ manifest: ScenarioManifestV5 | null }>;
 }): Map<string, Array<{ imageKey: ImageKey; closure: RunImageClosure }>> {
   const index = new Map<
     string,
@@ -1716,7 +1716,7 @@ function buildImageIdIndex(input: {
       initrdSha256: row.initrdSha256,
     });
   }
-  const manifestRows: Array<{ manifest: ScenarioManifestV4 | null }> = [
+  const manifestRows: Array<{ manifest: ScenarioManifestV5 | null }> = [
     ...input.candidateRows,
     ...input.buildRows,
   ];
@@ -1738,7 +1738,7 @@ function buildImageIdIndex(input: {
 }
 function addManifestClosures(
   index: Map<string, ImageClosureCandidate[]>,
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
 ): void {
   const vms = manifest?.vms;
   if (!Array.isArray(vms)) return;

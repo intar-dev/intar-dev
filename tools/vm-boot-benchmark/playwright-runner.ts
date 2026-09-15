@@ -413,7 +413,7 @@ function observeScenarioStart(
       const code = typeof record?.code === "string" ? record.code : null;
       if (
         response.status() === 409 &&
-        (code === "boot_capacity_pending" || code === "runtime_allocation_busy")
+        (code === "cpu_capacity_exhausted" || code === "runtime_allocation_busy")
       ) {
         return;
       }

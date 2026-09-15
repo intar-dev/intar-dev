@@ -120,8 +120,8 @@ work_dir = "/var/cache/intar-agent"
 
 [vm_defaults.resources]
 # Fallback topology for local requests. Scenario manifests carry their own
-# cpu_millis and vcpu_count values.
-vcpus = 1
+# cpu_millis values.
+cpu_millis = 1000
 memory_mib = 512
 
 [vm_defaults.network]
@@ -148,28 +148,37 @@ Cloud Hypervisor v53.0 path and SHA-256 belong only in the root-owned
 
 ## Scenario CPU resources
 
-Scenario HCL separates its aggregate CPU ceiling from guest topology:
+Scenario authors set one CPU-time limit:
 
 ```hcl
-cpu = 0.125
-# Optional; defaults to ceil(cpu), minimum 1.
-vcpus = 1
+cpu = 0.5
 ```
 
-`cpu` is exact fixed-point millicores: positive integer or decimal literals
-with at most three fractional digits are accepted. Thus `0.125` becomes 125
-millicores and `2` remains 2000 millicores. Zero, exponent notation, excess
-precision, and values greater than `vcpus * 1000` millicores are rejected.
-Catalog manifests use V4 (`cpu_millis`, `vcpu_count`) and the coordinated bridge
-uses V6 with V2 desired-state/resource/report documents. No old-version shim is
-provided. Jailerd capacity-accounts `max(2000m, steady_cpu_millis)` and applies
-that aggregate VMM quota for at most 45 seconds without changing guest vCPU
-topology, then a root-owned generation-bound guardian seals the VM to steady
-CPU without exposing ingress. Separately, agent runtime readiness scales its
-wall-clock timeout inversely from the steady CPU contract, capped at 360
-seconds. A `cpu = 0.125` VM may therefore wait 360 seconds for Kino, but it uses
-the 2000-millicore boot allocation only for the first 45 seconds and then runs
-at 125 millicores. Later finalization requires an attested steady quota before
-ingress can open. See
-[Scenario Host Jailer](../../docs/src/content/docs/operations/scenario-host-jailer.md) for the privileged
-configuration and drain-first host operations.
+`cpu` uses exact fixed-point millicores. Positive integer or ordinary decimal
+literals with up to three fractional digits are accepted; `0.5` means 500
+millicores. The former `vcpus` setting is rejected. Intar derives the guest CPU
+count as `ceil(cpu)`, with a minimum of one. For limits up to one CPU, the
+Cloud Hypervisor API configuration omits `cpus` and uses its one-vCPU default.
+Larger limits set the derived guest CPU count internally.
+
+Jailerd applies one hard limit to the complete VMM process group before VM
+boot. With a 100 ms period, `cpu = 0.5` gives `cpu.max = 50000 100000` and
+`cpu.max.burst = 0`. The same limit applies until shutdown. There is no extra
+boot CPU allocation. Two 500-millicore VMs reserve 1000 millicores, including
+while both boot. Linux shares host CPU time; guest vCPU count does not reserve
+host cores. A limit is a ceiling, not a minimum-service guarantee.
+
+Jailerd retains the global 1000-millicore host reserve. Both local and control
+plane admission charge the declared limit before launch and retain it until
+VM removal is proven. Additional CPU overcommit is disabled. Production units
+have no CPU pinning; Cloud Hypervisor retains per-VM core scheduling isolation.
+
+Catalog manifests are V5 and carry `cpu_millis`. The bridge envelope is V8;
+desired-state, host-state-report, and VM-report schemas are V5, V6, and V5.
+VM resource objects are V3 and runtime quota evidence is V2. The local jailer
+protocol is V4. Older hosts must be drained and upgraded before scheduling.
+
+Agent readiness deadlines remain bounded to 45–360 seconds according to the
+CPU limit. A slower startup never increases the quota. See
+[Scenario Host Jailer](../../docs/src/content/docs/operations/scenario-host-jailer.md)
+for host verification and upgrades.

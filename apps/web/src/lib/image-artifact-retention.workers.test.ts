@@ -22,7 +22,7 @@ import { HOST_DESIRED_STATE_SCHEMA_VERSION } from "@/generated/constants";
 import type {
   ImageArchitecture,
   ImageKey,
-  ScenarioManifestV4,
+  ScenarioManifestV5,
 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import {
@@ -103,7 +103,7 @@ function manifestFor(image: {
   initrdSha256: string;
 }) {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: SCENARIO_ID,
     name: SCENARIO_ID,
     title: "Broken Nginx",
@@ -130,7 +130,6 @@ function manifestFor(image: {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
@@ -843,9 +842,9 @@ function runManifest(input: {
   scenarioId: string;
   vmName: string;
   image: SeededChunkedImage;
-}): ScenarioManifestV4 {
+}): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: input.scenarioId,
     name: input.scenarioId,
     title: "Run reference",
@@ -876,7 +875,6 @@ function runManifest(input: {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
@@ -987,7 +985,7 @@ async function seedActiveRun(input: {
 
 /** One published build manifest, the audit record of an image. */
 async function seedBuildManifest(input: {
-  manifest: ScenarioManifestV4;
+  manifest: ScenarioManifestV5;
   id: string;
 }): Promise<void> {
   const db = drizzle(env.DB);
@@ -1027,7 +1025,7 @@ async function seedCandidateRow(input: {
   id: string;
   revision: string;
   buildId: string;
-  manifest: ScenarioManifestV4;
+  manifest: ScenarioManifestV5;
 }): Promise<void> {
   const db = drizzle(env.DB);
   const now = Date.now();

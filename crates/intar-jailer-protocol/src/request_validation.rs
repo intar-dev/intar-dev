@@ -12,12 +12,6 @@ impl VmLaunchRequest {
         &self,
         allow_prepared_boot_artifacts: bool,
     ) -> Result<CpuQuota, ValidationError> {
-        if self.vcpu_count == 0 {
-            return Err(ValidationError::ZeroVcpus);
-        }
-        if u64::from(self.cpu_millis) > u64::from(self.vcpu_count) * 1_000 {
-            return Err(ValidationError::QuotaExceedsTopology);
-        }
         if self.memory_mib == 0 {
             return Err(ValidationError::ZeroMemory);
         }

@@ -18,7 +18,7 @@ import {
   type CourseCatalogLectureV2,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { appError } from "@/lib/app-error";
 import type { ScenarioBriefing } from "@/lib/scenario-model";
 
@@ -757,9 +757,9 @@ export function findCourseLecturePresentation(
 
 /** Applies Markdown lecture presentation to a technical scenario manifest. */
 export function applyLecturePresentation(
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
   lecture: LecturePresentation,
-): ScenarioManifestV4 {
+): ScenarioManifestV5 {
   return {
     ...manifest,
     title: lecture.title,

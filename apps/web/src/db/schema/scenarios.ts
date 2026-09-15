@@ -10,7 +10,7 @@ import { sql } from "drizzle-orm";
 import type {
   ImageKey,
   ScenarioHintManifestV3,
-  ScenarioManifestV4,
+  ScenarioManifestV5,
 } from "@/generated/catalog";
 import { organization } from "./core";
 import {
@@ -89,7 +89,7 @@ export const scenarioCatalogCandidates = sqliteTable(
     }),
     scenarioId: text("scenario_id").notNull(),
     buildId: text("build_id").notNull(),
-    manifestJson: jsonText<ScenarioManifestV4>("manifest_json").notNull(),
+    manifestJson: jsonText<ScenarioManifestV5>("manifest_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -130,7 +130,6 @@ export const vmScenarioVms = sqliteTable(
     initrdSha256: text("initrd_sha256").notNull(),
     bootCmdline: text("boot_cmdline").notNull(),
     cpuMillis: integer("cpu_millis").default(1_000).notNull(),
-    vcpuCount: integer("vcpu_count").default(1).notNull(),
     memoryMib: integer("memory_mib").notNull(),
     diskMib: integer("disk_mib").notNull(),
   },

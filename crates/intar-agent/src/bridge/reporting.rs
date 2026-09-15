@@ -2,9 +2,9 @@ use super::*;
 
 pub(super) async fn run_bridge_writer<W>(
     mut write: W,
-    mut urgent: mpsc::Receiver<BridgeMessageV7>,
-    mut inventory: mpsc::Receiver<BridgeMessageV7>,
-    mut normal: mpsc::Receiver<BridgeMessageV7>,
+    mut urgent: mpsc::Receiver<BridgeMessageV8>,
+    mut inventory: mpsc::Receiver<BridgeMessageV8>,
+    mut normal: mpsc::Receiver<BridgeMessageV8>,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
@@ -23,10 +23,10 @@ where
 }
 
 pub(super) async fn next_outbound_message(
-    urgent: &mut mpsc::Receiver<BridgeMessageV7>,
-    inventory: &mut mpsc::Receiver<BridgeMessageV7>,
-    normal: &mut mpsc::Receiver<BridgeMessageV7>,
-) -> Option<BridgeMessageV7> {
+    urgent: &mut mpsc::Receiver<BridgeMessageV8>,
+    inventory: &mut mpsc::Receiver<BridgeMessageV8>,
+    normal: &mut mpsc::Receiver<BridgeMessageV8>,
+) -> Option<BridgeMessageV8> {
     tokio::select! {
         biased;
         message = urgent.recv() => message,
@@ -39,7 +39,7 @@ pub(super) async fn run_inventory_reporter(
     sources: BridgeReportSources,
     mut inventory_updates: watch::Receiver<u64>,
     mut desired_state: watch::Receiver<Option<HostDesiredStateV2>>,
-    outbound: mpsc::Sender<BridgeMessageV7>,
+    outbound: mpsc::Sender<BridgeMessageV8>,
 ) -> Result<()> {
     loop {
         tokio::select! {
@@ -56,8 +56,8 @@ pub(super) async fn run_inventory_reporter(
 }
 
 pub(super) async fn enqueue_bridge_message(
-    outbound: &mpsc::Sender<BridgeMessageV7>,
-    message: BridgeMessageV7,
+    outbound: &mpsc::Sender<BridgeMessageV8>,
+    message: BridgeMessageV8,
 ) -> Result<()> {
     outbound
         .send(message)
@@ -66,7 +66,7 @@ pub(super) async fn enqueue_bridge_message(
 }
 
 pub(super) async fn send_state_report(
-    outbound: &mpsc::Sender<BridgeMessageV7>,
+    outbound: &mpsc::Sender<BridgeMessageV8>,
     sources: &BridgeReportSources,
     desired: Option<&HostDesiredStateV2>,
 ) -> Result<()> {
@@ -82,7 +82,7 @@ pub(super) async fn send_state_report(
     .await;
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV7::StateReport(StateReportV7 {
+        BridgeMessageV8::StateReport(StateReportV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: sources.cfg.host_id.clone(),
             report,
@@ -92,7 +92,7 @@ pub(super) async fn send_state_report(
 }
 
 pub(super) async fn send_inventory_state_report(
-    outbound: &mpsc::Sender<BridgeMessageV7>,
+    outbound: &mpsc::Sender<BridgeMessageV8>,
     sources: &BridgeReportSources,
     desired: Option<&HostDesiredStateV2>,
 ) -> Result<()> {
@@ -112,7 +112,7 @@ pub(super) async fn send_inventory_state_report(
     .await;
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV7::StateReport(StateReportV7 {
+        BridgeMessageV8::StateReport(StateReportV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: sources.cfg.host_id.clone(),
             report,
@@ -122,13 +122,13 @@ pub(super) async fn send_inventory_state_report(
 }
 
 pub(super) async fn send_vm_report(
-    outbound: &mpsc::Sender<BridgeMessageV7>,
+    outbound: &mpsc::Sender<BridgeMessageV8>,
     host_id: &str,
     report: VmReportV2,
 ) -> Result<()> {
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV7::VmReport(VmReportV7 {
+        BridgeMessageV8::VmReport(VmReportV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -148,7 +148,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        &BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             reason,
@@ -468,10 +468,10 @@ pub(super) fn actual_state_from_status(
         verified: matches!(phase, VmPhase::Ready | VmPhase::Solved),
     });
     VmActualStateV2 {
+        phase,
         run_id,
         vm_name: status.name.clone(),
         desired_version: desired_vm.and_then(|_| desired.map(|state| state.version)),
-        phase,
         image_key: desired_vm.map(|vm| vm.image_key.clone()),
         image_id: desired_vm.map(|vm| vm.image_id.clone()),
         guest_tools,
@@ -563,25 +563,17 @@ pub(super) fn terminal_state_from_status_fallback(
 
 pub(super) fn runtime_constraints_from_status(
     status: &VmStatusResponse,
-) -> Option<VmRuntimeConstraintsV1> {
+) -> Option<VmRuntimeConstraintsV2> {
     let details = status.details.as_ref()?;
     let generation = details.jail_generation.clone()?;
     let runtime = details.cpu_runtime.as_ref()?;
-    Some(VmRuntimeConstraintsV1 {
+    Some(VmRuntimeConstraintsV2 {
         generation,
-        phase: match runtime.phase {
-            VmCpuPhase::BootBurst => VmRuntimeConstraintPhaseV1::BootBurst,
-            VmCpuPhase::Steady => VmRuntimeConstraintPhaseV1::Steady,
-        },
-        steady_cpu_millis: runtime.steady_quota.cpu_millis,
-        effective_cpu_millis: runtime.effective_quota.cpu_millis,
+        cpu_millis: runtime.quota.cpu_millis,
         quota_verified_at_unix_ms: runtime
             .attestation
             .as_ref()
             .and_then(|attestation| i64::try_from(attestation.verified_at_unix_ms).ok()),
-        lease_expires_at_unix_ms: runtime
-            .boot_deadline_unix_ms
-            .and_then(|deadline| i64::try_from(deadline).ok()),
     })
 }
 
@@ -882,8 +874,6 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
         arch: host_architecture(),
         cloud_hypervisor_sha256: jailer
             .map(|capabilities| capabilities.cloud_hypervisor_sha256.clone()),
-        boot_cpu_millis: jailer.map(|capabilities| capabilities.boot_cpu_millis),
-        boot_cpu_lease_ms: jailer.map(|capabilities| capabilities.boot_cpu_lease_ms),
         // The service deliberately runs with PrivateDevices=true. A successful
         // jailerd readiness attestation, not agent-visible device access, is
         // the authority for KVM availability and complete helper accounting.
@@ -902,8 +892,6 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
         supports_jailer_v3,
         supports_raw_chunks_v1: supports_jailer_v3,
         supports_scenario_guest_tools_v1: supports_jailer_v3,
-        supports_boot_cpu_lease: jailer
-            .is_some_and(|capabilities| capabilities.supports_boot_cpu_lease),
         supports_template_backed_launch: jailer
             .is_some_and(|capabilities| capabilities.supports_template_backed_launch),
         fast_template_store: jailer.is_some_and(|capabilities| capabilities.fast_template_store),
@@ -919,16 +907,15 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
 pub(super) fn resource_state_from_status(
     status: &VmStatusResponse,
     inspection: Option<&VmInspection>,
-) -> Option<VmResourceStateV2> {
+) -> Option<VmResourceStateV3> {
     let details = status.details.as_ref()?;
     let inspection = inspection?;
     if details.jail_generation.as_deref() != Some(inspection.generation.as_str()) {
         return None;
     }
     let cpu_stat = inspection.cpu_stat.as_ref();
-    Some(VmResourceStateV2 {
+    Some(VmResourceStateV3 {
         cpu_millis: inspection.cpu_quota.cpu_millis,
-        vcpu_count: inspection.vcpu_count,
         cpu_quota_us: inspection.cpu_quota.quota_micros,
         cpu_period_us: inspection.cpu_quota.period_micros,
         cpu_usage_usec: cpu_stat.map_or(0, |stat| stat.usage_usec),

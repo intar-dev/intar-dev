@@ -11,41 +11,35 @@ membership in `kvm` or `netdev`, or access to a host Cloud Hypervisor binary.
 
 ## Scenario CPU contract
 
-Scenario HCL expresses an aggregate hard CPU ceiling separately from the guest
-CPU topology:
+Scenario authors set one CPU-time limit:
 
 ```hcl
-cpu = 0.125
-# Optional. Defaults to ceil(cpu), with a minimum of one.
-vcpus = 1
+cpu = 0.5
 ```
 
-`cpu` is parsed as exact fixed-point millicores. A positive integer or ordinary
-decimal literal with at most three fractional digits is accepted. Therefore
-`0.125` is 125 millicores and the existing `cpu = 2` spelling is 2000
-millicores. Zero, negative values, exponent notation, and more than three
-fractional digits are rejected. `vcpus` must be positive and
-`cpu_millis <= vcpus * 1000`.
+`cpu` uses exact fixed-point millicores. Positive integer or ordinary decimal
+literals with up to three fractional digits are accepted; `0.5` means 500
+millicores. The former `vcpus` setting is rejected. Intar derives the guest CPU
+count as `ceil(cpu)`, with a minimum of one. For limits up to one CPU, the
+Cloud Hypervisor API configuration omits `cpus` and uses its one-vCPU default.
+Larger limits set the derived guest CPU count internally.
 
-The scenario value is the steady-state ceiling for the complete VMM process
-tree, not a limit on image preparation or a request for more guest vCPUs. With
-the fixed 100 ms cgroup period, 125 millicores maps to
-`cpu.max = 12500 100000` and
-`cpu.max.burst = 0`; it is not represented with CPU weight, affinity, or a
-cpuset. This is also an admission reservation, not a minimum-service guarantee.
+Jailerd applies one hard limit to the complete VMM process group before VM
+boot. With a 100 ms period, `cpu = 0.5` gives `cpu.max = 50000 100000` and
+`cpu.max.burst = 0`. The same limit applies until shutdown. There is no extra
+boot CPU allocation. Two 500-millicore VMs reserve 1000 millicores, including
+while both boot. Linux shares host CPU time; guest vCPU count does not reserve
+host cores. A limit is a ceiling, not a minimum-service guarantee.
 
-On hosts attesting the v2 readiness contract, jailerd may reserve a root-owned
-2000-millicore allocation and launch the VMM at `cpu.max = 200000 100000` for
-at most 45 seconds. The guest retains the scenario's `vcpus` topology. Capacity
-is charged at the effective boot quota before any launch side effect; an
-unavailable allocation returns `boot_capacity_pending` and is retried with
-jitter. Legacy launch requests are rejected; a host without the complete v2
-contract is unschedulable.
+Jailerd retains the global 1000-millicore host reserve. Both local and control
+plane admission charge the declared limit before launch and retain it until
+VM removal is proven. Additional CPU overcommit is disabled. Production units
+have no CPU pinning; Cloud Hypervisor retains per-VM core scheduling isolation.
 
-Catalog manifests are V4 and carry `cpu_millis` plus `vcpu_count`. The
-coordinated bridge is V7; its desired-state, host-state-report, and VM-report
-schemas are V4, V5, and V4. The host-capacity and VM-resource objects are V2.
-There is no V1-catalog or pre-V7 bridge compatibility shim.
+Catalog manifests are V5 and carry `cpu_millis`. The bridge envelope is V8;
+desired-state, host-state-report, and VM-report schemas are V5, V6, and V5.
+VM resource objects are V3 and runtime quota evidence is V2. The local jailer
+protocol is V4. Older hosts must be drained and upgraded before scheduling.
 
 ## Root-owned runtime boundary
 
@@ -61,8 +55,6 @@ The production defaults are:
 - runtime: `/usr/lib/intar/cloud-hypervisor-v53.0`
 - runtime SHA-256: `448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc`
 - host CPU reserve: 1000 millicores
-- boot CPU allocation: 2000 millicores
-- boot CPU lease: 45000 milliseconds
 - VM UID/GID range: `200000..=265535`
 
 Audit the UID/GID range against local and directory identities before enabling
@@ -113,22 +105,19 @@ package smoke test.
 
 ## Readiness gates
 
-The v2 protocol separates `PrepareImageV2`, `LaunchVmV2`, and
-`FinalizeVmBoot`. A v2 launch reserves its SSH port but installs no external
-DNAT while the boot allocation is active. Kino readiness triggers a
-generation-fenced, one-way finalization: jailerd lowers the quota, reads back
-both `cpu.max` and `cpu.max.burst`, persists steady state, releases excess boot
-capacity, then activates DNAT. The agent verifies the Kino-reported SSH host key
-and TCP/22 before publishing one terminal-ready report. The monotonic hard
-lease is enforced by a root-owned auxiliary systemd oneshot created atomically
-with and bound to the exact v2 VM generation. Its hidden typed worker waits for
-an absolute `/proc/uptime` deadline, lowers the unit through
-`SetUnitProperties`, forces `cpu.max.burst` to zero, and attests both cgroup
-files. Launch fails closed unless the guardian is active, and systemd keeps it
-running if jailerd dies. The in-process controller and watchdog remain for
-redundant enforcement and durable phase reconciliation; no deadline path
-exposes ingress. Failed or unattested sealing quarantines the VM and keeps
-ingress closed.
+Image preparation and VM launch remain separate typed operations. A launch
+reserves its SSH port but installs no external DNAT. The cgroup has the declared
+CPU limit before the VMM starts, and jailerd reads back the quota before it
+returns the launch result. Kino readiness triggers generation-fenced
+`FinalizeVmBoot`: jailerd verifies `cpu.max` and zero burst credit again,
+persists the proof, and then activates DNAT. The agent verifies the Kino SSH
+host key and TCP/22 before publishing terminal readiness. Failed verification
+contains the VM and keeps ingress closed.
+
+The cgroup continues to enforce the same quota if jailerd exits. The daemon's
+recovery worker retries unresolved cleanup independently. Background image
+preparation pauses during a separate bounded 45-second boot window, which
+closes early when the VM becomes ready or its launch fails.
 
 Run both checks before enabling scheduling:
 
@@ -159,10 +148,10 @@ root, while transient VM units prove the same inode at the configured
 `/run/netns` path before launch. An isolated
 in-memory jailerd authority
 advertises exactly 1000 schedulable millicores without changing production
-configuration. It boots eight concurrent 125-millicore v53.0 VMs in separate
+configuration. It boots two concurrent 500-millicore v53.0 VMs on one shared host CPU in separate
 units, cgroups, jails, identities, and TAPs under one run network namespace;
-requires a ninth launch to return `cpu_capacity_exhausted`; proves
-Landlock/seccomp and KVM task accounting for every VM; samples all eight busy
+requires a third launch to return `cpu_capacity_exhausted`; proves
+Landlock/seccomp and KVM task accounting for every VM; samples both busy
 guests for 30 seconds; and exhaustively removes the VMs and network before
 restoring the socket. A runtime hash mismatch, missing isolation feature,
 incomplete accounting, admission mismatch, or cleanup failure is a hard
@@ -170,6 +159,11 @@ failure. Only the complete artifact-backed run writes the readiness
 attestation.
 
 ## Install and upgrade
+
+The installer requires Python 3.11 or newer. After drain checks, it removes
+the obsolete jailerd boot-CPU settings and converts the agent fallback from
+`vcpus` to `cpu_millis`. It preserves other values and saves root-only copies
+in `/var/lib/intar/config-backups/cpu-v4-*` before replacing configuration.
 
 1. Disable scenario scheduling for the host and drain every run. Confirm desired
    state contains no non-absent VM, actual state contains no VM, and artifact
@@ -180,7 +174,7 @@ attestation.
    processes, publishes the pinned runtime and systemd definitions, and leaves
    the agent stopped.
 4. Run the root-only self-test and the agent doctor. Require the exact
-   2000m/45000ms boot lease, generation-fenced quota sealing, template-backed
+   startup CPU limit, shared-CPU proof, generation-fenced quota verification, template-backed
    launch, every source-to-jail reflink path, and each required image in
    `Ready` state.
 5. Start the agent, confirm its desired and actual revisions converge, then
@@ -188,7 +182,7 @@ attestation.
 
 Keep the host unschedulable on any hash, seccomp, Landlock, cgroup, accounting,
 template, or helper failure. Preserve current state and capacity accounting
-while preparing a forward fix; never enable a reduced-isolation, steady-only,
+while preparing a forward fix; never enable a reduced-isolation,
 copy-based, or direct-spawn launch path.
 
 The `intar-agent 0.12.11` package includes the jailerd traversal ACL fix from

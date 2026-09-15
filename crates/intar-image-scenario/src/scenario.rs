@@ -94,7 +94,6 @@ impl ProbePhase {
 pub struct VmDefinition {
     pub name: String,
     pub cpu_millis: u32,
-    pub vcpu_count: u16,
     pub memory: u32,
     pub disk: u32,
     pub image: String,

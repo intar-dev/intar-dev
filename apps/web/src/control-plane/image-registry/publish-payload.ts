@@ -1,8 +1,8 @@
 import {
   type ScenarioHintManifestV3,
-  type ScenarioManifestV4,
+  type ScenarioManifestV5,
   type ScenarioProbeManifestV3,
-  type ScenarioVmManifestV4,
+  type ScenarioVmManifestV5,
 } from "@/generated/catalog";
 import { bootArtifactObjectMatchesSha } from "./agent";
 import { imageManifestObjectKey } from "./chunks";
@@ -19,7 +19,6 @@ import {
   readString,
   isScenarioDifficulty,
   isPositiveU32,
-  isPositiveU16,
   isProbePhase,
   isOptionalString,
   artifactFilenameMatches,
@@ -60,7 +59,7 @@ export type PublishedVmImage = {
 export async function prepareBootArtifacts(
   env: Cloudflare.Env,
   form: FormData,
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
 ): Promise<
   | {
       ok: true;
@@ -138,7 +137,7 @@ export async function prepareBootArtifacts(
 
 export async function prepareVmImages(
   env: Cloudflare.Env,
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
 ): Promise<
   { ok: true; prepared: PreparedVmImage[] } | { ok: false; response: Response }
 > {
@@ -227,7 +226,7 @@ export async function storePreparedVmImages(
 export async function readManifest(
   value: FormDataEntryValue | null,
 ): Promise<
-  { ok: true; value: ScenarioManifestV4 } | { ok: false; response: Response }
+  { ok: true; value: ScenarioManifestV5 } | { ok: false; response: Response }
 > {
   if (!value) {
     return {
@@ -252,14 +251,14 @@ export async function readManifest(
       response: jsonResponse({ error: "manifest is not a JSON object" }, 400),
     };
   }
-  return { ok: true, value: parsed as unknown as ScenarioManifestV4 };
+  return { ok: true, value: parsed as unknown as ScenarioManifestV5 };
 }
 
 export function validateManifest(
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
 ): Response | null {
-  if (manifest.schema_version !== 4) {
-    return jsonResponse({ error: "manifest schema_version must be 4" }, 400);
+  if (manifest.schema_version !== 5) {
+    return jsonResponse({ error: "manifest schema_version must be 5" }, 400);
   }
   const scenarioId = manifest.scenario_id?.trim();
   if (!scenarioId) {
@@ -360,8 +359,8 @@ export function isDirectBootCmdline(value: string): boolean {
 }
 
 export function normalizePublishManifest(
-  manifest: ScenarioManifestV4,
-): ScenarioManifestV4 {
+  manifest: ScenarioManifestV5,
+): ScenarioManifestV5 {
   const scenarioId = manifest.scenario_id.trim();
   return {
     ...manifest,
@@ -395,7 +394,7 @@ export function normalizePublishManifest(
 }
 
 export function hasValidScenarioMetadata(
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
   scenarioId: string,
 ): boolean {
   return (
@@ -411,11 +410,11 @@ export function hasValidScenarioMetadata(
   );
 }
 
-export function hasValidVmResources(vm: ScenarioVmManifestV4): boolean {
+export function hasValidVmResources(vm: ScenarioVmManifestV5): boolean {
   return (
     isPositiveU32(vm.cpu_millis) &&
-    isPositiveU16(vm.vcpu_count) &&
-    vm.cpu_millis <= vm.vcpu_count * 1000 &&
+    vm.cpu_millis <= 65_535_000 &&
+    !Object.hasOwn(vm, "vcpu_count") &&
     isPositiveU32(vm.memory_mib) &&
     isPositiveU32(vm.disk_mib)
   );

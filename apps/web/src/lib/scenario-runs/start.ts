@@ -3,7 +3,7 @@ import { and, desc, eq, gte, inArray, isNull, or } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import { AppError, appError, errorChainMatches } from "@/lib/app-error";
 import {
-  bootCpuReservationForSteadyVms,
+  cpuReservationForVms,
   strictCpuCapacity,
 } from "@/control-plane/host-cpu-reservations";
 import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
@@ -54,7 +54,7 @@ export type ScenarioRouteType =
 
 export function scenarioRuntimeReservationResources(
   vms: RuntimeVmSpec[],
-  steadyCpuMillisByVm: readonly number[],
+  cpuMillisByVm: readonly number[],
 ): RuntimeResourceDemand {
   const resources = vms.reduce<RuntimeResourceDemand>(
     (total, vm) => ({
@@ -66,7 +66,7 @@ export function scenarioRuntimeReservationResources(
   );
   return {
     ...resources,
-    cpuMillis: bootCpuReservationForSteadyVms(steadyCpuMillisByVm),
+    cpuMillis: cpuReservationForVms(cpuMillisByVm),
   };
 }
 
@@ -165,7 +165,7 @@ export async function assertScenarioLaunchHostForUser(
     throw appError(
       409,
       "scenario_host_not_performance_ready",
-      "host does not attest the required v2 template, boot-quota, and fast-filesystem launch path",
+      "host does not attest the required template, CPU-limit, and fast-filesystem launch path",
     );
   }
 }

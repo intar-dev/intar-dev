@@ -27,14 +27,14 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 #[cfg(target_os = "linux")]
 use intar_jailer_protocol::{
-    CpuQuota, JailerdConfig, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, Request,
-    RequestEnvelope, Response, ResponseEnvelope, ValidatedId,
+    JailerdConfig, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, Request, RequestEnvelope,
+    Response, ResponseEnvelope,
 };
 #[cfg(target_os = "linux")]
 use intar_jailerd::{
-    BootCpuGuardianRequest, FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
+    FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
     host_cpu_capacity_millis, launch_vm_v2_response, launch_vm_v3_response,
-    prepare_chunked_image_v3_response, prepare_image_v2_response, run_boot_cpu_guardian, self_test,
+    prepare_chunked_image_v3_response, prepare_image_v2_response, self_test,
 };
 #[cfg(target_os = "linux")]
 use rustix::net::{
@@ -51,7 +51,7 @@ const MAX_CLIENT_CONNECTIONS: usize = 32;
 #[cfg(target_os = "linux")]
 const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "linux")]
-const BOOT_LEASE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
+const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(target_os = "linux")]
 const STORE_GC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
@@ -111,17 +111,6 @@ enum Command {
         #[arg(long)]
         expected_gid: u32,
     },
-    #[command(hide = true)]
-    BootCpuLeaseGuardian {
-        #[arg(long)]
-        generation: String,
-        #[arg(long)]
-        unit_name: String,
-        #[arg(long)]
-        steady_cpu_millis: u32,
-        #[arg(long)]
-        deadline_uptime_millis: u64,
-    },
 }
 
 fn main() {
@@ -133,6 +122,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    // Cargo can unify reqwest's TLS features with the agent. Initialize the
+    // provider before constructing even the Unix-socket HTTP client.
+    #[cfg(target_os = "linux")]
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let _telemetry =
         intar_observability::init("intar-jailerd", env!("CARGO_PKG_VERSION"), "info", true)?;
     #[cfg(not(target_os = "linux"))]
@@ -180,25 +173,6 @@ fn run() -> Result<()> {
             expected_uid,
             expected_gid,
         } => self_test::agent_api_worker(&socket, expected_uid, expected_gid),
-        Command::BootCpuLeaseGuardian {
-            generation,
-            unit_name,
-            steady_cpu_millis,
-            deadline_uptime_millis,
-        } => {
-            require_root()?;
-            let generation =
-                ValidatedId::parse(generation).context("validate guardian generation")?;
-            let steady_quota = CpuQuota::from_millis(steady_cpu_millis)
-                .context("validate guardian steady CPU quota")?;
-            let request = BootCpuGuardianRequest::new(
-                generation,
-                unit_name,
-                steady_quota,
-                deadline_uptime_millis,
-            )?;
-            run_boot_cpu_guardian(request)
-        }
     }
 }
 
@@ -232,7 +206,7 @@ fn run_server(config_path: &Path) -> Result<()> {
     readiness.privileged_self_test_passed = verified_self_test.as_ref().is_some_and(|value| {
         value.quota_verified
             && value.burst_verified
-            && value.boot_quota_transition_verified
+            && value.startup_quota_verified
             && value.network_verified
             && value.landlock_negative_access
             && value.cloud_hypervisor_lifecycle_verified
@@ -249,26 +223,24 @@ fn run_server(config_path: &Path) -> Result<()> {
     )?));
     let watchdog_core = Arc::clone(&core);
     std::thread::Builder::new()
-        .name("jailerd-boot-lease-watchdog".to_owned())
+        .name("jailerd-recovery-retry".to_owned())
         .spawn(move || {
             loop {
-                std::thread::sleep(BOOT_LEASE_WATCHDOG_INTERVAL);
+                std::thread::sleep(RECOVERY_RETRY_INTERVAL);
                 match watchdog_core.lock() {
-                    Ok(mut core) => match core.enforce_boot_deadlines() {
-                        Ok(sealed) if sealed > 0 => {
-                            info!(sealed, "sealed expired VM boot CPU leases")
+                    Ok(mut core) => {
+                        for error in core.retry_unresolved_recoveries() {
+                            error!(error, "VM recovery retry failed");
                         }
-                        Ok(_) => {}
-                        Err(error) => error!(?error, "boot CPU lease watchdog failed"),
-                    },
+                    }
                     Err(_) => {
-                        error!("jailerd state lock poisoned; boot CPU lease watchdog exiting");
+                        error!("jailerd state lock poisoned; VM recovery worker exiting");
                         return;
                     }
                 }
             }
         })
-        .context("spawn boot CPU lease watchdog")?;
+        .context("spawn VM recovery worker")?;
     let gc_core = Arc::clone(&core);
     let gc_config = config.clone();
     std::thread::Builder::new()

@@ -101,8 +101,8 @@ pub struct ScenarioHintManifestV3 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioManifestV4 {
-    #[schemars(range(min = 4, max = 4))]
+pub struct ScenarioManifestV5 {
+    #[schemars(range(min = 5, max = 5))]
     pub schema_version: u16,
     pub scenario_id: String,
     pub name: String,
@@ -115,12 +115,12 @@ pub struct ScenarioManifestV4 {
     pub briefing_markdown: String,
     pub solution_markdown: String,
     pub hints: Vec<ScenarioHintManifestV3>,
-    pub vms: Vec<ScenarioVmManifestV4>,
+    pub vms: Vec<ScenarioVmManifestV5>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioVmManifestV4 {
+pub struct ScenarioVmManifestV5 {
     pub name: String,
     pub image_key: ImageKey,
     pub image_id: String,
@@ -128,11 +128,9 @@ pub struct ScenarioVmManifestV4 {
     pub image_virtual_size_bytes: u64,
     pub chunk_manifest_sha256: String,
     pub guest_bootstrap_abi: u16,
-    pub boot: ScenarioVmBootManifestV4,
+    pub boot: ScenarioVmBootManifestV5,
     #[schemars(range(min = 1))]
     pub cpu_millis: u32,
-    #[schemars(range(min = 1))]
-    pub vcpu_count: u16,
     pub memory_mib: Mib,
     pub disk_mib: Mib,
     pub probes: Vec<ScenarioProbeManifestV3>,
@@ -150,7 +148,7 @@ pub enum ImageFormat {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioVmBootManifestV4 {
+pub struct ScenarioVmBootManifestV5 {
     pub kernel_sha256: String,
     pub initrd_sha256: String,
     pub cmdline: String,

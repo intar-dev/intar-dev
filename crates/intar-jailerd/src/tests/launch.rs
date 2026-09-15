@@ -42,7 +42,7 @@ fn capabilities_and_prepare_image_v2_require_fast_template_store() {
     )
     .expect("core");
     let capabilities = available.capabilities();
-    assert_eq!(capabilities.protocol_version, 3);
+    assert_eq!(capabilities.protocol_version, 4);
     assert!(capabilities.supports_jailer_v3);
     assert!(capabilities.supports_jailer_v2);
     assert!(capabilities.supports_template_backed_launch);
@@ -135,14 +135,13 @@ fn launch_vm_v2_requires_and_uses_one_prepared_template_bundle() {
 fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let backend = BlockingSharedBackend::default();
     let core = Arc::new(Mutex::new(
         JailerdCore::new_with_readiness(
             config,
             backend.clone(),
             FakeTemplatePreparer,
-            3_000,
+            2_000,
             ready_readiness(),
         )
         .expect("core"),
@@ -182,7 +181,7 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
             .expect("long VMM activation must not hold the core lock");
         assert_eq!(live.inflight_launches.len(), 1);
         assert_eq!(live.pending_cpu_reservations.len(), 1);
-        assert_eq!(live.capabilities().committed_cpu_millis, 3_000);
+        assert_eq!(live.capabilities().committed_cpu_millis, 2_000);
         assert!(matches!(
             live.handle(Request::FinalizeVmBoot(FinalizeVmBootRequest {
                 generation: first.generation,
@@ -194,7 +193,7 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
     let duplicate = launch_vm_v2_response(&core, launch_v2(1, 1_000));
     assert!(matches!(
         duplicate,
-        Response::Error(ProtocolError { ref code, .. }) if code == "boot_capacity_pending"
+        Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
     ));
     assert_eq!(
         core.lock().expect("core lock").inflight_launches.len(),
@@ -205,7 +204,7 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
     let rejected = launch_vm_v2_response(&core, launch_v2(2, 1_000));
     assert!(matches!(
         rejected,
-        Response::Error(ProtocolError { ref code, .. }) if code == "boot_capacity_pending"
+        Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
     ));
 
     backend.release_launch();
@@ -217,14 +216,13 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
     assert!(live.inflight_launches.is_empty());
     assert!(live.pending_cpu_reservations.is_empty());
     assert_eq!(live.records.len(), 2);
-    assert_eq!(live.capabilities().committed_cpu_millis, 3_000);
+    assert_eq!(live.capabilities().committed_cpu_millis, 2_000);
 }
 
 #[test]
 fn detached_v2_launch_failure_releases_proven_capacity() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let backend = BlockingSharedBackend::default();
     backend.state.lock().expect("backend state").fail_vm_network = true;
     let core = Arc::new(Mutex::new(
@@ -264,7 +262,6 @@ fn detached_v2_launch_failure_releases_proven_capacity() {
 fn detached_v2_launch_retains_capacity_until_failed_unit_is_contained() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let backend = BlockingSharedBackend::default();
     {
         let mut state = backend.state.lock().expect("backend state");
@@ -302,7 +299,7 @@ fn detached_v2_launch_retains_capacity_until_failed_unit_is_contained() {
     assert!(live.inflight_launches.is_empty());
     assert_eq!(live.pending_cpu_reservations.len(), 1);
     assert_eq!(live.unresolved_recoveries.len(), 1);
-    assert_eq!(live.capabilities().committed_cpu_millis, 2_000);
+    assert_eq!(live.capabilities().committed_cpu_millis, 1_000);
     assert!(!live.capabilities().supports_jailer_v2);
 }
 
@@ -310,7 +307,6 @@ fn detached_v2_launch_retains_capacity_until_failed_unit_is_contained() {
 fn detached_existing_identity_mismatch_releases_only_proven_capacity() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let backend = BlockingSharedBackend::default();
     let core = Arc::new(Mutex::new(
         JailerdCore::new_with_readiness(
@@ -369,7 +365,6 @@ fn detached_existing_identity_mismatch_releases_only_proven_capacity() {
 fn detached_existing_identity_mismatch_retains_boot_capacity_until_drain() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let backend = BlockingSharedBackend::default();
     let core = Arc::new(Mutex::new(
         JailerdCore::new_with_readiness(
@@ -422,7 +417,7 @@ fn detached_existing_identity_mismatch_retains_boot_capacity_until_drain() {
     assert!(live.inflight_launches.is_empty());
     assert_eq!(live.pending_cpu_reservations.len(), 1);
     assert_eq!(live.unresolved_recoveries.len(), 1);
-    assert_eq!(live.capabilities().committed_cpu_millis, 2_000);
+    assert_eq!(live.capabilities().committed_cpu_millis, 1_000);
     assert!(!live.capabilities().supports_jailer_v2);
     drop(live);
 
@@ -452,67 +447,57 @@ fn eight_eighth_cpu_vms_fill_exactly_one_schedulable_core() {
     let response = launch_prepared_v2(&mut core, 8, 125);
     assert!(matches!(
         response,
-        Response::Error(ProtocolError { ref code, .. }) if code == "boot_capacity_pending"
+        Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
     ));
     assert_eq!(core.capabilities().committed_cpu_millis, 1_000);
 }
 
 #[test]
-fn launch_uses_root_owned_boot_quota_and_keeps_ssh_closed() {
+fn half_cpu_launches_share_capacity_and_keep_ssh_closed() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
-    config.boot_cpu_lease_ms = 45_000;
     let mut core = JailerdCore::new_with_readiness(
         config,
         FakeBackend::default(),
         FakeTemplatePreparer,
-        4_000,
+        1000,
         ready_readiness(),
     )
-    .expect("core");
+    .expect("valid CPU test fixture");
     ensure_test_network(&mut core);
-
-    let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-        Response::LaunchVmV2(value) => value,
-        other => panic!("unexpected launch response {other:?}"),
-    };
-    assert_eq!(core.backend.started_specs[0].cpu_quota.cpu_millis, 2_000);
-    let remaining_lease_ms = core.backend.started_specs[0]
-        .boot_cpu_lease_ms
-        .expect("boot lease");
-    assert!((1..=45_000).contains(&remaining_lease_ms));
-    assert_eq!(
-        core.backend.started_specs[0].generation,
-        launched.generation
-    );
-    assert_eq!(
-        core.backend.started_specs[0].required_properties()["BindsTo"],
-        boot_cpu_guardian_unit_name(&launched.generation)
-    );
-    assert_eq!(launched.cpu_runtime.phase, VmCpuPhase::BootBurst);
-    assert_eq!(launched.cpu_runtime.steady_quota.cpu_millis, 1_000);
-    assert_eq!(launched.cpu_runtime.effective_quota.cpu_millis, 2_000);
-    assert!(launched.cpu_runtime.boot_deadline_unix_ms.is_some());
-    assert_eq!(
-        launched
+    for index in 0..2 {
+        let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(index, 500)))) {
+            Response::LaunchVmV2(result) => result,
+            response => panic!("{response:?}"),
+        };
+        assert_eq!(launched.cpu_runtime.quota.cpu_millis, 500);
+        let proof = launched
             .cpu_runtime
             .attestation
-            .as_ref()
-            .expect("boot quota attestation")
-            .cpu_max_burst,
-        0
+            .expect("valid CPU test fixture");
+        assert_eq!(proof.cpu_max, "50000 100000");
+        assert_eq!(proof.cpu_max_burst, 0);
+        assert_eq!(
+            core.backend.started_specs[index as usize]
+                .cpu_quota
+                .cpu_millis,
+            500
+        );
+        assert!(core.backend.active_ssh_forwards.is_empty());
+    }
+    assert_eq!(core.capabilities().committed_cpu_millis, 1000);
+    let before = core.allocated_identities.len();
+    assert!(
+        matches!(core.handle(Request::LaunchVmV2(Box::new(launch_v2(2, 500)))), Response::Error(ref error) if error.code == "cpu_capacity_exhausted")
     );
-    assert_eq!(core.capabilities().committed_cpu_millis, 2_000);
-    assert!(core.backend.active_ssh_forwards.is_empty());
-    assert!(core.backend.ssh_forward_updates.is_empty());
+    assert_eq!(core.backend.started_specs.len(), 2);
+    assert_eq!(core.allocated_identities.len(), before);
 }
 
 #[test]
 fn finalize_seals_quota_before_ingress_and_is_idempotent() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let mut core = JailerdCore::new_with_readiness(
         config,
         FakeBackend::default(),
@@ -536,9 +521,7 @@ fn finalize_seals_quota_before_ingress_and_is_idempotent() {
     };
     assert!(first.changed);
     assert!(first.ssh_forward_active);
-    assert_eq!(first.cpu_runtime.phase, VmCpuPhase::Steady);
-    assert_eq!(first.cpu_runtime.effective_quota.cpu_millis, 1_000);
-    assert_eq!(first.cpu_runtime.boot_deadline_unix_ms, None);
+    assert_eq!(first.cpu_runtime.quota.cpu_millis, 1_000);
     assert_eq!(core.backend.boundary_operations, ["quota:1000", "ssh:true"]);
     assert_eq!(core.capabilities().committed_cpu_millis, 1_000);
 
@@ -547,7 +530,6 @@ fn finalize_seals_quota_before_ingress_and_is_idempotent() {
         other => panic!("unexpected idempotent finalize response {other:?}"),
     };
     assert!(!second.changed);
-    assert_eq!(second.cpu_runtime.phase, VmCpuPhase::Steady);
     assert_eq!(
         core.backend.boundary_operations,
         ["quota:1000", "ssh:true", "quota:1000", "ssh:true"]
@@ -558,7 +540,6 @@ fn finalize_seals_quota_before_ingress_and_is_idempotent() {
 fn finalize_persistence_and_ingress_rollback_failure_contains_vm() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let preparer = TrackingPreparer {
         // Launch intent, launch identity, CPU seal, then ingress state.
         fail_persist_call: Some(4),
@@ -594,15 +575,14 @@ fn finalize_persistence_and_ingress_rollback_failure_contains_vm() {
 }
 
 #[test]
-fn boot_pool_exhaustion_is_a_typed_pending_result() {
+fn quota_exhaustion_is_rejected_before_launch() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let mut core = JailerdCore::new_with_readiness(
         config,
         FakeBackend::default(),
         FakeTemplatePreparer,
-        2_000,
+        1_000,
         ready_readiness(),
     )
     .expect("core");
@@ -613,16 +593,15 @@ fn boot_pool_exhaustion_is_a_typed_pending_result() {
     ));
     assert!(matches!(
         core.handle(Request::LaunchVmV2(Box::new(launch_v2(1, 1_000)))),
-        Response::Error(ProtocolError { ref code, .. }) if code == "boot_capacity_pending"
+        Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
     ));
-    assert_eq!(core.capabilities().committed_cpu_millis, 2_000);
+    assert_eq!(core.capabilities().committed_cpu_millis, 1_000);
 }
 
 #[test]
 fn failed_quota_readback_contains_vm_without_exposing_ssh() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let mut core = JailerdCore::new_with_readiness(
         config,
         FakeBackend::default(),
@@ -636,7 +615,7 @@ fn failed_quota_readback_contains_vm_without_exposing_ssh() {
         Response::LaunchVmV2(value) => value,
         other => panic!("unexpected launch response {other:?}"),
     };
-    core.backend.fail_quota_update = true;
+    core.backend.fail_quota_verification = true;
 
     let response = core.handle(Request::FinalizeVmBoot(FinalizeVmBootRequest {
         generation: launched.generation.clone(),
@@ -648,112 +627,5 @@ fn failed_quota_readback_contains_vm_without_exposing_ssh() {
     assert!(core.backend.stopped_units.contains(&launched.unit_name));
     assert!(core.backend.destroyed_units.contains(&launched.unit_name));
     assert!(core.preparer.quarantined.contains(&launched.generation));
-    assert!(!core.capabilities().supports_boot_cpu_lease);
-}
-
-#[test]
-fn admitted_boot_lease_ignores_wall_clock_steps() {
-    let admitted_at = Instant::now();
-    let monotonic_deadline = admitted_at + Duration::from_secs(45);
-    let unix_deadline_ms = 1_045_000;
-
-    // A forward wall-clock step cannot shorten a live lease while its
-    // same-daemon monotonic identity is available.
-    assert!(!boot_cpu_lease_expired(
-        Some(monotonic_deadline),
-        Some(unix_deadline_ms),
-        admitted_at + Duration::from_secs(44),
-        unix_deadline_ms + 60_000,
-    ));
-    assert_eq!(
-        remaining_boot_cpu_lease_ms(monotonic_deadline, admitted_at + Duration::from_secs(44),)
-            .expect("one second remains"),
-        1_000,
-    );
-
-    // A backward wall-clock step likewise cannot extend the quota after
-    // the monotonic admission deadline has elapsed.
-    assert!(boot_cpu_lease_expired(
-        Some(monotonic_deadline),
-        Some(unix_deadline_ms),
-        monotonic_deadline,
-        unix_deadline_ms - 60_000,
-    ));
-    assert!(remaining_boot_cpu_lease_ms(monotonic_deadline, monotonic_deadline).is_err());
-}
-
-#[test]
-fn watchdog_seals_expired_lease_without_activating_ingress() {
-    let mut config = test_config();
-    config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
-    let mut core = JailerdCore::new_with_readiness(
-        config,
-        FakeBackend::default(),
-        TrackingPreparer::default(),
-        4_000,
-        ready_readiness(),
-    )
-    .expect("core");
-    ensure_test_network(&mut core);
-    let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-        Response::LaunchVmV2(value) => value,
-        other => panic!("unexpected launch response {other:?}"),
-    };
-    let record = core.records.get_mut(&launched.generation).expect("record");
-    record.boot_deadline_unix_ms = Some(0);
-    record.boot_deadline_monotonic = Some(Instant::now());
-
-    assert_eq!(core.enforce_boot_deadlines().expect("watchdog"), 1);
-    let record = core.records.get(&launched.generation).expect("record");
-    assert_eq!(record.cpu_phase, VmCpuPhase::Steady);
-    assert!(!record.ssh_forward_active);
-    assert_eq!(record.effective_quota().cpu_millis, 1_000);
-    assert!(core.backend.active_ssh_forwards.is_empty());
-    assert!(core.backend.ssh_forward_updates.is_empty());
-}
-
-#[test]
-fn watchdog_continues_after_one_expired_lease_fails() {
-    let mut config = test_config();
-    config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
-    let mut core = JailerdCore::new_with_readiness(
-        config,
-        FakeBackend::default(),
-        TrackingPreparer::default(),
-        4_000,
-        ready_readiness(),
-    )
-    .expect("core");
-    ensure_test_network(&mut core);
-    let first = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-        Response::LaunchVmV2(value) => value,
-        other => panic!("unexpected launch response {other:?}"),
-    };
-    let second = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(1, 1_000)))) {
-        Response::LaunchVmV2(value) => value,
-        other => panic!("unexpected launch response {other:?}"),
-    };
-    for generation in [&first.generation, &second.generation] {
-        let record = core.records.get_mut(generation).expect("record");
-        record.boot_deadline_unix_ms = Some(0);
-        record.boot_deadline_monotonic = Some(Instant::now());
-    }
-    core.backend
-        .fail_quota_update_units
-        .insert(first.unit_name.clone());
-
-    let error = core
-        .enforce_boot_deadlines()
-        .expect_err("one injected seal should be reported");
-    assert!(format!("{error:#}").contains(first.generation.as_str()));
-    assert!(!core.records.contains_key(&first.generation));
-    assert_eq!(
-        core.records
-            .get(&second.generation)
-            .expect("second record")
-            .cpu_phase,
-        VmCpuPhase::Steady
-    );
+    assert!(!core.capabilities().supports_hard_cpu_quota);
 }

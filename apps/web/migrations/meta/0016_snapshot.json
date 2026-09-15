@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2ca5769a-7875-4f92-b856-848b22930adf",
-  "prevId": "b2927f24-f224-4886-9525-da9de5235ccd",
+  "id": "bb5884d5-2e32-46a7-b200-6d05808d2c9e",
+  "prevId": "2ca5769a-7875-4f92-b856-848b22930adf",
   "tables": {
     "access_allowlist": {
       "name": "access_allowlist",
@@ -1435,27 +1435,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "steady_cpu_millis": {
-          "name": "steady_cpu_millis",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "boot_cpu_millis": {
-          "name": "boot_cpu_millis",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "quota_phase": {
-          "name": "quota_phase",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
         "state": {
           "name": "state",
           "type": "text",
@@ -1525,23 +1504,11 @@
       "checkConstraints": {
         "host_cpu_reservations_cpu_positive": {
           "name": "host_cpu_reservations_cpu_positive",
-          "value": "\"host_cpu_reservations\".\"cpu_millis\" > 0"
-        },
-        "host_cpu_reservations_quota_positive": {
-          "name": "host_cpu_reservations_quota_positive",
-          "value": "\"host_cpu_reservations\".\"steady_cpu_millis\" > 0 AND \"host_cpu_reservations\".\"boot_cpu_millis\" >= \"host_cpu_reservations\".\"steady_cpu_millis\""
-        },
-        "host_cpu_reservations_quota_phase_valid": {
-          "name": "host_cpu_reservations_quota_phase_valid",
-          "value": "\"host_cpu_reservations\".\"quota_phase\" in ('boot', 'steady')"
-        },
-        "host_cpu_reservations_current_quota_valid": {
-          "name": "host_cpu_reservations_current_quota_valid",
-          "value": "(\"host_cpu_reservations\".\"quota_phase\" = 'boot' AND \"host_cpu_reservations\".\"cpu_millis\" = \"host_cpu_reservations\".\"boot_cpu_millis\") OR (\"host_cpu_reservations\".\"quota_phase\" = 'steady' AND \"host_cpu_reservations\".\"cpu_millis\" = \"host_cpu_reservations\".\"steady_cpu_millis\")"
+          "value": "\"cpu_millis\" > 0"
         },
         "host_cpu_reservations_state_valid": {
           "name": "host_cpu_reservations_state_valid",
-          "value": "\"host_cpu_reservations\".\"state\" in ('pending', 'committed')"
+          "value": "\"state\" in ('pending', 'committed')"
         }
       }
     },
@@ -7161,14 +7128,6 @@
           "notNull": true,
           "autoincrement": false,
           "default": 1000
-        },
-        "vcpu_count": {
-          "name": "vcpu_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
         },
         "memory_mib": {
           "name": "memory_mib",

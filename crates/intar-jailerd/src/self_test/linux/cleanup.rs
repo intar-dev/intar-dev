@@ -29,7 +29,7 @@ pub(super) fn validate_worker_paths(
     Ok(root.to_path_buf())
 }
 
-pub(super) fn validate_attestation(attestation: &SelfTestAttestationV2) -> Result<()> {
+pub(super) fn validate_attestation(attestation: &SelfTestAttestationV3) -> Result<()> {
     ensure!(
         attestation.version == ATTESTATION_VERSION,
         "unsupported self-test attestation version"
@@ -54,7 +54,7 @@ pub(super) fn validate_attestation(attestation: &SelfTestAttestationV2) -> Resul
     ensure!(attestation.quota_verified, "CPU quota was not verified");
     ensure!(attestation.burst_verified, "CPU burst was not disabled");
     ensure!(
-        attestation.boot_quota_transition_verified,
+        attestation.startup_quota_verified,
         "boot-to-steady CPU quota transition was not verified"
     );
     ensure!(
@@ -82,7 +82,7 @@ pub(super) fn validate_attestation(attestation: &SelfTestAttestationV2) -> Resul
 
 pub(super) fn write_attestation(
     config: &JailerdConfig,
-    attestation: &SelfTestAttestationV2,
+    attestation: &SelfTestAttestationV3,
 ) -> Result<()> {
     let root = open_trusted_attestation_root(config)?;
     let temporary = format!(".{ATTESTATION_FILE}.{}.tmp", Uuid::new_v4());

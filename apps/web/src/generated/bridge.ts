@@ -9,7 +9,7 @@ export type SyncRequestReason =
 
 export type HostRoleV1 = "agent" | "builder";
 
-export interface ClientHelloV7 {
+export interface ClientHelloV8 {
   protocol_version: number;
   host_id: string;
   agent_version: string;
@@ -18,50 +18,50 @@ export interface ClientHelloV7 {
   capabilities: HostCapabilitiesV2;
 }
 
-export interface ServerHelloV7 {
+export interface ServerHelloV8 {
   protocol_version: number;
   host_id: string;
   desired_version: number;
 }
 
-export interface DesiredStateV7 {
+export interface DesiredStateV8 {
   protocol_version: number;
   host_id: string;
   desired_state: HostDesiredStateV2;
 }
 
-export interface StateReportV7 {
+export interface StateReportV8 {
   protocol_version: number;
   host_id: string;
   report: HostStateReportV2;
 }
 
-export interface VmReportV7 {
+export interface VmReportV8 {
   protocol_version: number;
   host_id: string;
   report: VmReportV2;
 }
 
-export interface BuildReportV7 {
+export interface BuildReportV8 {
   protocol_version: number;
   host_id: string;
   report: BuildReportV1;
 }
 
-export interface SyncRequestV7 {
+export interface SyncRequestV8 {
   protocol_version: number;
   host_id: string;
   reason: SyncRequestReason;
 }
 
-export type BridgeMessageV7 =
-  | ({ type: "client_hello" } & ClientHelloV7)
-  | ({ type: "server_hello" } & ServerHelloV7)
-  | ({ type: "desired_state" } & DesiredStateV7)
-  | ({ type: "state_report" } & StateReportV7)
-  | ({ type: "vm_report" } & VmReportV7)
-  | ({ type: "build_report" } & BuildReportV7)
-  | ({ type: "sync_request" } & SyncRequestV7);
+export type BridgeMessageV8 =
+  | ({ type: "client_hello" } & ClientHelloV8)
+  | ({ type: "server_hello" } & ServerHelloV8)
+  | ({ type: "desired_state" } & DesiredStateV8)
+  | ({ type: "state_report" } & StateReportV8)
+  | ({ type: "vm_report" } & VmReportV8)
+  | ({ type: "build_report" } & BuildReportV8)
+  | ({ type: "sync_request" } & SyncRequestV8);
 
 export interface HostDesiredStateV2 {
   schema_version: number;
@@ -97,7 +97,7 @@ export interface DesiredVmV2 {
   image_key: ImageKey;
   image_id: string;
   guest_tools: DesiredGuestToolsV1;
-  resources: VmResourcesV2;
+  resources: VmResourcesV3;
   ssh_authorized_keys_openssh: string[];
   lease_expires_at_unix_ms: number;
 }
@@ -109,9 +109,8 @@ export interface DesiredGuestToolsV1 {
   bootstrap_abi: number;
 }
 
-export interface VmResourcesV2 {
+export interface VmResourcesV3 {
   cpu_millis: number;
-  vcpu_count: number;
   memory_mib: Mib;
   disk_mib: Mib;
 }
@@ -149,14 +148,11 @@ export interface HostCapacityV2 {
 export interface HostCapabilitiesV2 {
   arch: ImageArchitecture;
   cloud_hypervisor_sha256: string | null;
-  boot_cpu_millis: number | null;
-  boot_cpu_lease_ms: number | null;
   supports_kvm: boolean;
   supports_vsock: boolean;
   supports_reflink: boolean;
   supports_nftables: boolean;
   supports_jailer_v2: boolean;
-  supports_boot_cpu_lease: boolean;
   supports_template_backed_launch: boolean;
   fast_template_store: boolean;
   supports_hard_cpu_quota: boolean;
@@ -169,9 +165,8 @@ export interface HostCapabilitiesV2 {
   supports_run_cli_completion_v1?: boolean;
 }
 
-export interface VmResourceStateV2 {
+export interface VmResourceStateV3 {
   cpu_millis: number;
-  vcpu_count: number;
   cpu_quota_us: number;
   cpu_period_us: number;
   cpu_usage_usec: number;
@@ -239,8 +234,8 @@ export interface VmActualStateV2 {
   guest_tools?: VmGuestToolsStateV1 | null;
   network?: VmNetworkStateV1 | null;
   terminal: VmTerminalStateV1;
-  runtime_constraints?: VmRuntimeConstraintsV1 | null;
-  resource_state?: VmResourceStateV2 | null;
+  runtime_constraints?: VmRuntimeConstraintsV2 | null;
+  resource_state?: VmResourceStateV3 | null;
   sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];
   probes: VmProbeSnapshotV1[];
@@ -281,15 +276,11 @@ export interface VmTerminalStateV1 {
   observed_at_unix_ms: number;
 }
 
-export type VmRuntimeConstraintPhaseV1 = "boot_burst" | "steady";
 
-export interface VmRuntimeConstraintsV1 {
+export interface VmRuntimeConstraintsV2 {
   generation: string;
-  phase: VmRuntimeConstraintPhaseV1;
-  steady_cpu_millis: number;
-  effective_cpu_millis: number;
+  cpu_millis: number;
   quota_verified_at_unix_ms?: number | null;
-  lease_expires_at_unix_ms?: number | null;
 }
 
 export type VmProbeStatus = "unknown" | "pass" | "fail";
@@ -327,8 +318,8 @@ export interface VmReportV2 {
   guest_tools?: VmGuestToolsStateV1 | null;
   network?: VmNetworkStateV1 | null;
   terminal: VmTerminalStateV1;
-  runtime_constraints?: VmRuntimeConstraintsV1 | null;
-  resource_state?: VmResourceStateV2 | null;
+  runtime_constraints?: VmRuntimeConstraintsV2 | null;
+  resource_state?: VmResourceStateV3 | null;
   sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];
   probes: VmProbeSnapshotV1[];

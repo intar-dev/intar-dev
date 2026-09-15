@@ -1,9 +1,9 @@
 use intar_contracts::{
     bridge::{
-        BridgeMessageV7, BuildReportV1, DesiredBuildV1, HostDesiredStateV2, HostStateReportV2,
+        BridgeMessageV8, BuildReportV1, DesiredBuildV1, HostDesiredStateV2, HostStateReportV2,
         VmReportV2,
     },
-    catalog::{CourseCatalogSnapshotV2, ScenarioManifestV4},
+    catalog::{CourseCatalogSnapshotV2, ScenarioManifestV5},
     stargate::{
         ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
         IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse,
@@ -75,8 +75,8 @@ fn stargate_workspace_app_response_fixture_round_trips() {
 
 #[test]
 fn catalog_manifest_fixture_round_trips() {
-    assert_round_trip::<ScenarioManifestV4>(include_str!(
-        "../fixtures/catalog/scenario-manifest-v4.json"
+    assert_round_trip::<ScenarioManifestV5>(include_str!(
+        "../fixtures/catalog/scenario-manifest-v5.json"
     ));
 }
 
@@ -132,7 +132,7 @@ fn bridge_build_report_fixture_round_trips() {
 
 #[test]
 fn bridge_message_fixture_round_trips() {
-    assert_round_trip::<BridgeMessageV7>(include_str!("../fixtures/bridge/sync-request-v7.json"));
+    assert_round_trip::<BridgeMessageV8>(include_str!("../fixtures/bridge/sync-request-v8.json"));
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn catalog_v4_rejects_legacy_whole_image_fields() {
         }]
     });
 
-    assert!(serde_json::from_value::<ScenarioManifestV4>(value).is_err());
+    assert!(serde_json::from_value::<ScenarioManifestV5>(value).is_err());
 }
 
 #[test]

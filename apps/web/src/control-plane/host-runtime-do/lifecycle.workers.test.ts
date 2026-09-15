@@ -109,7 +109,6 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         guest_tools: testGuestTools,
         resources: {
           cpu_millis: 1_000,
-          vcpu_count: 1,
           memory_mib: 512,
           disk_mib: 4096,
         },
@@ -334,12 +333,10 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     if (unsealed.type !== "vm_report" || !unsealed.report.runtime_constraints) {
       throw new Error("expected runtime constraints");
     }
+    unsealed.report.phase = "booting";
     unsealed.report.runtime_constraints = {
       generation: "generation-runtime-web",
-      phase: "boot_burst",
-      steady_cpu_millis: 1_000,
-      effective_cpu_millis: 2_000,
-      lease_expires_at_unix_ms: now + 45_000,
+      cpu_millis: 1_000,
     };
     sendBridge(ws, unsealed);
 
@@ -351,11 +348,9 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     expect(state.vms[0]).toMatchObject({
       terminalPhase: "pending",
       canOpenTerminal: false,
-      terminalReason: "Waiting for verified steady CPU quota.",
+      terminalReason: "Waiting for CPU limit verification.",
       runtimeConstraints: {
-        phase: "boot_burst",
-        steadyCpuMillis: 1_000,
-        effectiveCpuMillis: 2_000,
+        cpuMillis: 1_000,
       },
     });
 
@@ -381,9 +376,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       canOpenTerminal: true,
       terminalTarget: { host: "203.0.113.9", port: 22_001 },
       runtimeConstraints: {
-        phase: "steady",
-        steadyCpuMillis: 1_000,
-        effectiveCpuMillis: 1_000,
+        cpuMillis: 1_000,
         quotaVerifiedAt: now + 29,
       },
     });
@@ -448,7 +441,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
 
     sendBridge(ws, {
       type: "sync_request",
-      protocol_version: 7,
+      protocol_version: 8,
       host_id: hostId,
       reason: "reconnect",
     });
@@ -637,7 +630,6 @@ async function seedCatalogImage(sha256: string): Promise<void> {
       initrdSha256: "b".repeat(64),
       bootCmdline: "console=ttyS0 root=/dev/vda rw",
       cpuMillis: 1_000,
-      vcpuCount: 1,
       memoryMib: 512,
       diskMib: 1_024,
     }),

@@ -114,7 +114,6 @@ fn parses_and_validates_supported_scenario() {
     assert_eq!(scenario.total_probe_count(), 4);
     assert_eq!(scenario.images["debian-12-minimal"].base, "trixie");
     assert_eq!(scenario.vms[0].cpu_millis, 1_000);
-    assert_eq!(scenario.vms[0].vcpu_count, 1);
 }
 
 #[test]
@@ -147,20 +146,16 @@ fn parses_fractional_cpu_as_exact_millicores() {
     let scenario = Scenario::parse_course(&hcl).unwrap();
 
     assert_eq!(scenario.vms[0].cpu_millis, 125);
-    assert_eq!(scenario.vms[0].vcpu_count, 1);
 }
 
 #[test]
-fn defaults_vcpus_to_the_cpu_ceiling_and_accepts_an_explicit_topology() {
-    let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 2.125");
-    let scenario = Scenario::parse_course(&hcl).unwrap();
-    assert_eq!(scenario.vms[0].cpu_millis, 2_125);
-    assert_eq!(scenario.vms[0].vcpu_count, 3);
-
-    let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 0.125\n    vcpus  = 4");
-    let scenario = Scenario::parse_course(&hcl).unwrap();
-    assert_eq!(scenario.vms[0].cpu_millis, 125);
-    assert_eq!(scenario.vms[0].vcpu_count, 4);
+fn accepts_cpu_limits_without_explicit_guest_topology() {
+    for (cpu, millis) in [("0.125", 125), ("0.5", 500), ("1", 1000), ("1.5", 1500)] {
+        let scenario =
+            Scenario::parse_course(&supported_hcl().replace("cpu    = 1", &format!("cpu = {cpu}")))
+                .unwrap();
+        assert_eq!(scenario.vms[0].cpu_millis, millis);
+    }
 }
 
 #[test]
@@ -182,13 +177,13 @@ fn rejects_inexact_or_non_positive_cpu_literals() {
 }
 
 #[test]
-fn rejects_cpu_above_explicit_vcpu_capacity() {
-    let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 1.001\n    vcpus  = 1");
-
+fn rejects_removed_vcpus_setting_with_migration_message() {
+    let hcl = supported_hcl().replace("cpu    = 1", "cpu = 0.5\n    vcpus = 1");
     let error = Scenario::parse_course(&hcl).unwrap_err();
-
     assert!(
-        matches!(error, ScenarioError::InvalidScenario(message) if message.contains("exceeds vcpus capacity"))
+        error
+            .to_string()
+            .contains("vcpus was removed; set only cpu")
     );
 }
 

@@ -13,12 +13,12 @@ use anyhow::{Result, bail};
 use intar_jailer_protocol::JailerdConfig;
 use serde::{Deserialize, Serialize};
 
-const ATTESTATION_VERSION: u16 = 2;
-const ATTESTATION_FILE: &str = "self-test-attestation-v2.json";
-const SELF_TEST_CPU_MILLIS: u32 = 125;
+const ATTESTATION_VERSION: u16 = 3;
+const ATTESTATION_FILE: &str = "self-test-attestation-v3.json";
+const SELF_TEST_CPU_MILLIS: u32 = 500;
 const SELF_TEST_CPU_PERIOD_US: u64 = 100_000;
-const SELF_TEST_CPU_QUOTA_US: u64 = 12_500;
-const SELF_TEST_SATURATION_VM_COUNT: usize = 8;
+const SELF_TEST_CPU_QUOTA_US: u64 = 50_000;
+const SELF_TEST_SATURATION_VM_COUNT: usize = 2;
 const SELF_TEST_SATURATION_CPU_MILLIS: u64 = 1_000;
 const SELF_TEST_VM_MEMORY_MIB: u32 = 256;
 const SELF_TEST_RESOURCE_HEADROOM_MIB: u64 = 512;
@@ -30,7 +30,7 @@ const SELF_TEST_RESOURCE_HEADROOM_MIB: u64 = 512;
 /// successful test non-transferable across host reboots.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SelfTestAttestationV2 {
+pub struct SelfTestAttestationV3 {
     pub version: u16,
     pub config_runtime_fingerprint_sha256: String,
     pub cloud_hypervisor_sha256: String,
@@ -42,7 +42,7 @@ pub struct SelfTestAttestationV2 {
     pub landlock_abi: u32,
     pub quota_verified: bool,
     pub burst_verified: bool,
-    pub boot_quota_transition_verified: bool,
+    pub startup_quota_verified: bool,
     pub network_verified: bool,
     pub landlock_negative_access: bool,
     pub kvm_accounting_proven: bool,
@@ -97,7 +97,7 @@ impl SelfTestArtifacts {
 /// its boot-bound readiness attestation only after proving eight concurrent
 /// jailed 125m Cloud Hypervisor lifecycles, exact one-core admission saturation,
 /// ninth-launch rejection, and KVM accounting.
-pub fn run(config: &JailerdConfig, artifacts: &SelfTestArtifacts) -> Result<SelfTestAttestationV2> {
+pub fn run(config: &JailerdConfig, artifacts: &SelfTestArtifacts) -> Result<SelfTestAttestationV3> {
     artifacts.validate()?;
     #[cfg(target_os = "linux")]
     {
@@ -113,12 +113,12 @@ pub fn run(config: &JailerdConfig, artifacts: &SelfTestArtifacts) -> Result<Self
 /// Load an attestation only when it is trusted and still matches this boot,
 /// configuration, and the currently installed runtime bytes.
 #[cfg(target_os = "linux")]
-pub fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV2>> {
+pub fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV3>> {
     linux::load_verified(config)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn load_verified(_config: &JailerdConfig) -> Result<Option<SelfTestAttestationV2>> {
+pub fn load_verified(_config: &JailerdConfig) -> Result<Option<SelfTestAttestationV3>> {
     Ok(None)
 }
 

@@ -104,8 +104,8 @@ pub(super) fn attempt_recovered_containment<B: HostBackend, P: JailPreparer>(
 }
 
 /// Fail closed when persisted state cannot be reattached safely. Constructor
-/// recovery must not abort and leave a boot-quota process tree without a live
-/// watchdog. Instead, charge the full effective boot allocation and retain a
+/// recovery must retain the declared quota for an unresolved process tree.
+/// Keep the host ineligible for new launches and retain a
 /// cleanup item until a later attempt proves cgroup drain.
 pub(super) fn contain_or_retain_recovered_record<B: HostBackend, P: JailPreparer>(
     config: &JailerdConfig,
@@ -115,10 +115,11 @@ pub(super) fn contain_or_retain_recovered_record<B: HostBackend, P: JailPreparer
     pending_cpu_reservations: &mut BTreeMap<ValidatedId, CpuQuota>,
     unresolved_recoveries: &mut BTreeMap<ValidatedId, UnresolvedRecovery>,
 ) {
-    let requested_effective = config.boot_cpu_millis.max(record.request.cpu_millis);
-    let conservative_quota = CpuQuota::from_millis(requested_effective).unwrap_or_else(|_| {
-        CpuQuota::from_millis(config.boot_cpu_millis).expect("validated quota")
-    });
+    let conservative_quota =
+        CpuQuota::from_millis(record.request.cpu_millis.max(record.quota.cpu_millis))
+            .unwrap_or_else(|_| {
+                CpuQuota::from_millis(u32::from(u16::MAX) * 1_000).expect("bounded quota")
+            });
     let recovery = UnresolvedRecovery {
         run_id: record.request.run_id.clone(),
         generation: record.generation.clone(),
@@ -182,30 +183,12 @@ pub(super) fn validate_recovered_record(config: &JailerdConfig, record: &VmRecor
         bail!("persisted VM runtime hash differs from the configured runtime")
     }
     if request_quota != record.quota
-        || record.vcpu_count != record.request.vcpu_count
         || CpuQuota::from_millis(record.quota.cpu_millis)? != record.quota
     {
         bail!("persisted CPU quota is not canonical")
     }
-    let expected_effective = match record.cpu_phase {
-        VmCpuPhase::BootBurst => {
-            if record.boot_deadline_unix_ms.is_none() || record.ssh_forward_active {
-                bail!("persisted boot CPU lease state is incomplete or externally reachable")
-            }
-            CpuQuota::from_millis(record.request.cpu_millis.max(config.boot_cpu_millis))?
-        }
-        VmCpuPhase::Steady => {
-            if record.boot_deadline_unix_ms.is_some() {
-                bail!("persisted steady CPU state retains a boot lease deadline")
-            }
-            record.quota
-        }
-    };
-    if record.effective_quota != expected_effective {
-        bail!("persisted effective CPU quota does not match its phase")
-    }
     if let Some(attestation) = &record.quota_attestation
-        && (attestation.quota != record.effective_quota()
+        && (attestation.quota != record.quota
             || attestation.cpu_max != attestation.quota.cpu_max()
             || attestation.cpu_max_burst != 0
             || attestation.verified_at_unix_ms == 0)

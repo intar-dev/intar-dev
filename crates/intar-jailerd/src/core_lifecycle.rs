@@ -27,9 +27,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         quota: CpuQuota,
         use_v3: bool,
     ) -> Result<VmLaunchResult> {
-        let effective_quota =
-            CpuQuota::from_millis(request.cpu_millis.max(self.config.boot_cpu_millis))
-                .context("derive root-owned boot CPU quota")?;
         self.config
             .validate_ssh_public_port(request.ssh_public_port)
             .context("validate root-owned SSH public port policy")?;
@@ -57,27 +54,16 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .saturating_sub(self.config.cpu_reserved_millis);
         let after_launch = self
             .committed_cpu_millis()
-            .checked_add(u64::from(effective_quota.cpu_millis))
+            .checked_add(u64::from(quota.cpu_millis))
             .context("CPU admission arithmetic overflow")?;
         if after_launch > schedulable {
-            return Err(BootCapacityPendingError {
+            return Err(CpuCapacityExhaustedError {
                 committed: self.committed_cpu_millis(),
-                requested: effective_quota.cpu_millis,
-                steady: request.cpu_millis,
+                requested: quota.cpu_millis,
                 schedulable,
             }
             .into());
         }
-
-        let admitted_at_monotonic = Instant::now();
-        let boot_deadline_monotonic = admitted_at_monotonic
-            .checked_add(Duration::from_millis(self.config.boot_cpu_lease_ms))
-            .context("monotonic boot CPU lease deadline overflow")?;
-        let boot_deadline_unix_ms = Some(
-            unix_time_millis()?
-                .checked_add(self.config.boot_cpu_lease_ms)
-                .context("boot CPU lease deadline overflow")?,
-        );
 
         let identity = self.allocate_identity()?;
         self.preparer
@@ -121,16 +107,14 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             return Err(error).context("prepare VM TAP and forwarding policy");
         }
         let unit_name = vm_unit_name(&generation);
-        let mut unit_spec = UnitLaunchSpec {
+        let unit_spec = UnitLaunchSpec {
             generation: generation.clone(),
             unit_name: unit_name.clone(),
             description: format!("Intar jailed VM {} / {}", request.run_id, request.vm_id),
             jailer_binary: self.config.jailer_binary.clone(),
             jail_spec_path: prepared.spec_path.clone(),
             api_socket_path: prepared.paths.host_api_socket.clone(),
-            cpu_quota: effective_quota,
-            steady_cpu_quota: quota,
-            boot_cpu_lease_ms: Some(self.config.boot_cpu_lease_ms),
+            cpu_quota: quota,
             vmm_executable_identity: prepared.vmm_executable_identity,
             uid: identity,
             gid: identity,
@@ -151,13 +135,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             uid: identity,
             gid: identity,
             quota,
-            effective_quota,
-            cpu_phase: VmCpuPhase::BootBurst,
-            boot_deadline_unix_ms,
-            boot_deadline_monotonic: Some(boot_deadline_monotonic),
             quota_attestation: None,
             ssh_forward_active: false,
-            vcpu_count: request.vcpu_count,
             paths: prepared.paths.clone(),
             cgroup_path: None,
             netns_name: run_network.result.namespace_name.clone(),
@@ -173,22 +152,11 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             let _ = self.preparer.quarantine(&self.config, &generation);
             return Err(error).context("persist pre-launch VM intent");
         }
-        unit_spec.boot_cpu_lease_ms =
-            match remaining_boot_cpu_lease_ms(boot_deadline_monotonic, Instant::now()) {
-                Ok(remaining_ms) => Some(remaining_ms),
-                Err(error) => {
-                    let _ = self
-                        .backend
-                        .destroy_vm_network(&request.run_id, &generation);
-                    let _ = self.preparer.quarantine(&self.config, &generation);
-                    return Err(error).context("start VM within admitted boot CPU lease");
-                }
-            };
-        // Charge the full boot allocation before the first operation that can
+        // Charge the declared CPU allocation before the first operation that can
         // create a live cgroup. From this point every failure must either
         // prove cgroup drain or retain this conservative reservation.
         self.pending_cpu_reservations
-            .insert(generation.clone(), effective_quota);
+            .insert(generation.clone(), quota);
         self.unresolved_recoveries.insert(
             generation.clone(),
             UnresolvedRecovery {
@@ -232,7 +200,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         record.cgroup_path.clone_from(&started.cgroup_path);
         record.host_boot_id.clone_from(&started.host_boot_id);
         record.pid_start_time_ticks = started.pid_start_time_ticks;
-        record.quota_attestation = match quota_attestation(effective_quota) {
+        record.quota_attestation = match quota_attestation(quota) {
             Ok(attestation) => Some(attestation),
             Err(error) => {
                 return self.fail_launch(
@@ -367,7 +335,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         request: FinalizeVmBootRequest,
     ) -> Result<FinalizeVmBootResult> {
         let generation = request.generation;
-        let phase_changed = self.seal_vm_cpu(&generation)?;
+        self.verify_vm_cpu(&generation)?;
         let mut record = self
             .records
             .get(&generation)
@@ -399,51 +367,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         }
         Ok(FinalizeVmBootResult {
             generation,
-            changed: phase_changed || forwarding_changed,
+            changed: forwarding_changed,
             ssh_forward_active: record.ssh_forward_active,
             cpu_runtime: record.cpu_runtime(),
         })
     }
 
-    /// Seal every expired boot lease without publishing SSH ingress. The
-    /// daemon watchdog calls this even when the agent is disconnected.
-    pub fn enforce_boot_deadlines(&mut self) -> Result<usize> {
-        let monotonic_now = Instant::now();
-        let unix_now_ms = unix_time_millis()?;
-        let mut failures = self.retry_unresolved_recoveries();
-        let expired = self
-            .records
-            .values()
-            .filter(|record| {
-                record.cpu_phase == VmCpuPhase::BootBurst
-                    && boot_cpu_lease_expired(
-                        record.boot_deadline_monotonic,
-                        record.boot_deadline_unix_ms,
-                        monotonic_now,
-                        unix_now_ms,
-                    )
-            })
-            .map(|record| record.generation.clone())
-            .collect::<Vec<_>>();
-        let mut sealed = 0;
-        for generation in expired {
-            match self.seal_vm_cpu(&generation) {
-                Ok(true) => sealed += 1,
-                Ok(false) => {}
-                Err(error) => failures.push(format!("{generation}: {error:#}")),
-            }
-        }
-        if failures.is_empty() {
-            Ok(sealed)
-        } else {
-            bail!(
-                "boot CPU lease watchdog sealed {sealed} VM(s) but failed for: {}",
-                failures.join("; ")
-            )
-        }
-    }
-
-    pub(super) fn retry_unresolved_recoveries(&mut self) -> Vec<String> {
+    pub fn retry_unresolved_recoveries(&mut self) -> Vec<String> {
         let generations = self
             .unresolved_recoveries
             .keys()
@@ -476,30 +406,25 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         failures
     }
 
-    pub(super) fn seal_vm_cpu(&mut self, generation: &ValidatedId) -> Result<bool> {
+    pub(super) fn verify_vm_cpu(&mut self, generation: &ValidatedId) -> Result<()> {
         let mut record = self
             .records
             .get(generation)
             .context("unknown jail generation")?
             .clone();
-        let phase_changed = record.cpu_phase == VmCpuPhase::BootBurst;
         let cgroup_path = record
             .cgroup_path
             .as_deref()
             .context("VM cgroup identity is not persisted")?;
         if let Err(error) =
             self.backend
-                .update_unit_cpu_quota(&record.unit_name, cgroup_path, record.quota)
+                .verify_unit_cpu_quota(&record.unit_name, cgroup_path, record.quota)
         {
             return self.contain_failed_boot_seal(&record, error);
         }
-        record.cpu_phase = VmCpuPhase::Steady;
-        record.effective_quota = record.quota;
-        record.boot_deadline_unix_ms = None;
-        record.boot_deadline_monotonic = None;
         record.quota_attestation = Some(quota_attestation(record.quota)?);
         // The boot is over. Release the background lane now instead of letting
-        // the window run to the end of the boot CPU lease.
+        // the window run to the end of the background preparation window.
         close_boot_window(generation);
         if let Err(error) = self.preparer.persist(&self.config, &record) {
             return self.contain_failed_boot_seal(
@@ -508,7 +433,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             );
         }
         self.records.insert(generation.clone(), record);
-        Ok(phase_changed)
+        Ok(())
     }
 
     pub(super) fn contain_failed_boot_seal<T>(
@@ -572,8 +497,8 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 .executable_sha256
                 .unwrap_or(record.cloud_hypervisor_sha256),
             cpu_quota: record.quota,
+            vcpu_count: record.quota.vcpu_count(),
             cpu_runtime,
-            vcpu_count: record.vcpu_count,
             health: inspection.health,
             cpu_stat: inspection.cpu_stat,
             seccomp_enabled: inspection.seccomp_enabled,
@@ -628,7 +553,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let committed: u64 = self
             .records
             .values()
-            .map(|record| u64::from(record.effective_quota().cpu_millis))
+            .map(|record| u64::from(record.quota.cpu_millis))
             .sum();
         committed.saturating_add(
             self.pending_cpu_reservations

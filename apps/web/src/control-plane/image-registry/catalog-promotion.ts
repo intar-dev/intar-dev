@@ -11,7 +11,7 @@ import {
 } from "@/db/schema";
 import type {
   ImageArchitecture,
-  ScenarioManifestV4,
+  ScenarioManifestV5,
 } from "@/generated/catalog";
 import { catalogRowsFromScenarioManifest } from "@/lib/catalog-manifest";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
@@ -683,7 +683,7 @@ export function familyKey(family: {
 /** Image ids each (scenario, arch) family installs when it is promoted. */
 export function incomingFamilyImages(
   expected: ImageBuildBundleMeta["scenarios"],
-  exactBuilds: Array<{ manifest: ScenarioManifestV4 | null } | undefined>,
+  exactBuilds: Array<{ manifest: ScenarioManifestV5 | null } | undefined>,
 ): IncomingFamily[] {
   const families = new Map<string, IncomingFamily>();
   expected.forEach((item, index) => {

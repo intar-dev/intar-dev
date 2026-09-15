@@ -47,9 +47,6 @@ fn ready_capabilities(source_root: PathBuf) -> JailerCapabilities {
         supports_template_backed_launch: true,
         fast_template_store: true,
         supports_hard_cpu_quota: true,
-        supports_boot_cpu_lease: true,
-        boot_cpu_millis: intar_jailer_protocol::DEFAULT_BOOT_CPU_MILLIS,
-        boot_cpu_lease_ms: intar_jailer_protocol::DEFAULT_BOOT_CPU_LEASE_MS,
         supports_landlock: true,
         supports_cgroup_v2: true,
         uid_gid_start: 200_000,
@@ -259,7 +256,6 @@ fn rejects_unattested_jailerd_security_and_identity_state() {
     capabilities.landlock_abi = Some(2);
     capabilities.kvm_accounting_proven = false;
     capabilities.supports_jailer_v2 = false;
-    capabilities.supports_boot_cpu_lease = false;
     capabilities.supports_template_backed_launch = false;
     capabilities.fast_template_store = false;
     capabilities.supports_hard_cpu_quota = false;
@@ -294,7 +290,6 @@ fn rejects_unattested_jailerd_security_and_identity_state() {
         "Landlock ABI",
         "KVM helper accounting",
         "jailer v2 isolation capability",
-        "boot CPU lease capability",
         "fast jail template store",
         "hard CPU quota capability",
     ] {
@@ -321,7 +316,7 @@ fn rejects_legacy_jailerd_protocol_v1() {
     assert!(report.checks.iter().any(|check| {
         check.name == "jailerd protocol"
             && check.status == PreflightStatus::Fail
-            && check.detail.contains("required version 3")
+            && check.detail.contains("required version 4")
     }));
 }
 

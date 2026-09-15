@@ -189,8 +189,7 @@ describe("admission batch", () => {
         nextVersion: next.version,
         nextDocJson: JSON.stringify(next),
       },
-      bootCpuMillis: 2_000,
-      steadyCpuMillis: 1_000,
+      cpuMillis: 1_000,
       reservationResources: {
         cpuMillis: 2_000,
         memoryMib: 512,
@@ -445,7 +444,6 @@ function admissionVm(): RunVmStateDocument {
       imageSha256: "2".repeat(64),
       resources: {
         cpuMillis: 1_000,
-        vcpuCount: 1,
         memoryMib: 512,
         diskMib: 4_096,
       },
@@ -595,8 +593,7 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       nextVersion: next.version,
       nextDocJson: JSON.stringify(next),
     },
-    bootCpuMillis: 2_000,
-    steadyCpuMillis: 1_000,
+    cpuMillis: 1_000,
     reservationResources: {
       cpuMillis: 2_000,
       memoryMib: 512,

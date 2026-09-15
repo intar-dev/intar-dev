@@ -135,7 +135,6 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             spool_dir: row.spool_dir.clone(),
             mac: mac.clone(),
             cpu_millis: row.cpu_millis.and_then(|value| u32::try_from(value).ok()),
-            vcpu_count: row.vcpu_count.and_then(|value| u16::try_from(value).ok()),
             guest_ip: row.guest_ip.clone(),
             guest_ip_cidr: row.guest_ip_cidr.clone(),
             gateway: row.gateway.clone(),

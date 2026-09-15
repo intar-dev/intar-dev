@@ -131,7 +131,6 @@ function vm(): ScenarioVmRecord {
     initrdSha256: "HIDDEN_INITRD_HASH",
     bootCmdline: "HIDDEN_BOOT_COMMAND",
     cpuMillis: 1000,
-    vcpuCount: 1,
     memoryMib: 1024,
     diskMib: 4096,
   };

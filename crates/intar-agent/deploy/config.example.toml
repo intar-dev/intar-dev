@@ -31,8 +31,8 @@ work_dir = "/var/cache/intar-agent"
 
 [vm_defaults.resources]
 # Fallback topology for local requests. Scenario catalog V4 manifests carry
-# exact cpu_millis and vcpu_count resources for scheduled VMs.
-vcpus = 1
+# exact cpu_millis resources for scheduled VMs.
+cpu_millis = 1000
 memory_mib = 512
 
 [vm_defaults.network]

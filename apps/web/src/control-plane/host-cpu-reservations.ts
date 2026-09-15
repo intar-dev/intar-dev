@@ -1,3 +1,4 @@
+import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
 import { and, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
@@ -20,15 +21,12 @@ import {
 type RuntimeD1Database = DrizzleD1Database & { $client: D1Database };
 
 export const HOST_CPU_RESERVATION_TTL_MS = 60_000;
-export const HOST_BOOT_CPU_MILLIS_PER_VM = 2_000;
 
 export interface HostCpuReservationCapacity {
   schedulableCpuMillis: number;
   reportedCommittedCpuMillis: number;
   controlPlanePendingCpuMillis: number;
   controlPlaneCommittedCpuMillis: number;
-  controlPlaneBootCpuMillis: number;
-  controlPlaneSteadyCpuMillis: number;
   effectiveCommittedCpuMillis: number;
   availableCpuMillis: number;
 }
@@ -36,30 +34,28 @@ export interface HostCpuReservationCapacity {
 export interface HostCpuReservationCapacityRow {
   runId: string;
   cpuMillis: number;
-  quotaPhase: "boot" | "steady";
   state: "pending" | "committed";
 }
 
-export function bootCpuReservationForSteadyVms(
-  steadyCpuMillisByVm: readonly number[],
+export function cpuReservationForVms(
+  cpuMillisByVm: readonly number[],
 ): number {
   if (
-    steadyCpuMillisByVm.length === 0 ||
-    steadyCpuMillisByVm.some(
+    cpuMillisByVm.length === 0 ||
+    cpuMillisByVm.some(
       (cpuMillis) => !Number.isSafeInteger(cpuMillis) || cpuMillis <= 0,
     )
   ) {
-    throw new Error("scenario boot CPU reservation is invalid");
+    throw new Error("scenario CPU reservation is invalid");
   }
-  const bootCpuMillis = steadyCpuMillisByVm.reduce(
-    (total, steadyCpuMillis) =>
-      total + Math.max(steadyCpuMillis, HOST_BOOT_CPU_MILLIS_PER_VM),
+  const cpuMillis = cpuMillisByVm.reduce(
+    (total, cpuMillis) => total + cpuMillis,
     0,
   );
-  if (!Number.isSafeInteger(bootCpuMillis)) {
-    throw new Error("scenario boot CPU reservation overflows");
+  if (!Number.isSafeInteger(cpuMillis)) {
+    throw new Error("scenario CPU reservation overflows");
   }
-  return bootCpuMillis;
+  return cpuMillis;
 }
 
 
@@ -126,8 +122,6 @@ export async function reconcileHostCpuReservations(
   committedRunIds: string[];
   expiredRunIds: string[];
   releasedRunIds: string[];
-  sealedRunIds: string[];
-  bootAccountingRunIds: string[];
 }> {
   const reservations = await db
     .select()
@@ -138,8 +132,6 @@ export async function reconcileHostCpuReservations(
       committedRunIds: [],
       expiredRunIds: [],
       releasedRunIds: [],
-      sealedRunIds: [],
-      bootAccountingRunIds: [],
     };
   }
 
@@ -201,7 +193,7 @@ export async function reconcileHostCpuReservations(
       await syncScenarioRuntimeResourceReservation(db, {
         executionId: run.runtimeExecutionId ?? reservation.runId,
         hostId,
-        cpuMillis: reservation.bootCpuMillis,
+        cpuMillis: reservation.cpuMillis,
         state: "committed",
         nowUnixMs,
       });
@@ -218,7 +210,7 @@ export async function reconcileHostCpuReservations(
         const disposition = await failExpiredUndispatchedRun(db, {
           hostId,
           runId: reservation.runId,
-          steadyCpuMillis: reservation.steadyCpuMillis,
+          cpuMillis: reservation.cpuMillis,
           nowUnixMs,
         });
         if (disposition === "durable") {
@@ -230,7 +222,7 @@ export async function reconcileHostCpuReservations(
           await syncScenarioRuntimeResourceReservation(db, {
             executionId: run.runtimeExecutionId ?? reservation.runId,
             hostId,
-            cpuMillis: reservation.bootCpuMillis,
+            cpuMillis: reservation.cpuMillis,
             state: "committed",
             nowUnixMs,
           });
@@ -264,12 +256,9 @@ export async function reconcileHostCpuReservations(
     actualRow !== undefined &&
     actualRow.appliedDesiredVersion >= desired.version;
   const releasedRunIds: string[] = [];
-  const sealedRunIds: string[] = [];
-  const bootAccountingRunIds: string[] = [];
 
-  // Reload after crash recovery may have committed a pending row above. All
-  // quota-phase mutations happen as one fenced row update while HostRuntimeDO
-  // holds its per-host CPU lock.
+  // Reload after crash recovery may have committed a pending row above.
+  // HostRuntimeDO holds its per-host CPU lock throughout reconciliation.
   const reconciledReservations = await db
     .select()
     .from(hostCpuReservations)
@@ -332,75 +321,20 @@ export async function reconcileHostCpuReservations(
       }
     }
 
-    // Teardown retains the last conservative reservation until applied
-    // absence proves the VM is gone. Active runs are charged boot allocation
-    // unless the current inventory and sticky projection agree on one live,
-    // generation-fenced steady attestation for every VM.
-    if (terminalOrDeleting || !run) {
-      continue;
-    }
-    const steadyAttested = hasGenerationFencedSteadyQuotaEvidence({
-      run,
-      reservation,
-      desired,
-      actual,
-      actualHasAppliedDesired,
+    // Keep the declared reservation until applied absence proves teardown.
+    await syncScenarioRuntimeResourceReservation(db, {
+      executionId: run?.runtimeExecutionId ?? reservation.runId,
+      hostId,
+      cpuMillis: reservation.cpuMillis,
+      state: "committed",
+      nowUnixMs,
     });
-    const nextPhase = steadyAttested ? "steady" : "boot";
-    const nextCpuMillis = steadyAttested
-      ? reservation.steadyCpuMillis
-      : reservation.bootCpuMillis;
-    if (
-      reservation.quotaPhase === nextPhase &&
-      reservation.cpuMillis === nextCpuMillis
-    ) {
-      await syncScenarioRuntimeResourceReservation(db, {
-        executionId: run.runtimeExecutionId ?? reservation.runId,
-        hostId,
-        cpuMillis: nextCpuMillis,
-        state: "committed",
-        nowUnixMs,
-      });
-      continue;
-    }
-    const updated = await db
-      .update(hostCpuReservations)
-      .set({
-        cpuMillis: nextCpuMillis,
-        quotaPhase: nextPhase,
-        updatedAt: nowUnixMs,
-      })
-      .where(
-        and(
-          eq(hostCpuReservations.hostId, hostId),
-          eq(hostCpuReservations.runId, reservation.runId),
-          eq(hostCpuReservations.state, "committed"),
-          eq(hostCpuReservations.quotaPhase, reservation.quotaPhase),
-          eq(hostCpuReservations.cpuMillis, reservation.cpuMillis),
-        ),
-      )
-      .returning({ runId: hostCpuReservations.runId });
-    if (updated.length > 0) {
-      await syncScenarioRuntimeResourceReservation(db, {
-        executionId: run.runtimeExecutionId ?? reservation.runId,
-        hostId,
-        cpuMillis: nextCpuMillis,
-        nowUnixMs,
-      });
-      if (nextPhase === "steady") {
-        sealedRunIds.push(reservation.runId);
-      } else {
-        bootAccountingRunIds.push(reservation.runId);
-      }
-    }
   }
 
   return {
     committedRunIds,
     expiredRunIds,
     releasedRunIds,
-    sealedRunIds,
-    bootAccountingRunIds,
   };
 }
 
@@ -453,7 +387,7 @@ async function syncScenarioRuntimeResourceReservation(
 
 function pendingRunHasDurableDesiredVms(input: {
   run: { runId: string; vmCount: number; stateJson: string };
-  reservation: { steadyCpuMillis: number };
+  reservation: { cpuMillis: number };
   desired: typeof hostDesiredState.$inferSelect.docJson | undefined;
 }): boolean {
   if (!input.desired || input.run.vmCount <= 0) {
@@ -485,7 +419,7 @@ function pendingRunHasDurableDesiredVms(input: {
   if (desiredVms.length !== input.run.vmCount) {
     return false;
   }
-  let steadyCpuMillis = 0;
+  let cpuMillis = 0;
   const desiredNames = new Set<string>();
   for (const vm of desiredVms) {
     if (
@@ -497,10 +431,10 @@ function pendingRunHasDurableDesiredVms(input: {
       return false;
     }
     desiredNames.add(vm.vm_name);
-    steadyCpuMillis += vm.resources.cpu_millis;
-    if (!Number.isSafeInteger(steadyCpuMillis)) return false;
+    cpuMillis += vm.resources.cpu_millis;
+    if (!Number.isSafeInteger(cpuMillis)) return false;
   }
-  return steadyCpuMillis === input.reservation.steadyCpuMillis;
+  return cpuMillis === input.reservation.cpuMillis;
 }
 
 async function failExpiredUndispatchedRun(
@@ -508,7 +442,7 @@ async function failExpiredUndispatchedRun(
   input: {
     hostId: string;
     runId: string;
-    steadyCpuMillis: number;
+    cpuMillis: number;
     nowUnixMs: number;
   },
 ): Promise<"failed" | "terminal" | "durable"> {
@@ -548,7 +482,7 @@ async function failExpiredUndispatchedRun(
     if (
       pendingRunHasDurableDesiredVms({
         run,
-        reservation: { steadyCpuMillis: input.steadyCpuMillis },
+        reservation: { cpuMillis: input.cpuMillis },
         desired: desiredRow?.docJson,
       })
     ) {
@@ -647,121 +581,6 @@ function failedUndispatchedRunStateJson(
   }
 }
 
-function hasGenerationFencedSteadyQuotaEvidence(input: {
-  run: { runId: string; vmCount: number; stateJson: string };
-  reservation: { steadyCpuMillis: number };
-  desired: unknown;
-  actual: unknown;
-  actualHasAppliedDesired: boolean;
-}): boolean {
-  if (
-    !input.actualHasAppliedDesired ||
-    !isRecord(input.desired) ||
-    !Array.isArray(input.desired.vms) ||
-    !isRecord(input.actual) ||
-    !Array.isArray(input.actual.vms)
-  ) {
-    return false;
-  }
-  let projectedState: unknown;
-  try {
-    projectedState = JSON.parse(input.run.stateJson);
-  } catch {
-    return false;
-  }
-  if (!isRecord(projectedState) || !Array.isArray(projectedState.vms)) {
-    return false;
-  }
-
-  const desiredVms = input.desired.vms.filter(
-    (vm) =>
-      isRecord(vm) &&
-      vm.run_id === input.run.runId &&
-      vm.desired_phase === "running",
-  );
-  if (
-    input.run.vmCount <= 0 ||
-    desiredVms.length !== input.run.vmCount ||
-    projectedState.vms.length !== input.run.vmCount
-  ) {
-    return false;
-  }
-
-  let steadyCpuTotal = 0;
-  const seenVmNames = new Set<string>();
-  for (const desiredVm of desiredVms) {
-    if (!isRecord(desiredVm)) {
-      return false;
-    }
-    const vmName = readNonEmptyString(desiredVm.vm_name);
-    const resources = isRecord(desiredVm.resources)
-      ? desiredVm.resources
-      : null;
-    const steadyCpuMillis = readPositiveInteger(resources?.cpu_millis);
-    if (!vmName || steadyCpuMillis === null || seenVmNames.has(vmName)) {
-      return false;
-    }
-    seenVmNames.add(vmName);
-    steadyCpuTotal += steadyCpuMillis;
-    if (!Number.isSafeInteger(steadyCpuTotal)) {
-      return false;
-    }
-
-    const projectedVm = projectedState.vms.find(
-      (vm) => isRecord(vm) && vm.runtimeVmName === vmName,
-    );
-    const actualMatches = input.actual.vms.filter(
-      (vm) =>
-        isRecord(vm) &&
-        vm.run_id === input.run.runId &&
-        vm.vm_name === vmName &&
-        vm.phase !== "absent",
-    );
-    if (!isRecord(projectedVm) || actualMatches.length !== 1) {
-      return false;
-    }
-    const actualVm = actualMatches[0];
-    if (!isRecord(actualVm)) {
-      return false;
-    }
-    const projectedQuota = isRecord(projectedVm.runtimeConstraints)
-      ? projectedVm.runtimeConstraints
-      : null;
-    const actualQuota = isRecord(actualVm.runtime_constraints)
-      ? actualVm.runtime_constraints
-      : null;
-    const resourceState = isRecord(actualVm.resource_state)
-      ? actualVm.resource_state
-      : null;
-    const generation = readNonEmptyString(actualQuota?.generation);
-    const quotaVerifiedAt = readPositiveInteger(
-      actualQuota?.quota_verified_at_unix_ms,
-    );
-    const reportUpdatedAt = readPositiveInteger(actualVm.updated_at_unix_ms);
-    if (
-      !generation ||
-      actualQuota?.phase !== "steady" ||
-      actualQuota?.steady_cpu_millis !== steadyCpuMillis ||
-      actualQuota?.effective_cpu_millis !== steadyCpuMillis ||
-      quotaVerifiedAt === null ||
-      reportUpdatedAt === null ||
-      quotaVerifiedAt > reportUpdatedAt ||
-      projectedQuota?.generation !== generation ||
-      projectedQuota?.phase !== "steady" ||
-      projectedQuota?.steadyCpuMillis !== steadyCpuMillis ||
-      projectedQuota?.effectiveCpuMillis !== steadyCpuMillis ||
-      projectedQuota?.quotaVerifiedAt !== quotaVerifiedAt ||
-      resourceState?.cpu_millis !== steadyCpuMillis ||
-      resourceState?.cpu_period_us !== 100_000 ||
-      resourceState?.cpu_quota_us !== steadyCpuMillis * 100
-    ) {
-      return false;
-    }
-  }
-
-  return steadyCpuTotal === input.reservation.steadyCpuMillis;
-}
-
 export async function nextPendingHostCpuReservationExpiry(
   db: DrizzleD1Database,
   hostId: string,
@@ -796,7 +615,6 @@ export async function loadHostCpuReservationCapacity(
     .select({
       runId: hostCpuReservations.runId,
       cpuMillis: hostCpuReservations.cpuMillis,
-      quotaPhase: hostCpuReservations.quotaPhase,
       state: hostCpuReservations.state,
     })
     .from(hostCpuReservations)
@@ -820,12 +638,6 @@ export function hostCpuReservationCapacityFromSnapshot(
   );
   const controlPlaneCommittedCpuMillis = sumCpuMillis(
     reservations.filter((reservation) => reservation.state === "committed"),
-  );
-  const controlPlaneBootCpuMillis = sumCpuMillis(
-    reservations.filter((reservation) => reservation.quotaPhase === "boot"),
-  );
-  const controlPlaneSteadyCpuMillis = sumCpuMillis(
-    reservations.filter((reservation) => reservation.quotaPhase === "steady"),
   );
   const reservedRunIds = new Set(
     reservations.map((reservation) => reservation.runId),
@@ -856,8 +668,6 @@ export function hostCpuReservationCapacityFromSnapshot(
     ...reported,
     controlPlanePendingCpuMillis,
     controlPlaneCommittedCpuMillis,
-    controlPlaneBootCpuMillis,
-    controlPlaneSteadyCpuMillis,
     effectiveCommittedCpuMillis,
     availableCpuMillis: Math.max(
       0,
@@ -890,7 +700,7 @@ function reportedCpuMillisByRun(
       ? vm.resource_state
       : null;
     const attestedEffective = readPositiveInteger(
-      runtimeConstraints?.effective_cpu_millis,
+      runtimeConstraints?.cpu_millis,
     );
     const quotaUs = readPositiveInteger(resourceState?.cpu_quota_us);
     const periodUs = readPositiveInteger(resourceState?.cpu_period_us);
@@ -912,7 +722,7 @@ export function strictCpuCapacity(
   HostCpuReservationCapacity,
   "schedulableCpuMillis" | "reportedCommittedCpuMillis"
 > | null {
-  if (!isRecord(report)) {
+  if (!isRecord(report) || report.schema_version !== HOST_STATE_REPORT_SCHEMA_VERSION) {
     return null;
   }
   const capacity = isRecord(report.capacity) ? report.capacity : null;
@@ -927,16 +737,13 @@ export function strictCpuCapacity(
     capabilities.supports_reflink !== true ||
     capabilities.supports_nftables !== true ||
     capabilities.supports_jailer_v3 !== true ||
-    capabilities.supports_boot_cpu_lease !== true ||
     capabilities.supports_template_backed_launch !== true ||
     capabilities.fast_template_store !== true ||
     capabilities.supports_hard_cpu_quota !== true ||
     capabilities.supports_landlock !== true ||
     capabilities.supports_cgroup_v2 !== true ||
     typeof capabilities.cloud_hypervisor_sha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(capabilities.cloud_hypervisor_sha256) ||
-    capabilities.boot_cpu_millis !== 2_000 ||
-    capabilities.boot_cpu_lease_ms !== 45_000
+    !/^[a-f0-9]{64}$/.test(capabilities.cloud_hypervisor_sha256)
   ) {
     return null;
   }
@@ -993,8 +800,7 @@ export function admissionCpuQuotaStatement(input: {
   runId: string;
   userId: string;
   hostId: string;
-  bootCpuMillis: number;
-  steadyCpuMillis: number;
+  cpuMillis: number;
   desiredVersion: number;
   nowUnixMs: number;
 }): D1PreparedStatement {
@@ -1003,18 +809,15 @@ export function admissionCpuQuotaStatement(input: {
   return input.d1
     .prepare(
       "INSERT INTO host_cpu_reservations (" +
-        "run_id, host_id, cpu_millis, steady_cpu_millis, boot_cpu_millis," +
-        " quota_phase, state, expires_at, created_at, updated_at" +
-        ") SELECT run.run_id, run.host_id, ?1, ?2, ?1, 'boot', 'committed'," +
-        " NULL, ?3, ?3" +
+        "run_id, host_id, cpu_millis, state, expires_at, created_at, updated_at" +
+        ") SELECT run.run_id, run.host_id, ?1, 'committed', NULL, ?2, ?2" +
         " FROM scenario_runs run" +
-        " WHERE run.run_id = ?4 AND run.user_id = ?5 AND run.host_id = ?6" +
+        " WHERE run.run_id = ?3 AND run.user_id = ?4 AND run.host_id = ?5" +
         " AND EXISTS (SELECT 1 FROM host_desired_state desired" +
-        " WHERE desired.host_id = run.host_id AND desired.version = ?7)",
+        " WHERE desired.host_id = run.host_id AND desired.version = ?6)",
     )
     .bind(
-      input.bootCpuMillis,
-      input.steadyCpuMillis,
+      input.cpuMillis,
       input.nowUnixMs,
       input.runId,
       input.userId,

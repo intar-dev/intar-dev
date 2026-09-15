@@ -377,7 +377,6 @@ fn runtime_socket_acl_failure_rolls_back_the_transient_unit() {
 fn failed_launch_reports_every_rollback_failure() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let mut core = JailerdCore::new_with_readiness(
         config,
         FakeBackend {
@@ -417,7 +416,7 @@ fn failed_launch_reports_every_rollback_failure() {
     assert_eq!(core.backend.destroyed_units.len(), 1);
     assert!(core.backend.destroyed_vm_networks.is_empty());
     assert!(core.preparer.quarantined.is_empty());
-    assert_eq!(core.capabilities().committed_cpu_millis, 2_000);
+    assert_eq!(core.capabilities().committed_cpu_millis, 1_000);
     assert_eq!(core.pending_cpu_reservations.len(), 1);
     assert_eq!(core.unresolved_recoveries.len(), 1);
 
@@ -425,7 +424,7 @@ fn failed_launch_reports_every_rollback_failure() {
     core.backend.fail_destroy_unit = false;
     core.backend.fail_destroy_vm_network = false;
     core.preparer.fail_quarantine = false;
-    assert_eq!(core.enforce_boot_deadlines().expect("retry cleanup"), 0);
+    assert_eq!(core.retry_unresolved_recoveries().len(), 0);
     assert_eq!(core.capabilities().committed_cpu_millis, 0);
     assert!(core.pending_cpu_reservations.is_empty());
     assert!(core.unresolved_recoveries.is_empty());
@@ -435,7 +434,6 @@ fn failed_launch_reports_every_rollback_failure() {
 fn drained_failed_launch_reports_network_and_quarantine_failures() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let mut core = JailerdCore::new_with_readiness(
         config,
         FakeBackend {
@@ -529,10 +527,7 @@ fn durable_v2_metadata_requires_explicit_cpu_and_ingress_state() {
     let encoded = serde_json::to_value(&record).expect("serialize v2 metadata");
     for required in [
         "schema_version",
-        "steady_quota",
-        "effective_quota",
-        "cpu_phase",
-        "boot_deadline_unix_ms",
+        "quota",
         "quota_attestation",
         "ssh_forward_active",
     ] {
@@ -555,18 +550,9 @@ fn legacy_metadata_shape_cannot_be_decoded_as_v2() {
     let mut legacy =
         serde_json::to_value(recovered_record(&config)).expect("serialize legacy metadata shape");
     let object = legacy.as_object_mut().expect("metadata object");
-    let legacy_quota = object
-        .remove("steady_quota")
-        .expect("serialized steady quota");
+    let legacy_quota = object.remove("quota").expect("serialized steady quota");
     object.insert("quota".to_owned(), legacy_quota);
-    for field in [
-        "schema_version",
-        "effective_quota",
-        "cpu_phase",
-        "boot_deadline_unix_ms",
-        "quota_attestation",
-        "ssh_forward_active",
-    ] {
+    for field in ["schema_version", "quota_attestation", "ssh_forward_active"] {
         object.remove(field);
     }
     let bytes = serde_json::to_vec(&legacy).expect("encode legacy metadata shape");
@@ -660,18 +646,14 @@ fn recovery_derives_unit_name_before_draining_tampered_metadata() {
 }
 
 #[test]
-fn recovery_starts_watchdog_and_accounts_boot_quota_when_containment_fails() {
+fn recovery_retains_quota_until_containment_succeeds() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
-    config.boot_cpu_millis = 2_000;
     let mut record = recovered_record(&config);
-    record.cpu_phase = VmCpuPhase::BootBurst;
-    record.effective_quota = CpuQuota::from_millis(2_000).expect("boot quota");
-    record.boot_deadline_unix_ms = Some(u64::MAX);
     record.quota_attestation = None;
     record.ssh_forward_active = false;
     let mut backend = FakeBackend {
-        fail_quota_update: true,
+        fail_quota_verification: true,
         fail_stop_unit: true,
         fail_destroy_unit: true,
         ..FakeBackend::default()
@@ -692,14 +674,14 @@ fn recovery_starts_watchdog_and_accounts_boot_quota_when_containment_fails() {
     .expect("recovery must retain a live watchdog");
 
     assert!(core.records.is_empty());
-    assert_eq!(core.capabilities().committed_cpu_millis, 2_000);
+    assert_eq!(core.capabilities().committed_cpu_millis, 125);
     assert_eq!(core.pending_cpu_reservations.len(), 1);
     assert!(core.unresolved_recoveries.contains_key(&record.generation));
 
-    core.backend.fail_quota_update = false;
+    core.backend.fail_quota_verification = false;
     core.backend.fail_stop_unit = false;
     core.backend.fail_destroy_unit = false;
-    assert_eq!(core.enforce_boot_deadlines().expect("retry containment"), 0);
+    assert_eq!(core.retry_unresolved_recoveries().len(), 0);
     assert_eq!(core.capabilities().committed_cpu_millis, 0);
     assert!(core.pending_cpu_reservations.is_empty());
     assert!(core.unresolved_recoveries.is_empty());
@@ -719,8 +701,6 @@ fn transient_unit_properties_encode_hard_quota_and_safety() {
         jail_spec_path: "/spec".into(),
         api_socket_path: "/api.sock".into(),
         cpu_quota: quota,
-        steady_cpu_quota: quota,
-        boot_cpu_lease_ms: Some(45_000),
         vmm_executable_identity: None,
         uid: 200_000,
         gid: 200_000,
@@ -731,58 +711,5 @@ fn transient_unit_properties_encode_hard_quota_and_safety() {
     assert_eq!(properties["CPUQuotaPeriodUSec"], "100000");
     assert_eq!(properties["KillMode"], "control-group");
     assert_eq!(properties["RestrictRealtime"], "yes");
-    assert_eq!(properties["BindsTo"], "intar-vm-boot-lease-test.service");
-}
-
-#[test]
-fn boot_cpu_guardian_unit_is_generation_bound_typed_and_hardened() {
-    let generation = ValidatedId::parse("generation-1").expect("generation");
-    let quota = CpuQuota::from_millis(1_000).expect("steady quota");
-    let request = BootCpuGuardianRequest::new(
-        generation.clone(),
-        vm_unit_name(&generation),
-        quota,
-        123_456,
-    )
-    .expect("guardian request");
-    let unit = BootCpuGuardianUnitSpec::new(PathBuf::from("/usr/lib/intar/intar-jailerd"), request)
-        .expect("guardian unit");
-    assert_eq!(unit.unit_name, "intar-vm-boot-lease-generation-1.service");
-    assert_eq!(
-        vm_cgroup_path(unit.request.unit_name()),
-        PathBuf::from("/intar.slice/intar-vms.slice/intar-vm-generation-1.service")
-    );
-    assert_eq!(
-        unit.command_argv(),
-        vec![
-            "/usr/lib/intar/intar-jailerd",
-            "boot-cpu-lease-guardian",
-            "--generation",
-            "generation-1",
-            "--unit-name",
-            "intar-vm-generation-1.service",
-            "--steady-cpu-millis",
-            "1000",
-            "--deadline-uptime-millis",
-            "123456",
-        ]
-    );
-    let properties = unit.required_properties();
-    assert_eq!(properties["Type"], "oneshot");
-    assert_eq!(properties["RemainAfterExit"], "yes");
-    assert_eq!(properties["PartOf"], "intar-vm-generation-1.service");
-    assert_eq!(properties["User"], "root");
-    assert_eq!(properties["NoNewPrivileges"], "yes");
-    assert_eq!(properties["ProtectSystem"], "strict");
-    assert_eq!(properties["ProtectControlGroups"], "no");
-    assert_eq!(properties["CapabilityBoundingSet"], "0");
-
-    let mismatch = BootCpuGuardianRequest::new(
-        generation,
-        "intar-vm-other.service".to_owned(),
-        quota,
-        123_456,
-    )
-    .expect_err("cross-generation guardian must fail");
-    assert!(mismatch.to_string().contains("unit mismatch"));
+    assert!(!properties.contains_key("BindsTo"));
 }

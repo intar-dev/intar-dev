@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Error, Result, anyhow, bail, ensure};
 use fs2::FileExt;
-use intar_contracts::catalog::{CourseCatalogLectureV2, ScenarioManifestV4};
+use intar_contracts::catalog::{CourseCatalogLectureV2, ScenarioManifestV5};
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
 
@@ -148,7 +148,7 @@ pub struct DirectBuildArtifact {
     pub image_id: String,
     pub kernel_sha256_hex: String,
     pub initrd_sha256_hex: String,
-    pub manifest: ScenarioManifestV4,
+    pub manifest: ScenarioManifestV5,
 }
 
 /// Render direct-QEMU build inputs without executing QEMU.

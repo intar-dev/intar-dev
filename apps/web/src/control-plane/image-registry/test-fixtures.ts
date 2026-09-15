@@ -1,7 +1,7 @@
 import { gzipSync } from "node:zlib";
 import { vi } from "vitest";
 import type { HostDesiredStateV2 } from "@/generated/bridge";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 
 const authMock = vi.hoisted(() => ({
   requireVerifiedAgentRequest: vi.fn(),
@@ -435,7 +435,7 @@ export function publishBuildAssignment(
   };
 }
 
-export function builderPublishForm(manifest: ScenarioManifestV4): FormData {
+export function builderPublishForm(manifest: ScenarioManifestV5): FormData {
   const form = new FormData();
   form.set("manifest", JSON.stringify(manifest));
   form.set("build_id", "build-1");
@@ -502,7 +502,7 @@ export interface HostSelectRow {
 export function imageIndexDb(
   rows: ImageIndexRow[],
   desiredRows: Array<{ docJson: HostDesiredStateV2 }> = [],
-  candidateRows: Array<{ manifest: ScenarioManifestV4 }> = [],
+  candidateRows: Array<{ manifest: ScenarioManifestV5 }> = [],
 ) {
   let call = 0;
   const select = vi.fn(() => {
@@ -532,7 +532,7 @@ export function imageIndexDb(
 
 export function candidateArtifactDb(
   desiredRows: Array<{ docJson: HostDesiredStateV2 }>,
-  candidateRows: Array<{ manifest: ScenarioManifestV4 }>,
+  candidateRows: Array<{ manifest: ScenarioManifestV5 }>,
 ) {
   let call = 0;
   const select = vi.fn(() => {
@@ -779,9 +779,9 @@ export function imageIndexRow(
 export function publishManifest(input: {
   imageSha256: string;
   artifactSha256: string;
-}): ScenarioManifestV4 {
+}): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: "broken-nginx",
     name: "broken-nginx",
     title: "Broken Nginx",
@@ -813,7 +813,6 @@ export function publishManifest(input: {
             "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false",
         },
         cpu_millis: 2_000,
-        vcpu_count: 2,
         memory_mib: 2048,
         disk_mib: 8192,
         probes: [],
@@ -822,7 +821,7 @@ export function publishManifest(input: {
   };
 }
 
-export function chunkManifestHead(manifest: ScenarioManifestV4) {
+export function chunkManifestHead(manifest: ScenarioManifestV5) {
   const vm = manifest.vms[0];
   if (!vm) throw new Error("manifest has no VM");
   return {

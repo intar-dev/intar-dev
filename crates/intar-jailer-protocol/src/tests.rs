@@ -8,31 +8,28 @@ fn quota_for_one_eighth_cpu_is_exact() {
 }
 
 #[test]
-fn boot_cpu_defaults_are_root_owned_and_bounded() {
-    let config = JailerdConfig::default();
-    assert_eq!(config.boot_cpu_millis, 2_000);
-    assert_eq!(config.boot_cpu_lease_ms, 45_000);
-    assert_eq!(config.legacy_template_retention_seconds, 7 * 24 * 60 * 60);
+fn removed_boot_cpu_settings_are_rejected() {
+    for key in ["boot_cpu_millis", "boot_cpu_lease_ms"] {
+        let mut value =
+            serde_json::to_value(JailerdConfig::default()).expect("valid CPU test fixture");
+        value[key] = serde_json::json!(2000);
+        assert!(serde_json::from_value::<JailerdConfig>(value).is_err());
+    }
+}
 
-    let mut invalid = JailerdConfig {
-        agent_uid: 991,
-        agent_gid: 991,
-        ..config
-    };
-    invalid.boot_cpu_lease_ms = 0;
-    assert_eq!(
-        invalid.validate(),
-        Err(ValidationError::InvalidBootCpuLease)
-    );
-    invalid.boot_cpu_lease_ms = 1;
-    invalid.boot_cpu_millis = 0;
-    assert_eq!(invalid.validate(), Err(ValidationError::ZeroCpu));
-    invalid.boot_cpu_millis = 1;
-    invalid.boot_cpu_lease_ms = DEFAULT_BOOT_CPU_LEASE_MS + 1;
-    assert_eq!(
-        invalid.validate(),
-        Err(ValidationError::InvalidBootCpuLease)
-    );
+#[test]
+fn fractional_limits_derive_only_guest_topology() {
+    for (millis, count, quota_us) in [
+        (125, 1, 12500),
+        (500, 1, 50000),
+        (1000, 1, 100000),
+        (1500, 2, 150000),
+    ] {
+        let quota = CpuQuota::from_millis(millis).expect("valid CPU test fixture");
+        assert_eq!(quota.vcpu_count(), count);
+        assert_eq!(quota.quota_micros, quota_us);
+        assert_eq!(quota.period_micros, 100000);
+    }
 }
 
 #[test]
@@ -88,10 +85,7 @@ fn finalize_boot_is_generation_fenced_and_rejects_extra_authority() {
 
     let steady_quota = CpuQuota::from_millis(1_000).expect("steady quota");
     let cpu_runtime = VmCpuRuntimeState {
-        phase: VmCpuPhase::Steady,
-        steady_quota,
-        effective_quota: steady_quota,
-        boot_deadline_unix_ms: None,
+        quota: steady_quota,
         attestation: Some(CpuQuotaAttestation {
             quota: steady_quota,
             cpu_max: steady_quota.cpu_max(),
@@ -165,14 +159,13 @@ fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
     let agent_owned = |name: &str, access| ArtifactSource {
         source_root: 0,
         relative_path: PathBuf::from(name),
-        sha256: None,
+        sha256: Some(Sha256Digest::for_bytes(b"fixture")),
         access,
     };
     let launch = VmLaunchRequest {
         run_id: ValidatedId::parse("run-1").expect("run ID"),
         vm_id: ValidatedId::parse("vm-1").expect("VM ID"),
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
         tap_name: "tap-test".to_string(),
@@ -287,7 +280,6 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         run_id: ValidatedId::parse("run-v3").expect("run ID"),
         vm_id: ValidatedId::parse("vm-v3").expect("VM ID"),
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         root_disk_size_bytes: 8 * 1024 * 1024,
         tap_name: "tap-v3".to_string(),
@@ -345,8 +337,8 @@ fn unknown_envelope_fields_are_rejected() {
 }
 
 #[test]
-fn protocol_v3_rejects_legacy_handshake_authority() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+fn protocol_v4_rejects_legacy_handshake_authority() {
+    assert_eq!(PROTOCOL_VERSION, 4);
     let legacy = RequestEnvelope::decode(
         br#"{"version":1,"request_id":1,"request":{"operation":"capabilities"}}"#,
     )
@@ -369,9 +361,6 @@ fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
         supports_template_backed_launch: true,
         fast_template_store: true,
         supports_hard_cpu_quota: true,
-        supports_boot_cpu_lease: true,
-        boot_cpu_millis: DEFAULT_BOOT_CPU_MILLIS,
-        boot_cpu_lease_ms: DEFAULT_BOOT_CPU_LEASE_MS,
         supports_landlock: true,
         supports_cgroup_v2: true,
         uid_gid_start: 200_000,
@@ -446,14 +435,13 @@ fn oversized_frames_are_rejected_before_json_parsing() {
 }
 
 #[test]
-fn launch_validation_enforces_aggregate_topology_limit() {
+fn guest_cpu_count_cannot_be_added_to_launch_request() {
     let request = VmLaunchRequest {
-        run_id: ValidatedId::parse("run").expect("run ID"),
-        vm_id: ValidatedId::parse("vm").expect("VM ID"),
-        cpu_millis: 1_001,
-        vcpu_count: 1,
+        run_id: ValidatedId::parse("run").expect("valid CPU test fixture"),
+        vm_id: ValidatedId::parse("vm").expect("valid CPU test fixture"),
+        cpu_millis: 500,
         memory_mib: 512,
-        root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
+        root_disk_size_bytes: 4096,
         tap_name: "tap0".to_owned(),
         mac_address: "02:00:00:00:00:01".to_owned(),
         guest_ip_cidr: "10.77.0.2/28".to_owned(),
@@ -462,16 +450,25 @@ fn launch_validation_enforces_aggregate_topology_limit() {
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,
-            root_disk: source("/trusted/root.raw", ArtifactAccess::ReadWrite),
-            runtime_disk: source("/trusted/runtime.raw", ArtifactAccess::ReadOnly),
-            recording_disk: source("/trusted/recordings.vfat", ArtifactAccess::ReadWrite),
+            root_disk: source("/trusted/root", ArtifactAccess::ReadWrite),
+            runtime_disk: source("/trusted/runtime", ArtifactAccess::ReadOnly),
+            recording_disk: source("/trusted/recording", ArtifactAccess::ReadWrite),
             tools_disk: None,
         },
     };
     assert_eq!(
-        request.validate(),
-        Err(ValidationError::QuotaExceedsTopology)
+        request
+            .validate()
+            .expect("valid CPU test fixture")
+            .cpu_millis,
+        500
     );
+    let mut value = serde_json::to_value(&request).expect("valid CPU test fixture");
+    assert!(serde_json::from_value::<VmLaunchRequest>(value.clone()).is_ok());
+    value["vcpu_count"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<VmLaunchRequest>(value).is_err());
+    assert!(CpuQuota::from_millis(0).is_err());
+    assert!(CpuQuota::from_millis(u32::MAX).is_err());
 }
 
 #[test]
@@ -690,7 +687,7 @@ fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {
     ArtifactSource {
         source_root: 0,
         relative_path: PathBuf::from(path.trim_start_matches("/trusted/")),
-        sha256: None,
+        sha256: Some(Sha256Digest::for_bytes(b"fixture")),
         access,
     }
 }

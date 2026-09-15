@@ -16,7 +16,7 @@ import {
   type ImageBuildBundleMeta,
 } from "@/db/schema";
 import type { HostStateReportV2 } from "@/generated/bridge";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import {
@@ -373,7 +373,7 @@ async function seedOrganization(organizationId: string): Promise<void> {
 
 async function seedStagedCandidate(input: {
   revision: string;
-  manifest: ScenarioManifestV4;
+  manifest: ScenarioManifestV5;
 }): Promise<void> {
   await env.DB.prepare(
     "INSERT INTO scenario_catalog_candidates (id, revision, organization_id, scenario_id, build_id, manifest_json, created_at, updated_at)" +
@@ -549,7 +549,7 @@ function reusedMeta(ids: string[]): ImageBuildBundleMeta {
 
 function hostReport(): HostStateReportV2 {
   return {
-    schema_version: 5,
+    schema_version: 6,
     host_id: "agent-1",
     observed_at_unix_ms: 1,
     applied_desired_version: 0,
@@ -567,8 +567,6 @@ function hostReport(): HostStateReportV2 {
     capabilities: {
       arch: "x86_64",
       cloud_hypervisor_sha256: null,
-      boot_cpu_millis: 2_000,
-      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
@@ -577,7 +575,6 @@ function hostReport(): HostStateReportV2 {
       supports_jailer_v3: true,
       supports_raw_chunks_v1: true,
       supports_scenario_guest_tools_v1: true,
-      supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
       supports_hard_cpu_quota: true,
@@ -590,9 +587,9 @@ function hostReport(): HostStateReportV2 {
   };
 }
 
-function technicalManifest(scenarioId = "task"): ScenarioManifestV4 {
+function technicalManifest(scenarioId = "task"): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: scenarioId,
     name: scenarioId,
     title: "Technical title",
@@ -619,7 +616,6 @@ function technicalManifest(scenarioId = "task"): ScenarioManifestV4 {
           cmdline: "root=/dev/vda rw",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],

@@ -11,10 +11,10 @@ use anyhow::{Context as _, Result};
 use fs2::{available_space, total_space};
 use futures_util::{Sink, SinkExt, StreamExt};
 use intar_contracts::bridge::{
-    BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV7, BuildPhase,
-    BuildReportV1, ClientHelloV7, DesiredStateV7, HOST_DESIRED_STATE_SCHEMA_VERSION,
+    BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV8, BuildPhase,
+    BuildReportV1, ClientHelloV8, DesiredStateV8, HOST_DESIRED_STATE_SCHEMA_VERSION,
     HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
-    HostRoleV1, HostStateReportV2, StateReportV7, SyncRequestReason, SyncRequestV7,
+    HostRoleV1, HostStateReportV2, StateReportV8, SyncRequestReason, SyncRequestV8,
 };
 use intar_contracts::catalog::{ImageArchitecture, Mib};
 use reqwest::Client as HttpClient;
@@ -162,7 +162,7 @@ async fn connect_once(
             if let Some(message) = parse_bridge_message(message)? {
                 validate_bridge_message(&message, &cfg.bridge.host_id)?;
                 match message {
-                    BridgeMessageV7::ServerHello(server_hello) => break Ok(server_hello),
+                    BridgeMessageV8::ServerHello(server_hello) => break Ok(server_hello),
                     other => {
                         anyhow::bail!("expected server_hello, got {}", bridge_message_type(&other))
                     }
@@ -245,14 +245,14 @@ async fn handle_server_message<W>(
     db: &BuilderDb,
     current_desired_state: &mut Option<HostDesiredStateV2>,
     desired_ready: &watch::Sender<u64>,
-    message: BridgeMessageV7,
+    message: BridgeMessageV8,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     match message {
-        BridgeMessageV7::DesiredState(message) => {
+        BridgeMessageV8::DesiredState(message) => {
             let desired_state = message.desired_state.clone();
             apply_desired_state(&cfg.bridge, db, &message)
                 .context("failed to apply builder desired state")?;
@@ -267,7 +267,7 @@ where
             )
             .await?;
         }
-        BridgeMessageV7::SyncRequest(_) => {
+        BridgeMessageV8::SyncRequest(_) => {
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
             replay_desired_build_reports(
                 write,
@@ -277,13 +277,13 @@ where
             )
             .await?;
         }
-        BridgeMessageV7::ServerHello(_) => {
+        BridgeMessageV8::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
         }
-        BridgeMessageV7::ClientHello(_)
-        | BridgeMessageV7::StateReport(_)
-        | BridgeMessageV7::VmReport(_)
-        | BridgeMessageV7::BuildReport(_) => {
+        BridgeMessageV8::ClientHello(_)
+        | BridgeMessageV8::StateReport(_)
+        | BridgeMessageV8::VmReport(_)
+        | BridgeMessageV8::BuildReport(_) => {
             anyhow::bail!("server sent builder-originated bridge message");
         }
     }
@@ -344,7 +344,7 @@ fn reconcile_cached_desired_state(
     Ok(())
 }
 
-fn apply_desired_state(cfg: &BridgeConfig, db: &BuilderDb, message: &DesiredStateV7) -> Result<()> {
+fn apply_desired_state(cfg: &BridgeConfig, db: &BuilderDb, message: &DesiredStateV8) -> Result<()> {
     validate_desired_state(&cfg.host_id, &message.desired_state)?;
     cache_desired_state(db, &message.desired_state)?;
     let inserted = reconcile_desired_builds(db, &message.desired_state.builds, now_ms())?;
@@ -376,7 +376,7 @@ where
     let report = build_host_state_report(cfg, db, desired)?;
     send_bridge_message(
         write,
-        &BridgeMessageV7::StateReport(StateReportV7 {
+        &BridgeMessageV8::StateReport(StateReportV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.bridge.host_id.clone(),
             report,
@@ -392,7 +392,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV7::BuildReport(intar_contracts::bridge::BuildReportV7 {
+        &BridgeMessageV8::BuildReport(intar_contracts::bridge::BuildReportV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -443,7 +443,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV7::SyncRequest(SyncRequestV7 {
+        &BridgeMessageV8::SyncRequest(SyncRequestV8 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             reason,
@@ -517,8 +517,6 @@ fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV2 {
     HostCapabilitiesV2 {
         arch: host_architecture(),
         cloud_hypervisor_sha256: None,
-        boot_cpu_millis: None,
-        boot_cpu_lease_ms: None,
         supports_kvm: cfg.qemu.accelerator == "kvm" && can_open_char_device(Path::new("/dev/kvm")),
         supports_vsock: can_open_char_device(Path::new("/dev/vhost-vsock")),
         supports_reflink: false,
@@ -527,7 +525,6 @@ fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV2 {
         supports_jailer_v3: false,
         supports_raw_chunks_v1: true,
         supports_scenario_guest_tools_v1: false,
-        supports_boot_cpu_lease: false,
         supports_template_backed_launch: false,
         fast_template_store: false,
         supports_hard_cpu_quota: false,
@@ -659,8 +656,8 @@ fn bytes_to_mib_u32(bytes: u64) -> Option<u32> {
         .filter(|value| *value > 0)
 }
 
-pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessageV7 {
-    BridgeMessageV7::ClientHello(ClientHelloV7 {
+pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessageV8 {
+    BridgeMessageV8::ClientHello(ClientHelloV8 {
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         host_id: input.host_id.to_string(),
         agent_version: input.agent_version.to_string(),
@@ -669,8 +666,6 @@ pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessage
         capabilities: HostCapabilitiesV2 {
             arch: input.arch,
             cloud_hypervisor_sha256: None,
-            boot_cpu_millis: None,
-            boot_cpu_lease_ms: None,
             supports_kvm: input.supports_kvm,
             supports_vsock: input.supports_vsock,
             supports_reflink: false,
@@ -679,7 +674,6 @@ pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessage
             supports_jailer_v3: false,
             supports_raw_chunks_v1: true,
             supports_scenario_guest_tools_v1: false,
-            supports_boot_cpu_lease: false,
             supports_template_backed_launch: false,
             fast_template_store: false,
             supports_hard_cpu_quota: false,
@@ -757,7 +751,7 @@ fn default_ws_url(base_url: &str, host_id: &str) -> String {
     format!("{ws_base}/agent/connect?hostId={host_id}")
 }
 
-async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV7) -> Result<()>
+async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV8) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
@@ -769,7 +763,7 @@ where
         .context("failed to send builder bridge websocket message")
 }
 
-fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV7>> {
+fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV8>> {
     match message {
         Message::Text(raw) => parse_bridge_json(&raw).map(Some),
         Message::Binary(raw) => {
@@ -783,16 +777,16 @@ fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV7>> {
     }
 }
 
-fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV7> {
+fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV8> {
     let message =
-        serde_json::from_str::<BridgeMessageV7>(raw).context("invalid bridge v7 JSON message")?;
+        serde_json::from_str::<BridgeMessageV8>(raw).context("invalid bridge v7 JSON message")?;
     if !message_has_v7_protocol(&message) {
         anyhow::bail!("invalid bridge protocol version; expected v7");
     }
     Ok(message)
 }
 
-fn validate_bridge_message(message: &BridgeMessageV7, host_id: &str) -> Result<()> {
+fn validate_bridge_message(message: &BridgeMessageV8, host_id: &str) -> Result<()> {
     if !message_has_v7_protocol(message) {
         anyhow::bail!("invalid bridge protocol version; expected v7");
     }
@@ -823,51 +817,51 @@ fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2) -> Result
     Ok(())
 }
 
-fn message_has_v7_protocol(message: &BridgeMessageV7) -> bool {
+fn message_has_v7_protocol(message: &BridgeMessageV8) -> bool {
     match message {
-        BridgeMessageV7::ClientHello(message) => {
+        BridgeMessageV8::ClientHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::ServerHello(message) => {
+        BridgeMessageV8::ServerHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::DesiredState(message) => {
+        BridgeMessageV8::DesiredState(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::StateReport(message) => {
+        BridgeMessageV8::StateReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
-        BridgeMessageV7::BuildReport(message) => {
+        BridgeMessageV8::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
+        BridgeMessageV8::BuildReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV7::SyncRequest(message) => {
+        BridgeMessageV8::SyncRequest(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
     }
 }
 
-fn bridge_message_host_id(message: &BridgeMessageV7) -> &str {
+fn bridge_message_host_id(message: &BridgeMessageV8) -> &str {
     match message {
-        BridgeMessageV7::ClientHello(message) => &message.host_id,
-        BridgeMessageV7::ServerHello(message) => &message.host_id,
-        BridgeMessageV7::DesiredState(message) => &message.host_id,
-        BridgeMessageV7::StateReport(message) => &message.host_id,
-        BridgeMessageV7::VmReport(message) => &message.host_id,
-        BridgeMessageV7::BuildReport(message) => &message.host_id,
-        BridgeMessageV7::SyncRequest(message) => &message.host_id,
+        BridgeMessageV8::ClientHello(message) => &message.host_id,
+        BridgeMessageV8::ServerHello(message) => &message.host_id,
+        BridgeMessageV8::DesiredState(message) => &message.host_id,
+        BridgeMessageV8::StateReport(message) => &message.host_id,
+        BridgeMessageV8::VmReport(message) => &message.host_id,
+        BridgeMessageV8::BuildReport(message) => &message.host_id,
+        BridgeMessageV8::SyncRequest(message) => &message.host_id,
     }
 }
 
-fn bridge_message_type(message: &BridgeMessageV7) -> &'static str {
+fn bridge_message_type(message: &BridgeMessageV8) -> &'static str {
     match message {
-        BridgeMessageV7::ClientHello(_) => "client_hello",
-        BridgeMessageV7::ServerHello(_) => "server_hello",
-        BridgeMessageV7::DesiredState(_) => "desired_state",
-        BridgeMessageV7::StateReport(_) => "state_report",
-        BridgeMessageV7::VmReport(_) => "vm_report",
-        BridgeMessageV7::BuildReport(_) => "build_report",
-        BridgeMessageV7::SyncRequest(_) => "sync_request",
+        BridgeMessageV8::ClientHello(_) => "client_hello",
+        BridgeMessageV8::ServerHello(_) => "server_hello",
+        BridgeMessageV8::DesiredState(_) => "desired_state",
+        BridgeMessageV8::StateReport(_) => "state_report",
+        BridgeMessageV8::VmReport(_) => "vm_report",
+        BridgeMessageV8::BuildReport(_) => "build_report",
+        BridgeMessageV8::SyncRequest(_) => "sync_request",
     }
 }
 
@@ -892,7 +886,7 @@ mod tests {
 
     use std::path::Path;
 
-    use intar_contracts::bridge::{BridgeMessageV7, HostRoleV1};
+    use intar_contracts::bridge::{BridgeMessageV8, HostRoleV1};
     use intar_contracts::catalog::ImageArchitecture;
 
     use crate::config::{BridgeConfig, BuilderConfig};
@@ -969,7 +963,7 @@ mod tests {
             last_applied_desired_version: Some(7),
         });
 
-        let BridgeMessageV7::ClientHello(hello) = message else {
+        let BridgeMessageV8::ClientHello(hello) = message else {
             panic!("expected client hello");
         };
         assert_eq!(hello.role, HostRoleV1::Builder);

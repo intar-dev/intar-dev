@@ -7,7 +7,7 @@ describe("selectOverdueRunLeases", () => {
     expect(
       selectOverdueRunLeases(
         {
-          schema_version: 3,
+          schema_version: 5,
           host_id: "host-alpha",
           version: 1,
           generated_at_unix_ms: 1_000,
@@ -49,7 +49,6 @@ function desiredVm(
     },
     resources: {
       cpu_millis: 1_000,
-      vcpu_count: 1,
       memory_mib: 512,
       disk_mib: 4,
     },

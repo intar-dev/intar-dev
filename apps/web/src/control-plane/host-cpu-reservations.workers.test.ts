@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   HOST_CPU_RESERVATION_TTL_MS,
-  bootCpuReservationForSteadyVms,
+  cpuReservationForVms,
   loadHostCpuReservationCapacity,
   reconcileHostCpuReservations,
   strictCpuCapacity,
@@ -33,10 +33,10 @@ describe("host CPU reservations", () => {
     await resetD1Database();
   });
 
-  it("reserves max(steady, 2000m) independently for every VM", () => {
-    expect(bootCpuReservationForSteadyVms([1_000, 2_500, 125])).toBe(6_500);
-    expect(() => bootCpuReservationForSteadyVms([])).toThrow(
-      "scenario boot CPU reservation is invalid",
+  it("reserves the exact CPU limit for every VM", () => {
+    expect(cpuReservationForVms([1_000, 2_500, 125])).toBe(3_625);
+    expect(() => cpuReservationForVms([])).toThrow(
+      "scenario CPU reservation is invalid",
     );
   });
 
@@ -50,16 +50,11 @@ describe("host CPU reservations", () => {
     expect(strictCpuCapacity(report)).toBeNull();
   });
 
-  it("rejects hosts that do not attest the root-owned 2000m/45s boot policy", () => {
-    const report = strictReport("host-policy-drift", 4_000, 1, 0);
-    report.capabilities.boot_cpu_millis = 1_000;
+  it("rejects hosts without hard CPU enforcement or a pinned runtime", () => {
+    const report = strictReport("host-policy-drift", 4000, 1, 0);
+    report.capabilities.supports_hard_cpu_quota = false;
     expect(strictCpuCapacity(report)).toBeNull();
-
-    report.capabilities.boot_cpu_millis = 2_000;
-    report.capabilities.boot_cpu_lease_ms = 45_001;
-    expect(strictCpuCapacity(report)).toBeNull();
-
-    report.capabilities.boot_cpu_lease_ms = 45_000;
+    report.capabilities.supports_hard_cpu_quota = true;
     report.capabilities.cloud_hypervisor_sha256 = null;
     expect(strictCpuCapacity(report)).toBeNull();
   });
@@ -96,10 +91,10 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await seedBootCpuReservation(db, {
+    await seedCpuReservation(db, {
         hostId,
         runId,
-        steadyCpuMillis: 125,
+        cpuMillis: 125,
         nowUnixMs: now,
         });
     await expect(
@@ -113,7 +108,7 @@ describe("host CPU reservations", () => {
       hostId,
       runId,
       now,
-      projectedQuotaState("generation-survived", "boot_burst", null, vmName),
+      projectedQuotaState("generation-survived", null, vmName),
     );
     await seedRunningDesiredState(hostId, runId, vmName, now, 125);
 
@@ -127,25 +122,25 @@ describe("host CPU reservations", () => {
     expect(reservation).toMatchObject({ state: "committed", expiresAt: null });
   });
 
-  it("holds the boot allocation until every VM has generation-fenced live steady evidence", async () => {
+  it("keeps the same CPU reservation before and after quota attestation", async () => {
     const hostId = "host-seal-capacity";
     const runId = "run-seal-capacity";
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 3_000, now);
-    await seedBootCpuReservation(db, {
+    await seedCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillis: 1_000,
+      cpuMillis: 1_000,
       nowUnixMs: now,
       });
     await seedRun(
       hostId,
       runId,
       now,
-      projectedQuotaState("generation-a", "boot_burst"),
+      projectedQuotaState("generation-a"),
     );
-    await seedGenericRuntimeReservation(hostId, runId, now, 2_000);
+    await seedGenericRuntimeReservation(hostId, runId, now, 1_000);
     await db
       .update(hostCpuReservations)
       .set({ state: "committed", expiresAt: null, updatedAt: now })
@@ -153,12 +148,9 @@ describe("host CPU reservations", () => {
     await seedRunningDesiredState(hostId, runId, "run-seal-capacity-vm", now);
 
     await expect(loadHostCpuReservationCapacity(db, hostId)).resolves.toMatchObject({
-      // 3_000 schedulable minus the run's boot quota of max(1_000 steady,
-      // 2_000 boot) = 1_000. A new run needs its own 2_000 boot quota, so this
-      // host is at boot capacity even though its steady quota is only 1_000.
-      availableCpuMillis: 1_000,
-      effectiveCommittedCpuMillis: 2_000,
-      controlPlaneBootCpuMillis: 2_000,
+      // The declared 1000m limit leaves 2000m available even before readiness.
+      availableCpuMillis: 2_000,
+      effectiveCommittedCpuMillis: 1_000,
     });
 
     const quotaVerifiedAt = now + 10;
@@ -166,7 +158,7 @@ describe("host CPU reservations", () => {
       .update(scenarioRuns)
       .set({
         stateJson: JSON.stringify(
-          projectedQuotaState("generation-a", "steady", quotaVerifiedAt),
+          projectedQuotaState("generation-a", quotaVerifiedAt),
         ),
       })
       .where(eq(scenarioRuns.runId, runId));
@@ -179,8 +171,7 @@ describe("host CPU reservations", () => {
             runId,
             vmName: "run-seal-capacity-vm",
             generation: "generation-a",
-            phase: "steady",
-            effectiveCpuMillis: 1_000,
+            phase: "running",
             quotaVerifiedAt,
             updatedAt: quotaVerifiedAt + 1,
           }),
@@ -190,7 +181,7 @@ describe("host CPU reservations", () => {
 
     await expect(
       reconcileHostCpuReservations(db, hostId, quotaVerifiedAt + 2),
-    ).resolves.toMatchObject({ sealedRunIds: [runId] });
+    ).resolves.toMatchObject({ releasedRunIds: [] });
     await expect(
       db
         .select()
@@ -199,9 +190,6 @@ describe("host CPU reservations", () => {
     ).resolves.toEqual([
       expect.objectContaining({
         cpuMillis: 1_000,
-        steadyCpuMillis: 1_000,
-        bootCpuMillis: 2_000,
-        quotaPhase: "steady",
       }),
     ]);
     await expect(
@@ -217,27 +205,26 @@ describe("host CPU reservations", () => {
     await expect(loadHostCpuReservationCapacity(db, hostId)).resolves.toMatchObject({
       availableCpuMillis: 2_000,
       effectiveCommittedCpuMillis: 1_000,
-      controlPlaneSteadyCpuMillis: 1_000,
     });
   });
 
-  it("restores conservative boot accounting when fresh steady evidence is missing", async () => {
+  it("keeps the CPU reservation when a new generation has no quota attestation", async () => {
     const hostId = "host-conservative-recovery";
     const runId = "run-conservative-recovery";
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await seedBootCpuReservation(db, {
+    await seedCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillis: 1_000,
+      cpuMillis: 1_000,
       nowUnixMs: now,
       });
     await seedRun(
       hostId,
       runId,
       now,
-      projectedQuotaState("generation-a", "steady", now + 10, `${runId}-vm`),
+      projectedQuotaState("generation-a", now + 10, `${runId}-vm`),
     );
     await seedRunningDesiredState(hostId, runId, `${runId}-vm`, now);
     await db
@@ -253,8 +240,7 @@ describe("host CPU reservations", () => {
             runId,
             vmName: `${runId}-vm`,
             generation: "generation-a",
-            phase: "steady",
-            effectiveCpuMillis: 1_000,
+            phase: "running",
             quotaVerifiedAt: now + 10,
             updatedAt: now + 11,
           }),
@@ -263,16 +249,13 @@ describe("host CPU reservations", () => {
       .where(eq(hostActualState.hostId, hostId));
     await reconcileHostCpuReservations(db, hostId, now + 12);
 
-    // A newer projected generation fences the old inventory attestation. The
-    // reservation returns to 2000m immediately and stays there until a fresh
-    // live cgroup read for generation-b proves steady state.
+    // A new generation without readiness evidence keeps the same reservation.
     await db
       .update(scenarioRuns)
       .set({
         stateJson: JSON.stringify(
           projectedQuotaState(
             "generation-b",
-            "boot_burst",
             null,
             `${runId}-vm`,
           ),
@@ -281,14 +264,14 @@ describe("host CPU reservations", () => {
       .where(eq(scenarioRuns.runId, runId));
     await expect(
       reconcileHostCpuReservations(db, hostId, now + 13),
-    ).resolves.toMatchObject({ bootAccountingRunIds: [runId] });
+    ).resolves.toMatchObject({ releasedRunIds: [] });
     await expect(
       db
         .select()
         .from(hostCpuReservations)
         .where(eq(hostCpuReservations.runId, runId)),
     ).resolves.toEqual([
-      expect.objectContaining({ cpuMillis: 2_000, quotaPhase: "boot" }),
+      expect.objectContaining({ cpuMillis: 1_000 }),
     ]);
   });
 
@@ -298,10 +281,10 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await seedBootCpuReservation(db, {
+    await seedCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillis: 875,
+      cpuMillis: 875,
       nowUnixMs: now,
       });
     await db
@@ -323,8 +306,8 @@ describe("host CPU reservations", () => {
       // reported VMs that no reservation covers (125 of the 250 reported
       // millicores) is charged, so no unreserved local quota hides behind the
       // control-plane row.
-      availableCpuMillis: 0,
-      effectiveCommittedCpuMillis: 2_125,
+      availableCpuMillis: 1_000,
+      effectiveCommittedCpuMillis: 1_000,
     });
   });
 
@@ -334,10 +317,10 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await seedBootCpuReservation(db, {
+    await seedCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillis: 500,
+      cpuMillis: 500,
       nowUnixMs: now,
       });
 
@@ -362,10 +345,10 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await seedBootCpuReservation(db, {
+    await seedCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillis: 500,
+      cpuMillis: 500,
       nowUnixMs: now,
       });
     await seedRun(hostId, runId, now);
@@ -396,10 +379,10 @@ describe("host CPU reservations", () => {
     const now = Date.now();
     const db = drizzle(env.DB);
     await seedStrictCpuHost(hostId, 2_000, now);
-    await seedBootCpuReservation(db, {
+    await seedCpuReservation(db, {
       hostId,
       runId,
-      steadyCpuMillis: 500,
+      cpuMillis: 500,
       nowUnixMs: now,
       });
     await db
@@ -456,30 +439,21 @@ describe("host CPU reservations", () => {
  * reservation service is gone, so these tests write the durable row the
  * admission batch writes and keep their assertions on the reconcile logic.
  */
-async function seedBootCpuReservation(
+async function seedCpuReservation(
   db: ReturnType<typeof drizzle>,
   input: {
     hostId: string;
     runId: string;
-    steadyCpuMillis: number;
-    bootCpuMillis?: number;
+    cpuMillis: number;
     nowUnixMs: number;
     state?: "pending" | "committed";
-    quotaPhase?: "boot" | "steady";
     expiresAt?: number | null;
   },
 ): Promise<void> {
-  const bootCpuMillis =
-    input.bootCpuMillis ?? Math.max(input.steadyCpuMillis, 2_000);
   await db.insert(hostCpuReservations).values({
     runId: input.runId,
     hostId: input.hostId,
-    cpuMillis: input.quotaPhase === "steady"
-      ? input.steadyCpuMillis
-      : bootCpuMillis,
-    steadyCpuMillis: input.steadyCpuMillis,
-    bootCpuMillis,
-    quotaPhase: input.quotaPhase ?? "boot",
+    cpuMillis: input.cpuMillis,
     state: input.state ?? "pending",
     expiresAt:
       input.expiresAt === undefined
@@ -536,7 +510,7 @@ function strictReport(
   vms: VmActualStateV2[] = [],
 ): typeof hostActualState.$inferInsert.reportJson {
   return {
-    schema_version: 4,
+    schema_version: 6,
     host_id: hostId,
     observed_at_unix_ms: Date.now(),
     applied_desired_version: appliedDesiredVersion,
@@ -555,8 +529,6 @@ function strictReport(
       arch: "x86_64",
       cloud_hypervisor_sha256:
         "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      boot_cpu_millis: 2_000,
-      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
@@ -565,7 +537,6 @@ function strictReport(
       supports_jailer_v3: true,
       supports_raw_chunks_v1: true,
       supports_scenario_guest_tools_v1: true,
-      supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
       supports_hard_cpu_quota: true,
@@ -590,7 +561,6 @@ function runningVmReport(runId: string, cpuMillis: number): VmActualStateV2 {
     },
     resource_state: {
       cpu_millis: cpuMillis,
-      vcpu_count: 1,
       cpu_quota_us: cpuMillis * 100,
       cpu_period_us: 100_000,
       cpu_usage_usec: 0,
@@ -654,7 +624,6 @@ async function seedRun(
 
 function projectedQuotaState(
   generation: string,
-  phase: "boot_burst" | "steady",
   quotaVerifiedAt: number | null = null,
   vmName = "run-seal-capacity-vm",
 ): unknown {
@@ -664,11 +633,8 @@ function projectedQuotaState(
         runtimeVmName: vmName,
         runtimeConstraints: {
           generation,
-          phase,
-          steadyCpuMillis: 1_000,
-          effectiveCpuMillis: phase === "steady" ? 1_000 : 2_000,
+          cpuMillis: 1_000,
           quotaVerifiedAt,
-          leaseExpiresAt: phase === "boot_burst" ? Date.now() + 45_000 : null,
         },
       },
     ],
@@ -695,7 +661,6 @@ async function seedRunningDesiredState(
         image_sha256: "2".repeat(64),
         resources: {
           cpu_millis: cpuMillis,
-          vcpu_count: 1,
           memory_mib: 512,
           disk_mib: 4_096,
         },
@@ -762,32 +727,26 @@ function quotaVmReport(input: {
   runId: string;
   vmName: string;
   generation: string;
-  phase: "boot_burst" | "steady";
-  effectiveCpuMillis: number;
+  phase: "booting" | "running";
   quotaVerifiedAt: number | null;
   updatedAt: number;
 }): VmActualStateV2 {
   return {
     run_id: input.runId,
     vm_name: input.vmName,
-    phase: input.phase === "steady" ? "running" : "booting",
+    phase: input.phase,
     terminal: {
       state: "pending",
       observed_at_unix_ms: input.updatedAt,
     },
     runtime_constraints: {
       generation: input.generation,
-      phase: input.phase,
-      steady_cpu_millis: 1_000,
-      effective_cpu_millis: input.effectiveCpuMillis,
+      cpu_millis: 1_000,
       quota_verified_at_unix_ms: input.quotaVerifiedAt,
-      lease_expires_at_unix_ms:
-        input.phase === "boot_burst" ? input.updatedAt + 45_000 : null,
     },
     resource_state: {
       cpu_millis: 1_000,
-      vcpu_count: 1,
-      cpu_quota_us: input.effectiveCpuMillis * 100,
+      cpu_quota_us: 100_000,
       cpu_period_us: 100_000,
       cpu_usage_usec: 0,
       cpu_user_usec: 0,

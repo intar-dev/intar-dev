@@ -15,7 +15,7 @@ import {
   vmScenarioVms,
   vmScenarios,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { withImageBuildCoordinationLock } from "@/lib/image-build-lock";
 import {
@@ -53,9 +53,9 @@ const REVISION = "revision-1";
 const CONTENT_HASH = "a".repeat(64);
 const PREVIOUS_IMAGE = "b".repeat(64);
 
-function manifestFor(image: SeededChunkedImage): ScenarioManifestV4 {
+function manifestFor(image: SeededChunkedImage): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: SCENARIO_ID,
     name: SCENARIO_ID,
     title: "Broken Nginx",
@@ -82,13 +82,12 @@ function manifestFor(image: SeededChunkedImage): ScenarioManifestV4 {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
       },
     ],
-  } as ScenarioManifestV4;
+  } as ScenarioManifestV5;
 }
 
 let candidateImage: SeededChunkedImage;

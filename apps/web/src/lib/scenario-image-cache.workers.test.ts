@@ -630,7 +630,6 @@ async function seedScenario(input: {
       initrdSha256: "2".repeat(64),
       bootCmdline: "console=ttyS0 root=/dev/vda rw",
       cpuMillis: 1_000,
-      vcpuCount: 1,
       memoryMib: 512,
       diskMib: 1_024,
     }),
@@ -690,7 +689,6 @@ function desiredVm(
     },
     resources: {
       cpu_millis: 1_000,
-      vcpu_count: 1,
       memory_mib: 512,
       disk_mib: 1_024,
     },
@@ -734,8 +732,6 @@ function hostReport(
     capabilities: {
       arch,
       cloud_hypervisor_sha256: null,
-      boot_cpu_millis: 2_000,
-      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
@@ -744,7 +740,6 @@ function hostReport(
       supports_jailer_v3: true,
       supports_raw_chunks_v1: true,
       supports_scenario_guest_tools_v1: true,
-      supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,
       fast_template_store: true,
       supports_hard_cpu_quota: true,

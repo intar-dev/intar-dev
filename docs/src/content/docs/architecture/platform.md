@@ -30,8 +30,8 @@ The platform contracts live in Rust and are generated into TypeScript:
 - Rust fixture tests and website schema tests validate the same committed fixtures.
 
 The platform contract is intentionally version-strict. Course catalog snapshots
-are V2 and Scenario manifests are V4. The bridge envelope is V7; its
-desired-state, host-state-report, and VM-report schemas are V4, V5, and V4.
+are V2 and Scenario manifests are V5. The bridge envelope is V8; its
+desired-state, host-state-report, and VM-report schemas are V5, V6, and V5.
 Build reports use schema V1. Unsupported versions are rejected rather than
 translated.
 
@@ -49,7 +49,7 @@ Host orchestration is desired-state based:
 - Desired phases are only `running` and `absent`.
 - Image build assignments are keyed by `build_id` and delivered in the same
   desired-state document under `builds`.
-- The bridge protocol is v7 and full-document based: `client_hello`,
+- The bridge protocol is v8 and full-document based: `client_hello`,
   `server_hello`, `desired_state`, `state_report`, `vm_report`, `build_report`,
   and `sync_request`. Every host declares `role = agent` or `role = builder`.
   Agent capacity reports total, reserved, schedulable, and committed host
@@ -62,7 +62,7 @@ state bleed.
 `apps/web/migrations/0000_current_schema.sql` describes a fresh control plane
 and the numbered migrations describe its current evolution. The per-host runtime
 Durable Object serializes pending and committed CPU reservations with explicit
-boot and steady quota phases so concurrent starts cannot overcommit a host.
+a single CPU quota so concurrent starts cannot overcommit a host.
 
 ## Image Registry
 
@@ -75,7 +75,7 @@ or runtime files change, it assigns the changed Scenarios to connected builder
 hosts. The Course snapshot synchronizes when the authenticated bundle is
 accepted, independently of asynchronous image publication.
 
-Builder hosts publish fixed 4 MiB raw chunks and `ScenarioManifestV4` manifest JSON.
+Builder hosts publish fixed 4 MiB raw chunks and `ScenarioManifestV5` manifest JSON.
 Zero chunks are holes. Non-zero chunks are SHA-256 addressed and compressed with
 zstd level 6. The publish endpoint verifies that every referenced chunk exists,
 stores the immutable chunk manifest in R2, stages a candidate D1 catalog, and
@@ -149,45 +149,45 @@ membership. It sends bounded typed requests to the root-owned
 
 ## Scenario CPU resources
 
-Scenario HCL uses exact fixed-point CPU ceilings:
+Scenario authors set one CPU-time limit:
 
 ```hcl
-cpu = 0.125
-# Optional; defaults to ceil(cpu), minimum 1.
-vcpus = 1
+cpu = 0.5
 ```
 
-Positive integer or decimal literals with at most three fractional digits are
-accepted. `0.125` becomes 125 millicores and `2` remains 2000 millicores;
-zero, exponent notation, excess precision, and
-`cpu_millis > vcpu_count * 1000` are rejected. `cpu_millis` is the aggregate
-systemd/cgroup-v2 hard ceiling for the complete VMM process tree, while
-`vcpu_count` controls guest topology. It is also the unit used for local and D1
-admission reservations.
+`cpu` uses exact fixed-point millicores. Positive integer or ordinary decimal
+literals with up to three fractional digits are accepted; `0.5` means 500
+millicores. The former `vcpus` setting is rejected. Intar derives the guest CPU
+count as `ceil(cpu)`, with a minimum of one. For limits up to one CPU, the
+Cloud Hypervisor API configuration omits `cpus` and uses its one-vCPU default.
+Larger limits set the derived guest CPU count internally.
 
-`intar-jailerd` reserves 1000 host millicores by default and is the final local
-admission authority. For a fixed 100 ms period, 125 millicores is
-`cpu.max = 12500 100000` with `cpu.max.burst = 0`; eight such VMs consume one
-schedulable core exactly.
+Jailerd applies one hard limit to the complete VMM process group before VM
+boot. With a 100 ms period, `cpu = 0.5` gives `cpu.max = 50000 100000` and
+`cpu.max.burst = 0`. The same limit applies until shutdown. There is no extra
+boot CPU allocation. Two 500-millicore VMs reserve 1000 millicores, including
+while both boot. Linux shares host CPU time; guest vCPU count does not reserve
+host cores. A limit is a ceiling, not a minimum-service guarantee.
 
-For a v2 launch, jailerd capacity-accounts `max(2000m, steady_cpu_millis)` and
-applies that hard aggregate VMM quota for at most 45 seconds without changing
-the guest's vCPU topology. This is a root-controlled lease, not cgroup burst
-credit. A generation-bound systemd guardian seals the unit to its steady quota
-at the deadline even if jailerd has restarted. Deadline sealing never activates
-SSH ingress; failed or unattested sealing leaves the VM quarantined and its
-capacity conservatively accounted.
+Jailerd retains the global 1000-millicore host reserve. Both local and control
+plane admission charge the declared limit before launch and retain it until
+VM removal is proven. Additional CPU overcommit is disabled. Production units
+have no CPU pinning; Cloud Hypervisor retains per-VM core scheduling isolation.
+
+Catalog manifests are V5 and carry `cpu_millis`. The bridge envelope is V8;
+desired-state, host-state-report, and VM-report schemas are V5, V6, and V5.
+VM resource objects are V3 and runtime quota evidence is V2. The local jailer
+protocol is V4. Older hosts must be drained and upgraded before scheduling.
 
 Kino readiness is push-based. Each guest receives `KINO_HOST_READY_PORT` in
 `runtime.env`; Kino connects to the host over vsock, streams protobuf probe
 snapshots, and includes generated SSH host public keys. The agent persists those
 host keys and includes them in VM reports. Separately, the agent's readiness
-timeout scales from the scenario's steady CPU as
+timeout scales from the scenario's CPU limit as
 `ceil(45 * 1000 / cpu_millis)`, bounded to 45–360 seconds. A 125-millicore VM may
-therefore wait up to 360 seconds for Kino, but only its first 45 seconds use the
-2000-millicore boot allocation; after sealing it runs at 125 millicores. If Kino
-becomes ready later, finalization can expose ingress only after jailerd attests
-the steady quota. The generated guest supervisor gives `sshd` an independent
+therefore wait up to 360 seconds for Kino. Its CPU limit remains 125 millicores
+throughout startup. Finalization exposes ingress only after jailerd verifies
+the declared quota. The generated guest supervisor gives `sshd` an independent
 120-second bound from the start of its activation, measured against Linux's
 monotonic uptime instead of a fixed retry count; the agent's whole-runtime
 readiness timeout remains authoritative when it is shorter. Readiness is only

@@ -125,14 +125,14 @@ impl Default for VmDefaultsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct VmResourcesConfig {
-    pub vcpus: u32,
+    pub cpu_millis: u32,
     pub memory_mib: u32,
 }
 
 impl Default for VmResourcesConfig {
     fn default() -> Self {
         Self {
-            vcpus: 2,
+            cpu_millis: 2_000,
             memory_mib: 2048,
         }
     }

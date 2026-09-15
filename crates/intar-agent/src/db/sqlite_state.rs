@@ -400,7 +400,6 @@ CREATE TABLE IF NOT EXISTS vms (
   recording_disk_path TEXT,
   spool_dir TEXT,
   cpu_millis INTEGER,
-  vcpu_count INTEGER,
   ch_executable_sha256 TEXT
 );
 

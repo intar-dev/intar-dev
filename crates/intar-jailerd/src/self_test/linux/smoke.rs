@@ -88,11 +88,10 @@ pub(super) fn run_cloud_hypervisor_smoke(
     // reserve is validated by the normal daemon; retaining it here would
     // make the proof impossible on an otherwise empty one-core CI host.
     smoke_config.cpu_reserved_millis = 0;
-    // The saturation proof intentionally exercises eight 125m cgroups in
+    // The saturation proof intentionally exercises two 500m cgroups in
     // one isolated 1000m authority. Production boot-lease defaults are
     // covered separately; using them here would test the boot pool rather
     // than the steady hard-quota invariant this proof exists to attest.
-    smoke_config.boot_cpu_millis = SELF_TEST_CPU_MILLIS;
     smoke_config.guest_network_pool = "10.77.255.240/28".to_owned();
     if !smoke_config
         .allowed_source_roots
@@ -133,7 +132,7 @@ pub(super) fn run_cloud_hypervisor_smoke(
         backend,
         FileSystemJailPreparer::default(),
         // The disposable authority intentionally advertises exactly one
-        // schedulable core. This makes the ninth 125m launch exercise the
+        // schedulable core. This makes the third 500m launch exercise the
         // same final local admission path used in production even on a
         // host with more CPUs.
         SELF_TEST_SATURATION_CPU_MILLIS,
@@ -154,11 +153,11 @@ pub(super) fn run_cloud_hypervisor_smoke(
     // cannot leave network authority behind.
     expect_run_network(core.handle(Request::EnsureRunNetwork(network_request.clone())))?;
 
-    // Boot eight independent v2 template-backed VMMs in the same run
-    // network. Their 125m
+    // Boot two independent v2 template-backed VMMs in the same run
+    // network. Their 500m
     // reservations fill exactly one advertised schedulable core while
     // retaining separate generations, identities, TAPs, units and leaf
-    // cgroups. A ninth typed request is then required to fail admission
+    // cgroups. A third typed request is then required to fail admission
     // before any privileged resource is allocated.
     let launch_requests = (0..SELF_TEST_SATURATION_VM_COUNT)
         .map(|index| {
@@ -213,6 +212,7 @@ pub(super) fn run_cloud_hypervisor_smoke(
     }
 
     let lifecycle = (|| -> Result<()> {
+        prove_shared_cpu_placement(&launches)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -259,7 +259,8 @@ pub(super) fn run_cloud_hypervisor_smoke(
                 generation: launch.generation.clone(),
             })) {
                 Response::FinalizeVmBoot(result)
-                    if result.cpu_runtime.phase == intar_jailer_protocol::VmCpuPhase::Steady => {}
+                    if result.cpu_runtime.quota.cpu_millis == SELF_TEST_CPU_MILLIS
+                        && result.cpu_runtime.attestation.is_some() => {}
                 Response::Error(error) => bail!(
                     "finalize package-smoke VM {index}: {}: {}",
                     error.code,
@@ -373,7 +374,7 @@ pub(super) fn ensure_saturation_resources(
     let host_cpu_millis = host_cpu_capacity_millis()?;
     ensure!(
         host_cpu_millis >= SELF_TEST_SATURATION_CPU_MILLIS,
-        "eight-VM saturation proof requires at least one online host CPU"
+        "two-VM saturation proof requires at least one online host CPU"
     );
     let identity_count = u64::from(config.uid_gid_end)
         .checked_sub(u64::from(config.uid_gid_start))
@@ -381,7 +382,7 @@ pub(super) fn ensure_saturation_resources(
         .context("self-test UID/GID range arithmetic overflow")?;
     ensure!(
         identity_count >= u64::try_from(SELF_TEST_SATURATION_VM_COUNT)?,
-        "eight-VM saturation proof requires at least eight disposable identities"
+        "two-VM saturation proof requires at least two disposable identities"
     );
 
     let meminfo = std::fs::read_to_string("/proc/meminfo")?;
@@ -400,7 +401,7 @@ pub(super) fn ensure_saturation_resources(
         .context("self-test memory requirement overflow")?;
     ensure!(
         available_kib >= required_memory_mib.saturating_mul(1024),
-        "eight-VM saturation proof requires {required_memory_mib} MiB available memory; host reports {} MiB",
+        "two-VM saturation proof requires {required_memory_mib} MiB available memory; host reports {} MiB",
         available_kib / 1024
     );
 
@@ -440,13 +441,13 @@ pub(super) fn ensure_saturation_resources(
         .context("self-test available disk size overflow")?;
     ensure!(
         available_disk_bytes >= required_disk_bytes,
-        "eight-VM saturation proof requires {} MiB free in the jail filesystem; host reports {} MiB",
+        "two-VM saturation proof requires {} MiB free in the jail filesystem; host reports {} MiB",
         required_disk_bytes / (1024 * 1024),
         available_disk_bytes / (1024 * 1024)
     );
     ensure!(
         filesystem.f_favail >= u64::try_from(SELF_TEST_SATURATION_VM_COUNT)?.saturating_mul(64),
-        "jail filesystem lacks free inodes for eight disposable VMs"
+        "jail filesystem lacks free inodes for two disposable VMs"
     );
     Ok(())
 }
@@ -462,7 +463,7 @@ pub(super) fn prove_saturation_admission(
 ) -> Result<()> {
     ensure!(
         selectors.len() == SELF_TEST_SATURATION_VM_COUNT,
-        "saturation admission proof requires eight launched VMs"
+        "saturation admission proof requires two launched VMs"
     );
     let before = core.capabilities();
     ensure!(
@@ -470,7 +471,7 @@ pub(super) fn prove_saturation_admission(
             && before.reserved_cpu_millis == 0
             && before.schedulable_cpu_millis == SELF_TEST_SATURATION_CPU_MILLIS
             && before.committed_cpu_millis == SELF_TEST_SATURATION_CPU_MILLIS,
-        "eight 125m VM reservations did not fill exactly one schedulable core"
+        "two 500m VM reservations did not fill exactly one schedulable core"
     );
     ensure!(
         before.supports_jailer_v2
@@ -482,7 +483,7 @@ pub(super) fn prove_saturation_admission(
 
     let rejected_index =
         u8::try_from(SELF_TEST_SATURATION_VM_COUNT).expect("saturation VM count fits in u8");
-    let ninth = smoke_launch_request(
+    let third = smoke_launch_request(
         config,
         artifacts,
         prepared_image,
@@ -490,26 +491,26 @@ pub(super) fn prove_saturation_admission(
         suffix,
         rejected_index,
     )?;
-    match core.handle(Request::LaunchVmV2(Box::new(ninth))) {
+    match core.handle(Request::LaunchVmV2(Box::new(third))) {
         Response::Error(error) => ensure!(
-            error.code == "boot_capacity_pending",
-            "ninth 125m launch failed with unexpected error {}: {}",
+            error.code == "cpu_capacity_exhausted",
+            "third 500m launch failed with unexpected error {}: {}",
             error.code,
             error.message
         ),
         Response::LaunchVmV2(launch) => {
             // Retain the selector so the caller's fail-closed cleanup also
-            // drains an erroneously admitted ninth unit and jail.
+            // drains an erroneously admitted third unit and jail.
             selectors.push(VmIdentityRequest::by_generation(launch.generation));
-            bail!("ninth 125m VM was admitted after one schedulable core was full")
+            bail!("third 500m VM was admitted after one schedulable core was full")
         }
-        response => bail!("ninth 125m launch returned unexpected response: {response:?}"),
+        response => bail!("third 500m launch returned unexpected response: {response:?}"),
     }
     let after = core.capabilities();
     ensure!(
         after.committed_cpu_millis == before.committed_cpu_millis
             && after.schedulable_cpu_millis == before.schedulable_cpu_millis,
-        "rejected ninth launch changed local CPU reservations"
+        "rejected third launch changed local CPU reservations"
     );
     Ok(())
 }
@@ -524,7 +525,7 @@ pub(super) fn smoke_launch_request(
 ) -> Result<LaunchVmV2Request> {
     ensure!(
         usize::from(index) <= SELF_TEST_SATURATION_VM_COUNT,
-        "package smoke supports eight VMs plus one rejected admission probe"
+        "package smoke supports two VMs plus one rejected admission probe"
     );
     Ok(LaunchVmV2Request {
         image_sha256: prepared_image.image_sha256.clone(),
@@ -533,7 +534,6 @@ pub(super) fn smoke_launch_request(
             run_id: run_id.clone(),
             vm_id: ValidatedId::parse(format!("vm-{index}"))?,
             cpu_millis: SELF_TEST_CPU_MILLIS,
-            vcpu_count: 1,
             memory_mib: SELF_TEST_VM_MEMORY_MIB,
             root_disk_size_bytes: prepared_image.virtual_size_bytes,
             tap_name: format!("is{index}{}", &suffix[..10]),
@@ -675,10 +675,7 @@ pub(super) fn smoke_vm_config(
     request: &VmLaunchRequest,
 ) -> Result<VmConfig> {
     Ok(VmConfig {
-        cpus: Some(CpusConfig {
-            boot_vcpus: 1,
-            max_vcpus: 1,
-        }),
+        cpus: None,
         memory: Some(MemoryConfig {
             size: i64::from(SELF_TEST_VM_MEMORY_MIB) * 1024 * 1024,
         }),
@@ -745,4 +742,48 @@ pub(super) fn smoke_vm_config(
         }),
         landlock_enable: Some(true),
     })
+}
+
+/// Restrict only the disposable test units to the same logical CPU. The sets
+/// overlap; no exclusive partition or production affinity is installed.
+fn prove_shared_cpu_placement(launches: &[VmLaunchResult]) -> Result<()> {
+    use zbus::zvariant::Value;
+
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .context("self-test CPU affinity is unavailable")?
+        .trim();
+    let cpu = allowed
+        .split([',', '-'])
+        .next()
+        .context("empty CPU affinity")?
+        .parse::<usize>()?;
+    let mut mask = vec![0_u8; cpu / 8 + 1];
+    mask[cpu / 8] = 1 << (cpu % 8);
+    let connection = zbus::blocking::Connection::system()?;
+    let manager = SystemdHostBackend::manager(&connection)?;
+    for launch in launches {
+        let properties = vec![("AllowedCPUs", Value::new(mask.clone()))];
+        let _: () = manager.call("SetUnitProperties", &(&launch.unit_name, true, properties))?;
+        let cgroup = cgroup_directory(
+            launch
+                .cgroup_path
+                .as_ref()
+                .context("test VM has no cgroup")?
+                .to_str()
+                .context("invalid cgroup path")?,
+        )?;
+        ensure!(
+            std::fs::read_to_string(cgroup.join("cpuset.cpus.effective"))?.trim()
+                == cpu.to_string(),
+            "test VM does not share the selected host CPU"
+        );
+        ensure!(
+            std::fs::read_to_string(cgroup.join("cpuset.cpus.partition"))?.trim() == "member",
+            "test VM acquired an exclusive CPU partition"
+        );
+    }
+    Ok(())
 }

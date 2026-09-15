@@ -13,7 +13,7 @@ import {
   vmScenarioVms,
   vmScenarios,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { appError } from "@/lib/app-error";
 import { catalogRowsFromScenarioManifest } from "@/lib/catalog-manifest";
 import { evaluateHostImageReferences } from "@/lib/image-artifact-retention";
@@ -170,7 +170,7 @@ function vmArtifactIdentity(input: VmArtifactIdentity): string {
   ].join(":");
 }
 
-function fromManifestVm(vm: ScenarioManifestV4["vms"][number]): VmArtifactIdentity {
+function fromManifestVm(vm: ScenarioManifestV5["vms"][number]): VmArtifactIdentity {
   return {
     vmName: vm.name.trim(),
     arch: vm.image_key.arch,
@@ -248,7 +248,7 @@ export async function nextCatalogRollbackTimestamp(
 /** True when this replacement changes the artifact identity of the catalog. */
 export function catalogRollbackRotates(input: {
   previous: ScenarioCatalogRollbackV1;
-  manifest: ScenarioManifestV4;
+  manifest: ScenarioManifestV5;
 }): boolean {
   if (!input.previous.vms.length) return false;
   return (
@@ -323,7 +323,7 @@ export async function replaceScenarioCatalogWithRollback(
   db: DrizzleD1Database,
   database: D1Database,
   input: {
-    manifest: ScenarioManifestV4;
+    manifest: ScenarioManifestV5;
     organizationId: string | null;
     sourceRevision: string | null;
     nowUnixMs: number;
@@ -583,9 +583,9 @@ export function vmInsert(
          id, scenario_id, ordinal, vm_name, image, image_key_json,
          image_sha256, image_format, image_virtual_size_bytes,
          chunk_manifest_sha256, guest_bootstrap_abi, kernel_sha256,
-         initrd_sha256, boot_cmdline, cpu_millis, vcpu_count, memory_mib,
+         initrd_sha256, boot_cmdline, cpu_millis, memory_mib,
          disk_mib
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       row.id,
@@ -603,7 +603,6 @@ export function vmInsert(
       row.initrdSha256,
       row.bootCmdline,
       row.cpuMillis,
-      row.vcpuCount,
       row.memoryMib,
       row.diskMib,
     );

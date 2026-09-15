@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "host_id": "host-alpha",
   "version": 42,
   "generated_at_unix_ms": 1762041600000,
@@ -32,7 +32,6 @@
       },
       "resources": {
         "cpu_millis": 125,
-        "vcpu_count": 1,
         "memory_mib": 512,
         "disk_mib": 4096
       },

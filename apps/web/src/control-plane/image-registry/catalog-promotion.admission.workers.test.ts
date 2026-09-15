@@ -13,7 +13,7 @@ import {
   vmScenarioVms,
   vmScenarios,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -45,9 +45,9 @@ function manifest(input: {
   chunkManifestSha256: string | null;
   kernelSha256: string;
   initrdSha256: string;
-}): ScenarioManifestV4 {
+}): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: SCENARIO_ID,
     name: SCENARIO_ID,
     title: "Broken Nginx",
@@ -74,18 +74,17 @@ function manifest(input: {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
       },
     ],
-  } as ScenarioManifestV4;
+  } as ScenarioManifestV5;
 }
 
-function legacyManifest(imageId: string): ScenarioManifestV4 {
+function legacyManifest(imageId: string): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: SCENARIO_ID,
     name: SCENARIO_ID,
     title: "Broken Nginx",
@@ -111,13 +110,12 @@ function legacyManifest(imageId: string): ScenarioManifestV4 {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
       },
     ],
-  } as unknown as ScenarioManifestV4;
+  } as unknown as ScenarioManifestV5;
 }
 
 async function seed(): Promise<void> {

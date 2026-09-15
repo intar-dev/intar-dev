@@ -64,17 +64,17 @@ describe("generated contract schemas", () => {
 
   it("validates the scenario manifest fixture", () => {
     expect(validateFixture(
-      "schemas/catalog-scenario-manifest-v4.schema.json",
-      "fixtures/catalog/scenario-manifest-v4.json",
+      "schemas/catalog-scenario-manifest-v5.schema.json",
+      "fixtures/catalog/scenario-manifest-v5.json",
     )).toBe(true);
   });
 
   it("rejects a v3 scenario manifest version", () => {
     const fixture = readJson(
-      "fixtures/catalog/scenario-manifest-v4.json",
+      "fixtures/catalog/scenario-manifest-v5.json",
     ) as Record<string, unknown>;
     expect(validateValue(
-      "schemas/catalog-scenario-manifest-v4.schema.json",
+      "schemas/catalog-scenario-manifest-v5.schema.json",
       { ...fixture, schema_version: 2 },
     )).toBe(false);
   });
@@ -116,8 +116,8 @@ describe("generated contract schemas", () => {
 
   it("validates the bridge message fixture", () => {
     expect(validateFixture(
-      "schemas/bridge-message-v7.schema.json",
-      "fixtures/bridge/sync-request-v7.json",
+      "schemas/bridge-message-v8.schema.json",
+      "fixtures/bridge/sync-request-v8.json",
     )).toBe(true);
   });
 
@@ -179,10 +179,10 @@ describe("generated contract schemas", () => {
 
   it("rejects a v5 bridge protocol version", () => {
     const fixture = readJson(
-      "fixtures/bridge/sync-request-v7.json",
+      "fixtures/bridge/sync-request-v8.json",
     ) as Record<string, unknown>;
     expect(validateValue(
-      "schemas/bridge-message-v7.schema.json",
+      "schemas/bridge-message-v8.schema.json",
       { ...fixture, protocol_version: 5 },
     )).toBe(false);
   });

@@ -1,7 +1,7 @@
 import {
   type ImageArchitecture,
   type ImageKey,
-  type ScenarioManifestV4,
+  type ScenarioManifestV5,
 } from "@/generated/catalog";
 
 export const textEncoder = new TextEncoder();
@@ -69,7 +69,7 @@ export function artifactFilenameMatches(
   return filename === sha256 || filename === `${sha256}.artifact`;
 }
 
-export function bootArtifactSha256s(manifest: ScenarioManifestV4): string[] {
+export function bootArtifactSha256s(manifest: ScenarioManifestV5): string[] {
   const values = new Set<string>();
   for (const vm of manifest.vms) {
     const kernelSha256 = normalizeSha256(vm.boot.kernel_sha256);

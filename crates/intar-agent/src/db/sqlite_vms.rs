@@ -160,6 +160,16 @@ pub(super) fn ensure_baseline_schema(conn: &Connection) -> Result<()> {
             .context("migrate persisted VM guest-tools pins")?;
     }
 
+    if table_has_column(conn, "vms", "vcpu_count")? {
+        let vm_count: i64 = conn.query_row("SELECT count(*) FROM vms", [], |row| row.get(0))?;
+        anyhow::ensure!(
+            vm_count == 0,
+            "drain all VMs before upgrading the CPU contract"
+        );
+        conn.execute("ALTER TABLE vms DROP COLUMN vcpu_count", [])
+            .context("remove obsolete guest CPU configuration")?;
+    }
+
     let has_any_tables: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%');",
@@ -197,7 +207,6 @@ pub(super) fn schema_is_compatible(conn: &Connection) -> Result<bool> {
         ("vms", "jail_gid"),
         ("vms", "jail_netns_name"),
         ("vms", "cpu_millis"),
-        ("vms", "vcpu_count"),
         ("vms", "ch_executable_sha256"),
         ("desired_state", "doc_json"),
         ("vm_probe_state", "snapshot_json"),
@@ -273,7 +282,6 @@ SELECT
   recording_disk_path,
   spool_dir,
   cpu_millis,
-  vcpu_count,
   ch_executable_sha256
 FROM vms
 ORDER BY created_at_s ASC;
@@ -323,8 +331,7 @@ ORDER BY created_at_s ASC;
                 recording_disk_path: row.get(36)?,
                 spool_dir: row.get(37)?,
                 cpu_millis: row.get(38)?,
-                vcpu_count: row.get(39)?,
-                ch_executable_sha256: row.get(40)?,
+                ch_executable_sha256: row.get(39)?,
             })
         })
         .context("query load_all_vms")?;
@@ -376,10 +383,9 @@ INSERT INTO vms (
   recording_disk_path,
   spool_dir,
   cpu_millis,
-  vcpu_count,
   ch_executable_sha256
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
@@ -420,7 +426,6 @@ ON CONFLICT(name) DO UPDATE SET
   recording_disk_path = excluded.recording_disk_path,
   spool_dir = excluded.spool_dir,
   cpu_millis = excluded.cpu_millis,
-  vcpu_count = excluded.vcpu_count,
   ch_executable_sha256 = excluded.ch_executable_sha256;
 "#,
         params![
@@ -463,7 +468,6 @@ ON CONFLICT(name) DO UPDATE SET
             row.recording_disk_path,
             row.spool_dir,
             row.cpu_millis,
-            row.vcpu_count,
             row.ch_executable_sha256,
         ],
     )

@@ -31,8 +31,8 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 4,
-      "minimum": 4
+      "maximum": 5,
+      "minimum": 5
     },
     "version": {
       "type": "integer",
@@ -158,7 +158,7 @@
           "format": "int64"
         },
         "resources": {
-          "$ref": "#/$defs/VmResourcesV2"
+          "$ref": "#/$defs/VmResourcesV3"
         },
         "run_id": {
           "type": "string"
@@ -211,7 +211,7 @@
         "arch"
       ]
     },
-    "VmResourcesV2": {
+    "VmResourcesV3": {
       "type": "object",
       "properties": {
         "cpu_millis": {
@@ -228,17 +228,10 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
-        },
-        "vcpu_count": {
-          "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1
         }
       },
       "required": [
         "cpu_millis",
-        "vcpu_count",
         "memory_mib",
         "disk_mib"
       ]

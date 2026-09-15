@@ -209,7 +209,6 @@ pub(super) fn parse_vm(
     let name = required_single_label(block, "vm", "missing vm name")?;
 
     let mut cpu_millis = 1_000;
-    let mut vcpu_count = None;
     let mut memory: u32 = 1024;
     let mut disk: u32 = 10;
     let mut image = String::new();
@@ -229,7 +228,11 @@ pub(super) fn parse_vm(
                     ScenarioError::InvalidScenario(format!("vm '{name}' cpu {message}"))
                 })?;
             }
-            "vcpus" => vcpu_count = Some(extract_u16(&attr.expr)?),
+            "vcpus" => {
+                return Err(ScenarioError::InvalidScenario(format!(
+                    "vm '{name}': vcpus was removed; set only cpu. Intar derives the guest CPU count."
+                )));
+            }
             "memory" => memory = extract_u32(&attr.expr)?,
             "disk" => disk = extract_u32(&attr.expr)?,
             "image" => image = extract_string(&attr.expr)?,
@@ -276,32 +279,16 @@ pub(super) fn parse_vm(
         )));
     }
 
-    let vcpu_count = match vcpu_count {
-        Some(0) => {
-            return Err(ScenarioError::InvalidScenario(format!(
-                "vm '{name}' vcpus must be > 0"
-            )));
-        }
-        Some(value) => value,
-        None => u16::try_from(cpu_millis.div_ceil(1_000)).map_err(|_| {
-            ScenarioError::InvalidScenario(format!(
-                "vm '{name}' cpu requires more than {} vcpus",
-                u16::MAX
-            ))
-        })?,
-    };
-
-    let vcpu_capacity_millis = u32::from(vcpu_count) * 1_000;
-    if cpu_millis > vcpu_capacity_millis {
-        return Err(ScenarioError::InvalidScenario(format!(
-            "vm '{name}' cpu ({cpu_millis} millicores) exceeds vcpus capacity ({vcpu_capacity_millis} millicores)"
-        )));
-    }
+    u16::try_from(cpu_millis.div_ceil(1_000)).map_err(|_| {
+        ScenarioError::InvalidScenario(format!(
+            "vm '{name}' cpu requires more than {} guest CPUs",
+            u16::MAX
+        ))
+    })?;
 
     Ok(VmDefinition {
         name,
         cpu_millis,
-        vcpu_count,
         memory,
         disk,
         image,

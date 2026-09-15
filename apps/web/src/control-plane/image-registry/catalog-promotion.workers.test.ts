@@ -13,7 +13,7 @@ import {
   vmScenarioVms,
   vmScenarios,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -243,9 +243,9 @@ describe("candidate scenario catalog promotion", () => {
   });
 });
 
-function manifest(image: Awaited<ReturnType<typeof seedChunkedImage>>): ScenarioManifestV4 {
+function manifest(image: Awaited<ReturnType<typeof seedChunkedImage>>): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: "broken-nginx",
     name: "broken-nginx",
     title: "Broken Nginx",
@@ -272,7 +272,6 @@ function manifest(image: Awaited<ReturnType<typeof seedChunkedImage>>): Scenario
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],

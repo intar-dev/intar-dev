@@ -166,7 +166,6 @@ export interface AdminScenarioSummary {
   vmCount: number;
   requiredResources: {
     cpuMillis: number;
-    vcpuCount: number;
     memoryMib: number;
     diskMib: number;
   };

@@ -1,5 +1,8 @@
 use super::*;
 
+// Bound background preparation deferral independently of VM CPU limits.
+pub(super) const BACKGROUND_BOOT_WINDOW: Duration = Duration::from_secs(45);
+
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 

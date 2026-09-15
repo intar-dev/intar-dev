@@ -400,9 +400,10 @@ pub(super) fn terminal_state_from_vm(
         .map(str::to_string);
     let runtime_constraints = runtime_constraints_from_details(details);
     let steady_quota_verified = runtime_constraints.as_ref().is_some_and(|constraints| {
-        constraints.phase == VmRuntimeConstraintPhaseV1::Steady
-            && constraints.effective_cpu_millis == constraints.steady_cpu_millis
-            && constraints.quota_verified_at_unix_ms.is_some()
+        Some(constraints.cpu_millis) == details.cpu_millis
+            && constraints
+                .quota_verified_at_unix_ms
+                .is_some_and(|time| time > 0)
     });
     let terminal_target = if vm.state == VmLifecycleState::Running
         && ssh_access.enabled
@@ -446,25 +447,16 @@ pub(super) fn terminal_state_from_vm(
 
 pub(super) fn runtime_constraints_from_details(
     details: &VmDetails,
-) -> Option<VmRuntimeConstraintsV1> {
+) -> Option<VmRuntimeConstraintsV2> {
     let runtime = details.cpu_runtime.as_ref()?;
     let generation = details.jail_generation.clone()?;
-    let phase = match runtime.phase {
-        VmCpuPhase::BootBurst => VmRuntimeConstraintPhaseV1::BootBurst,
-        VmCpuPhase::Steady => VmRuntimeConstraintPhaseV1::Steady,
-    };
-    Some(VmRuntimeConstraintsV1 {
+    Some(VmRuntimeConstraintsV2 {
         generation,
-        phase,
-        steady_cpu_millis: runtime.steady_quota.cpu_millis,
-        effective_cpu_millis: runtime.effective_quota.cpu_millis,
+        cpu_millis: runtime.quota.cpu_millis,
         quota_verified_at_unix_ms: runtime
             .attestation
             .as_ref()
             .and_then(|attestation| i64::try_from(attestation.verified_at_unix_ms).ok()),
-        lease_expires_at_unix_ms: runtime
-            .boot_deadline_unix_ms
-            .and_then(|deadline| i64::try_from(deadline).ok()),
     })
 }
 
@@ -639,7 +631,7 @@ pub(super) async fn wait_for_guest_ssh_before_running(
             }
             _ => {
                 anyhow::bail!(
-                    "guest SSH did not complete a Kino-attested host-key handshake after steady quota sealing"
+                    "guest SSH did not complete a Kino-attested host-key handshake after CPU quota verification"
                 )
             }
         }

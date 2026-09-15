@@ -38,13 +38,10 @@ async fn terminal_ready_cache_precedes_targeted_publication() {
         }),
         reason: None,
         observed_at: 2_000,
-        runtime_constraints: Some(VmRuntimeConstraintsV1 {
+        runtime_constraints: Some(VmRuntimeConstraintsV2 {
             generation: "generation-1".to_string(),
-            phase: VmRuntimeConstraintPhaseV1::Steady,
-            steady_cpu_millis: 1_000,
-            effective_cpu_millis: 1_000,
+            cpu_millis: 1_000,
             quota_verified_at_unix_ms: Some(1_999),
-            lease_expires_at_unix_ms: None,
         }),
     };
 

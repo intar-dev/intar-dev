@@ -547,7 +547,7 @@ function queueSchedulerDb(input: {
 
 function emptyDesiredState(hostId: string): HostDesiredStateV2 {
   return {
-    schema_version: 3,
+    schema_version: 5,
     host_id: hostId,
     version: 0,
     generated_at_unix_ms: 0,

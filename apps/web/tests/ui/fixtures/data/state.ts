@@ -161,7 +161,6 @@ function makeAdminScenario(enabled = true) {
     vmCount: 1,
     requiredResources: {
       cpuMillis: 2_000,
-      vcpuCount: 2,
       memoryMib: scenarioVm.memoryMib,
       diskMib: scenarioVm.diskMib,
     },

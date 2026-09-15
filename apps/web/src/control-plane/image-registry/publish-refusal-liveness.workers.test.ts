@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { agentHosts, hostDesiredState, user, vmScenarioVms } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import {
   acquireRegistrySweep,
@@ -41,9 +41,9 @@ const OWNER_USER_ID = "publisher-owner";
 const PUBLISH_TOKEN = "test-publish-token";
 const OWNER = { kind: "publish_token", id: "publish-token" } as const;
 
-function manifestFor(image: SeededChunkedImage): ScenarioManifestV4 {
+function manifestFor(image: SeededChunkedImage): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: SCENARIO_ID,
     name: SCENARIO_ID,
     title: "Broken Nginx",
@@ -70,13 +70,12 @@ function manifestFor(image: SeededChunkedImage): ScenarioManifestV4 {
           cmdline: "root=/dev/vda rw console=ttyS0",
         },
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 1_024,
         probes: [],
       },
     ],
-  } as ScenarioManifestV4;
+  } as ScenarioManifestV5;
 }
 
 function publish(

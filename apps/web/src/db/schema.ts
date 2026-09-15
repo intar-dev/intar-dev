@@ -76,7 +76,6 @@ export type {
 } from "./schema/application";
 export type {
   AgentHostRole,
-  HostCpuReservationQuotaPhase,
   HostCpuReservationState,
   ImageBuildBundleMeta,
   ImageBuildStatus,

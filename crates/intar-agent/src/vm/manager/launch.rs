@@ -17,7 +17,6 @@ pub(super) struct RunCreateInput<'a> {
     pub(super) kino_vsock_port: u32,
     pub(super) kino_host_ready_port: u32,
     pub(super) cpu_millis: u32,
-    pub(super) vcpus: u32,
     pub(super) memory_mib: u32,
     pub(super) disk_mib: Option<u32>,
     pub(super) hostname: &'a str,
@@ -30,10 +29,10 @@ pub(super) struct RunCreateInput<'a> {
 }
 
 pub(super) struct CloudHypervisorVmConfigInput<'a> {
+    pub(super) cpu_millis: u32,
     pub(super) name: &'a str,
     pub(super) cmdline: &'a str,
     pub(super) paths: &'a JailPathMap,
-    pub(super) vcpus: u32,
     pub(super) memory_mib: u32,
     pub(super) tap: &'a str,
     pub(super) mac: &'a str,
@@ -72,9 +71,9 @@ pub(super) fn build_cloud_hypervisor_vm_config(
         });
     }
     Ok(VmConfig {
-        cpus: Some(CpusConfig {
-            boot_vcpus: input.vcpus,
-            max_vcpus: input.vcpus,
+        cpus: (input.cpu_millis > 1_000).then(|| CpusConfig {
+            boot_vcpus: input.cpu_millis.div_ceil(1_000),
+            max_vcpus: input.cpu_millis.div_ceil(1_000),
         }),
         memory: Some(MemoryConfig {
             size: (input.memory_mib as i64) * 1024 * 1024,
@@ -343,7 +342,6 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
         run_id,
         vm_id,
         cpu_millis: req.cpu_millis,
-        vcpu_count: u16::try_from(req.vcpus).context("vCPU count exceeds jailer contract")?,
         memory_mib: req.memory_mib,
         root_disk_size_bytes,
         tap_name: req.tap.to_string(),
@@ -366,8 +364,8 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
 
     match launch_response {
         JailerResponse::LaunchVmV3(result) => Ok(result),
-        JailerResponse::Error(error) if error.code == "boot_capacity_pending" => {
-            Err(BootCapacityPending {
+        JailerResponse::Error(error) if error.code == "cpu_capacity_exhausted" => {
+            Err(CpuCapacityPending {
                 message: error.message,
             }
             .into())
@@ -437,21 +435,16 @@ pub(super) async fn finalize_jailed_vm_boot(
         result.generation == *generation,
         "jailerd finalized a different VM generation"
     );
-    anyhow::ensure!(
-        result.cpu_runtime.phase == VmCpuPhase::Steady,
-        "jailerd finalized VM without entering steady CPU phase"
-    );
     let attestation = result
         .cpu_runtime
         .attestation
         .as_ref()
         .context("jailerd finalized VM without quota readback attestation")?;
     anyhow::ensure!(
-        attestation.quota == result.cpu_runtime.steady_quota
-            && result.cpu_runtime.effective_quota == result.cpu_runtime.steady_quota
-            && attestation.cpu_max == result.cpu_runtime.steady_quota.cpu_max()
+        attestation.quota == result.cpu_runtime.quota
+            && attestation.cpu_max == result.cpu_runtime.quota.cpu_max()
             && attestation.cpu_max_burst == 0,
-        "jailerd steady quota attestation did not match the recorded entitlement"
+        "jailerd CPU quota attestation did not match the recorded entitlement"
     );
     anyhow::ensure!(
         !expect_ssh_forward || result.ssh_forward_active,
@@ -507,9 +500,14 @@ pub(super) async fn commit_ready_vm_and_probe(
         .as_ref()
         .context("VM has no live CPU quota attestation during ready commit")?;
     anyhow::ensure!(
-        runtime.phase == VmCpuPhase::Steady
-            && runtime.effective_quota == runtime.steady_quota
-            && runtime.attestation.is_some(),
+        Some(runtime.quota.cpu_millis) == details.cpu_millis
+            && runtime
+                .attestation
+                .as_ref()
+                .is_some_and(|proof| proof.quota == runtime.quota
+                    && proof.cpu_max == runtime.quota.cpu_max()
+                    && proof.cpu_max_burst == 0
+                    && proof.verified_at_unix_ms > 0),
         "VM CPU quota is not attested steady during ready commit"
     );
     details.ssh_host_keys_openssh = normalize_ssh_host_keys(ready.ssh_host_keys_openssh.clone());
@@ -964,10 +962,10 @@ pub(super) async fn run_create(
         .await
         {
             Ok(result) => break result,
-            Err(error) if error.downcast_ref::<BootCapacityPending>().is_some() => {
+            Err(error) if error.downcast_ref::<CpuCapacityPending>().is_some() => {
                 ensure_create_not_deleted(inner, req.name).await?;
                 if Instant::now() >= launch_deadline {
-                    return Err(error).context("timed out waiting for jailerd boot CPU capacity");
+                    return Err(error).context("timed out waiting for jailerd CPU capacity");
                 }
                 let delay = boot_capacity_retry_delay(capacity_attempt);
                 capacity_attempt = capacity_attempt.saturating_add(1);
@@ -992,10 +990,10 @@ pub(super) async fn run_create(
     let jail_ready_at = Instant::now();
 
     let vm_cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
+        cpu_millis: req.cpu_millis,
         name: req.name,
         cmdline: &cached_image.cmdline,
         paths: &launch.paths,
-        vcpus: req.vcpus,
         memory_mib: req.memory_mib,
         tap: req.tap,
         mac: req.mac,

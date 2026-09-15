@@ -11,7 +11,7 @@ import {
   vmScenarioVms,
 } from "@/db/schema";
 import type { VerifiedAgentHost } from "@/control-plane/auth";
-import type { ScenarioVmManifestV4 } from "@/generated/catalog";
+import type { ScenarioVmManifestV5 } from "@/generated/catalog";
 import {
   jsonResponse,
   isSafeBundleRev,
@@ -383,7 +383,7 @@ function chunkedImageIndexIdentity(
 async function loadDesiredCandidateVms(
   db: DrizzleD1Database,
   agent: VerifiedAgentHost,
-): Promise<ScenarioVmManifestV4[]> {
+): Promise<ScenarioVmManifestV5[]> {
   const desiredRows = await db
     .select({ docJson: hostDesiredState.docJson })
     .from(hostDesiredState)
@@ -409,10 +409,10 @@ async function loadDesiredCandidateVms(
           )
         : isNull(scenarioCatalogCandidates.organizationId),
     );
-  const matches = new Map<string, ScenarioVmManifestV4>();
+  const matches = new Map<string, ScenarioVmManifestV5>();
   for (const candidate of candidateRows) {
     if (
-      candidate.manifest.schema_version !== 4 ||
+      candidate.manifest.schema_version !== 5 ||
       !Array.isArray(candidate.manifest.vms)
     ) {
       continue;

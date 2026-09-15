@@ -372,22 +372,13 @@ impl VmManager {
         }
 
         let resources = requested_resources.unwrap_or(CreateVmResources {
-            cpu_millis: self.inner.defaults.resources.vcpus.saturating_mul(1_000),
-            vcpus: self.inner.defaults.resources.vcpus,
+            cpu_millis: self.inner.defaults.resources.cpu_millis,
             memory_mib: self.inner.defaults.resources.memory_mib,
             disk_mib: None,
         });
-        if resources.vcpus == 0 {
-            return Err(ApiError::bad_request("resources.vcpus must be >= 1"));
-        }
-        if resources.cpu_millis == 0 {
-            return Err(ApiError::bad_request("resources.cpu_millis must be >= 1"));
-        }
-        if resources.cpu_millis > resources.vcpus.saturating_mul(1_000) {
-            return Err(ApiError::bad_request(
-                "resources.cpu_millis must not exceed resources.vcpus * 1000",
-            ));
-        }
+        intar_jailer_protocol::CpuQuota::from_millis(resources.cpu_millis).map_err(|error| {
+            ApiError::bad_request(format!("invalid resources.cpu_millis: {error}"))
+        })?;
         if resources.memory_mib == 0 {
             return Err(ApiError::bad_request("resources.memory_mib must be >= 1"));
         }
@@ -536,7 +527,6 @@ impl VmManager {
             spool_dir: Some(spool_dir.display().to_string()),
             mac: mac.clone(),
             cpu_millis: Some(resources.cpu_millis),
-            vcpu_count: u16::try_from(resources.vcpus).ok(),
             guest_ip: Some(guest_ip.clone()),
             guest_ip_cidr: Some(network.guest_ip_cidr.clone()),
             gateway: Some(network.gateway.clone()),
@@ -670,7 +660,6 @@ impl VmManager {
                 kino_vsock_port,
                 kino_host_ready_port: KINO_HOST_READY_PORT,
                 cpu_millis: resources.cpu_millis,
-                vcpus: resources.vcpus,
                 memory_mib: resources.memory_mib,
                 disk_mib: resources.disk_mib,
                 hostname: &hostname_for_task,

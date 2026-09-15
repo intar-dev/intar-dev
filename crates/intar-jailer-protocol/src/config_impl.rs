@@ -28,10 +28,6 @@ impl JailerdConfig {
         if self.vmm_file_size_limit_bytes == Some(0) {
             return Err(ValidationError::InvalidFileSizeLimit);
         }
-        CpuQuota::from_millis(self.boot_cpu_millis)?;
-        if self.boot_cpu_lease_ms == 0 || self.boot_cpu_lease_ms > DEFAULT_BOOT_CPU_LEASE_MS {
-            return Err(ValidationError::InvalidBootCpuLease);
-        }
         if self.allowed_source_roots.is_empty()
             || self
                 .allowed_source_roots

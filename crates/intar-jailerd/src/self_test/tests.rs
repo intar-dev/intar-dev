@@ -38,7 +38,7 @@ fn attestation_rejects_unknown_fields() {
         "landlock_abi": 3,
         "quota_verified": true,
         "burst_verified": true,
-        "boot_quota_transition_verified": true,
+        "startup_quota_verified": true,
         "network_verified": true,
         "landlock_negative_access": true,
         "kvm_accounting_proven": true,
@@ -46,7 +46,7 @@ fn attestation_rejects_unknown_fields() {
         "passed_at_unix_s": 1,
         "unexpected": true
     });
-    assert!(serde_json::from_value::<SelfTestAttestationV2>(value).is_err());
+    assert!(serde_json::from_value::<SelfTestAttestationV3>(value).is_err());
 }
 
 #[test]
@@ -69,5 +69,5 @@ fn legacy_attestation_without_boot_transition_proof_is_rejected() {
         "cloud_hypervisor_lifecycle_verified": true,
         "passed_at_unix_s": 1
     });
-    assert!(serde_json::from_value::<SelfTestAttestationV2>(value).is_err());
+    assert!(serde_json::from_value::<SelfTestAttestationV3>(value).is_err());
 }

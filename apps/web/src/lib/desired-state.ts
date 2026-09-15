@@ -12,7 +12,7 @@ import type { RunVmStateDocument } from "@/lib/run-state";
 export type DesiredStateDraft = HostDesiredStateV2;
 export type DesiredStateMutator = (draft: DesiredStateDraft) => void;
 
-const LEGACY_HOST_DESIRED_STATE_SCHEMA_VERSION = 3;
+const LEGACY_HOST_DESIRED_STATE_SCHEMA_VERSION = 4;
 
 export interface StoredHostDesiredStateUpgrade {
   desiredState: HostDesiredStateV2;
@@ -281,7 +281,6 @@ export function desiredVmFromRunVm(input: {
     guest_tools: { ...input.guestTools },
     resources: {
       cpu_millis: resources.cpuMillis,
-      vcpu_count: resources.vcpuCount,
       memory_mib: resources.memoryMib,
       disk_mib: resources.diskMib,
     },

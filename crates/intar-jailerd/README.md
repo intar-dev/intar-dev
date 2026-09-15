@@ -15,22 +15,17 @@ reserves 1000 host millicores by default, and allocates per-generation
 identities from `200000..=265535`. Audit that range for local/directory identity
 collisions before deployment.
 
-VM CPU declarations are steady-state entitlements. For a prepared
-`LaunchVmV2`, jailerd capacity-accounts a root-owned 2000-millicore aggregate
-VMM quota for at most 45 seconds during boot, without changing guest vCPU
-topology. There is no steady-quota downgrade or copy-based launch path. Public SSH
-ports are reserved but v2 DNAT remains absent
-until `FinalizeVmBoot` has lowered and read back `cpu.max`, verified
-`cpu.max.burst = 0`, persisted the steady phase, and activated ingress. An
-auxiliary root-owned systemd oneshot is created in the same transaction as
-each v2 VM and is lifecycle-bound to that exact generation. It runs a hidden,
-typed `intar-jailerd` worker at an absolute `/proc/uptime` deadline, applies the
-steady quota through `SetUnitProperties`, clears `cpu.max.burst`, and reads both
-files back. The VM launch is contained unless the guardian process is active;
-because systemd owns it, the hard lease survives a jailerd crash. The local
-controller and daemon watchdog remain as redundant enforcement and persisted
-state/recovery reconciliation, and none of these deadline paths activates
-ingress.
+VM CPU declarations apply from startup to shutdown. Jailerd charges the
+exact `cpu_millis` value before launch and sets the corresponding systemd CPU
+quota. Cloud Hypervisor retains its own integer guest CPU count, derived from
+the limit. No host core is reserved for a guest vCPU.
+
+Public SSH ports are reserved at launch. DNAT remains absent until
+`FinalizeVmBoot` verifies the declared quota and `cpu.max.burst = 0`, persists
+the generation-bound proof, and activates ingress. The same cgroup quota
+continues to apply if jailerd exits. A periodic recovery worker retries
+unresolved cleanup and retains reservations until cgroup drain is proven.
+Background image work uses a separate bounded 45-second boot window.
 
 The root-owned network policy reserves `10.77.0.0/16` for canonical per-run
 `/28`s and `22000..=22999` for SSH DNAT by default. Keep the agent values in
@@ -89,12 +84,12 @@ Agent doctor is read-only. The root-only self-test runs under the same
 private-mount/filesystem sandbox as the installed service and uses an isolated
 in-memory 1000-millicore authority. The daemon resolves each root-owned nsfs
 handle through PID 1's root, while transient VM units prove the same inode at
-the configured `/run/netns` path. The test then creates eight
+the configured `/run/netns` path. The test then creates two
 concurrent Cloud Hypervisor v53 VMs,
 each with its own unit, cgroup, jail, identity, and TAP in one shared run
-network namespace. It requires the ninth 125-millicore request to fail local
-admission, proves every API/Landlock lifecycle and KVM task tree, measures all
-eight busy cgroups during one 30-second window, and exhaustively removes them.
+network namespace. It requires the third 500-millicore request to fail local
+admission, proves every API/Landlock lifecycle and KVM task tree, measures both
+busy cgroups during one 30-second window, and exhaustively removes them.
 Only that complete artifact-backed run writes the boot-bound readiness
 attestation.
 

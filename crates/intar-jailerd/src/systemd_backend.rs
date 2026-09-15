@@ -1,83 +1,7 @@
 use super::*;
 
-#[cfg(any(target_os = "linux", test))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct BootCpuGuardianUnitSpec {
-    pub(super) unit_name: String,
-    pub(super) executable: String,
-    pub(super) request: BootCpuGuardianRequest,
-}
-
-#[cfg(any(target_os = "linux", test))]
-impl BootCpuGuardianUnitSpec {
-    pub(super) fn new(executable: PathBuf, request: BootCpuGuardianRequest) -> Result<Self> {
-        if !executable.is_absolute() {
-            bail!("boot CPU guardian executable must be absolute")
-        }
-        let executable = executable
-            .to_str()
-            .context("boot CPU guardian executable must be valid UTF-8")?
-            .to_owned();
-        Ok(Self {
-            unit_name: boot_cpu_guardian_unit_name(request.generation()),
-            executable,
-            request,
-        })
-    }
-
-    pub(super) fn command_argv(&self) -> Vec<String> {
-        vec![
-            self.executable.clone(),
-            "boot-cpu-lease-guardian".to_owned(),
-            "--generation".to_owned(),
-            self.request.generation().to_string(),
-            "--unit-name".to_owned(),
-            self.request.unit_name().to_owned(),
-            "--steady-cpu-millis".to_owned(),
-            self.request.steady_quota().cpu_millis.to_string(),
-            "--deadline-uptime-millis".to_owned(),
-            self.request.deadline_uptime_millis().to_string(),
-        ]
-    }
-
-    #[cfg(test)]
-    pub(super) fn required_properties(&self) -> BTreeMap<&'static str, String> {
-        BTreeMap::from([
-            ("Type", "oneshot".to_owned()),
-            ("RemainAfterExit", "yes".to_owned()),
-            ("PartOf", self.request.unit_name().to_owned()),
-            ("User", "root".to_owned()),
-            ("Group", "root".to_owned()),
-            ("NoNewPrivileges", "yes".to_owned()),
-            ("ProtectSystem", "strict".to_owned()),
-            ("ProtectControlGroups", "no".to_owned()),
-            ("CapabilityBoundingSet", "0".to_owned()),
-            ("AmbientCapabilities", "0".to_owned()),
-            ("CollectMode", "inactive-or-failed".to_owned()),
-        ])
-    }
-}
-
 pub(super) fn vm_unit_name(generation: &ValidatedId) -> String {
     format!("intar-vm-{generation}.service")
-}
-
-pub(super) fn boot_cpu_guardian_unit_name(generation: &ValidatedId) -> String {
-    format!("intar-vm-boot-lease-{generation}.service")
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn restrict_all_namespaces_dbus_value() -> zbus::zvariant::Value<'static> {
-    // systemd exposes RestrictNamespaces as the uint64 namespace-type mask on
-    // D-Bus. `yes` in a unit file maps to every bit set; a boolean variant
-    // makes StartTransientUnit reject the entire auxiliary unit with
-    // "Unexpected message contents".
-    zbus::zvariant::Value::new(u64::MAX)
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn vm_cgroup_path(unit_name: &str) -> PathBuf {
-    Path::new("/intar.slice/intar-vms.slice").join(unit_name)
 }
 
 impl HostBackend for UnavailableHostBackend {
@@ -93,7 +17,7 @@ impl HostBackend for UnavailableHostBackend {
         bail!("systemd transient-unit backend is not available in this build")
     }
 
-    fn update_unit_cpu_quota(
+    fn verify_unit_cpu_quota(
         &mut self,
         _unit_name: &str,
         _cgroup_path: &Path,
@@ -171,18 +95,11 @@ impl SystemdHostBackend {
         landlock_attested: bool,
     ) -> Result<Self> {
         require_supervisor_process_inspection_capability()?;
-        let guardian_binary =
-            std::env::current_exe().context("resolve intar-jailerd executable")?;
-        ensure!(
-            guardian_binary.is_absolute() && path_is_root_trusted(&guardian_binary, false),
-            "intar-jailerd executable is not a trusted root-owned guardian binary"
-        );
         let system_bus = zbus::blocking::Connection::system().context("connect to system D-Bus")?;
         Ok(Self {
             network: Arc::new(Mutex::new(NetworkManager::new(config)?)),
             system_bus,
             cloud_hypervisor_sha256: config.cloud_hypervisor_sha256.clone(),
-            guardian_binary,
             landlock_attested,
         })
     }
@@ -213,53 +130,6 @@ impl SystemdHostBackend {
                 Ok(None)
             }
             Err(error) => Err(error).with_context(|| format!("get systemd unit {unit_name}")),
-        }
-    }
-
-    fn attest_boot_cpu_guardian_active(&self, unit_name: &str) -> Result<()> {
-        let deadline = Instant::now() + BOOT_CPU_GUARDIAN_START_TIMEOUT;
-        let mut last_observation = "guardian unit has not appeared".to_owned();
-        loop {
-            let manager = Self::manager(&self.system_bus)?;
-            if let Some(path) = Self::get_unit_path(&manager, unit_name)? {
-                let unit = zbus::blocking::Proxy::new(
-                    &self.system_bus,
-                    "org.freedesktop.systemd1",
-                    path,
-                    "org.freedesktop.systemd1.Unit",
-                )?;
-                let active_state: String = unit.get_property("ActiveState")?;
-                match active_state.as_str() {
-                    // A completed oneshot remains active only after its helper
-                    // has successfully mutated and attested the VM cgroup.
-                    "active" => return Ok(()),
-                    "activating" | "reloading" => {
-                        let service = zbus::blocking::Proxy::new(
-                            &self.system_bus,
-                            "org.freedesktop.systemd1",
-                            unit.path(),
-                            "org.freedesktop.systemd1.Service",
-                        )?;
-                        let main_pid: u32 = service.get_property("MainPID")?;
-                        if main_pid != 0 {
-                            return Ok(());
-                        }
-                        last_observation =
-                            format!("guardian is {active_state} without a main process");
-                    }
-                    "inactive" => {
-                        last_observation = "guardian is still inactive".to_owned();
-                    }
-                    "deactivating" | "failed" => {
-                        bail!("boot CPU guardian {unit_name} became {active_state}")
-                    }
-                    state => bail!("boot CPU guardian {unit_name} entered {state}"),
-                }
-            }
-            if Instant::now() >= deadline {
-                bail!("timed out attesting boot CPU guardian {unit_name}: {last_observation}")
-            }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -343,27 +213,6 @@ impl HostBackend for SystemdHostBackend {
             spec.unit_name == vm_unit_name(&spec.generation),
             "VM transient unit name is not bound to its generation"
         );
-        // Anchor the hard lease to a monotonic clock before creating the
-        // cgroup. Both the daemon-local watchdog and the systemd-owned
-        // guardian use this interval without consulting wall time.
-        let boot_deadline = spec
-            .boot_cpu_lease_ms
-            .map(|lease_ms| Instant::now() + Duration::from_millis(lease_ms));
-        let guardian = spec
-            .boot_cpu_lease_ms
-            .map(|lease_ms| {
-                let deadline_uptime_millis = proc_uptime_millis()?
-                    .checked_add(lease_ms)
-                    .context("boot CPU guardian deadline overflow")?;
-                let request = BootCpuGuardianRequest::new(
-                    spec.generation.clone(),
-                    spec.unit_name.clone(),
-                    spec.steady_cpu_quota,
-                    deadline_uptime_millis,
-                )?;
-                BootCpuGuardianUnitSpec::new(self.guardian_binary.clone(), request)
-            })
-            .transpose()?;
         let connection = &self.system_bus;
         let manager = Self::manager(connection)?;
         let executable = spec.jailer_binary.to_string_lossy().into_owned();
@@ -381,7 +230,7 @@ impl HostBackend for SystemdHostBackend {
                 (path.to_owned(), access.to_owned())
             })
             .collect::<Vec<_>>();
-        let mut properties = vec![
+        let properties = vec![
             ("Description", Value::new(spec.description.clone())),
             ("Slice", Value::new("intar-vms.slice")),
             ("Type", Value::new("simple")),
@@ -410,78 +259,18 @@ impl HostBackend for SystemdHostBackend {
             ),
             ("AmbientCapabilities", Value::new(0_u64)),
         ];
-        if let Some(guardian) = &guardian {
-            // BindsTo starts the auxiliary unit in the same transaction and
-            // tears the VM down if the sleeping guardian ever fails. Do not
-            // add an ordering dependency: a oneshot remains activating until
-            // the lease deadline and must not delay VM startup.
-            properties.push(("BindsTo", Value::new(vec![guardian.unit_name.clone()])));
-        }
-        let auxiliary = guardian
-            .as_ref()
-            .map(|guardian| {
-                let executable = guardian.executable.clone();
-                let exec_start = vec![(executable.clone(), guardian.command_argv(), false)];
-                let timeout_start_usec = spec
-                    .boot_cpu_lease_ms
-                    .unwrap_or_default()
-                    .saturating_add(30_000)
-                    .saturating_mul(1_000);
-                vec![(
-                    guardian.unit_name.as_str(),
-                    vec![
-                        (
-                            "Description",
-                            Value::new(format!(
-                                "Intar boot CPU lease guardian for {}",
-                                spec.generation
-                            )),
-                        ),
-                        ("Slice", Value::new("system.slice")),
-                        ("Type", Value::new("oneshot")),
-                        ("ExecStart", Value::new(exec_start)),
-                        ("RemainAfterExit", Value::new(true)),
-                        (
-                            "PartOf",
-                            Value::new(vec![guardian.request.unit_name().to_owned()]),
-                        ),
-                        ("CollectMode", Value::new("inactive-or-failed")),
-                        ("TimeoutStartUSec", Value::new(timeout_start_usec)),
-                        ("KillMode", Value::new("process")),
-                        ("Restart", Value::new("no")),
-                        ("User", Value::new("root")),
-                        ("Group", Value::new("root")),
-                        ("UMask", Value::new(0o077_u32)),
-                        ("NoNewPrivileges", Value::new(true)),
-                        ("PrivateTmp", Value::new(true)),
-                        ("ProtectHome", Value::new("yes")),
-                        ("ProtectSystem", Value::new("strict")),
-                        ("ProtectControlGroups", Value::new(false)),
-                        ("ProtectKernelTunables", Value::new(true)),
-                        ("ProtectKernelModules", Value::new(true)),
-                        ("ProtectKernelLogs", Value::new(true)),
-                        ("ProtectClock", Value::new(true)),
-                        ("LockPersonality", Value::new(true)),
-                        ("MemoryDenyWriteExecute", Value::new(true)),
-                        ("RestrictNamespaces", restrict_all_namespaces_dbus_value()),
-                        ("RestrictRealtime", Value::new(true)),
-                        ("DevicePolicy", Value::new("closed")),
-                        ("CapabilityBoundingSet", Value::new(0_u64)),
-                        ("AmbientCapabilities", Value::new(0_u64)),
-                    ],
-                )]
-            })
-            .unwrap_or_default();
         let _: OwnedObjectPath = manager
             .call(
                 "StartTransientUnit",
-                &(spec.unit_name.as_str(), "fail", properties, auxiliary),
+                &(
+                    spec.unit_name.as_str(),
+                    "fail",
+                    properties,
+                    Vec::<(&str, Vec<(&str, Value)>)>::new(),
+                ),
             )
             .with_context(|| format!("start transient unit {}", spec.unit_name))?;
         drop(manager);
-        if let Some(guardian) = &guardian {
-            self.attest_boot_cpu_guardian_active(&guardian.unit_name)?;
-        }
 
         let deadline = Instant::now() + VMM_START_TIMEOUT;
         loop {
@@ -526,15 +315,6 @@ impl HostBackend for SystemdHostBackend {
         {
             return Err(error).context("verify transient unit CPU controller");
         }
-        if let (Some(cgroup_path), Some(boot_deadline)) = (&cgroup_path, boot_deadline) {
-            spawn_hard_cpu_seal(
-                self.clone(),
-                spec.unit_name.clone(),
-                cgroup_path.clone(),
-                spec.steady_cpu_quota,
-                boot_deadline,
-            )?;
-        }
         Ok(StartedUnit {
             unit_name: spec.unit_name.clone(),
             pid: inspection.pid,
@@ -548,28 +328,14 @@ impl HostBackend for SystemdHostBackend {
         self.inspect_existing(unit_name)
     }
 
-    fn update_unit_cpu_quota(
+    fn verify_unit_cpu_quota(
         &mut self,
         unit_name: &str,
         cgroup_path: &Path,
         quota: CpuQuota,
     ) -> Result<()> {
-        use zbus::zvariant::Value;
-
-        let connection = &self.system_bus;
-        let manager = Self::manager(connection)?;
-        let properties = vec![
-            (
-                "CPUQuotaPerSecUSec",
-                Value::new(u64::from(quota.cpu_millis) * 1_000),
-            ),
-            ("CPUQuotaPeriodUSec", Value::new(quota.period_micros)),
-        ];
-        let _: () = manager
-            .call("SetUnitProperties", &(unit_name, true, properties))
-            .with_context(|| format!("seal transient unit CPU quota for {unit_name}"))?;
         assert_cpu_quota(cgroup_path, quota)
-            .with_context(|| format!("read back sealed CPU quota for {unit_name}"))
+            .with_context(|| format!("verify CPU quota for {unit_name}"))
     }
 
     fn stop_unit(&mut self, unit_name: &str) -> Result<bool> {

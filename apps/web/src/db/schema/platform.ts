@@ -14,12 +14,11 @@ import type {
 } from "@/generated/bridge";
 import type {
   ImageArchitecture,
-  ScenarioManifestV4,
+  ScenarioManifestV5,
 } from "@/generated/catalog";
 import { organization, user } from "./core";
 import {
   type AgentHostRole,
-  type HostCpuReservationQuotaPhase,
   type HostCpuReservationState,
   type ImageBuildBundleMeta,
   type ImageBuildStatus,
@@ -126,7 +125,7 @@ export const imageBuilds = sqliteTable(
     attempt: integer("attempt").default(0).notNull(),
     error: text("error"),
     logR2Key: text("log_r2_key"),
-    publishedManifestJson: jsonText<ScenarioManifestV4>(
+    publishedManifestJson: jsonText<ScenarioManifestV5>(
       "published_manifest_json",
     ),
     /**
@@ -219,33 +218,16 @@ export const hostCpuReservations = sqliteTable(
       .notNull()
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     cpuMillis: integer("cpu_millis").notNull(),
-    steadyCpuMillis: integer("steady_cpu_millis").notNull(),
-    bootCpuMillis: integer("boot_cpu_millis").notNull(),
-    quotaPhase: text("quota_phase")
-      .$type<HostCpuReservationQuotaPhase>()
-      .notNull(),
     state: text("state").$type<HostCpuReservationState>().notNull(),
     expiresAt: integer("expires_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
   (table) => [
-    check("host_cpu_reservations_cpu_positive", sql`${table.cpuMillis} > 0`),
-    check(
-      "host_cpu_reservations_quota_positive",
-      sql`${table.steadyCpuMillis} > 0 AND ${table.bootCpuMillis} >= ${table.steadyCpuMillis}`,
-    ),
-    check(
-      "host_cpu_reservations_quota_phase_valid",
-      sql`${table.quotaPhase} in ('boot', 'steady')`,
-    ),
-    check(
-      "host_cpu_reservations_current_quota_valid",
-      sql`(${table.quotaPhase} = 'boot' AND ${table.cpuMillis} = ${table.bootCpuMillis}) OR (${table.quotaPhase} = 'steady' AND ${table.cpuMillis} = ${table.steadyCpuMillis})`,
-    ),
+    check("host_cpu_reservations_cpu_positive", sql`"cpu_millis" > 0`),
     check(
       "host_cpu_reservations_state_valid",
-      sql`${table.state} in ('pending', 'committed')`,
+      sql`"state" in ('pending', 'committed')`,
     ),
     index("host_cpu_reservations_host_state_idx").on(table.hostId, table.state),
     index("host_cpu_reservations_pending_expiry_idx").on(

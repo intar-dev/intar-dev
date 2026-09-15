@@ -54,13 +54,13 @@ export interface ScenarioProbeManifestV3 {
   hints: ScenarioHintManifestV3[];
 }
 
-export interface ScenarioVmBootManifestV4 {
+export interface ScenarioVmBootManifestV5 {
   kernel_sha256: string;
   initrd_sha256: string;
   cmdline: string;
 }
 
-export interface ScenarioVmManifestV4 {
+export interface ScenarioVmManifestV5 {
   name: string;
   image_key: ImageKey;
   image_id: string;
@@ -68,15 +68,14 @@ export interface ScenarioVmManifestV4 {
   image_virtual_size_bytes: number;
   chunk_manifest_sha256: string;
   guest_bootstrap_abi: number;
-  boot: ScenarioVmBootManifestV4;
+  boot: ScenarioVmBootManifestV5;
   cpu_millis: number;
-  vcpu_count: number;
   memory_mib: Mib;
   disk_mib: Mib;
   probes: ScenarioProbeManifestV3[];
 }
 
-export interface ScenarioManifestV4 {
+export interface ScenarioManifestV5 {
   schema_version: number;
   scenario_id: string;
   name: string;
@@ -89,7 +88,7 @@ export interface ScenarioManifestV4 {
   briefing_markdown: string;
   solution_markdown: string;
   hints: ScenarioHintManifestV3[];
-  vms: ScenarioVmManifestV4[];
+  vms: ScenarioVmManifestV5[];
 }
 
 export interface ImageChunkManifestV1 {

@@ -52,7 +52,6 @@ export type ImageRegistryOperationKind =
    */
   | "run_start";
 export type HostCpuReservationState = "pending" | "committed";
-export type HostCpuReservationQuotaPhase = "boot" | "steady";
 export type ImageBuildStatus =
   | "queued"
   | "assigned"

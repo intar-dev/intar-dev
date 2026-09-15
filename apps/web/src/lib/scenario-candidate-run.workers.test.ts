@@ -12,7 +12,7 @@ import {
   scenarioCatalogCandidates,
   scenarioRuns,
 } from "@/db/schema";
-import type { ScenarioManifestV4 } from "@/generated/catalog";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { startScenarioRunForUser } from "@/lib/scenario-runs";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
@@ -503,11 +503,11 @@ describe("candidate scenario proof runs", () => {
 
 async function seedCandidate(
   db: ReturnType<typeof drizzle>,
-  manifest: ScenarioManifestV4,
+  manifest: ScenarioManifestV5,
   options: {
     organizationId?: string | null;
     status?: "succeeded" | "building";
-    publishedManifest?: ScenarioManifestV4;
+    publishedManifest?: ScenarioManifestV5;
     candidateRevision?: string;
     sourceRevision?: string;
     buildId?: string;
@@ -593,9 +593,9 @@ async function seedCandidate(
   });
 }
 
-function candidateManifest(): ScenarioManifestV4 {
+function candidateManifest(): ScenarioManifestV5 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     scenario_id: "broken-nginx",
     name: "broken-nginx",
     title: "Candidate Broken Nginx",
@@ -628,7 +628,6 @@ function candidateManifest(): ScenarioManifestV4 {
           cmdline: "console=hvc0 root=/dev/vda rw",
         },
         cpu_millis: 125,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 4096,
         probes: [

@@ -230,7 +230,6 @@ async function seedDestroyableRun(runId: string, now: number) {
       },
       resources: {
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 4_096,
       },

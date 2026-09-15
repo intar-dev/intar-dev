@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use intar_contracts::catalog::{
     IMAGE_CHUNK_ENCODING, IMAGE_CHUNK_SIZE_BYTES, ImageArchitecture, ImageChunkManifestV1,
-    ImageChunkV1, ImageFormat, ImageKey, Mib, ScenarioDifficulty, ScenarioManifestV4,
-    ScenarioVmBootManifestV4, ScenarioVmManifestV4,
+    ImageChunkV1, ImageFormat, ImageKey, Mib, ScenarioDifficulty, ScenarioManifestV5,
+    ScenarioVmBootManifestV5, ScenarioVmManifestV5,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -352,7 +352,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 struct PublishFixture {
-    manifest: ScenarioManifestV4,
+    manifest: ScenarioManifestV5,
     image: PublishChunkedImage,
     artifacts: Vec<PublishArtifactFile>,
     _dir: tempfile::TempDir,
@@ -386,7 +386,7 @@ fn publish_fixture() -> PublishFixture {
     let artifact_path = dir.path().join("vmlinuz");
     std::fs::write(&artifact_path, b"kernel-image").unwrap();
 
-    let manifest = ScenarioManifestV4 {
+    let manifest = ScenarioManifestV5 {
         schema_version: 4,
         scenario_id: "scenario-1".to_owned(),
         name: "Scenario One".to_owned(),
@@ -399,7 +399,7 @@ fn publish_fixture() -> PublishFixture {
         briefing_markdown: String::new(),
         solution_markdown: String::new(),
         hints: vec![],
-        vms: vec![ScenarioVmManifestV4 {
+        vms: vec![ScenarioVmManifestV5 {
             name: "vm-1".to_owned(),
             image_key: ImageKey {
                 scenario: "scenario-1".to_owned(),
@@ -411,13 +411,12 @@ fn publish_fixture() -> PublishFixture {
             image_virtual_size_bytes: chunk_manifest.virtual_size_bytes,
             chunk_manifest_sha256: chunk_manifest_sha256.clone(),
             guest_bootstrap_abi: 1,
-            boot: ScenarioVmBootManifestV4 {
+            boot: ScenarioVmBootManifestV5 {
                 kernel_sha256: sha256_hex(b"kernel-image"),
                 initrd_sha256: "b".repeat(64),
                 cmdline: "console=ttyS0".to_owned(),
             },
             cpu_millis: 1000,
-            vcpu_count: 1,
             memory_mib: Mib(512),
             disk_mib: Mib(1024),
             probes: vec![],

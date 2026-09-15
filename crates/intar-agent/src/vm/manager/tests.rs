@@ -45,7 +45,6 @@ fn test_vm_status(name: &str, run_id: Option<&str>) -> VmStatusResponse {
             spool_dir: None,
             mac: "02:00:00:00:00:01".to_string(),
             cpu_millis: Some(125),
-            vcpu_count: Some(1),
             guest_ip: None,
             guest_ip_cidr: None,
             gateway: None,

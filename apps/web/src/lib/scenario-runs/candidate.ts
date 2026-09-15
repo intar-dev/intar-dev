@@ -204,7 +204,6 @@ function isReadyCandidateManifest(
       vm.boot.initrd_sha256 === publishedVm.boot.initrd_sha256 &&
       vm.boot.cmdline === publishedVm.boot.cmdline &&
       vm.cpu_millis === publishedVm.cpu_millis &&
-      vm.vcpu_count === publishedVm.vcpu_count &&
       vm.memory_mib === publishedVm.memory_mib &&
       vm.disk_mib === publishedVm.disk_mib &&
       JSON.stringify(vm.probes) === JSON.stringify(publishedVm.probes)
@@ -251,7 +250,6 @@ function candidateSourceFromManifest(input: {
         imageSha256: vm.image_id,
         ...directBoot,
         cpuMillis: vm.cpu_millis,
-        vcpuCount: vm.vcpu_count,
         memoryMib: vm.memory_mib,
         diskMib: vm.disk_mib,
       } satisfies ScenarioVmRecord,

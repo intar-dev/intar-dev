@@ -26,7 +26,7 @@ describe("desired state", () => {
       hostId: "host-alpha",
       nowUnixMs: 1_762_041_600_000,
     })).toEqual({
-      schema_version: 4,
+      schema_version: 5,
       host_id: "host-alpha",
       version: 0,
       generated_at_unix_ms: 1_762_041_600_000,
@@ -47,9 +47,9 @@ describe("desired state", () => {
     })).toEqual({ desiredState: current, migrated: false });
   });
 
-  it("migrates a drained v3 desired state and drops obsolete work", () => {
+  it("migrates a drained v4 desired state and drops obsolete work", () => {
     const legacy = {
-      schema_version: 3,
+      schema_version: 4,
       host_id: "host-alpha",
       version: 235,
       generated_at_unix_ms: 1_762_041_600_000,
@@ -66,7 +66,7 @@ describe("desired state", () => {
     })).toEqual({
       migrated: true,
       desiredState: {
-        schema_version: 4,
+        schema_version: 5,
         host_id: "host-alpha",
         version: 236,
         generated_at_unix_ms: 1_762_041_660_000,
@@ -78,10 +78,10 @@ describe("desired state", () => {
     });
   });
 
-  it("refuses to migrate a v3 desired state with a running VM", () => {
+  it("refuses to migrate a v4 desired state with a running VM", () => {
     expect(() => upgradeStoredHostDesiredState({
       document: {
-        schema_version: 3,
+        schema_version: 4,
         host_id: "host-alpha",
         version: 9,
         generated_at_unix_ms: 1_762_041_600_000,
@@ -273,7 +273,6 @@ describe("desired state", () => {
       guest_tools: guestTools(),
       resources: {
         cpu_millis: 1_000,
-        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 4096,
       },
@@ -337,7 +336,7 @@ function hostDesiredState(input: {
   builds?: DesiredBuildV1[];
 }): HostDesiredStateV2 {
   return {
-    schema_version: 4,
+    schema_version: 5,
     host_id: "host-alpha",
     version: input.version,
     generated_at_unix_ms: 1_762_041_600_000,
@@ -390,7 +389,6 @@ function desiredVm(
     guest_tools: guestTools(),
     resources: {
       cpu_millis: 1_000,
-      vcpu_count: 1,
       memory_mib: 512,
       disk_mib: 4096,
     },
@@ -443,7 +441,6 @@ function runStateWithProvisioning(input: {
         imageSha256: input.imageSha256,
         resources: {
           cpuMillis: 1_000,
-          vcpuCount: 1,
           memoryMib: 512,
           diskMib: 4096,
         },

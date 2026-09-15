@@ -198,13 +198,11 @@ fn terminal_state_reports_ready_when_running_and_ssh_is_ready() {
     vm.state = VmLifecycleState::Running;
     let quota = CpuQuota::from_millis(125).expect("quota");
     let details = vm.details.as_mut().expect("details");
+    details.cpu_millis = Some(125);
     details.ssh_public_port = Some(2222);
     details.jail_generation = Some("generation-1".to_string());
     details.cpu_runtime = Some(VmCpuRuntimeState {
-        phase: VmCpuPhase::Steady,
-        steady_quota: quota,
-        effective_quota: quota,
-        boot_deadline_unix_ms: None,
+        quota,
         attestation: Some(CpuQuotaAttestation {
             quota,
             cpu_max: quota.cpu_max(),
@@ -224,8 +222,8 @@ fn terminal_state_reports_ready_when_running_and_ssh_is_ready() {
         state
             .runtime_constraints
             .as_ref()
-            .map(|constraints| constraints.phase.clone()),
-        Some(VmRuntimeConstraintPhaseV1::Steady)
+            .map(|constraints| constraints.cpu_millis),
+        Some(125)
     );
     assert_eq!(
         state.terminal_target,
@@ -267,10 +265,7 @@ fn recovered_running_vm_stays_pending_without_fresh_terminal_event() {
     details.ssh_public_port = Some(2222);
     details.jail_generation = Some("generation-1".to_string());
     details.cpu_runtime = Some(VmCpuRuntimeState {
-        phase: VmCpuPhase::Steady,
-        steady_quota: quota,
-        effective_quota: quota,
-        boot_deadline_unix_ms: None,
+        quota,
         attestation: Some(CpuQuotaAttestation {
             quota,
             cpu_max: quota.cpu_max(),

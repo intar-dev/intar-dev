@@ -482,7 +482,6 @@ export function formatScenarioResourceItems(
 ): string[] {
   return [
     `${formatCpu(resources.cpuMillis)} CPU`,
-    `${resources.vcpuCount.toLocaleString()} vCPU`,
     formatMibResource(resources.memoryMib, "RAM"),
     formatMibResource(resources.diskMib, "disk"),
   ];
