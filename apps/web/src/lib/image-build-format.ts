@@ -5,4 +5,4 @@
 // without a change to any hashed scenario input, such as the generated guest
 // startup unit or an embedded kernel fix. See the Rust constant for the full
 // rule.
-export const IMAGE_BUILD_FORMAT_VERSION = "intar-image-build-v16";
+export const IMAGE_BUILD_FORMAT_VERSION = "intar-image-build-v17";

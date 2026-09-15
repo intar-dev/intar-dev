@@ -14,7 +14,7 @@ use crate::ScenarioError;
 /// hash, so a change to the unit writer or to the kernel with unchanged
 /// scenario HCL would otherwise reuse the existing image. A bump makes every
 /// existing image hash stale and forces a rebuild, which is the intended cost.
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v16";
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v17";
 pub const GUEST_BOOTSTRAP_ABI: u16 = 2;
 
 #[derive(Debug, Clone)]
@@ -166,8 +166,8 @@ mod tests {
     }
 
     #[test]
-    fn v16_build_format_invalidates_v15_images_and_matches_the_golden_hash() {
-        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v16");
+    fn v17_build_format_invalidates_v16_images_and_matches_the_golden_hash() {
+        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v17");
         assert_eq!(GUEST_BOOTSTRAP_ABI, 2);
         let hash = scenario_content_hash_from_entries(
             &params(),
@@ -177,28 +177,14 @@ mod tests {
             ],
         )
         .unwrap();
-        // The regression for the identity bump: the same scenario inputs that
-        // produced an older golden hash must NOT produce it again under v16, so a
-        // published image from an earlier epoch can never satisfy a v16 build.
+        // The same source files must not reuse an image from the previous epoch.
         assert_ne!(
-            hash, "aa185f95ab0bede21d2272f650c55fd0bcb99ddac4f571e8cd9fecdfe39c33cd",
-            "the v15 golden hash must not satisfy a v16 build"
-        );
-        assert_ne!(
-            hash, "8a354ed23a7f4618ffdaee4f5868a5d29fc08f82cf785d76a3b24e05a926f526",
-            "the v14 golden hash must not satisfy a v16 build"
-        );
-        assert_ne!(
-            hash, "e52ce43604b4c7074469382d39d777f718773fd519d4a0574fc43dde9980b50c",
-            "a v13 image must not satisfy a v16 build"
-        );
-        assert_ne!(
-            hash, "4872af896df70a8afc2811a50adb1a3b04320f23fd35f4e758f99bef21a60c13",
-            "the v13 golden hash must not satisfy a v16 build"
+            hash, "e1122e3777248dfb31d26d1910ca480834ad8404007d7752a9480e798514cb9c",
+            "the v16 kernel must not satisfy a v17 build"
         );
         assert_eq!(
             hash,
-            "e1122e3777248dfb31d26d1910ca480834ad8404007d7752a9480e798514cb9c"
+            "e80f6269f3767565df92c17a64f847705c7502b7514349ab13fcf28ac96df2c5"
         );
     }
 
