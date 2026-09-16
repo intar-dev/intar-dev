@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "51763a9d-87d4-45d1-9706-f1518f6ab62b",
-  "prevId": "bb5884d5-2e32-46a7-b200-6d05808d2c9e",
+  "id": "2485a08a-e61c-4a52-ae5c-6a8f953c1cff",
+  "prevId": "51763a9d-87d4-45d1-9706-f1518f6ab62b",
   "tables": {
     "access_allowlist": {
       "name": "access_allowlist",
@@ -974,13 +974,6 @@
           "autoincrement": false,
           "default": "'agent'"
         },
-        "provider": {
-          "name": "provider",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "scenario_enabled": {
           "name": "scenario_enabled",
           "type": "integer",
@@ -1587,90 +1580,6 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
-    },
-    "host_geo_locations": {
-      "name": "host_geo_locations",
-      "columns": {
-        "ip": {
-          "name": "ip",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "latitude": {
-          "name": "latitude",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "longitude": {
-          "name": "longitude",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "city": {
-          "name": "city",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "country": {
-          "name": "country",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "resolved_at": {
-          "name": "resolved_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
-        }
-      },
-      "indexes": {
-        "host_geo_locations_resolved_idx": {
-          "name": "host_geo_locations_resolved_idx",
-          "columns": [
-            "resolved_at"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "host_geo_locations_status_valid": {
-          "name": "host_geo_locations_status_valid",
-          "value": "\"status\" in ('resolved', 'unresolved')"
-        },
-        "host_geo_locations_shape_valid": {
-          "name": "host_geo_locations_shape_valid",
-          "value": "(\"status\" = 'resolved' and \"latitude\" is not null and \"longitude\" is not null) or (\"status\" = 'unresolved' and \"latitude\" is null and \"longitude\" is null)"
-        }
-      }
     },
     "host_resource_reservations": {
       "name": "host_resource_reservations",

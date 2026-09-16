@@ -52,7 +52,6 @@ export const ROUTE_CASES = [
     sessionRole: "owner",
   },
   { id: "profile", path: "/profile", sessionRole: "learner" },
-  { id: "fleet", path: "/fleet", sessionRole: "learner" },
   { id: "admin-overview", path: "/admin", sessionRole: "global-admin" },
   {
     id: "admin-hosts",

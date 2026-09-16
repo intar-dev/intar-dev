@@ -33,6 +33,7 @@ describe("generated migration apply", () => {
         "0015_parched_captain_marvel",
         "0016_salty_shiver_man",
         "0017_narrow_angel",
+        "0018_exotic_deathbird",
       ]);
     } finally {
       fixture.database.close(false);
@@ -75,33 +76,35 @@ describe("generated migration apply", () => {
       const plan = await planGeneratedMigrations(client);
       expect(plan.appliedMigrationCount).toBe(APPENDED_IDX);
       expect(plan.pending.map(({ tag }) => tag)).toEqual([
-        "0017_narrow_angel",
+        "0018_exotic_deathbird",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);
-      expect(evidence.appliedTags).toEqual(["0017_narrow_angel"]);
+      expect(evidence.appliedTags).toEqual(["0018_exotic_deathbird"]);
       expect(evidence.appliedMigrationCount).toBe(COMMITTED_COUNT);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(client.database.query("SELECT cpu_millis FROM host_cpu_reservations WHERE run_id = 'run-1'").get()).toEqual({ cpu_millis: 500 });
-      // The appended step adds a sponsor column and the address cache table
-      // without touching the populated rows.
+      // The appended step removes the retired sponsor column and the address
+      // cache table without touching the populated rows.
       expect(
         client.database
-          .query("SELECT provider FROM agent_hosts WHERE id = 'h1'")
+          .query(
+            "SELECT count(*) AS count FROM pragma_table_info('agent_hosts') WHERE name = 'provider'",
+          )
           .get(),
-      ).toEqual({ provider: null });
+      ).toEqual({ count: 0 });
       expect(
         client.database
           .query(
             "SELECT count(*) AS count FROM sqlite_schema WHERE name = 'host_geo_locations'",
           )
           .get(),
-      ).toEqual({ count: 1 });
+      ).toEqual({ count: 0 });
       expect(
         client.database
-          .query("SELECT count(*) AS count FROM host_geo_locations")
+          .query("SELECT name FROM agent_hosts WHERE id = 'h1'")
           .get(),
-      ).toEqual({ count: 0 });
+      ).toEqual({ name: "Host" });
       const columns = client.database.query("SELECT name FROM pragma_table_info('host_cpu_reservations')").all() as { name: string }[];
       expect(columns.map((column) => column.name)).not.toContain("boot_cpu_millis");
       expect(columns.map((column) => column.name)).not.toContain("steady_cpu_millis");

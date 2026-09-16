@@ -20,7 +20,6 @@ import {
   scenarioRuns,
   user,
 } from "@/db/schema";
-import type { HostProvider } from "@/db/schema/shared";
 import {
   buildStoredBridgeStatus,
   type AgentHostRow,
@@ -192,7 +191,6 @@ export async function loadAdminFleetSnapshot(params: {
       userId: agentHosts.userId,
       name: agentHosts.name,
       role: agentHosts.role,
-      provider: agentHosts.provider,
       disabled: agentHosts.disabled,
       scenarioEnabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,
@@ -564,7 +562,6 @@ function serializeFleetHost(
     userId: string;
     name: string;
     role: AgentHostRow["role"];
-    provider: HostProvider | null;
     disabled: boolean;
     scenarioEnabled: boolean;
     connected: boolean;
@@ -622,7 +619,6 @@ function serializeFleetHost(
     role: row.role,
     disabled: row.disabled,
     scenarioEnabled: row.scenarioEnabled,
-    provider: row.provider,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     status: buildStoredBridgeStatus(hostRow, numberOrZero(row.inventoryVmCount)),

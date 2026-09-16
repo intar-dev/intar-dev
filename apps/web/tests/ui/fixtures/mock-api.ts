@@ -17,8 +17,6 @@ export interface MockApiServer {
     body: Record<string, unknown>;
   }>;
   expectedNativeSshNoProfileConflicts: number;
-  /** 503s the fleet refresh test expects the browser to log, one per read. */
-  expectedFleetRefreshFailures: number;
   nativeSshResponseDelayMs: number;
   scenarioRunStatusRevision: number;
   handle(route: Route): Promise<void>;
@@ -243,101 +241,6 @@ function records(value: unknown): FixtureRecord[] {
       )
     : [];
 }
-
-/**
- * The signed-in fleet map. One small fleet carries every state the page must
- * show: a crowded place where two hosts sit on one coordinate, a host with no
- * sponsor, a host with no capacity report, an overdue report, and no report
- * yet. It carries no host name, no host id, and no address, like the endpoint.
- */
-const FLEET_MAP_SNAPSHOT = {
-  generatedAt: FIXED_NOW,
-  hosts: [
-    {
-      latitude: 39.0438,
-      longitude: -77.4874,
-      city: "Ashburn",
-      country: "United States",
-      state: "degraded",
-      cpuMillis: null,
-      memoryMib: null,
-      provider: "other",
-    },
-    {
-      latitude: 50.4752,
-      longitude: 12.3701,
-      city: "Falkenstein/Vogtl.",
-      country: "Germany",
-      state: "degraded",
-      cpuMillis: 32_000,
-      memoryMib: 131_072,
-      provider: "namespace",
-    },
-    {
-      latitude: 50.1109,
-      longitude: 8.6821,
-      city: "Frankfurt am Main",
-      country: "Germany",
-      state: "healthy",
-      cpuMillis: 16_000,
-      memoryMib: 65_536,
-      provider: "hetzner",
-    },
-    {
-      latitude: 50.1109,
-      longitude: 8.6821,
-      city: "Frankfurt am Main",
-      country: "Germany",
-      state: "healthy",
-      cpuMillis: 16_000,
-      memoryMib: 65_536,
-      provider: "namespace",
-    },
-    {
-      latitude: 45.5229,
-      longitude: -122.9898,
-      city: "Hillsboro",
-      country: "United States",
-      state: "healthy",
-      cpuMillis: 8_000,
-      memoryMib: 32_768,
-      provider: null,
-    },
-    {
-      latitude: 49.4521,
-      longitude: 11.0767,
-      city: "Nuremberg",
-      country: "Germany",
-      state: "healthy",
-      cpuMillis: 64_000,
-      memoryMib: 262_144,
-      provider: "hetzner",
-    },
-    {
-      latitude: 1.3521,
-      longitude: 103.8198,
-      city: "Singapore",
-      country: "Singapore",
-      state: "unknown",
-      cpuMillis: 4_000,
-      memoryMib: 16_384,
-      provider: "hetzner",
-    },
-    {
-      latitude: -33.8688,
-      longitude: 151.2093,
-      city: "Sydney",
-      country: "Australia",
-      state: "healthy",
-      cpuMillis: 48_000,
-      memoryMib: 196_608,
-      provider: "namespace",
-    },
-  ],
-  unlocatedHostCount: 1,
-  pendingHostCount: 0,
-  truncatedHostCount: 1,
-};
 
 /**
  * Match the bounded fleet DTO. The fixture keeps the legacy rich archive
@@ -590,7 +493,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     requests: [],
     nativeSshRequests: [],
     expectedNativeSshNoProfileConflicts: 0,
-    expectedFleetRefreshFailures: 0,
     nativeSshResponseDelayMs: 0,
     scenarioRunStatusRevision: 0,
     setRunState(runState) {
@@ -1310,10 +1212,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, {
           hosts: server.state.hosts.filter((host) => host.disabled !== true),
         });
-        return;
-      }
-      if (pathname === "/api/fleet/map" && method === "GET") {
-        await json(route, FLEET_MAP_SNAPSHOT);
         return;
       }
       if (pathname === "/api/admin/runs" && method === "GET") {

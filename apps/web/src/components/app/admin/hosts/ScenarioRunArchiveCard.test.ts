@@ -223,7 +223,6 @@ function host(): AgentHostApi {
     id: "host-1",
     name: "Agent 1",
     role: "agent",
-    provider: null,
     disabled: false,
     scenarioEnabled: true,
     createdAt: 0,

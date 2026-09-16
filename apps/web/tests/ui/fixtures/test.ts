@@ -50,13 +50,6 @@ function actionableConsoleError(
     return false;
   }
   if (
-    text === EXPECTED_MOCK_503_CONSOLE_ERROR &&
-    server.expectedFleetRefreshFailures > 0
-  ) {
-    server.expectedFleetRefreshFailures -= 1;
-    return false;
-  }
-  if (
     text === EXPECTED_MOCK_409_CONSOLE_ERROR &&
     server.expectedNativeSshNoProfileConflicts > 0
   ) {
@@ -120,7 +113,6 @@ export const test = base.extend<UiFixtures>({
         server.requests.length = 0;
         server.nativeSshRequests.length = 0;
         server.expectedNativeSshNoProfileConflicts = 0;
-        server.expectedFleetRefreshFailures = 0;
         server.nativeSshResponseDelayMs = 0;
         server.unhandled.length = 0;
       },

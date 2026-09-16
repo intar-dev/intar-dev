@@ -127,6 +127,13 @@
       "when": 1789491573090,
       "tag": "0017_narrow_angel",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1789554953102,
+      "tag": "0018_exotic_deathbird",
+      "breakpoints": true
     }
   ]
 }

@@ -19,7 +19,6 @@ function makeHost() {
     id: "host-eu-1",
     name: "agent-eu-1",
     role: "agent",
-    provider: "hetzner",
     disabled: false,
     scenarioEnabled: true,
     createdAt: FIXED_NOW - 90 * day,

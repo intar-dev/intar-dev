@@ -2,7 +2,6 @@ import type { LucideIcon } from "lucide-react";
 import {
   BookOpen,
   Hammer,
-  Globe,
   LayoutDashboard,
   Library,
   ListChecks,
@@ -66,20 +65,6 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Users,
         requires: "signedIn",
         matchPrefix: "/organizations",
-      },
-    ],
-  },
-  {
-    id: "platform",
-    label: "Platform",
-    requires: "signedIn",
-    items: [
-      {
-        id: "fleet",
-        label: "Fleet",
-        to: "/fleet",
-        icon: Globe,
-        requires: "signedIn",
       },
     ],
   },
