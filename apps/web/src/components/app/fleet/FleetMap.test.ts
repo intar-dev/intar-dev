@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { FleetMap, FleetMapCard } from "./FleetMap";
+import { FleetMap } from "./FleetMap";
 import type { FleetMapHost } from "./types";
 
 // A host that carries the identity values the map must never publish.
@@ -21,12 +21,14 @@ function host(overrides: Partial<FleetMapHost> = {}): FleetMapHost {
 
 function renderMap({
   hosts = [host()],
+  selectedIndex = null,
   unlocatedHostCount = 0,
   pendingHostCount = 0,
   pendingStalled = false,
   truncatedHostCount = 0,
 }: {
   hosts?: FleetMapHost[];
+  selectedIndex?: number | null;
   unlocatedHostCount?: number;
   pendingHostCount?: number;
   pendingStalled?: boolean;
@@ -35,6 +37,8 @@ function renderMap({
   return renderToStaticMarkup(
     createElement(FleetMap, {
       hosts,
+      selectedIndex,
+      onSelect: () => {},
       unlocatedHostCount,
       pendingHostCount,
       pendingStalled,
@@ -48,7 +52,7 @@ describe("fleet map markup", () => {
     const markup = renderMap();
 
     expect(markup).toContain("Nuremberg, Germany");
-    expect(markup).toContain("Healthy");
+    expect(markup).toContain("Report on time");
     expect(markup).toContain("CPU 64 vCPU");
     expect(markup).toContain("memory 256 GiB");
     expect(markup).toContain("sponsored by Hetzner");
@@ -56,56 +60,41 @@ describe("fleet map markup", () => {
     expect(markup).not.toMatch(/\d+\.\d+\.\d+\.\d+/u);
   });
 
-  it("draws the sponsor mark on the card", () => {
-    const markup = renderToStaticMarkup(
-      createElement(FleetMapCard, { host: host(), placement: "below" }),
-    );
+  it("marks only the selected pin as current", () => {
+    const markup = renderMap({
+      hosts: [host(), host({ city: "Falkenstein/Vogtl." })],
+      selectedIndex: 1,
+    });
 
-    expect(markup).toContain("Infrastructure by");
-    expect(markup).toContain("alt=\"Hetzner\"");
-    expect(markup).toContain("64 vCPU");
-    expect(markup).toContain("256 GiB");
-    expect(markup).toContain("Nuremberg, Germany");
+    expect(markup.match(/aria-current="true"/gu)).toHaveLength(1);
   });
 
-  it("omits the sponsor line when nobody set a sponsor", () => {
-    const markup = renderToStaticMarkup(
-      createElement(FleetMapCard, {
-        host: host({ provider: null }),
-        placement: "above",
-      }),
-    );
-
-    expect(markup).not.toContain("Infrastructure by");
-  });
-
-  it("hides the sponsor line for a provider without a mark", () => {
-    const markup = renderToStaticMarkup(
-      createElement(FleetMapCard, {
-        host: host({ provider: "other" }),
-        placement: "below",
-      }),
-    );
-
-    expect(markup).not.toContain("Infrastructure by");
-  });
-
-  it("states each value when a host reports no capacity", () => {
-    const markup = renderToStaticMarkup(
-      createElement(FleetMapCard, {
-        host: host({ cpuMillis: null, memoryMib: null, provider: null }),
-        placement: "below",
-      }),
-    );
-
-    expect(markup).toContain("Not reported");
-  });
-
-  it("names both pin colors in the legend", () => {
+  it("keeps normal operation quiet", () => {
     const markup = renderMap();
 
-    expect(markup).toContain("Healthy");
-    expect(markup).toContain("Report out of date");
+    expect(markup).not.toContain("animate-ping");
+    expect(markup).not.toContain("animate-pulse");
+  });
+
+  it("keeps the hover preview out of the pointer's way", () => {
+    const markup = renderMap({
+      hosts: [host({ city: "Frankfurt am Main" }), host({ city: "Frankfurt am Main" })],
+    });
+
+    // The preview shows one place name on hover. It must never take a click
+    // from the pin under it, and it must stay inside the map box.
+    expect(markup.match(/pointer-events-none[^"]*max-w-44/gu)).toHaveLength(2);
+  });
+
+  it("describes the states as report recency, not as workload health", () => {
+    const markup = renderMap();
+
+    expect(markup).toContain("Report on time");
+    expect(markup).toContain("Report overdue");
+    expect(markup).toContain("No report yet");
+    expect(markup).toContain("A report arrived in the last minute.");
+    expect(markup).toContain("The newest report is older than one minute.");
+    expect(markup).toContain("This host has not reported yet.");
   });
 
   it("counts the hosts without a location", () => {

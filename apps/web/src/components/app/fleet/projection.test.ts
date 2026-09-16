@@ -3,6 +3,7 @@ import {
   layoutMapPins,
   MAP_PIN_COARSE_PX,
   MAP_PIN_PX,
+  MAP_PIN_TARGET_PX,
   projectToMapPoint,
   WORLD_MAP_HEIGHT,
   WORLD_MAP_WIDTH,
@@ -90,6 +91,31 @@ describe("fleet map projection", () => {
     }
   });
 
+  it("keeps no pin button over another pin button, at every width", () => {
+    // The WCAG 2.2 target-size rule fails a target whose button is partly
+    // covered, and two buttons overlap unless they differ by one target side
+    // on an axis. A ring neighbour sits diagonally, so this is the check that
+    // caught the old 26px chord.
+    for (const widthPx of WIDTHS) {
+      const pins = layoutMapPins(Array.from({ length: 4 }, () => NUREMBERG), {
+        widthPx,
+      });
+      const pixels = pins.map((pin) => toPixel(pin, widthPx));
+      for (let left = 0; left < pixels.length; left += 1) {
+        for (let right = left + 1; right < pixels.length; right += 1) {
+          const a = pixels[left]!;
+          const b = pixels[right]!;
+          expect(
+            Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y)),
+          ).toBeGreaterThanOrEqual(MAP_PIN_TARGET_PX - SEPARATION_TOLERANCE_PX);
+        }
+      }
+      expect(MAP_PIN_PX).toBeGreaterThanOrEqual(
+        Math.ceil(MAP_PIN_TARGET_PX * Math.SQRT2),
+      );
+    }
+  });
+
   it("separates two hosts in nearby places at every width", () => {
     for (const widthPx of WIDTHS) {
       const pins = layoutMapPins([NUREMBERG, FALKENSTEIN], { widthPx });
@@ -126,6 +152,22 @@ describe("fleet map projection", () => {
   });
 
   it("keeps a crowd whose ring cannot fit in its true place", () => {
+    // Thirteen 24px targets need a 137px diagonal ring; the phone map is
+    // only 133px tall. The retry at a 24px chord fits, so every pin keeps a
+    // distinct place and a clickable center.
+    const hosts = Array.from({ length: 13 }, () => NUREMBERG);
+    const pins = layoutMapPins(hosts, { widthPx: 320 });
+    expectInsideBox(pins);
+    const places = new Set(
+      pins.map((pin) => pin.leftPercent + ":" + pin.topPercent),
+    );
+    expect(places.size).toBe(13);
+    expect(closestPair(pins, 320)).toBeGreaterThanOrEqual(
+      MAP_PIN_TARGET_PX - SEPARATION_TOLERANCE_PX,
+    );
+  });
+
+  it("keeps a coarse crowd whose ring cannot fit in its true place", () => {
     // Ten 44px targets need a 142px ring. The box is only 133px tall, so a
     // ring would leave the map. The pins stay where they are, and the host
     // list beside the map carries the facts.

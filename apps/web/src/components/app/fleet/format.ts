@@ -3,11 +3,30 @@
 
 import type { HostHealth } from "@/lib/host-health";
 
+/**
+ * The state words name the report, not the workload. A host holds the healthy
+ * state because its report arrived on time, which is not proof that every
+ * workload inside that host is running.
+ */
 export const HOST_STATE_LABELS: Record<HostHealth, string> = {
-  healthy: "Healthy",
-  degraded: "Report out of date",
-  unknown: "No report",
+  healthy: "Report on time",
+  degraded: "Report overdue",
+  unknown: "No report yet",
 };
+
+/** Why a host holds its state. The map legend prints these after the words. */
+export const HOST_STATE_DETAILS: Record<HostHealth, string> = {
+  healthy: "A report arrived in the last minute.",
+  degraded: "The newest report is older than one minute.",
+  unknown: "This host has not reported yet.",
+};
+
+/** The states in reading order: newest report first, no report last. */
+export const HOST_STATES: readonly HostHealth[] = [
+  "healthy",
+  "degraded",
+  "unknown",
+];
 
 export function formatHostState(state: HostHealth): string {
   return HOST_STATE_LABELS[state];
@@ -23,6 +42,17 @@ export function formatLocation(
   return parts.length ? parts.join(", ") : "Unknown location";
 }
 
+/** The short place name for a map label: the city when the host reports one. */
+export function formatPlaceLabel(
+  city: string | null,
+  country: string | null,
+): string {
+  const cityText = city?.trim();
+  if (cityText) return cityText;
+  const countryText = country?.trim();
+  return countryText || "Unknown location";
+}
+
 export function formatCpuMillis(cpuMillis: number | null): string {
   if (cpuMillis === null) return "Not reported";
   return `${formatNumber(cpuMillis / 1000)} vCPU`;
@@ -33,12 +63,33 @@ export function formatMemoryMib(memoryMib: number | null): string {
   return `${formatNumber(memoryMib / 1024)} GiB`;
 }
 
-export function formatHostNameCount(count: number): string {
-  return count === 1 ? "1 agent host" : `${count} agent hosts`;
+/** Mapped hosts are the placed hosts, which may be fewer than all hosts. */
+export function formatMappedHostCount(count: number): string {
+  return count === 1 ? "1 mapped host" : `${count} mapped hosts`;
 }
 
-export function formatPlaceCount(count: number): string {
-  return count === 1 ? "1 place" : `${count} places`;
+export function formatLocationCount(count: number): string {
+  return count === 1 ? "1 location" : `${count} locations`;
+}
+
+/** The summary words for one host and for several, so no count reads "times". */
+const STATE_COUNT_WORDS: Record<HostHealth, readonly [string, string]> = {
+  healthy: ["report on time", "reports on time"],
+  degraded: ["report overdue", "reports overdue"],
+  unknown: ["host with no report", "hosts with no report"],
+};
+
+export function formatStateCount(state: HostHealth, count: number): string {
+  const [one, many] = STATE_COUNT_WORDS[state];
+  return count === 1 ? `1 ${one}` : `${count} ${many}`;
+}
+
+/** The clock time of the snapshot, so the reader judges its age. */
+export function formatCheckedAt(generatedAt: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(generatedAt));
 }
 
 export function formatUnlocatedNote(count: number): string {

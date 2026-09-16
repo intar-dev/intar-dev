@@ -8,8 +8,27 @@ export const WORLD_MAP_HEIGHT = 150;
 /**
  * A pin target is 24px on a fine pointer. The global coarse-pointer rule grows
  * every button to 44px, so a touch device needs the larger separation.
+ *
+ * Two 24px buttons overlap unless they differ by a whole target side on one
+ * axis, and two ring neighbours sit diagonally to each other. The chord of a
+ * ring therefore has to cover the diagonal of a target, not its side, or a
+ * corner of each button covers a corner of its neighbour and the covered
+ * target fails the WCAG 2.2 target-size rule.
+ *
+ * The coarse value stays at one target side. A chord of 63px would push a
+ * six-host ring past the height of a phone map, and a ring that cannot fit
+ * leaves every host of that crowd in one place, which is worse than a covered
+ * corner.
+ *
+ * The same tradeoff guards the fine pointer: a crowd whose diagonal ring
+ * cannot fit retries with a chord of one target side before it gives up. At
+ * that chord every 24px button keeps a free center, and only corners touch.
+ * The coarse pointer keeps the collapse: a 24px chord would put a 44px
+ * button's center under its neighbour, which is worse than one crowded
+ * place the host list already explains.
  */
-export const MAP_PIN_PX = 26;
+export const MAP_PIN_TARGET_PX = 24;
+export const MAP_PIN_PX = Math.ceil(MAP_PIN_TARGET_PX * Math.SQRT2);
 export const MAP_PIN_COARSE_PX = 44;
 
 export interface MapPoint {
@@ -131,7 +150,8 @@ function starGroups(pixels: readonly MapPoint[], pinPx: number): number[][] {
 /**
  * The ring for one group, or null when the group must stay where it is: a ring
  * wider than the map, or one that would land on a settled pin, is worse than a
- * crowded place.
+ * crowded place. A fine-pointer crowd whose diagonal ring cannot fit retries
+ * with a chord of one target side, so every pin keeps a clickable center.
  */
 function ringForGroup(
   group: readonly number[],
@@ -141,12 +161,26 @@ function ringForGroup(
   heightPx: number,
   settled: readonly MapPoint[],
 ): MapPoint[] | null {
+  const ring = ringAtChord(group, pixels, pinPx, widthPx, heightPx, settled);
+  if (ring || pinPx !== MAP_PIN_PX) return ring;
+  return ringAtChord(group, pixels, MAP_PIN_TARGET_PX, widthPx, heightPx, settled);
+}
+
+/** One ring attempt at a fixed neighbour chord, or null when it cannot fit. */
+function ringAtChord(
+  group: readonly number[],
+  pixels: readonly MapPoint[],
+  chordPx: number,
+  widthPx: number,
+  heightPx: number,
+  settled: readonly MapPoint[],
+): MapPoint[] | null {
   const members = group.map((index) => pixels[index]!);
   const center = {
     x: members.reduce((sum, point) => sum + point.x, 0) / members.length,
     y: members.reduce((sum, point) => sum + point.y, 0) / members.length,
   };
-  const radiusPx = pinPx / (2 * Math.sin(Math.PI / group.length));
+  const radiusPx = chordPx / (2 * Math.sin(Math.PI / group.length));
   // A ring wider than the map cannot fit, however it moves.
   if (2 * radiusPx > widthPx || 2 * radiusPx > heightPx) {
     return null;
@@ -169,7 +203,7 @@ function ringForGroup(
     };
   });
   const collides = ring.some((point) =>
-    settled.some((other) => distance(point, other) < pinPx),
+    settled.some((other) => distance(point, other) < chordPx),
   );
   return collides ? null : ring;
 }

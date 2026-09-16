@@ -1,71 +1,73 @@
 // The fleet map: one SVG world background and one HTML button for each placed
-// agent host. Pins are buttons so a keyboard user reaches every host, and the
-// card is decoration: its facts also live in the button label.
+// agent host. Pins are buttons so a keyboard user reaches every host, and every
+// fact on a pin also lives in the host list, so the map never hides a host.
 
-import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { HostHealth } from "@/lib/host-health";
 import {
+  HOST_STATE_DETAILS,
+  HOST_STATES,
   formatCpuMillis,
   formatHostState,
   formatLocation,
   formatMemoryMib,
   formatPendingNote,
+  formatPlaceLabel,
   formatStalledNote,
   formatTruncatedNote,
   formatUnlocatedNote,
 } from "./format";
-import { layoutMapPins } from "./projection";
 import { providerMark } from "./providers";
+import { layoutMapPins } from "./projection";
 import type { FleetMapHost } from "./types";
-import { WORLD_MAP_LAND_PATH, WORLD_MAP_VIEWBOX } from "./world-map-path";
 import { useMapMetrics } from "./useMapMetrics";
+import { WORLD_MAP_LAND_PATH, WORLD_MAP_VIEWBOX } from "./world-map-path";
 
-/** Half of the card width (`w-60`), used to keep the card inside the box. */
-const CARD_HALF_WIDTH_REM = 7.5;
-
+/**
+ * A quiet map: normal operation stays neutral, and the rust action color is
+ * reserved for the selected host, so selection is never confused with state.
+ */
 const PIN_STATE_CLASS_NAME: Record<HostHealth, string> = {
-  healthy: "bg-primary",
+  healthy: "bg-success",
   degraded: "bg-warning",
   unknown: "bg-muted-foreground",
 };
 
-const LEGEND: ReadonlyArray<{ state: HostHealth; detail: string }> = [
-  { state: "healthy", detail: "A report arrived in the last minute" },
-  { state: "degraded", detail: "The newest report is older than one minute" },
-];
+/** Matches the hover preview's `max-w-44`, so the edge math and the style agree. */
+const LABEL_MAX_WIDTH_PX = 176;
 
 export function FleetMap({
   hosts,
+  selectedIndex,
+  onSelect,
   unlocatedHostCount,
   pendingHostCount,
   pendingStalled,
   truncatedHostCount,
 }: {
   hosts: readonly FleetMapHost[];
+  /** Snapshot index of the selected host, or null. */
+  selectedIndex: number | null;
+  /**
+   * Selects a host, or clears the selection with null. The origin is the
+   * control the reader selected from, so a clear can return focus to it.
+   */
+  onSelect: (index: number | null, origin?: HTMLElement | null) => void;
   unlocatedHostCount: number;
   pendingHostCount: number;
   pendingStalled: boolean;
   truncatedHostCount: number;
 }) {
-  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [mapRef, metrics] = useMapMetrics();
-  // A follow-up load can insert a host that sorts before the open pin, and
-  // the selection is an index. Close the card instead of showing another
-  // host's facts under the reader's cursor.
-  useEffect(() => setActiveIndex(null), [hosts]);
   const pins = layoutMapPins(hosts, metrics);
-  const active = activeIndex === null ? null : (hosts[activeIndex] ?? null);
-  const activePin = activeIndex === null ? null : (pins[activeIndex] ?? null);
 
   return (
-    <figure className="space-y-3">
+    <figure className="min-w-0 space-y-3">
       <div
         ref={mapRef}
         className="relative w-full rounded-xl border bg-card"
         style={{ aspectRatio: "360 / 150" }}
-        onClick={() => setActiveIndex(null)}
-        onMouseLeave={() => setActiveIndex(null)}
+        onClick={() => onSelect(null)}
       >
         <div className="absolute inset-0 overflow-hidden rounded-[inherit]">
           <svg
@@ -82,11 +84,22 @@ export function FleetMap({
           </svg>
         </div>
 
-        {/* The fleet arrives once per page load, so the list index names
-            the pin and the card that belongs to it. */}
+        {/* The fleet arrives once per page load, so the list index names the
+            pin and the details that belong to it. */}
         {hosts.map((host, index) => {
           const pin = pins[index];
           if (!pin) return null;
+          const selected = index === selectedIndex;
+          // A label above a pin in the top band would leave the map box.
+          const labelBelow = pin.topPercent < 20;
+          // A centered preview would leave the map box at either edge, so
+          // near an edge it aligns to its pin instead of centering.
+          const leftPx = (pin.leftPercent / 100) * metrics.widthPx;
+          const labelAtStart =
+            metrics.widthPx > 0 && leftPx < LABEL_MAX_WIDTH_PX / 2;
+          const labelAtEnd =
+            metrics.widthPx > 0 &&
+            metrics.widthPx - leftPx < LABEL_MAX_WIDTH_PX / 2;
           return (
             <div
               key={`${host.latitude}:${host.longitude}:${index}`}
@@ -96,42 +109,51 @@ export function FleetMap({
                 top: `${pin.topPercent}%`,
               }}
             >
-              {host.state === "healthy" ? (
+              {selected ? (
                 <span
                   aria-hidden="true"
-                  className="pointer-events-none absolute size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary/40 motion-safe:animate-ping"
+                  className="pointer-events-none absolute size-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary"
                 />
               ) : null}
               <button
                 type="button"
                 aria-label={pinLabel(host)}
-                className={cn(
-                  // The hit area is 24px while the pin stays small, so a
-                  // finger reaches it without a heavy mark on the map.
-                  "group absolute size-6 -translate-x-1/2 -translate-y-1/2 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-                )}
+                aria-current={selected ? "true" : undefined}
+                // The page returns focus to this pin when the control that
+                // made the selection has left the page, as a filter can do.
+                data-fleet-pin-index={index}
+                className="group absolute size-6 -translate-x-1/2 -translate-y-1/2 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
                 onClick={(event) => {
+                  // The map box itself clears the selection.
                   event.stopPropagation();
-                  // Activation only opens the card. A tap also focuses the
-                  // button first, so a toggle here would close it again and
-                  // leave a touch user with nothing.
-                  setActiveIndex(index);
+                  onSelect(index, event.currentTarget);
                 }}
-                onMouseEnter={() => setActiveIndex(index)}
-                onFocus={() => setActiveIndex(index)}
-                onBlur={() =>
-                  setActiveIndex((current) =>
-                    current === index ? null : current,
-                  )
-                }
                 onKeyDown={(event) => {
-                  if (event.key === "Escape") setActiveIndex(null);
+                  if (event.key === "Escape") onSelect(null);
                 }}
               >
+                {/* A pointer preview only: the place name, not the whole card.
+                    The card belongs to the selection, which persists. */}
                 <span
                   aria-hidden="true"
                   className={cn(
-                    "absolute inset-0 m-auto size-3.5 rounded-full border-2 border-background transition-transform group-hover:scale-125 group-focus-visible:scale-125",
+                    // The preview is pointer-transparent: it must never take
+                    // a click that belongs to the pin it happens to cover.
+                    "pointer-events-none absolute hidden max-w-44 truncate rounded-md border bg-popover px-1.5 py-0.5 text-caption font-semibold text-popover-foreground shadow-xs group-hover:block",
+                    labelBelow ? "top-full mt-1" : "bottom-full mb-1",
+                    labelAtStart
+                      ? "left-0"
+                      : labelAtEnd
+                        ? "right-0"
+                        : "left-1/2 -translate-x-1/2",
+                  )}
+                >
+                  {formatPlaceLabel(host.city, host.country)}
+                </span>
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "absolute inset-0 m-auto size-3.5 rounded-full border-2 border-background transition-transform group-hover:scale-125",
                     PIN_STATE_CLASS_NAME[host.state],
                   )}
                 />
@@ -139,111 +161,51 @@ export function FleetMap({
             </div>
           );
         })}
-
-        {active && activePin ? (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute z-10"
-            style={{
-              left: `clamp(${CARD_HALF_WIDTH_REM}rem, ${activePin.leftPercent}%, calc(100% - ${CARD_HALF_WIDTH_REM}rem))`,
-              top: `${activePin.topPercent}%`,
-            }}
-          >
-            <FleetMapCard
-              host={active}
-              placement={activePin.topPercent > 60 ? "above" : "below"}
-            />
-          </div>
-        ) : null}
       </div>
 
-      <figcaption className="flex flex-wrap items-center gap-x-5 gap-y-2">
-        {LEGEND.map((item) => (
-          <span
-            key={item.state}
-            className="flex items-center gap-2 text-caption"
-          >
-            <span
-              aria-hidden="true"
-              className={cn(
-                "size-2.5 rounded-full border border-background",
-                PIN_STATE_CLASS_NAME[item.state],
-              )}
-            />
-            <span className="font-semibold text-foreground">
-              {formatHostState(item.state)}
-            </span>
-            {item.detail}
-          </span>
-        ))}
-        {unlocatedHostCount > 0 ? (
-          <span className="text-caption">
-            {formatUnlocatedNote(unlocatedHostCount)}
-          </span>
-        ) : null}
-        {pendingHostCount > 0 ? (
-          <span className="text-caption">
-            {pendingStalled
-              ? formatStalledNote(pendingHostCount)
-              : formatPendingNote(pendingHostCount)}
-          </span>
-        ) : null}
-        {truncatedHostCount > 0 ? (
-          <span className="text-caption">
-            {formatTruncatedNote(truncatedHostCount)}
-          </span>
+      <figcaption className="space-y-2">
+        <ul className="flex flex-wrap items-center gap-x-5 gap-y-2">
+          {HOST_STATES.map((state) => (
+            <li key={state} className="flex items-center gap-2 text-caption">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "size-2.5 shrink-0 rounded-full border border-background",
+                  PIN_STATE_CLASS_NAME[state],
+                )}
+              />
+              <span className="font-semibold text-foreground">
+                {formatHostState(state)}
+              </span>
+              {HOST_STATE_DETAILS[state]}
+            </li>
+          ))}
+        </ul>
+        {unlocatedHostCount > 0 ||
+        pendingHostCount > 0 ||
+        truncatedHostCount > 0 ? (
+          <ul className="flex flex-wrap items-center gap-x-5 gap-y-1">
+            {unlocatedHostCount > 0 ? (
+              <li className="text-caption">
+                {formatUnlocatedNote(unlocatedHostCount)}
+              </li>
+            ) : null}
+            {pendingHostCount > 0 ? (
+              <li className="text-caption">
+                {pendingStalled
+                  ? formatStalledNote(pendingHostCount)
+                  : formatPendingNote(pendingHostCount)}
+              </li>
+            ) : null}
+            {truncatedHostCount > 0 ? (
+              <li className="text-caption">
+                {formatTruncatedNote(truncatedHostCount)}
+              </li>
+            ) : null}
+          </ul>
         ) : null}
       </figcaption>
     </figure>
-  );
-}
-
-export function FleetMapCard({
-  host,
-  placement,
-}: {
-  host: FleetMapHost;
-  placement: "above" | "below";
-}) {
-  const mark = providerMark(host.provider);
-  return (
-    <div
-      className={cn(
-        "w-60 -translate-x-1/2",
-        placement === "above" ? "-translate-y-full pb-2" : "pt-2",
-      )}
-    >
-      <div className="space-y-2 rounded-lg border bg-popover p-3 shadow-lg shadow-black/10">
-        <div className="space-y-0.5">
-          <p className="text-card-title">
-            {formatLocation(host.city, host.country)}
-          </p>
-          <p className="text-caption">{formatHostState(host.state)}</p>
-        </div>
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-support">
-          <dt className="text-caption">CPU</dt>
-          <dd className="text-right tabular-nums">
-            {formatCpuMillis(host.cpuMillis)}
-          </dd>
-          <dt className="text-caption">Memory</dt>
-          <dd className="text-right tabular-nums">
-            {formatMemoryMib(host.memoryMib)}
-          </dd>
-        </dl>
-        {mark ? (
-          <div className="flex items-center gap-2 border-t pt-2">
-            <span className="text-caption">Infrastructure by</span>
-            <img
-              src={mark.src}
-              width={mark.width}
-              height={mark.height}
-              alt={mark.label}
-              className={mark.className}
-            />
-          </div>
-        ) : null}
-      </div>
-    </div>
   );
 }
 

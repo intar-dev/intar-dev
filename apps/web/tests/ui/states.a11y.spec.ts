@@ -125,6 +125,7 @@ async function expectStandardRunChrome(
   options: {
     status?: string;
     hasDeleteAction?: boolean;
+    hasPageMenu?: boolean;
     hasBack?: boolean;
   } = {},
 ) {
@@ -176,7 +177,12 @@ async function expectStandardRunChrome(
     }
   } else {
     await expect(allDeleteRunActions).toHaveCount(0);
-    await expect(pageActions).toHaveCount(0);
+    // A settled failed run keeps "End run…" in the mobile menu while its
+    // infrastructure teardown is still pending (#161), so the menu can exist
+    // with no delete action anywhere.
+    await expect(pageActions).toHaveCount(
+      options.hasPageMenu && viewport && viewport.width < 640 ? 1 : 0,
+    );
   }
 }
 
@@ -1470,6 +1476,7 @@ test.describe("focused mobile state accessibility", () => {
     await expectStandardRunChrome(page, "Repair a broken nginx service", {
       status: "Failed",
       hasDeleteAction: false,
+      hasPageMenu: true,
     });
     const progress = page.getByRole("progressbar", {
       name: "Final checks progress",

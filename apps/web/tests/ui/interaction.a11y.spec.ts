@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
-import { makeMultiReplayRun } from "./fixtures/data";
+import { FIXED_NOW, makeMultiReplayRun } from "./fixtures/data";
 import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
@@ -1317,4 +1317,295 @@ test("Recursive Mono keeps terminal cell geometry stable", async ({
   expect(
     REPLAY_TERMINAL_ROWS * terminalFontSize * REPLAY_TERMINAL_LINE_HEIGHT,
   ).toBe(567);
+});
+
+test.describe("fleet map and host list", () => {
+  test("labels the summary with the counts the endpoint reports", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+
+    // Mapped hosts are the placed hosts, and each state word names the report.
+    for (const fact of [
+      "8 mapped hosts",
+      "7 locations",
+      "5 reports on time",
+      "2 reports overdue",
+      "1 host with no report",
+    ]) {
+      await expect(page.getByText(fact, { exact: true })).toBeVisible();
+    }
+    await expect(
+      page.getByText("report on times", { exact: true }),
+    ).toHaveCount(0);
+
+    // The endpoint omits the hosts it cannot place, so the page says so.
+    await expect(
+      page.getByText("1 agent host has no location yet."),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "1 agent host is beyond the map read limit and is not shown.",
+      ),
+    ).toBeVisible();
+  });
+
+  test("a pin and its list row share one selection", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+
+    const prompt = page.getByText(
+      "Choose a pin on the map, or a row in the list, to read that host here.",
+    );
+    await expect(prompt).toBeVisible();
+    await expect(page.locator('button[aria-current="true"]')).toHaveCount(0);
+
+    // The pin label carries the state word and the capacity, so this reaches
+    // the pin and not the list row that opens with the same place name.
+    await page
+      .getByRole("button", { name: /^Nuremberg, Germany\./u })
+      .click();
+
+    await expect(page.locator('button[aria-current="true"]')).toHaveCount(2);
+    await expect(prompt).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Clear selected host" }),
+    ).toBeVisible();
+
+    // Escape clears the selection, and the panel says what to do next.
+    await page.keyboard.press("Escape");
+    await expect(page.locator('button[aria-current="true"]')).toHaveCount(0);
+    await expect(prompt).toBeVisible();
+  });
+
+  test("a list row selects the host that its pin shows", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+
+    await page
+      .getByRole("button", { name: /^Sydney, Australia Report on time/u })
+      .click();
+
+    const details = page.locator("section", {
+      has: page.getByRole("heading", { name: "Selected host" }),
+    });
+    await expect(
+      page.getByRole("button", { name: "Clear selected host" }),
+    ).toBeVisible();
+    await expect(details.getByText("48 vCPU")).toBeVisible();
+    await expect(page.locator('button[aria-current="true"]')).toHaveCount(2);
+
+    // Escape clears a list selection too, with focus on the row.
+    await page.keyboard.press("Escape");
+    await expect(page.locator('button[aria-current="true"]')).toHaveCount(0);
+  });
+
+  test("a hover preview never takes a click from another pin", async ({
+    page,
+    ui,
+  }) => {
+    // Two hosts sit on one coordinate, so the ring puts one pin directly
+    // above the other and the lower pin's preview covers the upper pin.
+    // This route must register before open, so the load reads it first.
+    await page.route("**/api/fleet/map", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          generatedAt: FIXED_NOW,
+          hosts: [
+            {
+              latitude: 50.1109,
+              longitude: 8.6821,
+              city: "Frankfurt am Main",
+              country: "Germany",
+              state: "healthy",
+              cpuMillis: 16_000,
+              memoryMib: 65_536,
+              provider: "hetzner",
+            },
+            {
+              latitude: 50.1109,
+              longitude: 8.6821,
+              city: "Frankfurt am Main",
+              country: "Germany",
+              state: "healthy",
+              cpuMillis: 16_000,
+              memoryMib: 65_536,
+              provider: "namespace",
+            },
+          ],
+          unlocatedHostCount: 0,
+          pendingHostCount: 0,
+          truncatedHostCount: 0,
+        }),
+      }),
+    );
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+    await expect(page.getByText("2 mapped hosts", { exact: true })).toBeVisible();
+
+    const pins = page.locator("figure button");
+    await expect(pins).toHaveCount(2);
+
+    // Hover the lower pin so its preview renders over the upper pin, then
+    // send a raw mouse click to the upper pin's center. A raw click has no
+    // actionability retry: if the preview ate pointer events, it would take
+    // this click for the lower pin.
+    await pins.nth(1).hover();
+    const box = await pins.nth(0).boundingBox();
+    if (!box) throw new Error("The covered pin has no box");
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+
+    await expect(pins.nth(0)).toHaveAttribute("aria-current", "true");
+    await expect(pins.nth(1)).not.toHaveAttribute("aria-current", "true");
+  });
+
+  test("clearing the selection returns focus to the control that opened it", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+
+    const sydneyRow = page.getByRole("button", {
+      name: /^Sydney, Australia Report on time/u,
+    });
+    await sydneyRow.click();
+    const clear = page.getByRole("button", { name: "Clear selected host" });
+    await clear.click();
+
+    // The clear button leaves the page with the panel action, so focus must
+    // not fall to the document body.
+    await expect(clear).toHaveCount(0);
+    await expect(sydneyRow).toBeFocused();
+
+    const nurembergPin = page
+      .locator("figure")
+      .getByRole("button", { name: /^Nuremberg, Germany\./u });
+    await nurembergPin.click();
+    await page.getByRole("button", { name: "Clear selected host" }).click();
+    await expect(nurembergPin).toBeFocused();
+
+    // A filter can remove the selected row from the list. The pin that
+    // shows the same host stays on the map and takes the focus.
+    await page
+      .getByRole("button", { name: /^Sydney, Australia Report on time/u })
+      .click();
+    await page
+      .getByRole("group", { name: "Filter hosts by sponsor" })
+      .getByRole("button", { name: "Hetzner" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: /^Sydney, Australia Report on time/u }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "Clear selected host" }).click();
+    await expect(
+      page
+        .locator("figure")
+        .getByRole("button", { name: /^Sydney, Australia\./u }),
+    ).toBeFocused();
+  });
+
+  test("an edge preview stays inside the page", async ({ page, ui }) => {
+    // Two hosts sit on the left and right map edges with long place names.
+    // Their previews clamp inside the map box instead of widening the page.
+    // This route must register before open, so the load reads it first.
+    await page.route("**/api/fleet/map", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          generatedAt: FIXED_NOW,
+          hosts: [
+            {
+              latitude: -36.8485,
+              longitude: 178.9,
+              city: "Auckland Metropolitan Area",
+              country: "New Zealand",
+              state: "healthy",
+              cpuMillis: 8_000,
+              memoryMib: 32_768,
+              provider: null,
+            },
+            {
+              latitude: 64.1466,
+              longitude: -179.5,
+              city: "Reykjavik Metropolitan Area",
+              country: "Iceland",
+              state: "healthy",
+              cpuMillis: 8_000,
+              memoryMib: 32_768,
+              provider: null,
+            },
+          ],
+          unlocatedHostCount: 0,
+          pendingHostCount: 0,
+          truncatedHostCount: 0,
+        }),
+      }),
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+    await expect(page.getByText("2 mapped hosts", { exact: true })).toBeVisible();
+
+    const pins = page.locator("figure button");
+    await expect(pins).toHaveCount(2);
+    for (const pin of [pins.nth(0), pins.nth(1)]) {
+      await pin.hover();
+      await expectNoHorizontalOverflow(page);
+    }
+  });
+
+  test("a failed refresh keeps the loaded snapshot", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+    await expect(
+      page.getByText("8 mapped hosts", { exact: true }),
+    ).toBeVisible();
+
+    // Every read after the first fails. The query tries four times (one
+    // refetch plus three retries), and the browser logs each one, so the
+    // harness expects four console errors.
+    await page.route("**/api/fleet/map", (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Deterministic fixture failure" }),
+      }),
+    );
+    ui.server.expectedFleetRefreshFailures = 4;
+    await page.getByRole("button", { name: "Refresh" }).click();
+
+    // The snapshot stays on screen, and the page says the check failed.
+    await expect(page.getByRole("alert")).toContainText(
+      "Could not check again",
+      { timeout: 20_000 },
+    );
+    await expect(
+      page.getByText("8 mapped hosts", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("figure button")).toHaveCount(8);
+    await expect(
+      page.getByRole("heading", { name: "Could not load the fleet map" }),
+    ).toHaveCount(0);
+  });
+
+  test("a filter narrows the list while the map keeps every pin", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({ ...routeCase("fleet"), theme: "light" });
+
+    await page
+      .getByRole("group", { name: "Filter hosts by sponsor" })
+      .getByRole("button", { name: "Hetzner" })
+      .click();
+
+    await expect(page.getByText("Showing 3 of 8")).toBeVisible();
+    // The map still shows every placed host, not only the rows that match.
+    await expect(page.locator("figure button")).toHaveCount(8);
+    await expect(
+      page.getByRole("button", { name: /^Hillsboro, United States\./u }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Clear filters" }).click();
+    await expect(page.getByText("Showing 3 of 8")).toHaveCount(0);
+  });
 });

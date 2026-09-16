@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import {
   HttpResponseError,
@@ -17,6 +17,8 @@ export interface FleetMapQuery {
   query: UseQueryResult<FleetMapSnapshot, unknown>;
   /** True when follow-up reads stopped with a first lookup still missing. */
   stalled: boolean;
+  /** Reads the fleet again and starts the follow-up budget from zero. */
+  refresh: () => void;
 }
 
 /**
@@ -62,5 +64,13 @@ export function useFleetMap(): FleetMapQuery {
     refetchOnWindowFocus: false,
     retry: retryHttpResponseError,
   });
-  return { query, stalled };
+  const { refetch } = query;
+  // A deliberate refresh is a new budget: the reader asked for the host that
+  // the last read left pending, not for a promise that already ran out.
+  const refresh = useCallback(() => {
+    reads.current = 0;
+    setStalled(false);
+    void refetch();
+  }, [refetch]);
+  return { query, stalled, refresh };
 }
