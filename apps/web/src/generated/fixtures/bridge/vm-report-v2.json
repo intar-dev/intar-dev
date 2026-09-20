@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "host_id": "host-alpha",
   "run_id": "run-20260702-a",
   "vm_name": "webserver",
@@ -74,5 +74,8 @@
   "archive": {
     "phase": "none",
     "artifact_count": 0
-  }
+  },
+  "owner_user_id": "user-1",
+  "runtime_execution_id": "execution-1",
+  "generation": 1
 }

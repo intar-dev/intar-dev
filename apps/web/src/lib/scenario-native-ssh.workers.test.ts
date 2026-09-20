@@ -16,6 +16,9 @@ const mocks = vi.hoisted(() => ({
   deleteStargateRoute: vi.fn(),
 }));
 
+vi.mock("@/lib/stargate-relay", () => ({
+  loadStargateSshTransport: vi.fn(async (input) => ({kind:"direct",host:input.directHost,port:input.directPort})),
+}));
 vi.mock("@/lib/beta-route-issuance", () => ({
   issueBetaAccessFencedRoute: mocks.issueBetaAccessFencedRoute,
 }));
@@ -62,6 +65,8 @@ describe("scenario native SSH authorization", () => {
       generation: 1,
       routeGeneration: "run-1:1",
       userId: "user-1",
+      hostId: "host-1",
+      hostCredentialGeneration: 1,
     });
     mocks.attachReadyScenarioTerminalTargets.mockResolvedValue("not_ready");
     mocks.loadRunRow.mockResolvedValue(readyRunRow());
@@ -107,8 +112,7 @@ describe("scenario native SSH authorization", () => {
         mode: "native",
         target: expect.objectContaining({
           username: "ubuntu",
-          host: "10.0.0.10",
-          port: 22,
+          transport: {kind:"direct", host:"10.0.0.10",port:22},
           authorizedClientPublicKeysOpenssh: [
             "ssh-ed25519 PROFILE profile@example.test",
           ],

@@ -32,10 +32,6 @@ import {
 } from "./host-runtime-do/test-fixtures";
 import { organization } from "@/db/schema";
 import {
-  insertPersonalHostForActiveBetaAdmission,
-  rotatePersonalBootstrapForActiveBetaAdmission,
-} from "@/lib/personal-agent-admission";
-import {
   acquireBetaRevocationCleanup,
   completeBetaRevocationCleanup,
   revokeBetaUser,
@@ -63,7 +59,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       headers: { "x-agent-host-id": hostId },
     });
     expect(retired.status).toBe(200);
-    await expect(retired.json()).resolves.toEqual({ ok: true, hostId });
+    await expect(retired.json()).resolves.toEqual({ ok: true, hostId, alarmCleared: true });
 
     expect(await runDurableObjectAlarm(stub)).toBe(false);
     const wakeWithoutIdentity = await stub.fetch(
@@ -92,15 +88,16 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       headers: {
         upgrade: "websocket",
         "x-agent-host-id": hostId,
+        "x-agent-credential-generation": "1",
         "x-agent-beta-source-invite-id": admission!.source_invite_id,
         "x-agent-beta-source-lease-id": admission!.source_lease_id,
         "x-agent-beta-admission-granted-at": String(admission!.granted_at),
       },
     });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      error: "beta access is revoked",
+      error: "server credentials changed",
     });
   });
 
@@ -122,6 +119,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       headers: {
         upgrade: "websocket",
         "x-agent-host-id": hostId,
+        "x-agent-credential-generation": "1",
         "x-agent-beta-source-invite-id": `${admission!.source_invite_id}-old`,
         "x-agent-beta-source-lease-id": `${admission!.source_lease_id}-old`,
         "x-agent-beta-admission-granted-at": String(admission!.granted_at),
@@ -151,6 +149,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       headers: {
         upgrade: "websocket",
         "x-agent-host-id": hostId,
+        "x-agent-credential-generation": "1",
         "x-agent-beta-source-invite-id": admission!.source_invite_id,
         "x-agent-beta-source-lease-id": admission!.source_lease_id,
         "x-agent-beta-admission-granted-at": String(admission!.granted_at),
@@ -243,28 +242,23 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     expect(messages).toEqual([]);
   });
 
-  it("keeps organization-owned host connections independent of beta access", async () => {
-    const hostId = "host-organization-owned";
+  it("keeps platform host connections independent of beta access", async () => {
+    const hostId = "host-platform-owned";
     const now = Date.now();
     const db = drizzle(env.DB);
     await db.insert(user).values({
-      id: "org-host-owner",
-      name: "Organization Host Owner",
-      email: "org-host-owner@example.com",
+      id: "platform-host-owner",
+      name: "Platform Host Owner",
+      email: "platform-host-owner@example.com",
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    await db.insert(organization).values({
-      id: "org-host-test",
-      name: "Host Test Org",
-      slug: "host-test-org",
-      createdAt: new Date(now),
-    });
     await db.insert(agentHosts).values({
       id: hostId,
-      userId: "org-host-owner",
-      organizationId: "org-host-test",
-      name: "Organization Host",
+      userId: "platform-host-owner",
+      scope: "platform",
+      credentialGeneration: 1,
+      name: "Platform Host",
       role: "agent",
       disabled: false,
       connected: false,
@@ -282,147 +276,42 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     ws.close();
   });
 
-  it("fences paused personal issuance against revocation and readmission", async () => {
-    await seedHost("host-existing-admission");
-    const capturedAdmission = await loadFixtureBetaAdmission("user-1");
-    const now = Date.now();
-    await expect(
-      insertPersonalHostForActiveBetaAdmission(env.DB, {
-        hostId: "host-created-while-active",
-        userId: "user-1",
-        name: "Created While Active",
-        role: "agent",
-        betaAdmission: capturedAdmission,
-        now,
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      rotatePersonalBootstrapForActiveBetaAdmission(env.DB, {
-        tokenId: "token-created-while-active",
-        hostId: "host-created-while-active",
-        userId: "user-1",
-        tokenHash: "a".repeat(64),
-        betaAdmission: capturedAdmission,
-        now: now + 1,
-      }),
-    ).resolves.toBe(true);
-
-    const blocked = await blockFixtureBetaAccess("user-1");
-    await expect(
-      insertPersonalHostForActiveBetaAdmission(env.DB, {
-        hostId: "host-created-after-revoke",
-        userId: "user-1",
-        name: "Must Not Exist",
-        role: "agent",
-        betaAdmission: capturedAdmission,
-        now: now + 2,
-      }),
-    ).resolves.toBe(false);
-    await expect(
-      rotatePersonalBootstrapForActiveBetaAdmission(env.DB, {
-        tokenId: "token-created-after-revoke",
-        hostId: "host-created-while-active",
-        userId: "user-1",
-        tokenHash: "b".repeat(64),
-        betaAdmission: capturedAdmission,
-        now: now + 3,
-      }),
-    ).resolves.toBe(false);
-
-    await expect(
-      env.DB.prepare(
-        `SELECT
-           (SELECT count(*) FROM agent_hosts WHERE id = 'host-created-after-revoke') AS hosts,
-           (SELECT count(*) FROM agent_bootstrap_tokens WHERE id = 'token-created-after-revoke') AS tokens`,
-      ).first<{ hosts: number; tokens: number }>(),
-    ).resolves.toEqual({ hosts: 0, tokens: 0 });
-
-    const cleanup = await acquireBetaRevocationCleanup({
-      d1: env.DB,
-      userId: "user-1",
-      revocationId: blocked.revocationId,
-      now: blocked.now + 1,
+  it.each([0, 1])("rejects a historical organization host with connection generation %s", async (generation) => {
+    const hostId = "host-historical-organization";
+    await seedHost(hostId);
+    const db = drizzle(env.DB);
+    await db.insert(organization).values({
+      id: "historical-org",
+      name: "Historical Organization",
+      slug: "historical-org",
+      createdAt: new Date(),
     });
-    expect(cleanup.status).toBe("acquired");
-    await completeBetaRevocationCleanup({
-      d1: env.DB,
-      userId: "user-1",
-      revocationId: blocked.revocationId,
-      cleanupAttemptId: cleanup.cleanupAttemptId,
-      now: blocked.now + 2,
+    await db.update(agentHosts).set({
+      scope: null,
+      credentialGeneration: 0,
+    }).where(eq(agentHosts.id, hostId));
+
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    const response = await stub.fetch("http://host-runtime/connect", {
+      headers: {
+        upgrade: "websocket",
+        "x-agent-host-id": hostId,
+        "x-agent-credential-generation": String(generation),
+      },
     });
-    await grantFixtureBetaAccess({
-      d1: env.DB,
-      userId: "user-1",
-      githubAccountId: "host-runtime-github-user-1",
-      githubUsername: "user-1",
-      now: blocked.now + 3,
+    expect(response.status).toBe(401);
+    expect(response.webSocket).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      error: generation === 0
+        ? "invalid credential generation"
+        : "server credentials changed",
     });
-    const freshAdmission = await loadFixtureBetaAdmission("user-1");
-    expect(freshAdmission).not.toEqual(capturedAdmission);
-
-    // These calls model requests paused after requireUserContext captured the
-    // old admission, then resumed only after the same user was re-admitted.
-    await expect(
-      insertPersonalHostForActiveBetaAdmission(env.DB, {
-        hostId: "host-created-by-paused-request",
-        userId: "user-1",
-        name: "Must Still Not Exist",
-        role: "agent",
-        betaAdmission: capturedAdmission,
-        now: blocked.now + 7,
-      }),
-    ).resolves.toBe(false);
-    await expect(
-      rotatePersonalBootstrapForActiveBetaAdmission(env.DB, {
-        tokenId: "token-created-by-paused-request",
-        hostId: "host-created-while-active",
-        userId: "user-1",
-        tokenHash: "c".repeat(64),
-        betaAdmission: capturedAdmission,
-        now: blocked.now + 8,
-      }),
-    ).resolves.toBe(false);
-
-    await expect(
-      insertPersonalHostForActiveBetaAdmission(env.DB, {
-        hostId: "host-created-by-fresh-request",
-        userId: "user-1",
-        name: "Fresh Admission Host",
-        role: "agent",
-        betaAdmission: freshAdmission,
-        now: blocked.now + 9,
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      rotatePersonalBootstrapForActiveBetaAdmission(env.DB, {
-        tokenId: "token-created-by-fresh-request",
-        hostId: "host-created-while-active",
-        userId: "user-1",
-        tokenHash: "d".repeat(64),
-        betaAdmission: freshAdmission,
-        now: blocked.now + 10,
-      }),
-    ).resolves.toBe(true);
-
-    await expect(
-      env.DB.prepare(
-        `SELECT
-           (SELECT count(*) FROM agent_hosts WHERE id = 'host-created-by-paused-request') AS stale_hosts,
-           (SELECT count(*) FROM agent_bootstrap_tokens WHERE id = 'token-created-by-paused-request') AS stale_tokens,
-           (SELECT count(*) FROM agent_hosts WHERE id = 'host-created-by-fresh-request') AS fresh_hosts,
-           (SELECT count(*) FROM agent_bootstrap_tokens WHERE id = 'token-created-by-fresh-request') AS fresh_tokens`,
-      ).first<{
-        stale_hosts: number;
-        stale_tokens: number;
-        fresh_hosts: number;
-        fresh_tokens: number;
-      }>(),
-    ).resolves.toEqual({
-      stale_hosts: 0,
-      stale_tokens: 0,
-      fresh_hosts: 1,
-      fresh_tokens: 1,
+    expect(await env.DB.prepare(
+      "SELECT connected, active_session_id, last_client_hello_at FROM agent_hosts WHERE id = ?",
+    ).bind(hostId).first()).toEqual({
+      connected: 0,
+      active_session_id: null,
+      last_client_hello_at: null,
     });
   });
 
@@ -670,6 +559,12 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await waitForBridgeMessage(
       messages,
       (message) => message.type === "server_hello",
+    );
+    // Finish the initial grant before this test adds work. A grant whose
+    // authorization changes in flight correctly forces a new connection.
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "desired_state" && message.desired_state.version === 0,
     );
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now });

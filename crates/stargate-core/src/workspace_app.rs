@@ -16,8 +16,7 @@ pub struct RegisteredWorkspaceAppRoute {
     pub route_id: String,
     pub create_only: bool,
     pub target_username: String,
-    pub target_ip: String,
-    pub target_ssh_port: u16,
+    pub transport: crate::SshTargetTransport,
     pub target_host_key_openssh: String,
     pub target_private_key_openssh: String,
     pub target_app_port: u16,
@@ -32,8 +31,7 @@ pub struct RegisteredWorkspaceAppRoute {
 pub struct WorkspaceAppRouteRecord {
     pub route_id: String,
     pub target_username: String,
-    pub target_ip: String,
-    pub target_ssh_port: u16,
+    pub transport: crate::SshTargetTransport,
     pub target_host_key_openssh: String,
     pub target_private_key_openssh: String,
     pub target_app_port: u16,
@@ -53,20 +51,24 @@ pub fn validate_workspace_app_session_request(
 ) -> Result<RegisteredWorkspaceAppRoute> {
     validate_workspace_app_route_id(&request.route_id)?;
     validate_target_username(&request.target_username)?;
-    if request.target_ssh_port == 0 {
-        return Err(StargateError::Validation(
-            "target_ssh_port must be between 1 and 65535".to_owned(),
-        ));
-    }
     if request.target_app_port == 0 {
         return Err(StargateError::Validation(
             "target_app_port must be between 1 and 65535".to_owned(),
         ));
     }
-    let _ = request
-        .target_ip
-        .parse::<std::net::IpAddr>()
-        .map_err(|_| StargateError::Validation("target_ip must be a literal IP".to_owned()))?;
+    if let crate::SshTargetTransport::Relay { target } = &request.transport
+        && (request.metadata.host_id.as_deref() != Some(&target.host.host_id)
+            || request.metadata.vm_id.as_deref() != Some(&target.vm_id)
+            || request.metadata.user_id.as_deref() != Some(&target.owner_id))
+    {
+        return Err(StargateError::Validation(
+            "relay assignment does not match workspace app".into(),
+        ));
+    }
+    request
+        .transport
+        .validate()
+        .map_err(|e| StargateError::Validation(e.to_string()))?;
     let expires_at = validate_future_timestamp(request.route_expires_at)?;
     validate_target_credentials(
         &request.target_host_key_openssh,
@@ -80,8 +82,7 @@ pub fn validate_workspace_app_session_request(
         route_id: request.route_id,
         create_only: request.create_only,
         target_username: request.target_username,
-        target_ip: request.target_ip,
-        target_ssh_port: request.target_ssh_port,
+        transport: request.transport,
         target_host_key_openssh: request.target_host_key_openssh,
         target_private_key_openssh: request.target_private_key_openssh,
         target_app_port: request.target_app_port,
@@ -291,8 +292,10 @@ mod tests {
             route_id: "wa-key-policy".to_owned(),
             create_only: true,
             target_username: "ubuntu".to_owned(),
-            target_ip: "127.0.0.1".to_owned(),
-            target_ssh_port: 22,
+            transport: crate::SshTargetTransport::Direct {
+                host: "127.0.0.1".to_owned(),
+                port: 22,
+            },
             target_host_key_openssh: target_host_key.public_key().to_openssh().expect("host"),
             target_private_key_openssh: target_key
                 .to_openssh(russh::keys::ssh_key::LineEnding::LF)

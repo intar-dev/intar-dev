@@ -308,6 +308,7 @@ pub(super) async fn build_host_state_report(
         };
 
     HostStateReportV2 {
+        relay_connected: vm.relay_connected(),
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
         observed_at_unix_ms: now,
@@ -408,6 +409,9 @@ pub(super) fn build_vm_report_from_status(
     VmReportV2 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
+        owner_user_id: actual.owner_user_id,
+        runtime_execution_id: actual.runtime_execution_id,
+        generation: actual.generation,
         run_id: actual.run_id,
         vm_name: actual.vm_name,
         desired_version: actual.desired_version,
@@ -437,10 +441,15 @@ pub(super) fn actual_state_from_status(
 ) -> VmActualStateV2 {
     let run_id = local_run_id(&status).unwrap_or_default();
     let desired_vm = desired.and_then(|state| {
-        state
-            .vms
-            .iter()
-            .find(|vm| vm.run_id == run_id && vm.vm_name == status.name)
+        state.vms.iter().find(|vm| {
+            vm.run_id == run_id
+                && vm.vm_name == status.name
+                && status.details.as_ref().is_some_and(|d| {
+                    d.owner_user_id == vm.owner_user_id
+                        && d.runtime_execution_id == vm.runtime_execution_id
+                        && d.generation == vm.generation
+                })
+        })
     });
 
     let status_updated_at = parse_rfc3339_ms(&status.updated_at).unwrap_or_else(now_ms);
@@ -468,6 +477,21 @@ pub(super) fn actual_state_from_status(
         verified: matches!(phase, VmPhase::Ready | VmPhase::Solved),
     });
     VmActualStateV2 {
+        owner_user_id: status
+            .details
+            .as_ref()
+            .map(|d| d.owner_user_id.clone())
+            .unwrap_or_default(),
+        runtime_execution_id: status
+            .details
+            .as_ref()
+            .map(|d| d.runtime_execution_id.clone())
+            .unwrap_or_default(),
+        generation: status
+            .details
+            .as_ref()
+            .map(|d| d.generation)
+            .unwrap_or_default(),
         phase,
         run_id,
         vm_name: status.name.clone(),
@@ -502,6 +526,9 @@ pub(super) fn failed_vm_report(
     VmReportV2 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
+        owner_user_id: vm.owner_user_id.clone(),
+        runtime_execution_id: vm.runtime_execution_id.clone(),
+        generation: vm.generation,
         run_id: vm.run_id.clone(),
         vm_name: vm.vm_name.clone(),
         desired_version: Some(desired.version),

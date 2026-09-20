@@ -1,4 +1,4 @@
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
@@ -26,6 +26,7 @@ import {
   SHA256_HEX_RE,
 } from "./shared";
 import { imageManifestObjectKey } from "./chunks";
+import { agentScenarioImageAccess, currentAgentHost } from "./image-access";
 
 interface AgentChunkedImageIndexSource {
   imageKey: unknown;
@@ -77,22 +78,21 @@ export async function handleAgentBundleDownload(
     return jsonResponse({ error: "invalid bundle rev" }, 400);
   }
 
-  const rows = await drizzle(env.DB)
-    .select({ r2Key: imageBuildBundles.r2Key })
+  const db = drizzle(env.DB);
+  const activeAssignment = and(
+    currentAgentHost(verified.agent),
+    eq(imageBuilds.rev, rev),
+    eq(imageBuilds.hostId, verified.agent.hostId),
+    or(eq(imageBuilds.status, "assigned"), eq(imageBuilds.status, "building")),
+  );
+  const rows = await db
+    .select({ id: imageBuilds.id, r2Key: imageBuildBundles.r2Key })
     .from(imageBuilds)
     .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
-    .where(
-      and(
-        eq(imageBuilds.rev, rev),
-        eq(imageBuilds.hostId, verified.agent.hostId),
-        or(
-          eq(imageBuilds.status, "assigned"),
-          eq(imageBuilds.status, "building"),
-        ),
-      ),
-    )
+    .where(activeAssignment)
     .limit(1);
-  const objectKey = rows[0]?.r2Key;
+  const assignment = rows[0];
+  const objectKey = assignment?.r2Key;
   if (!objectKey) {
     return jsonResponse({ error: "bundle not found" }, 404);
   }
@@ -100,6 +100,23 @@ export async function handleAgentBundleDownload(
   const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(objectKey);
   if (!object) {
     return jsonResponse({ error: "bundle object not found" }, 404);
+  }
+
+  // R2 can wait across a credential rotation or an assignment change. Check
+  // the same assignment and object before exposing any source bytes.
+  const current = await db
+    .select({ id: imageBuilds.id })
+    .from(imageBuilds)
+    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
+    .where(and(
+      activeAssignment,
+      eq(imageBuilds.id, assignment.id),
+      eq(imageBuildBundles.r2Key, objectKey),
+    ))
+    .limit(1);
+  if (!current.length) {
+    await object.body.cancel();
+    return jsonResponse({ error: "bundle not found" }, 404);
   }
 
   return new Response(object.body, {
@@ -193,6 +210,29 @@ export async function handleAgentImageIndex(
   if (!verified.ok) return verified.response;
 
   const db = drizzle(env.DB);
+  const sources = await loadAgentImageIndexSources(db, verified.agent);
+  const byKey = new Map<string, AgentImageIndexEntry>();
+  const headCache: RegistryHeadCache = new Map();
+  await addChunkedImageIndexEntries(byKey, env, sources, headCache);
+
+  // R2 reads can wait across access revocation or replacement of image metadata.
+  // Return only captured entries which still have an exact current source.
+  const currentSources = await loadAgentImageIndexSources(db, verified.agent);
+  const currentByIdentity = new Map(groupChunkedImageIndexSources(currentSources)
+    .map(group => [chunkedImageIndexIdentity(group[0]!), group]));
+  return jsonResponse({
+    images: [...byKey.entries()]
+      .filter(([identity, entry]) => currentByIdentity.get(identity)?.some(source =>
+        imageIndexEntryMatchesSource(entry, source)))
+      .map(([, entry]) => entry)
+      .sort((a, b) => a.image_key.localeCompare(b.image_key)),
+  });
+}
+
+async function loadAgentImageIndexSources(
+  db: DrizzleD1Database,
+  agent: VerifiedAgentHost,
+): Promise<AgentChunkedImageIndexSource[]> {
   const rows = await db
     .select({
       imageKey: vmScenarioVms.imageKeyJson,
@@ -210,9 +250,9 @@ export async function handleAgentImageIndex(
       vmScenarios,
       eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
     )
-    .where(visibleScenarioScope(verified.agent.organizationId));
+    .where(agentScenarioImageAccess(agent));
 
-  const sources: AgentChunkedImageIndexSource[] = [
+  return [
     ...rows.map((row) => ({
       imageKey: row.imageKey,
       imageId: row.imageSha256,
@@ -224,7 +264,7 @@ export async function handleAgentImageIndex(
       initrdSha256: row.initrdSha256,
       bootCmdline: row.bootCmdline,
     })),
-    ...(await loadDesiredCandidateVms(db, verified.agent)).map((vm) => ({
+    ...(await loadDesiredCandidateVms(db, agent)).map((vm) => ({
       imageKey: vm.image_key,
       imageId: vm.image_id,
       imageFormat: vm.image_format,
@@ -236,15 +276,6 @@ export async function handleAgentImageIndex(
       bootCmdline: vm.boot.cmdline,
     })),
   ];
-  const byKey = new Map<string, AgentImageIndexEntry>();
-  const headCache: RegistryHeadCache = new Map();
-  await addChunkedImageIndexEntries(byKey, env, sources, headCache);
-
-  return jsonResponse({
-    images: [...byKey.values()].sort((a, b) =>
-      a.image_key.localeCompare(b.image_key),
-    ),
-  });
 }
 
 async function addChunkedImageIndexEntry(
@@ -277,13 +308,7 @@ async function addChunkedImageIndexEntry(
   const identity = `${imageKey}:${imageId}`;
   const existing = byKey.get(identity);
   if (
-    existing?.image_format === source.imageFormat &&
-    existing.image_virtual_size_bytes === source.imageVirtualSizeBytes &&
-    existing.chunk_manifest_sha256 === chunkManifestSha256 &&
-    existing.guest_bootstrap_abi === source.guestBootstrapAbi &&
-    existing.boot.kernel_sha256 === kernelSha256 &&
-    existing.boot.initrd_sha256 === initrdSha256 &&
-    existing.boot.cmdline === bootCmdline
+    existing && imageIndexEntryMatchesSource(existing, source)
   ) {
     return;
   }
@@ -315,8 +340,21 @@ async function addChunkedImageIndexEntry(
     },
     bytes: source.imageVirtualSizeBytes,
     manifest_download_url: `/agent/registry/image-manifests/${chunkManifestSha256}`,
-    chunk_download_base_url: "/agent/registry/image-chunks",
+    chunk_download_base_url: `/agent/registry/image-manifests/${chunkManifestSha256}/chunks`,
   });
+}
+
+function imageIndexEntryMatchesSource(
+  entry: AgentImageIndexEntry,
+  source: AgentChunkedImageIndexSource,
+): boolean {
+  return entry.image_format === source.imageFormat &&
+    entry.image_virtual_size_bytes === source.imageVirtualSizeBytes &&
+    entry.chunk_manifest_sha256 === normalizeSha256(source.chunkManifestSha256 ?? "") &&
+    entry.guest_bootstrap_abi === source.guestBootstrapAbi &&
+    entry.boot.kernel_sha256 === normalizeSha256(source.kernelSha256 ?? "") &&
+    entry.boot.initrd_sha256 === normalizeSha256(source.initrdSha256 ?? "") &&
+    entry.boot.cmdline === source.bootCmdline?.trim();
 }
 
 async function addChunkedImageIndexEntries(
@@ -384,10 +422,12 @@ async function loadDesiredCandidateVms(
   db: DrizzleD1Database,
   agent: VerifiedAgentHost,
 ): Promise<ScenarioVmManifestV5[]> {
+  // Candidate prewarming has no owner workload grant for personal hosts.
+  if (agent.scope !== "platform") return [];
   const desiredRows = await db
     .select({ docJson: hostDesiredState.docJson })
     .from(hostDesiredState)
-    .where(eq(hostDesiredState.hostId, agent.hostId))
+    .where(and(eq(hostDesiredState.hostId, agent.hostId), currentAgentHost(agent)))
     .limit(1);
   const desiredImages = new Set(
     (desiredRows[0]?.docJson.cached_images ?? []).flatMap((image) => {
@@ -401,14 +441,7 @@ async function loadDesiredCandidateVms(
   const candidateRows = await db
     .select({ manifest: scenarioCatalogCandidates.manifestJson })
     .from(scenarioCatalogCandidates)
-    .where(
-      agent.organizationId
-        ? or(
-            isNull(scenarioCatalogCandidates.organizationId),
-            eq(scenarioCatalogCandidates.organizationId, agent.organizationId),
-          )
-        : isNull(scenarioCatalogCandidates.organizationId),
-    );
+    .where(currentAgentHost(agent));
   const matches = new Map<string, ScenarioVmManifestV5>();
   for (const candidate of candidateRows) {
     if (
@@ -524,7 +557,8 @@ export async function handleAgentImageDownload(
 
   const objectKey = imageObjectKey(imageKey, sha256);
   const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(objectKey);
-  if (!imageObjectMatchesSha(object, imageKey, sha256)) {
+  if (!imageObjectMatchesSha(object, imageKey, sha256) ||
+      !await agentCanAccessImage(db, verified.agent, imageKey, sha256)) {
     return jsonResponse({ error: "image not found" }, 404);
   }
 
@@ -565,7 +599,8 @@ export async function handleAgentArtifactDownload(
   const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(
     artifactObjectKey(sha256),
   );
-  if (!bootArtifactObjectMatchesSha(object, sha256)) {
+  if (!bootArtifactObjectMatchesSha(object, sha256) ||
+      !await agentCanAccessArtifact(db, verified.agent, sha256)) {
     return jsonResponse({ error: "artifact not found" }, 404);
   }
 
@@ -593,25 +628,16 @@ export async function requireBuilderAgentRequest(
       response: jsonResponse({ error: "builder role required" }, 403),
     };
   }
-  if (verified.agent.organizationId) {
+  if (verified.agent.scope !== "platform") {
     return {
       ok: false as const,
       response: jsonResponse(
-        { error: "organization runners cannot build images" },
+        { error: "Only platform servers can build images" },
         403,
       ),
     };
   }
   return verified;
-}
-
-function visibleScenarioScope(organizationId: string | null) {
-  return organizationId
-    ? or(
-        isNull(vmScenarios.organizationId),
-        eq(vmScenarios.organizationId, organizationId),
-      )
-    : isNull(vmScenarios.organizationId);
 }
 
 async function agentCanAccessImage(
@@ -630,7 +656,7 @@ async function agentCanAccessImage(
     .where(
       and(
         eq(vmScenarioVms.imageSha256, sha256),
-        visibleScenarioScope(agent.organizationId),
+        agentScenarioImageAccess(agent),
       ),
     );
   if (
@@ -663,7 +689,7 @@ async function agentCanAccessArtifact(
           eq(vmScenarioVms.kernelSha256, sha256),
           eq(vmScenarioVms.initrdSha256, sha256),
         ),
-        visibleScenarioScope(agent.organizationId),
+        agentScenarioImageAccess(agent),
       ),
     )
     .limit(1);

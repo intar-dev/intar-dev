@@ -1,12 +1,9 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { and, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  agentBootstrapTokens,
-  agentHosts,
   member,
   organization,
   user,
@@ -15,7 +12,6 @@ import {
 } from "@/db/schema";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import { errorChainMatches } from "@/lib/app-error";
-import { createOrRotateOrganizationRunner } from "@/lib/organization-runners";
 import { createOrganization } from "@/lib/organizations";
 import { listEnabledScenarios, loadScenario } from "@/lib/scenarios";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -102,50 +98,6 @@ describe("organization boundaries", () => {
       scenarioId: "org-a-private",
       organizationId: "org-a",
     });
-  });
-
-  it("creates agent-only organization runners with non-expiring bootstrap credentials", async () => {
-    const db = drizzle(env.DB);
-    await insertUser("owner");
-    await insertOrganization("org-a");
-    await db.insert(member).values({
-      id: "owner-membership",
-      organizationId: "org-a",
-      userId: "owner",
-      role: "owner",
-      createdAt: new Date(),
-    });
-
-    const result = await createOrRotateOrganizationRunner({
-      organizationId: "org-a",
-      actorUserId: "owner",
-      name: "Academy runner",
-      baseUrl: "https://intar.test",
-    });
-    expect(result.bootstrapTokenExpiresAt).toBeNull();
-    expect(result.runner.role).toBe("agent");
-    expect(result.bridgeConfigToml).toContain("bootstrap_token");
-
-    const [hosts, tokens] = await Promise.all([
-      db
-        .select({
-          organizationId: agentHosts.organizationId,
-          role: agentHosts.role,
-        })
-        .from(agentHosts)
-        .where(eq(agentHosts.id, result.runner.id)),
-      db
-        .select({ expiresAt: agentBootstrapTokens.expiresAt })
-        .from(agentBootstrapTokens)
-        .where(
-          and(
-            eq(agentBootstrapTokens.hostId, result.runner.id),
-            isNull(agentBootstrapTokens.revokedAt),
-          ),
-        ),
-    ]);
-    expect(hosts).toEqual([{ organizationId: "org-a", role: "agent" }]);
-    expect(tokens).toEqual([{ expiresAt: null }]);
   });
 });
 

@@ -184,11 +184,11 @@ export async function handleImageRegistryRequest(
     return handleAgentImageIndex(request, env);
   }
 
-  const agentChunkMatch = url.pathname.match(
-    /^\/agent\/registry\/image-chunks\/([a-f0-9]{64})$/,
+  const scopedChunkMatch = url.pathname.match(
+    /^\/agent\/registry\/image-manifests\/([a-f0-9]{64})\/chunks\/([a-f0-9]{64})$/,
   );
-  if (agentChunkMatch) {
-    return handleAgentImageChunkDownload(request, env, agentChunkMatch[1] ?? "");
+  if (scopedChunkMatch) {
+    return handleAgentImageChunkDownload(request, env, scopedChunkMatch[2]!, scopedChunkMatch[1]!);
   }
 
   const agentManifestMatch = url.pathname.match(

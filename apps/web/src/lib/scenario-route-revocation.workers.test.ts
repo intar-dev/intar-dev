@@ -183,8 +183,8 @@ async function seedRoutes(): Promise<void> {
     {
       id: "org-host",
       userId: "blocked-user",
-      organizationId: "org-a",
-      name: "Organization host",
+      scope: "personal",
+      name: "Personal host",
     },
     {
       id: "other-host",

@@ -159,7 +159,20 @@ pub fn validate_terminal_session_request(
             ));
         }
         (TerminalSessionMode::Native, TerminalTargetState::Ready(target)) => {
-            let target = validate_target(target)?;
+            let target = validate_target(*target)?;
+            if let crate::SshTargetTransport::Relay { target: relay } = &target.transport {
+                validate_relay_route(
+                    relay,
+                    &request.metadata.vm_id,
+                    &request.metadata.user_id,
+                    &request.generation,
+                )?;
+                if relay.host.host_id != request.metadata.host_id {
+                    return Err(StargateError::Validation(
+                        "relay host does not match route".into(),
+                    ));
+                }
+            }
             if target.authorized_client_public_keys_openssh.is_empty() {
                 return Err(StargateError::Validation(
                     "authorized_client_public_keys_openssh must not be empty for native sessions"
@@ -200,7 +213,26 @@ pub fn validate_stage_request(request: StageTerminalTargetRequest) -> Result<Ter
     validate_metadata_id(&request.run_id, "run_id")?;
     validate_metadata_id(&request.vm_id, "vm_id")?;
     validate_metadata_id(&request.user_id, "user_id")?;
+    if let crate::SshTargetTransport::Relay { target: relay } = &request.target.transport {
+        validate_relay_route(relay, &request.vm_id, &request.user_id, &request.generation)?;
+    }
     validate_target(request.target)
+}
+fn validate_relay_route(
+    target: &crate::relay::RelayTarget,
+    vm: &str,
+    user: &str,
+    generation: &str,
+) -> Result<()> {
+    if target.vm_id != vm
+        || target.owner_id != user
+        || format!("{}:{}", target.execution_id, target.execution_generation) != generation
+    {
+        return Err(StargateError::Validation(
+            "relay assignment does not match route".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate one activation call. Every field is required: an absent or empty
@@ -272,15 +304,10 @@ fn validate_route_expiry(raw: i64) -> Result<OffsetDateTime> {
 
 fn validate_target(target: TerminalTarget) -> Result<TerminalTarget> {
     validate_target_username(&target.username)?;
-    if target.port == 0 {
-        return Err(StargateError::Validation(
-            "target.port must be between 1 and 65535".to_owned(),
-        ));
-    }
-    let _ = target
-        .host
-        .parse::<std::net::IpAddr>()
-        .map_err(|_| StargateError::Validation("target.host must be a literal IP".to_owned()))?;
+    target
+        .transport
+        .validate()
+        .map_err(|e| StargateError::Validation(e.to_string()))?;
     let _ = parse_target_host_key(&target.host_key_openssh)?;
     let _ = parse_target_private_key(&target.private_key_openssh)?;
     let authorized_client_public_keys_openssh =
@@ -288,8 +315,7 @@ fn validate_target(target: TerminalTarget) -> Result<TerminalTarget> {
 
     Ok(TerminalTarget {
         username: target.username,
-        host: target.host,
-        port: target.port,
+        transport: target.transport,
         host_key_openssh: target.host_key_openssh,
         private_key_openssh: target.private_key_openssh,
         authorized_client_public_keys_openssh,
@@ -430,8 +456,11 @@ mod tests {
     fn browser_route_rejects_a_ready_target() {
         let (host_key, private_key) = ed25519_target_credentials();
         let mut request = pending_request();
-        request.target =
-            TerminalTargetState::Ready(target(&host_key, &private_key, vec![client_key_openssh()]));
+        request.target = TerminalTargetState::Ready(Box::new(target(
+            &host_key,
+            &private_key,
+            vec![client_key_openssh()],
+        )));
 
         assert!(validate_terminal_session_request(request).is_err());
     }
@@ -441,13 +470,17 @@ mod tests {
         let (host_key, private_key) = ed25519_target_credentials();
         let mut request = pending_request();
         request.mode = TerminalSessionMode::Native;
-        request.target =
-            TerminalTargetState::Ready(target(&host_key, &private_key, vec![client_key_openssh()]));
+        request.target = TerminalTargetState::Ready(Box::new(target(
+            &host_key,
+            &private_key,
+            vec![client_key_openssh()],
+        )));
         assert!(validate_terminal_session_request(request).is_ok());
 
         let mut request = pending_request();
         request.mode = TerminalSessionMode::Native;
-        request.target = TerminalTargetState::Ready(target(&host_key, &private_key, Vec::new()));
+        request.target =
+            TerminalTargetState::Ready(Box::new(target(&host_key, &private_key, Vec::new())));
         assert!(validate_terminal_session_request(request).is_err());
 
         let mut request = pending_request();
@@ -493,8 +526,11 @@ mod tests {
         let mut request = pending_request();
         request.mode = TerminalSessionMode::Native;
         let mut target = target(&host_key, &private_key, vec![client_key_openssh()]);
-        target.host = "worker.example.test".to_owned();
-        request.target = TerminalTargetState::Ready(target);
+        target.transport = crate::SshTargetTransport::Direct {
+            host: "worker.example.test".to_owned(),
+            port: 22,
+        };
+        request.target = TerminalTargetState::Ready(Box::new(target));
         assert!(validate_terminal_session_request(request).is_err());
     }
 
@@ -699,8 +735,10 @@ mod tests {
     ) -> TerminalTarget {
         TerminalTarget {
             username: "ubuntu".to_owned(),
-            host: "127.0.0.1".to_owned(),
-            port: 22,
+            transport: crate::SshTargetTransport::Direct {
+                host: "127.0.0.1".to_owned(),
+                port: 22,
+            },
             host_key_openssh: host_key_openssh.to_owned(),
             private_key_openssh: private_key_openssh.to_owned(),
             authorized_client_public_keys_openssh,

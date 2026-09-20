@@ -361,6 +361,9 @@ CREATE INDEX IF NOT EXISTS idx_image_cache_verified_age
 
 pub(super) const BASELINE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS vms (
+  owner_user_id TEXT NOT NULL,
+  runtime_execution_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation > 0),
   name TEXT PRIMARY KEY,
   state TEXT NOT NULL,
   image_key TEXT,

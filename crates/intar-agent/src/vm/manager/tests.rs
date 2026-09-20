@@ -35,6 +35,9 @@ fn test_vm_status(name: &str, run_id: Option<&str>) -> VmStatusResponse {
         created_at: "1970-01-01T00:00:00Z".to_string(),
         updated_at: "1970-01-01T00:00:00Z".to_string(),
         details: Some(VmDetails {
+            owner_user_id: "user-1".to_string(),
+            runtime_execution_id: "execution-1".to_string(),
+            generation: 1,
             image_key: None,
             image_sha256: None,
             guest_tools: None,

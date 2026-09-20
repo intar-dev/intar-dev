@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "host_id": "host-alpha",
   "observed_at_unix_ms": 1762041660000,
   "applied_desired_version": 42,
@@ -132,7 +132,10 @@
         "phase": "none",
         "artifact_count": 0
       },
-      "updated_at_unix_ms": 1762041660000
+      "updated_at_unix_ms": 1762041660000,
+      "owner_user_id": "user-1",
+      "runtime_execution_id": "execution-1",
+      "generation": 1
     }
   ],
   "builds": [
@@ -148,5 +151,6 @@
       "started_at_unix_ms": 1762041600000,
       "attempt": 1
     }
-  ]
+  ],
+  "relay_connected": true
 }

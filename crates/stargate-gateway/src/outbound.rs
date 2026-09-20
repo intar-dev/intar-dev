@@ -14,6 +14,7 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use sha2::{Digest as _, Sha256};
 use std::borrow::Cow;
 
+use crate::HostRelayRegistry;
 use russh::{
     ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, Preferred,
     client::{self, Msg},
@@ -23,14 +24,20 @@ use russh::{
         ssh_key::{Algorithm, PublicKey},
     },
 };
-use stargate_core::{StoredTerminalRoute, TerminalTarget, WorkspaceAppRouteRecord};
+use stargate_core::{
+    SshTargetTransport, StoredTerminalRoute, TerminalTarget, WorkspaceAppRouteRecord,
+};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc as tokio_mpsc};
 use tokio_util::sync::CancellationToken;
 
 const BRIDGE_INPUT_CAPACITY: usize = 32;
 const BRIDGE_EVENT_CAPACITY: usize = 32;
+const BRIDGE_OUTPUT_TIMEOUT: Duration = Duration::from_secs(2);
 const WORKSPACE_APP_CHANNELS_PER_ROUTE: usize = 64;
+
+#[cfg(test)]
+mod relay_tests;
 
 #[derive(Debug)]
 pub enum BridgeEvent {
@@ -70,11 +77,12 @@ enum BridgeMode {
 }
 
 pub fn spawn_exec_bridge(
+    relays: HostRelayRegistry,
     route: StoredTerminalRoute,
     command: String,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ExecBridgeControl, tokio_mpsc::Receiver<BridgeEvent>)> {
-    let (target, target_username) = prepared_target(&route)?;
+    let (target, target_username) = prepared_target(&route, relays)?;
     let (events_tx, events_rx) = tokio_mpsc::channel(BRIDGE_EVENT_CAPACITY);
     let (input_tx, input_rx) = tokio_mpsc::channel(BRIDGE_INPUT_CAPACITY);
 
@@ -97,11 +105,12 @@ pub fn spawn_exec_bridge(
 }
 
 pub fn spawn_pty_bridge(
+    relays: HostRelayRegistry,
     route: StoredTerminalRoute,
     options: PtyBridgeOptions,
     cancel: CancellationToken,
 ) -> anyhow::Result<(PtyBridgeControl, tokio_mpsc::Receiver<BridgeEvent>)> {
-    let (target, target_username) = prepared_target(&route)?;
+    let (target, target_username) = prepared_target(&route, relays)?;
     let (events_tx, events_rx) = tokio_mpsc::channel(BRIDGE_EVENT_CAPACITY);
     let (input_tx, input_rx) = tokio_mpsc::channel(BRIDGE_INPUT_CAPACITY);
 
@@ -160,6 +169,10 @@ async fn send_bridge_input(
     cancel: &CancellationToken,
     input: BridgeInput,
 ) {
+    if matches!(&input, BridgeInput::Data(data) if data.len() > 64*1024) {
+        cancel.cancel();
+        return;
+    }
     tokio::select! {
         _ = cancel.cancelled() => {}
         _ = tx.send(input) => {}
@@ -168,18 +181,22 @@ async fn send_bridge_input(
 
 /// A bridge can only start from a route that already carries its target. A
 /// pending route has no guest address and no guest key, so it can not dial.
-fn prepared_target(route: &StoredTerminalRoute) -> anyhow::Result<(PreparedSshTarget, String)> {
+fn prepared_target(
+    route: &StoredTerminalRoute,
+    relays: HostRelayRegistry,
+) -> anyhow::Result<(PreparedSshTarget, String)> {
     let target = route
         .ready_target()
         .context("terminal route has no attached target")?;
     Ok((
-        PreparedSshTarget::from_terminal_target(target)?,
+        PreparedSshTarget::from_terminal_target(target, relays)?,
         target.username.clone(),
     ))
 }
 
 struct PreparedSshTarget {
-    addr: SocketAddr,
+    transport: SshTargetTransport,
+    relays: HostRelayRegistry,
     expected_host_key: PublicKey,
     private_key: Arc<russh::keys::PrivateKey>,
 }
@@ -189,11 +206,12 @@ struct PreparedSshTarget {
 pub struct DirectTcpIpTunnel {
     _session: Arc<client::Handle<StrictHostKey>>,
     _channel_permit: OwnedSemaphorePermit,
-    stream: russh::ChannelStream<Msg>,
+    stream: stargate_core::relay::RelayIo<tokio::io::DuplexStream>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct WorkspaceAppTunnelPool {
+    relays: HostRelayRegistry,
     routes: Arc<DashMap<String, Arc<PooledWorkspaceAppTarget>>>,
 }
 
@@ -239,13 +257,18 @@ pub async fn open_workspace_app_tunnel(
 }
 
 impl WorkspaceAppTunnelPool {
+    pub(crate) fn new(relays: HostRelayRegistry) -> Self {
+        Self {
+            relays,
+            ..Self::default()
+        }
+    }
     async fn open(&self, route: &WorkspaceAppRouteRecord) -> anyhow::Result<DirectTcpIpTunnel> {
         let pooled_target = self.target_for(route).await;
         let channel_permit = pooled_target
             .channel_slots
             .clone()
-            .acquire_owned()
-            .await
+            .try_acquire_owned()
             .context("workspace app route channel limiter closed")?;
 
         // A long-lived SSH transport can disappear between the liveness check
@@ -254,7 +277,7 @@ impl WorkspaceAppTunnelPool {
         // full of failed requests.
         let mut last_error = None;
         for _ in 0..2 {
-            let session = pooled_target.session(route).await?;
+            let session = pooled_target.session(route, self.relays.clone()).await?;
             match session
                 .channel_open_direct_tcpip(
                     "127.0.0.1",
@@ -268,7 +291,10 @@ impl WorkspaceAppTunnelPool {
                     return Ok(DirectTcpIpTunnel {
                         _session: session,
                         _channel_permit: channel_permit,
-                        stream: channel.into_stream(),
+                        stream: stargate_core::relay::isolated_channel(
+                            channel.into_stream(),
+                            &CancellationToken::new(),
+                        ),
                     });
                 }
                 Err(error) => {
@@ -326,6 +352,7 @@ impl PooledWorkspaceAppTarget {
     async fn session(
         &self,
         route: &WorkspaceAppRouteRecord,
+        relays: HostRelayRegistry,
     ) -> anyhow::Result<Arc<client::Handle<StrictHostKey>>> {
         let mut pooled = self.session.lock().await;
         if let Some(session) = pooled.as_ref()
@@ -335,8 +362,8 @@ impl PooledWorkspaceAppTarget {
         }
 
         let target = PreparedSshTarget::from_parts(
-            &route.target_ip,
-            route.target_ssh_port,
+            &route.transport,
+            relays,
             &route.target_host_key_openssh,
             &route.target_private_key_openssh,
         )?;
@@ -378,11 +405,15 @@ async fn disconnect_workspace_app_session(session: &client::Handle<StrictHostKey
 
 fn workspace_app_target_fingerprint(route: &WorkspaceAppRouteRecord) -> [u8; 32] {
     let mut digest = Sha256::new();
-    for value in [route.target_username.as_bytes(), route.target_ip.as_bytes()] {
+    for value in [
+        route.target_username.as_bytes(),
+        serde_json::to_string(&route.transport)
+            .expect("transport JSON")
+            .as_bytes(),
+    ] {
         digest.update((value.len() as u64).to_be_bytes());
         digest.update(value);
     }
-    digest.update(route.target_ssh_port.to_be_bytes());
     for value in [
         route.target_host_key_openssh.as_bytes(),
         route.target_private_key_openssh.as_bytes(),
@@ -394,24 +425,25 @@ fn workspace_app_target_fingerprint(route: &WorkspaceAppRouteRecord) -> [u8; 32]
 }
 
 impl PreparedSshTarget {
-    fn from_terminal_target(target: &TerminalTarget) -> anyhow::Result<Self> {
+    fn from_terminal_target(
+        target: &TerminalTarget,
+        relays: HostRelayRegistry,
+    ) -> anyhow::Result<Self> {
         Self::from_parts(
-            &target.host,
-            target.port,
+            &target.transport,
+            relays,
             &target.host_key_openssh,
             &target.private_key_openssh,
         )
     }
 
     fn from_parts(
-        target_ip: &str,
-        target_port: u16,
+        transport: &SshTargetTransport,
+        relays: HostRelayRegistry,
         target_host_key_openssh: &str,
         target_private_key_openssh: &str,
     ) -> anyhow::Result<Self> {
-        let ip = target_ip
-            .parse::<IpAddr>()
-            .with_context(|| format!("target_ip '{target_ip}' is not a literal IP"))?;
+        transport.validate()?;
         let expected_host_key =
             PublicKey::from_openssh(target_host_key_openssh).context("invalid target host key")?;
         if expected_host_key.algorithm() != Algorithm::Ed25519 {
@@ -424,7 +456,8 @@ impl PreparedSshTarget {
         }
 
         Ok(Self {
-            addr: SocketAddr::new(ip, target_port),
+            transport: transport.clone(),
+            relays,
             expected_host_key,
             private_key: Arc::new(private_key),
         })
@@ -435,15 +468,42 @@ async fn connect_authenticated_target(
     target: PreparedSshTarget,
     target_username: &str,
 ) -> anyhow::Result<client::Handle<StrictHostKey>> {
-    let mut session = client::connect(
+    tokio::time::timeout(Duration::from_secs(15), async {
+        match &target.transport {
+            SshTargetTransport::Direct { host, port } => {
+                let stream =
+                    tokio::net::TcpStream::connect(SocketAddr::new(host.parse::<IpAddr>()?, *port))
+                        .await?;
+                stream.set_nodelay(true)?;
+                connect_authenticated_stream(target, target_username, stream).await
+            }
+            SshTargetTransport::Relay { target: assignment } => {
+                let stream = target.relays.open(assignment).await?;
+                connect_authenticated_stream(target, target_username, stream).await
+            }
+        }
+    })
+    .await
+    .context("guest SSH connection timed out")?
+}
+
+async fn connect_authenticated_stream<S>(
+    target: PreparedSshTarget,
+    target_username: &str,
+    stream: S,
+) -> anyhow::Result<client::Handle<StrictHostKey>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut session = client::connect_stream(
         client_config(),
-        target.addr,
+        stream,
         StrictHostKey {
             expected: target.expected_host_key,
         },
     )
     .await
-    .with_context(|| format!("failed connecting to target {}", target.addr))?;
+    .context("failed connecting to guest SSH")?;
     let auth_result = session
         .authenticate_publickey(
             target_username,
@@ -523,8 +583,9 @@ async fn send_bridge_event(
     event: BridgeEvent,
 ) -> bool {
     tokio::select! {
+        biased;
         _ = cancel.cancelled() => false,
-        result = tx.send(event) => result.is_ok(),
+        result = tokio::time::timeout(BRIDGE_OUTPUT_TIMEOUT, tx.send(event)) => matches!(result, Ok(Ok(()))),
     }
 }
 
@@ -536,30 +597,10 @@ async fn run_bridge_inner(
     events_tx: &tokio_mpsc::Sender<BridgeEvent>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<u32> {
-    let mut session = tokio::select! {
+    let session = tokio::select! {
         _ = cancel.cancelled() => return Ok(255),
-        result = client::connect(
-            client_config(),
-            target.addr,
-            StrictHostKey {
-                expected: target.expected_host_key,
-            },
-        ) => result.with_context(|| format!("failed connecting to target {}", target.addr))?,
+        result = connect_authenticated_target(target, &target_username) => result?,
     };
-    if cancel.is_cancelled() {
-        return Ok(255);
-    }
-
-    let auth_result = tokio::select! {
-        _ = cancel.cancelled() => return Ok(255),
-        result = session.authenticate_publickey(
-            target_username,
-            PrivateKeyWithHashAlg::new(target.private_key, None),
-        ) => result.context("target public-key authentication failed")?,
-    };
-    if !auth_result.success() {
-        bail!("target public-key authentication was rejected");
-    }
     if cancel.is_cancelled() {
         return Ok(255);
     }
@@ -706,22 +747,16 @@ async fn pump_bridge_output(
             message = read_half.wait() => {
                 match message {
                     Some(ChannelMsg::Data { data }) => {
-                        if !send_bridge_event(
-                            events_tx,
-                            cancel,
-                            BridgeEvent::Stdout(data.to_vec()),
-                        ).await {
-                            return Ok(255);
-                        }
+                        // This terminal owns its guest SSH connection. russh
+                        // 0.62.2 awaits its bounded channel queue (capacity 4),
+                        // so waiting here also bounds input and window updates.
+                        // Shared app/host relay channels use separate pumps.
+                        anyhow::ensure!(send_bridge_event(events_tx, cancel, BridgeEvent::Stdout(data.to_vec())).await,
+                            "terminal output stalled or closed");
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        if !send_bridge_event(
-                            events_tx,
-                            cancel,
-                            BridgeEvent::Stderr(data.to_vec()),
-                        ).await {
-                            return Ok(255);
-                        }
+                        anyhow::ensure!(send_bridge_event(events_tx, cancel, BridgeEvent::Stderr(data.to_vec())).await,
+                            "terminal output stalled or closed");
                     }
                     Some(ChannelMsg::ExitStatus { exit_status: status }) => {
                         exit_status = Some(status);
@@ -751,6 +786,9 @@ fn client_config() -> Arc<client::Config> {
         ..Preferred::DEFAULT
     };
     Arc::new(client::Config {
+        window_size: stargate_core::relay::RELAY_WINDOW_BYTES,
+        maximum_packet_size: stargate_core::relay::RELAY_FRAME_BYTES as u32,
+        channel_buffer_size: 4,
         client_id: russh::SshId::Standard("SSH-2.0-Stargate".into()),
         inactivity_timeout: Some(Duration::from_secs(300)),
         keepalive_interval: Some(Duration::from_secs(30)),
@@ -935,25 +973,41 @@ mod tests {
 
         let terminal_target = TerminalTarget {
             username: "ubuntu".to_owned(),
-            host: "127.0.0.1".to_owned(),
-            port: 22,
+            transport: stargate_core::SshTargetTransport::Direct {
+                host: "127.0.0.1".to_owned(),
+                port: 22,
+            },
             host_key_openssh: target_host_key_openssh.clone(),
             private_key_openssh: target_private_key_openssh.clone(),
             authorized_client_public_keys_openssh: Vec::new(),
         };
-        assert!(PreparedSshTarget::from_terminal_target(&terminal_target).is_ok());
+        assert!(
+            PreparedSshTarget::from_terminal_target(
+                &terminal_target,
+                crate::HostRelayRegistry::default()
+            )
+            .is_ok()
+        );
 
         let legacy_terminal_target = TerminalTarget {
             host_key_openssh: legacy_host_key_openssh,
             ..terminal_target
         };
-        assert!(PreparedSshTarget::from_terminal_target(&legacy_terminal_target).is_err());
+        assert!(
+            PreparedSshTarget::from_terminal_target(
+                &legacy_terminal_target,
+                crate::HostRelayRegistry::default()
+            )
+            .is_err()
+        );
 
         let legacy_workspace_app_route = WorkspaceAppRouteRecord {
             route_id: "wa-key-policy".to_owned(),
             target_username: "ubuntu".to_owned(),
-            target_ip: "127.0.0.1".to_owned(),
-            target_ssh_port: 22,
+            transport: stargate_core::SshTargetTransport::Direct {
+                host: "127.0.0.1".to_owned(),
+                port: 22,
+            },
             target_host_key_openssh,
             target_private_key_openssh: legacy_private_key_openssh,
             target_app_port: 8080,
@@ -966,8 +1020,8 @@ mod tests {
         };
         assert!(
             PreparedSshTarget::from_parts(
-                &legacy_workspace_app_route.target_ip,
-                legacy_workspace_app_route.target_ssh_port,
+                &legacy_workspace_app_route.transport,
+                crate::HostRelayRegistry::default(),
                 &legacy_workspace_app_route.target_host_key_openssh,
                 &legacy_workspace_app_route.target_private_key_openssh,
             )

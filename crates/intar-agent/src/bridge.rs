@@ -100,22 +100,27 @@ struct BridgeReportSources {
     cache: BridgeReportCache,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentBootstrapRequest<'a> {
     host_id: &'a str,
     bootstrap_token: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AgentBootstrapResponse {
-    access_token: String,
-    ws_url: Option<String>,
+pub(crate) struct AgentBootstrapResponse {
+    pub(crate) access_token: String,
+    pub(crate) ws_url: Option<String>,
+    host_id: String,
+    owner_user_id: String,
+    scope: intar_contracts::bridge::HostScope,
+    credential_generation: u64,
 }
 
 pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: PathBuf) {
     let http = match HttpClient::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
     {
@@ -128,15 +133,8 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
 
     let mut retry_ms = RETRY_MIN_MS;
     let mut current_desired_state = load_cached_desired_state(&cfg, &db).await;
-    if let Some(desired_state) = current_desired_state.clone() {
-        // There is no preceding desired state after an agent restart. Wake the
-        // worker once so its MissingOnly pass observes persisted pins even if
-        // the startup repair pass began before this state was loaded.
-        crate::image_cache::wake_cache_refresh();
-        if let Err(error) = apply_cached_desired_state(&cfg, &vm, desired_state).await {
-            warn!(error = %error, "failed to apply cached desired state");
-        }
-    }
+    // Cached identity is restart evidence, not permission to create new work.
+    // Reconcile only after this control connection receives current desired state.
     let mut reconnect = false;
 
     loop {
@@ -230,10 +228,15 @@ async fn connect_once(
     })
     .await
     .context("timed out waiting for server_hello")??;
+    anyhow::ensure!(
+        !server_hello.session_id.trim().is_empty(),
+        "missing bridge session identity"
+    );
+    validate_relay_identity(cfg, &server_hello.session_id, server_hello.relay.as_ref())?;
     info!(
         host_id = %server_hello.host_id,
         desired_version = server_hello.desired_version,
-        "bridge v7 handshake complete"
+        "bridge v8 handshake complete"
     );
 
     send_sync_request(
@@ -253,6 +256,15 @@ async fn connect_once(
     let mut probe_updates = vm.subscribe_probe_updates();
     let mut terminal_updates = vm.subscribe_terminal_updates();
     let inventory_updates = vm.subscribe_inventory_updates();
+    let mut relay_updates = vm.subscribe_inventory_updates();
+    let mut relay = crate::relay::RelayRunner::new();
+    let mut relay_status = relay.subscribe();
+    vm.set_relay_status(relay_status.clone());
+    vm.set_control_connected(true);
+    let mut relay_credentials = server_hello.relay;
+    // Wait for a current desired state on this authenticated connection before
+    // granting relay access to any records recovered from disk.
+    let mut received_desired = false;
     let (desired_state_tx, desired_state_rx) = watch::channel(current_desired_state.clone());
     let report_cache = BridgeReportCache::new(
         host_profile::collect(disk_probe_path),
@@ -314,6 +326,14 @@ async fn connect_once(
                     let inbound = inbound.context("failed reading bridge message")?;
                     if let Some(message) = parse_bridge_message(inbound)? {
                         validate_bridge_message(&message, &cfg.host_id)?;
+                        if let BridgeMessageV8::DesiredState(desired) = &message {
+                            validate_desired_state(cfg, &desired.desired_state)?;
+                            validate_relay_identity(cfg, &server_hello.session_id, desired.relay.as_ref())?;
+                            if !desired_state_is_stale(current_desired_state.as_ref(), &desired.desired_state) {
+                                relay_credentials = desired.relay.clone();
+                                received_desired = true;
+                            }
+                        }
                         handle_server_message(
                             &outbound.normal,
                             &report_sources,
@@ -321,6 +341,20 @@ async fn connect_once(
                             &desired_state_tx,
                             message,
                         ).await?;
+                        if received_desired {
+                            update_relay(&mut relay, cfg, vm, relay_credentials.clone(), current_desired_state.as_ref()).await?;
+                        }
+                    }
+                }
+                changed = relay_status.changed() => {
+                    changed.context("relay status channel closed")?;
+                    relay_status.borrow_and_update();
+                    vm.request_inventory_update();
+                }
+                changed = relay_updates.changed() => {
+                    changed.context("relay inventory channel closed")?;
+                    if received_desired {
+                        update_relay(&mut relay, cfg, vm, relay_credentials.clone(), current_desired_state.as_ref()).await?;
                     }
                 }
                 _ = state_report_interval.tick() => {
@@ -332,25 +366,9 @@ async fn connect_once(
                     .await?;
                 }
                 _ = run_cli_access_refresh.tick() => {
-                    match timeout(
-                        Duration::from_secs(RUN_CLI_ACCESS_REFRESH_TIMEOUT_SECS),
-                        bootstrap_agent_access(cfg, http),
-                    ).await {
-                        Ok(Ok(access)) => {
-                            vm.cache_run_cli_access_token(&access.access_token).await;
-                            crate::image_cache::cache_registry_access_token(&access.access_token).await;
-                        }
-                        Ok(Err(error)) => {
-                            vm.clear_run_cli_access_token().await;
-                            crate::image_cache::clear_registry_access_token().await;
-                            warn!(error = %error, "run CLI access refresh failed; cleared the cached run CLI token");
-                        }
-                        Err(_) => {
-                            vm.clear_run_cli_access_token().await;
-                            crate::image_cache::clear_registry_access_token().await;
-                            warn!("run CLI access refresh timed out; cleared the cached run CLI token");
-                        }
-                    }
+                    let access = refresh_agent_access(cfg, http).await?;
+                    vm.cache_run_cli_access_token(&access.access_token).await;
+                    crate::image_cache::cache_registry_access_token(&access.access_token).await;
                 }
                 update = probe_updates.recv() => {
                     match update {
@@ -441,6 +459,10 @@ async fn connect_once(
     }
     .await;
 
+    relay.close();
+    vm.set_control_connected(false);
+    vm.clear_run_cli_access_token().await;
+    crate::image_cache::clear_registry_access_token().await;
     writer_task.abort();
     inventory_task.abort();
     connection_result
@@ -458,6 +480,7 @@ async fn handle_server_message(
     let db = &sources.db;
     match message {
         BridgeMessageV8::DesiredState(message) => {
+            validate_desired_state(cfg, &message.desired_state)?;
             let desired_state = message.desired_state.clone();
             if desired_state_is_stale(current_desired_state.as_ref(), &desired_state) {
                 let current_version = current_desired_state
@@ -471,6 +494,7 @@ async fn handle_server_message(
                 send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
                 return Ok(());
             }
+            validate_desired_transition(current_desired_state.as_ref(), &desired_state)?;
             let refresh_cache =
                 required_cache_pins_changed(current_desired_state.as_ref(), &desired_state);
             cache_desired_state(db, &desired_state)
@@ -572,7 +596,10 @@ fn normalized_cache_pin_digest(value: &str) -> String {
     normalize_sha256(value).unwrap_or_else(|| value.trim().to_ascii_lowercase())
 }
 
-async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDesiredStateV2> {
+pub(crate) async fn load_cached_desired_state(
+    cfg: &BridgeConfig,
+    db: &Db,
+) -> Option<HostDesiredStateV2> {
     let row = match db.load_desired_state().await {
         Ok(Some(row)) => row,
         Ok(None) => return None,
@@ -597,7 +624,10 @@ async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDe
             return None;
         }
     };
-    if let Err(error) = validate_desired_state(&cfg.host_id, &desired_state) {
+    if row.version < 0 || desired_state.version != row.version as u64 {
+        return None;
+    }
+    if let Err(error) = validate_desired_state(cfg, &desired_state) {
         warn!(error = %error, version = row.version, "cached desired state failed validation");
         return None;
     }
@@ -609,34 +639,6 @@ async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDe
         "loaded cached desired state"
     );
     Some(desired_state)
-}
-
-async fn apply_cached_desired_state(
-    cfg: &BridgeConfig,
-    vm: &VmManager,
-    desired_state: HostDesiredStateV2,
-) -> Result<()> {
-    let version = desired_state.version;
-    let failure_reports = apply_desired_state(
-        cfg,
-        vm,
-        &DesiredStateV8 {
-            protocol_version: BRIDGE_PROTOCOL_VERSION,
-            host_id: cfg.host_id.clone(),
-            desired_state,
-        },
-    )
-    .await?;
-    if failure_reports.is_empty() {
-        info!(version, "applied cached desired state");
-    } else {
-        warn!(
-            version,
-            failure_count = failure_reports.len(),
-            "cached desired state produced vm failure reports while offline"
-        );
-    }
-    Ok(())
 }
 
 async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV2) -> Result<()> {
@@ -658,7 +660,7 @@ async fn apply_desired_state(
     vm: &VmManager,
     message: &DesiredStateV8,
 ) -> Result<Vec<VmReportV2>> {
-    validate_desired_state(&cfg.host_id, &message.desired_state)?;
+    validate_desired_state(cfg, &message.desired_state)?;
     let desired = &message.desired_state;
     let now = now_ms();
     let mut failures = Vec::new();
@@ -726,9 +728,19 @@ async fn reconcile_desired_vm(
     desired_vm: &DesiredVmV2,
     now: i64,
 ) -> Result<()> {
+    if desired_vm.lease_expires_at_unix_ms <= now {
+        delete_vm_if_present(vm, &desired_vm.vm_name).await;
+        anyhow::bail!("desired VM lease expired");
+    }
     if let Some(existing) = vm.get_vm(&desired_vm.vm_name).await {
         let existing_run_id = local_run_id(&existing);
-        if existing_run_id.as_deref() == Some(desired_vm.run_id.as_str()) {
+        if existing_run_id.as_deref() == Some(desired_vm.run_id.as_str())
+            && existing.details.as_ref().is_some_and(|d| {
+                d.owner_user_id == desired_vm.owner_user_id
+                    && d.runtime_execution_id == desired_vm.runtime_execution_id
+                    && d.generation == desired_vm.generation
+            })
+        {
             return Ok(());
         }
         warn!(
@@ -755,6 +767,9 @@ async fn reconcile_desired_vm(
     let peer_vm_aliases = desired_peer_vm_aliases(desired, desired_vm);
 
     vm.create_scenario_vm(CreateScenarioVmRequest {
+        owner_user_id: desired_vm.owner_user_id.clone(),
+        runtime_execution_id: desired_vm.runtime_execution_id.clone(),
+        generation: desired_vm.generation,
         name: desired_vm.vm_name.clone(),
         run_id: desired_vm.run_id.clone(),
         image: image_cache_key(&desired_vm.image_key),
@@ -803,6 +818,149 @@ async fn delete_vm_if_present(vm: &VmManager, vm_name: &str) {
 mod reporting;
 use reporting::*;
 mod transport;
+pub(crate) use transport::bootstrap_agent_access;
 use transport::*;
 #[cfg(test)]
 mod tests;
+
+/// Refuse startup before any cache, networking, readiness or VM work if local
+/// records cannot be attributed to the current enrolled host and assignment.
+pub(crate) async fn validate_restart(
+    cfg: &BridgeConfig,
+    db: &Db,
+    rows: &[crate::db::VmRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let desired = load_cached_desired_state(cfg, db)
+        .await
+        .context("persisted VMs require a valid desired state for this host")?;
+    for row in rows {
+        cfg.validate_owner(
+            &row.owner_user_id,
+            &row.runtime_execution_id,
+            u64::try_from(row.generation).context("invalid persisted generation")?,
+        )?;
+        anyhow::ensure!(
+            desired.vms.iter().any(|vm| vm.vm_name == row.name
+                && Some(vm.run_id.as_str()) == row.run_id.as_deref()
+                && vm.owner_user_id == row.owner_user_id
+                && vm.runtime_execution_id == row.runtime_execution_id
+                && vm.generation == row.generation as u64),
+            "persisted VM execution differs from desired state"
+        );
+    }
+    Ok(())
+}
+
+fn validate_relay_identity(
+    cfg: &BridgeConfig,
+    session_id: &str,
+    credentials: Option<&intar_contracts::bridge::HostRelayCredentials>,
+) -> Result<()> {
+    if let Some(credentials) = credentials {
+        anyhow::ensure!(
+            credentials.identity.host_id == cfg.host_id
+                && credentials.identity.credential_generation == cfg.credential_generation
+                && credentials.identity.session_id == session_id,
+            "relay control session identity mismatch"
+        );
+    }
+    Ok(())
+}
+
+async fn update_relay(
+    relay: &mut crate::relay::RelayRunner,
+    cfg: &BridgeConfig,
+    vm: &VmManager,
+    credentials: Option<intar_contracts::bridge::HostRelayCredentials>,
+    desired: Option<&HostDesiredStateV2>,
+) -> Result<()> {
+    use intar_contracts::stargate::{RelayService, RelayTarget};
+    let mut assignments = Vec::new();
+    if let Some(credentials) = &credentials {
+        anyhow::ensure!(
+            credentials.identity.host_id == cfg.host_id
+                && credentials.identity.credential_generation == cfg.credential_generation,
+            "relay host identity mismatch"
+        );
+        if let Some(desired) = desired {
+            for target in &desired.vms {
+                if target.desired_phase != DesiredVmPhase::Running
+                    || target.lease_expires_at_unix_ms <= now_ms()
+                {
+                    continue;
+                }
+                let Some(local) = vm.get_vm(&target.vm_name).await else {
+                    continue;
+                };
+                let Some(details) = local.details.as_ref() else {
+                    continue;
+                };
+                if details.run_id.as_deref() != Some(target.run_id.as_str())
+                    || details.owner_user_id != target.owner_user_id
+                    || details.runtime_execution_id != target.runtime_execution_id
+                    || details.generation != target.generation
+                {
+                    continue;
+                }
+                let Some(terminal) = vm.committed_terminal_state(&target.vm_name).await else {
+                    continue;
+                };
+                if terminal.state != VmTerminalStateKind::Ready {
+                    continue;
+                }
+                let Some(ip) = details.guest_ip.as_deref() else {
+                    continue;
+                };
+                let address =
+                    std::net::SocketAddr::new(ip.parse().context("invalid local guest IP")?, 22);
+                let remaining = target.lease_expires_at_unix_ms.saturating_sub(now_ms());
+                if remaining <= 0 {
+                    continue;
+                }
+                assignments.push((
+                    RelayTarget {
+                        host: credentials.identity.clone(),
+                        owner_id: target.owner_user_id.clone(),
+                        execution_id: target.runtime_execution_id.clone(),
+                        execution_generation: target.generation,
+                        vm_id: target.vm_id.clone(),
+                        service: RelayService::Ssh,
+                    },
+                    address,
+                    tokio::time::Instant::now() + Duration::from_millis(remaining as u64),
+                ));
+            }
+        }
+    }
+    relay.apply(credentials, assignments).await
+}
+
+fn validate_desired_transition(
+    current: Option<&HostDesiredStateV2>,
+    incoming: &HostDesiredStateV2,
+) -> Result<()> {
+    let Some(current) = current else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        incoming.version != current.version || incoming == current,
+        "desired state changed without a version increment"
+    );
+    for vm in &incoming.vms {
+        for previous in current.vms.iter().filter(|old| old.run_id == vm.run_id) {
+            anyhow::ensure!(
+                vm.owner_user_id == previous.owner_user_id && vm.generation >= previous.generation,
+                "desired execution owner or generation regressed"
+            );
+            anyhow::ensure!(
+                vm.generation != previous.generation
+                    || vm.runtime_execution_id == previous.runtime_execution_id,
+                "desired execution identity changed within one generation"
+            );
+        }
+    }
+    Ok(())
+}

@@ -20,13 +20,6 @@ export function isReportedHostRoleAllowed(
   return reportedRole === persistedRole;
 }
 
-export function resolveScenarioEnabledForHostRole(
-  role: ScenarioHostRole,
-  currentScenarioEnabled: boolean,
-): boolean {
-  return role === "agent" && currentScenarioEnabled;
-}
-
 export interface ScenarioLaunchHostCandidate {
   role: ScenarioHostRole;
   disabled: boolean;

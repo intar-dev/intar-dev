@@ -5,7 +5,8 @@ run-name: >-
       || format('Website release main @ {0}', github.sha) }}
 
 # One lane for the website: validate and smoke on every change, then release
-# the tested artifact. A push to main deploys it. A manual dispatch may deploy
+# the tested artifact. The personal-metal rollout guard blocks normal deploys.
+# Otherwise, a push to main deploys it. A manual dispatch may deploy
 # deliberately (maintenance on or off, or the registry delete campaign) or
 # validate only, which is what the default operation does.
 
@@ -20,6 +21,21 @@ on:
         options:
           - validate
           - deploy
+          - metal-deploy
+          - metal-open-platform-registration
+          - metal-open-admission
+      metal_revision:
+        description: Full commit SHA; keep main at this revision for every metal action
+        type: string
+      metal_deploy_run_id:
+        description: Prior metal-deploy run ID for recovery; successful run required for open actions
+        type: string
+      metal_checks:
+        description: Fleet checks JSON for an open action; record actual checks only
+        type: string
+      metal_proof_artifact_id:
+        description: Admission only; artifact containing personal-metal-proof.evidence from the actual NAT tests
+        type: string
       maintenance:
         description: auto follows pending migrations, on holds the control plane closed for a deliberate release, off returns the release to service
         required: false
@@ -167,9 +183,9 @@ jobs:
           name: website-dist-${{ github.sha }}
           path: apps/web/dist
           include-hidden-files: true
-          overwrite: true
+          overwrite: ${{ !startsWith(inputs.operation, 'metal-') }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: ${{ inputs.operation == 'metal-deploy' && 90 || 1 }}
 
       - name: Record the tested artifact identity
         id: artifact
@@ -259,12 +275,15 @@ jobs:
     needs:
       - validate
       - ui
-    # A push to main releases the revision its tests proved. A manual dispatch
-    # deploys only when it asked for the deploy operation.
+    # During this rollout, only explicit metal actions may reach production.
+    # The guard must be a repository variable, available before jobs start.
     if: >-
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))
+      ((vars.PERSONAL_METAL_ROLLOUT != 'active' &&
+        (github.event_name == 'push' ||
+         (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))) ||
+       (vars.PERSONAL_METAL_ROLLOUT == 'active' && github.event_name == 'workflow_dispatch' &&
+        contains(fromJSON('["metal-deploy","metal-open-platform-registration","metal-open-admission"]'), inputs.operation)))
     runs-on: namespace-profile-intar-dev
     env:
       BUCKET: intar-dev-vm-image-registry-20260709
@@ -274,6 +293,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       static_pin_json: ${{ steps.pin.outputs.static_pin_json }}
+      metal_action: ${{ steps.request.outputs.metal_action }}
       maintenance: ${{ steps.request.outputs.maintenance }}
       registry_cleanup_mode: ${{ steps.request.outputs.registry_cleanup_mode }}
       artifact_id: ${{ needs.validate.outputs.artifact_id }}
@@ -284,6 +304,11 @@ jobs:
         id: request
         env:
           EVENT_NAME: ${{ github.event_name }}
+          OPERATION: ${{ inputs.operation }}
+          METAL_REVISION: ${{ inputs.metal_revision }}
+          METAL_DEPLOY_RUN_ID: ${{ inputs.metal_deploy_run_id }}
+          METAL_CHECKS: ${{ inputs.metal_checks }}
+          METAL_PROOF_ARTIFACT_ID: ${{ inputs.metal_proof_artifact_id }}
           CONFIRMATION: ${{ inputs.confirmation }}
           REQUESTED_MAINTENANCE: ${{ inputs.maintenance || 'auto' }}
           REQUESTED_CLEANUP_MODE: ${{ inputs.registry_cleanup_mode || 'preserve' }}
@@ -307,6 +332,35 @@ jobs:
               exit 1
               ;;
           esac
+          metal_action=""
+          case "${OPERATION}" in
+            metal-deploy|metal-open-platform-registration|metal-open-admission)
+              # Use a fresh dispatch for recovery; never replace source artifacts.
+              test "${GITHUB_RUN_ATTEMPT}" = 1
+              [[ "${METAL_REVISION}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+              test "${METAL_REVISION}" = "${GITHUB_SHA}"
+              test "${REQUESTED_MAINTENANCE}" = auto
+              test "${REQUESTED_CLEANUP_MODE}" = preserve
+              metal_action="${OPERATION#metal-}"
+              if [ "${metal_action}" = deploy ]; then
+                test -z "${METAL_CHECKS}${METAL_PROOF_ARTIFACT_ID}"
+                if [ -n "${METAL_DEPLOY_RUN_ID}" ]; then
+                  [[ "${METAL_DEPLOY_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+                fi
+                REQUESTED_MAINTENANCE=on
+              else
+                [[ "${METAL_DEPLOY_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+                printf '%s' "${METAL_CHECKS}" | jq -e --arg sha "${GITHUB_SHA}" '.revision == $sha' >/dev/null
+                REQUESTED_MAINTENANCE=off
+                if [ "${metal_action}" = open-admission ]; then
+                  [[ "${METAL_PROOF_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+                else
+                  test -z "${METAL_PROOF_ARTIFACT_ID}"
+                fi
+              fi
+              ;;
+          esac
+          printf 'metal_action=%s\n' "${metal_action}" >> "${GITHUB_OUTPUT}"
           case "${REQUESTED_MAINTENANCE}" in
             auto|on|off) ;;
             *) echo 'maintenance must be auto, on, or off' >&2; exit 1 ;;
@@ -334,6 +388,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Resolve the verified guest-tools pin
+        if: steps.request.outputs.metal_action == '' || (steps.request.outputs.metal_action == 'deploy' && inputs.metal_deploy_run_id == '')
         id: pin
         env:
           GH_TOKEN: ${{ github.token }}
@@ -464,7 +519,7 @@ jobs:
         # An explicit prerequisite: only a dispatch that asked for delete turns
         # this on. It runs before the deploy job closes the plane, because the
         # registry sits behind the maintenance fence.
-        if: steps.request.outputs.registry_cleanup_mode == 'delete'
+        if: steps.request.outputs.metal_action == '' && steps.request.outputs.registry_cleanup_mode == 'delete'
         env:
           REGISTRY_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |
@@ -489,6 +544,10 @@ jobs:
 
   deploy:
     name: Deploy production
+    # Guard the whole job, including always() cleanup, during the metal rollout.
+    if: >-
+      (vars.PERSONAL_METAL_ROLLOUT != 'active' && needs.plan.outputs.metal_action == '') ||
+      (vars.PERSONAL_METAL_ROLLOUT == 'active' && needs.plan.outputs.metal_action != '')
     needs:
       - plan
     runs-on: namespace-profile-intar-dev
@@ -528,13 +587,89 @@ jobs:
               ;;
           esac
 
+      - name: Restore metal retirement evidence
+        if: needs.plan.outputs.metal_action != '' && inputs.metal_deploy_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.metal_deploy_run_id }}
+          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
+          PROOF_ARTIFACT_ID: ${{ inputs.metal_proof_artifact_id }}
+        run: |
+          set -euo pipefail
+          source_run="${RUNNER_TEMP}/metal-source-run.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" > "${source_run}"
+          jq -e --arg sha "${GITHUB_SHA}" --arg action "${METAL_ACTION}" '
+            .head_sha == $sha and .head_branch == "main" and
+            .path == ".github/workflows/website.yml" and .event == "workflow_dispatch" and
+            .status == "completed" and ($action == "deploy" or .conclusion == "success")
+          ' "${source_run}" >/dev/null
+          artifact_name="personal-metal-${GITHUB_SHA}-${SOURCE_RUN_ID}-1"
+          if [ "${METAL_ACTION}" = deploy ]; then
+            artifact_name="personal-metal-inputs-${GITHUB_SHA}-${SOURCE_RUN_ID}"
+          fi
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts" \
+            > "${RUNNER_TEMP}/metal-source-artifacts.json"
+          artifact_id="$(jq -er --arg name "${artifact_name}" '
+            [.artifacts[] | select(.name == $name and .expired == false)] |
+            select(length == 1) | .[0].id
+          ' "${RUNNER_TEMP}/metal-source-artifacts.json")"
+          # Verify immutable artifact bytes before extracting any evidence.
+          download_evidence() {
+            local id="$1" destination="$2" metadata archive digest
+            metadata="${RUNNER_TEMP}/metal-artifact-${id}.json"
+            archive="${RUNNER_TEMP}/metal-artifact-${id}.zip"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" > "${metadata}"
+            jq -e --arg sha "${GITHUB_SHA}" '
+              .expired == false and .workflow_run.head_sha == $sha and
+              (.digest | test("^sha256:[0-9a-f]{64}$"))
+            ' "${metadata}" >/dev/null
+            digest="$(jq -er .digest "${metadata}")"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" > "${archive}"
+            test "$(sha256sum "${archive}" | cut -d ' ' -f 1)" = "${digest#sha256:}"
+            python3 - "${archive}" "${destination}" <<'PYTHON'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              for name in archive.namelist():
+                  if name.startswith("/") or ".." in name.split("/"):
+                      sys.exit("unsafe artifact member: " + name)
+              archive.extractall(sys.argv[2])
+          PYTHON
+          }
+          prior="${RUNNER_TEMP}/metal-prior"
+          download_evidence "${artifact_id}" "${prior}"
+          jq -e --arg sha "${GITHUB_SHA}" '
+            .action == "deploy" and .revision == $sha and (.buildRunId | test("^[1-9][0-9]*$"))
+          ' "${prior}/release.json" >/dev/null
+          mkdir -p "${RUNNER_TEMP}/personal-metal"
+          cp "${prior}/release-static-pin.json" "${prior}/release.json" "${RUNNER_TEMP}/personal-metal/"
+          if [ "${METAL_ACTION}" != deploy ]; then
+            jq -e --arg sha "${GITHUB_SHA}" '
+              .revision == $sha and (.runtimeRetiredAt | type == "number")
+            ' "${prior}/deploy.json" >/dev/null
+            cp "${prior}/deploy.json" "${RUNNER_TEMP}/personal-metal/"
+          fi
+          if [ -n "${PROOF_ARTIFACT_ID}" ]; then
+            download_evidence "${PROOF_ARTIFACT_ID}" "${RUNNER_TEMP}/metal-proof"
+            test -s "${RUNNER_TEMP}/metal-proof/personal-metal-proof.evidence"
+            cp "${RUNNER_TEMP}/metal-artifact-${PROOF_ARTIFACT_ID}.json" \
+              "${RUNNER_TEMP}/personal-metal/proof-artifact.json"
+          fi
+
       - name: Download tested deployment artifact
         env:
           GH_TOKEN: ${{ github.token }}
           TESTED_ARTIFACT_ID: ${{ needs.plan.outputs.artifact_id }}
           TESTED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.artifact_digest }}
+          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
         run: |
           set -euo pipefail
+          source_run_id="${GITHUB_RUN_ID}"
+          if [ -f "${RUNNER_TEMP}/personal-metal/release.json" ]; then
+            receipt="${RUNNER_TEMP}/personal-metal/release.json"
+            TESTED_ARTIFACT_ID="$(jq -er .buildArtifactId "${receipt}")"
+            TESTED_ARTIFACT_DIGEST="$(jq -er .buildArtifactDigest "${receipt}")"
+            source_run_id="$(jq -er .buildRunId "${receipt}")"
+          fi
           [[ "${TESTED_ARTIFACT_ID}" =~ ^[0-9]+$ ]]
           [[ "${TESTED_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           expected_digest="${TESTED_ARTIFACT_DIGEST#sha256:}"
@@ -542,10 +677,10 @@ jobs:
           artifact_json="${RUNNER_TEMP}/website-dist-artifact.json"
           gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${TESTED_ARTIFACT_ID}" \
             > "${artifact_json}"
-          # The artifact must be this run's, for this revision, unexpired, and
-          # carry the digest the validate job recorded.
+          # Reopen uses the original metal deploy build. Other releases use
+          # this run's build. Both require the recorded identity and digest.
           jq -e \
-            --arg run "${GITHUB_RUN_ID}" \
+            --arg run "${source_run_id}" \
             --arg name "${artifact_name}" \
             --arg expected "${expected_digest}" '
             .name == $name and
@@ -571,6 +706,14 @@ jobs:
               archive.extractall(destination)
           PY
           test -f "${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
+          if [ "${METAL_ACTION}" = deploy ] && [ ! -f "${RUNNER_TEMP}/personal-metal/release.json" ]; then
+            mkdir -p "${RUNNER_TEMP}/personal-metal"
+            jq -n --arg revision "${GITHUB_SHA}" --arg run "${GITHUB_RUN_ID}" \
+              --arg id "${TESTED_ARTIFACT_ID}" --arg digest "${TESTED_ARTIFACT_DIGEST}" \
+              '{action: "deploy", revision: $revision, buildRunId: $run,
+                buildArtifactId: $id, buildArtifactDigest: $digest}' \
+              > "${RUNNER_TEMP}/personal-metal/release.json"
+          fi
 
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
@@ -644,6 +787,7 @@ jobs:
 
       - name: Inject the verified ABI 2 guest-tools pin
         env:
+          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
           GUEST_TOOLS_PIN_JSON: ${{ needs.plan.outputs.static_pin_json }}
           MAINTENANCE_MODE: ${{ needs.plan.outputs.maintenance }}
         run: |
@@ -652,6 +796,9 @@ jobs:
             auto|on|off) ;;
             *) echo "maintenance input must be auto, on, or off" >&2; exit 1 ;;
           esac
+          if [ -f "${RUNNER_TEMP}/personal-metal/release-static-pin.json" ]; then
+            GUEST_TOOLS_PIN_JSON="$(cat "${RUNNER_TEMP}/personal-metal/release-static-pin.json")"
+          fi
           if [ -z "${GUEST_TOOLS_PIN_JSON}" ]; then
             echo 'SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON is not set.' >&2
             echo 'The ABI 2 release has no dynamic channel fallback, so the' >&2
@@ -663,6 +810,9 @@ jobs:
           printf '%s' "${GUEST_TOOLS_PIN_JSON}" > "${pin_file}"
           bun tools/deploy/guest-tools-pin.ts check --pin "${pin_file}" > "${pin_check}"
           jq -e '.status == "valid"' "${pin_check}" >/dev/null
+          if [ "${METAL_ACTION}" = deploy ]; then
+            cp "${pin_file}" "${RUNNER_TEMP}/personal-metal/release-static-pin.json"
+          fi
           # The Worker reads this variable as a JSON string and then parses it,
           # so store the serialized form. The assertion checks the type and that
           # parsing it returns the verified pin; an object is not accepted.
@@ -708,6 +858,7 @@ jobs:
             >> "${GITHUB_ENV}"
 
       - name: Plan production D1 migrations
+        if: needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy'
         id: migrations
         run: |
           set -euo pipefail
@@ -736,7 +887,7 @@ jobs:
             >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Rehearse pending migrations on disposable D1
-        if: steps.migrations.outputs.pending == 'true'
+        if: (needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy') && steps.migrations.outputs.pending == 'true'
         env:
           # Step outputs travel through the environment, never interpolated
           # into the command line.
@@ -747,12 +898,13 @@ jobs:
             --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
 
       - name: Capture pre-migration D1 evidence
-        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'
+        if: needs.plan.outputs.metal_action == 'deploy' || (needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'))
         env:
           # Both cutover operations, the pin deploy and the return to service,
           # require the drained gate and a whole-fleet zero state. The normal
           # migration path keeps only its original run and artifact checks.
           REQUIRE_DRAINED_GATE: ${{ needs.plan.outputs.maintenance != 'auto' }}
+          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
         run: |
           set -euo pipefail
           d1_info="${RUNNER_TEMP}/production-d1-info.json"
@@ -785,6 +937,10 @@ jobs:
             test("^[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{32}$")
             )
           ' "${bookmark}" >/dev/null
+
+          # Metal retirement preserves incomplete uploads and ends active work.
+          # Its own transaction checks the closed gates after maintenance.
+          if [ "${METAL_ACTION}" = deploy ]; then exit 0; fi
 
           d1_readonly_query() {
             local sql="$1"
@@ -923,9 +1079,57 @@ jobs:
             "${child_present}" "${REGISTRY_CLEANUP_INTENT}" "${resolved}" "${live_mode}" \
             >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Retain immutable personal-metal release inputs
+        if: needs.plan.outputs.metal_action == 'deploy'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: personal-metal-inputs-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/personal-metal/release.json
+            ${{ runner.temp }}/personal-metal/release-static-pin.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Run the staged personal-metal action
+        if: needs.plan.outputs.metal_action != ''
+        env:
+          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
+          METAL_CHECKS: ${{ inputs.metal_checks }}
+          PERSONAL_METAL_RELEASE_INPUTS_FILE: ${{ runner.temp }}/personal-metal/release.json
+          COLLECTOR_PRESENT: ${{ steps.registry-cleanup-state.outputs.child_present }}
+        run: |
+          set -euo pipefail
+          # This release uses the existing collector and HOST_RUNTIME namespace.
+          # No bootstrap or normal workflow cleanup may run alongside it.
+          test "${COLLECTOR_PRESENT}" = true
+          config="$(dirname "${DEPLOYMENT_CONFIG}")/wrangler-metal.json"
+          mode=off
+          if [ "${METAL_ACTION}" = deploy ]; then mode=on; fi
+          jq --arg mode "${mode}" '.vars.CONTROL_PLANE_MAINTENANCE = $mode' \
+            "${DEPLOYMENT_CONFIG}" > "${config}"
+          evidence="${RUNNER_TEMP}/personal-metal"
+          args=()
+          if [ "${METAL_ACTION}" != deploy ]; then
+            checks="${evidence}/fleet-checks.json"
+            printf '%s' "${METAL_CHECKS}" | jq . > "${checks}"
+            if [ "${METAL_ACTION}" = open-admission ]; then
+              # Copy actual supporting output; never set proof pass flags here.
+              jq --arg path "${RUNNER_TEMP}/metal-proof/personal-metal-proof.evidence" \
+                '.personalMetalProof.evidencePath = $path' "${checks}" > "${checks}.tmp"
+              mv "${checks}.tmp" "${checks}"
+            fi
+            args+=("${checks}")
+          fi
+          bun tools/deploy/release-personal-metal.ts "${METAL_ACTION}" \
+            "${config}" "${DATABASE_ID}" "${ACTIVATION_SECRETS_FILE}" "${evidence}" "${args[@]}"
+          printf 'Metal action %s completed for %s.\n' "${METAL_ACTION}" "${GITHUB_SHA}" >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${METAL_ACTION}" != open-admission ]; then
+            echo 'Personal registration and scenario admission remain closed. Real VM/NAT proof is still required.' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
       - name: Prepare the parent bootstrap configuration
         working-directory: apps/web
-        if: steps.registry-cleanup-state.outputs.child_present != 'true'
+        if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true')
         run: |
           set -euo pipefail
           # The parent phase that runs before the collector exists omits the
@@ -942,7 +1146,7 @@ jobs:
 
       - name: Prepare maintenance configuration
         working-directory: apps/web
-        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
+        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         run: |
           set -euo pipefail
           config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"
@@ -981,7 +1185,7 @@ jobs:
         # A reopen already holds a paused collector, and the control plane is
         # still closed at this point, so its hold would travel to a fenced
         # route. The release step below is what the reopen needs.
-        if: needs.plan.outputs.maintenance != 'off'
+        if: needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance != 'off')
         env:
           # The collector has no public route: the parent worker holds the
           # service binding, and the gate route on that worker is the only path
@@ -1006,7 +1210,7 @@ jobs:
             "${RUNNER_TEMP}/registry-cleanup-hold.json"
 
       - name: Enable maintenance for pending migrations
-        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
+        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         env:
           WEB_DEPLOY_LABEL: maintenance
         run: |
@@ -1017,7 +1221,7 @@ jobs:
             "${RUNNER_TEMP}/web-maintenance.json"
 
       - name: Drain and recheck maintenance
-        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on'
+        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         run: |
           set -euo pipefail
           sleep 30
@@ -1043,7 +1247,7 @@ jobs:
           test "$(jq -er '.code' "${probe}")" = maintenance
 
       - name: Deploy the parent revision for the first cleanup rollout
-        if: steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto'
+        if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')
         env:
           WEB_DEPLOY_LABEL: bootstrap
         run: |
@@ -1060,7 +1264,7 @@ jobs:
             "${RUNNER_TEMP}/web-bootstrap.json"
 
       - name: Apply pending D1 migrations
-        if: steps.migrations.outputs.pending == 'true'
+        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true')
         env:
           CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
           MIGRATION_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-migrate.json
@@ -1070,6 +1274,7 @@ jobs:
             tee "${RUNNER_TEMP}/production-d1-migrate.log"
 
       - name: Verify production D1 schema
+        if: needs.plan.outputs.metal_action == ''
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/production-d1-verified.json"
@@ -1096,7 +1301,7 @@ jobs:
         # delete-capable collector, it refuses with the operation to run instead
         # of deadlocking on evidence the fenced control plane can not produce.
         id: registry-cleanup-child
-        if: needs.plan.outputs.maintenance == 'off'
+        if: needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance == 'off')
         env:
           REGISTRY_CLEANUP_OPERATION: reopen
         run: |
@@ -1110,7 +1315,7 @@ jobs:
         # verification step above sets skip, and the reopen then only reopens
         # the parent, releases the collector, and runs the campaign. A skipped
         # verification step leaves skip empty, so every other path still deploys.
-        if: steps.registry-cleanup-child.outputs.skip != 'true'
+        if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-child.outputs.skip != 'true')
         run: |
           set -euo pipefail
           # Astro builds this auxiliary worker next to the parent configuration,
@@ -1147,6 +1352,7 @@ jobs:
             "${RUNNER_TEMP}/registry-cleanup-deploy.json"
 
       - name: Deploy production at 100 percent
+        if: needs.plan.outputs.metal_action == ''
         env:
           WEB_DEPLOY_LABEL: standard
         run: |
@@ -1161,7 +1367,7 @@ jobs:
         # and the reopen operation releases it after its maintenance-off deploy.
         # A paused collector can not retire anything, and it can not refuse a
         # learner either.
-        if: always() && needs.plan.outputs.maintenance != 'on'
+        if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: |
@@ -1183,7 +1389,7 @@ jobs:
         # plan must be complete and fault free. That is the evidence a later
         # delete release needs from the report-only rollout before it turns
         # deletes on. A plan is a read, so it deletes nothing.
-        if: always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only'
+        if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: |
@@ -1198,7 +1404,7 @@ jobs:
         # campaign is bounded by passes and by wall clock inside the script,
         # and it proves the result with a fresh report whose keyset digest is
         # the one the finished campaign recorded.
-        if: always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete'
+        if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
           # A full plan takes roughly 90 seconds plus its post-scan, so the
@@ -1215,6 +1421,31 @@ jobs:
       - name: Remove runtime secret file
         if: always() && steps.runtime-secrets.outcome != 'skipped'
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
+
+      - name: Collect personal-metal diagnostics
+        if: always() && needs.plan.outputs.metal_action != ''
+        run: |
+          set -euo pipefail
+          destination="${RUNNER_TEMP}/personal-metal/diagnostics"
+          mkdir -p "${destination}"
+          for item in production-d1-plan.json d1-removal-rehearsal.json \
+            production-d1-info.json production-d1-bookmark.json registry-cleanup-mode.json \
+            "intar-web-deploy-${GITHUB_RUN_ID}-metal-closed" \
+            "intar-web-deploy-${GITHUB_RUN_ID}-metal-registration" \
+            "intar-registry-cleanup-gate-${GITHUB_RUN_ID}"; do
+            if [ -e "${RUNNER_TEMP}/${item}" ]; then
+              cp -R "${RUNNER_TEMP}/${item}" "${destination}/"
+            fi
+          done
+
+      - name: Retain personal-metal evidence
+        if: always() && needs.plan.outputs.metal_action != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: personal-metal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/personal-metal/
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Retain deployment evidence
         if: always()

@@ -17,6 +17,8 @@ use crate::{
     },
 };
 
+const OUTPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Clone)]
 pub struct SshProxyServer {
     state: GatewayState,
@@ -32,7 +34,10 @@ pub struct SshConnection {
 }
 
 enum ChannelState {
-    Pending { pty: Option<PtySpec> },
+    Pending {
+        pty: Option<PtySpec>,
+        output: Arc<russh::ChannelWriteHalf<Msg>>,
+    },
     Active(ActiveBridge),
 }
 
@@ -220,8 +225,15 @@ impl server::Handler for SshConnection {
                 .await;
             return Ok(());
         }
-        self.channels
-            .insert(channel.id(), ChannelState::Pending { pty: None });
+        let id = channel.id();
+        let (_, output) = channel.split();
+        self.channels.insert(
+            id,
+            ChannelState::Pending {
+                pty: None,
+                output: Arc::new(output),
+            },
+        );
         reply.accept().await;
         Ok(())
     }
@@ -242,7 +254,7 @@ impl server::Handler for SshConnection {
             .get_mut(&channel)
             .ok_or_else(|| anyhow::anyhow!("channel {channel:?} not found"))?;
         match state {
-            ChannelState::Pending { pty } => {
+            ChannelState::Pending { pty, .. } => {
                 *pty = Some(PtySpec {
                     term: term.to_owned(),
                     cols: col_width as u16,
@@ -278,6 +290,10 @@ impl server::Handler for SshConnection {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("route missing for shell request"))?;
         let pty = self.pty_for(channel);
+        let Some(output) = self.pending_output(channel) else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
         let handle = session.handle();
         let Some(connection) = self.connection_lease.as_ref() else {
             session.channel_failure(channel)?;
@@ -296,6 +312,7 @@ impl server::Handler for SshConnection {
             return Ok(());
         }
         let (controller, events) = spawn_pty_bridge(
+            self.state.host_relays.clone(),
             route,
             PtyBridgeOptions {
                 term: pty.term,
@@ -305,7 +322,7 @@ impl server::Handler for SshConnection {
             },
             lease.token(),
         )?;
-        tokio::spawn(forward_bridge_events(handle, channel, events));
+        tokio::spawn(forward_bridge_events(output, events, lease.token()));
         self.channels.insert(
             channel,
             ChannelState::Active(ActiveBridge {
@@ -334,6 +351,10 @@ impl server::Handler for SshConnection {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("route missing for exec request"))?;
         let command = std::str::from_utf8(data)?.to_owned();
+        let Some(output) = self.pending_output(channel) else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
         let handle = session.handle();
         let Some(connection) = self.connection_lease.as_ref() else {
             session.channel_failure(channel)?;
@@ -353,10 +374,11 @@ impl server::Handler for SshConnection {
         }
 
         let active = if let Some(pty) = self.channels.get(&channel).and_then(|state| match state {
-            ChannelState::Pending { pty } => pty.clone(),
+            ChannelState::Pending { pty, .. } => pty.clone(),
             ChannelState::Active(_) => None,
         }) {
             let (controller, events) = spawn_pty_bridge(
+                self.state.host_relays.clone(),
                 route,
                 PtyBridgeOptions {
                     term: pty.term,
@@ -366,14 +388,19 @@ impl server::Handler for SshConnection {
                 },
                 lease.token(),
             )?;
-            tokio::spawn(forward_bridge_events(handle, channel, events));
+            tokio::spawn(forward_bridge_events(output, events, lease.token()));
             ActiveBridge {
                 controller: BridgeController::Pty(controller),
                 _lease: lease,
             }
         } else {
-            let (controller, events) = spawn_exec_bridge(route, command, lease.token())?;
-            tokio::spawn(forward_bridge_events(handle, channel, events));
+            let (controller, events) = spawn_exec_bridge(
+                self.state.host_relays.clone(),
+                route,
+                command,
+                lease.token(),
+            )?;
+            tokio::spawn(forward_bridge_events(output, events, lease.token()));
             ActiveBridge {
                 controller: BridgeController::Exec(controller),
                 _lease: lease,
@@ -531,9 +558,16 @@ impl SshConnection {
         })
     }
 
+    fn pending_output(&self, channel: ChannelId) -> Option<Arc<russh::ChannelWriteHalf<Msg>>> {
+        match self.channels.get(&channel) {
+            Some(ChannelState::Pending { output, .. }) => Some(output.clone()),
+            _ => None,
+        }
+    }
+
     fn pty_for(&self, channel: ChannelId) -> PtySpec {
         match self.channels.get(&channel) {
-            Some(ChannelState::Pending { pty: Some(pty) }) => pty.clone(),
+            Some(ChannelState::Pending { pty: Some(pty), .. }) => pty.clone(),
             _ => PtySpec {
                 term: "xterm-256color".to_owned(),
                 cols: 80,
@@ -567,25 +601,40 @@ fn server_config() -> russh::server::Config {
 }
 
 async fn forward_bridge_events(
-    handle: server::Handle,
-    channel: ChannelId,
+    output: Arc<russh::ChannelWriteHalf<Msg>>,
     mut events: tokio::sync::mpsc::Receiver<BridgeEvent>,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
-    while let Some(event) = events.recv().await {
-        match event {
-            BridgeEvent::Stdout(data) => {
-                let _ = handle.data(channel, data).await;
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            event = events.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+        };
+        let exiting = matches!(event, BridgeEvent::Exit(_));
+        // Handle::data bypasses the peer's window and grows russh's pending
+        // queue. The channel writer reserves window space before each send.
+        let send = async {
+            match event {
+                BridgeEvent::Stdout(data) => output.data_bytes(data).await,
+                BridgeEvent::Stderr(data) => output.extended_data_bytes(1, data).await,
+                BridgeEvent::Exit(status) => output.exit_status(status).await,
             }
-            BridgeEvent::Stderr(data) => {
-                let _ = handle.extended_data(channel, 1, data).await;
-            }
-            BridgeEvent::Exit(exit_status) => {
-                let _ = handle.exit_status_request(channel, exit_status).await;
-                let _ = handle.close(channel).await;
-                break;
-            }
+        };
+        let sent = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            result = tokio::time::timeout(OUTPUT_WRITE_TIMEOUT, send) => matches!(result, Ok(Ok(()))),
+        };
+        if !sent || exiting {
+            break;
         }
     }
+    cancel.cancel();
+    let _ = tokio::time::timeout(OUTPUT_WRITE_TIMEOUT, output.close()).await;
 }
 
 #[cfg(test)]
@@ -669,8 +718,10 @@ mod tests {
                 attachment_id: "attachment-01".to_owned(),
                 target: TerminalTarget {
                     username: "ubuntu".to_owned(),
-                    host: "127.0.0.1".to_owned(),
-                    port: 22,
+                    transport: stargate_core::SshTargetTransport::Direct {
+                        host: "127.0.0.1".to_owned(),
+                        port: 22,
+                    },
                     host_key_openssh: "target-host-key".to_owned(),
                     private_key_openssh: "target-private-key".to_owned(),
                     authorized_client_public_keys_openssh: vec![key.to_owned()],

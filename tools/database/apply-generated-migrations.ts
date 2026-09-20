@@ -13,6 +13,7 @@ import {
   type D1WriteClient,
 } from "./d1-rest-client";
 import { verifyGeneratedD1Schema } from "./generated-d1-schema";
+import { preserveHostReferences } from "./preserve-host-references";
 
 const migrationsFolder = fileURLToPath(
   new URL("../../apps/web/migrations", import.meta.url),
@@ -108,7 +109,9 @@ export function generatedMigrationBatch(
     );
   }
   return [
-    ...migration.statements.map((sql) => ({ sql })),
+    ...(migration.tag === "0023_fuzzy_mastermind"
+      ? preserveHostReferences(migration.statements)
+      : migration.statements.map((sql) => ({ sql }))),
     {
       sql: "INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)",
       params: [migration.hash, migration.folderMillis],

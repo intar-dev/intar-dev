@@ -366,7 +366,8 @@ function scenarioRunRuntimeProjectionStatements(
              WHERE run.run_id = ?1
            )
            AND domain_kind = 'scenario'
-           AND domain_id = ?1`,
+           AND domain_id = ?1
+           AND state <> 'archived'`,
       )
       .bind(runId),
     d1
@@ -392,6 +393,8 @@ function scenarioRunRuntimeProjectionStatements(
          WHERE run.run_id = ?1
            AND run.active_key IS NOT NULL
            AND run.runtime_execution_id IS NOT NULL
+           AND EXISTS (SELECT 1 FROM runtime_executions execution
+             WHERE execution.id = run.runtime_execution_id AND execution.state <> 'archived')
            AND NOT EXISTS (
              SELECT 1
              FROM active_runtime_slots slot
@@ -701,6 +704,9 @@ export async function updateRuntimeExecutionState(input: {
 export async function recordRuntimeVmTerminalTarget(input: {
   executionId: string;
   expectedGeneration: number;
+  hostId: string;
+  expectedHostSessionId: string;
+  expectedHostCredentialGeneration: number;
   vmId: string;
   target: {
     host: string;
@@ -764,8 +770,13 @@ export async function recordRuntimeVmTerminalTarget(input: {
        AND EXISTS (
          SELECT 1
          FROM runtime_executions current
+         INNER JOIN agent_hosts host ON host.id = current.host_id
          WHERE current.id = runtime_vms.execution_id
            AND current.generation = ?
+           AND host.id = ?
+           AND host.active_session_id = ?
+           AND host.credential_generation = ?
+           AND host.disabled = 0
            AND current.state NOT IN ('archived', 'failed')
            AND NOT EXISTS (
              SELECT 1 FROM runtime_executions newer
@@ -788,6 +799,9 @@ export async function recordRuntimeVmTerminalTarget(input: {
       execution.id,
       observedAt,
       input.expectedGeneration,
+      input.hostId,
+      input.expectedHostSessionId,
+      input.expectedHostCredentialGeneration,
     )
     .run();
   if (changes(result) !== 1) {
@@ -796,9 +810,13 @@ export async function recordRuntimeVmTerminalTarget(input: {
       input.expectedGeneration,
     );
     const current = await env.DB.prepare(
-      "SELECT terminal_observed_at FROM runtime_vms WHERE id = ?",
+      "SELECT vm.terminal_observed_at FROM runtime_vms vm " +
+      "JOIN runtime_executions execution ON execution.id = vm.execution_id " +
+      "JOIN agent_hosts host ON host.id = execution.host_id " +
+      "WHERE vm.id = ? AND host.id = ? AND host.active_session_id = ? " +
+      "AND host.credential_generation = ? AND host.disabled = 0",
     )
-      .bind(vm.id)
+      .bind(vm.id, input.hostId, input.expectedHostSessionId, input.expectedHostCredentialGeneration)
       .first<{ terminal_observed_at: number | null }>();
     if ((current?.terminal_observed_at ?? -1) <= observedAt) {
       throw runtimeGenerationStale(execution);

@@ -134,6 +134,69 @@
       "when": 1789554953102,
       "tag": "0018_exotic_deathbird",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1789592987129,
+      "tag": "0019_military_lightspeed",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1789593327970,
+      "tag": "0020_noisy_plazm",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1789593970830,
+      "tag": "0021_greedy_trish_tilby",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1789857547022,
+      "tag": "0022_petite_colleen_wing",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1789857557047,
+      "tag": "0023_fuzzy_mastermind",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1789857870653,
+      "tag": "0024_white_masque",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1789859298785,
+      "tag": "0025_cheerful_sway",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1789859847241,
+      "tag": "0026_groovy_doctor_octopus",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1789860736007,
+      "tag": "0027_real_big_bertha",
+      "breakpoints": true
     }
   ]
 }

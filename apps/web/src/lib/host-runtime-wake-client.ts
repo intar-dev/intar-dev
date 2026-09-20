@@ -18,11 +18,14 @@ export async function wakeHostRuntimeViaNamespace(
     body: JSON.stringify({ hostId }),
   });
 
-  await withTimeout(
+  const response = await withTimeout(
     stub.fetch(request),
     HOST_RUNTIME_WAKE_TIMEOUT_MS,
     `host runtime wake timed out for ${hostId}`,
   );
+  if (!response.ok) {
+    throw new Error(`host runtime wake failed for ${hostId}: ${response.status}`);
+  }
 }
 
 export async function tryWakeHostRuntimeViaNamespace(

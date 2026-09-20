@@ -23,6 +23,7 @@ import {
   loadStoredRunLifecycle,
   persistStoredRunLifecycle,
 } from "@/control-plane/agent-run-artifacts/storage";
+import { platformArtifactFixture } from "@/control-plane/agent-run-artifacts/test-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("scenario run artifact ledger", () => {
@@ -128,6 +129,7 @@ describe("scenario run artifact ledger", () => {
     await seedIdentity();
     await insertActiveRun();
     const db = drizzle(env.DB);
+    const runVm = await platformArtifactFixture(env.DB, "vm-1-run-1");
     const stale = await loadStoredRunLifecycle(db, "run-1");
     expect(stale).not.toBeNull();
     if (!stale) return;
@@ -145,7 +147,7 @@ describe("scenario run artifact ledger", () => {
 
     await persistStoredRunLifecycle(
       db,
-      "run-1",
+      runVm,
       stale,
       completed,
       deleteRequestedAt + 1,

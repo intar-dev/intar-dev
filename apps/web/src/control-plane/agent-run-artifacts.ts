@@ -2,6 +2,9 @@ import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import { type SessionTimelineEntry } from "@/lib/run-state";
 import {
+  ArtifactStateConflict,
+  ArtifactWriteFenced,
+  artifactWriteBatch,
   advanceRunVmArchiveStage,
   advanceArtifactUpload,
   artifactMetadataMatches,
@@ -23,6 +26,7 @@ import {
   transitionRunVmToArchiving,
   transitionRunVmToCompleted,
   type ResolvedRunVm,
+  type SourceArtifactState,
 } from "./agent-run-artifacts/storage";
 import {
   archiveStageRankForAgentStage,
@@ -109,6 +113,32 @@ interface TimelineSessionWork {
 }
 
 export async function handleAgentRunArtifactRequest(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response | null> {
+  try {
+    return await dispatchAgentRunArtifactRequest(request, env);
+  } catch (error) {
+    if (error instanceof ArtifactStateConflict) {
+      return jsonResponse(
+        { code: "artifact_state_conflict", error: error.message },
+        409,
+      );
+    }
+    if (error instanceof ArtifactWriteFenced) {
+      return jsonResponse(
+        {
+          code: "artifact_write_fenced",
+          error: "Artifact write identity is no longer current",
+        },
+        410,
+      );
+    }
+    throw error;
+  }
+}
+
+async function dispatchAgentRunArtifactRequest(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response | null> {
@@ -269,7 +299,7 @@ async function handleBeginRunUpload(
     db,
     runId,
     vmName,
-    hostId: verified.agent.hostId,
+    agent: verified.agent,
   });
   if (!runVm) {
     return runPurgedResponse();
@@ -365,6 +395,17 @@ function runBeginSuccessResponse(
   });
 }
 
+function artifactObjectMetadata(runVm: ResolvedRunVm, artifact: SourceArtifactState) {
+  return {
+    artifactId: artifact.id,
+    executionId: runVm.runId,
+    executionGeneration: String(runVm.generation),
+    ownerId: runVm.userId,
+    vmId: runVm.vmId,
+    sha256: artifact.sha256,
+  };
+}
+
 async function handleMultipartBegin(
   request: Request,
   env: Cloudflare.Env,
@@ -396,9 +437,11 @@ async function handleMultipartBegin(
     return artifactWritesSealedResponse();
   }
 
+  await artifactWriteBatch(db.$client, runVm, []);
   const now = Date.now();
   if (artifact.sizeBytes === 0) {
     await env.VM_RUN_ARTIFACTS_BUCKET.put(artifact.r2Key, new Uint8Array(), {
+      customMetadata: artifactObjectMetadata(runVm, artifact),
       httpMetadata: {
         contentType: artifact.contentType,
       },
@@ -423,19 +466,26 @@ async function handleMultipartBegin(
   const multipart = await env.VM_RUN_ARTIFACTS_BUCKET.createMultipartUpload(
     artifact.r2Key,
     {
+      customMetadata: artifactObjectMetadata(runVm, artifact),
       httpMetadata: {
         contentType: artifact.contentType,
       },
     },
   );
 
-  await initializeArtifactUpload({
-    db,
-    runVm,
-    artifact,
-    r2UploadId: multipart.uploadId,
-    updatedAt: now,
-  });
+  try {
+    await initializeArtifactUpload({
+      db,
+      runVm,
+      artifact,
+      r2UploadId: multipart.uploadId,
+      updatedAt: now,
+    });
+  } catch (error) {
+    if (error instanceof ArtifactWriteFenced)
+      await multipart.abort().catch(() => {});
+    throw error;
+  }
 
   return jsonResponse({ done: false, nextExpectedPart: 1 });
 }
@@ -484,6 +534,7 @@ async function handleMultipartPart(
     artifact.r2Key,
     upload.r2UploadId,
   );
+  await artifactWriteBatch(db.$client, runVm, []);
   const uploadedPart = await multipart.uploadPart(partNumber, request.body);
   const uploadedParts = parseUploadedParts(upload.uploadedPartsJson);
   uploadedParts.push({
@@ -491,14 +542,20 @@ async function handleMultipartPart(
     etag: uploadedPart.etag,
   });
 
-  await advanceArtifactUpload({
-    db,
-    runVm,
-    artifact,
-    uploadedParts,
-    nextExpectedPart: partNumber + 1,
-    updatedAt: Date.now(),
-  });
+  try {
+    await advanceArtifactUpload({
+      db,
+      runVm,
+      artifact,
+      uploadedParts,
+      nextExpectedPart: partNumber + 1,
+      updatedAt: Date.now(),
+    });
+  } catch (error) {
+    if (error instanceof ArtifactWriteFenced)
+      await multipart.abort().catch(() => {});
+    throw error;
+  }
 
   return jsonResponse({ ok: true, nextExpectedPart: partNumber + 1 });
 }
@@ -533,9 +590,11 @@ async function handleArtifactComplete(
     return artifactWritesSealedResponse();
   }
 
+  await artifactWriteBatch(db.$client, runVm, []);
   const now = Date.now();
   if (artifact.sizeBytes === 0) {
     await env.VM_RUN_ARTIFACTS_BUCKET.put(artifact.r2Key, new Uint8Array(), {
+      customMetadata: artifactObjectMetadata(runVm, artifact),
       httpMetadata: {
         contentType: artifact.contentType,
       },
@@ -563,14 +622,30 @@ async function handleArtifactComplete(
     artifact.r2Key,
     upload.r2UploadId,
   );
-  await multipart.complete(uploadedParts);
+  try {
+    // R2 may have committed before a lost response or a D1 state conflict.
+    // Recover only this exact artifact; a completed multipart ID cannot be
+    // assumed to remain usable. The D1 write still checks current access.
+    const object = await env.VM_RUN_ARTIFACTS_BUCKET.head(artifact.r2Key)
+      ?? await multipart.complete(uploadedParts);
+    const metadata = artifactObjectMetadata(runVm, artifact);
+    if (object.key !== artifact.r2Key || object.size !== artifact.sizeBytes ||
+        object.httpMetadata?.contentType !== artifact.contentType ||
+        !Object.entries(metadata).every(([key, value]) => object.customMetadata?.[key] === value)) {
+      return jsonResponse({ error: "Stored artifact does not match this upload", code: "artifact_object_conflict" }, 409);
+    }
 
-  await markArtifactUploaded({
-    db,
-    runVm,
-    artifact,
-    uploadedAt: now,
-  });
+    await markArtifactUploaded({
+      db,
+      runVm,
+      artifact,
+      uploadedAt: now,
+    });
+  } catch (error) {
+    if (error instanceof ArtifactWriteFenced)
+      await multipart.abort().catch(() => {});
+    throw error;
+  }
 
   return jsonResponse({ ok: true, uploaded: true });
 }
@@ -819,11 +894,8 @@ async function publishTimelineAtomically(input: {
   if (statements.length > 90) {
     throw new Error("timeline publication statement budget exceeded");
   }
-  if (statements.length === 0) {
-    return "published";
-  }
   try {
-    await input.d1.batch(statements);
+    await artifactWriteBatch(input.d1, input.runVm, statements);
   } catch (error) {
     if (
       input.runVm.domainKind === "scenario" &&

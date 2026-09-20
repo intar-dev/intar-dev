@@ -33,6 +33,46 @@ type StatusMessage =
 describe("HostRuntimeDO run status stream", () => {
   beforeEach(resetHostRuntimeTestDatabase);
 
+  it("serializes broadcasts across runs and keeps only the newest pending revision", async () => {
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName("fanout-queue"));
+    await runInDurableObject(stub, async instance => {
+      type Update = { runId: string; hostId: string; revision: number };
+      const runtime = instance as unknown as {
+        notifyRunStatusInvalidation(input: Update): Promise<void>;
+        scheduleRunStatusInvalidation(input: Update): void;
+      };
+      const original = runtime.notifyRunStatusInvalidation;
+      const updates: Update[] = [];
+      let active = 0;
+      let maxActive = 0;
+      let release!: () => void;
+      const firstBroadcast = new Promise<void>(resolve => { release = resolve; });
+      let done!: () => void;
+      const complete = new Promise<void>(resolve => { done = resolve; });
+      runtime.notifyRunStatusInvalidation = async input => {
+        maxActive = Math.max(maxActive, ++active);
+        updates.push({ ...input });
+        if (updates.length === 1) await firstBroadcast;
+        active--;
+        if (updates.length === 3) done();
+      };
+      try {
+        runtime.scheduleRunStatusInvalidation({ runId: "a", hostId: "host", revision: 1 });
+        runtime.scheduleRunStatusInvalidation({ runId: "b", hostId: "host", revision: 2 });
+        runtime.scheduleRunStatusInvalidation({ runId: "a", hostId: "host", revision: 5 });
+        runtime.scheduleRunStatusInvalidation({ runId: "a", hostId: "host", revision: 3 });
+        release();
+        await complete;
+        expect(maxActive).toBe(1);
+        expect(updates.map(({ runId, revision }) => [runId, revision])).toEqual([
+          ["a", 1], ["b", 2], ["a", 5],
+        ]);
+      } finally {
+        runtime.notifyRunStatusInvalidation = original;
+      }
+    });
+  });
+
   it("sends an invalidation only after the VM report projection commits", async () => {
     const hostId = "host-status-invalidation";
     const runId = "run-status-invalidation";

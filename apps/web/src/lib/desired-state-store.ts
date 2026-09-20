@@ -1,12 +1,12 @@
 import { and, eq, type SQL } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
-import { hostDesiredState } from "@/db/schema";
+import { agentHosts, hostDesiredState } from "@/db/schema";
 import type { HostDesiredStateV2 } from "@/generated/bridge";
 import {
   createEmptyHostDesiredState,
   mutateDesiredState,
   type DesiredStateMutator,
-  upgradeStoredHostDesiredState,
+  validateStoredHostDesiredState,
 } from "@/lib/desired-state";
 
 export async function loadOrCreateHostDesiredState(
@@ -14,6 +14,9 @@ export async function loadOrCreateHostDesiredState(
   hostId: string,
   nowUnixMs: number,
 ): Promise<HostDesiredStateV2> {
+  const [host] = await db.select({ scope: agentHosts.scope, ownerUserId: agentHosts.userId })
+    .from(agentHosts).where(eq(agentHosts.id, hostId)).limit(1);
+  if (!host || !host.scope || !host.ownerUserId) throw new Error("host ownership is not enrolled");
   for (let attempt = 0; attempt < MUTATE_DESIRED_STATE_MAX_ATTEMPTS; attempt++) {
     const rows = await db
       .select({
@@ -25,36 +28,19 @@ export async function loadOrCreateHostDesiredState(
       .limit(1);
     const existing = rows[0];
     if (existing) {
-      const upgraded = upgradeStoredHostDesiredState({
+      const desired = validateStoredHostDesiredState({
         document: existing.docJson,
         hostId,
         rowVersion: existing.version,
         nowUnixMs,
       });
-      if (!upgraded.migrated) {
-        return upgraded.desiredState;
+      if (desired.scope !== host.scope || desired.owner_user_id !== host.ownerUserId) {
+        throw new Error("stored desired state has wrong host owner");
       }
-      const persisted = await db
-        .update(hostDesiredState)
-        .set({
-          version: upgraded.desiredState.version,
-          docJson: upgraded.desiredState,
-          updatedAt: nowUnixMs,
-        })
-        .where(
-          and(
-            eq(hostDesiredState.hostId, hostId),
-            eq(hostDesiredState.version, existing.version),
-          ),
-        )
-        .returning({ version: hostDesiredState.version });
-      if (persisted.length > 0) {
-        return upgraded.desiredState;
-      }
-      continue;
+      return desired;
     }
 
-    const doc = createEmptyHostDesiredState({ hostId, nowUnixMs });
+    const doc = createEmptyHostDesiredState({ hostId, nowUnixMs, scope: host.scope, ownerUserId: host.ownerUserId });
     const inserted = await db
       .insert(hostDesiredState)
       .values({

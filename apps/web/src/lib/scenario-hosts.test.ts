@@ -5,7 +5,6 @@ import {
   isFreshHostHeartbeat,
   isReportedHostRoleAllowed,
   isScenarioLaunchHost,
-  resolveScenarioEnabledForHostRole,
   resolveRequestedHostRole,
 } from "@/lib/scenario-hosts";
 
@@ -27,12 +26,6 @@ describe("scenario host launch eligibility", () => {
     expect(isReportedHostRoleAllowed("agent", "agent")).toBe(true);
     expect(isReportedHostRoleAllowed("builder", "agent")).toBe(false);
     expect(isReportedHostRoleAllowed("agent", "builder")).toBe(false);
-  });
-
-  it("forces scenario scheduling off for builder hosts", () => {
-    expect(resolveScenarioEnabledForHostRole("agent", true)).toBe(true);
-    expect(resolveScenarioEnabledForHostRole("agent", false)).toBe(false);
-    expect(resolveScenarioEnabledForHostRole("builder", true)).toBe(false);
   });
 
   it("allows enabled agent hosts to launch scenarios", () => {

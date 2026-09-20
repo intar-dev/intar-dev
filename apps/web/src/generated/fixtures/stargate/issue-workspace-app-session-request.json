@@ -2,8 +2,6 @@
   "route_id": "01j-workspace-app-argocd",
   "create_only": false,
   "target_username": "user",
-  "target_ip": "10.77.0.2",
-  "target_ssh_port": 22,
   "target_host_key_openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeHostKeyForContractTestsOnly",
   "target_private_key_openssh": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-contract-fixture-only\n-----END OPENSSH PRIVATE KEY-----\n",
   "target_app_port": 30080,
@@ -15,5 +13,10 @@
     "run_id": "runtime-01",
     "vm_id": "workspace",
     "user_id": "user-01"
+  },
+  "transport": {
+    "kind": "direct",
+    "host": "10.77.0.2",
+    "port": 22
   }
 }

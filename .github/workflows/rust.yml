@@ -16,6 +16,8 @@ on:
       - "bun.lock"
       - "content/scenarios/base-images.hcl"
       - "crates/**"
+      - "deploy/personal-metal/**"
+      - "apps/web/public/install.sh"
       - "apps/web/src/generated/**"
   push:
     branches:
@@ -56,6 +58,11 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
+
+      - name: Check personal-host installer
+        run: |
+          python3 -m unittest discover -s deploy/personal-metal -p 'test_*.py'
+          sh -n apps/web/public/install.sh deploy/personal-metal/package.sh
 
       - name: Run workspace checks
         run: just verify

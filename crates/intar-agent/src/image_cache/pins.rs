@@ -115,6 +115,8 @@ mod tests {
 
     fn desired_state(images: Vec<(&str, &str)>, running: Vec<(&str, &str)>) -> HostDesiredStateV2 {
         HostDesiredStateV2 {
+            scope: intar_contracts::bridge::HostScope::Personal,
+            owner_user_id: "user-1".to_string(),
             schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "host-1".to_owned(),
             version: 1,
@@ -135,6 +137,10 @@ mod tests {
             vms: running
                 .into_iter()
                 .map(|(key, digest)| DesiredVmV2 {
+                    vm_id: "vm-1".to_string(),
+                    owner_user_id: "user-1".to_string(),
+                    runtime_execution_id: "execution-1".to_string(),
+                    generation: 1,
                     run_id: "run-1".to_owned(),
                     vm_name: "vm-1".to_owned(),
                     desired_phase: DesiredVmPhase::Running,

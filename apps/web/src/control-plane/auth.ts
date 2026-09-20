@@ -18,6 +18,7 @@ interface BootstrapRequest {
 }
 
 interface JwtPayload {
+  credential_generation: number;
   iss: string;
   aud: string;
   sub: string;
@@ -25,16 +26,17 @@ interface JwtPayload {
   nbf: number;
   exp: number;
   jti: string;
-  /** Exact beta admission that minted a personal-host token; null for org hosts. */
+  /** Exact beta admission that minted a personal-host token; null for platform hosts. */
   beta_source_invite_id: string | null;
   beta_source_lease_id: string | null;
   beta_admission_granted_at: number | null;
 }
 
 export interface VerifiedAgentHost {
+  scope: "personal" | "platform";
+  credentialGeneration: number;
   hostId: string;
   userId: string;
-  organizationId: string | null;
   role: "agent" | "builder";
   betaSourceInviteId: string | null;
   betaSourceLeaseId: string | null;
@@ -61,8 +63,8 @@ export async function handleAgentBootstrap(
     return jsonResponse({ error: "invalid json body" }, 400);
   }
 
-  const hostId = body.hostId?.trim();
-  const bootstrapToken = body.bootstrapToken?.trim();
+  const hostId = typeof body?.hostId === "string" ? body.hostId.trim() : "";
+  const bootstrapToken = typeof body?.bootstrapToken === "string" ? body.bootstrapToken.trim() : "";
   if (!hostId || !bootstrapToken) {
     return jsonResponse(
       { error: "hostId and bootstrapToken are required" },
@@ -79,7 +81,9 @@ export async function handleAgentBootstrap(
       revokedAt: agentBootstrapTokens.revokedAt,
       hostDisabled: agentHosts.disabled,
       hostUserId: agentHosts.userId,
-      hostOrganizationId: agentHosts.organizationId,
+      scope: agentHosts.scope,
+      credentialGeneration: agentHosts.credentialGeneration,
+      tokenCredentialGeneration: agentBootstrapTokens.credentialGeneration,
       betaState: accessAllowlist.state,
       betaSourceInviteId: accessAllowlist.sourceInviteId,
       betaSourceLeaseId: accessAllowlist.sourceLeaseId,
@@ -104,11 +108,15 @@ export async function handleAgentBootstrap(
   if (!match) {
     return jsonResponse({ error: "invalid bootstrap credentials" }, 401);
   }
+  if (!match.scope || match.credentialGeneration < 1 ||
+      match.tokenCredentialGeneration !== match.credentialGeneration) {
+    return jsonResponse({ error: "Install and register this server again" }, 401);
+  }
   if (match.hostDisabled) {
     return jsonResponse({ error: "host is disabled" }, 403);
   }
   if (
-    match.hostOrganizationId === null &&
+    match.scope === "personal" &&
     (match.betaState !== "active" ||
       !match.betaSourceInviteId ||
       !match.betaSourceLeaseId ||
@@ -133,6 +141,7 @@ export async function handleAgentBootstrap(
   const nowSeconds = Math.floor(nowMs / 1000);
 
   const payload: JwtPayload = {
+    credential_generation: match.credentialGeneration,
     iss: issuer,
     aud: audience,
     sub: hostId,
@@ -141,11 +150,11 @@ export async function handleAgentBootstrap(
     exp: nowSeconds + JWT_TTL_SECONDS,
     jti: createAppId(),
     beta_source_invite_id:
-      match.hostOrganizationId === null ? match.betaSourceInviteId : null,
+      match.scope === "personal" ? match.betaSourceInviteId : null,
     beta_source_lease_id:
-      match.hostOrganizationId === null ? match.betaSourceLeaseId : null,
+      match.scope === "personal" ? match.betaSourceLeaseId : null,
     beta_admission_granted_at:
-      match.hostOrganizationId === null ? match.betaGrantedAt : null,
+      match.scope === "personal" ? match.betaGrantedAt : null,
   };
 
   const accessToken = await signJwt(payload, jwtSecret);
@@ -156,6 +165,10 @@ export async function handleAgentBootstrap(
 
   return jsonResponse(
     {
+      hostId,
+      ownerUserId: match.hostUserId,
+      scope: match.scope,
+      credentialGeneration: match.credentialGeneration,
       accessToken,
       expiresAt: new Date(payload.exp * 1000).toISOString(),
       wsUrl: wsUrl.toString(),
@@ -191,6 +204,7 @@ export async function handleAgentConnect(
 
   const headers = new Headers(request.headers);
   headers.set("x-agent-host-id", hostId);
+  headers.set("x-agent-credential-generation", String(verified.agent.credentialGeneration));
   if (verified.agent.betaAdmissionGrantedAt !== null) {
     headers.set(
       "x-agent-beta-source-invite-id",
@@ -270,7 +284,8 @@ export async function requireVerifiedAgentRequest(
     .select({
       id: agentHosts.id,
       userId: agentHosts.userId,
-      organizationId: agentHosts.organizationId,
+      scope: agentHosts.scope,
+      credentialGeneration: agentHosts.credentialGeneration,
       role: agentHosts.role,
       disabled: agentHosts.disabled,
       betaState: accessAllowlist.state,
@@ -293,6 +308,9 @@ export async function requireVerifiedAgentRequest(
       response: jsonResponse({ error: "host not found" }, 404),
     };
   }
+  if (!host.scope || host.credentialGeneration < 1 || payload.credential_generation !== host.credentialGeneration) {
+    return { ok: false, response: jsonResponse({ error: "Server credentials are no longer valid" }, 401) };
+  }
   if (host.disabled) {
     return {
       ok: false,
@@ -300,7 +318,7 @@ export async function requireVerifiedAgentRequest(
     };
   }
   if (
-    host.organizationId === null &&
+    host.scope === "personal" &&
     (host.betaState !== "active" ||
       !host.betaSourceInviteId ||
       !host.betaSourceLeaseId ||
@@ -312,7 +330,7 @@ export async function requireVerifiedAgentRequest(
     };
   }
   if (
-    host.organizationId === null &&
+    host.scope === "personal" &&
     (payload.beta_source_invite_id !== host.betaSourceInviteId ||
       payload.beta_source_lease_id !== host.betaSourceLeaseId ||
       payload.beta_admission_granted_at !== host.betaGrantedAt)
@@ -323,7 +341,7 @@ export async function requireVerifiedAgentRequest(
     };
   }
   if (
-    host.organizationId !== null &&
+    host.scope === "platform" &&
     (payload.beta_source_invite_id !== null ||
       payload.beta_source_lease_id !== null ||
       payload.beta_admission_granted_at !== null)
@@ -337,16 +355,17 @@ export async function requireVerifiedAgentRequest(
   return {
     ok: true,
     agent: {
+      scope: host.scope,
+      credentialGeneration: host.credentialGeneration,
       hostId: host.id,
       userId: host.userId,
-      organizationId: host.organizationId,
       role: host.role,
       betaSourceInviteId:
-        host.organizationId === null ? host.betaSourceInviteId : null,
+        host.scope === "personal" ? host.betaSourceInviteId : null,
       betaSourceLeaseId:
-        host.organizationId === null ? host.betaSourceLeaseId : null,
+        host.scope === "personal" ? host.betaSourceLeaseId : null,
       betaAdmissionGrantedAt:
-        host.organizationId === null ? host.betaGrantedAt : null,
+        host.scope === "personal" ? host.betaGrantedAt : null,
     },
   };
 }
@@ -429,6 +448,8 @@ async function verifyJwt(
     typeof payload.nbf !== "number" ||
     typeof payload.exp !== "number" ||
     typeof payload.jti !== "string" ||
+    !Number.isSafeInteger(payload.credential_generation) ||
+    (payload.credential_generation ?? 0) < 1 ||
     !isValidBetaAdmissionClaims(payload)
   ) {
     return null;

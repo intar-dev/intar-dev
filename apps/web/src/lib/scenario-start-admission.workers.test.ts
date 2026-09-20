@@ -22,6 +22,7 @@ import {
   grantFixtureBetaAccess,
 } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
+import { seedAdmissionGuardFixture } from "@/lib/scenario-runs/admission-test-fixtures";
 
 /**
  * The beta-admission fence of the single admission batch. The old per-step
@@ -32,7 +33,15 @@ import { resetD1Database } from "@/test/d1-migrations";
 describe("scenario start beta-admission fence", () => {
   beforeEach(resetD1Database);
 
-  it("cannot insert a run or SSH capability after revocation, including on an organization runner", async () => {
+  it("admits the control workload while its epoch and host placement are valid", async () => {
+    const parts = await admissionInput();
+    const results = await env.DB.batch(admissionStatements(parts).statements);
+    expect(admissionWrites(results)).toBeGreaterThan(0);
+    expect(await countRows("scenario_runs", "run_id")).toBe(1);
+    expect(await countRows("runtime_executions", "id")).toBe(1);
+  });
+
+  it("cannot insert a run or SSH capability after revocation, including on a platform host", async () => {
     const parts = await admissionInput();
     await revokeBetaUser({
       d1: env.DB,
@@ -77,7 +86,7 @@ describe("scenario start beta-admission fence", () => {
     ).resolves.toEqual({ count: 0 });
     await expect(
       env.DB.prepare(
-        "SELECT disabled FROM agent_hosts WHERE id = 'organization-runner'",
+        "SELECT disabled FROM agent_hosts WHERE id = 'platform-host'",
       ).first(),
     ).resolves.toEqual({ disabled: 0 });
   });
@@ -91,7 +100,7 @@ describe("scenario start beta-admission fence", () => {
     await drizzle(env.DB)
       .update(hostDesiredState)
       .set({ version: parts.desired.expectedVersion + 1 })
-      .where(eq(hostDesiredState.hostId, "organization-runner"));
+      .where(eq(hostDesiredState.hostId, "platform-host"));
     const stale: AdmissionCommitInput = parts;
 
     await expect(
@@ -109,7 +118,7 @@ describe("scenario start beta-admission fence", () => {
       drizzle(env.DB)
         .select({ version: hostDesiredState.version })
         .from(hostDesiredState)
-        .where(eq(hostDesiredState.hostId, "organization-runner")),
+        .where(eq(hostDesiredState.hostId, "platform-host")),
     ).resolves.toEqual([{ version: parts.desired.expectedVersion + 1 }]);
   });
 
@@ -129,7 +138,7 @@ describe("scenario start beta-admission fence", () => {
       drizzle(env.DB)
         .select({ version: hostDesiredState.version })
         .from(hostDesiredState)
-        .where(eq(hostDesiredState.hostId, "organization-runner")),
+        .where(eq(hostDesiredState.hostId, "platform-host")),
     ).resolves.toEqual([{ version: parts.desired.expectedVersion }]);
   });
 });
@@ -176,10 +185,11 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     createdAt: new Date(now),
   });
   await db.insert(agentHosts).values({
-    id: "organization-runner",
+    scope: "platform",
+    credentialGeneration: 1,
+    id: "platform-host",
     userId: FIXTURE_BETA_ADMIN_ID,
-    organizationId: "scenario-organization",
-    name: "Organization runner",
+    name: "Platform host",
     role: "agent",
     scenarioEnabled: true,
     disabled: false,
@@ -198,13 +208,16 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     .limit(1);
   if (!admission) throw new Error("fixture admission missing");
 
+  const readiness = await seedAdmissionGuardFixture({
+    userId: "scenario-user", organizationId: "scenario-organization", hostId: "platform-host",
+  });
   const vmState = scenarioVm("admission-run");
   const current = await loadOrCreateHostDesiredState(
     db,
-    "organization-runner",
+    "platform-host",
     now,
   );
-  const desiredVm = desiredVmFromRunVm({
+  const desiredVm = desiredVmFromRunVm({ ownerUserId: "scenario-user", runtimeExecutionId: "admission-run", generation: 1,
     runId: "admission-run",
     vm: vmState,
     nowUnixMs: now,
@@ -225,9 +238,12 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       userId: "scenario-user",
       organizationId: "scenario-organization",
       runtimeExecutionId: "admission-run",
-      hostId: "organization-runner",
+      hostId: "platform-host",
       scenarioId: "scenario-one",
       scenarioName: "scenario-one",
+      courseScopeKey: "organization:scenario-organization",
+      courseId: "linux-operations",
+      lectureId: "01-repair-nginx",
       title: "Scenario one",
       tagline: "A scenario",
       briefingMarkdown: "Briefing",
@@ -285,7 +301,8 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     accessKeys: [{ ciphertextB64: "ciphertext", ivB64: "iv" }],
     desiredVms: [desiredVm],
     desired: {
-      hostId: "organization-runner",
+      hostId: "platform-host",
+      readiness,
       expectedVersion: current.version,
       nextVersion: next.version,
       nextDocJson: JSON.stringify(next),

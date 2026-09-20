@@ -1,0 +1,1 @@
+ALTER TABLE `runtime_operation_gates` ADD `evidence_json` text;

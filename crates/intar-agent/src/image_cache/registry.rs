@@ -213,55 +213,13 @@ pub(super) async fn apply_registry_auth(
     Ok(builder.bearer_auth(token))
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AgentBootstrapRequest<'a> {
-    host_id: &'a str,
-    bootstrap_token: &'a str,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AgentBootstrapResponse {
-    access_token: String,
-}
-
 pub(super) async fn bootstrap_agent_access(
     bridge: &BridgeConfig,
     client: &reqwest::Client,
 ) -> Result<String> {
-    if bridge.base_url.trim().is_empty()
-        || bridge.host_id.trim().is_empty()
-        || bridge.bootstrap_token.trim().is_empty()
-    {
-        anyhow::bail!("bridge bootstrap config is required for registry bearer auth");
-    }
-
-    let url = format!(
-        "{}/api/agent/bootstrap",
-        bridge.base_url.trim_end_matches('/')
-    );
-    let display_url = redact_url_userinfo(&url);
-    let response = client
-        .post(&url)
-        .json(&AgentBootstrapRequest {
-            host_id: &bridge.host_id,
-            bootstrap_token: &bridge.bootstrap_token,
-        })
-        .send()
-        .await
-        .with_context(|| format!("POST {display_url}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("agent bootstrap failed with HTTP {status}: {body}");
-    }
-
-    let body = response
-        .json::<AgentBootstrapResponse>()
-        .await
-        .context("failed to parse agent bootstrap response")?;
-    Ok(body.access_token)
+    Ok(crate::bridge::bootstrap_agent_access(bridge, client)
+        .await?
+        .access_token)
 }
 
 pub(super) fn is_safe_component(s: &str) -> bool {

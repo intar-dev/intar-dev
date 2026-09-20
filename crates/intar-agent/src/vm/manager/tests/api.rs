@@ -43,6 +43,9 @@ fn lease_expiry_error_log_state_is_throttled_per_vm_signature() {
 #[test]
 fn create_scenario_vm_request_accepts_runtime() {
     let req: CreateScenarioVmRequest = serde_json::from_value(json!({
+        "owner_user_id": "user-1",
+        "runtime_execution_id": "execution-1",
+        "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
@@ -98,6 +101,9 @@ fn create_scenario_vm_request_accepts_runtime() {
 #[test]
 fn create_scenario_vm_request_rejects_missing_runtime() {
     let err = serde_json::from_value::<CreateScenarioVmRequest>(json!({
+        "owner_user_id": "user-1",
+        "runtime_execution_id": "execution-1",
+        "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
@@ -121,6 +127,9 @@ fn create_scenario_vm_request_rejects_missing_runtime() {
 #[test]
 fn create_scenario_vm_request_rejects_missing_image_digest() {
     let error = serde_json::from_value::<CreateScenarioVmRequest>(json!({
+        "owner_user_id": "user-1",
+        "runtime_execution_id": "execution-1",
+        "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
@@ -135,6 +144,9 @@ fn create_scenario_vm_request_rejects_missing_image_digest() {
 #[test]
 fn create_scenario_vm_request_rejects_unknown_field() {
     let err = serde_json::from_value::<CreateScenarioVmRequest>(json!({
+        "owner_user_id": "user-1",
+        "runtime_execution_id": "execution-1",
+        "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
@@ -156,6 +168,9 @@ fn create_scenario_vm_request_rejects_unknown_field() {
 #[test]
 fn create_scenario_vm_request_rejects_legacy_network_field() {
     let err = serde_json::from_value::<CreateScenarioVmRequest>(json!({
+        "owner_user_id": "user-1",
+        "runtime_execution_id": "execution-1",
+        "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",

@@ -59,7 +59,6 @@ const BODYLESS_CUSTOM_MUTATIONS = [
   ["DELETE", "/api/organizations/org"],
   ["POST", "/api/organizations/org/leave"],
   ["DELETE", "/api/organizations/org/members/member-1"],
-  ["DELETE", "/api/organizations/org/runners/runner-1"],
   ["DELETE", "/api/organizations/org/scenarios/demo"],
   ["DELETE", "/api/organizations/org/sso"],
   ["POST", "/api/organizations/org/sso/verification"],

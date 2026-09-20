@@ -11,6 +11,7 @@ import {
   hostDesiredState,
   imageBuildBundles,
   imageBuilds,
+  runtimeOperationGates,
   user,
 } from "@/db/schema";
 import type {
@@ -20,7 +21,9 @@ import type {
 } from "@/generated/bridge";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
+import { sha256HexOf } from "./registry-artifact-fixtures";
 
 const IMAGE_ID = "a".repeat(64);
 const CONTENT_HASH = "b".repeat(64);
@@ -81,6 +84,8 @@ describe("image revision completion status", () => {
       id: "agent-1",
       userId: "owner",
       name: "agent-1",
+      scope: "platform",
+      credentialGeneration: 1,
       role: "agent",
       connected: true,
       activeSessionId: "session-1",
@@ -147,6 +152,113 @@ describe("image revision completion status", () => {
       state: "warming",
       hosts: [{ host_id: "agent-1", actual_guest_tools_ready: false }],
     });
+  });
+
+  it("ignores a connected personal server that has not cached the publication", async () => {
+    const db = drizzle(env.DB);
+    await db.insert(agentHosts).values({
+      id: "personal", userId: "owner", name: "Personal", scope: "personal",
+      credentialGeneration: 1, role: "agent", connected: true,
+    });
+    await db.insert(hostDesiredState).values({
+      hostId: "personal", version: 7, docJson: { ...desiredState(), host_id: "personal" },
+    });
+    const report = hostReport();
+    report.cached_images = [];
+    report.cached_guest_tools = [];
+    await db.insert(hostActualState).values({
+      hostId: "personal", appliedDesiredVersion: 7, observedAt: Date.now(), reportJson: report,
+    });
+    await expect((await status()).json()).resolves.toMatchObject({
+      ok: true, state: "ready", hosts: [{ host_id: "agent-1", ready: true }],
+    });
+  });
+
+  it.each([
+    { action: "warm", platformRunning: false },
+    { action: "promote", platformRunning: false },
+    { action: "promote", platformRunning: true },
+  ])("$action counts only platform VMs (platformRunning=$platformRunning)", async ({ action, platformRunning }) => {
+    const db = drizzle(env.DB);
+    await db.insert(agentHosts).values([
+      { id: "personal", scope: "personal" as const, role: "agent" as const },
+      { id: "legacy", scope: null, role: "agent" as const },
+      { id: "builder", scope: "platform" as const, role: "builder" as const },
+      { id: "disabled", scope: "platform" as const, role: "agent" as const, disabled: true },
+    ].map((host) => ({
+      userId: "owner", name: host.id, credentialGeneration: 1, connected: true, ...host,
+    })));
+    const excluded = ["personal", "legacy", "builder", "disabled"];
+    for (const hostId of excluded) {
+      await db.insert(hostDesiredState).values({
+        hostId, version: 7, docJson: { ...desiredState(), host_id: hostId },
+      });
+    }
+    // Personal workloads keep running while the platform publication fleet drains.
+    await env.DB.prepare("UPDATE host_desired_state SET doc_json = json_set(doc_json, '$.vms', json(?)) WHERE host_id = ?")
+      .bind(JSON.stringify([{ desired_phase: "running" }]), "personal").run();
+    if (platformRunning) {
+      await env.DB.prepare("UPDATE host_desired_state SET doc_json = json_set(doc_json, '$.vms', json(?)) WHERE host_id = ?")
+        .bind(JSON.stringify([{ desired_phase: "running" }]), "agent-1").run();
+    }
+    const before = await db.select().from(hostDesiredState);
+    const compressed = new Uint8Array([1, 2, 3]);
+    const kino = new Uint8Array([4, 5, 6]);
+    const pin = {
+      ...CHANNEL_PIN, tools_disk_sha256: "9".repeat(64),
+      compressed_disk_sha256: await sha256HexOf(compressed),
+      compressed_disk_size_bytes: compressed.byteLength,
+      kino_sha256: await sha256HexOf(kino), kino_size_bytes: kino.byteLength,
+    };
+    const candidate = new TextEncoder().encode(JSON.stringify(pin));
+    await env.VM_IMAGE_REGISTRY_BUCKET.put("guest-tools/scenario/candidate.json", candidate);
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(`guest-tools/scenario/disks/${pin.tools_disk_sha256}.ext4.zst`, compressed);
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(`guest-tools/scenario/kino/${pin.kino_sha256}/kino`, kino);
+    await db.insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "drained" });
+    const cutover = await handleImageRegistryRequest(new Request("https://intar.test/registry/v1/cutover/gate", {
+      headers: { authorization: "Bearer test-publish-token" },
+    }), env);
+    expect(cutover?.status).toBe(200);
+    expect(await cutover!.json()).toMatchObject({ active_desired_vms: platformRunning ? 1 : 0 });
+    const woken: string[] = [];
+    const response = await handleImageRegistryRequest(new Request(`https://intar.test/registry/v1/guest-tools/${action}`, {
+      method: "POST", headers: {
+        authorization: "Bearer test-publish-token",
+        "x-intar-candidate-sha256": await sha256HexOf(candidate),
+      },
+    }), {
+      ...env,
+      HOST_RUNTIME: {
+        idFromName: (hostId: string) => hostId,
+        get: (hostId: string) => ({ fetch: async () => { woken.push(hostId); return new Response(); } }),
+      } as unknown as Cloudflare.Env["HOST_RUNTIME"],
+    });
+    if (platformRunning) {
+      expect(response?.status).toBe(409);
+      expect(woken).toEqual([]);
+      expect(await db.select().from(hostDesiredState)).toEqual(before);
+      expect(await (await env.VM_IMAGE_REGISTRY_BUCKET.get("guest-tools/scenario/stable.json"))!.json()).toEqual(CHANNEL_PIN);
+      return;
+    }
+    expect(response?.status).toBe(200);
+    const warmed = await response!.json() as { warmed_host_ids: string[]; updated_host_ids: string[] };
+    expect(warmed.warmed_host_ids).toEqual(["agent-1"]);
+    expect(warmed.updated_host_ids).toEqual(["agent-1"]);
+    expect(woken).toEqual(["agent-1"]);
+    const after = await db.select().from(hostDesiredState);
+    expect(after.filter((row) => excluded.includes(row.hostId))).toEqual(before.filter((row) => excluded.includes(row.hostId)));
+    const desired = after.find((row) => row.hostId === "agent-1")!;
+    const tools = desired.docJson.cached_guest_tools?.[0]!;
+    expect(tools.tools_disk_sha256).toBe(pin.tools_disk_sha256);
+    const channel = action === "warm" ? "candidate" : "stable";
+    await expect((await status(channel)).json()).resolves.toMatchObject({ state: "warming" });
+    const report = hostReport();
+    report.applied_desired_version = desired.version;
+    report.cached_guest_tools = [{ guest_tools: tools, phase: "ready", bytes_on_disk: tools.tools_disk_size_bytes, updated_at_unix_ms: Date.now() }];
+    await db.update(hostActualState).set({ appliedDesiredVersion: desired.version, reportJson: report }).where(eq(hostActualState.hostId, "agent-1"));
+    const ready = await (await status(channel)).json() as { state: string; hosts: Array<{ host_id: string }> };
+    expect(ready.state).toBe("ready");
+    expect(ready.hosts.map((host) => host.host_id)).toEqual(warmed.warmed_host_ids);
   });
 
   it("marks a content-only bundle ready without an affected host", async () => {
@@ -219,10 +331,10 @@ describe("image revision completion status", () => {
   });
 });
 
-async function status(): Promise<Response> {
+async function status(channel: "candidate" | "stable" = "stable"): Promise<Response> {
   const response = await handleImageRegistryRequest(
     new Request(
-      "https://intar.test/registry/v1/builds/revisions/revision-1?tools=stable",
+      `https://intar.test/registry/v1/builds/revisions/revision-1?tools=${channel}`,
       {
         headers: { authorization: "Bearer test-publish-token" },
       },
@@ -234,8 +346,8 @@ async function status(): Promise<Response> {
 }
 
 function desiredState(): HostDesiredStateV2 {
-  return {
-    schema_version: 5,
+  return { owner_user_id: "owner", scope: "platform",
+    schema_version: 6,
     host_id: "agent-1",
     version: 7,
     generated_at_unix_ms: Date.now(),
@@ -252,8 +364,8 @@ function desiredState(): HostDesiredStateV2 {
 }
 
 function hostReport(): HostStateReportV2 {
-  return {
-    schema_version: 6,
+  return { relay_connected: true,
+    schema_version: 7,
     host_id: "agent-1",
     observed_at_unix_ms: Date.now(),
     applied_desired_version: 7,

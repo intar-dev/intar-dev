@@ -335,6 +335,8 @@ mod tests {
         let running_sha256 = "b".repeat(64);
         let absent_sha256 = "c".repeat(64);
         let desired = HostDesiredStateV2 {
+            scope: intar_contracts::bridge::HostScope::Personal,
+            owner_user_id: "user-1".to_string(),
             schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "host-1".to_owned(),
             version: 1,
@@ -411,6 +413,10 @@ mod tests {
 
     fn desired_vm(phase: DesiredVmPhase, tools_disk_sha256: &str) -> DesiredVmV2 {
         DesiredVmV2 {
+            vm_id: "vm-1".to_string(),
+            owner_user_id: "user-1".to_string(),
+            runtime_execution_id: "execution-1".to_string(),
+            generation: 1,
             run_id: "run-1".to_owned(),
             vm_name: "vm-1".to_owned(),
             desired_phase: phase,

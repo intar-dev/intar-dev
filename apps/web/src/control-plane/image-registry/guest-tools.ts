@@ -97,8 +97,10 @@ async function convergeScenarioGuestTools(
       `SELECT
          (SELECT state FROM runtime_operation_gates WHERE key = ?) AS state,
          (SELECT COUNT(*)
-            FROM host_desired_state, json_each(host_desired_state.doc_json, '$.vms') AS vm
-           WHERE json_extract(vm.value, '$.desired_phase') = 'running') AS count`,
+            FROM host_desired_state
+            JOIN agent_hosts host ON host.id = host_desired_state.host_id
+            JOIN json_each(host_desired_state.doc_json, '$.vms') AS vm
+           WHERE host.scope = 'platform' AND json_extract(vm.value, '$.desired_phase') = 'running') AS count`,
     )
       .bind(IMAGE_CUTOVER_GATE)
       .first<{ state: string | null; count: number }>();
@@ -116,7 +118,11 @@ async function convergeScenarioGuestTools(
   const hosts = await db
     .select({ id: agentHosts.id })
     .from(agentHosts)
-    .where(and(eq(agentHosts.role, "agent"), eq(agentHosts.disabled, false)));
+    .where(and(
+      eq(agentHosts.scope, "platform"),
+      eq(agentHosts.role, "agent"),
+      eq(agentHosts.disabled, false),
+    ));
   const updatedHostIds: string[] = [];
   for (let offset = 0; offset < hosts.length; offset += PROMOTION_CONCURRENCY) {
     await Promise.all(

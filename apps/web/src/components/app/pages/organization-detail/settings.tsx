@@ -477,7 +477,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       <Section
         density="compact"
         title="Organization lifecycle"
-        description="Organization deletion is blocked while it owns identity, scenarios, runners, builds, or run history."
+        description="Organization deletion is blocked while it owns identity, scenarios, builds, or run history."
       >
         <div className="space-y-3">
           {owner ? (

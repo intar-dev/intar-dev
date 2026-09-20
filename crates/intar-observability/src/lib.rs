@@ -57,11 +57,15 @@ pub fn init(
         .with(telemetry);
     if json {
         subscriber
-            .with(tracing_subscriber::fmt::layer().json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .json(),
+            )
             .try_init()?;
     } else {
         subscriber
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .try_init()?;
     }
     Ok(TelemetryGuard(provider))

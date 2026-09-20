@@ -27,6 +27,11 @@
         "null"
       ]
     },
+    "generation": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1
+    },
     "guest_tools": {
       "anyOf": [
         {
@@ -53,6 +58,9 @@
     "observed_at_unix_ms": {
       "type": "integer",
       "format": "int64"
+    },
+    "owner_user_id": {
+      "type": "string"
     },
     "phase": {
       "$ref": "#/$defs/VmPhase"
@@ -86,6 +94,9 @@
         }
       ]
     },
+    "runtime_execution_id": {
+      "type": "string"
+    },
     "sandbox": {
       "anyOf": [
         {
@@ -99,8 +110,8 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 5,
-      "minimum": 5
+      "maximum": 6,
+      "minimum": 6
     },
     "ssh_host_keys_openssh": {
       "type": "array",
@@ -116,6 +127,9 @@
     }
   },
   "required": [
+    "owner_user_id",
+    "runtime_execution_id",
+    "generation",
     "schema_version",
     "host_id",
     "run_id",

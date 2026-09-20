@@ -11,6 +11,7 @@ import {
   organization,
   scenarioCatalogCandidates,
   scenarioRuns,
+  user,
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
@@ -519,6 +520,7 @@ async function seedCandidate(
 ): Promise<void> {
   const now = Date.now();
   const organizationId = options.organizationId ?? null;
+  await db.update(user).set({ role: "admin" }).where(eq(user.id, "user-1"));
   const status = options.status ?? "succeeded";
   const candidateRevision = options.candidateRevision ?? CANDIDATE_REVISION;
   const sourceRevision = options.sourceRevision ?? candidateRevision;

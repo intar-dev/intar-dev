@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { accessAllowlist, agentHosts, member } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
@@ -226,7 +226,6 @@ export async function requireAdminUserContext(
 export async function loadHostForUser(
   hostId: string,
   userId: string,
-  organizationId: string | null = null,
 ): Promise<AgentHostRow | null> {
   const db = drizzle(env.DB);
   const rows = await db
@@ -253,9 +252,7 @@ export async function loadHostForUser(
       and(
         eq(agentHosts.id, hostId),
         eq(agentHosts.userId, userId),
-        organizationId
-          ? eq(agentHosts.organizationId, organizationId)
-          : isNull(agentHosts.organizationId),
+        eq(agentHosts.scope, "platform"),
       ),
     )
     .limit(1);

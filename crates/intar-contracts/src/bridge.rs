@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
 
 pub const BRIDGE_PROTOCOL_VERSION: u16 = 8;
-pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 5;
-pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 6;
+pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 6;
+pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 7;
 pub const BUILD_REPORT_SCHEMA_VERSION: u16 = 1;
-pub const VM_REPORT_SCHEMA_VERSION: u16 = 5;
+pub const VM_REPORT_SCHEMA_VERSION: u16 = 6;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -38,10 +38,13 @@ pub struct ClientHelloV8 {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ServerHelloV8 {
+    pub session_id: String,
     #[schemars(range(min = 8, max = 8))]
     pub protocol_version: u16,
     pub host_id: String,
     pub desired_version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<HostRelayCredentials>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -51,6 +54,8 @@ pub struct DesiredStateV8 {
     pub protocol_version: u16,
     pub host_id: String,
     pub desired_state: HostDesiredStateV2,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<HostRelayCredentials>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -108,7 +113,9 @@ pub enum SyncRequestReason {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HostDesiredStateV2 {
-    #[schemars(range(min = 5, max = 5))]
+    pub scope: HostScope,
+    pub owner_user_id: String,
+    #[schemars(range(min = 6, max = 6))]
     pub schema_version: u16,
     pub host_id: String,
     pub version: u64,
@@ -141,6 +148,11 @@ pub struct DesiredBuildV1 {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DesiredVmV2 {
+    pub vm_id: String,
+    pub owner_user_id: String,
+    pub runtime_execution_id: String,
+    #[schemars(range(min = 1))]
+    pub generation: u64,
     pub run_id: String,
     pub vm_name: String,
     pub desired_phase: DesiredVmPhase,
@@ -180,7 +192,8 @@ pub struct VmResourcesV3 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HostStateReportV2 {
-    #[schemars(range(min = 6, max = 6))]
+    pub relay_connected: bool,
+    #[schemars(range(min = 7, max = 7))]
     pub schema_version: u16,
     pub host_id: String,
     pub observed_at_unix_ms: i64,
@@ -320,6 +333,10 @@ pub struct CachedGuestToolsStateV1 {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct VmActualStateV2 {
+    pub owner_user_id: String,
+    pub runtime_execution_id: String,
+    #[schemars(range(min = 1))]
+    pub generation: u64,
     pub run_id: String,
     pub vm_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -482,7 +499,11 @@ pub enum VmArchivePhase {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct VmReportV2 {
-    #[schemars(range(min = 5, max = 5))]
+    pub owner_user_id: String,
+    pub runtime_execution_id: String,
+    #[schemars(range(min = 1))]
+    pub generation: u64,
+    #[schemars(range(min = 6, max = 6))]
     pub schema_version: u16,
     pub host_id: String,
     pub run_id: String,
@@ -568,4 +589,22 @@ mod tests {
             })
         );
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostScope {
+    #[default]
+    Personal,
+    Platform,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostRelayCredentials {
+    pub websocket_url: String,
+    pub token: String,
+    pub gateway_host_key_openssh: String,
+    pub identity: crate::stargate::HostRelayIdentity,
+    pub expires_at_unix_ms: i64,
 }

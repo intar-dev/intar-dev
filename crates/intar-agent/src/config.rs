@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use intar_contracts::bridge::HostScope;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -69,13 +70,22 @@ impl Default for JailerClientConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BridgeConfig {
     pub enabled: bool,
     pub base_url: String,
+    pub credential_file: PathBuf,
+    #[serde(skip)]
     pub host_id: String,
-    pub bootstrap_token: String,
+    #[serde(skip)]
+    pub owner_user_id: String,
+    #[serde(skip)]
+    pub scope: HostScope,
+    #[serde(skip)]
+    pub credential_generation: u64,
+    #[serde(skip)]
+    pub credential: String,
     pub heartbeat_interval_seconds: u64,
 }
 
@@ -85,9 +95,88 @@ impl Default for BridgeConfig {
             enabled: false,
             base_url: String::new(),
             host_id: String::new(),
-            bootstrap_token: String::new(),
+            credential_file: PathBuf::new(),
+            owner_user_id: String::new(),
+            scope: HostScope::Personal,
+            credential_generation: 0,
+            credential: String::new(),
             heartbeat_interval_seconds: 30,
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostCredential {
+    host_id: String,
+    owner_user_id: String,
+    scope: HostScope,
+    credential_generation: u64,
+    credential: String,
+}
+
+impl BridgeConfig {
+    fn load_credential(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.credential_file.is_absolute(),
+            "bridge.credential_file must be absolute"
+        );
+        let file = std::fs::File::open(&self.credential_file)?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(metadata.is_file(), "host credential must be a regular file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            anyhow::ensure!(
+                metadata.mode() & 0o027 == 0,
+                "host credential must have no group write or other access"
+            );
+            anyhow::ensure!(
+                metadata.uid() == 0 || metadata.uid() == rustix::process::geteuid().as_raw(),
+                "host credential has wrong owner"
+            );
+        }
+        // Never include the input or serde's value-bearing error in logs.
+        let identity: HostCredential = serde_json::from_reader(file)
+            .map_err(|_| anyhow::anyhow!("invalid host credential file"))?;
+        anyhow::ensure!(
+            is_safe_image_key(&identity.host_id)
+                && !identity.host_id.is_empty()
+                && !identity.owner_user_id.trim().is_empty()
+                && identity.owner_user_id.trim() == identity.owner_user_id
+                && identity.credential_generation > 0
+                && identity.credential.len() == 64
+                && identity.credential.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid host credential identity"
+        );
+        self.host_id = identity.host_id;
+        self.owner_user_id = identity.owner_user_id;
+        self.scope = identity.scope;
+        self.credential_generation = identity.credential_generation;
+        self.credential = identity.credential;
+        Ok(())
+    }
+
+    pub(crate) fn validate_owner(
+        &self,
+        owner: &str,
+        execution: &str,
+        generation: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !owner.trim().is_empty()
+                && owner.trim() == owner
+                && !execution.trim().is_empty()
+                && execution.trim() == execution
+                && generation > 0
+                && generation <= i64::MAX as u64,
+            "owner, runtime execution and positive generation are required"
+        );
+        anyhow::ensure!(
+            self.scope != HostScope::Personal || owner == self.owner_user_id,
+            "personal host owner mismatch"
+        );
+        Ok(())
     }
 }
 
@@ -245,9 +334,9 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
         )
     })?;
 
-    let mut cfg = toml::from_str::<AgentConfig>(&content).map_err(|e| {
+    let mut cfg = toml::from_str::<AgentConfig>(&content).map_err(|_| {
         anyhow::anyhow!(
-            "failed to parse config TOML at {}: {e}\n\nExample config:\n{EXAMPLE_TOML}",
+            "failed to parse config TOML at {}: invalid value or unknown field\n\nExample config:\n{EXAMPLE_TOML}",
             path.display()
         )
     })?;
@@ -279,12 +368,17 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
             "config value server.bind must be a socket address like 127.0.0.1:8080: {e}\n\nExample config:\n{EXAMPLE_TOML}"
         )
     })?;
+    anyhow::ensure!(
+        bind.ip().is_loopback(),
+        "server.bind must use a loopback address"
+    );
     cfg.server.bind = bind.to_string();
 
     cfg.bridge.base_url = cfg.bridge.base_url.trim_end_matches('/').to_string();
     cfg.bridge.host_id = cfg.bridge.host_id.trim().to_string();
-    cfg.bridge.bootstrap_token = cfg.bridge.bootstrap_token.trim().to_string();
+
     if cfg.bridge.enabled {
+        cfg.bridge.load_credential()?;
         if cfg.bridge.base_url.is_empty() {
             anyhow::bail!(
                 "config value bridge.base_url must not be empty when bridge.enabled is true\n\nExample config:\n{EXAMPLE_TOML}"
@@ -307,9 +401,9 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
                 "config value bridge.host_id must match [A-Za-z0-9_-]+\n\nExample config:\n{EXAMPLE_TOML}"
             );
         }
-        if cfg.bridge.bootstrap_token.is_empty() {
+        if cfg.bridge.credential.is_empty() {
             anyhow::bail!(
-                "config value bridge.bootstrap_token must not be empty when bridge.enabled is true\n\nExample config:\n{EXAMPLE_TOML}"
+                "config value bridge credential must not be empty when bridge.enabled is true\n\nExample config:\n{EXAMPLE_TOML}"
             );
         }
         if cfg.bridge.heartbeat_interval_seconds == 0 {
@@ -325,6 +419,10 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
         .clone()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    anyhow::ensure!(
+        !(cfg.bridge.enabled && cfg.bridge.scope == HostScope::Personal && cfg.ssh_access.enabled),
+        "personal hosts require outbound relay; disable ssh_access"
+    );
     if cfg.ssh_access.enabled {
         if cfg.ssh_access.public_port_start == 0 || cfg.ssh_access.public_port_end == 0 {
             anyhow::bail!(
@@ -699,5 +797,63 @@ refresh_interval_minutes = 0
         }
 
         Ok(())
+    }
+}
+
+impl std::fmt::Debug for BridgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BridgeConfig")
+            .field("host_id", &self.host_id)
+            .field("scope", &self.scope)
+            .field("credential_generation", &self.credential_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[test]
+    fn loads_only_protected_enrolled_identity_without_logging_secrets() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let credential_file = dir.path().join("credential.json");
+        let secret = "a".repeat(64);
+        let identity = serde_json::json!({"hostId":"host-1", "ownerUserId":"user-1", "scope":"personal", "credentialGeneration":1, "credential":secret});
+        std::fs::write(&credential_file, identity.to_string())?;
+        std::fs::set_permissions(&credential_file, std::fs::Permissions::from_mode(0o600))?;
+        let mut cfg = BridgeConfig {
+            credential_file: credential_file.clone(),
+            ..BridgeConfig::default()
+        };
+        cfg.load_credential()?;
+        assert_eq!(cfg.host_id, "host-1");
+        assert_eq!(cfg.owner_user_id, "user-1");
+        assert_eq!(cfg.scope, HostScope::Personal);
+        assert_eq!(cfg.credential_generation, 1);
+        assert!(!format!("{cfg:?}").contains(&secret));
+        std::fs::set_permissions(&credential_file, std::fs::Permissions::from_mode(0o644))?;
+        assert!(cfg.load_credential().is_err());
+        std::fs::set_permissions(&credential_file, std::fs::Permissions::from_mode(0o600))?;
+        for field in ["ownerUserId", "scope", "credentialGeneration", "credential"] {
+            let mut invalid = identity.clone();
+            invalid
+                .as_object_mut()
+                .expect("fixture object")
+                .remove(field);
+            std::fs::write(&credential_file, invalid.to_string())?;
+            assert!(cfg.load_credential().is_err(), "{field}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_inline_credentials_are_rejected() {
+        assert!(
+            toml::from_str::<AgentConfig>(
+                "[bridge]\nhost_id = 'host-1'\nbootstrap_token = 'secret'"
+            )
+            .is_err()
+        );
     }
 }

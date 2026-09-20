@@ -1,15 +1,53 @@
 use super::*;
 
 impl VmManager {
+    pub(crate) fn set_control_connected(&self, connected: bool) {
+        self.inner
+            .control_connected
+            .store(connected, Ordering::Release);
+    }
+    pub(crate) fn set_relay_status(&self, receiver: watch::Receiver<bool>) {
+        *self.inner.relay_status.write().expect("relay status lock") = Some(receiver);
+    }
+    pub(crate) fn relay_connected(&self) -> bool {
+        self.inner.control_connected.load(Ordering::Acquire)
+            && self
+                .inner
+                .relay_status
+                .read()
+                .expect("relay status lock")
+                .as_ref()
+                .is_some_and(|status| *status.borrow())
+    }
+    pub(crate) async fn local_status(&self) -> Result<serde_json::Value> {
+        let draining = crate::drain::is_draining()?;
+        let connected = self.inner.control_connected.load(Ordering::Acquire);
+        let relay = self.relay_connected();
+        Ok(
+            json!({ "draining": draining, "trackedVms": self.list_vms().await.len(),
+            "connected": connected, "relayConnected": relay,
+            "ready": !draining && connected && (self.inner.bridge.scope == intar_contracts::bridge::HostScope::Platform || relay) }),
+        )
+    }
+
     pub fn new(cfg: &AgentConfig, db: Db, persisted: Vec<VmRow>) -> Result<Self> {
         let mut states = BTreeMap::new();
         for row in persisted {
             match vm_status_from_row(row) {
                 Ok(vm) => {
+                    let details = vm
+                        .details
+                        .as_ref()
+                        .context("persisted VM lacks execution identity")?;
+                    cfg.bridge.validate_owner(
+                        &details.owner_user_id,
+                        &details.runtime_execution_id,
+                        details.generation,
+                    )?;
                     states.insert(vm.name.clone(), vm);
                 }
                 Err(e) => {
-                    warn!(error = %e, "skipping invalid vm row from sqlite");
+                    return Err(e.context("invalid persisted VM; refusing restart"));
                 }
             }
         }
@@ -19,6 +57,8 @@ impl VmManager {
         let (terminal_updates_tx, _) = broadcast::channel(256);
         let (inventory_updates_tx, _) = watch::channel(0);
         let inner = Inner {
+            control_connected: AtomicBool::new(false),
+            relay_status: std::sync::RwLock::new(None),
             ch_spawn_timeout_seconds: cfg.cloud_hypervisor.spawn_timeout_seconds,
             jailer_socket: cfg.jailer.socket.clone(),
             jailer_request_timeout_seconds: cfg.jailer.request_timeout_seconds,
@@ -28,6 +68,7 @@ impl VmManager {
             ssh_access: cfg.ssh_access.clone(),
             db,
             http: HttpClient::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(ARCHIVE_HTTP_CONNECT_TIMEOUT)
                 // Bound an idle response as well as the whole archive
                 // request. Archive jobs are durable and retryable, so one
@@ -274,6 +315,9 @@ impl VmManager {
         };
 
         self.queue_vm_create(QueueVmCreateRequest {
+            owner_user_id: req.owner_user_id,
+            runtime_execution_id: req.runtime_execution_id,
+            generation: req.generation,
             api_started_at,
             requested_name: req.name,
             requested_run_id: req.run_id,
@@ -293,6 +337,9 @@ impl VmManager {
         req: QueueVmCreateRequest,
     ) -> Result<CreateVmResponse, ApiError> {
         let QueueVmCreateRequest {
+            owner_user_id,
+            runtime_execution_id,
+            generation,
             api_started_at,
             requested_name,
             requested_run_id,
@@ -305,6 +352,11 @@ impl VmManager {
             runtime,
         } = req;
 
+        self.inner
+            .bridge
+            .validate_owner(&owner_user_id, &runtime_execution_id, generation)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let _admission = crate::drain::admit().map_err(|e| ApiError::conflict(e.to_string()))?;
         let name = requested_name.trim().to_string();
         if name.is_empty() {
             return Err(ApiError::bad_request("name must not be empty"));
@@ -517,6 +569,9 @@ impl VmManager {
         let kino_vsock_path = vm_dir.join("kino.vsock");
 
         let details = VmDetails {
+            owner_user_id,
+            runtime_execution_id,
+            generation,
             image_key: Some(image_key.clone()),
             image_sha256: Some(image_sha256.clone()),
             guest_tools: Some(guest_tools.clone()),

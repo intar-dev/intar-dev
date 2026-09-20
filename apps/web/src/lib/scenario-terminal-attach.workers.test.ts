@@ -57,11 +57,13 @@ describe("scenario terminal attach", () => {
     await resetHostRuntimeTestDatabase();
     vi.clearAllMocks();
     await seedHost("host-1");
+    await env.DB.prepare("UPDATE agent_hosts SET active_session_id = ?1 WHERE id = ?2").bind("session-1", "host-1").run();
     await seedRun({
       db: drizzle(env.DB),
       hostId: "host-1",
       runId: RUN_ID,
       runtimeVmName: "run-1-webserver",
+      seedRuntimeVms: false,
       now: NOW,
     });
     await markRunActive();
@@ -100,8 +102,8 @@ describe("scenario terminal attach", () => {
         vmId: "vm-1",
         userId: "user-1",
         target: expect.objectContaining({
-          host: "10.0.0.10",
-          port: 22,
+          transport: {kind:"relay", target:{host:{host_id:"host-1",session_id:"session-1",credential_generation:1},
+            owner_id:"user-1",execution_id:RUN_ID,execution_generation:1,vm_id:"vm-1",service:"ssh"}},
           username: "ubuntu",
           privateKeyOpenssh: "PRIVATE KEY",
           authorizedClientPublicKeysOpenssh: [
@@ -182,7 +184,7 @@ describe("scenario terminal attach", () => {
     ).resolves.toEqual({ attempted: 1, attached: 1 });
     expect(mocks.stageStargateTerminalTarget).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        target: expect.objectContaining({ host: "10.0.0.11" }),
+        target: expect.objectContaining({ transport: expect.objectContaining({kind:"relay"}) }),
       }),
     );
     expect(await attachedAt()).toBe(NOW + 5_000);

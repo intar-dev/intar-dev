@@ -3,7 +3,6 @@ export type OrganizationDetailTab =
   | "people"
   | "assignments"
   | "progress"
-  | "runners"
   | "settings";
 
 export type AdminPeopleTab = "beta" | "users" | "organizations";
@@ -21,7 +20,6 @@ export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
   "people",
   "assignments",
   "progress",
-  "runners",
   "settings",
 ];
 

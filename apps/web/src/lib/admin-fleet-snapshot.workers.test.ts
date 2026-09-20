@@ -475,7 +475,8 @@ async function seedOwnerAndHosts(hostCount: number) {
   });
   for (let index = 0; index < hostCount; index += 1) {
     await db.insert(agentHosts).values({
-      id: `fleet-host-${index}`,
+      scope: "platform",
+    id: `fleet-host-${index}`,
       userId: "fleet-owner",
       name: `Fleet host ${index}`,
       inventoryJson:
@@ -571,7 +572,7 @@ async function seedForeignArchiveOwner() {
   await db.insert(agentHosts).values({
     id: "foreign-host",
     userId: "foreign-user",
-    organizationId: "foreign-org",
+    scope: "personal",
     name: "Disabled learner host",
     disabled: true,
     createdAt: 40_000,

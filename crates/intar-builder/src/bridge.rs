@@ -465,6 +465,7 @@ fn build_host_state_report(
         .collect();
 
     Ok(HostStateReportV2 {
+        relay_connected: false,
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
         host_id: cfg.bridge.host_id.clone(),
         observed_at_unix_ms: now,
@@ -978,6 +979,8 @@ mod tests {
     #[test]
     fn process_start_forces_fresh_desired_state_before_workers_run() {
         let desired = intar_contracts::bridge::HostDesiredStateV2 {
+            scope: intar_contracts::bridge::HostScope::Platform,
+            owner_user_id: "builder-owner".into(),
             schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "builder-1".to_string(),
             version: 7,
@@ -1064,6 +1067,8 @@ mod tests {
     #[test]
     fn desired_state_rejects_invalid_build_identity() {
         let mut desired = intar_contracts::bridge::HostDesiredStateV2 {
+            scope: intar_contracts::bridge::HostScope::Platform,
+            owner_user_id: "builder-owner".into(),
             schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "builder-1".to_string(),
             version: 1,

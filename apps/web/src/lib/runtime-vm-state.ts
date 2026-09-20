@@ -110,7 +110,8 @@ export async function recordRuntimeVmActualState(input: {
   hostId: string;
   report: VmActualStateV2;
   observedAt?: number;
-  expectedHostSessionId?: string;
+  expectedHostSessionId: string;
+  expectedHostCredentialGeneration: number;
 }): Promise<"updated" | "stale"> {
   const execution = await requireCurrentRuntimeGeneration(
     input.executionId,
@@ -118,7 +119,7 @@ export async function recordRuntimeVmActualState(input: {
   );
   const vmId = required(input.vmId, "vmId");
   const hostId = required(input.hostId, "hostId");
-  const expectedHostSessionId = optional(input.expectedHostSessionId);
+  const expectedHostSessionId = required(input.expectedHostSessionId, "expectedHostSessionId");
   if (
     execution.host_id !== hostId ||
     execution.state === "archived" ||
@@ -137,7 +138,10 @@ export async function recordRuntimeVmActualState(input: {
     throw appError(404, "runtime_vm_not_found", "runtime VM not found");
   }
   if (
-    input.report.run_id !== execution.id ||
+    input.report.runtime_execution_id !== execution.id ||
+    input.report.run_id !== execution.domain_id ||
+    input.report.owner_user_id !== execution.user_id ||
+    input.report.generation !== execution.generation ||
     input.report.vm_name !== vm.runtime_vm_name
   ) {
     return "stale";
@@ -160,7 +164,9 @@ export async function recordRuntimeVmActualState(input: {
          AND current.generation = ?
          AND current.host_id = ?
          AND current.state NOT IN ('archived', 'failed')
-         AND (? IS NULL OR host.active_session_id = ?)
+         AND host.active_session_id = ?
+         AND host.credential_generation = ?
+         AND host.disabled = 0
          AND NOT EXISTS (
            SELECT 1 FROM runtime_executions newer
            WHERE newer.domain_kind = current.domain_kind
@@ -182,7 +188,9 @@ export async function recordRuntimeVmActualState(input: {
        AND EXISTS (
          SELECT 1 FROM agent_hosts host
          WHERE host.id = excluded.host_id
-           AND (? IS NULL OR host.active_session_id = ?)
+           AND host.active_session_id = ?
+           AND host.credential_generation = ?
+           AND host.disabled = 0
        )`,
   )
     .bind(
@@ -198,9 +206,9 @@ export async function recordRuntimeVmActualState(input: {
       input.expectedGeneration,
       hostId,
       expectedHostSessionId,
+      input.expectedHostCredentialGeneration,
       expectedHostSessionId,
-      expectedHostSessionId,
-      expectedHostSessionId,
+      input.expectedHostCredentialGeneration,
     )
     .run();
   if ((result.meta.changes ?? 0) !== 1) return "stale";
@@ -216,6 +224,9 @@ export async function recordRuntimeVmActualState(input: {
     await recordRuntimeVmTerminalTarget({
       executionId: execution.id,
       expectedGeneration: input.expectedGeneration,
+      hostId,
+      expectedHostSessionId,
+      expectedHostCredentialGeneration: input.expectedHostCredentialGeneration,
       vmId,
       target: {
         host: target.host,
@@ -294,10 +305,6 @@ function required(value: string, label: string): string {
     throw appError(400, "runtime_execution_invalid", `${label} is required`);
   }
   return normalized;
-}
-
-function optional(value: string | undefined): string | null {
-  return value === undefined ? null : required(value, "expectedHostSessionId");
 }
 
 function timestamp(value: number, label: string): number {

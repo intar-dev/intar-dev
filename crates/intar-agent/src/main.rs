@@ -3,11 +3,13 @@
 mod bridge;
 mod config;
 mod db;
+mod drain;
 mod host_profile;
 mod image_cache;
 mod kino_probe;
 mod preflight;
 mod proto;
+mod relay;
 mod tls_provider;
 mod vm;
 
@@ -35,6 +37,15 @@ struct Cli {
     /// Run the read-only readiness gate and exit; does not replace jailerd self-test.
     #[arg(long)]
     doctor: bool,
+    /// Reject new work and persist the drain state.
+    #[arg(long, conflicts_with_all = ["resume", "status", "doctor"])]
+    drain: bool,
+    /// Accept new work after a completed maintenance operation.
+    #[arg(long, conflicts_with_all = ["drain", "status", "doctor"])]
+    resume: bool,
+    /// Print local drain state and all tracked VM phases.
+    #[arg(long, conflicts_with_all = ["drain", "resume", "doctor"])]
+    status: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +62,31 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = config::load(&cli.config)?;
+    if cli.drain || cli.resume {
+        drain::set(cli.drain)?;
+        return Ok(());
+    }
+    if cli.status {
+        let live = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?
+            .get(format!("http://{}/status", cfg.server.bind))
+            .send()
+            .await;
+        if let Ok(response) = live
+            && response.status().is_success()
+        {
+            println!("{}", response.json::<serde_json::Value>().await?);
+            return Ok(());
+        }
+        let (_, persisted) = db::Db::open().await?;
+        println!(
+            "{}",
+            serde_json::json!({ "draining": drain::is_draining()?, "trackedVms": persisted.len(), "ready": false, "connected": false, "relayConnected": false })
+        );
+        return Ok(());
+    }
     if cli.doctor {
         let report = preflight::collect_preflight(&cfg).await;
         print_preflight_report(&report);
@@ -69,9 +105,19 @@ async fn main() -> Result<()> {
         .parse()
         .context("failed to parse server.bind")?;
 
+    if cfg.bridge.enabled {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        bridge::bootstrap_agent_access(&cfg.bridge, &http)
+            .await
+            .context("host authentication failed before local recovery")?;
+    }
     let (db, persisted) = db::Db::open()
         .await
         .context("failed to open sqlite db for persisted vm state")?;
+    bridge::validate_restart(&cfg.bridge, &db, &persisted).await?;
     let vm = vm::VmManager::new(&cfg, db.clone(), persisted)
         .context("failed to initialize VM manager HTTP clients")?;
     image_cache::spawn_warm_cache_with_bridge(
@@ -155,6 +201,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/ping", get(ping_handler))
+        .route("/status", get(status_handler))
         .route("/vms", get(list_vms_handler))
         .route("/vms/prune", post(prune_vms_handler))
         .route("/vms/{name}", get(get_vm_handler))
@@ -265,6 +312,16 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = term => {},
+    }
+}
+
+async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.vm.local_status().await {
+        Ok(status) => (StatusCode::OK, Json(status)),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ready":false})),
+        ),
     }
 }
 

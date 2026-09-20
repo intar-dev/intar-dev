@@ -1,5 +1,5 @@
 import { traceOperation } from "./tracing";
-import { and, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   agentHosts,
@@ -598,15 +598,24 @@ export async function recordImageBuildReport(
   hostId: string,
   report: BuildReportV1,
   nowUnixMs: number,
+  expectedHost: { sessionId: string; credentialGeneration: number },
 ): Promise<{ updated: boolean; terminal: boolean }> {
   return traceOperation("build.report", async () => {
+  const currentHost = exists(db.select({ id: agentHosts.id }).from(agentHosts).where(and(
+    eq(agentHosts.id, hostId),
+    eq(agentHosts.scope, "platform"),
+    eq(agentHosts.role, "builder"),
+    eq(agentHosts.disabled, false),
+    eq(agentHosts.activeSessionId, expectedHost.sessionId),
+    eq(agentHosts.credentialGeneration, expectedHost.credentialGeneration),
+  )));
   const identities = await db
     .select({
       scenarioId: imageBuilds.scenarioId,
       arch: imageBuilds.arch,
     })
     .from(imageBuilds)
-    .where(eq(imageBuilds.id, report.build_id))
+    .where(and(eq(imageBuilds.id, report.build_id), currentHost))
     .limit(1);
   const identity = identities[0];
   if (!identity) {
@@ -623,7 +632,7 @@ export async function recordImageBuildReport(
         timingsJson: imageBuilds.timingsJson,
       })
       .from(imageBuilds)
-      .where(eq(imageBuilds.id, report.build_id))
+      .where(and(eq(imageBuilds.id, report.build_id), currentHost))
       .limit(1);
     const existing = rows[0];
     if (!existing) {
@@ -667,6 +676,7 @@ export async function recordImageBuildReport(
       .where(
         and(
           eq(imageBuilds.id, report.build_id),
+          currentHost,
           eq(imageBuilds.hostId, hostId),
           eq(imageBuilds.scenarioId, existing.scenarioId),
           eq(imageBuilds.contentHash, existing.contentHash),
@@ -689,10 +699,11 @@ export async function recordHostBuildReports(
   hostId: string,
   reports: BuildReportV1[],
   nowUnixMs: number,
+  expectedHost: { sessionId: string; credentialGeneration: number },
 ): Promise<{ terminalBuildIds: string[] }> {
   const terminalBuildIds: string[] = [];
   for (const report of reports) {
-    const result = await recordImageBuildReport(db, hostId, report, nowUnixMs);
+    const result = await recordImageBuildReport(db, hostId, report, nowUnixMs, expectedHost);
     if (result.terminal) {
       terminalBuildIds.push(report.build_id);
     }
@@ -927,7 +938,7 @@ async function loadBuilderCandidates(
       .from(agentHosts)
       .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
       .where(
-        and(eq(agentHosts.role, "builder"), isNull(agentHosts.organizationId)),
+        and(eq(agentHosts.role, "builder"), eq(agentHosts.scope, "platform")),
       ),
     db
       .select({

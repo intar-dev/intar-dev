@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2485a08a-e61c-4a52-ae5c-6a8f953c1cff",
-  "prevId": "51763a9d-87d4-45d1-9706-f1518f6ab62b",
+  "id": "55d7f344-a2f5-461e-a773-e2e75382e42e",
+  "prevId": "206edc4a-0584-4d17-85d8-7d73fdd12066",
   "tables": {
     "access_allowlist": {
       "name": "access_allowlist",
@@ -877,6 +877,14 @@
           "notNull": true,
           "autoincrement": false
         },
+        "credential_generation": {
+          "name": "credential_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "integer",
@@ -952,19 +960,41 @@
           "notNull": true,
           "autoincrement": false
         },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "name": {
           "name": "name",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "owner_removal_id": {
+          "name": "owner_removal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "owner_removal_completed_at": {
+          "name": "owner_removal_completed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "credential_generation": {
+          "name": "credential_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
         },
         "role": {
           "name": "role",
@@ -1086,15 +1116,6 @@
           ],
           "isUnique": false
         },
-        "agent_hosts_organization_idx": {
-          "name": "agent_hosts_organization_idx",
-          "columns": [
-            "organization_id",
-            "role",
-            "connected"
-          ],
-          "isUnique": false
-        },
         "agent_hosts_role_idx": {
           "name": "agent_hosts_role_idx",
           "columns": [
@@ -1125,24 +1146,20 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
-        },
-        "agent_hosts_organization_id_organization_id_fk": {
-          "name": "agent_hosts_organization_id_organization_id_fk",
-          "tableFrom": "agent_hosts",
-          "tableTo": "organization",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "agent_hosts_scope_valid": {
+          "name": "agent_hosts_scope_valid",
+          "value": "\"scope\" is null OR \"scope\" in ('personal', 'platform')"
+        },
+        "agent_hosts_personal_role_valid": {
+          "name": "agent_hosts_personal_role_valid",
+          "value": "\"scope\" is null OR \"scope\" <> 'personal' OR \"role\" = 'agent'"
+        }
+      }
     },
     "course_catalogs": {
       "name": "course_catalogs",
@@ -1569,6 +1586,129 @@
           "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "host_enrollments": {
+      "name": "host_enrollments",
+      "columns": {
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "host_id": {
+          "name": "host_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_invite_id": {
+          "name": "source_invite_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_lease_id": {
+          "name": "source_lease_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "granted_at": {
+          "name": "granted_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "claimed_at": {
+          "name": "claimed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "credential_hash": {
+          "name": "credential_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "host_enrollments_host_id_unique": {
+          "name": "host_enrollments_host_id_unique",
+          "columns": [
+            "host_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "host_enrollments_user_id_user_id_fk": {
+          "name": "host_enrollments_user_id_user_id_fk",
+          "tableFrom": "host_enrollments",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
           ],
           "columnsTo": [
             "id"
@@ -4006,6 +4146,99 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "personal_image_preparations": {
+      "name": "personal_image_preparations",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "host_id": {
+          "name": "host_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "credential_generation": {
+          "name": "credential_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_key": {
+          "name": "request_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "access_json": {
+          "name": "access_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "beta_json": {
+          "name": "beta_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "images_json": {
+          "name": "images_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "personal_image_preparations_user_id_user_id_fk": {
+          "name": "personal_image_preparations_user_id_user_id_fk",
+          "tableFrom": "personal_image_preparations",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "personal_image_preparations_host_id_agent_hosts_id_fk": {
+          "name": "personal_image_preparations_host_id_agent_hosts_id_fk",
+          "tableFrom": "personal_image_preparations",
+          "tableTo": "agent_hosts",
+          "columnsFrom": [
+            "host_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "runtime_artifact_uploads": {
       "name": "runtime_artifact_uploads",
       "columns": {
@@ -4524,6 +4757,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "evidence_json": {
+          "name": "evidence_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "updated_at": {
@@ -6165,6 +6405,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "route_cleanup_id": {
+          "name": "route_cleanup_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "solved_at": {
           "name": "solved_at",
           "type": "integer",
@@ -6695,6 +6942,14 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "metal_placement": {
+          "name": "metal_placement",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'platform'"
         }
       },
       "indexes": {

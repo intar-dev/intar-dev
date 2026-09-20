@@ -28,11 +28,17 @@
     "host_id": {
       "type": "string"
     },
+    "owner_user_id": {
+      "type": "string"
+    },
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 5,
-      "minimum": 5
+      "maximum": 6,
+      "minimum": 6
+    },
+    "scope": {
+      "$ref": "#/$defs/HostScope"
     },
     "version": {
       "type": "integer",
@@ -47,6 +53,8 @@
     }
   },
   "required": [
+    "scope",
+    "owner_user_id",
     "schema_version",
     "host_id",
     "version",
@@ -144,6 +152,11 @@
         "desired_phase": {
           "$ref": "#/$defs/DesiredVmPhase"
         },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
         "guest_tools": {
           "$ref": "#/$defs/DesiredGuestToolsV1"
         },
@@ -157,10 +170,16 @@
           "type": "integer",
           "format": "int64"
         },
+        "owner_user_id": {
+          "type": "string"
+        },
         "resources": {
           "$ref": "#/$defs/VmResourcesV3"
         },
         "run_id": {
+          "type": "string"
+        },
+        "runtime_execution_id": {
           "type": "string"
         },
         "ssh_authorized_keys_openssh": {
@@ -169,11 +188,18 @@
             "type": "string"
           }
         },
+        "vm_id": {
+          "type": "string"
+        },
         "vm_name": {
           "type": "string"
         }
       },
       "required": [
+        "vm_id",
+        "owner_user_id",
+        "runtime_execution_id",
+        "generation",
         "run_id",
         "vm_name",
         "desired_phase",
@@ -183,6 +209,13 @@
         "resources",
         "ssh_authorized_keys_openssh",
         "lease_expires_at_unix_ms"
+      ]
+    },
+    "HostScope": {
+      "type": "string",
+      "enum": [
+        "personal",
+        "platform"
       ]
     },
     "ImageArchitecture": {

@@ -148,8 +148,8 @@ impl SqliteRouteStore {
             .bind(attachment_id)
             .bind(now)
             .bind(&target.username)
-            .bind(&target.host)
-            .bind(i64::from(target.port))
+            .bind(serde_json::to_string(&target.transport)?)
+            .bind(0_i64)
             .bind(&target.host_key_openssh)
             .bind(&target.private_key_openssh)
             .bind(authorized_client_public_keys_json(target)?)
@@ -359,8 +359,8 @@ impl SqliteRouteStore {
         .bind(route_username)
         .bind(&attachment_id)
         .bind(&target_to_stage.username)
-        .bind(&target_to_stage.host)
-        .bind(i64::from(target_to_stage.port))
+        .bind(serde_json::to_string(&target_to_stage.transport)?)
+        .bind(0_i64)
         .bind(&target_to_stage.host_key_openssh)
         .bind(&target_to_stage.private_key_openssh)
         .bind(authorized_client_public_keys_json(&target_to_stage)?)
@@ -609,8 +609,8 @@ impl SqliteRouteStore {
         let result = sqlx::query(statement)
             .bind(&route.route_id)
             .bind(&route.target_username)
-            .bind(&route.target_ip)
-            .bind(i64::from(route.target_ssh_port))
+            .bind(serde_json::to_string(&route.transport)?)
+            .bind(0_i64)
             .bind(&route.target_host_key_openssh)
             .bind(&route.target_private_key_openssh)
             .bind(i64::from(route.target_app_port))
@@ -915,6 +915,8 @@ fn row_to_route(row: sqlx::sqlite::SqliteRow) -> Result<StoredTerminalRoute> {
 
 /// The target row, as the stored state. A row that carries `activated_at` is
 /// active; a row without it is staged and never reaches a dial path.
+// The existing TEXT endpoint columns hold the tagged transport JSON. The old
+// numeric port columns are inert (zero). Old untagged endpoints fail closed.
 fn row_to_target(row: &sqlx::sqlite::SqliteRow) -> Result<Option<StoredTarget>> {
     let Some(route_username) = row.get::<Option<String>, _>("target_route_username") else {
         return Ok(None);
@@ -922,13 +924,9 @@ fn row_to_target(row: &sqlx::sqlite::SqliteRow) -> Result<Option<StoredTarget>> 
     if route_username.is_empty() {
         return Ok(None);
     }
-    let port = row.get::<i64, _>("target_port");
-    let port = u16::try_from(port)
-        .map_err(|_| StargateError::Internal("target_port overflowed".to_owned()))?;
     let target = TerminalTarget {
         username: row.get("target_username"),
-        host: row.get("target_host"),
-        port,
+        transport: serde_json::from_str(&row.get::<String, _>("target_host"))?,
         host_key_openssh: row.get("target_host_key_openssh"),
         private_key_openssh: row.get("target_private_key_openssh"),
         authorized_client_public_keys_openssh: authorized_client_public_keys_from_row(row)?,
@@ -973,8 +971,7 @@ fn row_to_workspace_app_route(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceA
     Ok(WorkspaceAppRouteRecord {
         route_id: row.get("route_id"),
         target_username: row.get("target_username"),
-        target_ip: row.get("target_ip"),
-        target_ssh_port: parse_port("target_ssh_port")?,
+        transport: serde_json::from_str(&row.get::<String, _>("target_ip"))?,
         target_host_key_openssh: row.get("target_host_key_openssh"),
         target_private_key_openssh: row.get("target_private_key_openssh"),
         target_app_port: parse_port("target_app_port")?,

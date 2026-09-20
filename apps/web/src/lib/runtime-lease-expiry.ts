@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { archiveRuntimeExecution } from "@/lib/runtime-executions";
-import { loadRunRow } from "@/lib/scenario-runs/storage";
+import { loadRunRow, updateRunState } from "@/lib/scenario-runs/storage";
 import { revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
 
 type ExpiredRuntimeExecutionRow = {
@@ -16,10 +16,8 @@ export interface RuntimeLeaseExpiryResult {
 }
 
 /**
- * Completes the domain-neutral half of lease expiry. Scenario expiry still
- * projects its learner-facing failure before this runs; this function revokes
- * access and releases the shared execution, slot, and capacity reservation for
- * both domains. Current-generation guards make retries safe.
+ * Finalizes expired executions even when teardown already marked desired VMs
+ * absent. Lease expiry ends the run; it does not prove physical VM removal.
  */
 export async function expireOverdueRuntimeExecutions(
   hostId: string,
@@ -55,6 +53,18 @@ export async function expireOverdueRuntimeExecutions(
     try {
       const run = await loadRunRow(execution.domain_id);
       if (run) await revokeScenarioRunRoutes(run);
+      if (run && !["completed", "failed"].includes(run.state.phase)) {
+        // End the logical run without inventing a host absence observation.
+        await updateRunState(run.runId, {
+          mutate: (current) => ["completed", "failed"].includes(current.phase)
+            ? current
+            : {
+                ...current,
+                phase: "failed",
+              },
+          releaseActiveSlot: true,
+        });
+      }
       await archiveRuntimeExecution({
         executionId: execution.execution_id,
         expectedGeneration: execution.generation,

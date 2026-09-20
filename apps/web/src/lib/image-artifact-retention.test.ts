@@ -668,7 +668,7 @@ describe("host image references", () => {
         phase: entry.phase,
         updated_at_unix_ms: 0,
       })),
-      vms: vms.map((entry, index) => ({
+      vms: vms.map((entry, index) => ({ owner_user_id: "warm-cache-owner", runtime_execution_id: "run-" + index, generation: 1,
         run_id: "run-" + index,
         vm_name: "vm-" + index,
         phase: entry.phase,

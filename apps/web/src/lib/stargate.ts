@@ -7,6 +7,7 @@ import type {
   RouteMetadata as StargateRouteMetadata,
   StageTerminalTargetRequest as StargateStageRequest,
   StageTerminalTargetResponse as StargateStageResponse,
+  SshTargetTransport,
   TerminalTarget as StargateWireTerminalTarget,
   TerminalTargetState as StargateWireTargetState,
 } from "@/generated/stargate";
@@ -48,8 +49,7 @@ function routeMetadata(metadata: {
  * gateway attaches the ready target; it never travels through the browser. */
 export interface StargateTerminalTarget {
   username: string;
-  host: string;
-  port: number;
+  transport: SshTargetTransport;
   hostKeyOpenssh: string;
   privateKeyOpenssh: string;
   authorizedClientPublicKeysOpenssh: string[];
@@ -66,8 +66,7 @@ function wireTerminalTarget(
 ): StargateWireTerminalTarget {
   return {
     username: target.username,
-    host: target.host,
-    port: target.port,
+    transport: target.transport,
     host_key_openssh: target.hostKeyOpenssh,
     private_key_openssh: target.privateKeyOpenssh,
     authorized_client_public_keys_openssh:
@@ -612,4 +611,26 @@ function requiredValue(value: string | undefined, name: string): string {
 
 function requiredUrl(value: string | undefined): URL {
   return new URL(requiredValue(value, "stargate base url"));
+}
+
+/** Host-level relay control calls share the existing private admin channel. */
+export async function stargateRelayAdminRequest(
+  action: "grant" | "revoke" | "revoke-credentials",
+  body: unknown,
+): Promise<Response> {
+  return stargateAdminFetch(`/v1/host-relays/${action}`, {
+    method: "POST",
+    signal: AbortSignal.timeout(5_000),
+    headers: {
+      "content-type": "application/json",
+      [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]: await createAssertionToken({
+        secret: requiredValue(env.STARGATE_ADMIN_AUTH_SECRET, "STARGATE_ADMIN_AUTH_SECRET"),
+        issuer: requiredValue(env.STARGATE_ADMIN_AUTH_ISSUER, "STARGATE_ADMIN_AUTH_ISSUER"),
+        audience: requiredValue(env.STARGATE_ADMIN_AUTH_AUDIENCE, "STARGATE_ADMIN_AUTH_AUDIENCE"),
+        subject: "intar-admin",
+        ttlSeconds: 60,
+      }),
+    },
+    body: JSON.stringify(body),
+  });
 }

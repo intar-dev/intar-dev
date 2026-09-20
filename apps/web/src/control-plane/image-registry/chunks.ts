@@ -1,3 +1,7 @@
+import { and, eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { agentHosts } from "@/db/schema";
+import { agentCanAccessManifest, currentAgentHost } from "./image-access";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import type {
   ImageChunkManifestV1,
@@ -225,13 +229,9 @@ export async function handleAgentImageChunkDownload(
   request: Request,
   env: Cloudflare.Env,
   rawSha256: string,
+  manifestSha256: string,
 ): Promise<Response> {
-  return handleAgentImmutableDownload(
-    request,
-    env,
-    imageChunkObjectKey(rawSha256),
-    "application/zstd",
-  );
+  return handleAgentManifestContent(request, env, manifestSha256, rawSha256);
 }
 
 export async function handleAgentImageManifestDownload(
@@ -239,12 +239,48 @@ export async function handleAgentImageManifestDownload(
   env: Cloudflare.Env,
   manifestSha256: string,
 ): Promise<Response> {
-  return handleAgentImmutableDownload(
-    request,
-    env,
-    imageManifestObjectKey(manifestSha256),
-    "application/json",
-  );
+  return handleAgentManifestContent(request, env, manifestSha256);
+}
+
+async function handleAgentManifestContent(
+  request: Request, env: Cloudflare.Env, manifestSha256: string, rawSha256?: string,
+): Promise<Response> {
+  if (request.method !== "GET") return jsonResponse({ error: "method not allowed" }, 405);
+  const verified = await requireVerifiedAgentRequest(request, env);
+  if (!verified.ok) return verified.response;
+  const db = drizzle(env.DB);
+  const denied = () => jsonResponse({ error: "object not found" }, 404);
+  if (!await agentCanAccessManifest(db, verified.agent, manifestSha256)) return denied();
+
+  // The upload contract caps manifest size at 4 MiB. Check before parsing.
+  const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(imageManifestObjectKey(manifestSha256));
+  if (!object || object.size <= 0 || object.size > 4 * 1024 * 1024) return denied();
+  const payload = await object.arrayBuffer();
+  if (payload.byteLength > 4 * 1024 * 1024 || await sha256Hex(payload) !== manifestSha256) return denied();
+  let decoded: unknown;
+  try { decoded = JSON.parse(new TextDecoder().decode(payload)); } catch { return denied(); }
+  const manifest = await validateImageChunkManifest(decoded);
+  if (!manifest.ok) return denied();
+
+  let body: BodyInit = payload;
+  let size = payload.byteLength;
+  let etag = object.httpEtag;
+  if (rawSha256 !== undefined) {
+    const chunk = manifest.value.chunks.find(chunk => chunk.raw_sha256 === rawSha256);
+    if (!chunk) return denied();
+    const content = await env.VM_IMAGE_REGISTRY_BUCKET.get(imageChunkObjectKey(rawSha256));
+    if (!chunkObjectMatchesDescriptor(content, chunk) || !content) return denied();
+    body = content.body;
+    size = content.size;
+    etag = content.httpEtag;
+  }
+  // R2 reads can yield to revocation or credential replacement. Recheck the
+  // exact manifest and identity after all reads; never cache authorization.
+  if (!await agentCanAccessManifest(db, verified.agent, manifestSha256, manifest.value.image_id)) return denied();
+  return new Response(body, { headers: {
+    "content-type": rawSha256 === undefined ? "application/json" : "application/zstd",
+    "content-length": String(size), "cache-control": "private, no-store", etag,
+  } });
 }
 
 export async function handleAgentToolsDiskDownload(
@@ -252,30 +288,19 @@ export async function handleAgentToolsDiskDownload(
   env: Cloudflare.Env,
   toolsDiskSha256: string,
 ): Promise<Response> {
-  return handleAgentImmutableDownload(
-    request,
-    env,
-    `guest-tools/scenario/disks/${toolsDiskSha256}.ext4.zst`,
-    "application/zstd",
-  );
-}
-
-async function handleAgentImmutableDownload(
-  request: Request,
-  env: Cloudflare.Env,
-  objectKey: string,
-  contentType: string,
-): Promise<Response> {
   if (request.method !== "GET") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
   const verified = await requireVerifiedAgentRequest(request, env);
   if (!verified.ok) return verified.response;
-  const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(objectKey);
+  const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(`guest-tools/scenario/disks/${toolsDiskSha256}.ext4.zst`);
   if (!object) return jsonResponse({ error: "object not found" }, 404);
+  const current = await drizzle(env.DB).select({ id: agentHosts.id }).from(agentHosts)
+    .where(and(eq(agentHosts.id, verified.agent.hostId), currentAgentHost(verified.agent))).limit(1);
+  if (!current.length) return jsonResponse({ error: "object not found" }, 404);
   return new Response(object.body, {
     headers: {
-      "content-type": contentType,
+      "content-type": "application/zstd",
       "content-length": String(object.size),
       "cache-control": "private, max-age=31536000, immutable",
       etag: object.httpEtag,

@@ -17,8 +17,8 @@ import {
 
 /** Every committed generated migration, in journal order. */
 const COMMITTED_COUNT = expectedGeneratedD1Schema().committedMigrationCount;
-/** The newest committed migration, which is the one production still lacks. */
-const APPENDED_IDX = COMMITTED_COUNT - 1;
+/** The schema before personal-metal fields and credential generations. */
+const APPENDED_IDX = 19;
 
 describe("generated migration apply", () => {
   test("plans every committed migration after the observed ledger", async () => {
@@ -34,13 +34,22 @@ describe("generated migration apply", () => {
         "0016_salty_shiver_man",
         "0017_narrow_angel",
         "0018_exotic_deathbird",
+        "0019_military_lightspeed",
+        "0020_noisy_plazm",
+        "0021_greedy_trish_tilby",
+        "0022_petite_colleen_wing",
+        "0023_fuzzy_mastermind",
+        "0024_white_masque",
+        "0025_cheerful_sway",
+        "0026_groovy_doctor_octopus",
+        "0027_real_big_bertha",
       ]);
     } finally {
       fixture.database.close(false);
     }
   });
 
-  test("applies the actual production step: the newest migration with populated data", async () => {
+  test("applies personal-metal migrations while preserving populated history", async () => {
     const fixture = prefixDatabase(APPENDED_IDX);
     try {
       const client = fixture.client;
@@ -76,16 +85,23 @@ describe("generated migration apply", () => {
       const plan = await planGeneratedMigrations(client);
       expect(plan.appliedMigrationCount).toBe(APPENDED_IDX);
       expect(plan.pending.map(({ tag }) => tag)).toEqual([
-        "0018_exotic_deathbird",
+        "0019_military_lightspeed",
+        "0020_noisy_plazm",
+        "0021_greedy_trish_tilby",
+        "0022_petite_colleen_wing",
+        "0023_fuzzy_mastermind",
+        "0024_white_masque",
+        "0025_cheerful_sway",
+        "0026_groovy_doctor_octopus",
+        "0027_real_big_bertha",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);
-      expect(evidence.appliedTags).toEqual(["0018_exotic_deathbird"]);
+      expect(evidence.appliedTags).toEqual(plan.pending.map(({ tag }) => tag));
       expect(evidence.appliedMigrationCount).toBe(COMMITTED_COUNT);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(client.database.query("SELECT cpu_millis FROM host_cpu_reservations WHERE run_id = 'run-1'").get()).toEqual({ cpu_millis: 500 });
-      // The appended step removes the retired sponsor column and the address
-      // cache table without touching the populated rows.
+      // Already removed schema stays removed without affecting history.
       expect(
         client.database
           .query(
@@ -110,20 +126,24 @@ describe("generated migration apply", () => {
       expect(columns.map((column) => column.name)).not.toContain("steady_cpu_millis");
       expect(columns.map((column) => column.name)).not.toContain("quota_phase");
       expect(client.database.query("SELECT count(*) AS count FROM pragma_table_info('vm_scenario_vms') WHERE name = 'vcpu_count'").get()).toEqual({ count: 0 });
-      // One migration, one batch, and that batch carries the marker last.
-      expect(client.batches).toHaveLength(1);
-      expect(client.batches[0]?.at(-1)?.sql).toBe(
-        "INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)",
-      );
+      expect(client.batches).toHaveLength(COMMITTED_COUNT - APPENDED_IDX);
+      for (const batch of client.batches) {
+        expect(batch.at(-1)?.sql).toBe("INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)");
+      }
+      expect(client.database.query("SELECT scope, credential_generation, owner_removal_completed_at FROM agent_hosts WHERE id = 'h1'").get())
+        .toEqual({ scope: null, credential_generation: 0, owner_removal_completed_at: null });
+      expect(client.database.query("SELECT metal_placement FROM user WHERE id = 'u1'").get())
+        .toEqual({ metal_placement: "platform" });
 
       // The populated rows survive with NULL values in the new columns.
       const run = client.database
         .query(
-          "SELECT request_idempotency_key, request_scope_json FROM scenario_runs WHERE run_id = 'run-1'",
+          "SELECT request_idempotency_key, request_scope_json, route_cleanup_id FROM scenario_runs WHERE run_id = 'run-1'",
         )
-        .get() as { request_idempotency_key: string | null; request_scope_json: string | null };
+        .get() as { request_idempotency_key: string | null; request_scope_json: string | null; route_cleanup_id: string | null };
       expect(run.request_idempotency_key).toBeNull();
       expect(run.request_scope_json).toBeNull();
+      expect(run.route_cleanup_id).toBeNull();
       const vm = client.database
         .query(
           "SELECT terminal_attached_at FROM runtime_vms WHERE id = 'vm-1'",

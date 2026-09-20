@@ -1,278 +1,172 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
-
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, describe, expect, it } from "vitest";
-import {
-  agentBootstrapTokens,
-  agentHosts,
-  hostActualState,
-  hostDesiredState,
-  scenarioRuns,
-  user,
-} from "@/db/schema";
-import { getBetaAccess, type BetaAdmissionEpoch } from "@/lib/allowlist";
-import { createEmptyHostDesiredState } from "@/lib/desired-state";
+import { beforeEach, expect, it, vi } from "vitest";
+import { agentHosts, user, runtimeExecutions, runtimeVms } from "@/db/schema";
+import type { UserContext } from "@/lib/agent-bridge";
 import { retirePersonalHost } from "@/lib/personal-host-retirement";
+import { persistHostReport } from "@/lib/personal-host-readiness";
+import { updatePersonalServer, listPersonalServers } from "@/lib/personal-servers";
+import { createHostEnrollment, claimHostEnrollment, randomHostSecret } from "@/lib/host-enrollment";
 import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
-
-const USER_ID = "retirement-owner";
-const HOST_ID = "retirement-host";
-const NOW = 20_000;
-
-describe("personal host retirement boundary", () => {
-  beforeEach(async () => {
-    await resetD1Database();
-    const db = drizzle(env.DB);
-    await db.insert(user).values({
-      id: USER_ID,
-      name: "Retirement Owner",
-      email: "retirement@example.test",
-    });
-    await grantFixtureBetaAccess({ d1: env.DB, userId: USER_ID, now: 10_000 });
-  });
-
-  it("revokes and hides a drained host while preserving identity and history", async () => {
-    const db = drizzle(env.DB);
-    await seedHost();
-    await db.insert(agentBootstrapTokens).values({
-      id: "bootstrap-1",
-      hostId: HOST_ID,
-      tokenHash: "bootstrap-hash",
-      createdAt: 11_000,
-    });
-    await db.insert(scenarioRuns).values(completedRun());
-    const desired = {
-      ...createEmptyHostDesiredState({ hostId: HOST_ID, nowUnixMs: 11_000 }),
-      version: 1,
-    };
-    await db.insert(hostDesiredState).values({
-      hostId: HOST_ID,
-      version: 1,
-      docJson: desired,
-      createdAt: 11_000,
-      updatedAt: 11_000,
-    });
-    await db.insert(hostActualState).values({
-      hostId: HOST_ID,
-      appliedDesiredVersion: 1,
-      observedAt: 11_000,
-      reportJson: emptyHostReport(),
-      createdAt: 11_000,
-      updatedAt: 11_000,
-    });
-
-    await expect(
-      retirePersonalHost({
-        d1: env.DB,
-        hostId: HOST_ID,
-        userId: USER_ID,
-        betaAdmission: await admission(),
-        now: NOW,
-      }),
-    ).resolves.toBe(true);
-
-    await expect(
-      db
-        .select({
-          id: agentHosts.id,
-          name: agentHosts.name,
-          role: agentHosts.role,
-          disabled: agentHosts.disabled,
-          scenarioEnabled: agentHosts.scenarioEnabled,
-          connected: agentHosts.connected,
-          activeSessionId: agentHosts.activeSessionId,
-        })
-        .from(agentHosts)
-        .where(eq(agentHosts.id, HOST_ID)),
-    ).resolves.toEqual([
-      {
-        id: HOST_ID,
-        name: "Cutover host",
-        role: "agent",
-        disabled: true,
-        scenarioEnabled: false,
-        connected: false,
-        activeSessionId: null,
-      },
-    ]);
-    await expect(
-      db
-        .select({ revokedAt: agentBootstrapTokens.revokedAt })
-        .from(agentBootstrapTokens),
-    ).resolves.toEqual([{ revokedAt: NOW }]);
-    await expect(db.select().from(hostDesiredState)).resolves.toHaveLength(0);
-    await expect(db.select().from(hostActualState)).resolves.toHaveLength(0);
-    await expect(
-      db.select({ hostId: scenarioRuns.hostId }).from(scenarioRuns),
-    ).resolves.toEqual([{ hostId: HOST_ID }]);
-
-    await expect(
-      retirePersonalHost({
-        d1: env.DB,
-        hostId: HOST_ID,
-        userId: USER_ID,
-        betaAdmission: await admission(),
-        now: NOW + 1,
-      }),
-    ).resolves.toBe(true);
-  });
-
-  it("fails closed while connected or when a run is active", async () => {
-    const db = drizzle(env.DB);
-    await seedHost({ connected: true, activeSessionId: "session-1" });
-
-    await expect(
-      retirePersonalHost({
-        d1: env.DB,
-        hostId: HOST_ID,
-        userId: USER_ID,
-        betaAdmission: await admission(),
-        now: NOW,
-      }),
-    ).resolves.toBe(false);
-
-    await db
-      .update(agentHosts)
-      .set({ connected: false, activeSessionId: null })
-      .where(eq(agentHosts.id, HOST_ID));
-    await db
-      .insert(scenarioRuns)
-      .values({
-        ...completedRun(),
-        activeKey: USER_ID,
-        state: "running",
-        completedAt: null,
-      });
-
-    await expect(
-      retirePersonalHost({
-        d1: env.DB,
-        hostId: HOST_ID,
-        userId: USER_ID,
-        betaAdmission: await admission(),
-        now: NOW,
-      }),
-    ).resolves.toBe(false);
-    await expect(
-      db.select({ disabled: agentHosts.disabled }).from(agentHosts),
-    ).resolves.toEqual([{ disabled: false }]);
-  });
-
-  it("rejects a stale admission epoch", async () => {
-    await seedHost();
-    const current = await admission();
-
-    await expect(
-      retirePersonalHost({
-        d1: env.DB,
-        hostId: HOST_ID,
-        userId: USER_ID,
-        betaAdmission: {
-          ...current,
-          sourceLeaseId: `${current.sourceLeaseId}-old`,
-        },
-        now: NOW,
-      }),
-    ).resolves.toBe(false);
-  });
+import fixture from "@/generated/fixtures/bridge/host-state-report-v2.json";
+import type { HostStateReportV2 } from "@/generated/bridge";
+import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
+let context: UserContext;
+const now = Date.now();
+let reportSequence = now;
+beforeEach(async () => {
+  await resetD1Database();
+  await drizzle(env.DB).insert(user).values([
+    { id: "owner", name: "Owner", email: "owner@example.test" },
+    { id: "other", name: "Other", email: "other@example.test" },
+  ]);
+  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner" });
+  const epoch = await env.DB.prepare("SELECT source_invite_id AS sourceInviteId, source_lease_id AS sourceLeaseId, granted_at AS grantedAt FROM access_allowlist WHERE user_id = 'owner'").first<UserContext["betaAdmission"]>();
+  context = { userId: "owner", sessionId: "browser", betaAdmission: epoch!, isAdmin: false, role: "user", organizationIds: [], activeOrganizationId: null };
+  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('personal_metal_registration','open',1)").run();
+});
+async function host(id = "host", scope: "personal" | "platform" = "personal") {
+  await drizzle(env.DB).insert(agentHosts).values({ id, userId: "owner", name: id, scope, credentialGeneration: 1, connected: true, activeSessionId: "session", lastHeartbeatAt: now });
+}
+function report(id = "host"): HostStateReportV2 {
+  return { ...structuredClone(fixture), observed_at_unix_ms: ++reportSequence, schema_version: HOST_STATE_REPORT_SCHEMA_VERSION, relay_connected: true, host_id: id, vms: [], builds: [] } as HostStateReportV2;
+}
+function ready(id = "host", snapshot = report(id), sessionId = "session") {
+  return persistHostReport({ d1: env.DB, hostId: id, sessionId, credentialGeneration: 1, report: snapshot, now, requireRunCli: false });
+}
+function remove(hostId = "host", confirmReturnToCloud = true) {
+  return retirePersonalHost({ d1: env.DB, hostId, userId: context.userId, betaAdmission: context.betaAdmission, confirmReturnToCloud });
+}
+async function placement() { return env.DB.prepare("SELECT metal_placement AS mode FROM user WHERE id = 'owner'").first<{ mode: string }>(); }
+it("changes placement only when a current personal server is Ready", async () => {
+  await host("platform", "platform"); await ready("platform");
+  expect(await placement()).toEqual({ mode: "platform" });
+  await host();
+  expect(await ready("host", report(), "old-session")).toBe(false);
+  expect(await placement()).toEqual({ mode: "platform" });
+  const broken = report(); broken.capabilities.supports_kvm = false;
+  await ready("host", broken);
+  expect(await placement()).toEqual({ mode: "platform" });
+  await ready();
+  expect(await placement()).toEqual({ mode: "personal" });
+  await updatePersonalServer(env.DB, context, "host", { paused: true });
+  expect(await placement()).toEqual({ mode: "personal" });
+  expect((await listPersonalServers(context)).servers[0]?.status).toBe("paused");
+});
+it("requires last-server consent, revokes credentials, preserves identity, and makes retries safe", async () => {
+  const enrollment = await createHostEnrollment(env.DB, context, { name: "My server", scope: "personal", role: "agent" });
+  const credential = randomHostSecret();
+  await claimHostEnrollment(env.DB, enrollment.enrollmentToken, credential);
+  await env.DB.prepare("UPDATE user SET metal_placement = 'personal' WHERE id = 'owner'").run();
+  await expect(remove(enrollment.hostId, false)).rejects.toMatchObject({ code: "last_server_confirmation_required" });
+  expect(await remove(enrollment.hostId)).toEqual({ placement: "platform" });
+  expect(await remove(enrollment.hostId)).toEqual({ placement: "platform" });
+  expect(await claimHostEnrollment(env.DB, enrollment.enrollmentToken, credential)).toBeNull();
+  expect(await env.DB.prepare("SELECT disabled, credential_generation FROM agent_hosts WHERE id = ?").bind(enrollment.hostId).first()).toEqual({ disabled: 1, credential_generation: 2 });
+});
+it("does not let a retry override another server's later administrative revocation", async () => {
+  await host(); await host("second"); await ready();
+  await remove("host", false);
+  await env.DB.prepare("UPDATE agent_hosts SET disabled = 1 WHERE id = 'second'").run();
+  await remove("host", true);
+  expect(await placement()).toEqual({ mode: "personal" });
+  expect((await listPersonalServers(context)).servers.find(row => row.id === "second")?.status).toBe("revoked");
+  await expect(remove("second", false)).rejects.toMatchObject({ code: "last_server_confirmation_required" });
+  expect(await placement()).toEqual({ mode: "personal" });
+  await remove("second", true);
+  expect(await placement()).toEqual({ mode: "platform" });
+});
+it("keeps registration, last removal and first Ready consistent when requests race", async () => {
+  await host(); await ready();
+  const enrollment = await createHostEnrollment(env.DB, context, { name: "Second", scope: "personal", role: "agent" });
+  await Promise.all([remove(), claimHostEnrollment(env.DB, enrollment.enrollmentToken, randomHostSecret())]);
+  await env.DB.prepare("UPDATE agent_hosts SET active_session_id = 'session' WHERE id = ?").bind(enrollment.hostId).run();
+  await Promise.all([remove(), ready(enrollment.hostId)]);
+  expect(await placement()).toEqual({ mode: "personal" });
+  expect((await listPersonalServers(context)).servers.filter(row => row.status !== "removing").map(row => row.id)).toEqual([enrollment.hostId]);
+});
+it("rejects another owner and a stale admission for management", async () => {
+  await host();
+  const intruder = { ...context, userId: "other" };
+  await expect(updatePersonalServer(env.DB, intruder, "host", { name: "stolen" })).rejects.toMatchObject({ status: 404 });
+  await expect(retirePersonalHost({ d1: env.DB, hostId: "host", userId: "other", betaAdmission: context.betaAdmission, confirmReturnToCloud: true })).rejects.toMatchObject({ status: 404 });
+  expect((await listPersonalServers(intruder)).servers).toEqual([]);
+  await env.DB.prepare("UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = 'owner'").run();
+  await expect(updatePersonalServer(env.DB, context, "host", { paused: true })).rejects.toMatchObject({ status: 404 });
+  await expect(remove()).rejects.toMatchObject({ status: 404 });
+});
+it("a delayed report after removal cannot restore readiness or change placement", async () => {
+  await host(); await ready(); await remove();
+  expect(await ready()).toBe(false);
+  expect(await placement()).toEqual({ mode: "platform" });
 });
 
-async function seedHost(
-  input: { connected?: boolean; activeSessionId?: string | null } = {},
-) {
-  await drizzle(env.DB)
-    .insert(agentHosts)
-    .values({
-      id: HOST_ID,
-      userId: USER_ID,
-      name: "Cutover host",
-      role: "agent",
-      scenarioEnabled: true,
-      disabled: false,
-      connected: input.connected ?? false,
-      activeSessionId: input.activeSessionId ?? null,
-      createdAt: 11_000,
-      updatedAt: 11_000,
-    });
-}
+it("rejects missing or wrong workload identity before saving a host report", async () => {
+  await host();
+  const db = drizzle(env.DB);
+  await db.insert(runtimeExecutions).values({ id: "execution", userId: "owner", hostId: "host", domainKind: "scenario", domainId: "run", generation: 1 });
+  await db.insert(runtimeVms).values({ id: "runtime-vm", executionId: "execution", vmId: "web", ordinal: 0,
+    runtimeVmName: "runtime-web", imageKeyJson: {}, imageSha256: "a".repeat(64), cpuMillis: 500, memoryMib: 512, diskMib: 1024 });
+  const snapshot = report();
+  const valid = { ...structuredClone(fixture.vms[0]!), owner_user_id: "owner", runtime_execution_id: "execution", generation: 1, run_id: "run", vm_name: "runtime-web" };
+  for (const invalid of [
+    { ...valid, owner_user_id: "other" }, { ...valid, generation: 2 },
+    { ...valid, runtime_execution_id: "missing" }, { ...valid, run_id: "other-run" },
+  ]) {
+    snapshot.vms = [invalid as HostStateReportV2["vms"][number]];
+    expect(await ready("host", snapshot)).toBe(false);
+    expect(await placement()).toEqual({ mode: "platform" });
+    expect(await env.DB.prepare("SELECT host_id FROM host_actual_state").first()).toBeNull();
+  }
+  snapshot.vms = [valid as HostStateReportV2["vms"][number]];
+  expect(await ready("host", snapshot)).toBe(true);
+});
 
-async function admission(): Promise<BetaAdmissionEpoch> {
-  const access = await getBetaAccess(USER_ID, env.DB);
-  if (!access) throw new Error("missing admission fixture");
-  return {
-    sourceInviteId: access.sourceInviteId,
-    sourceLeaseId: access.sourceLeaseId,
-    grantedAt: access.grantedAt,
-  };
-}
+it("rejects an older Ready report after the tunnel disconnects", async () => {
+  await host();
+  const oldReady = report();
+  const disconnected = { ...report(), relay_connected: false };
+  expect(await ready("host", disconnected)).toBe(true);
+  expect(await ready("host", oldReady)).toBe(false);
+  expect(await placement()).toEqual({ mode: "platform" });
+  expect((await listPersonalServers(context)).servers[0]?.status).toBe("needs_attention");
+});
+it("changes placement atomically when the first healthy paused server resumes", async () => {
+  await host();
+  await updatePersonalServer(env.DB, context, "host", { paused: true });
+  await ready();
+  expect(await placement()).toEqual({ mode: "platform" });
+  await updatePersonalServer(env.DB, context, "host", { paused: false });
+  expect(await placement()).toEqual({ mode: "personal" });
+  expect((await listPersonalServers(context)).servers[0]?.status).toBe("ready");
+});
+it("keeps failed removal visible until cleanup succeeds without restoring access", async () => {
+  await host(); await ready(); await remove();
+  const pending = (await listPersonalServers(context)).servers[0];
+  expect(pending).toMatchObject({ id: "host", status: "removing", connected: false });
+  await expect(updatePersonalServer(env.DB, context, "host", { paused: false })).rejects.toMatchObject({ status: 404 });
+  expect(await remove("host", false)).toEqual({ placement: "platform" });
+  await env.DB.prepare("UPDATE agent_hosts SET owner_removal_completed_at = ? WHERE id = 'host'").bind(Date.now()).run();
+  expect((await listPersonalServers(context)).servers).toEqual([]);
+});
 
-function completedRun() {
-  return {
-    runId: "retirement-run",
-    userId: USER_ID,
-    hostId: HOST_ID,
-    scenarioId: "retirement-scenario",
-    scenarioName: "retirement-scenario",
-    title: "Retirement history",
-    tagline: "",
-    briefingMarkdown: "",
-    objectivesJson: "[]",
-    difficulty: "easy",
-    estimatedMinutes: 1,
-    tagsJson: [],
-    hintsJson: [],
-    solutionMarkdown: "",
-    vmCount: 1,
-    state: "completed",
-    stateRank: 1,
-    activeKey: null as string | null,
-    stateJson: "{}",
-    completedAt: 11_000 as number | null,
-    createdAt: 11_000,
-    updatedAt: 11_000,
-  };
-}
-
-function emptyHostReport(): typeof hostActualState.$inferInsert.reportJson {
-  return {
-    schema_version: 6,
-    host_id: HOST_ID,
-    observed_at_unix_ms: 11_000,
-    applied_desired_version: 1,
-    capacity: {
-      total_cpu_millis: 2_000,
-      reserved_cpu_millis: 1_000,
-      schedulable_cpu_millis: 1_000,
-      committed_cpu_millis: 0,
-      memory_total_mib: 8_192,
-      memory_available_mib: 4_096,
-      disk_probe_path: "/var/lib/intar-agent",
-      disk_total_mib: 100_000,
-      disk_available_mib: 80_000,
-    },
-    capabilities: {
-      arch: "x86_64",
-      cloud_hypervisor_sha256:
-        "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      supports_kvm: true,
-      supports_vsock: true,
-      supports_reflink: true,
-      supports_nftables: true,
-      supports_jailer_v2: true,
-      supports_jailer_v3: true,
-      supports_raw_chunks_v1: true,
-      supports_scenario_guest_tools_v1: true,
-      supports_template_backed_launch: true,
-      fast_template_store: true,
-      supports_hard_cpu_quota: true,
-      supports_landlock: true,
-      supports_cgroup_v2: true,
-    },
-    cached_images: [],
-    vms: [],
-    builds: [],
-  };
-}
+it.each([false, true])("does not resume across a changed readiness snapshot (initial report: %s)", async initialReport => {
+  await host();
+  await updatePersonalServer(env.DB, context, "host", { paused: true });
+  if (initialReport) await ready();
+  const batch = env.DB.batch.bind(env.DB);
+  const spy = vi.spyOn(env.DB, "batch").mockImplementationOnce(async statements => {
+    spy.mockRestore();
+    await ready();
+    return batch(statements);
+  });
+  try {
+    await expect(updatePersonalServer(env.DB, context, "host", { paused: false })).rejects.toMatchObject({ code: "server_status_changed" });
+  } finally { spy.mockRestore(); }
+  expect((await listPersonalServers(context)).servers[0]?.status).toBe("paused");
+  expect(await placement()).toEqual({ mode: "platform" });
+  await updatePersonalServer(env.DB, context, "host", { paused: false });
+  expect(await placement()).toEqual({ mode: "personal" });
+});

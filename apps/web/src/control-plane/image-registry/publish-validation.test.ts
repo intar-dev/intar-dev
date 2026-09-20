@@ -28,7 +28,7 @@ describe("image registry publish validation", () => {
   it("accepts builder agent JWTs for image publish requests", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
 
     const response = await handleImageRegistryRequest(
@@ -70,7 +70,7 @@ describe("image registry publish validation", () => {
   it("requires typed build identity fields for builder publishes", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
     const form = new FormData();
     form.set(
@@ -113,7 +113,7 @@ describe("image registry publish validation", () => {
     async (_label, assignmentOverride) => {
       authMock.requireVerifiedAgentRequest.mockResolvedValue({
         ok: true,
-        agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+        agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
       });
       const form = builderPublishForm(
         publishManifest({
@@ -152,7 +152,7 @@ describe("image registry publish validation", () => {
   it("stages an exactly assigned candidate result while holding the build lock", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
     const imageSha256 = "e".repeat(64);
     const artifactSha256 = "f".repeat(64);
@@ -232,7 +232,7 @@ describe("image registry publish validation", () => {
   it("keeps the stale-build 409 when lease release also fails", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
     const imageSha256 = "e".repeat(64);
     const artifactSha256 = "f".repeat(64);

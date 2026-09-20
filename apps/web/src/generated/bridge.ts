@@ -18,13 +18,24 @@ export interface ClientHelloV8 {
   capabilities: HostCapabilitiesV2;
 }
 
+export interface HostRelayCredentials {
+  websocket_url: string;
+  token: string;
+  gateway_host_key_openssh: string;
+  identity: import("./stargate").HostRelayIdentity;
+  expires_at_unix_ms: number;
+}
+
 export interface ServerHelloV8 {
+  session_id: string;
+  relay?: HostRelayCredentials | null;
   protocol_version: number;
   host_id: string;
   desired_version: number;
 }
 
 export interface DesiredStateV8 {
+  relay?: HostRelayCredentials | null;
   protocol_version: number;
   host_id: string;
   desired_state: HostDesiredStateV2;
@@ -63,7 +74,11 @@ export type BridgeMessageV8 =
   | ({ type: "build_report" } & BuildReportV8)
   | ({ type: "sync_request" } & SyncRequestV8);
 
+export type HostScope = "personal" | "platform";
+
 export interface HostDesiredStateV2 {
+  scope: HostScope;
+  owner_user_id: string;
   schema_version: number;
   host_id: string;
   version: number;
@@ -91,6 +106,10 @@ export interface DesiredBuildV1 {
 export type DesiredVmPhase = "running" | "absent";
 
 export interface DesiredVmV2 {
+  vm_id: string;
+  owner_user_id: string;
+  runtime_execution_id: string;
+  generation: number;
   run_id: string;
   vm_name: string;
   desired_phase: DesiredVmPhase;
@@ -116,6 +135,7 @@ export interface VmResourcesV3 {
 }
 
 export interface HostStateReportV2 {
+  relay_connected: boolean;
   schema_version: number;
   host_id: string;
   observed_at_unix_ms: number;
@@ -225,6 +245,9 @@ export type VmPhase =
   | "absent";
 
 export interface VmActualStateV2 {
+  owner_user_id: string;
+  runtime_execution_id: string;
+  generation: number;
   run_id: string;
   vm_name: string;
   desired_version?: number | null;
@@ -308,6 +331,9 @@ export interface VmArchiveStateV1 {
 }
 
 export interface VmReportV2 {
+  owner_user_id: string;
+  runtime_execution_id: string;
+  generation: number;
   schema_version: number;
   host_id: string;
   run_id: string;

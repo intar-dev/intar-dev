@@ -937,6 +937,11 @@ async function isValidRestrictedSessionFlow(
 }
 
 const betaAuthBeforeRequest = createAuthMiddleware(async (context) => {
+  // disabledPaths protects HTTP. This guard also protects direct auth.api
+  // calls, including leaveOrganization, which has no member-removal hook.
+  if (context.path === "/organization/leave" || context.path === "/organization/remove-member") {
+    throw new APIError("FORBIDDEN", { message: "Use the application organization membership routes" });
+  }
   const requestHeaders = context.request?.headers ?? context.headers;
   const encodedHandoff = requestHeaders?.get(INVITE_OAUTH_HANDOFF_HEADER);
   // Session inspection carries no credential material beyond the cookie, and

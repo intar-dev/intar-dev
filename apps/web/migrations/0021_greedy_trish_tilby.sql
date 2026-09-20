@@ -1,0 +1,1 @@
+ALTER TABLE `agent_bootstrap_tokens` ADD `credential_generation` integer DEFAULT 0 NOT NULL;

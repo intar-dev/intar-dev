@@ -19,7 +19,7 @@ describe("image registry agent routes", () => {
   it("deduplicates and advertises only valid chunked direct-boot image index entries", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const validImageSha256 = "a".repeat(64);
     const validKernelSha256 = "b".repeat(64);
@@ -146,7 +146,7 @@ describe("image registry agent routes", () => {
           },
           bytes: 8_589_934_592,
           manifest_download_url: `/agent/registry/image-manifests/${"d".repeat(64)}`,
-          chunk_download_base_url: "/agent/registry/image-chunks",
+          chunk_download_base_url: `/agent/registry/image-manifests/${"d".repeat(64)}/chunks`,
         },
       ],
     });
@@ -161,7 +161,7 @@ describe("image registry agent routes", () => {
   it("checks distinct chunked image identities concurrently", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const first = imageIndexRow({
       imageKey: { scenario: "alpha", vm: "web", arch: "x86_64" },
@@ -242,7 +242,7 @@ describe("image registry agent routes", () => {
   it("keeps four image index workers busy after a slow group", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const sha = (value: number) => value.toString(16).padStart(64, "0");
     const rows = ["alpha", "bravo", "charlie", "delta", "echo"].map(
@@ -338,7 +338,7 @@ describe("image registry agent routes", () => {
   it("reuses shared boot metadata without accepting invalid artifacts", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const kernelSha256 = "a".repeat(64);
     const initrdSha256 = "b".repeat(64);
@@ -445,7 +445,7 @@ describe("image registry agent routes", () => {
   it("does not retain failed metadata across image-index requests", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const row = imageIndexRow();
     dbMock.drizzle.mockImplementation(() => imageIndexDb([row]));
@@ -497,10 +497,26 @@ describe("image registry agent routes", () => {
     expect(bucketHead).toHaveBeenCalledTimes(4);
   });
 
+  it.each([undefined, null, "organization", "personal"])("does not load candidate grants for scope %s", async scope => {
+    authMock.requireVerifiedAgentRequest.mockResolvedValue({
+      ok: true, agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope, credentialGeneration: 1 },
+    });
+    const db = imageIndexDb([]);
+    dbMock.drizzle.mockReturnValueOnce(db);
+    const head = vi.fn();
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/agent/registry/images", { headers: { authorization: "Bearer agent-jwt" } }),
+      { DB: "db-binding", VM_IMAGE_REGISTRY_BUCKET: { head } } as unknown as Cloudflare.Env,
+    );
+    await expect(response?.json()).resolves.toEqual({ images: [] });
+    expect(db.select).toHaveBeenCalledTimes(2);
+    expect(head).not.toHaveBeenCalled();
+  });
+
   it("advertises a verified desired candidate before catalog promotion", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const imageId = "a".repeat(64);
     const chunkManifestSha256 = "d".repeat(64);
@@ -527,8 +543,8 @@ describe("image registry agent routes", () => {
         ],
         [
           {
-            docJson: {
-              schema_version: 5,
+            docJson: { owner_user_id: "user-1", scope: "platform",
+              schema_version: 6,
               host_id: "agent-1",
               version: 1,
               generated_at_unix_ms: 1,
@@ -639,7 +655,7 @@ describe("image registry agent routes", () => {
   it("streams raw-zstd images to verified agents", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const imageKey = "broken-nginx-web-x86_64";
     const imageSha256 = "a".repeat(64);
@@ -688,7 +704,7 @@ describe("image registry agent routes", () => {
   it("rejects image downloads with stale object metadata", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const imageKey = "broken-nginx-web-x86_64";
     const imageSha256 = "a".repeat(64);
@@ -729,7 +745,7 @@ describe("image registry agent routes", () => {
   it("streams boot artifacts to verified agents", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const artifactSha256 = "b".repeat(64);
     const bucketGet = vi.fn().mockResolvedValue({
@@ -771,7 +787,7 @@ describe("image registry agent routes", () => {
   it("streams a boot artifact for an exact desired candidate", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const imageId = "a".repeat(64);
     const artifactSha256 = "b".repeat(64);
@@ -784,8 +800,8 @@ describe("image registry agent routes", () => {
       candidateArtifactDb(
         [
           {
-            docJson: {
-              schema_version: 5,
+            docJson: { owner_user_id: "user-1", scope: "platform",
+              schema_version: 6,
               host_id: "agent-1",
               version: 1,
               generated_at_unix_ms: 1,
@@ -862,7 +878,7 @@ describe("image registry agent routes", () => {
   it("rejects boot artifact downloads with stale object metadata", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
     const artifactSha256 = "b".repeat(64);
     const bucketGet = vi.fn().mockResolvedValue({
@@ -897,7 +913,7 @@ describe("image registry agent routes", () => {
   it("rejects source bundle downloads from non-builder agents", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "agent-1", userId: "user-1", role: "agent" },
+      agent: { hostId: "agent-1", userId: "user-1", role: "agent", scope: "platform", credentialGeneration: 1 },
     });
 
     const response = await handleImageRegistryRequest(
@@ -917,9 +933,9 @@ describe("image registry agent routes", () => {
   it("streams source bundles to builder agents", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
-    const db = bundleDownloadDb([{ r2Key: "builds/bundles/abc123.tar.gz" }]);
+    const db = bundleDownloadDb([{ id: "build-1", r2Key: "builds/bundles/abc123.tar.gz" }]);
     dbMock.drizzle.mockReturnValueOnce(db);
     const bucketGet = vi.fn().mockResolvedValue({
       body: "bundle-bytes",
@@ -952,7 +968,7 @@ describe("image registry agent routes", () => {
   it("rejects build log uploads from builders that do not own the build", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-2", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-2", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
     const db = buildLogDb({
       selectRows: [{ hostId: "builder-1" }],
@@ -983,7 +999,7 @@ describe("image registry agent routes", () => {
   it("rejects unsafe build log ids before looking up build ownership", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
     const unsafeBuildId = "a".repeat(129);
     const bucketPut = vi.fn();
@@ -1013,7 +1029,7 @@ describe("image registry agent routes", () => {
     const dateSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
     const db = buildLogDb({
       selectRows: [{ hostId: "builder-1" }],
@@ -1064,7 +1080,7 @@ describe("image registry agent routes", () => {
   it("deletes uploaded build logs if assignment changes during upload", async () => {
     authMock.requireVerifiedAgentRequest.mockResolvedValue({
       ok: true,
-      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder", scope: "platform", credentialGeneration: 1 },
     });
     const db = buildLogDb({
       selectRows: [{ hostId: "builder-1" }],

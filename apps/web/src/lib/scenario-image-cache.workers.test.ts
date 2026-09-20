@@ -10,6 +10,7 @@ import {
   hostActualState,
   hostDesiredState,
   organization,
+  member,
   user,
   vmScenarios,
   vmScenarioVms,
@@ -47,7 +48,7 @@ describe("scenario image cache reconciliation", () => {
     await seedIdentity();
   });
 
-  it("gives public and organization agents their complete visible architecture-specific catalog", async () => {
+  it("prewarms published courses only on platform hosts", async () => {
     await Promise.all([
       seedScenario({
         scenarioId: "public-disabled",
@@ -86,9 +87,15 @@ describe("scenario image cache reconciliation", () => {
       }),
     ]);
     await Promise.all([
-      seedHost({ hostId: "public-agent", organizationId: null }),
-      seedHost({ hostId: "org-a-agent", organizationId: "org-a" }),
+      seedHost({ hostId: "public-agent", scope: "personal" }),
+      seedHost({ hostId: "org-a-agent", }),
     ]);
+    await drizzle(env.DB).insert(member).values({
+      id: "owner-membership", userId: "owner", organizationId: "org-a", role: "member", createdAt: new Date(),
+    });
+    await mutateStoredHostDesiredState(drizzle(env.DB), "public-agent", Date.now(), draft => {
+      upsertDesiredCachedImage(draft, { image_key: image("org-a-private", "vm", "x86_64"), image_id: ORG_A_SHA });
+    });
     await mutateStoredHostDesiredState(
       drizzle(env.DB),
       "org-a-agent",
@@ -116,9 +123,7 @@ describe("scenario image cache reconciliation", () => {
     ]);
 
     expect(publicResult.outcome).toBe("changed");
-    expect(imageIdentities(requiredState(publicResult).cached_images)).toEqual([
-      `public-disabled:vm:x86_64:${PUBLIC_SHA}`,
-    ]);
+    expect(imageIdentities(requiredState(publicResult).cached_images)).toEqual([]);
     expect(
       imageIdentities(requiredState(organizationResult).cached_images),
     ).toEqual([
@@ -146,7 +151,7 @@ describe("scenario image cache reconciliation", () => {
       organizationId: null,
       scenarioIds: ["x86-scenario", "arm-scenario"],
     });
-    await seedHost({ hostId: "x86-agent", organizationId: null });
+    await seedHost({ hostId: "x86-agent", });
     await mutateStoredHostDesiredState(
       drizzle(env.DB),
       "x86-agent",
@@ -182,11 +187,10 @@ describe("scenario image cache reconciliation", () => {
       scenarioIds: ["public-scenario"],
     });
     await Promise.all([
-      seedHost({ hostId: "builder", organizationId: null, role: "builder" }),
-      seedHost({ hostId: "disabled", organizationId: null, disabled: true }),
+      seedHost({ hostId: "builder", role: "builder" }),
+      seedHost({ hostId: "disabled", disabled: true }),
       seedHost({
         hostId: "placement-paused",
-        organizationId: null,
         scenarioEnabled: false,
       }),
     ]);
@@ -231,7 +235,7 @@ describe("scenario image cache reconciliation", () => {
       organizationId: null,
       scenarioIds: ["rolling-scenario"],
     });
-    await seedHost({ hostId: "active-agent", organizationId: null });
+    await seedHost({ hostId: "active-agent", });
     const manualImage = image("manual-checkpoint", "vm", "x86_64");
     const runningScenarioVm = desiredVm(scenarioImage, PUBLIC_SHA, "run-1");
     const runningManualVm = desiredVm(
@@ -293,7 +297,7 @@ describe("scenario image cache reconciliation", () => {
       organizationId: null,
       scenarioIds: ["renamed-vm"],
     });
-    await seedHost({ hostId: "renamed-vm-agent", organizationId: null });
+    await seedHost({ hostId: "renamed-vm-agent", });
     const oldVmImage = image("renamed-vm", "old-vm", "x86_64");
     const db = drizzle(env.DB);
     await mutateStoredHostDesiredState(
@@ -335,7 +339,7 @@ describe("scenario image cache reconciliation", () => {
       organizationId: null,
       scenarioIds: ["public-scenario"],
     });
-    await seedHost({ hostId: "racing-agent", organizationId: null });
+    await seedHost({ hostId: "racing-agent", });
     const db = drizzle(env.DB);
     const now = Date.now();
     const first = await reconcileHostScenarioImages(db, {
@@ -404,7 +408,7 @@ describe("scenario image cache reconciliation", () => {
       organizationId: null,
       scenarioIds: ["initial-scenario"],
     });
-    await seedHost({ hostId: "catalog-race-agent", organizationId: null });
+    await seedHost({ hostId: "catalog-race-agent", });
     const replacementCatalog = JSON.stringify(
       courseCatalog(["replacement-scenario"]),
     ).replaceAll("'", "''");
@@ -445,7 +449,7 @@ describe("scenario image cache reconciliation", () => {
       organizationId: null,
       scenarioIds: ["public-scenario"],
     });
-    await seedHost({ hostId: "reinstalled-agent", organizationId: null });
+    await seedHost({ hostId: "reinstalled-agent", });
     const db = drizzle(env.DB);
     const helloAt = Date.now();
     await db.insert(hostActualState).values({
@@ -521,7 +525,7 @@ async function seedIdentity(): Promise<void> {
 
 async function seedHost(input: {
   hostId: string;
-  organizationId: string | null;
+  scope?: "personal" | "platform";
   role?: "agent" | "builder";
   disabled?: boolean;
   scenarioEnabled?: boolean;
@@ -530,8 +534,9 @@ async function seedHost(input: {
     .insert(agentHosts)
     .values({
       id: input.hostId,
+      scope: input.scope ?? "platform",
+      credentialGeneration: 1,
       userId: "owner",
-      organizationId: input.organizationId,
       name: input.hostId,
       role: input.role ?? "agent",
       disabled: input.disabled ?? false,
@@ -675,8 +680,11 @@ function desiredVm(
   imageSha256: string,
   runId: string,
 ): DesiredVmV2 {
-  return {
+  return { vm_id: `${runId}-vm`,
     run_id: runId,
+    owner_user_id: "owner",
+    runtime_execution_id: runId,
+    generation: 1,
     vm_name: `${runId}-vm`,
     desired_phase: "running",
     image_key: imageKey,
@@ -713,7 +721,7 @@ function hostReport(
   arch: ImageArchitecture,
   observedAt: number,
 ): HostStateReportV2 {
-  return {
+  return { relay_connected: true,
     schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
     host_id: hostId,
     observed_at_unix_ms: observedAt,

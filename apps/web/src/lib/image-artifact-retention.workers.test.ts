@@ -669,6 +669,8 @@ async function seedWarmCacheHost(now: number): Promise<WarmCacheFixture> {
     updatedAt: new Date(now),
   });
   await db.insert(agentHosts).values({
+    scope: "platform",
+    credentialGeneration: 1,
     id: hostId,
     userId: "warm-cache-owner",
     name: hostId,
@@ -695,7 +697,7 @@ async function seedWarmCacheHost(now: number): Promise<WarmCacheFixture> {
   await db.insert(hostDesiredState).values({
     hostId,
     version: 7,
-    docJson: {
+    docJson: { owner_user_id: "warm-cache-owner", scope: "platform",
       schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
       host_id: hostId,
       version: 7,
@@ -728,7 +730,7 @@ async function seedWarmCacheHost(now: number): Promise<WarmCacheFixture> {
         },
       ],
       vms: [
-        {
+        { owner_user_id: "warm-cache-owner", runtime_execution_id: "run-warm", generation: 1,
           run_id: "run-warm",
           vm_name: WARM_VM,
           phase: "running",
@@ -911,6 +913,8 @@ async function seedActiveRun(input: {
     updatedAt: new Date(now),
   });
   await db.insert(agentHosts).values({
+    scope: "platform",
+    credentialGeneration: 1,
     id: hostId,
     userId,
     name: hostId,
@@ -1887,9 +1891,9 @@ describe("host operational closure against real D1", () => {
         builds: [],
         vms: [
           // Operational but incomplete: this is the fault.
-          { run_id: "run-no-id", vm_name: "web", phase: "running" },
+          { owner_user_id: "warm-cache-owner", runtime_execution_id: "run-no-id", generation: 1, run_id: "run-no-id", vm_name: "web", phase: "running" },
           // A tombstone with no id is still a tombstone, not a fault.
-          {
+          { owner_user_id: "warm-cache-owner", runtime_execution_id: "run-tombstone", generation: 1,
             run_id: "run-tombstone",
             vm_name: "web",
             phase: "absent",
@@ -2153,7 +2157,7 @@ function phaseVm(
   archive: { phase: string; artifact_count: number } | null,
   imageKey: ImageKey | null = { scenario: "host-phase", vm: "web", arch: "x86_64" },
 ) {
-  return {
+  return { owner_user_id: "warm-cache-owner", runtime_execution_id: runId, generation: 1,
     run_id: runId,
     vm_name: "web",
     phase,
@@ -2181,7 +2185,7 @@ async function seedHostDesiredRow(
   await db.insert(hostDesiredState).values({
     hostId: input.hostId,
     version: 1,
-    docJson: {
+    docJson: { owner_user_id: "warm-cache-owner", scope: "platform",
       schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
       host_id: input.hostId,
       version: 1,
@@ -2209,6 +2213,8 @@ async function seedHostRow(
     updatedAt: new Date(input.now),
   });
   await db.insert(agentHosts).values({
+    scope: "platform",
+    credentialGeneration: 1,
     id: input.hostId,
     userId: "owner-" + input.hostId,
     name: input.hostId,
@@ -2232,7 +2238,7 @@ async function seedManyHostsWithTombstone(input: {
     await db.insert(hostDesiredState).values({
       hostId,
       version: 1,
-      docJson: {
+      docJson: { owner_user_id: "warm-cache-owner", scope: "platform",
         schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
         host_id: hostId,
         version: 1,
@@ -2241,7 +2247,7 @@ async function seedManyHostsWithTombstone(input: {
         cached_guest_tools: [],
         builds: [],
         vms: [
-          {
+          { owner_user_id: "warm-cache-owner", runtime_execution_id: "run-" + index, generation: 1, vm_id: "webserver",
             run_id: "run-" + index,
             vm_name: "webserver",
             desired_phase: input.desiredPhase,

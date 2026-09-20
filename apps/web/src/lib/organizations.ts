@@ -1,8 +1,7 @@
 import { env } from "cloudflare:workers";
-import { and, count, desc, eq, inArray, ne, or } from "drizzle-orm";
+import { and, count, desc, eq, inArray, ne, notInArray, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
-  agentHosts,
   imageBuildBundles,
   imageBuilds,
   member,
@@ -302,7 +301,7 @@ export async function deleteOrganization(params: {
     throw appError(
       409,
       "organization_not_empty",
-      "remove the organization scenarios, runners, builds, and runs before deleting it",
+      "remove the organization scenarios, builds, and runs before deleting it",
     );
   }
   await drizzle(env.DB)
@@ -322,15 +321,22 @@ export async function leaveOrganization(params: {
       "transfer ownership or delete the organization first",
     );
   }
-  await drizzle(env.DB)
-    .delete(member)
+  const db = drizzle(env.DB);
+  const [removed, runs] = await db.batch([
+    db.delete(member)
     .where(
       and(
         eq(member.organizationId, params.organizationId),
         eq(member.userId, params.userId),
         ne(member.role, "owner"),
       ),
-    );
+    ).returning({ id: member.id }),
+    requestRemovedMemberRunShutdown(db, params),
+  ]);
+  if (removed.length !== 1) {
+    throw appError(409, "organization_membership_changed", "organization membership changed while it was being removed");
+  }
+  await finishRemovedMemberRunShutdown(params.userId, runs);
 }
 
 export async function transferOrganizationOwnership(params: {
@@ -503,18 +509,60 @@ export async function removeOrganizationMember(params: {
       "the organization owner cannot be removed",
     );
   }
-  const removed = await db
-    .delete(member)
+  const [removed, runs] = await db.batch([
+    db.delete(member)
     .where(
       and(
         eq(member.id, params.memberId),
         eq(member.organizationId, params.organizationId),
         ne(member.role, "owner"),
+        sql`EXISTS (SELECT 1 FROM member actor WHERE actor.organization_id = ${params.organizationId}
+          AND actor.user_id = ${params.actorUserId} AND actor.role IN ('owner', 'admin'))`,
       ),
     )
-    .returning({ id: member.id });
+    .returning({ id: member.id }),
+    requestRemovedMemberRunShutdown(db, { organizationId: params.organizationId, userId: rows[0].userId }),
+  ]);
   if (removed.length !== 1) {
     throw appError(409, "organization_membership_changed", "organization membership changed while it was being removed");
+  }
+  await finishRemovedMemberRunShutdown(rows[0].userId, runs);
+}
+
+function requestRemovedMemberRunShutdown(
+  db: ReturnType<typeof drizzle>,
+  params: { organizationId: string; userId: string },
+) {
+  const now = Date.now();
+  // This durable intent lands with membership deletion. A rejoin cannot turn
+  // the old run back into an authorized workload. DO content checks also read
+  // delete_requested_at on reconnect, dispatch, and alarm retries.
+  return db.update(scenarioRuns).set({
+    deleteRequestedAt: sql`coalesce(${scenarioRuns.deleteRequestedAt}, ${now})`,
+    updatedAt: now,
+  }).where(and(
+    eq(scenarioRuns.organizationId, params.organizationId),
+    eq(scenarioRuns.userId, params.userId),
+    notInArray(scenarioRuns.state, ["completed", "failed"]),
+    sql`NOT EXISTS (SELECT 1 FROM member remaining WHERE remaining.organization_id = ${params.organizationId}
+      AND remaining.user_id = ${params.userId})`,
+  )).returning({ runId: scenarioRuns.runId, hostId: scenarioRuns.hostId });
+}
+
+async function finishRemovedMemberRunShutdown(
+  userId: string,
+  runs: Array<{ runId: string; hostId: string }>,
+): Promise<void> {
+  if (!runs.length) return;
+  const { destroyScenarioRunForUser } = await import("@/lib/scenario-runs/lifecycle");
+  const { wakeHostRuntime } = await import("@/lib/host-runtime-wake");
+  const cleanup = await Promise.allSettled(runs.map(run => destroyScenarioRunForUser({ runId: run.runId, userId })));
+  // A desired-state or route failure must not prevent the independent DO
+  // authorization check from running for the other affected hosts.
+  const wakes = await Promise.allSettled([...new Set(runs.map(run => run.hostId))].map(hostId => wakeHostRuntime(hostId)));
+  if ([...cleanup, ...wakes].some(result => result.status === "rejected")) {
+    console.warn(JSON.stringify({ event: "organization_run_cleanup_pending", userId, runIds: runs.map(run => run.runId) }));
+    throw appError(503, "organization_run_cleanup_pending", "Membership was removed. Run shutdown is pending.");
   }
 }
 
@@ -532,11 +580,6 @@ async function organizationHasOwnedResources(
       .select({ id: vmScenarios.scenarioId })
       .from(vmScenarios)
       .where(eq(vmScenarios.organizationId, organizationId))
-      .limit(1),
-    db
-      .select({ id: agentHosts.id })
-      .from(agentHosts)
-      .where(eq(agentHosts.organizationId, organizationId))
       .limit(1),
     db
       .select({ id: imageBuildBundles.rev })

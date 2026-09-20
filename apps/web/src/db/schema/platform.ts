@@ -41,10 +41,11 @@ export const agentHosts = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "restrict",
-    }),
     name: text("name").notNull(),
+    scope: text("scope").$type<"personal" | "platform">(),
+    ownerRemovalId: text("owner_removal_id"),
+    ownerRemovalCompletedAt: integer("owner_removal_completed_at"),
+    credentialGeneration: integer("credential_generation").default(0).notNull(),
     role: text("role").$type<AgentHostRole>().default("agent").notNull(),
     scenarioEnabled: integer("scenario_enabled", { mode: "boolean" })
       .default(true)
@@ -67,11 +68,8 @@ export const agentHosts = sqliteTable(
   },
   (table) => [
     index("agent_hosts_user_idx").on(table.userId),
-    index("agent_hosts_organization_idx").on(
-      table.organizationId,
-      table.role,
-      table.connected,
-    ),
+    check("agent_hosts_scope_valid", sql`"scope" is null OR "scope" in ('personal', 'platform')`),
+    check("agent_hosts_personal_role_valid", sql`"scope" is null OR "scope" <> 'personal' OR "role" = 'agent'`),
     index("agent_hosts_role_idx").on(table.role, table.connected),
     index("agent_hosts_connected_idx").on(table.connected, table.updatedAt),
   ],
@@ -173,6 +171,7 @@ export const imageBuildCoordinationLocks = sqliteTable(
 export const runtimeOperationGates = sqliteTable("runtime_operation_gates", {
   key: text("key").primaryKey(),
   state: text("state").$type<"open" | "drained">().notNull(),
+  evidenceJson: text("evidence_json"),
   updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
 });
 
@@ -245,6 +244,7 @@ export const agentBootstrapTokens = sqliteTable(
       .notNull()
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     tokenHash: text("token_hash").notNull(),
+    credentialGeneration: integer("credential_generation").default(0).notNull(),
     expiresAt: integer("expires_at"),
     revokedAt: integer("revoked_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
@@ -254,6 +254,22 @@ export const agentBootstrapTokens = sqliteTable(
     index("agent_bootstrap_tokens_hash_idx").on(table.tokenHash),
   ],
 );
+
+export const hostEnrollments = sqliteTable("host_enrollments", {
+  tokenHash: text("token_hash").primaryKey(),
+  hostId: text("host_id").notNull().unique(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  scope: text("scope").$type<"personal" | "platform">().notNull(),
+  role: text("role").$type<AgentHostRole>().notNull(),
+  sourceInviteId: text("source_invite_id").notNull(),
+  sourceLeaseId: text("source_lease_id").notNull(),
+  grantedAt: integer("granted_at").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  claimedAt: integer("claimed_at"),
+  credentialHash: text("credential_hash"),
+  revokedAt: integer("revoked_at"),
+});
 
 /**
  * Single gate row for the image registry. Shared writers (uploads, publishes,

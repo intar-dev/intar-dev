@@ -142,9 +142,7 @@ export async function handleImageBuildRevisionStatus(
         eq(agentHosts.role, "agent"),
         eq(agentHosts.disabled, false),
         eq(agentHosts.connected, true),
-        bundle.organizationId
-          ? eq(agentHosts.organizationId, bundle.organizationId)
-          : undefined,
+        eq(agentHosts.scope, "platform"),
       ),
     );
   const cacheReports = hosts

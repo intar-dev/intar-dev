@@ -1,3 +1,7 @@
+#[path = "support/native_output.rs"]
+mod native_output;
+#[path = "support/relay_wss.rs"]
+mod relay_wss;
 use std::{
     borrow::Cow,
     collections::HashSet,
@@ -348,7 +352,10 @@ async fn a_stale_attachment_id_can_not_activate_another_target() -> Result<()> {
     // immutable, so a second stage can not swap it under the control plane.
     let target = harness.terminal_target(Vec::new())?;
     let mut other = target.clone();
-    other.host = "127.0.0.2".to_owned();
+    other.transport = stargate_core::SshTargetTransport::Direct {
+        host: "127.0.0.2".into(),
+        port: 22,
+    };
     let conflict = harness.stage_terminal_target(other).await?;
     assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
 
@@ -926,6 +933,8 @@ struct WorkspaceAppBrowserSession {
 }
 
 struct Harness {
+    relay_transport: Option<stargate_core::SshTargetTransport>,
+    host_relays: stargate_gateway::HostRelayRegistry,
     _temp_dir: TempDir,
     database_path: PathBuf,
     // Every spawned server task, held so a test can cancel and join it. A test
@@ -950,6 +959,7 @@ struct Harness {
     allowed_origin: String,
     public_host_public: russh::keys::ssh_key::PublicKey,
     target_connections: Arc<AtomicUsize>,
+    output_probe: Arc<native_output::OutputProbe>,
 }
 
 impl Harness {
@@ -1075,12 +1085,14 @@ impl Harness {
             russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
         let target_host_public = target_host_key.public_key().to_openssh()?;
         let target_connections = Arc::new(AtomicUsize::new(0));
+        let output_probe = Arc::new(native_output::OutputProbe::default());
         let target_server = TestTargetServer {
             allowed_username: "ubuntu".to_owned(),
             allowed_public_key: target_key.public_key().clone(),
             host_key: target_host_key,
             direct_channels: Arc::new(Mutex::new(HashSet::new())),
             connections: target_connections.clone(),
+            output_probe: output_probe.clone(),
         };
         let target_task = tokio::spawn(async move {
             target_server
@@ -1096,6 +1108,8 @@ impl Harness {
         ));
 
         let harness = Self {
+            relay_transport: None,
+            host_relays: gateway.host_relays.clone(),
             _temp_dir: temp_dir,
             database_path,
             tasks: vec![
@@ -1123,6 +1137,7 @@ impl Harness {
             allowed_origin,
             public_host_public,
             target_connections,
+            output_probe,
         };
 
         harness.wait_ready().await?;
@@ -1229,9 +1244,9 @@ impl Harness {
             // A browser route starts pending: it carries the run identity and
             // no guest endpoint at all. The admin attach supplies the target.
             TerminalSessionMode::Browser => TerminalTargetState::Pending,
-            TerminalSessionMode::Native => TerminalTargetState::Ready(
+            TerminalSessionMode::Native => TerminalTargetState::Ready(Box::new(
                 self.terminal_target(authorized_client_public_keys_openssh)?,
-            ),
+            )),
         };
         Ok(IssueTerminalSessionRequest {
             route_username: self.route_username.clone(),
@@ -1251,8 +1266,12 @@ impl Harness {
     ) -> Result<TerminalTarget> {
         Ok(TerminalTarget {
             username: self.target_username.clone(),
-            host: "127.0.0.1".to_owned(),
-            port: self.target_addr.port(),
+            transport: self.relay_transport.clone().unwrap_or_else(|| {
+                stargate_core::SshTargetTransport::Direct {
+                    host: "127.0.0.1".to_owned(),
+                    port: self.target_addr.port(),
+                }
+            }),
             host_key_openssh: self.target_host_key.clone(),
             private_key_openssh: self.target_private_key_openssh.clone(),
             authorized_client_public_keys_openssh,
@@ -1442,8 +1461,12 @@ impl Harness {
             route_id: route_id.to_owned(),
             create_only,
             target_username: self.target_username.clone(),
-            target_ip: "127.0.0.1".to_owned(),
-            target_ssh_port: self.target_addr.port(),
+            transport: self.relay_transport.clone().unwrap_or_else(|| {
+                stargate_core::SshTargetTransport::Direct {
+                    host: "127.0.0.1".to_owned(),
+                    port: self.target_addr.port(),
+                }
+            }),
             target_host_key_openssh: self.target_host_key.clone(),
             target_private_key_openssh: self.target_private_key_openssh.clone(),
             target_app_port: self.app_addr.port(),
@@ -2277,6 +2300,7 @@ struct TestTargetServer {
     host_key: russh::keys::PrivateKey,
     direct_channels: Arc<Mutex<HashSet<u32>>>,
     connections: Arc<AtomicUsize>,
+    output_probe: Arc<native_output::OutputProbe>,
 }
 
 impl TestTargetServer {
@@ -2398,6 +2422,9 @@ impl server::Handler for TestTargetServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
+        if native_output::start_output(data, channel, session, self.output_probe.clone())? {
+            return Ok(());
+        }
         let response = format!("exec:{}\n", std::str::from_utf8(data)?);
         session.data(channel, response.into_bytes())?;
         session.exit_status_request(channel, 0)?;

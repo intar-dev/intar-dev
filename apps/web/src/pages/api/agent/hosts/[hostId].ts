@@ -1,11 +1,10 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   hostActualState,
   hostDesiredState,
-  imageBuilds,
 } from "@/db/schema";
 import type {
   DesiredBuildV1,
@@ -20,14 +19,7 @@ import {
   parseInventory,
   requireAdminUserContext,
 } from "@/lib/agent-bridge";
-import {
-  accessInviteError,
-  accessInviteJson,
-  accessInviteNoStore,
-} from "@/lib/access-invite-http";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
-import { retireHostRuntime } from "@/lib/host-runtime-wake";
-import { retirePersonalHost } from "@/lib/personal-host-retirement";
 
 export const prerender = false;
 
@@ -85,100 +77,6 @@ export const GET: APIRoute = async ({ request, params }) => {
     },
   });
 };
-
-export const DELETE: APIRoute = async ({ request, params }) => {
-  try {
-    const authz = await requireAdminUserContext(request);
-    if (!authz.ok) return accessInviteNoStore(authz.response);
-
-    const hostId = params.hostId?.trim() ?? "";
-    if (!hostId) {
-      return accessInviteJson({ error: "hostId is required" }, { status: 400 });
-    }
-
-    const host = await loadHostForUser(hostId, authz.context.userId);
-    if (!host) {
-      return accessInviteJson({ error: "host not found" }, { status: 404 });
-    }
-    if (host.connected || host.active_session_id) {
-      return hostMustDisconnectResponse(host.id);
-    }
-
-    const db = drizzle(env.DB);
-
-    if (host.role === "builder") {
-      const activeBuilds = await db
-        .select({ buildId: imageBuilds.id })
-        .from(imageBuilds)
-        .where(
-          and(
-            eq(imageBuilds.hostId, host.id),
-            inArray(imageBuilds.status, ["assigned", "building"]),
-          ),
-        )
-        .limit(1);
-      if (activeBuilds.length > 0) {
-        return hostHasActiveBuildsResponse(host.id);
-      }
-    }
-
-    const retired = await retirePersonalHost({
-      d1: env.DB,
-      hostId: host.id,
-      userId: authz.context.userId,
-      betaAdmission: authz.context.betaAdmission,
-    });
-    if (!retired) {
-      return accessInviteJson(
-        {
-          error:
-            "host removal conflicted with a connection, active work, or a concurrent access change",
-          code: "host_remove_conflict",
-          hostId: host.id,
-        },
-        { status: 409 },
-      );
-    }
-
-    try {
-      await retireHostRuntime(host.id);
-    } catch (error) {
-      console.warn(
-        JSON.stringify({
-          message: "host runtime retirement failed after host removal",
-          hostId: host.id,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
-    }
-
-    return accessInviteJson({ ok: true, hostId });
-  } catch (error) {
-    return accessInviteError(error, "the host could not be removed");
-  }
-};
-
-function hostMustDisconnectResponse(hostId: string): Response {
-  return accessInviteJson(
-    {
-      error: "host is connected and must be stopped before it can be removed",
-      code: "host_must_disconnect",
-      hostId,
-    },
-    { status: 409 },
-  );
-}
-
-function hostHasActiveBuildsResponse(hostId: string): Response {
-  return accessInviteJson(
-    {
-      error: "builder host has active image builds and must be drained first",
-      code: "host_has_active_builds",
-      hostId,
-    },
-    { status: 409 },
-  );
-}
 
 async function loadHostActualStateSummary(
   hostId: string,

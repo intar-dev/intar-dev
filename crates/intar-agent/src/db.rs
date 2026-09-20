@@ -10,6 +10,9 @@ use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct VmRow {
+    pub owner_user_id: String,
+    pub runtime_execution_id: String,
+    pub generation: i64,
     pub name: String,
     pub state: String,
     pub image_key: Option<String>,

@@ -33,21 +33,15 @@
     "target_host_key_openssh": {
       "type": "string"
     },
-    "target_ip": {
-      "description": "Literal IP and port of the guest SSH endpoint already exposed to\nStargate by the VM harness.",
-      "type": "string"
-    },
     "target_private_key_openssh": {
       "type": "string"
     },
-    "target_ssh_port": {
-      "type": "integer",
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
-    },
     "target_username": {
       "type": "string"
+    },
+    "transport": {
+      "description": "Literal IP and port of the guest SSH endpoint already exposed to\nStargate by the VM harness.",
+      "$ref": "#/$defs/SshTargetTransport"
     },
     "upstream_host": {
       "description": "Optional virtual-host value sent only to the declared guest service.\nThe public route hostname remains available as X-Forwarded-Host.",
@@ -60,8 +54,7 @@
   "required": [
     "route_id",
     "target_username",
-    "target_ip",
-    "target_ssh_port",
+    "transport",
     "target_host_key_openssh",
     "target_private_key_openssh",
     "target_app_port",
@@ -69,6 +62,113 @@
     "route_expires_at"
   ],
   "$defs": {
+    "HostRelayIdentity": {
+      "type": "object",
+      "properties": {
+        "credential_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_id",
+        "session_id",
+        "credential_generation"
+      ]
+    },
+    "RelayService": {
+      "type": "string",
+      "enum": [
+        "ssh"
+      ]
+    },
+    "RelayTarget": {
+      "type": "object",
+      "properties": {
+        "execution_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "execution_id": {
+          "type": "string"
+        },
+        "host": {
+          "$ref": "#/$defs/HostRelayIdentity"
+        },
+        "owner_id": {
+          "type": "string"
+        },
+        "service": {
+          "$ref": "#/$defs/RelayService"
+        },
+        "vm_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "owner_id",
+        "execution_id",
+        "execution_generation",
+        "vm_id",
+        "service"
+      ]
+    },
+    "SshTargetTransport": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "direct"
+            },
+            "port": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "host",
+            "port"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "relay"
+            },
+            "target": {
+              "$ref": "#/$defs/RelayTarget"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target"
+          ]
+        }
+      ]
+    },
     "WorkspaceAppMetadata": {
       "description": "Workspace app routes keep optional metadata: they carry no terminal route\nidentity, and an absent value is not an authorization decision.",
       "type": "object",

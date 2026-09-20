@@ -12,6 +12,7 @@ export {
 export {
   agentBootstrapTokens,
   agentHosts,
+  hostEnrollments,
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
@@ -99,3 +100,4 @@ export type {
   RuntimeProviderKind,
 } from "./schema/runtime";
 export { ACTIVE_RUNTIME_EXECUTION_STATES } from "./schema/runtime";
+export { personalImagePreparations } from "./schema/personal-image-preparations";

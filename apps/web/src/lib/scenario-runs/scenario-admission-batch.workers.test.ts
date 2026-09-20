@@ -36,6 +36,7 @@ import {
   grantFixtureBetaAccess,
 } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
+import { seedAdmissionGuardFixture } from "./admission-test-fixtures";
 
 const USER_ID = "admission-user";
 const HOST_ID = "admission-host";
@@ -48,157 +49,16 @@ const guestTools = {
   tools_disk_sha256: "a".repeat(64),
   tools_disk_size_bytes: 64 * 1024 * 1024,
   kino_sha256: "b".repeat(64),
-  bootstrap_abi: 1,
+  bootstrap_abi: 2,
 } as const;
 
 describe("admission batch", () => {
   beforeEach(resetD1Database);
 
   it("admits one run in a single D1 batch", async () => {
-    const db = drizzle(env.DB);
-    await db.insert(user).values({
-      id: USER_ID,
-      name: "Admission User",
-      email: "admission@example.test",
-      emailVerified: true,
-      username: USER_ID,
-      role: "user",
-      createdAt: new Date(NOW),
-      updatedAt: new Date(NOW),
-    });
-    await grantFixtureBetaAccess({
-      d1: env.DB,
-      userId: USER_ID,
-      githubAccountId: "admission-github",
-      githubUsername: USER_ID,
-      now: NOW,
-    });
-    await db.insert(organization).values({
-      id: ORG_ID,
-      name: "Admission Org",
-      slug: "admission-org",
-      createdAt: new Date(NOW),
-    });
-    await db.insert(agentHosts).values({
-      id: HOST_ID,
-      userId: USER_ID,
-      organizationId: ORG_ID,
-      name: "Admission host",
-      role: "agent",
-      scenarioEnabled: true,
-      disabled: false,
-      connected: true,
-      createdAt: NOW,
-      updatedAt: NOW,
-    });
-    const [admission] = await db
-      .select({
-        sourceInviteId: accessAllowlist.sourceInviteId,
-        sourceLeaseId: accessAllowlist.sourceLeaseId,
-        grantedAt: accessAllowlist.grantedAt,
-      })
-      .from(accessAllowlist)
-      .where(eq(accessAllowlist.userId, USER_ID))
-      .limit(1);
-    if (!admission) throw new Error("fixture admission missing");
-    const current = await loadOrCreateHostDesiredState(db, HOST_ID, NOW);
-    const desiredVm = desiredVmFromRunVm({
-      runId: RUN_ID,
-      vm: admissionVm(),
-      nowUnixMs: NOW,
-      sshAuthorizedKeysOpenssh: ["ssh-ed25519 AAAAC3Nza admission"],
-      guestTools,
-    });
-    if (!desiredVm) throw new Error("desired vm");
-    const next = mutateDesiredState(
-      current,
-      (draft) => {
-        upsertDesiredVm(draft, desiredVm);
-      },
-      { nowUnixMs: NOW },
-    );
-
-    const batch = admissionStatements({
-      run: {
-        runId: RUN_ID,
-        userId: USER_ID,
-        organizationId: ORG_ID,
-        runtimeExecutionId: RUN_ID,
-        hostId: HOST_ID,
-        scenarioId: "scenario-one",
-        scenarioName: "scenario-one",
-        title: "Title",
-        tagline: "Tagline",
-        briefingMarkdown: "Briefing",
-        objectivesJson: "[]",
-        difficulty: "beginner",
-        estimatedMinutes: 30,
-        tagsJson: [],
-        hintsJson: [],
-        solutionMarkdown: "Solution",
-        revealedHintsJson: [],
-        solutionAssisted: false,
-        vmCount: 1,
-        state: "provisioning",
-        stateRank: 1,
-        activeKey: USER_ID,
-        requestIdempotencyKey: "key-abcdefgh",
-        requestScopeJson: {
-          scenarioId: "scenario-one",
-          organizationId: ORG_ID,
-          hostId: null,
-          candidateRevision: null,
-          candidateBuildId: null,
-          allowDrainedAdminProof: false,
-          allowSequenceBypass: false,
-        },
-        stateJson: JSON.stringify({ vms: [{ runtimeVmName: VM_ID }] }),
-        createdAt: NOW,
-        updatedAt: NOW,
-      },
-      sshKeyRows: [
-        {
-          id: "admission-ssh-key",
-          runId: RUN_ID,
-          vmId: VM_ID,
-          runtimeVmName: VM_ID,
-          publicKeyOpenssh: "ssh-ed25519 AAAAC3Nza admission",
-          privateKeyCiphertextB64: "ciphertext",
-          privateKeyIvB64: "iv",
-          createdAt: NOW,
-        },
-      ],
-      runtimeVms: [
-        {
-          vmId: VM_ID,
-          ordinal: 0,
-          runtimeVmName: VM_ID,
-          imageKey: { scenario: "scenario-one", vm: "web", arch: "x86_64" },
-          imageSha256: "2".repeat(64),
-          cpuMillis: 1_000,
-          memoryMib: 512,
-          diskMib: 4_096,
-          runtimeVmId: "admission-runtime-vm",
-        },
-      ],
-      accessKeys: [{ ciphertextB64: "ciphertext", ivB64: "iv" }],
-      desiredVms: [desiredVm],
-      desired: {
-        hostId: HOST_ID,
-        expectedVersion: current.version,
-        nextVersion: next.version,
-        nextDocJson: JSON.stringify(next),
-      },
-      cpuMillis: 1_000,
-      reservationResources: {
-        cpuMillis: 2_000,
-        memoryMib: 512,
-        worstCaseDiskMib: 4_096,
-      },
-      leaseExpiresAt: NOW + 3_600_000,
-      betaAdmission: admission,
-      now: NOW,
-    });
+    const db = await seedAdmissionFixture();
+    const input = await admissionInput();
+    const batch = admissionStatements(input);
     const results = await env.DB.batch(batch.statements);
     expect(results.length).toBeGreaterThan(0);
     expect(batch.runGateIndex).toBe(1);
@@ -215,7 +75,7 @@ describe("admission batch", () => {
         .select({ version: hostDesiredState.version })
         .from(hostDesiredState)
         .where(eq(hostDesiredState.hostId, HOST_ID)),
-    ).resolves.toEqual([{ version: next.version }]);
+    ).resolves.toEqual([{ version: input.desired.nextVersion }]);
   });
 
   it("aborts the whole batch when the desired-state compare-and-set is lost", async () => {
@@ -232,6 +92,54 @@ describe("admission batch", () => {
     await expect(count(db, runtimeExecutions)).resolves.toBe(0);
     await expect(count(db, runtimeVms)).resolves.toBe(0);
     await expect(count(db, hostCpuReservations)).resolves.toBe(0);
+  });
+
+  it.each([
+    ["membership removed", "DELETE FROM member"],
+    ["scenario disabled", "UPDATE vm_scenarios SET enabled = 0"],
+    ["catalog removed", "DELETE FROM course_catalogs"],
+    ["lecture unlinked", "UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].scenarioId', NULL)"],
+    ["host disconnected", "UPDATE agent_hosts SET connected = 0, active_session_id = NULL"],
+    ["host disabled", "UPDATE agent_hosts SET disabled = 1"],
+    ["launch policy changed", "UPDATE agent_hosts SET scenario_enabled = 0"],
+    ["placement changed", "UPDATE user SET metal_placement = 'personal' WHERE id = 'admission-user'"],
+    ["credential rotated with session cleared", "UPDATE agent_hosts SET credential_generation = 2, active_session_id = NULL"],
+    ["credential generation alone changed", "UPDATE agent_hosts SET credential_generation = 2"],
+    ["session replaced", "UPDATE agent_hosts SET active_session_id = 'replacement-session'"],
+    ["report changed at the same timestamp", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.capacity.memory_available_mib', 0)"],
+    ["report timestamp changed", "UPDATE host_actual_state SET updated_at = updated_at + 1"],
+    ["report removed", "DELETE FROM host_actual_state"],
+    ["heartbeat expired", "UPDATE agent_hosts SET last_heartbeat_at = 1"],
+    ["report expired", "UPDATE host_actual_state SET updated_at = 1"],
+  ])("rejects the exact prepared batch after %s", async (_name, sql) => {
+    await seedAdmissionFixture();
+    const input = await admissionInput();
+    const batch = admissionStatements(input);
+    // No source read or statement construction happens after the mutation.
+    await env.DB.prepare(sql).run();
+    await expect(env.DB.batch(batch.statements)).rejects.toThrow(/runtime_executions_generation_positive|CHECK/i);
+    await assertNoAdmissionWrites();
+  });
+
+  it("rejects the prepared batch after host removal", async () => {
+    await seedAdmissionFixture();
+    const batch = admissionStatements(await admissionInput());
+    await env.DB.prepare("DELETE FROM agent_hosts WHERE id = ?1").bind(HOST_ID).run();
+    await expect(env.DB.batch(batch.statements)).rejects.toThrow(/runtime_executions_generation_positive|CHECK/i);
+    await assertNoAdmissionWrites({ hostRemoved: true });
+  });
+
+  it("uses commit time for a snapshot whose report is already expired", async () => {
+    await seedAdmissionFixture();
+    const input = await admissionInput();
+    // Report and anchor agree, and the caller's captured time is fresh for
+    // both. Only the database clock can refuse this stale preparation.
+    input.now = 20_000;
+    input.desired.readiness.actualReportedAt = input.now;
+    await env.DB.prepare("UPDATE host_actual_state SET updated_at = ?1").bind(input.now).run();
+    const batch = admissionStatements(input);
+    await expect(env.DB.batch(batch.statements)).rejects.toThrow(/runtime_executions_generation_positive|CHECK/i);
+    await assertNoAdmissionWrites();
   });
 
   it("aborts the whole batch on a duplicate idempotency key", async () => {
@@ -266,6 +174,7 @@ describe("admission batch", () => {
     // run, key, reservation, or desired-state change behind.
     await expect(count(db, scenarioRuns)).resolves.toBe(0);
 
+    await db.update(user).set({ role: "admin" }).where(eq(user.id, USER_ID));
     const proof = await env.DB.batch(
       admissionStatements({
         ...parts,
@@ -480,9 +389,10 @@ async function seedAdmissionFixture() {
     createdAt: new Date(NOW),
   });
   await db.insert(agentHosts).values({
+    scope: "platform",
+    credentialGeneration: 1,
     id: HOST_ID,
     userId: USER_ID,
-    organizationId: ORG_ID,
     name: "Admission host",
     role: "agent",
     scenarioEnabled: true,
@@ -506,8 +416,11 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       .where(eq(accessAllowlist.userId, USER_ID))
       .limit(1);
   if (!admission) throw new Error("fixture admission missing");
+  const readiness = await seedAdmissionGuardFixture({
+    userId: USER_ID, organizationId: ORG_ID, hostId: HOST_ID,
+  });
   const current = await loadOrCreateHostDesiredState(db, HOST_ID, NOW);
-  const desiredVm = desiredVmFromRunVm({
+  const desiredVm = desiredVmFromRunVm({ ownerUserId: USER_ID, runtimeExecutionId: RUN_ID, generation: 1,
     runId: RUN_ID,
     vm: admissionVm(),
     nowUnixMs: NOW,
@@ -531,6 +444,9 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       hostId: HOST_ID,
       scenarioId: "scenario-one",
       scenarioName: "scenario-one",
+      courseScopeKey: "organization:" + ORG_ID,
+      courseId: "linux-operations",
+      lectureId: "01-repair-nginx",
       title: "Title",
       tagline: "Tagline",
       briefingMarkdown: "Briefing",
@@ -589,6 +505,7 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     desiredVms: [desiredVm],
     desired: {
       hostId: HOST_ID,
+      readiness,
       expectedVersion: current.version,
       nextVersion: next.version,
       nextDocJson: JSON.stringify(next),
@@ -613,4 +530,18 @@ async function count(
 ): Promise<number> {
   const rows = await db.select().from(table);
   return rows.length;
+}
+
+async function assertNoAdmissionWrites(input: { hostRemoved?: boolean } = {}) {
+  for (const table of [
+    "scenario_runs", "scenario_run_ssh_keys", "runtime_executions", "runtime_vms",
+    "runtime_vm_access_keys", "host_cpu_reservations", "host_resource_reservations", "active_runtime_slots",
+  ]) {
+    const row = await env.DB.prepare(`SELECT count(*) AS count FROM ${table}`).first();
+    expect(row, table).toEqual({ count: 0 });
+  }
+  const desired = await env.DB.prepare(
+    "SELECT version, json_array_length(doc_json, '$.vms') AS vms FROM host_desired_state WHERE host_id = ?1",
+  ).bind(HOST_ID).first();
+  expect(desired).toEqual(input.hostRemoved ? null : { version: 0, vms: 0 });
 }

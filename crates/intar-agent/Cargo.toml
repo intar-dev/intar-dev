@@ -21,6 +21,8 @@ futures-util.workspace = true
 fs2.workspace = true
 getrandom.workspace = true
 intar-contracts = { path = "../intar-contracts" }
+stargate-core = { path = "../stargate-core" }
+tokio-util.workspace = true
 intar-jailer-protocol = { path = "../intar-jailer-protocol" }
 intar-kino-proto = { path = "../intar-kino-proto" }
 prost.workspace = true

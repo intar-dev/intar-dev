@@ -107,6 +107,22 @@ describe("agent JWT secret validation", () => {
     });
   });
 
+  it("rejects both an issued JWT and the old durable secret after generation changes", async () => {
+    const hostId = "host-credential-generation";
+    await seedBootstrapToken(hostId, "old-secret");
+    const runtimeEnv = agentEnv(STRONG_SECRET);
+    const bootstrap = await handleAgentBootstrap(bootstrapRequest(hostId, "old-secret"), runtimeEnv);
+    expect(bootstrap.status).toBe(200);
+    const { accessToken } = await bootstrap.json() as { accessToken: string };
+    await env.DB.prepare("UPDATE agent_hosts SET credential_generation = 2 WHERE id = ?").bind(hostId).run();
+    const replay = await handleAgentBootstrap(bootstrapRequest(hostId, "old-secret"), runtimeEnv);
+    expect(replay.status).toBe(401);
+    const verified = await requireVerifiedAgentRequest(new Request("http://localhost/agent/connect", {
+      headers: { authorization: `Bearer ${accessToken}` },
+    }), runtimeEnv, hostId);
+    expect(verified.ok).toBe(false);
+  });
+
   it("rejects an earlier personal-host JWT after equal-timestamp readmission", async () => {
     const hostId = "host-stale-beta-admission";
     const bootstrapToken = "stale-admission-bootstrap-token";
@@ -194,7 +210,7 @@ describe("agent JWT secret validation", () => {
     if (verified.ok) return;
     expect(verified.response.status).toBe(401);
     await expect(verified.response.json()).resolves.toEqual({
-      error: "stale beta admission",
+      error: "Server credentials are no longer valid",
     });
   });
 });
@@ -237,9 +253,12 @@ async function seedBootstrapToken(
     id: hostId,
     userId: "user-valid-secret",
     name: "Valid Secret Host",
+    scope: "personal",
+    credentialGeneration: 1,
   });
   await db.insert(agentBootstrapTokens).values({
     id: "bootstrap-valid-secret",
+    credentialGeneration: 1,
     hostId,
     tokenHash: await sha256Hex(bootstrapToken),
     expiresAt: now + 60_000,

@@ -41,6 +41,7 @@ import {
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
+import { setPlatformUserRole } from "@/lib/beta-admin-guard";
 import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
@@ -384,6 +385,195 @@ describe("scenario admission batch", () => {
       cpuReservations: 1,
       desiredVersion: 1,
     });
+  });
+
+  for (const candidate of [false, true]) {
+    it.each([
+      ["membership removed", "DELETE FROM member"],
+      ["scenario disabled", "UPDATE vm_scenarios SET enabled = 0"],
+      ["scenario unpublished", "UPDATE vm_scenarios SET enabled_at = NULL"],
+      ["catalog removed", "DELETE FROM course_catalogs WHERE scope_key = 'public'"],
+      ["lecture unlinked", "UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'"],
+      ["public lecture hidden by organization", "UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].scenarioId', 'scenario-one') WHERE organization_id IS NOT NULL"],
+      ["new incomplete prerequisite", "UPDATE course_catalogs SET catalog_json = json_insert(catalog_json, '$.courses[0].lectures[#]', json_extract(catalog_json, '$.courses[0].lectures[0]')) WHERE scope_key = 'public'; UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].lectureId', 'new-prerequisite', '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'"],
+    ])(`rolls back ${candidate ? "candidate" : "live"} content and slots when %s before commit`, async (_name, sql) => {
+      const fixture = await seedAdmissionFixture();
+      if (candidate) await seedCandidateProof({
+        revision: CANDIDATE_REVISION_A,
+        buildId: CANDIDATE_BUILD_A,
+        scenarioId: SCENARIO_ID,
+        organizationId: fixture.organizationId,
+        imageSha256: IMAGE_SHA_ONE,
+      });
+      admissionHarness.armBeforeAdmissionBatch(async () => {
+        // The admission statements are already prepared and bound here.
+        for (const statement of sql.split("; ")) await env.DB.prepare(statement).run();
+      });
+      await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, candidate ? candidateProofInput() : {}))).rejects.toMatchObject({
+        code: "scenario_content_access_changed",
+      });
+      await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+      expect((await desiredDocument()).vms).toEqual([]);
+      expect(admissionHarness.state.admissionBatches).toBe(1);
+      expect(admissionHarness.eventIndex(`host-runtime-id:${HOST_ID}`)).toBe(-1);
+    });
+  }
+
+  for (const automatic of [false, true]) {
+    it.each([
+      ["disconnected", "UPDATE agent_hosts SET connected = 0, active_session_id = NULL"],
+      ["credential rotated", "UPDATE agent_hosts SET credential_generation = credential_generation + 1, active_session_id = NULL"],
+      ["session cleared", "UPDATE agent_hosts SET active_session_id = NULL"],
+      ["heartbeat expired", "UPDATE agent_hosts SET last_heartbeat_at = 1"],
+      ["report expired", "UPDATE host_actual_state SET updated_at = 1"],
+      ["capability removed", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.capabilities.supports_kvm', json('false'))"],
+      ["image removed", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.cached_images', json('[]'))"],
+      ["capacity reduced", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.capacity.memory_available_mib', 0)"],
+    ])(`refuses ${automatic ? "automatic" : "explicit"} admission when host %s before commit`, async (_name, sql) => {
+      const fixture = await seedAdmissionFixture();
+      admissionHarness.armBeforeAdmissionBatch(() => env.DB.prepare(sql).run());
+      const input = fixture.input(RUNNER_USER_ID);
+      if (automatic) delete input.hostId;
+      await expect(beginScenarioRun(input)).rejects.toMatchObject({ status: 409 });
+      await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+      expect((await desiredDocument()).vms).toEqual([]);
+      expect(admissionHarness.eventIndex(`host-runtime-id:${HOST_ID}`)).toBe(-1);
+    });
+  }
+
+  it.each([
+    ["session", "UPDATE agent_hosts SET active_session_id = 'replacement-session'"],
+    ["credential generation", "UPDATE agent_hosts SET credential_generation = credential_generation + 1"],
+    ["report bytes at the same timestamp", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.capacity.memory_available_mib', 4095)"],
+    ["report timestamp", "UPDATE host_actual_state SET updated_at = updated_at + 1"],
+  ])("retries from fresh reads after a changed %s invalidates the prepared batch", async (_name, sql) => {
+    const fixture = await seedAdmissionFixture();
+    admissionHarness.armBeforeAdmissionBatch(async () => {
+      await env.DB.prepare(sql).run();
+      admissionHarness.armBeforeAdmissionBatch(async () => {
+        await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+        expect((await desiredDocument()).vms).toEqual([]);
+      });
+    });
+    const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID));
+    await result.deliveryHint;
+    expect(admissionHarness.state.admissionBatches).toBe(2);
+    expect(admissionHarness.state.admissionChanges).toHaveLength(1);
+    await expect(admissionSnapshot()).resolves.toMatchObject({ runs: 1, activeSlots: 1, desiredVersion: 1 });
+  });
+
+  it("admits a public live start without an organization membership", async () => {
+    const fixture = await seedAdmissionFixture();
+    await env.DB.prepare("DELETE FROM member").run();
+    const input = fixture.input(RUNNER_USER_ID);
+    delete input.organizationId;
+    const result = await beginScenarioRun(input);
+    await result.deliveryHint;
+    expect(result.accepted).toBe(true);
+  });
+
+  it("admits current organization content through its private course", async () => {
+    const fixture = await seedAdmissionFixture({ withSecondScenario: true });
+    await env.DB.prepare("UPDATE vm_scenarios SET organization_id = ?1, enabled = 1, enabled_at = ?2 WHERE scenario_id = ?3")
+      .bind(fixture.organizationId, Date.now(), THIRD_SCENARIO_ID).run();
+    const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID, { scenarioId: THIRD_SCENARIO_ID }));
+    await result.deliveryHint;
+    expect(await loadRunRow(result.runId)).toMatchObject({
+      courseScopeKey: "organization:" + fixture.organizationId,
+      courseId: "organization-course",
+    });
+  });
+
+  it.each(["completed", "nonsequential", "admin bypass"])(
+    "keeps valid course access with a %s prerequisite at commit",
+    async (mode) => {
+      const fixture = await seedAdmissionFixture();
+      if (mode === "admin bypass") {
+        await drizzle(env.DB).update(user).set({ role: "admin" }).where(eq(user.id, RUNNER_USER_ID));
+      }
+      admissionHarness.armBeforeAdmissionBatch(async () => {
+        await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_insert(catalog_json, '$.courses[0].lectures[#]', json_extract(catalog_json, '$.courses[0].lectures[0]')) WHERE scope_key = 'public'").run();
+        await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].lectureId', 'new-prerequisite', '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'").run();
+        if (mode === "completed") {
+          await env.DB.prepare("INSERT INTO course_unit_completions (user_id, scope_key, course_id, lecture_id, completed_at) VALUES (?1, 'public', 'admission-course', 'new-prerequisite', ?2)")
+            .bind(RUNNER_USER_ID, Date.now()).run();
+        } else if (mode === "nonsequential") {
+          await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].sequential', json('false')) WHERE scope_key = 'public'").run();
+        }
+      });
+      const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID, {
+        allowSequenceBypass: mode === "admin bypass",
+      }));
+      await result.deliveryHint;
+      expect(admissionHarness.state.admissionBatches).toBe(1);
+    },
+  );
+
+  it.each([
+    ["sequence", false, true],
+    ["drained proof", true, false],
+    ["both", true, true],
+  ] as const)("rejects a captured %s bypass after admin demotion at commit", async (_name, proof, sequence) => {
+    const fixture = await seedAdmissionFixture();
+    await setPlatformUserRole({ d1: env.DB, targetUserId: RUNNER_USER_ID, actorUserId: FIXTURE_BETA_ADMIN_ID, role: "admin" });
+    if (sequence) {
+      await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_insert(catalog_json, '$.courses[0].lectures[#]', json_extract(catalog_json, '$.courses[0].lectures[0]')) WHERE scope_key = 'public'").run();
+      await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].lectureId', 'locked-prerequisite', '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'").run();
+    }
+    if (proof) {
+      await seedCandidateProof({ revision: CANDIDATE_REVISION_A, buildId: CANDIDATE_BUILD_A,
+        scenarioId: SCENARIO_ID, organizationId: fixture.organizationId, imageSha256: IMAGE_SHA_ONE });
+      await drizzle(env.DB).insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "drained" });
+    }
+    admissionHarness.armBeforeAdmissionBatch(() => setPlatformUserRole({
+      d1: env.DB, targetUserId: RUNNER_USER_ID, actorUserId: FIXTURE_BETA_ADMIN_ID, role: "user",
+    }));
+    await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, {
+      ...(proof ? candidateProofInput() : {}), allowSequenceBypass: sequence,
+    }))).rejects.toMatchObject({ status: 409, code: "scenario_content_access_changed" });
+    await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+    expect((await desiredDocument()).vms).toEqual([]);
+  });
+
+  it("admits a live start on the user's own personal host", async () => {
+    const fixture = await seedAdmissionFixture();
+    await env.DB.prepare("UPDATE user SET metal_placement = 'personal' WHERE id = ?1").bind(RUNNER_USER_ID).run();
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'personal' WHERE id = ?1").bind(HOST_ID).run();
+    await env.DB.prepare("UPDATE host_desired_state SET doc_json = json_set(doc_json, '$.scope', 'personal') WHERE host_id = ?1").bind(HOST_ID).run();
+    const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID));
+    await result.deliveryHint;
+    expect(result.hostId).toBe(HOST_ID);
+  });
+
+  it("reselects a ready host after the selected host disconnects in the commit window", async () => {
+    const fixture = await seedAdmissionFixture();
+    const db = drizzle(env.DB);
+    const [host] = await db.select().from(agentHosts).where(eq(agentHosts.id, HOST_ID));
+    const [actual] = await db.select().from(hostActualState).where(eq(hostActualState.hostId, HOST_ID));
+    if (!host || !actual) throw new Error("fixture host missing");
+    const fallbackId = "fallback-runner";
+    await db.insert(agentHosts).values({ ...host, id: fallbackId, activeSessionId: "fallback-session", updatedAt: host.updatedAt - 1 });
+    await db.insert(hostActualState).values({ ...actual, hostId: fallbackId, reportJson: { ...actual.reportJson, host_id: fallbackId } });
+    admissionHarness.armBeforeAdmissionBatch(async () => {
+      await env.DB.prepare("UPDATE agent_hosts SET connected = 0, active_session_id = NULL WHERE id = ?1").bind(HOST_ID).run();
+      admissionHarness.armBeforeAdmissionBatch(async () => {
+        await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+      });
+    });
+    const input = fixture.input(RUNNER_USER_ID);
+    delete input.hostId;
+    const result = await beginScenarioRun(input);
+    await result.deliveryHint;
+    expect(result.hostId).toBe(fallbackId);
+    expect(admissionHarness.state.admissionBatches).toBe(2);
+    expect((await desiredDocument()).vms).toEqual([]);
+    await expect(admissionSnapshot()).resolves.toMatchObject({ runs: 1, activeSlots: 1, cpuReservations: 1, desiredVersion: 0 });
+  });
+
+  it("refuses an unknown explicit host before creating desired state", async () => {
+    const fixture = await seedAdmissionFixture();
+    await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, { hostId: "unknown-host" }))).rejects.toMatchObject({ code: "scenario_host_not_found" });
+    await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
 
   it("keeps one active run when one user starts twice at the same time", async () => {
@@ -1158,6 +1348,41 @@ describe("scenario admission batch", () => {
       await expect(openWriterRows()).resolves.toBe(0);
     });
 
+    it("keeps the candidate image proof separate from changed live image rows", async () => {
+      const fixture = await seedAdmissionFixture();
+      await seedCandidateProof({
+        revision: CANDIDATE_REVISION_A,
+        buildId: CANDIDATE_BUILD_A,
+        scenarioId: SCENARIO_ID,
+        organizationId: fixture.organizationId,
+        imageSha256: IMAGE_SHA_ONE,
+      });
+      admissionHarness.armBeforeAdmissionBatch(() => env.DB.prepare(
+        "UPDATE vm_scenario_vms SET image_sha256 = ?1 WHERE scenario_id = ?2",
+      ).bind("9".repeat(64), SCENARIO_ID).run());
+      const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID, candidateProofInput()));
+      await result.deliveryHint;
+      expect((await desiredDocument()).vms[0]).toMatchObject({ image_id: IMAGE_SHA_ONE });
+      expect(admissionHarness.state.admissionBatches).toBe(1);
+    });
+
+    it("does not let an administrative candidate proof bypass a cleared host session", async () => {
+      const fixture = await seedAdmissionFixture();
+      await seedCandidateProof({
+        revision: CANDIDATE_REVISION_A,
+        buildId: CANDIDATE_BUILD_A,
+        scenarioId: SCENARIO_ID,
+        organizationId: fixture.organizationId,
+        imageSha256: IMAGE_SHA_ONE,
+      });
+      admissionHarness.armBeforeAdmissionBatch(() => env.DB.prepare(
+        "UPDATE agent_hosts SET active_session_id = NULL",
+      ).run());
+      await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, candidateProofInput()))).rejects.toMatchObject({ status: 409 });
+      await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+      expect((await desiredDocument()).vms).toEqual([]);
+    });
+
     it("refuses a live start for each identity field a publish can replace", async () => {
       const fixture = await seedAdmissionFixture();
       // A live row has no candidate proof to anchor on, so a publish can
@@ -1385,6 +1610,8 @@ async function seedCandidateProof(input: {
   contentHash?: string;
 }): Promise<void> {
   const db = drizzle(env.DB);
+  // Candidate proof starts use a current administrator's bypass permission.
+  await db.update(user).set({ role: "admin" }).where(eq(user.id, RUNNER_USER_ID));
   const now = Date.now();
   const bundleRev = `${input.buildId}-bundle`;
   const contentHash = input.contentHash ?? CANDIDATE_CONTENT_HASH;
@@ -1559,11 +1786,12 @@ async function seedHostAndCatalog(input: {
 
   const hostId = HOST_ID;
   await db.insert(agentHosts).values({
+    scope: "platform",
+    credentialGeneration: 1,
+    activeSessionId: "admission-session",
     id: hostId,
     userId: input.userIds[0] as string,
-    // The host belongs to the fixture organization, so every seeded member
-    // of that organization can start on it.
-    organizationId,
+    // The platform host is shared; course access is checked for each user.
     name: hostId,
     role: "agent",
     scenarioEnabled: true,
@@ -1601,7 +1829,7 @@ async function seedHostAndCatalog(input: {
   await db.insert(hostDesiredState).values({
     hostId,
     version: 0,
-    docJson: createEmptyHostDesiredState({ hostId, nowUnixMs: now }),
+    docJson: createEmptyHostDesiredState({ ownerUserId: input.userIds[0]!, scope: "platform", hostId, nowUnixMs: now }),
     createdAt: now,
     updatedAt: now,
   });
@@ -1866,7 +2094,7 @@ function hostReport(input: {
     imageSha256: string;
   }>;
 }): typeof hostActualState.$inferInsert.reportJson {
-  return {
+  return { relay_connected: true,
     schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
     host_id: input.hostId,
     observed_at_unix_ms: input.now,

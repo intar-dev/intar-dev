@@ -1182,6 +1182,16 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
+      if (pathname === "/api/servers" && method === "GET") {
+        await json(route, {
+          placement: "platform",
+          registrationOpen: true,
+          installerCommand: "curl -fsSL https://intar.dev/install.sh | sudo sh",
+          servers: [],
+          enrollments: [],
+        });
+        return;
+      }
       if (pathname === "/api/profile/ssh-keys" && method === "GET") {
         await json(route, { keys: server.state.sshKeys });
         return;

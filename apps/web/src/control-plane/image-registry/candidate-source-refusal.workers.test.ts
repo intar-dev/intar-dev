@@ -2,6 +2,7 @@
 
 import { gzipSync } from "node:zlib";
 import { env } from "cloudflare:workers";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAgentBootstrap, sha256Hex } from "@/control-plane/auth";
@@ -70,6 +71,9 @@ describe("candidate source refusal at the registry routes", () => {
   });
 
   it("answers the exact 409, keeps the staged row, and leaves no hold when the client abandons the upload", async () => {
+    const db = drizzle(env.DB);
+    await db.update(imageBuilds).set({ artifactsRetiredAt: STAGED_AT });
+    const [buildBefore] = await db.select().from(imageBuilds);
     // The uploader owns one registry session for the whole upload, and the
     // publish holds a writer under it.
     const owner = { kind: "builder", id: BUILDER_HOST_ID } as const;
@@ -95,6 +99,7 @@ describe("candidate source refusal at the registry routes", () => {
       manifestJson: JSON.stringify(stagedManifest()),
       updatedAt: STAGED_AT,
     });
+    expect((await db.select().from(imageBuilds))[0]).toEqual(buildBefore);
     // The refusal already settled the writer while the client still held its
     // session: the open session is what keeps the collector out at this point,
     // not an unresolved write.
@@ -112,6 +117,21 @@ describe("candidate source refusal at the registry routes", () => {
     });
     await expect(blockedWriterCount()).resolves.toBe(0);
     await expect(sweepAcquires()).resolves.toBe(true);
+  });
+
+  it("publishes a receipt for an identical candidate replay while a run reads it", async () => {
+    const db = drizzle(env.DB);
+    await db.update(imageBuilds).set({
+      publishedManifestJson: null, artifactsRetiredAt: STAGED_AT,
+    }).where(eq(imageBuilds.id, BUILD_ID));
+    const before = await stagedRow();
+    const response = await publishRequest({ token: builderToken, manifest: stagedManifest() });
+    expect(response?.status, await response?.clone().text()).toBe(201);
+    expect(await stagedRow()).toEqual(before);
+    expect((await db.select().from(imageBuilds))[0]).toMatchObject({
+      publishedManifestJson: stagedManifest(), artifactsRetiredAt: null,
+    });
+    expect(await blockedWriterCount()).toBe(0);
   });
 
   it("still holds the writer when the publish fails with an unexpected error", async () => {
@@ -186,6 +206,8 @@ async function seedFixture(): Promise<void> {
   await db.insert(agentHosts).values([
     {
       id: AGENT_HOST_ID,
+      scope: "platform",
+      credentialGeneration: 1,
       userId: RUN_USER_ID,
       name: AGENT_HOST_ID,
       role: "agent",
@@ -194,6 +216,8 @@ async function seedFixture(): Promise<void> {
     },
     {
       id: BUILDER_HOST_ID,
+      scope: "platform",
+      credentialGeneration: 1,
       userId: BUILDER_OWNER_ID,
       name: BUILDER_HOST_ID,
       role: "builder",
@@ -211,6 +235,7 @@ async function seedFixture(): Promise<void> {
     id: "locked-builder-bootstrap",
     hostId: BUILDER_HOST_ID,
     tokenHash: await sha256Hex(BOOTSTRAP_TOKEN),
+    credentialGeneration: 1,
     expiresAt: now + 60_000,
   });
   builderToken = await bootstrapBuilderToken();

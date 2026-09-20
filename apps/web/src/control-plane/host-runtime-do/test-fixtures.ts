@@ -1,10 +1,10 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import {
   accessAllowlist,
   agentHosts,
@@ -13,6 +13,7 @@ import {
   hostDesiredState,
   courseCatalogs,
   scenarioRuns,
+  runtimeVms,
   user,
   vmScenarioVms,
   vmScenarios,
@@ -100,7 +101,7 @@ export function desiredRunningVm(
   vmName: string,
   now: number,
 ): DesiredVmV2 {
-  return {
+  return { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: "vm-1",
     run_id: runId,
     vm_name: vmName,
     desired_phase: "running",
@@ -126,6 +127,7 @@ export async function seedHost(hostId: string): Promise<void> {
     .insert(user)
     .values({
       id: "user-1",
+      metalPlacement: "personal",
       name: "Test User",
       email: "test@example.com",
       emailVerified: true,
@@ -138,6 +140,8 @@ export async function seedHost(hostId: string): Promise<void> {
     id: hostId,
     userId: "user-1",
     name: hostId,
+    scope: "personal",
+    credentialGeneration: 1,
     role: "agent",
     scenarioEnabled: true,
     disabled: false,
@@ -157,7 +161,7 @@ export async function connectHost(
 }> {
   const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
   const admission = await env.DB.prepare(
-    `SELECT host.organization_id,
+    `SELECT host.scope, host.credential_generation,
             access.source_invite_id,
             access.source_lease_id,
             access.granted_at
@@ -168,14 +172,15 @@ export async function connectHost(
   )
     .bind(hostId)
     .first<{
-      organization_id: string | null;
+      scope: "personal" | "platform";
+      credential_generation: number;
       source_invite_id: string | null;
       source_lease_id: string | null;
       granted_at: number | null;
     }>();
   if (!admission) throw new Error(`host fixture is missing: ${hostId}`);
   if (
-    admission.organization_id === null &&
+    admission.scope === "personal" &&
     (!admission.source_invite_id ||
       !admission.source_lease_id ||
       admission.granted_at === null)
@@ -185,8 +190,9 @@ export async function connectHost(
   const headers = new Headers({
     upgrade: "websocket",
     "x-agent-host-id": hostId,
+    "x-agent-credential-generation": String(admission.credential_generation),
   });
-  if (admission.granted_at !== null) {
+  if (admission.scope === "personal" && admission.granted_at !== null) {
     headers.set(
       "x-agent-beta-source-invite-id",
       admission.source_invite_id!,
@@ -321,8 +327,16 @@ export async function runNextScheduledAlarm(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
-    if (await runDurableObjectAlarm(stub)) {
-      return;
+    const scheduled = await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
+    if (scheduled !== null) {
+      // The test API fires early. Observe the scheduled time so the DO can
+      // distinguish socket expiry from runtime maintenance on its shared alarm.
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Math.max(Date.now(), scheduled));
+      try {
+        if (await runDurableObjectAlarm(stub)) return;
+      } finally {
+        clock.mockRestore();
+      }
     }
     await sleep(10);
   }
@@ -401,6 +415,7 @@ export async function seedRun(input: {
   runId: string;
   runtimeVmName?: string;
   now: number;
+  seedRuntimeVms?: boolean;
   vms?: Array<{
     id: string;
     ordinal?: number;
@@ -410,6 +425,7 @@ export async function seedRun(input: {
     hostname: string;
   }>;
 }): Promise<void> {
+  await seedEnabledScenario(input.db, input.now);
   const vms = input.vms ?? [
     {
       id: "vm-1",
@@ -465,6 +481,9 @@ export async function seedRun(input: {
     userId: "user-1",
     hostId: input.hostId,
     scenarioId: "broken-nginx",
+    courseScopeKey: "public",
+    courseId: "linux-operations",
+    lectureId: "01-broken-nginx",
     scenarioName: "broken-nginx",
     title: "Broken Nginx",
     tagline: "",
@@ -489,6 +508,15 @@ export async function seedRun(input: {
     statements: [drizzleQueryToD1Statement(env.DB, mutation)],
     mode: "create",
   });
+  if (input.seedRuntimeVms !== false) {
+    await input.db.insert(runtimeVms).values(vms.map((vm, index) => ({
+      id: `${input.runId}:${vm.id}`, executionId: input.runId, vmId: vm.id,
+      ordinal: vm.ordinal ?? index, runtimeVmName: vm.runtimeVmName,
+      imageKeyJson: testImageKey, imageSha256: "2".repeat(64),
+      cpuMillis: 1_000, memoryMib: 512, diskMib: 4_096,
+      createdAt: input.now, updatedAt: input.now,
+    })));
+  }
 }
 
 export async function seedEnabledScenario(
@@ -544,7 +572,7 @@ export async function seedEnabledScenario(
     enabledAt: now,
     createdAt: now,
     updatedAt: now,
-  });
+  }).onConflictDoNothing();
   await db.insert(vmScenarioVms).values({
     id: "scenario-vm-web",
     scenarioId: "broken-nginx",
@@ -561,7 +589,7 @@ export async function seedEnabledScenario(
     cpuMillis: 125,
     memoryMib: 512,
     diskMib: 4096,
-  });
+  }).onConflictDoNothing();
 }
 
 export function stateReport(
@@ -578,7 +606,7 @@ export function stateReport(
     type: "state_report",
     protocol_version: 8,
     host_id: hostId,
-    report: {
+    report: { relay_connected: true,
       schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
       host_id: hostId,
       observed_at_unix_ms: input.observedAt,
@@ -626,7 +654,7 @@ export function actualVm(
   vmName: string,
   observedAt: number,
 ): VmActualStateV2 {
-  return {
+  return { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1,
     run_id: runId,
     vm_name: vmName,
     phase: "running",
@@ -660,8 +688,8 @@ export function vmReport(
     type: "vm_report",
     protocol_version: 8,
     host_id: hostId,
-    report: {
-      schema_version: 5,
+    report: { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1,
+      schema_version: 6,
       host_id: hostId,
       run_id: runId,
       vm_name: vmName,

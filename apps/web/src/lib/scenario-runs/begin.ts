@@ -1,29 +1,30 @@
 import { env } from "cloudflare:workers";
+import { metalAdmissionSql } from "@/lib/metal-placement";
 import { and, eq } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import type {
   DesiredGuestToolsV1,
   DesiredVmV2,
   HostDesiredStateV2,
-  HostStateReportV2,
 } from "@/generated/bridge";
 import {
   admissionCpuQuotaStatement,
   admissionResourceReservationStatement,
   cpuReservationForVms,
-  loadHostCpuReservationCapacity,
+  hostCpuReservationCapacityFromSnapshot,
 } from "@/control-plane/host-cpu-reservations";
 import {
   isSafeBuildId,
   isSafeBundleRev,
 } from "@/control-plane/image-registry/shared";
 import {
+  hostCpuReservations,
   scenarioRuns,
   scenarioRunSshKeys,
 } from "@/db/schema";
 import type { ScenarioStartRequestScope } from "@/db/schema/runs";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
-import { appError, type AppError, errorChainMatches } from "@/lib/app-error";
+import { appError, AppError, errorChainMatches } from "@/lib/app-error";
 import {
   applyLectureBriefingPresentation,
   assertCourseScenarioStartAllowed,
@@ -64,6 +65,7 @@ import {
 import type { RuntimeVmSpec } from "@/lib/runtime-executions";
 import { candidateScenarioId } from "@/lib/scenario-catalog-candidates";
 import { loadScenarioGuestToolsPin } from "@/lib/scenario-guest-tools";
+import { preparePersonalScenarioImages } from "@/lib/personal-image-preparation";
 import type { ScenarioLaunchSpec } from "@/lib/scenario-model";
 import {
   generateScenarioRunSshKeyDraft,
@@ -71,12 +73,19 @@ import {
 } from "@/lib/scenario-run-ssh-keys";
 import { traceOperation } from "@/lib/tracing";
 import { loadCandidateScenarioRunSource } from "./candidate";
+import {
+  admissionContentAccessCondition,
+  admissionHostReadinessCondition,
+  type AdmissionContentAccess,
+  type AdmissionHostReadiness,
+} from "./admission-guards";
 import { deterministicRuntimeVmName } from "./runtime-vm-name";
 import {
   type RequiredScenarioImage,
 } from "@/lib/scenario-host-readiness";
 import {
   assertScenarioLaunchHostForUser,
+  loadScenarioLaunchHostForUser,
   isActiveKeyUniqueViolation,
   requiredImagesForScenarioLaunch,
   scenarioRuntimeReservationResources,
@@ -904,6 +913,9 @@ async function admitNewRun(context: {
     }
     const desiredVm = desiredVmFromRunVm({
       runId,
+      ownerUserId: input.userId,
+      runtimeExecutionId: runId,
+      generation: 1,
       vm: vmState,
       nowUnixMs: createdAt,
       sshAuthorizedKeysOpenssh: sshAuthorizedKeysByVmId.get(vm.vmId) ?? [],
@@ -965,11 +977,47 @@ async function admitNewRun(context: {
     updatedAt: createdAt,
   } satisfies typeof scenarioRuns.$inferInsert;
 
+  let preparedHostId: string | undefined;
+  try {
+    preparedHostId = context.candidateProof ? undefined : await preparePersonalScenarioImages({
+      access: {
+        userId: input.userId,
+        organizationId,
+        scenarioId: scenario.scenarioId,
+        courseScopeKey: courseLecture.courseScopeKey,
+        courseId: courseLecture.courseId,
+        lectureId: courseLecture.lectureId,
+        allowSequenceBypass: input.allowSequenceBypass === true,
+        requiresAdmin: input.allowDrainedAdminProof === true || input.allowSequenceBypass === true,
+      },
+      betaAdmission: input.betaAdmission,
+      requestKey: context.idempotencyKey,
+      ...(input.hostId ? { requestedHostId: input.hostId } : {}),
+      requiredImages,
+      requiredResources: reservationResources,
+    });
+  } catch (error) {
+    if (!(error instanceof AppError) || error.code !== "scenario_preparation_changed") throw error;
+    // Another request can admit this key after the initial replay lookup but
+    // before preparation. Its run consumes the preparation grant atomically.
+    const raced = await loadRunByIdempotencyKey(drizzle(env.DB), input.userId, context.idempotencyKey);
+    if (!raced) throw error;
+    assertReplayMatchesScope(raced.requestScopeJson, context.scope);
+    return {
+      accepted: true,
+      runId: raced.runId,
+      scenarioId: raced.scenarioId,
+      acceptedAt: raced.acceptedAt,
+      reused: true,
+      hostId: raced.hostId,
+      deliveryHint: deliveryHint(raced.hostId),
+    };
+  }
+
   for (let attempt = 1; attempt <= ADMISSION_CAS_ATTEMPTS; attempt += 1) {
     const allocated = await allocateAdmissionHost({
       userId: input.userId,
-      organizationId,
-      ...(input.hostId ? { requestedHostId: input.hostId } : {}),
+      ...(preparedHostId ? { requestedHostId: preparedHostId } : input.hostId ? { requestedHostId: input.hostId } : {}),
       requiredImages,
       reservationResources,
       cpuMillis,
@@ -1080,6 +1128,7 @@ async function admitNewRun(context: {
         scenarioId: scenario.scenarioId,
       });
       if (refusal) throw refusal;
+      await assertCurrentContentAccess(run, input.allowDrainedAdminProof);
       if (attempt < ADMISSION_CAS_ATTEMPTS) {
         continue;
       }
@@ -1136,6 +1185,7 @@ function runtimeVmSpecsFromScenarioState(
 
 export interface AdmissionHostAllocation {
   hostId: string;
+  readiness: AdmissionHostReadiness;
   expectedVersion: number;
   nextVersion: number;
   nextDocJson: string;
@@ -1143,7 +1193,6 @@ export interface AdmissionHostAllocation {
 
 async function allocateAdmissionHost(input: {
   userId: string;
-  organizationId: string | null;
   requestedHostId?: string;
   requiredImages: RequiredScenarioImage[];
   reservationResources: RuntimeResourceDemand;
@@ -1159,7 +1208,6 @@ async function allocateAdmissionHost(input: {
         input.requestedHostId,
         input.userId,
         input.requiredImages,
-        input.organizationId,
       );
       // No separate capacity precheck: planAdmissionHost reads the desired
       // version, the reported capacity, and the reservation ledger for this
@@ -1169,7 +1217,7 @@ async function allocateAdmissionHost(input: {
     } else {
       const selection = await selectScenarioHosts(
         input.requiredImages,
-        input.organizationId,
+        input.userId,
         input.reservationResources,
         input.now,
       );
@@ -1179,11 +1227,11 @@ async function allocateAdmissionHost(input: {
           selection.reason === "image_not_ready"
             ? "image_not_ready"
             : "scenario_host_unavailable",
-          selection.reason === "image_not_ready"
+          selection.message ?? (selection.reason === "image_not_ready"
             ? "scenario images are not ready on any available host"
             : selection.reason === "resource_capacity"
               ? "no scenario host has enough CPU, memory, and worst-case disk capacity"
-              : "no scenario host available",
+              : "no scenario host available"),
         );
       }
       candidateHostIds = selection.hostIds;
@@ -1203,6 +1251,9 @@ async function allocateAdmissionHost(input: {
     // version it read after the winner's commit.
     const allocation = await planAdmissionHost({
       candidateHostIds,
+      userId: input.userId,
+      requiredImages: input.requiredImages,
+      explicitHost: !!input.requestedHostId,
       now: input.now,
       cpuMillis: input.cpuMillis,
       reservationResources: input.reservationResources,
@@ -1239,6 +1290,9 @@ async function allocateAdmissionHost(input: {
  */
 async function planAdmissionHost(input: {
   candidateHostIds: readonly string[];
+  userId: string;
+  requiredImages: RequiredScenarioImage[];
+  explicitHost: boolean;
   now: number;
   cpuMillis: number;
   reservationResources: RuntimeResourceDemand;
@@ -1248,14 +1302,43 @@ async function planAdmissionHost(input: {
   const db = drizzle(env.DB);
   for (const hostId of [...new Set(input.candidateHostIds)]) {
     const current = await loadOrCreateHostDesiredState(db, hostId, input.now);
-    const capacity = await loadHostCpuReservationCapacity(db, hostId);
+    let host;
+    try {
+      host = await loadScenarioLaunchHostForUser(
+        hostId,
+        input.userId,
+        input.requiredImages,
+      );
+    } catch (error) {
+      if (!input.explicitHost && error instanceof AppError && error.status < 500) {
+        continue;
+      }
+      throw error;
+    }
+    if (
+      !host.activeSessionId || host.credentialGeneration <= 0 ||
+      host.actualReportedAt === null || host.actualReportText === null
+    ) {
+      continue;
+    }
+    const report = host.actualReport;
+    const reservations = await db
+      .select({
+        runId: hostCpuReservations.runId,
+        cpuMillis: hostCpuReservations.cpuMillis,
+        state: hostCpuReservations.state,
+      })
+      .from(hostCpuReservations)
+      .where(eq(hostCpuReservations.hostId, hostId));
+    // CPU and other resource checks must use the same report as the commit
+    // anchor. A second report read could hide a capacity/capability change.
+    const capacity = hostCpuReservationCapacityFromSnapshot(report, reservations);
     if (!capacity) {
       continue;
     }
     if (input.cpuMillis > capacity.availableCpuMillis) {
       continue;
     }
-    const report = await loadHostReportOrNull(hostId);
     if (!report) {
       continue;
     }
@@ -1292,6 +1375,12 @@ async function planAdmissionHost(input: {
     }
     return {
       hostId,
+      readiness: {
+        credentialGeneration: host.credentialGeneration,
+        activeSessionId: host.activeSessionId,
+        actualReportedAt: host.actualReportedAt,
+        actualReportText: host.actualReportText,
+      },
       expectedVersion: current.version,
       nextVersion: next.version,
       nextDocJson: JSON.stringify(next),
@@ -1300,24 +1389,6 @@ async function planAdmissionHost(input: {
   return null;
 }
 
-/** Reads one host's last bridge report, or null when it has never reported. */
-async function loadHostReportOrNull(
-  hostId: string,
-): Promise<HostStateReportV2 | null> {
-  const row = await env.DB.prepare(
-    "SELECT report_json FROM host_actual_state WHERE host_id = ?1",
-  )
-    .bind(hostId)
-    .first<{ report_json: string }>();
-  if (!row) {
-    return null;
-  }
-  try {
-    return JSON.parse(row.report_json) as HostStateReportV2;
-  } catch {
-    return null;
-  }
-}
 export interface AdmissionCommitInput {
   run: typeof scenarioRuns.$inferInsert & { hostId: string };
   sshKeyRows: Array<typeof scenarioRunSshKeys.$inferInsert>;
@@ -1428,7 +1499,41 @@ async function admissionRefusal(input: AdmissionCommitInput) {
       ? { allowDrainedAdminProof: true }
       : {}),
   });
+  await assertCurrentContentAccess(input.run, input.allowDrainedAdminProof);
   return scenarioStartAdmissionChanged();
+}
+
+function admissionContentAccess(
+  run: AdmissionCommitInput["run"],
+  allowDrainedAdminProof = false,
+): AdmissionContentAccess {
+  return {
+    userId: run.userId,
+    organizationId: run.organizationId ?? null,
+    scenarioId: run.scenarioId,
+    courseScopeKey: run.courseScopeKey ?? null,
+    courseId: run.courseId ?? null,
+    lectureId: run.lectureId ?? null,
+    allowSequenceBypass: run.requestScopeJson?.allowSequenceBypass === true,
+    requiresAdmin: allowDrainedAdminProof ||
+      run.requestScopeJson?.allowDrainedAdminProof === true ||
+      run.requestScopeJson?.allowSequenceBypass === true,
+  };
+}
+
+async function assertCurrentContentAccess(run: AdmissionCommitInput["run"], allowDrainedAdminProof = false) {
+  const row = await env.DB.prepare(
+    "SELECT " + admissionContentAccessCondition(1) + " AS allowed",
+  )
+    .bind(JSON.stringify(admissionContentAccess(run, allowDrainedAdminProof)))
+    .first<{ allowed: number }>();
+  if (row?.allowed !== 1) {
+    throw appError(
+      409,
+      "scenario_content_access_changed",
+      "scenario, course, or administrator access changed during admission",
+    );
+  }
 }
 
 /**
@@ -1552,10 +1657,9 @@ export interface AdmissionBatch {
 export function admissionStatements(input: AdmissionCommitInput): AdmissionBatch {
   const run = input.run;
   const statements = [
-    // The runtime execution is inserted before the run row because the run
-    // row references it. Both carry the same admission guard, so a revoked
-    // epoch refuses both and the abort sentinel below rolls back anything
-    // else that already landed in this transaction.
+    // The run references the execution, so insert the execution first. Both
+    // check the beta epoch. The run also checks content access and the host
+    // snapshot; the sentinel rolls the execution back if either check fails.
     runtimeExecutionStatement(run, input),
     insertRunStatement(run, input),
     runRefusedSentinelStatement(run, input),
@@ -1768,12 +1872,11 @@ function insertRunStatement(
     run.updatedAt as number,
   ];
   const hostParam = values.length + 1;
-  const organizationParam = values.length + 2;
-  const userParam = values.length + 3;
-  const inviteParam = values.length + 4;
-  const leaseParam = values.length + 5;
-  const grantedAtParam = values.length + 6;
-  const candidateParam = values.length + 7;
+  const userParam = values.length + 2;
+  const inviteParam = values.length + 3;
+  const leaseParam = values.length + 4;
+  const grantedAtParam = values.length + 5;
+  const candidateParam = values.length + 6;
   const candidateProof = input.candidateProof;
   const sourceAnchor = input.sourceAnchor ?? null;
   const anchorCondition = candidateProof
@@ -1801,6 +1904,8 @@ function insertRunStatement(
     : sourceAnchor
       ? [sourceAnchor.json, sourceAnchor.vmCount]
       : [];
+  const readinessParam = candidateParam + anchorParams.length;
+  const contentParam = readinessParam + 1;
   // host_id is the fifth column and takes the host row id, so the host join
   // supplies that one expression and the bound values supply the rest.
   const hostIdColumnIndex = RUN_INSERT_COLUMNS.indexOf("host_id");
@@ -1818,11 +1923,9 @@ function insertRunStatement(
     String(hostParam) +
     " AND host.disabled = 0 AND host.role = 'agent'" +
     " AND host.scenario_enabled = 1" +
-    " AND ((?" +
-    String(organizationParam) +
-    " IS NULL AND host.organization_id IS NULL) OR host.organization_id = ?" +
-    String(organizationParam) +
-    ")" +
+    " AND " + metalAdmissionSql("?" + String(userParam)) +
+    " AND " + admissionHostReadinessCondition(readinessParam) +
+    " AND " + admissionContentAccessCondition(contentParam) +
     drainGateCondition(input.allowDrainedAdminProof) +
     (anchorCondition ? " AND " + anchorCondition : "") +
     " AND EXISTS (SELECT 1 FROM access_allowlist access" +
@@ -1840,12 +1943,13 @@ function insertRunStatement(
   return env.DB.prepare(sqlText).bind(
     ...values,
     run.hostId,
-    run.organizationId ?? null,
     run.userId,
     betaAdmission.sourceInviteId,
     betaAdmission.sourceLeaseId,
     betaAdmission.grantedAt,
     ...anchorParams,
+    JSON.stringify(input.desired.readiness),
+    JSON.stringify(admissionContentAccess(run, input.allowDrainedAdminProof)),
   );
 }
 
@@ -1973,8 +2077,7 @@ function runtimeExecutionStatement(
       " NULL, NULL, ?7, ?7" +
       " FROM agent_hosts host" +
       " WHERE host.id = ?5 AND host.disabled = 0" +
-      " AND ((?4 IS NULL AND host.organization_id IS NULL)" +
-      " OR host.organization_id = ?4)" +
+      " AND " + metalAdmissionSql("?3") +
       " AND EXISTS (SELECT 1 FROM access_allowlist access" +
       " WHERE access.user_id = ?3 AND access.state = 'active'" +
       " AND access.source_invite_id = ?8" +

@@ -1,5 +1,6 @@
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
+import type { VerifiedAgentHost } from "@/control-plane/auth";
 import {
   imageBuilds,
   type ImageBuildStatus,
@@ -13,7 +14,7 @@ import {
   stageCandidateScenarioManifest,
   warmCandidateScenarioManifest,
 } from "@/lib/scenario-catalog-candidates";
-import { toErrorResponse } from "@/lib/app-error";
+import { AppError, toErrorResponse } from "@/lib/app-error";
 import {
   withImageBuildCoordinationLock,
   withImageBuildCoordinationLocks,
@@ -39,6 +40,7 @@ import {
   storePreparedVmImages,
 } from "./publish-payload";
 import { requireBuilderAgentRequest } from "./agent";
+import { currentAgentHost } from "./image-access";
 import {
   admitRegistryOperation,
   createRegistryWriterGuard,
@@ -88,15 +90,14 @@ export async function handlePublish(
     }
     return response;
   } catch (error) {
-    // A refused candidate source is a settled write, not an unknown one: the
-    // conditional stage proved that no catalog row changed, and every write of
-    // this publish was awaited before it. Settling the guard here is what keeps
-    // the collector reachable; an unresolved row would instead block every
-    // destructive sweep until an operator reap, for a refusal that no retry can
-    // pass while the run that reads the candidate is still active.
-    if (!isCandidateSourceLocked(error)) throw error;
+    // Both refusals prove that the conditional catalog writes changed no rows.
+    // All preceding R2 stores were awaited, so the writer can safely settle.
+    if (
+      !isCandidateSourceLocked(error) &&
+      !(error instanceof AppError && error.code === "catalog_publication_revoked")
+    ) throw error;
     await writer.release("ok");
-    const refusal = toErrorResponse(error, "candidate publish refused", 409);
+    const refusal = toErrorResponse(error, "image publish refused", 409);
     return jsonResponse(refusal.body, refusal.status);
   } finally {
     await writer.finish();
@@ -140,7 +141,7 @@ async function publishManifest(
 
     buildFence = {
       ...identity.value,
-      hostId: authorization.hostId,
+      hostId: authorization.agent.hostId,
       scenarioId: normalizedManifest.scenario_id,
     };
   }
@@ -211,6 +212,22 @@ async function publishManifest(
     }
 
     const now = Date.now();
+    // Carry the authenticated identity and exact assignment into each catalog
+    // mutation. A JS read before the commit would leave a revocation race.
+    const writeGuard = buildFence && authorization.kind === "builder"
+      ? and(currentAgentHost(authorization.agent), sql`EXISTS (
+          SELECT 1 FROM image_builds current_build
+          WHERE current_build.id = ${buildFence.buildId}
+            AND current_build.host_id = ${buildFence.hostId}
+            AND current_build.status IN ('assigned', 'building')
+            AND current_build.scenario_id = ${buildFence.scenarioId}
+            AND current_build.arch = ${buildFence.architecture}
+            AND current_build.rev = ${buildFence.rev}
+            AND current_build.content_hash = ${buildFence.contentHash}
+            AND current_build.organization_id IS ${organizationId}
+            AND current_build.catalog_channel = ${catalogChannel}
+        )`)
+      : undefined;
     if (buildFence && catalogChannel === "candidate") {
       // A candidate publish replaces no live catalog, so it records no
       // rollback: the live pointers it warms are still the live ones.
@@ -220,6 +237,7 @@ async function publishManifest(
         buildId: buildFence.buildId,
         manifest: normalizedManifest,
         nowUnixMs: now,
+        ...(writeGuard ? { publication: { database: env.DB, writeGuard } } : {}),
       });
     } else {
       // A live publish replaces the catalog pointers. The previous-state read,
@@ -242,6 +260,7 @@ async function publishManifest(
             organizationId,
             sourceRevision: buildFence?.rev ?? null,
             nowUnixMs: now,
+            ...(writeGuard && buildFence ? { writeGuard, buildId: buildFence.buildId } : {}),
           },
         );
         if (replacement.blocked) {
@@ -282,20 +301,6 @@ async function publishManifest(
             applyLiveReplacement,
           );
       if (!liveReplacement.ok) return liveReplacement;
-    }
-    if (buildFence) {
-      await db
-        .update(imageBuilds)
-        .set({
-          publishedManifestJson: normalizedManifest,
-          updatedAt: Date.now(),
-        })
-        .where(
-          and(
-            eq(imageBuilds.id, buildFence.buildId),
-            eq(imageBuilds.hostId, buildFence.hostId),
-          ),
-        );
     }
     return {
       ok: true,
@@ -347,14 +352,7 @@ async function publishManifest(
   }
   if (!published.ok) return published.response;
 
-  // The pointer marker is settled outside the family lock: the batch above is
-  // committed with its rollback record, so the family already has one live
-  // pointer set and one recoverable previous state.
-  const retention = await finishPublishCommit(db, {
-    buildId: buildFence?.buildId ?? null,
-    nowUnixMs: Date.now(),
-    releaseWriter: () => writer.release("ok"),
-  });
+  await writer.release("ok");
 
   if (published.catalogChannel === "candidate") {
     await warmCandidateScenarioManifest(db, {
@@ -381,58 +379,18 @@ async function publishManifest(
       catalog_channel: published.catalogChannel,
       transition_id: published.transitionId,
       evicted_host_ids: published.evictedHostIds,
-      cleanup: retention.cleanup,
+      // The uploader holds its upload session until this response arrives.
+      // A sweep waits for all sessions to close, so waiting here would deadlock.
+      // The scheduled pass removes whatever this publish replaced.
+      cleanup: {
+        state: "deferred",
+        deleted_objects: 0,
+        deleted_bytes: 0,
+        pending: true,
+      },
     },
     201,
   );
-}
-
-/**
- * The last step of a publish: a rebuilt content hash becomes an active pointer
- * again, and the registry writer ends. The family lock is already released, so
- * the collector can take its exclusive sweep while this request finishes.
- */
-async function finishPublishCommit(
-  db: DrizzleD1Database,
-  input: {
-    buildId: string | null;
-    nowUnixMs: number;
-    releaseWriter: () => Promise<void>;
-  },
-): Promise<{
-  cleanup: {
-    state: string;
-    deleted_objects: number;
-    deleted_bytes: number;
-    pending: boolean;
-  };
-}> {
-  if (input.buildId) {
-    // Its artifacts may have been deleted when an earlier generation retired
-    // this content hash.
-    await db
-      .update(imageBuilds)
-      .set({ artifactsRetiredAt: null, updatedAt: input.nowUnixMs })
-      .where(
-        and(
-          inArray(imageBuilds.id, [input.buildId]),
-          isNotNull(imageBuilds.artifactsRetiredAt),
-        ),
-      );
-  }
-  await input.releaseWriter();
-  // No sweep is attempted here. The uploader holds its upload session until
-  // this response arrives and the collector refuses its exclusive lease while
-  // any session is open, so a waited sweep would deadlock. The scheduled pass
-  // removes whatever this publish replaced.
-  return {
-    cleanup: {
-      state: "deferred",
-      deleted_objects: 0,
-      deleted_bytes: 0,
-      pending: true,
-    },
-  };
 }
 
 /**
@@ -473,7 +431,7 @@ export { isRuntimeImageCacheHost } from "@/lib/scenario-image-cache";
 
 export type ManifestPublishAuthorization =
   | { ok: true; kind: "trusted-token" }
-  | { ok: true; kind: "builder"; hostId: string }
+  | { ok: true; kind: "builder"; agent: VerifiedAgentHost }
   | { ok: false; response: Response };
 
 export type PublishBuildIdentity = {
@@ -511,7 +469,7 @@ export async function authorizeManifestPublish(
   return {
     ok: true,
     kind: "builder",
-    hostId: verified.agent.hostId,
+    agent: verified.agent,
   };
 }
 

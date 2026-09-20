@@ -30,11 +30,11 @@ export async function pruneSupersededHostCachedImages(
     .from(agentHosts)
     .where(
       and(
+        // Publication manages the platform cache. Personal cache intents are
+        // trimmed by the collector, which preserves active VMs and transfers.
+        eq(agentHosts.scope, "platform"),
         eq(agentHosts.role, "agent"),
         eq(agentHosts.disabled, false),
-        input.organizationId
-          ? eq(agentHosts.organizationId, input.organizationId)
-          : undefined,
       ),
     );
   const changedHostIds: string[] = [];

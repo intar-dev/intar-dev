@@ -6,8 +6,8 @@ describe("selectOverdueRunLeases", () => {
   it("groups only running VMs whose lease is strictly overdue", () => {
     expect(
       selectOverdueRunLeases(
-        {
-          schema_version: 5,
+        { owner_user_id: "user-1", scope: "platform",
+          schema_version: 6,
           host_id: "host-alpha",
           version: 1,
           generated_at_unix_ms: 1_000,
@@ -35,7 +35,7 @@ function desiredVm(
   leaseExpiresAt: number,
   desiredPhase: "running" | "absent",
 ): HostDesiredStateV2["vms"][number] {
-  return {
+  return { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: vmName,
     run_id: runId,
     vm_name: vmName,
     desired_phase: desiredPhase,

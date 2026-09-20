@@ -67,6 +67,10 @@ pub struct CreateVmResources {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateScenarioVmRequest {
+    pub owner_user_id: String,
+    pub runtime_execution_id: String,
+    pub generation: u64,
+
     pub name: String,
     pub run_id: String,
     pub image: String,
@@ -138,6 +142,10 @@ pub struct VmStatusResponse {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VmDetails {
+    pub owner_user_id: String,
+    pub runtime_execution_id: String,
+    pub generation: u64,
+
     #[serde(skip_serializing)]
     pub image_key: Option<String>,
     #[serde(skip_serializing)]
@@ -243,6 +251,21 @@ impl VmLifecycleState {
 impl VmStatusResponse {
     fn to_db_row(&self) -> VmRow {
         VmRow {
+            owner_user_id: self
+                .details
+                .as_ref()
+                .map(|d| d.owner_user_id.clone())
+                .unwrap_or_default(),
+            runtime_execution_id: self
+                .details
+                .as_ref()
+                .map(|d| d.runtime_execution_id.clone())
+                .unwrap_or_default(),
+            generation: self
+                .details
+                .as_ref()
+                .map(|d| d.generation as i64)
+                .unwrap_or_default(),
             name: self.name.clone(),
             state: self.state.as_str().to_string(),
             image_key: self.details.as_ref().and_then(|d| d.image_key.clone()),
@@ -364,6 +387,10 @@ impl VmStatusResponse {
 }
 
 struct QueueVmCreateRequest {
+    pub owner_user_id: String,
+    pub runtime_execution_id: String,
+    pub generation: u64,
+
     api_started_at: Instant,
     requested_name: String,
     requested_run_id: String,
@@ -621,6 +648,8 @@ pub struct VmManager {
 
 #[derive(Debug)]
 struct Inner {
+    control_connected: AtomicBool,
+    relay_status: std::sync::RwLock<Option<watch::Receiver<bool>>>,
     ch_spawn_timeout_seconds: u64,
     jailer_socket: PathBuf,
     jailer_request_timeout_seconds: u64,

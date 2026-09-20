@@ -1,6 +1,9 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
+import type { HostStateReportV2 } from "@/generated/bridge";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 
 const stargateMocks = vi.hoisted(() => ({
   deleteStargateRoute: vi.fn().mockResolvedValue(undefined),
@@ -19,6 +22,7 @@ import {
 import {
   testImageKey,
   testGuestTools,
+  desiredRunningVm,
   seedHost,
   connectHost,
   sendBridge,
@@ -30,6 +34,7 @@ import {
   sleep,
   seedRun,
   stateReport,
+  actualVm,
   vmReport,
   env,
   eq,
@@ -46,8 +51,197 @@ import {
   resetHostRuntimeTestDatabase,
 } from "./test-fixtures";
 
+// Workerd eviction drains active requests for up to five seconds per eviction.
+vi.setConfig({ testTimeout: 20_000 });
+
 describe("HostRuntimeDO run lifecycle projection", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+
+  it("restores its alarm when a slow retirement clears a concurrent wake", async () => {
+    const hostId = "late-retirement";
+    await seedHost(hostId);
+    const leaseExpiry = Date.now() + 120_000;
+    await seedRun({ db: drizzle(env.DB), hostId, runId: "run", runtimeVmName: "vm", now: Date.now() });
+    await drizzle(env.DB).update(runtimeExecutions).set({ leaseExpiresAt: leaseExpiry }).where(eq(runtimeExecutions.id, "run"));
+    await mutateStoredHostDesiredState(drizzle(env.DB), hostId, Date.now(), draft => {
+      upsertDesiredVm(draft, { ...desiredRunningVm("run", "vm", Date.now()), lease_expires_at_unix_ms: leaseExpiry });
+    });
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    await runInDurableObject(stub, async (instance, state) => {
+      const runtime = instance as unknown as { fetch(request: Request): Promise<Response> };
+      let reached!: () => void;
+      let resume!: () => void;
+      const clearing = new Promise<void>(resolve => { reached = resolve; });
+      const release = new Promise<void>(resolve => { resume = resolve; });
+      const deleteAll = state.storage.deleteAll.bind(state.storage);
+      const spy = vi.spyOn(state.storage, "deleteAll").mockImplementationOnce(async () => {
+        reached();
+        await release;
+        return deleteAll();
+      });
+      const retirement = runtime.fetch(new Request("http://host-runtime/_internal/retire", {
+        method: "POST", headers: { "x-agent-host-id": hostId },
+      }));
+      try {
+        await clearing;
+        const wake = await runtime.fetch(new Request("http://host-runtime/_internal/wake", {
+          method: "POST", body: JSON.stringify({ hostId }),
+        }));
+        expect(wake.status).toBe(202);
+        await wake.text();
+        expect(await state.storage.getAlarm()).not.toBeNull();
+      } finally {
+        resume();
+        spy.mockRestore();
+      }
+      const retired = await retirement;
+      expect(retired.status).toBe(200);
+      await retired.text();
+      expect(await state.storage.getAlarm()).not.toBeNull();
+      expect(await state.storage.getAlarm()).toBeLessThanOrEqual(leaseExpiry + 1);
+    });
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance, state) => {
+      const runtime = instance as unknown as { loadKnownHostId(): Promise<string | null> };
+      expect(await runtime.loadKnownHostId()).toBe(hostId);
+      expect(await state.storage.getAlarm()).not.toBeNull();
+    });
+  });
+
+  it.each(["stop-read", "alarm-read"] as const)("returns 503 and retains a cleanup alarm after a retirement %s failure", async failure => {
+    const hostId = `retire-${failure}`;
+    await seedHost(hostId);
+    await seedRun({ db: drizzle(env.DB), hostId, runId: "run", runtimeVmName: "vm", now: Date.now() });
+    await drizzle(env.DB).update(runtimeExecutions).set({ leaseExpiresAt: Date.now() + 60_000 }).where(eq(runtimeExecutions.id, "run"));
+    await mutateStoredHostDesiredState(drizzle(env.DB), hostId, Date.now(), draft => {
+      upsertDesiredVm(draft, desiredRunningVm("run", "vm", Date.now()));
+    });
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    await runInDurableObject(stub, async (instance, state) => {
+      const runtime = instance as unknown as {
+        env: { DB: D1Database };
+        fetch(request: Request): Promise<Response>;
+        computeNextAlarm(hostId: string): Promise<number | null>;
+      };
+      const error = new Error("injected D1 read failure");
+      const spy = failure === "stop-read"
+        ? vi.spyOn(runtime.env.DB, "prepare").mockImplementationOnce(() => { throw error; })
+        : vi.spyOn(runtime, "computeNextAlarm").mockRejectedValueOnce(error);
+      try {
+        const response = await runtime.fetch(new Request("http://host-runtime/_internal/retire", {
+          method: "POST", headers: { "x-agent-host-id": hostId },
+        }));
+        expect(response.status).toBe(503);
+        await response.text();
+        expect(await state.storage.getAlarm()).not.toBeNull();
+      } finally { spy.mockRestore(); }
+    });
+  });
+
+  it.each(["personal", "platform"] as const)("sends a final stop-only frame to a revoked %s host and restores lease cleanup after clearing storage", async scope => {
+    const hostId = `retire-${scope}`;
+    const now = Date.now();
+    await seedHost(hostId);
+    await env.DB.prepare("UPDATE agent_hosts SET scope = ? WHERE id = ?").bind(scope, hostId).run();
+    const { messages, stub, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(messages, frame => frame.type === "desired_state");
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId: "run", now });
+    const leaseExpiry = Date.now() + 120_000;
+    await db.update(runtimeExecutions).set({ leaseExpiresAt: leaseExpiry }).where(eq(runtimeExecutions.id, "run"));
+    const retained = await mutateStoredHostDesiredState(db, hostId, now, draft => {
+      upsertDesiredVm(draft, { ...desiredRunningVm("run", "runtime-web", now), lease_expires_at_unix_ms: leaseExpiry });
+      upsertDesiredVm(draft, { ...desiredRunningVm("run", "already-absent", now), desired_phase: "absent" });
+      draft.cached_images = [{ image_key: testImageKey, image_id: "2".repeat(64) }];
+      draft.cached_guest_tools = [testGuestTools];
+      draft.builds = [{ build_id: "build", scenario_id: "scenario", arch: "x86_64", rev: "revision", content_hash: "3".repeat(64), bundle_ref: "bundle" }];
+    });
+    const before = await env.DB.prepare("SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = 'run'").first();
+    const executionBefore = await env.DB.prepare("SELECT state, ended_at FROM runtime_executions WHERE id = 'run'").first();
+    // Reproduce the ordering used by revocation: fence reports before retirement.
+    await env.DB.prepare("UPDATE agent_hosts SET disabled = 1, credential_generation = 2, active_session_id = NULL WHERE id = ?").bind(hostId).run();
+    const close = new Promise<number>(resolve => ws.addEventListener("close", event => resolve(event.code), { once: true }));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("unrelated-old-state", "must be cleared");
+    });
+    await evictDurableObject(stub);
+    const response = await stub.fetch("http://host-runtime/_internal/retire", {
+      method: "POST", headers: { "x-agent-host-id": hostId },
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(await close).toBe(1001);
+    const stop = await waitForBridgeMessage(messages, frame => frame.type === "desired_state" && frame.desired_state.version === retained.version + 1);
+    if (stop.type !== "desired_state") throw new Error("expected stop state");
+    expect(stop.desired_state.vms.map(vm => [vm.vm_name, vm.desired_phase])).toEqual([
+      ["already-absent", "absent"], ["runtime-web", "absent"],
+    ]);
+    expect(stop.desired_state).toMatchObject({ cached_images: [], cached_guest_tools: [], builds: [] });
+    const [stored] = await db.select().from(hostDesiredState).where(eq(hostDesiredState.hostId, hostId));
+    expect(stored?.docJson).toEqual(stop.desired_state);
+    expect(stop.desired_state.vms.map(vm => vm.lease_expires_at_unix_ms))
+      .toEqual(retained.vms.map(vm => vm.lease_expires_at_unix_ms));
+    // Sending the stop is not evidence that a physical VM stopped.
+    expect(await env.DB.prepare("SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = 'run'").first()).toEqual(before);
+    expect(await env.DB.prepare("SELECT state, ended_at FROM runtime_executions WHERE id = 'run'").first()).toEqual(executionBefore);
+    // No follow-up wake: retirement must repair its own alarm even if its
+    // caller timed out before this operation completed.
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get("unrelated-old-state")).toBeUndefined();
+      expect(await state.storage.getAlarm()).not.toBeNull();
+      expect(await state.storage.getAlarm()).toBeLessThanOrEqual(leaseExpiry + 1);
+    });
+    // Reach the retained lease deadline without waiting for any host report.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(leaseExpiry + 1);
+    try { await runNextScheduledAlarm(stub); } finally { clock.mockRestore(); }
+    expect(await env.DB.prepare("SELECT state FROM scenario_runs WHERE run_id = 'run'").first()).toEqual({ state: "failed" });
+    expect(await env.DB.prepare("SELECT state FROM runtime_executions WHERE id = 'run'").first()).toEqual({ state: "archived" });
+  });
+
+  it("does not revive an execution archived after full-report acceptance", async () => {
+    const hostId = "host-report-expiry-race";
+    const runId = "run-report-expiry-race";
+    const now = Date.now();
+    await seedHost(hostId);
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const leaseExpiry = now + 120_000;
+    await db.update(runtimeExecutions).set({ leaseExpiresAt: leaseExpiry }).where(eq(runtimeExecutions.id, runId));
+    const { stub, ws, messages } = await connectHost(hostId);
+    await waitForBridgeMessage(messages, frame => frame.type === "desired_state");
+    const message = stateReport(hostId, { observedAt: now + 1, appliedDesiredVersion: 0,
+      vms: [actualVm(runId, "runtime-web", now + 1)] });
+    if (message.type !== "state_report") throw new Error("expected full report");
+    await runInDurableObject(stub, async instance => {
+      const runtime = instance as unknown as {
+        persistRunState(...args: unknown[]): Promise<unknown>;
+        applyBridgeStateReport(hostId: string, report: HostStateReportV2, sessionId: string, generation: number): Promise<void>;
+      };
+      const session = await env.DB.prepare("SELECT active_session_id FROM agent_hosts WHERE id = ?").bind(hostId).first<{active_session_id:string}>();
+      const persist = runtime.persistRunState.bind(runtime);
+      let expiredState: unknown;
+      const spy = vi.spyOn(runtime, "persistRunState").mockImplementationOnce(async (...args) => {
+        // The inventory INSERT succeeded; expiry now wins before the run CAS.
+        expect(await env.DB.prepare("SELECT observed_at FROM host_actual_state WHERE host_id = ?").bind(hostId).first())
+          .toEqual({ observed_at: now + 1 });
+        expect(await expireOverdueRuntimeExecutions(hostId, leaseExpiry + 1))
+          .toEqual({ expiredExecutionIds: [runId], failedExecutionIds: [] });
+        expiredState = await env.DB.prepare("SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = ?").bind(runId).first();
+        return persist(...args);
+      });
+      try {
+        await runtime.applyBridgeStateReport(hostId, message.report, session!.active_session_id, 1);
+        expect(spy).toHaveBeenCalledOnce();
+        expect(await env.DB.prepare("SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = ?").bind(runId).first()).toEqual(expiredState);
+      } finally { spy.mockRestore(); }
+    });
+    expect(await db.select({ state: runtimeExecutions.state }).from(runtimeExecutions).where(eq(runtimeExecutions.id, runId)))
+      .toEqual([{ state: "archived" }]);
+    expect(await db.select().from(activeRuntimeSlots).where(eq(activeRuntimeSlots.executionId, runId))).toEqual([]);
+    ws.close();
+  });
 
   it("expires overdue run leases from a durable-object alarm", async () => {
     const hostId = "host-lease-expiry";
@@ -68,6 +262,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       runId,
       runtimeVmName,
       now,
+      seedRuntimeVms: false,
     });
     await db.batch([
       db
@@ -100,7 +295,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       }),
     ]);
     await mutateStoredHostDesiredState(db, hostId, now, (draft) => {
-      upsertDesiredVm(draft, {
+      upsertDesiredVm(draft, { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: runtimeVmName,
         run_id: runId,
         vm_name: runtimeVmName,
         desired_phase: "running",
@@ -411,6 +606,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
   it("re-pushes desired state after reconnect sync and persists applied version catch-up", async () => {
     const hostId = "host-reconnect-sync";
     await seedHost(hostId);
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
     await seedCatalogImage("3".repeat(64));
     const first = await connectHost(hostId);
     await waitForBridgeMessage(
@@ -483,6 +679,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     const hostId = "host-created-after-publication";
     const sha256 = "4".repeat(64);
     await seedHost(hostId);
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
     await seedCatalogImage(sha256);
 
     const { messages, ws } = await connectHost(hostId);
@@ -522,6 +719,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     const hostId = "host-periodic-image-repair";
     const sha256 = "5".repeat(64);
     await seedHost(hostId);
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
     await seedCatalogImage(sha256);
     const { messages, ws } = await connectHost(hostId);
     await waitForBridgeMessage(

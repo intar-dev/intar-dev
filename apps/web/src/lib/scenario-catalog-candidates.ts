@@ -1,5 +1,6 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
+import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import {
   ACTIVE_RUNTIME_EXECUTION_STATES,
   agentHosts,
@@ -43,6 +44,8 @@ export async function stageCandidateScenarioManifest(
     buildId: string;
     manifest: ScenarioManifestV5;
     nowUnixMs: number;
+    /** Builder authority; also commits its publication receipt in the batch. */
+    publication?: { database: D1Database; writeGuard: SQL };
   },
 ): Promise<void> {
   const id = candidateScenarioId(
@@ -52,20 +55,21 @@ export async function stageCandidateScenarioManifest(
   );
   const scenarioId = input.manifest.scenario_id;
   const manifestJson = JSON.stringify(input.manifest);
+  const writeGuard = input.publication?.writeGuard;
   // The same authority the retention policy and the outgoing-reference check
   // read, rendered as bound values so the guard and the policy cannot drift.
   const activeExecutionStates = sql.join(
     ACTIVE_RUNTIME_EXECUTION_STATES.map((state) => sql`${state}`),
     sql`, `,
   );
-  const written = await db.all<{ id: string }>(sql`
+  const stage = sql`
     INSERT INTO scenario_catalog_candidates (
       id, revision, organization_id, scenario_id, build_id, manifest_json,
       created_at, updated_at
     )
     SELECT ${id}, ${input.revision}, ${input.organizationId}, ${scenarioId},
            ${input.buildId}, ${manifestJson}, ${input.nowUnixMs}, ${input.nowUnixMs}
-    WHERE NOT EXISTS (
+    WHERE (${writeGuard ?? sql`1`}) AND NOT EXISTS (
       SELECT 1
       FROM scenario_runs run
       JOIN runtime_executions execution
@@ -89,7 +93,43 @@ export async function stageCandidateScenarioManifest(
     WHERE scenario_catalog_candidates.build_id IS NOT excluded.build_id
        OR scenario_catalog_candidates.manifest_json IS NOT excluded.manifest_json
     RETURNING id
-  `);
+  `;
+  if (input.publication) {
+    const queries = [
+      sql`SELECT (${writeGuard}) AS authorized`,
+      stage,
+      db.update(imageBuilds).set({
+        publishedManifestJson: input.manifest,
+        artifactsRetiredAt: null,
+        updatedAt: input.nowUnixMs,
+      }).where(and(
+        eq(imageBuilds.id, input.buildId),
+        writeGuard,
+        // A refused stage must not publish a receipt. An identical replay is
+        // valid, including while an active run reads this exact candidate.
+        sql`EXISTS (
+          SELECT 1 FROM scenario_catalog_candidates staged
+          WHERE staged.id = ${id}
+            AND staged.build_id IS ${input.buildId}
+            AND staged.manifest_json IS ${manifestJson}
+        )`,
+      )).returning({ id: imageBuilds.id }).getSQL(),
+    ];
+    const dialect = new SQLiteSyncDialect();
+    const { database } = input.publication;
+    const statements = queries.map((query) => {
+      const compiled = dialect.sqlToQuery(query);
+      return database.prepare(compiled.sql).bind(...compiled.params);
+    });
+    const [allowed, , receipt] = await database.batch<{ authorized: number }>(statements);
+    if (allowed?.results[0]?.authorized !== 1) {
+      throw appError(409, "catalog_publication_revoked", "build is not active for this builder");
+    }
+    if (receipt?.results.length) return;
+    throw appError(409, "candidate_source_locked",
+      "an active run still reads this candidate scenario; the staged manifest was not changed");
+  }
+  const written = await db.all<{ id: string }>(stage);
   if (written.length > 0) return;
   // Nothing was written: the row either already holds this exact payload, which
   // is an identical replay, or the guard refused a change while a run still
@@ -136,7 +176,7 @@ export async function warmCandidateScenarioManifest(
     wakeHost: (hostId: string) => Promise<void>;
   },
 ): Promise<string[]> {
-  const hosts = await loadCandidateAgentHosts(db, input.organizationId);
+  const hosts = await loadCandidateAgentHosts(db);
   const warmed: string[] = [];
   for (const host of hosts) {
     const images = input.manifest.vms.filter(
@@ -173,7 +213,7 @@ async function warmReusableCandidateManifests(
 ): Promise<void> {
   if (!input.manifests.length) return;
 
-  const hosts = await loadCandidateAgentHosts(db, input.organizationId);
+  const hosts = await loadCandidateAgentHosts(db);
   for (const host of hosts) {
     const images = input.manifests.flatMap((manifest) =>
       manifest.vms.filter((vm) => vm.image_key.arch === host.arch),
@@ -219,7 +259,6 @@ async function warmReusableCandidateManifests(
 
 async function loadCandidateAgentHosts(
   db: DrizzleD1Database,
-  organizationId: string | null,
 ) {
   return db
     .select({
@@ -230,11 +269,9 @@ async function loadCandidateAgentHosts(
     .innerJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(
       and(
+        eq(agentHosts.scope, "platform"),
         eq(agentHosts.role, "agent"),
         eq(agentHosts.disabled, false),
-        organizationId
-          ? eq(agentHosts.organizationId, organizationId)
-          : undefined,
       ),
     );
 }

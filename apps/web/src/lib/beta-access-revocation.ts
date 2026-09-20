@@ -13,7 +13,7 @@ import {
 } from "@/lib/beta-access-revocation-store";
 import { appError } from "@/lib/app-error";
 import { auth } from "@/lib/auth";
-import { retireHostRuntime } from "@/lib/host-runtime-wake";
+import { retireHostRuntime, wakeHostRuntime } from "@/lib/host-runtime-wake";
 import {
   destroyScenarioRunForUser,
   revokeScenarioRoutesForUser,
@@ -65,7 +65,7 @@ export async function cleanupBetaRevocation(params: {
       .where(
         and(
           eq(agentHosts.userId, params.userId),
-          isNull(agentHosts.organizationId),
+          eq(agentHosts.scope, "personal"),
         ),
       );
     const activeUserRuns = await db
@@ -80,8 +80,8 @@ export async function cleanupBetaRevocation(params: {
         ),
       );
 
-    // Each statement carries the same fence. D1 batch transactionality keeps
-    // OAuth and personal-agent credential cleanup together.
+    // Host credentials were invalidated by the revocation transaction. These
+    // OAuth cleanup writes carry the same fence as the external cleanup.
     const fence = `EXISTS (
       SELECT 1 FROM access_allowlist
       WHERE user_id = ?1
@@ -114,28 +114,6 @@ export async function cleanupBetaRevocation(params: {
              AND ${fence}`,
         )
         .bind(params.userId, params.revocationId, cleanupAttemptId),
-      env.DB
-        .prepare(
-          `UPDATE agent_bootstrap_tokens
-           SET revoked_at = coalesce(revoked_at, unixepoch('subsec') * 1000)
-           WHERE host_id IN (
-             SELECT id FROM agent_hosts
-             WHERE user_id = ?1 AND organization_id IS NULL
-           ) AND ${fence}`,
-        )
-        .bind(params.userId, params.revocationId, cleanupAttemptId),
-      env.DB
-        .prepare(
-          `UPDATE agent_hosts
-           SET disabled = 1,
-               scenario_enabled = 0,
-               connected = 0,
-               active_session_id = NULL,
-               disconnected_at = coalesce(disconnected_at, unixepoch('subsec') * 1000),
-               updated_at = unixepoch('subsec') * 1000
-           WHERE user_id = ?1 AND organization_id IS NULL AND ${fence}`,
-        )
-        .bind(params.userId, params.revocationId, cleanupAttemptId),
     ]);
     await assertRevocationFence(
       params.userId,
@@ -143,9 +121,8 @@ export async function cleanupBetaRevocation(params: {
       cleanupAttemptId,
     );
 
-    // Every run is a user-owned capability even when an organization runner
-    // hosts it. Tear down only that user's VMs; never disable the organization
-    // host or disturb another member's workloads.
+    // Every run is a user-owned capability even when a platform server
+    // hosts it. Tear down only that user's VMs.
     for (const run of activeUserRuns) {
       await assertRevocationFence(
         params.userId,
@@ -172,7 +149,13 @@ export async function cleanupBetaRevocation(params: {
         params.revocationId,
         cleanupAttemptId,
       );
-      await retireHostRuntime(host.id);
+      try {
+        await retireHostRuntime(host.id);
+      } finally {
+        // Retirement clears DO storage. Restore finite-lease cleanup after it,
+        // including when the retirement response was lost.
+        await wakeHostRuntime(host.id);
+      }
     }
 
     await completeBetaRevocationCleanup({

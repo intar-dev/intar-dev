@@ -1,0 +1,913 @@
+#!/usr/bin/python3 -I
+"""Personal host management. Ubuntu 24.04, x86_64; Python standard library only."""
+import argparse
+import errno
+import fcntl
+import grp
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import platform
+import pwd
+import re
+import resource
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import termios
+import time
+import urllib.error
+import urllib.request
+
+ROOT = Path('/var/lib/intar-personal')
+STATE = ROOT / 'state.json'
+ENROLLMENT = ROOT / 'enrollment.json'
+MAINTENANCE = ROOT / 'maintenance'
+STORAGE = ROOT / 'storage'
+IMAGE = ROOT / 'storage.xfs'
+CONFIG = Path('/etc/intar-agent/config.toml')
+CREDENTIAL = Path('/etc/intar-agent/credential.json')
+JAILER_CONFIG = Path('/etc/intar-jailerd/config.toml')
+UNITS = Path('/etc/systemd/system')
+COMMAND = Path('/usr/local/bin/intar-host')
+ORIGIN = 'https://intar.dev'
+RELEASES = 'https://api.github.com/repos/intar-dev/intar-dev/releases'
+DOWNLOAD = 'https://github.com/intar-dev/intar-dev/releases/download/agent%2Fv'
+GIB = 1024 ** 3
+IMAGE_SIZE = 100 * GIB
+RESERVE = 10 * GIB
+MOUNTS = {
+    'cache': Path('/var/cache/intar-agent'),
+    'jails': Path('/var/lib/intar/jails'),
+    'self-test': Path('/var/lib/intar/self-test-assets'),
+}
+ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8',
+       'DEBIAN_FRONTEND': 'noninteractive', 'PYTHONDONTWRITEBYTECODE': '1'}
+AGENT_ENV = ['XDG_CACHE_HOME=/var/cache/intar-agent',
+             'XDG_STATE_HOME=/var/cache/intar-agent/state']
+
+
+class HostError(Exception):
+    pass
+
+
+def require(ok, message):
+    if not ok:
+        raise HostError(message)
+
+
+def run(*args, capture=False):
+    # Do not forward proxy, loader, Python, curl or package-manager environment.
+    result = subprocess.run([str(a) for a in args], env=ENV, text=True,
+                            stdout=subprocess.PIPE if capture else None,
+                            stderr=subprocess.PIPE if capture else None)
+    require(result.returncode == 0, f'{Path(args[0]).name} failed. Run intar-host doctor.')
+    return result.stdout.strip() if capture else None
+
+
+def secure_path(path, *, directory=False, uid=0, mode=None):
+    path = Path(path)
+    for parent in reversed(path.parents):
+        info = parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                f'Unsafe parent directory: {parent}')
+    info = path.lstat()
+    require((stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+            and info.st_uid == uid and not info.st_mode & 0o022
+            and (directory or info.st_nlink == 1)
+            and (mode is None or stat.S_IMODE(info.st_mode) == mode),
+            f'Unsafe owner, type, links, or permissions: {path}')
+    return info
+
+
+def mkdir(path, mode=0o700, gid=0, uid=0):
+    path = Path(path)
+    if not path.exists():
+        path.mkdir(mode=mode)
+        os.chown(path, 0, gid)
+    secure_path(path, directory=True, uid=uid)
+
+
+def sync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic(path, data, mode=0o600, gid=0):
+    path = Path(path)
+    secure_path(path.parent, directory=True)
+    if path.exists() or path.is_symlink():
+        secure_path(path)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), mode)
+            os.fchown(output.fileno(), 0, gid)
+            output.write(data.encode() if isinstance(data, str) else data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(name, path)
+        sync_dir(path.parent)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def save(state):
+    atomic(STATE, json.dumps(state) + '\n')
+
+
+def load(path):
+    secure_path(path, mode=0o600)
+    return json.loads(path.read_text())
+
+
+def download(url, destination):
+    # URLs contain public release identifiers only. Enrollment has its own client.
+    request = urllib.request.Request(url, headers={'User-Agent': 'intar-host'})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, open(destination, 'wb') as output:
+            require(response.url.startswith('https://'), 'Release redirect requires HTTPS.')
+            shutil.copyfileobj(response, output)
+    except (OSError, urllib.error.URLError):
+        raise HostError('Release download failed. Repeat the command.') from None
+
+
+def latest_version():
+    for page in range(1, 21):
+        request = urllib.request.Request(f'{RELEASES}?per_page=100&page={page}',
+                                         headers={'User-Agent': 'intar-host'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            releases = json.load(response)
+        for release in releases:
+            match = re.fullmatch(r'agent/v([0-9]+\.[0-9]+\.[0-9]+)', release['tag_name'])
+            if match and not release['draft'] and not release['prerelease']:
+                return match[1]
+        if not releases:
+            break
+    raise HostError('No published agent release is available.')
+
+
+def digest(path):
+    with open(path, 'rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def checksums(text):
+    result = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  (\S+)', line)
+        require(match is not None, 'Invalid release checksum list.')
+        value, name = match.groups()
+        require(name not in result, 'Duplicate release checksum.')
+        result[name] = value
+    return result
+
+
+def extract(archive, destination):
+    with tarfile.open(archive, 'r:gz') as bundle:
+        names = set()
+        for entry in bundle.getmembers():
+            name = PurePosixPath(entry.name)
+            require(not name.is_absolute() and '..' not in name.parts
+                    and (entry.isfile() or entry.isdir()) and str(name) not in names,
+                    'Unsafe release archive entry.')
+            names.add(str(name))
+        bundle.extractall(destination, filter='data')
+    for path in destination.rglob('*'):
+        os.chmod(path, 0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644)
+
+
+def verify_package(package):
+    secure_path(package, directory=True)
+    listed = checksums((package / 'deploy/SHA256SUMS').read_text())
+    actual = set()
+    for path in package.rglob('*'):
+        secure_path(path, directory=path.is_dir())
+        if path.is_file() and path != package / 'deploy/SHA256SUMS':
+            name = './' + path.relative_to(package).as_posix()
+            require(listed.get(name) == digest(path), 'Release package checksum mismatch.')
+            actual.add(name)
+    require(actual == set(listed), 'Release package checksum list does not match its files.')
+    for name in ('intar-agent', 'intar-jailer', 'intar-jailerd', 'deploy/install.sh',
+                 'deploy/personal-metal/intar-host', 'deploy/personal-metal/dependencies.lock'):
+        require('./' + name in listed, f'Release package is missing {name}.')
+
+
+def package_for(state, version=None, replace_pending=False):
+    if version is not None:
+        require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Invalid release version.')
+    pending = state.get('pendingVersion')
+    if replace_pending and version and pending != version:
+        require(not state.get('pendingStarted'),
+                'The pending release has already changed this host. Repeat setup to finish it before selecting another release.')
+    else:
+        version = pending or version
+    version = version or latest_version()
+    require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Invalid release version.')
+    state['pendingVersion'] = version
+    save(state)  # An interrupted download must not select a different release.
+    releases = ROOT / 'releases'
+    mkdir(releases)
+    package = releases / version
+    if not package.exists():
+        with tempfile.TemporaryDirectory(prefix='.download-', dir=releases) as tmp:
+            tmp = Path(tmp)
+            archive = f'intar-agent_{version}_linux_amd64.tar.gz'
+            sums = tmp / 'checksums'
+            download(f'{DOWNLOAD}{version}/intar-agent_{version}_checksums.txt', sums)
+            download(f'{DOWNLOAD}{version}/{archive}', tmp / archive)
+            require(checksums(sums.read_text()).get(archive) == digest(tmp / archive),
+                    'Release archive checksum mismatch.')
+            extracted = tmp / 'package'
+            extracted.mkdir()
+            extract(tmp / archive, extracted)
+            verify_package(extracted)
+            os.rename(extracted, package)
+            sync_dir(releases)
+    verify_package(package)
+    return package, version
+
+
+def cancel_update(state):
+    require(not state.get('pendingStarted'),
+            'The pending release has already changed this host. Repeat setup to finish it; cancellation is refused.')
+    state.pop('pendingVersion', None)
+    save(state)
+    print('Release selection cleared. Data, maintenance, and drain state are kept. Use update --version VERSION to continue.')
+
+
+def preflight():
+    require(platform.system() == 'Linux' and platform.machine() == 'x86_64',
+            'Use an Ubuntu 24.04 x86_64 host.')
+    release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+    require(release.get('ID', '').strip('"') == 'ubuntu'
+            and release.get('VERSION_ID', '').strip('"') == '24.04', 'Ubuntu 24.04 is required.')
+    require(Path('/proc/1/comm').read_text().strip() == 'systemd', 'systemd must be PID 1.')
+    run('systemctl', 'show', '--property=Version', capture=True)
+    require(len(os.sched_getaffinity(0)) >= 2, 'At least 2 CPU threads are required.')
+    memory = re.search(r'^MemTotal:\s+(\d+) kB$', Path('/proc/meminfo').read_text(), re.M)
+    require(memory and int(memory[1]) * 1024 >= 4 * GIB, 'At least 4 GiB of usable RAM is required.')
+    require('cpu' in Path('/sys/fs/cgroup/cgroup.controllers').read_text().split(), 'cgroup v2 with CPU control is required.')
+    for device in ('/dev/kvm', '/dev/net/tun'):
+        require(Path(device).exists() and stat.S_ISCHR(Path(device).stat().st_mode), f'{device} is required.')
+    with open('/dev/kvm', 'rb') as kvm:
+        require(fcntl.ioctl(kvm, 0xAE00) == 12, 'KVM is not available.')
+
+
+def no_vms(include_services=False):
+    units = run('systemctl', 'list-units', '--all', '--type=service', '--no-legend', '--plain', 'intar-vm-*.service', capture=True)
+    require(not units, 'VM units remain. Wait for all runs to stop, then repeat the command.')
+    for path in Path('/proc').iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            name = Path(os.readlink(path / 'exe').removesuffix(' (deleted)')).name
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        require(not (name.startswith(('cloud-hypervisor', 'qemu-system-'))
+                     or name in ('intar-jailer', 'kino', 'firecracker')
+                     or (include_services and name in ('intar-agent', 'intar-jailerd'))),
+                'A VM or VM helper is still running. Stop it before setup.')
+        try:
+            for descriptor in (path / 'fd').iterdir():
+                try:
+                    target = os.readlink(descriptor)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                require('kvm-vm' not in target and 'kvm-vcpu' not in target,
+                        'An active KVM instance was found. Stop it before maintenance.')
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    group = run('systemctl', 'show', '--property=ControlGroup', '--value', 'intar-vms.slice', capture=True)
+    if group:
+        require(group.startswith('/') and '..' not in group.split('/'), 'Invalid VM cgroup.')
+        events = Path('/sys/fs/cgroup' + group) / 'cgroup.events'
+        if events.exists():
+            require('populated 0' in events.read_text().splitlines(), 'The VM cgroup still has processes.')
+
+
+def active(unit):
+    return run('systemctl', 'show', '--property=ActiveState', '--value', unit, capture=True) == 'active'
+
+
+def agent(*args):
+    return run('runuser', '-u', 'intar-agent', '--', 'env', *AGENT_ENV,
+               '/usr/local/bin/intar-agent', '--config', CONFIG, *args, capture=True)
+
+
+def drain(state, timeout):
+    atomic(MAINTENANCE, 'Maintenance in progress. Repeat intar-host setup or update.\n')
+    state['phase'] = 'draining'
+    save(state)
+    if active('intar-agent.service'):
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                agent('--drain')
+                break
+            except HostError:
+                require(time.monotonic() < deadline, 'Could not drain the agent. Repeat the command later.')
+                time.sleep(2)
+        while True:
+            status = json.loads(agent('--status'))
+            require(status.get('draining') is True, 'Agent drain is not active.')
+            if status.get('trackedVms') == 0:
+                break
+            require(time.monotonic() < deadline, 'Drain timed out. Runs remain active; repeat the command later.')
+            time.sleep(2)
+        run('systemctl', 'stop', 'intar-agent.service')
+    no_vms()
+
+
+def install_dependencies(package):
+    locked = (package / 'deploy/personal-metal/dependencies.lock').read_text().splitlines()
+    require(locked and all(re.fullmatch(r'[a-z0-9][a-z0-9+.-]*=[A-Za-z0-9.+:~\-]+', item) for item in locked),
+            'Invalid package dependency lock.')
+    run('apt-get', 'update')
+    run('apt-get', 'install', '--yes', '--no-install-recommends', *locked)
+
+
+def ensure_user():
+    try:
+        account = pwd.getpwnam('intar-agent')
+    except KeyError:
+        run('useradd', '--system', '--user-group', '--no-create-home', '--home-dir',
+            '/nonexistent', '--shell', '/usr/sbin/nologin', 'intar-agent')
+        account = pwd.getpwnam('intar-agent')
+    require(0 < account.pw_uid < 1000 and account.pw_shell in ('/usr/sbin/nologin', '/bin/false'),
+            'intar-agent must be a dedicated system user with login disabled.')
+    groups = run('id', '-nG', 'intar-agent', capture=True).split()
+    require(set(groups) <= {'intar-agent'}, 'intar-agent must not have extra group access.')
+    group = grp.getgrnam('intar-agent')
+    require(group.gr_gid == account.pw_gid and set(group.gr_mem) <= {'intar-agent'}
+            and all(user.pw_uid == account.pw_uid or user.pw_gid != account.pw_gid for user in pwd.getpwall()),
+            'The intar-agent group must not grant access to other users.')
+    return account
+
+
+def reflink(source_dir, target_dir):
+    try:
+        with tempfile.TemporaryFile(dir=source_dir) as source, tempfile.TemporaryFile(dir=target_dir) as target:
+            source.write(b'\0' * 4096)
+            source.flush()
+            fcntl.ioctl(target.fileno(), 0x40049409, source.fileno())
+        return True
+    except OSError as error:
+        if error.errno in (errno.EOPNOTSUPP, errno.EXDEV, errno.EINVAL, errno.ENOTTY):
+            return False
+        raise
+
+
+def mount_name(path):
+    return run('systemd-escape', '--path', '--suffix=mount', path, capture=True)
+
+
+def mounted_paths():
+    # stat-based ismount misses bind mounts whose source and target share a filesystem.
+    table = json.loads(run('findmnt', '--kernel', '--list', '--json', '--output', 'TARGET', capture=True))
+    return {Path(entry['target']) for entry in table['filesystems']}
+
+
+def is_mounted(path):
+    return Path(path) in mounted_paths()
+
+
+def mount_unit(source, target, options, fstype='none'):
+    unit = mount_name(target)
+    text = f'''[Unit]
+Description=Intar personal host storage
+RequiresMountsFor={source}
+Before=intar-jailerd.socket intar-jailerd.service intar-personal-check.service intar-agent.service
+
+[Mount]
+What={source}
+Where={target}
+Type={fstype}
+Options={options}
+
+[Install]
+WantedBy=local-fs.target
+'''
+    atomic(UNITS / unit, text, 0o644)
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', unit)
+    require(is_mounted(target), f'Storage is not mounted: {target}')
+    if options == 'bind':
+        require(os.path.samefile(source, target), f'A different filesystem is mounted at {target}.')
+
+
+def disable_loop_discard(read_only=False):
+    device = run('findmnt', '-n', '-o', 'SOURCE', '--mountpoint', STORAGE, capture=True)
+    require(re.fullmatch('/dev/loop[0-9]+', device), 'Intar storage must use its own loop device.')
+    backing = run('losetup', '--noheadings', '--output', 'BACK-FILE', device, capture=True)
+    require(os.path.samefile(backing, IMAGE), 'Loop device does not use the owned Intar storage file.')
+    # FITRIM on the inner XFS must not turn our preallocated file into a sparse file.
+    limit = Path('/sys/block') / Path(device).name / 'queue/discard_max_bytes'
+    if not read_only and limit.read_text().strip() != '0':
+        limit.write_text('0\n')
+    require(limit.read_text().strip() == '0', 'Could not disable storage-file discard.')
+
+
+def storage(state):
+    mkdir(STORAGE)
+    if 'storage' not in state:
+        state['storage'] = {'kind': 'directory' if reflink(STORAGE, STORAGE) else 'loop'}
+        save(state)
+    spec = state['storage']
+    if spec['kind'] == 'loop':
+        if 'inode' not in spec:
+            require(shutil.disk_usage(ROOT).free >= IMAGE_SIZE + RESERVE,
+                    'Storage needs 110 GiB free for a 100 GiB XFS file and 10 GiB reserve.')
+            if not spec.get('creating'):
+                if IMAGE.exists() or IMAGE.is_symlink():
+                    raise FileExistsError('Storage path already exists.')
+                spec['creating'] = True
+                save(state)
+            # O_EXCL prohibits opening or formatting any existing file or device.
+            try:
+                fd = os.open(IMAGE, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except FileExistsError:
+                # Recover only an empty file created after the durable creation intent.
+                info = secure_path(IMAGE, mode=0o600)
+                require(info.st_size == 0 and info.st_blocks == 0,
+                        'Unrecorded storage file contains data; refusing to format it.')
+                fd = os.open(IMAGE, os.O_RDWR | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+                sync_dir(ROOT)
+                info = os.fstat(fd)
+                spec.update(inode=info.st_ino, device=info.st_dev, initialized=False)
+                save(state)
+            finally:
+                os.close(fd)
+        info = secure_path(IMAGE, mode=0o600)
+        require((info.st_ino, info.st_dev) == (spec['inode'], spec['device']), 'Storage file identity changed.')
+        if not spec['initialized']:
+            require(not is_mounted(STORAGE), 'Uninitialized storage is mounted; refusing to format.')
+            remaining = max(0, IMAGE_SIZE - info.st_blocks * 512)
+            require(shutil.disk_usage(ROOT).free >= remaining + RESERVE, 'Storage must retain 10 GiB free.')
+            with open(IMAGE, 'r+b') as image:
+                os.posix_fallocate(image.fileno(), 0, IMAGE_SIZE)
+                os.fsync(image.fileno())
+            # -K retains the preallocated blocks. Only our recorded new file is formatted.
+            run('mkfs.xfs', '-K', '-f', '-m', 'reflink=1', IMAGE)
+            with open(IMAGE, 'rb') as image:
+                os.fsync(image.fileno())
+            require(shutil.disk_usage(ROOT).free >= RESERVE, 'Storage reserve is below 10 GiB.')
+            spec['initialized'] = True
+            save(state)
+        require(IMAGE.stat().st_size == IMAGE_SIZE and IMAGE.stat().st_blocks * 512 >= IMAGE_SIZE,
+                'The storage file is not fully preallocated.')
+        if is_mounted(STORAGE):
+            require(run('findmnt', '-n', '-o', 'UUID', '--mountpoint', STORAGE, capture=True)
+                    == run('blkid', '-s', 'UUID', '-o', 'value', IMAGE, capture=True),
+                    'A different filesystem is mounted at the Intar storage path.')
+        mount_unit(IMAGE, STORAGE, 'loop,nodev,nosuid', 'xfs')
+        disable_loop_discard()
+    else:
+        require(spec['kind'] == 'directory', 'Unknown storage type.')
+    for name, target in MOUNTS.items():
+        source = STORAGE / name
+        owner = source.lstat().st_uid if source.exists() else 0
+        require(owner == 0 or (name == 'cache' and owner == pwd.getpwnam('intar-agent').pw_uid),
+                f'Unexpected storage owner: {source}')
+        mkdir(source, uid=owner)
+        if not target.parent.exists():
+            mkdir(target.parent, 0o755)
+        if not target.exists():
+            mkdir(target)
+        require(not target.is_symlink(), f'Storage target must not be a symlink: {target}')
+        if is_mounted(target):
+            require(os.path.samefile(source, target), f'A different filesystem is mounted at {target}.')
+        else:
+            require(not any(target.iterdir()), f'Refusing to cover existing data at {target}.')
+        mount_unit(source, target, 'bind')
+    require(reflink(MOUNTS['cache'], MOUNTS['jails'])
+            and reflink(MOUNTS['self-test'], MOUNTS['jails']), 'Storage does not support exact reflinks.')
+    require(shutil.disk_usage(STORAGE).free >= RESERVE, 'Intar storage has less than 10 GiB free.')
+
+
+def read_token():
+    # Explicit terminal only: getpass fallback to stdin would consume a pipe.
+    with open('/dev/tty', 'r+', buffering=1) as tty:
+        require(tty.isatty(), 'Enrollment requires a terminal.')
+        previous = termios.tcgetattr(tty.fileno())
+        hidden = previous.copy()
+        hidden[3] &= ~termios.ECHO
+        try:
+            termios.tcsetattr(tty.fileno(), termios.TCSAFLUSH, hidden)
+            tty.write('Paste the token from My servers: ')
+            token = tty.readline(256).strip()
+        finally:
+            termios.tcsetattr(tty.fileno(), termios.TCSAFLUSH, previous)
+            tty.write('\n')
+    require(re.fullmatch('[a-f0-9]{64}', token), 'Invalid enrollment token. Copy it again from My servers.')
+    return token
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise HostError('Enrollment redirects are not allowed.')
+
+
+def claim(enrollment):
+    body = json.dumps({'enrollmentToken': enrollment['enrollmentToken'],
+                       'credential': enrollment['credential']}).encode()
+    request = urllib.request.Request(ORIGIN + '/agent/enroll', data=body,
+                                     headers={'Content-Type': 'application/json'})
+    try:
+        client = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        with client.open(request, timeout=30) as response:
+            result = json.loads(response.read(16384))
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            raise HostError('Enrollment was refused. The saved claim is intact. Follow https://docs.intar.dev/operations/personal-host/#register-again') from None
+        raise HostError('Enrollment service failed. The saved claim is intact. Repeat setup to recover it.') from None
+    except (OSError, ValueError, urllib.error.URLError):
+        # Never print the request, response, or exception: they can contain secrets.
+        raise HostError('Enrollment failed. The saved claim is intact. Repeat setup to recover it.') from None
+    require(isinstance(result, dict) and result.get('scope') == 'personal'
+            and type(result.get('credentialGeneration')) is int and result['credentialGeneration'] == 1
+            and all(isinstance(result.get(k), str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', result[k])
+                    for k in ('hostId', 'ownerUserId')), 'Invalid personal enrollment response.')
+    return {key: result[key] for key in ('hostId', 'ownerUserId', 'scope', 'credentialGeneration')}
+
+
+def enroll(gid):
+    if ENROLLMENT.exists():
+        enrollment = load(ENROLLMENT)
+    else:
+        enrollment = {'enrollmentToken': read_token(), 'credential': secrets.token_hex(32)}
+        atomic(ENROLLMENT, json.dumps(enrollment) + '\n')
+    require(isinstance(enrollment.get('credential'), str) and re.fullmatch('[a-f0-9]{64}', enrollment['credential']),
+            'The saved enrollment credential is invalid.')
+    if 'claim' not in enrollment:
+        enrollment['claim'] = claim(enrollment)
+        atomic(ENROLLMENT, json.dumps(enrollment) + '\n')
+    credential = {**enrollment['claim'], 'credential': enrollment['credential']}
+    atomic(CREDENTIAL, json.dumps(credential) + '\n', 0o640, gid)
+    # The durable successful claim lets setup recover after token removal.
+    if 'enrollmentToken' in enrollment:
+        del enrollment['enrollmentToken']
+        atomic(ENROLLMENT, json.dumps(enrollment) + '\n')
+
+
+def configure(package, account):
+    mkdir(CONFIG.parent, 0o750, account.pw_gid)
+    atomic(CONFIG, f'''[server]
+bind = "127.0.0.1:8080"
+[jailer]
+socket = "/run/intar-jailerd/control.sock"
+[bridge]
+enabled = true
+base_url = "{ORIGIN}"
+credential_file = "{CREDENTIAL}"
+heartbeat_interval_seconds = 30
+[ssh_access]
+enabled = false
+[vm_defaults]
+work_dir = "/var/cache/intar-agent"
+[vm_defaults.resources]
+cpu_millis = 1000
+memory_mib = 512
+[image_registry]
+url = "{ORIGIN}/agent/registry/images"
+[image_cache]
+max_bytes = {20 * GIB}
+''', 0o640, account.pw_gid)
+    mkdir(JAILER_CONFIG.parent, 0o700)
+    jailer = (package / 'deploy/config.example.toml').read_text()
+    for key, value in {'agent_uid': account.pw_uid, 'agent_gid': account.pw_gid,
+                       'template_budget_bytes': 30 * GIB, 'minimum_free_space_bytes': RESERVE}.items():
+        jailer, count = re.subn(rf'(?m)^{key} = .*$', f'{key} = {value}', jailer)
+        require(count == 1, f'Release jailer config is missing {key}.')
+    atomic(JAILER_CONFIG, jailer)
+    enroll(account.pw_gid)
+
+
+def boot_units():
+    dropin = UNITS / 'intar-agent.service.d'
+    mkdir(dropin, 0o755)
+    atomic(dropin / 'personal.conf', f'''[Unit]
+Requires=intar-personal-check.service
+After=intar-personal-check.service
+ConditionPathExists=!{MAINTENANCE}
+
+[Service]
+LimitCORE=0
+''', 0o644)
+    atomic(UNITS / 'intar-personal-check.service', '''[Unit]
+Description=Intar privileged boot proof and agent doctor
+Wants=network-online.target
+After=network-online.target intar-jailerd.socket
+Before=intar-agent.service
+RequiresMountsFor=/var/cache/intar-agent /var/lib/intar/jails /var/lib/intar/self-test-assets
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/intar-host verify-boot
+RemainAfterExit=yes
+TimeoutStartSec=900
+UMask=0077
+''', 0o644)
+    run('systemctl', 'daemon-reload')
+
+
+def doctor():
+    preflight()
+    state = load(STATE)
+    package = ROOT / 'releases' / state.get('pendingVersion', state.get('version', ''))
+    verify_package(package)
+    for source, target in {
+        'intar-agent': '/usr/local/bin/intar-agent',
+        'intar-jailerd': '/usr/lib/intar/intar-jailerd',
+        'intar-jailer': '/usr/lib/intar/intar-jailer',
+        'cloud-hypervisor-v53.0': '/usr/lib/intar/cloud-hypervisor-v53.0',
+    }.items():
+        secure_path(target)
+        require(digest(package / source) == digest(target), f'Installed binary differs from release: {target}')
+    secure_path(CONFIG, mode=0o640)
+    secure_path(CREDENTIAL, mode=0o640)
+    for name, target in MOUNTS.items():
+        require(is_mounted(target) and os.path.samefile(STORAGE / name, target),
+                f'Required storage mount is missing: {target}')
+    require(shutil.disk_usage(STORAGE).free >= RESERVE, 'Intar storage has less than 10 GiB free.')
+    if state.get('storage', {}).get('kind') == 'loop':
+        disable_loop_discard(read_only=True)
+        require(shutil.disk_usage(ROOT).free >= RESERVE, 'The storage file parent has less than 10 GiB free.')
+        info = secure_path(IMAGE, mode=0o600)
+        require(info.st_size == IMAGE_SIZE and info.st_blocks * 512 >= IMAGE_SIZE
+                and (info.st_ino, info.st_dev) == (state['storage']['inode'], state['storage']['device']),
+                'The preallocated storage file changed.')
+    print(agent('--doctor'))
+
+
+def wait_ready(timeout=120):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            status = json.loads(agent('--status'))
+            if (status.get('draining') is False and status.get('ready') is True
+                    and active('intar-agent.service')):
+                return
+        except HostError:
+            pass
+        require(time.monotonic() < deadline,
+                'Installed, but the control connection or tunnel is not ready. Check My servers and repeat setup.')
+        time.sleep(2)
+
+
+def setup(state, args):
+    preflight()
+    if (state.get('phase') == 'ready' and not args.version and args.command == 'setup'
+            and active('intar-agent.service')):
+        doctor()
+        status = json.loads(agent('--status'))
+        require(status.get('draining') is False, 'Agent is drained. Run intar-host update to resume it.')
+        wait_ready()
+        print('Ready. Open My servers at https://intar.dev.')
+        return
+    if state.get('version'):
+        print('Drain active runs before maintenance.')
+        drain(state, args.drain_timeout)
+    else:
+        no_vms()
+        require(not active('intar-agent.service'), 'An unmanaged agent is running.')
+        atomic(MAINTENANCE, 'Setup in progress.\n')
+    package, version = package_for(state, args.version, replace_pending=args.command == 'update')
+    # Finish this release with its own manager, including during an interrupted update.
+    target = package / 'deploy/personal-metal/intar-host'
+    if digest(target) != digest(Path(__file__)):
+        os.execv('/usr/bin/python3', ['/usr/bin/python3', '-I', str(target), args.command,
+                                    '--version', version, '--drain-timeout', str(args.drain_timeout)])
+    atomic(COMMAND, target.read_bytes(), 0o755)
+    state['phase'] = 'dependencies'
+    save(state)
+    install_dependencies(package)
+    # A missing pinned dependency needs a newer release. Keep that choice
+    # possible until storage/configuration/runtime installation starts.
+    state['pendingStarted'] = True
+    save(state)
+    account = ensure_user()
+    state['phase'] = 'storage'
+    save(state)
+    storage(state)
+    state['phase'] = 'enrollment'
+    save(state)
+    configure(package, account)
+    state['phase'] = 'installing'
+    save(state)
+    run('sh', package / 'deploy/install.sh')
+    # The shared package installer creates general-purpose 0755 config directories.
+    secure_path(CONFIG.parent, directory=True)
+    os.chown(CONFIG.parent, 0, account.pw_gid)
+    os.chmod(CONFIG.parent, 0o750)
+    os.chmod(JAILER_CONFIG.parent, 0o700)
+    boot_units()
+    state['phase'] = 'checking'
+    save(state)
+    run('systemctl', 'stop', 'intar-personal-check.service')
+    run('systemctl', 'start', 'intar-personal-check.service')
+    state.update(phase='connecting', version=version)
+    save(state)
+    MAINTENANCE.unlink(missing_ok=True)
+    sync_dir(ROOT)
+    run('systemctl', 'enable', '--now', 'intar-agent.service')
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            agent('--status')
+            break
+        except HostError:
+            require(time.monotonic() < deadline, 'Agent did not start. Run intar-host doctor.')
+            time.sleep(2)
+    agent('--resume')
+    require(active('intar-agent.service'), 'Agent is not active.')
+    wait_ready()
+    state.update(phase='ready', version=version)
+    state.pop('pendingVersion', None)
+    state.pop('pendingStarted', None)
+    save(state)
+    print('Ready. Open My servers at https://intar.dev.')
+
+
+def remove_data(state):
+    no_vms(include_services=True)
+    # Fixed destinations only; never use a path read from the state file for deletion.
+    secure_path(ROOT, directory=True, mode=0o700)
+    spec = state.get('storage', {})
+    image_exists = IMAGE.exists() or IMAGE.is_symlink()
+    if image_exists:
+        require(spec.get('kind') == 'loop', 'Unowned storage file; data removal refused.')
+        info = secure_path(IMAGE, mode=0o600)
+        if 'device' in spec and 'inode' in spec:
+            require((info.st_dev, info.st_ino) == (spec['device'], spec['inode']),
+                    'Storage file identity changed; data removal refused.')
+        else:
+            require(spec.get('creating') is True and not spec.get('initialized')
+                    and info.st_size == 0 and info.st_blocks == 0,
+                    'Unrecorded storage file contains data or lacks creation intent; removal refused.')
+    if is_mounted(STORAGE):
+        require(spec.get('kind') == 'loop' and image_exists and spec.get('initialized'),
+                'Mounted storage has no initialized owned file; data removal refused.')
+        require(run('findmnt', '-n', '-o', 'UUID', '--mountpoint', STORAGE, capture=True)
+                == run('blkid', '-s', 'UUID', '-o', 'value', IMAGE, capture=True),
+                'A different filesystem is mounted at the Intar storage path.')
+    for name, target in MOUNTS.items():
+        require(not target.is_symlink(), f'Data removal refuses a symlink: {target}')
+        if is_mounted(target):
+            require(os.path.samefile(STORAGE / name, target), f'Unowned mount at {target}; removal refused.')
+    # Refuse extra nested mounts. rmtree must never cross into an unrelated filesystem.
+    allowed = {STORAGE, *MOUNTS.values()}
+    for target in mounted_paths():
+        inside = target == ROOT or ROOT in target.parents or any(path == target or path in target.parents for path in MOUNTS.values())
+        require(not inside or target in allowed, 'An extra filesystem is mounted below Intar data; removal refused.')
+    state['phase'] = 'removing-data'
+    save(state)
+    for target in [*reversed(MOUNTS.values()), *([STORAGE] if state.get('storage', {}).get('kind') == 'loop' else [])]:
+        unit = UNITS / mount_name(target)
+        if unit.exists():
+            secure_path(unit)
+            run('systemctl', 'disable', '--now', unit.name)
+            unit.unlink()
+        require(not is_mounted(target), f'Could not unmount {target}; data is kept.')
+    run('systemctl', 'daemon-reload')
+    for target in MOUNTS.values():
+        if target.exists():
+            # These were empty mount points at setup; never recursively remove them.
+            target.rmdir()
+    for path in (CONFIG, CREDENTIAL, JAILER_CONFIG):
+        if path.exists() or path.is_symlink():
+            secure_path(path)
+            path.unlink()
+    for directory in (CONFIG.parent, JAILER_CONFIG.parent):
+        if directory.exists() and not any(directory.iterdir()):
+            directory.rmdir()
+    require(shutil.rmtree.avoids_symlink_attacks, 'Safe directory deletion is unavailable on this platform.')
+    shutil.rmtree(ROOT)
+    secure_path(COMMAND)
+    COMMAND.unlink()
+    print('Intar data and local credentials removed. Remove this server in My servers to revoke its server credential.')
+
+
+def remove_runtime():
+    units = ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service',
+             'intar-personal-check.service', 'intar-vms.slice')
+    for unit in units:
+        if run('systemctl', 'show', '--property=LoadState', '--value', unit, capture=True) != 'not-found':
+            run('systemctl', 'stop', unit)
+            if unit in ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service'):
+                run('systemctl', 'disable', unit)
+    no_vms(include_services=True)
+    paths = [*(UNITS / name for name in units),
+             UNITS / 'intar-agent.service.d/personal.conf',
+             Path('/etc/tmpfiles.d/intar-jailerd.conf'), Path('/etc/sysctl.d/90-intar-jailerd.conf'),
+             Path('/usr/local/bin/intar-agent'),
+             *(Path('/usr/lib/intar') / name for name in (
+                 'intar-jailerd', 'intar-jailer', 'intar-jailerd-self-test',
+                 'cloud-hypervisor-v53.0', 'cloud-hypervisor-v53.0.sha256'))]
+    for path in paths:
+        if path.exists() or path.is_symlink():
+            secure_path(path)
+            path.unlink()
+    run('systemctl', 'daemon-reload')
+
+
+def uninstall(state, timeout, purge=False):
+    if state.get('phase') in ('removed', 'removing-data'):
+        if purge:
+            remove_data(state)
+        else:
+            print('Already removed. Data and credentials are kept.')
+        return
+    drain(state, timeout)
+    # This also completes removal after an interrupted first installation, when
+    # not all of the shared package's service units have been published yet.
+    remove_runtime()
+    state['phase'] = 'removed'
+    save(state)
+    if purge:
+        remove_data(state)
+        return
+    print('Services and runtime binaries removed. Data, credentials, storage mounts, and intar-host are kept.')
+    print('Remove this server in My servers to revoke its credential. Run intar-host setup to restore it.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['setup', 'status', 'doctor', 'update', 'uninstall', 'verify-boot'])
+    parser.add_argument('--version', help='Exact agent release version (setup/update only).')
+    parser.add_argument('--drain-timeout', type=int, default=900, help='Maximum seconds to wait for active runs.')
+    parser.add_argument('--remove-data', action='store_true', help='With uninstall, delete owned Intar data and credentials.')
+    parser.add_argument('--cancel-update', action='store_true', help='With update, clear an unapplied release selection and keep the host drained.')
+    args = parser.parse_args()
+    require(os.geteuid() == 0, 'Run this command with sudo.')
+    require(args.drain_timeout > 0, 'Drain timeout must be positive.')
+    require(not args.version or args.command in ('setup', 'update'), '--version is only valid for setup/update.')
+    require(not args.remove_data or args.command == 'uninstall', '--remove-data is only valid for uninstall.')
+    require(not args.cancel_update or (args.command == 'update' and not args.version),
+            '--cancel-update requires update without --version.')
+    os.umask(0o077)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if args.command == 'verify-boot':
+        if load(STATE).get('storage', {}).get('kind') == 'loop':
+            disable_loop_discard()
+        no_vms()
+        run('/usr/lib/intar/intar-jailerd-self-test')
+        doctor()
+        return
+    if not ROOT.exists():
+        require(args.command == 'setup', 'This host is not installed. Run setup first.')
+        # An existing deployment must not be adopted or overwritten.
+        for path in (CONFIG.parent, Path('/etc/intar-jailerd'), Path('/usr/local/bin/intar-agent'), *MOUNTS.values()):
+            require(not path.exists() and not path.is_symlink(), f'Existing deployment or data at {path}; setup refused.')
+        preflight()
+        no_vms()
+        mkdir(ROOT)
+    secure_path(ROOT, directory=True, mode=0o700)
+    lock = os.open(ROOT / 'lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        # Python descriptors close on exec. The next release acquires the lock again.
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise HostError('Another intar-host command is running.') from None
+        state = load(STATE) if STATE.exists() else {'phase': 'new'}
+        require(state.get('phase') != 'removing-data' or (args.command == 'uninstall' and args.remove_data),
+                'Data removal was interrupted. Repeat uninstall --remove-data.')
+        if args.cancel_update:
+            cancel_update(state)
+        elif args.command in ('setup', 'update'):
+            setup(state, args)
+        elif args.command == 'doctor':
+            doctor()
+        elif args.command == 'status':
+            print('State:', state['phase'])
+            print('Version:', state.get('version', 'not installed'))
+            print('Agent:', 'active' if active('intar-agent.service') else 'stopped')
+            if active('intar-agent.service'):
+                print(agent('--status'))
+        else:
+            uninstall(state, args.drain_timeout, args.remove_data)
+    finally:
+        os.close(lock)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (HostError, OSError, ValueError, KeyError) as error:
+        # OS/JSON errors can reference secret input; only authored messages are displayed.
+        print(f'intar-host: {error if isinstance(error, HostError) else "Operation failed. Saved state is kept; run setup again."}', file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print('intar-host: Interrupted. Saved state is kept; repeat the command.', file=sys.stderr)
+        sys.exit(130)

@@ -30,6 +30,10 @@ export const user = sqliteTable("user", {
   banReason: text("ban_reason"),
   banExpires: integer("ban_expires", { mode: "timestamp_ms" }),
   deletedAt: integer("deleted_at", { mode: "timestamp_ms" }),
+  metalPlacement: text("metal_placement")
+    .$type<"personal" | "platform">()
+    .default("platform")
+    .notNull(),
 });
 
 export const userSshKeys = sqliteTable(

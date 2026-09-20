@@ -1,7 +1,8 @@
+import { revokeStargateHostRelay } from "@/lib/stargate-relay";
 import { DurableObject } from "cloudflare:workers";
 import { and, desc, eq, exists, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
+import { agentHosts, hostActualState, scenarioRuns, runtimeExecutions } from "@/db/schema";
 import { nextPendingHostCpuReservationExpiry } from "@/control-plane/host-cpu-reservations";
 import {
   RUN_PHASE_ORDER,
@@ -27,13 +28,19 @@ import type { HostDesiredStateV2 } from "@/generated/bridge";
 export const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 export const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
 export const RUNTIME_LEASE_CLEANUP_RETRY_MS = 10_000;
+export const HOST_HELLO_TIMEOUT_MS = 15_000;
+export const MAX_PENDING_HOST_SOCKETS = 4;
+export const MAX_STATUS_SOCKETS_PER_USER = 8;
+export const MAX_STATUS_SOCKETS = 512;
+export const STATUS_SOCKET_LIFETIME_MS = 15 * 60_000;
+const RUNTIME_ALARM_KEY = "runtime-alarm-at-ms";
 
 export interface SocketAttachment {
-  /** Missing on sockets created before run-status subscriptions existed. */
-  kind?: "agent";
+  kind: "agent";
   hostId: string;
+  credentialGeneration: number;
   sessionId: string | null;
-  /** Exact beta grant carried by a personal-host JWT; null for org hosts. */
+  /** Exact beta grant carried by a personal-host JWT; null for platform hosts. */
   betaSourceInviteId: string | null;
   betaSourceLeaseId: string | null;
   betaAdmissionGrantedAt: number | null;
@@ -58,6 +65,7 @@ export interface RunStatusSocketAttachment {
   betaSourceInviteId: string;
   betaSourceLeaseId: string;
   betaAdmissionGrantedAt: number;
+  expiresAt: number;
 }
 
 interface RunProjectionRow {
@@ -118,9 +126,11 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       deleteRequestedAt?: number | null;
       keepDeleteRequestedAt?: boolean;
       initialRow?: RunProjectionRow;
+      expectedExecution?: { id: string; ownerUserId: string; generation: number };
       expectedHostSession?: {
         hostId: string;
         activeSessionId: string;
+        credentialGeneration: number;
       };
     },
   ): Promise<RunProjectionOutcome> {
@@ -213,6 +223,16 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           and(
             eq(scenarioRuns.runId, runId),
             eq(scenarioRuns.updatedAt, row.updatedAt),
+            ...(options?.expectedExecution ? [sql`EXISTS (SELECT 1 FROM runtime_executions execution
+              WHERE execution.id = ${options.expectedExecution.id}
+                AND execution.id = ${scenarioRuns.runtimeExecutionId}
+                AND execution.user_id = ${options.expectedExecution.ownerUserId}
+                AND execution.generation = ${options.expectedExecution.generation}
+                AND execution.host_id = ${scenarioRuns.hostId}
+                AND execution.state <> 'archived'
+                AND execution.domain_id = ${scenarioRuns.runId}
+                AND NOT EXISTS (SELECT 1 FROM runtime_executions newer WHERE newer.domain_kind = execution.domain_kind
+                  AND newer.domain_id = execution.domain_id AND newer.generation > execution.generation))`] : []),
             ...(expectedHostSession
               ? [
                   exists(
@@ -222,6 +242,10 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
                       .where(
                         and(
                           eq(agentHosts.id, expectedHostSession.hostId),
+                          eq(agentHosts.credentialGeneration, expectedHostSession.credentialGeneration),
+                          eq(agentHosts.disabled, false),
+                          sql`(${agentHosts.scope} = 'platform' OR (${agentHosts.scope} = 'personal'
+                            AND ${agentHosts.userId} = ${scenarioRuns.userId}))`,
                           eq(
                             agentHosts.activeSessionId,
                             expectedHostSession.activeSessionId,
@@ -242,6 +266,15 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       });
       const updated = updatedResult?.results ?? [];
       if (!updated.length) {
+        if (options?.expectedExecution) {
+          const execution = await db.select({ id: runtimeExecutions.id }).from(runtimeExecutions)
+            .innerJoin(scenarioRuns, eq(scenarioRuns.runtimeExecutionId, runtimeExecutions.id))
+            .where(and(eq(scenarioRuns.runId, runId), eq(runtimeExecutions.id, options.expectedExecution.id),
+              eq(runtimeExecutions.generation, options.expectedExecution.generation),
+              eq(runtimeExecutions.userId, options.expectedExecution.ownerUserId),
+              sql`${runtimeExecutions.state} <> 'archived'`)).get();
+          if (!execution) return { kind: "unchanged" };
+        }
         if (
           expectedHostSession &&
           !(await this.isActiveHostSession(expectedHostSession))
@@ -311,18 +344,69 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   }
 
   protected async scheduleNextAlarm(hostId: string): Promise<void> {
-    const next = await this.computeNextAlarm(hostId);
-    if (next === null) {
-      await this.ctx.storage.deleteAlarm();
-      return;
-    }
-    await this.ctx.storage.setAlarm(next);
+    await this.armNextAlarm(await this.computeNextAlarm(hostId));
   }
 
   protected async scheduleAlarmNoLaterThan(timestamp: number): Promise<void> {
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > timestamp) {
-      await this.ctx.storage.setAlarm(timestamp);
+    await this.armNextAlarm(timestamp);
+  }
+
+  protected async scheduleSocketExpiry(): Promise<void> {
+    await this.armNextAlarm();
+  }
+
+  protected async runtimeAlarmIsDue(): Promise<boolean> {
+    const deadline = await this.ctx.storage.get<number | null>(RUNTIME_ALARM_KEY);
+    // An alarm created before separate socket deadlines existed is runtime work.
+    return deadline === undefined || (deadline !== null && deadline <= Date.now());
+  }
+
+  private async armNextAlarm(runtimeDeadline?: number | null): Promise<void> {
+    await this.ctx.storage.transaction(async (storage) => {
+      const currentAlarm = await storage.getAlarm();
+      const stored = await storage.get<number | null>(RUNTIME_ALARM_KEY);
+      let runtime = stored === undefined ? currentAlarm : stored;
+      if (runtimeDeadline !== undefined) {
+        runtime = runtime !== null && runtime > Date.now()
+          ? Math.min(runtime, runtimeDeadline ?? Infinity)
+          : runtimeDeadline;
+      }
+      if (stored !== runtime) await storage.put(RUNTIME_ALARM_KEY, runtime);
+      // Read attachments after all awaits: concurrent accepts must not lose
+      // their earlier deadline to a slower maintenance calculation.
+      const next = Math.min(runtime ?? Infinity, this.nextSocketExpiry());
+      if (next === Infinity) await storage.deleteAlarm();
+      else if (next !== currentAlarm) await storage.setAlarm(next);
+    });
+  }
+
+  private socketExpiry(socket: WebSocket): number {
+    const status = this.readRunStatusSocketAttachment(socket);
+    if (status) return status.expiresAt;
+    const agent = this.readSocketAttachment(socket);
+    if (!agent) return 0;
+    return agent.helloReceived ? Infinity : agent.connectedAt + HOST_HELLO_TIMEOUT_MS;
+  }
+
+  private nextSocketExpiry(): number {
+    let next = Infinity;
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket.readyState === WebSocket.OPEN) {
+        next = Math.min(next, this.socketExpiry(socket));
+      }
+    }
+    return next;
+  }
+
+  protected closeExpiredSockets(): void {
+    const now = Date.now();
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket.readyState !== WebSocket.OPEN || this.socketExpiry(socket) > now) continue;
+      try {
+        socket.close(1008, "socket admission expired");
+      } catch {
+        // One disconnected socket must not stop cleanup of the others.
+      }
     }
   }
 
@@ -401,45 +485,25 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
 
   protected async handleSocketClosed(ws: WebSocket): Promise<void> {
     const attachment = this.readSocketAttachment(ws);
-    if (!attachment?.helloReceived || !attachment.sessionId) {
+    if (!attachment?.sessionId) {
       return;
     }
-
-    const host = await this.loadRequiredHost(attachment.hostId);
-    if (host.activeSessionId !== attachment.sessionId) {
-      return;
-    }
-
-    const replacement = this.ctx
-      .getWebSockets(`host:${attachment.hostId}`)
-      .map((socket) => ({
-        socket,
-        attachment: this.readSocketAttachment(socket),
-      }))
-      .filter(
-        (
-          candidate,
-        ): candidate is { socket: WebSocket; attachment: SocketAttachment } =>
-          candidate.attachment !== null &&
-          candidate.socket !== ws &&
-          candidate.attachment.hostId === attachment.hostId &&
-          candidate.attachment.helloReceived &&
-          candidate.socket.readyState === WebSocket.OPEN,
-      )
-      .sort(
-        (left, right) =>
-          right.attachment.connectedAt - left.attachment.connectedAt,
-      )[0];
-
     const now = Date.now();
-    await this.updateHostRow(attachment.hostId, {
-      activeSessionId: replacement?.attachment.sessionId ?? null,
-      connected: Boolean(replacement),
-      disconnectedAt: replacement ? null : now,
-      updatedAt: now,
-    });
-
-    await this.scheduleNextAlarm(attachment.hostId);
+    // A close can only release its own session. Never revive an older socket
+    // or overwrite a replacement hello that committed while D1 was in flight.
+    const updated = await drizzle(this.env.DB).update(agentHosts).set({
+      activeSessionId: null, connected: false, disconnectedAt: now, updatedAt: now,
+    }).where(and(
+      eq(agentHosts.id, attachment.hostId),
+      eq(agentHosts.activeSessionId, attachment.sessionId),
+      eq(agentHosts.credentialGeneration, attachment.credentialGeneration),
+    )).returning({ id: agentHosts.id });
+    try {
+      if (attachment.betaSourceInviteId !== null) await revokeStargateHostRelay({ hostId: attachment.hostId, sessionId: attachment.sessionId,
+        credentialGeneration: attachment.credentialGeneration });
+    } finally {
+      if (updated.length) await this.scheduleNextAlarm(attachment.hostId);
+    }
   }
 
   protected async closeOlderSockets(
@@ -459,9 +523,12 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         continue;
       }
       try {
-        socket.close(1012, "replaced by newer session");
-      } catch {
-        // ignore
+        if (attachment.sessionId && attachment.betaSourceInviteId !== null) await revokeStargateHostRelay({ hostId,
+          sessionId: attachment.sessionId, credentialGeneration: attachment.credentialGeneration });
+      } catch (error) {
+        console.warn(JSON.stringify({ event: "relay_session_revoke_failed", hostId }));
+      } finally {
+        try { socket.close(1012, "replaced by newer session"); } catch { /* Already closed. */ }
       }
     }
   }
@@ -513,6 +580,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected async isActiveHostSession(input: {
     hostId: string;
     activeSessionId: string;
+    credentialGeneration: number;
   }): Promise<boolean> {
     const rows = await drizzle(this.env.DB)
       .select({ id: agentHosts.id })
@@ -521,6 +589,8 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         and(
           eq(agentHosts.id, input.hostId),
           eq(agentHosts.activeSessionId, input.activeSessionId),
+          eq(agentHosts.credentialGeneration, input.credentialGeneration),
+          eq(agentHosts.disabled, false),
         ),
       )
       .limit(1);
@@ -532,14 +602,17 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       const parsed = ws.deserializeAttachment() as SocketAttachment | null;
       if (
         !parsed ||
-        (parsed.kind !== undefined && parsed.kind !== "agent") ||
+        parsed.kind !== "agent" ||
+        !Number.isSafeInteger(parsed.credentialGeneration) ||
+        parsed.credentialGeneration < 1 ||
         typeof parsed.hostId !== "string"
       ) {
         return null;
       }
       return {
-        ...(parsed.kind === "agent" ? { kind: "agent" as const } : {}),
+        kind: "agent",
         hostId: parsed.hostId,
+        credentialGeneration: parsed.credentialGeneration,
         sessionId:
           typeof parsed.sessionId === "string" && parsed.sessionId
             ? parsed.sessionId
@@ -628,6 +701,9 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         betaSourceInviteId,
         betaSourceLeaseId,
         betaAdmissionGrantedAt,
+        // Pre-upgrade subscriptions have no bounded lifetime. Close them on
+        // the next event instead of assigning them a new lifetime on wake.
+        expiresAt: requiredAttachmentTimestamp(parsed.expiresAt) ?? 0,
       };
     } catch {
       return null;
@@ -715,14 +791,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     return row;
   }
 
-  protected async updateHostRow(
-    hostId: string,
-    values: Partial<typeof agentHosts.$inferInsert>,
-  ): Promise<void> {
-    const db = drizzle(this.env.DB);
-    await db.update(agentHosts).set(values).where(eq(agentHosts.id, hostId));
-  }
-
   protected async loadRun(runId: string): Promise<{
     runId: string;
     hostId: string;
@@ -774,6 +842,8 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     Array<{
       runId: string;
       userId: string;
+      executionId: string;
+      executionGeneration: number;
       state: RunStateDocument;
       deleteRequestedAt: number | null;
     }>
@@ -783,10 +853,13 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       .select({
         runId: scenarioRuns.runId,
         userId: scenarioRuns.userId,
+        executionId: runtimeExecutions.id,
+        executionGeneration: runtimeExecutions.generation,
         stateJson: scenarioRuns.stateJson,
         deleteRequestedAt: scenarioRuns.deleteRequestedAt,
       })
       .from(scenarioRuns)
+      .innerJoin(runtimeExecutions, eq(runtimeExecutions.id, scenarioRuns.runtimeExecutionId))
       .where(
         and(
           eq(scenarioRuns.hostId, hostId),
@@ -799,6 +872,8 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     return rows.map((row) => ({
       runId: row.runId,
       userId: row.userId,
+      executionId: row.executionId,
+      executionGeneration: row.executionGeneration,
       state: parseRunState(row.stateJson),
       deleteRequestedAt: row.deleteRequestedAt,
     }));

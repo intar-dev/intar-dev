@@ -1,5 +1,6 @@
 mod config;
 mod error;
+pub mod relay;
 mod terminal;
 mod workspace_app;
 
@@ -12,9 +13,9 @@ pub use intar_contracts::stargate::{
     ActivateTerminalTargetRequest, BrowserTerminalSession, IssueTerminalSessionRequest,
     IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
     IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode, NativeTerminalSession, RouteMetadata,
-    SessionKind, StageTerminalTargetRequest, StageTerminalTargetResponse, TerminalSessionMode,
-    TerminalTarget, TerminalTargetState, WorkspaceAppMetadata, WorkspaceAppProtocol,
-    validate_route_username,
+    SessionKind, SshTargetTransport, StageTerminalTargetRequest, StageTerminalTargetResponse,
+    TerminalSessionMode, TerminalTarget, TerminalTargetState, WorkspaceAppMetadata,
+    WorkspaceAppProtocol, validate_route_username,
 };
 pub use terminal::{
     ROUTE_TTL, StoredTarget, StoredTerminalRoute, allows_client_public_key,

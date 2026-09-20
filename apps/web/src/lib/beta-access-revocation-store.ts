@@ -1,4 +1,4 @@
-import { and, eq, isNull, notExists, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, notExists, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   accessAllowlist,
@@ -6,6 +6,7 @@ import {
   type AccessEventType,
 } from "@/db/schema/application";
 import { user } from "@/db/schema/core";
+import { agentBootstrapTokens, agentHosts } from "@/db/schema/platform";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 
@@ -36,6 +37,13 @@ export async function revokeBetaUser(params: {
   const reason = validReason(params.reason);
   const revocationId = createAppId();
   const blockedEventId = createAppId();
+  const currentRevocation = exists(
+    db.select({ userId: accessAllowlist.userId }).from(accessAllowlist).where(and(
+      eq(accessAllowlist.userId, userId),
+      eq(accessAllowlist.state, "blocked"),
+      eq(accessAllowlist.revocationId, revocationId),
+    )),
+  );
   const [updated] = await db.batch([
     db
       .update(accessAllowlist)
@@ -58,6 +66,30 @@ export async function revokeBetaUser(params: {
         ),
       )
       .returning({ userId: accessAllowlist.userId }),
+    // A report admitted before this transaction must fail its session/generation
+    // check after it. Do not defer credential invalidation to network cleanup.
+    db.update(agentHosts).set({
+      disabled: true,
+      scenarioEnabled: false,
+      credentialGeneration: sql`${agentHosts.credentialGeneration} + 1`,
+      connected: false,
+      activeSessionId: null,
+      disconnectedAt: now,
+      updatedAt: now,
+    }).where(and(
+      eq(agentHosts.userId, userId),
+      eq(agentHosts.scope, "personal"),
+      currentRevocation,
+    )),
+    db.update(agentBootstrapTokens).set({ revokedAt: now }).where(and(
+      isNull(agentBootstrapTokens.revokedAt),
+      inArray(agentBootstrapTokens.hostId,
+        db.select({ id: agentHosts.id }).from(agentHosts).where(and(
+          eq(agentHosts.userId, userId), eq(agentHosts.scope, "personal"),
+        )),
+      ),
+      currentRevocation,
+    )),
     db.insert(accessEvents).select(
       db
         .select({

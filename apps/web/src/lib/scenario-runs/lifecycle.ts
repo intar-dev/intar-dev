@@ -1,3 +1,4 @@
+import { loadStargateSshTransport } from "@/lib/stargate-relay";
 import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
@@ -47,6 +48,7 @@ import {
   buildRunVmRouteUsername,
 } from "./start";
 import { beginScenarioRun } from "./begin";
+import { completeScenarioRunRouteCleanup, requestScenarioRunRouteCleanup } from "./route-cleanup";
 import {
   loadRunRow,
   updateRunState,
@@ -134,6 +136,8 @@ export async function destroyScenarioRunForUserWithDependencies(
   }
 
   const acceptedAt = Date.now();
+  const [cleanup] = await requestScenarioRunRouteCleanup(row.hostId, [row.runId], acceptedAt);
+  if (!cleanup) throw appError(404, "scenario_run_not_found", "scenario run not found");
   const deleteRequestedAt = row.deleteRequestedAt ?? acceptedAt;
   const teardownVms = runVmsRequiringDesiredAbsence(row.state);
   if (!["completed", "failed"].includes(row.state.phase)) {
@@ -256,6 +260,7 @@ export async function destroyScenarioRunForUserWithDependencies(
       "scenario teardown was accepted but its snapshot could not be loaded",
     );
   }
+  await completeScenarioRunRouteCleanup(row.runId, cleanup.cleanupId);
   const run = toScenarioRunRecord(acceptedRow);
   console.log(
     JSON.stringify({
@@ -512,7 +517,7 @@ export async function createScenarioSshSessionForUser(params: {
     { "intar.run.id": row.runId, "intar.vm.id": vm.id },
   );
 
-  const buildNativeTarget = () => {
+  const buildNativeTarget = async () => {
     const host = vm.terminalTarget.host?.trim() ?? "";
     const port =
       typeof vm.terminalTarget.port === "number" && vm.terminalTarget.port > 0
@@ -529,8 +534,9 @@ export async function createScenarioSshSessionForUser(params: {
       );
     }
     return {
-      host,
-      port,
+      transport: await loadStargateSshTransport({hostId: row.hostId, ownerId: row.userId,
+        executionId: routeGeneration.executionId, executionGeneration: routeGeneration.generation,
+        vmId: vm.id, directHost: host, directPort: port}),
       username: targetUsername,
       hostKeyOpenssh: targetHostKeyOpenssh,
     };
@@ -579,7 +585,7 @@ export async function createScenarioSshSessionForUser(params: {
   // A native route still needs the ready endpoint and the guest private key in
   // the create call. A pending browser route holds neither.
   const nativeTarget =
-    requestedMode === "native" ? buildNativeTarget() : null;
+    requestedMode === "native" ? await buildNativeTarget() : null;
   const targetKey = nativeTarget
     ? await traceOperation(
         "scenario.terminal.route_keys",
@@ -587,6 +593,21 @@ export async function createScenarioSshSessionForUser(params: {
         { "intar.run.id": row.runId, "intar.vm.id": vm.id },
       )
     : null;
+  const assertRouteAdmission = async () => {
+    const current = await loadScenarioTerminalRouteGeneration({
+      runId: row.runId,
+      vmId: vm.id,
+    });
+    if (
+      current.executionId !== routeGeneration.executionId ||
+      current.generation !== routeGeneration.generation ||
+      current.hostCredentialGeneration !== routeGeneration.hostCredentialGeneration ||
+      current.userId !== params.userId ||
+      current.hostId !== row.hostId
+    ) {
+      throw appError(409, "scenario_terminal_target_changed", "The terminal target changed. Retry opening the terminal.");
+    }
+  };
   const session = await traceOperation(
     "scenario.terminal.route_issue",
     () =>
@@ -601,8 +622,9 @@ export async function createScenarioSshSessionForUser(params: {
             routeGeneration.routeGeneration,
           ),
         issuedRouteIds: (session) => [session.routeUsername],
-        issue: () =>
-          issueStargateTerminalSession(
+        issue: async () => {
+          await assertRouteAdmission();
+          const issued = await issueStargateTerminalSession(
             requestedMode === "browser"
               ? {
                   routeUsername,
@@ -638,7 +660,12 @@ export async function createScenarioSshSessionForUser(params: {
                     userId: row.userId,
                   },
                 },
-          ),
+          );
+          // Keep the post-check inside the existing generation-specific route
+          // cleanup boundary, including failures to read current admission.
+          await assertRouteAdmission();
+          return issued;
+        },
       }),
     { "intar.run.id": params.runId },
   );

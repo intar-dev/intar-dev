@@ -53,10 +53,10 @@ export function OrganizationOverview({
     <Section
       variant="flat"
       density="compact"
-      title="Organization control plane"
-      description="Identity, private content, and execution capacity stay inside this boundary."
+      title="Organization"
+      description="Manage members, courses, and private content."
     >
-      <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <dl className="grid gap-3 sm:grid-cols-3">
         <OverviewMetric
           label="Members"
           value={detail.members.length}
@@ -68,12 +68,6 @@ export function OrganizationOverview({
           value="Catalog"
           action="Open courses"
           onClick={onOpenCourses}
-        />
-        <OverviewMetric
-          label="Runners"
-          value="Isolated"
-          action={admin ? "Manage runners" : "View runners"}
-          onClick={() => setTab("runners")}
         />
         <OverviewMetric
           label="Your role"

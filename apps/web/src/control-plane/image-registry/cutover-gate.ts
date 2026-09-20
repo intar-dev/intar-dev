@@ -46,8 +46,10 @@ export async function handleImageCutoverGate(
     .first<{ state: "open" | "drained"; updated_at: number }>();
   const active = await env.DB.prepare(
     `SELECT COUNT(*) AS count
-       FROM host_desired_state, json_each(host_desired_state.doc_json, '$.vms') AS vm
-      WHERE json_extract(vm.value, '$.desired_phase') = 'running'`,
+       FROM host_desired_state
+       JOIN agent_hosts host ON host.id = host_desired_state.host_id
+       JOIN json_each(host_desired_state.doc_json, '$.vms') AS vm
+      WHERE host.scope = 'platform' AND json_extract(vm.value, '$.desired_phase') = 'running'`,
   ).first<{ count: number }>();
   return jsonResponse({
     ok: true,

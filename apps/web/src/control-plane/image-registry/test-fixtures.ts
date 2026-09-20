@@ -1,5 +1,6 @@
 import { gzipSync } from "node:zlib";
 import { vi } from "vitest";
+import { hostDesiredState, vmScenarioVms } from "@/db/schema";
 import type { HostDesiredStateV2 } from "@/generated/bridge";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 
@@ -504,25 +505,17 @@ export function imageIndexDb(
   desiredRows: Array<{ docJson: HostDesiredStateV2 }> = [],
   candidateRows: Array<{ manifest: ScenarioManifestV5 }> = [],
 ) {
-  let call = 0;
-  const select = vi.fn(() => {
-    const current = call++;
-    if (current === 0) {
-      const where = vi.fn().mockResolvedValue(rows);
-      const innerJoin = vi.fn(() => ({ where }));
-      const from = vi.fn(() => ({ innerJoin }));
-      return { from };
-    }
-    if (current === 1) {
-      const limit = vi.fn().mockResolvedValue(desiredRows);
-      const where = vi.fn(() => ({ limit }));
-      const from = vi.fn(() => ({ where }));
-      return { from };
-    }
-    const where = vi.fn().mockResolvedValue(candidateRows);
-    const from = vi.fn(() => ({ where }));
-    return { from };
-  });
+  const select = vi.fn(() => ({
+    from: vi.fn((table: unknown) => {
+      if (table === vmScenarioVms) {
+        return { innerJoin: vi.fn(() => ({ where: vi.fn().mockResolvedValue(rows) })) };
+      }
+      if (table === hostDesiredState) {
+        return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue(desiredRows) })) };
+      }
+      return { where: vi.fn().mockResolvedValue(candidateRows) };
+    }),
+  }));
 
   return {
     kind: "test-db",
@@ -536,7 +529,7 @@ export function candidateArtifactDb(
 ) {
   let call = 0;
   const select = vi.fn(() => {
-    const current = call++;
+    const current = call++ % 3;
     if (current === 0) {
       const limit = vi.fn().mockResolvedValue([]);
       const where = vi.fn(() => ({ limit }));
@@ -550,8 +543,7 @@ export function candidateArtifactDb(
       const from = vi.fn(() => ({ where }));
       return { from };
     }
-    const where = vi.fn().mockResolvedValue(candidateRows);
-    const from = vi.fn(() => ({ where }));
+    const from = vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(candidateRows) });
     return { from };
   });
 
@@ -561,7 +553,7 @@ export function candidateArtifactDb(
   };
 }
 
-export function bundleDownloadDb(rows: Array<{ r2Key: string }>) {
+export function bundleDownloadDb(rows: Array<{ id: string; r2Key: string }>) {
   const selectLimit = vi.fn().mockResolvedValue(rows);
   const selectWhere = vi.fn(() => ({ limit: selectLimit }));
   const selectInnerJoin = vi.fn(() => ({ where: selectWhere }));

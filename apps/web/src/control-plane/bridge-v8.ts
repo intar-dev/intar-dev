@@ -176,7 +176,7 @@ function isServerHello(
   if (!isRecord(value)) {
     return false;
   }
-  return isNonNegativeInteger(value.desired_version);
+  return Boolean(readString(value.session_id)) && isNonNegativeInteger(value.desired_version);
 }
 
 function isDesiredState(
@@ -194,12 +194,16 @@ function isDesiredState(
     isRecord(desiredState) &&
     desiredState.schema_version === HOST_DESIRED_STATE_SCHEMA_VERSION &&
     desiredState.host_id === hostId &&
+    (desiredState.scope === "personal" || desiredState.scope === "platform") &&
+    readString(desiredState.owner_user_id) !== null &&
     isNonNegativeInteger(desiredState.version) &&
     isInteger(desiredState.generated_at_unix_ms) &&
     Array.isArray(desiredState.cached_images) &&
     desiredState.cached_images.every(isDesiredCachedImagePayload) &&
     Array.isArray(desiredState.vms) &&
-    desiredState.vms.every(isDesiredVmPayload) &&
+    desiredState.vms.every((vm) => isDesiredVmPayload(vm) &&
+      (desiredState.scope !== "personal" || vm.owner_user_id === desiredState.owner_user_id)) &&
+    new Set(desiredState.vms.map((vm) => vm.vm_name)).size === desiredState.vms.length &&
     Array.isArray(desiredState.builds) &&
     desiredState.builds.every(isDesiredBuildPayload)
   );
@@ -219,6 +223,7 @@ function isStateReport(
   return (
     isRecord(report) &&
     report.schema_version === HOST_STATE_REPORT_SCHEMA_VERSION &&
+    typeof report.relay_connected === "boolean" &&
     report.host_id === hostId &&
     isInteger(report.observed_at_unix_ms) &&
     isNonNegativeInteger(report.applied_desired_version) &&
@@ -381,10 +386,12 @@ function isDesiredVmPayload(value: unknown): boolean {
   }
   const desiredPhase = readString(value.desired_phase);
   return (
+    isExecutionIdentity(value) &&
     readString(value.run_id) !== null &&
     readString(value.vm_name) !== null &&
     desiredPhase !== null &&
     DESIRED_VM_PHASES.has(desiredPhase as DesiredVmPhase) &&
+    readString(value.vm_id) !== null &&
     isImageKeyPayload(value.image_key) &&
     isSha256Hex(value.image_id) &&
     isGuestToolsPayload(value.guest_tools) &&
@@ -715,11 +722,8 @@ function isVmActualStatePayload(value: unknown): boolean {
   }
   const phase = readString(value.phase);
   return (
-    // Host inventory is authoritative even for a VM that cannot be
-    // attributed to a control-plane run. The agent deliberately reports that
-    // condition as an empty run_id; only per-run vm_report envelopes require
-    // a non-empty run identity.
-    typeof value.run_id === "string" &&
+    isExecutionIdentity(value) &&
+    readString(value.run_id) !== null &&
     readString(value.vm_name) !== null &&
     isOptionalNonNegativeInteger(value.desired_version) &&
     phase !== null &&
@@ -752,6 +756,7 @@ function isVmReportPayload(value: unknown, hostId: string): boolean {
   return (
     value.schema_version === VM_REPORT_SCHEMA_VERSION &&
     value.host_id === hostId &&
+    isExecutionIdentity(value) &&
     readString(value.run_id) !== null &&
     readString(value.vm_name) !== null &&
     isOptionalNonNegativeInteger(value.desired_version) &&
@@ -798,4 +803,10 @@ function isBuildReportPayload(
     isNonNegativeInteger(value.attempt) &&
     isOptionalString(value.error)
   );
+}
+
+function isExecutionIdentity(value: Record<string, unknown>): boolean {
+  return readString(value.owner_user_id) !== null &&
+    readString(value.runtime_execution_id) !== null &&
+    Number.isSafeInteger(value.generation) && Number(value.generation) > 0;
 }

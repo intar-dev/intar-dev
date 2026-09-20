@@ -1,3 +1,4 @@
+import { loadStargateSshTransport } from "@/lib/stargate-relay";
 import { env } from "cloudflare:workers";
 import { issueBetaAccessFencedRoute } from "@/lib/beta-route-issuance";
 import { parseRunState } from "@/lib/scenario-runs/storage";
@@ -125,8 +126,9 @@ export async function attachReadyScenarioTerminalTargets(input: {
     userId: input.expectedUserId,
     target: {
       username: row.terminal_username?.trim() || "ubuntu",
-      host: row.terminal_host,
-      port: row.terminal_port,
+      transport: await loadStargateSshTransport({hostId: row.host_id, ownerId: row.user_id,
+        executionId: row.execution_id, executionGeneration: row.generation, vmId: input.vmId,
+        directHost: row.terminal_host, directPort: row.terminal_port}),
       hostKeyOpenssh: row.terminal_host_key_openssh,
       privateKeyOpenssh: accessKey.privateKeyOpenssh,
       authorizedClientPublicKeysOpenssh: [accessKey.publicKeyOpenssh],

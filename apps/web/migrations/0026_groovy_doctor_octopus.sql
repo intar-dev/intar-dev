@@ -1,0 +1,1 @@
+ALTER TABLE `scenario_runs` ADD `route_cleanup_id` text;

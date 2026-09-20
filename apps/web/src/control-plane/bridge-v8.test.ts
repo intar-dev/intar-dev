@@ -75,7 +75,7 @@ describe("bridge v7 protocol", () => {
     ).toBe("build_report");
   });
 
-  it("retains unattributed VMs in authoritative host state reports", () => {
+  it("rejects unattributed VMs in authoritative host state reports", () => {
     const hostReport = readFixture<HostStateReportV2>(
       "host-state-report-v2.json",
     );
@@ -90,10 +90,7 @@ describe("bridge v7 protocol", () => {
       }),
     );
 
-    expect(parsed?.type).toBe("state_report");
-    expect(
-      parsed?.type === "state_report" ? parsed.report.vms[0]?.run_id : null,
-    ).toBe("");
+    expect(parsed).toBeNull();
   });
 
   it("parses client hello only with valid host capabilities", () => {
@@ -556,3 +553,39 @@ function readFixture<T = unknown>(name: string): T {
 function cloneFixture<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
+
+describe("execution ownership contract", () => {
+  it("requires a control session and an explicit relay connection report", () => {
+    const hello = { type: "server_hello", protocol_version: 8, host_id: "host-1", desired_version: 0 };
+    expect(parseBridgeMessageV8(JSON.stringify(hello))).toBeNull();
+    expect(parseBridgeMessageV8(JSON.stringify({ ...hello, session_id: "session-1" }))?.type).toBe("server_hello");
+    const report = readFixture<HostStateReportV2>("host-state-report-v2.json");
+    Reflect.deleteProperty(report, "relay_connected");
+    expect(parseBridgeMessageV8(JSON.stringify({ type: "state_report", protocol_version: 8,
+      host_id: report.host_id, report }))).toBeNull();
+  });
+
+  it.each(["owner_user_id", "runtime_execution_id", "generation", "vm_id"])("rejects desired work without %s", (field) => {
+    const desired = readFixture<HostDesiredStateV2>("host-desired-state-v2.json");
+    Reflect.deleteProperty(desired.vms[0]!, field);
+    expect(parseBridgeMessageV8(JSON.stringify({ type: "desired_state", protocol_version: 8,
+      host_id: desired.host_id, desired_state: desired }))).toBeNull();
+  });
+  it.each(["owner_user_id", "runtime_execution_id", "generation"])("rejects a VM report without %s", (field) => {
+    const report = readFixture<VmReportV2>("vm-report-v2.json");
+    Reflect.deleteProperty(report, field);
+    expect(parseBridgeMessageV8(JSON.stringify({ type: "vm_report", protocol_version: 8,
+      host_id: report.host_id, report }))).toBeNull();
+  });
+  it("rejects another user's workload on personal hosts and accepts explicit platform ownership", () => {
+    const desired = readFixture<HostDesiredStateV2>("host-desired-state-v2.json");
+    desired.vms[0]!.owner_user_id = "another-user";
+    const parse = () => parseBridgeMessageV8(JSON.stringify({ type: "desired_state", protocol_version: 8,
+      host_id: desired.host_id, desired_state: desired }));
+    expect(parse()).toBeNull();
+    desired.scope = "platform";
+    expect(parse()?.type).toBe("desired_state");
+    desired.vms[0]!.generation = 0;
+    expect(parse()).toBeNull();
+  });
+});

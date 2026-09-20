@@ -39,11 +39,14 @@
       "type": "integer",
       "format": "int64"
     },
+    "relay_connected": {
+      "type": "boolean"
+    },
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 6,
-      "minimum": 6
+      "maximum": 7,
+      "minimum": 7
     },
     "vms": {
       "type": "array",
@@ -53,6 +56,7 @@
     }
   },
   "required": [
+    "relay_connected",
     "schema_version",
     "host_id",
     "observed_at_unix_ms",
@@ -492,6 +496,11 @@
             "null"
           ]
         },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
         "guest_tools": {
           "anyOf": [
             {
@@ -528,6 +537,9 @@
             }
           ]
         },
+        "owner_user_id": {
+          "type": "string"
+        },
         "phase": {
           "$ref": "#/$defs/VmPhase"
         },
@@ -561,6 +573,9 @@
             }
           ]
         },
+        "runtime_execution_id": {
+          "type": "string"
+        },
         "sandbox": {
           "anyOf": [
             {
@@ -590,6 +605,9 @@
         }
       },
       "required": [
+        "owner_user_id",
+        "runtime_execution_id",
+        "generation",
         "run_id",
         "vm_name",
         "phase",

@@ -3,6 +3,8 @@ title: Terminal-ready cutover
 description: Move the terminal-ready runtime release as one version, with traffic closed and matching rollback state.
 ---
 
+For the current fleet replacement, use the [personal metal release](./personal-metal-release/) command first.
+
 The terminal-ready release changes the gateway route contract, the web
 terminal client, the agent boot path, and the runtime image pins. It has no
 compatibility path. Move the complete release as one version.
@@ -63,9 +65,8 @@ ssh root@<gateway-host> /usr/local/sbin/intar-deploy-stargate plan
 # 3. Keep the scenario host ENABLED and assert it. The fleet gate is what
 #    stops learner placement; the host stays enabled so the administrator
 #    proof run in step 4 can be placed.
-curl -sS -X PATCH -H 'content-type: application/json' \
-  -d '{"disabled":false}' \
-  https://intar.dev/api/organizations/<orgId>/runners/<runnerId>
+# Use a freshly enrolled platform host. Organization runners no longer exist.
+# Follow operations/personal-metal-release.md for enrollment and retirement.
 
 # 4. Stage the immutable artifacts here, while the plane is open. See step 3.
 #    Build and upload only: the tools build lane makes no plane call.
@@ -81,9 +82,9 @@ learner start already answers `503 runtime_cutover_drained`, so no learner VM
 is placed while the proof configuration is in place. This step ends with the
 plane open and the fleet drained; step 4 closes the plane.
 
-The host enable call is the item that is easy to get wrong: it is an
-`/api/*` request, so once maintenance is `on` it answers the JSON 503 and the
-host can no longer be enabled from CI. Enable it in this step.
+Host enrollment is an `/api/*` operation. It cannot run while maintenance
+is `on`. The [personal metal release](./personal-metal-release/) command opens
+registration separately while scenario admission remains drained.
 
 Then confirm the host is empty: the desired state has no non-absent VM, the
 actual state has no VM, and artifact archival and teardown have completed. The

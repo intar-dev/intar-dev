@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { MyServers } from "./MyServers";
 
 interface UserSshKeyRecord {
   id: string;
@@ -205,6 +206,8 @@ export function Profile() {
           </div>
         </dl>
       </Section>
+
+      {user ? <MyServers key={user.id} userId={user.id} /> : null}
 
       <Section
         title="SSH keys"

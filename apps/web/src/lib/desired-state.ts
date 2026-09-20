@@ -7,25 +7,24 @@ import type {
 } from "@/generated/bridge";
 import { HOST_DESIRED_STATE_SCHEMA_VERSION } from "@/generated/constants";
 import type { ImageKey } from "@/generated/catalog";
+import { parseBridgeMessageV8 } from "@/control-plane/bridge-v8";
+import { BRIDGE_PROTOCOL_VERSION } from "@/generated/constants";
 import type { RunVmStateDocument } from "@/lib/run-state";
 
 export type DesiredStateDraft = HostDesiredStateV2;
 export type DesiredStateMutator = (draft: DesiredStateDraft) => void;
 
-const LEGACY_HOST_DESIRED_STATE_SCHEMA_VERSION = 4;
-
-export interface StoredHostDesiredStateUpgrade {
-  desiredState: HostDesiredStateV2;
-  migrated: boolean;
-}
-
 export function createEmptyHostDesiredState(input: {
   hostId: string;
+  scope: "personal" | "platform";
+  ownerUserId: string;
   nowUnixMs: number;
 }): HostDesiredStateV2 {
   return {
     schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
     host_id: input.hostId,
+    scope: input.scope,
+    owner_user_id: input.ownerUserId,
     version: 0,
     generated_at_unix_ms: input.nowUnixMs,
     cached_images: [],
@@ -35,12 +34,12 @@ export function createEmptyHostDesiredState(input: {
   };
 }
 
-export function upgradeStoredHostDesiredState(input: {
+export function validateStoredHostDesiredState(input: {
   document: unknown;
   hostId: string;
   rowVersion: number;
   nowUnixMs: number;
-}): StoredHostDesiredStateUpgrade {
+}): HostDesiredStateV2 {
   const document = input.document;
   if (!isUnknownRecord(document)) {
     throw new Error(`desired state for host ${input.hostId} is not an object`);
@@ -54,53 +53,15 @@ export function upgradeStoredHostDesiredState(input: {
     throw new Error(`desired state identity is invalid for host ${input.hostId}`);
   }
 
-  if (document.schema_version === HOST_DESIRED_STATE_SCHEMA_VERSION) {
-    if (
-      !Array.isArray(document.cached_images) ||
-      (document.cached_guest_tools !== undefined &&
-        !Array.isArray(document.cached_guest_tools)) ||
-      !Array.isArray(document.vms) ||
-      !Array.isArray(document.builds)
-    ) {
-      throw new Error(`desired state arrays are invalid for host ${input.hostId}`);
-    }
-    return {
-      desiredState: document as unknown as HostDesiredStateV2,
-      migrated: false,
-    };
+  const message = parseBridgeMessageV8(JSON.stringify({
+    type: "desired_state", protocol_version: BRIDGE_PROTOCOL_VERSION,
+    host_id: input.hostId, desired_state: document,
+  }));
+  if (message?.type !== "desired_state") {
+    throw new Error(`desired state schema or ownership is invalid for host ${input.hostId}`);
   }
+  return message.desired_state;
 
-  if (document.schema_version !== LEGACY_HOST_DESIRED_STATE_SCHEMA_VERSION) {
-    throw new Error(
-      `desired state schema ${String(document.schema_version)} is unsupported for host ${input.hostId}`,
-    );
-  }
-  if (
-    !Array.isArray(document.cached_images) ||
-    !Array.isArray(document.vms) ||
-    !Array.isArray(document.builds)
-  ) {
-    throw new Error(`legacy desired state arrays are invalid for host ${input.hostId}`);
-  }
-  const runningVm = document.vms.find(
-    (vm) => !isUnknownRecord(vm) || vm.desired_phase !== "absent",
-  );
-  if (runningVm !== undefined) {
-    throw new Error(
-      `legacy desired state for host ${input.hostId} still contains a running or malformed VM`,
-    );
-  }
-
-  return {
-    desiredState: {
-      ...createEmptyHostDesiredState({
-        hostId: input.hostId,
-        nowUnixMs: input.nowUnixMs,
-      }),
-      version: input.rowVersion + 1,
-    },
-    migrated: true,
-  };
 }
 
 export function mutateDesiredState(
@@ -111,8 +72,13 @@ export function mutateDesiredState(
   const before = comparableDesiredStatePayload(current);
   const draft = cloneDesiredState(current);
   mutator(draft);
+  if (draft.scope !== current.scope || draft.owner_user_id !== current.owner_user_id || draft.host_id !== current.host_id) {
+    throw new Error("host desired-state ownership is immutable");
+  }
 
   const normalized = normalizeDesiredState(draft);
+  validateStoredHostDesiredState({ document: normalized, hostId: current.host_id,
+    rowVersion: current.version, nowUnixMs: options.nowUnixMs });
   const after = comparableDesiredStatePayload(normalized);
   if (before === after) {
     return current;
@@ -250,6 +216,9 @@ export function markDesiredVmAbsent(
 
 export function desiredVmFromRunVm(input: {
   runId: string;
+  ownerUserId: string;
+  runtimeExecutionId: string;
+  generation: number;
   vm: RunVmStateDocument;
   nowUnixMs: number;
   sshAuthorizedKeysOpenssh: string[];
@@ -263,6 +232,8 @@ export function desiredVmFromRunVm(input: {
     input.sshAuthorizedKeysOpenssh,
   );
   if (
+    !input.ownerUserId?.trim() || !input.runtimeExecutionId?.trim() ||
+    !Number.isSafeInteger(input.generation) || input.generation < 1 ||
     !imageKey ||
     !imageSha256 ||
     !resources ||
@@ -273,7 +244,11 @@ export function desiredVmFromRunVm(input: {
   }
 
   return {
+    vm_id: input.vm.id,
     run_id: input.runId,
+    owner_user_id: input.ownerUserId,
+    runtime_execution_id: input.runtimeExecutionId,
+    generation: input.generation,
     vm_name: input.vm.runtimeVmName,
     desired_phase: "running",
     image_key: cloneImageKey(imageKey),
@@ -326,6 +301,8 @@ function comparableDesiredStatePayload(document: HostDesiredStateV2): string {
   return JSON.stringify({
     schema_version: normalized.schema_version,
     host_id: normalized.host_id,
+    scope: normalized.scope,
+    owner_user_id: normalized.owner_user_id,
     cached_images: normalized.cached_images,
     cached_guest_tools: normalized.cached_guest_tools,
     vms: normalized.vms,

@@ -1,12 +1,23 @@
+import { enforceHostWorkloadAccess } from "@/lib/host-workload-access";
+import { refreshStargateHostRelay, revokeStargateHostRelay, revokeStargateHostRelayCredentials } from "@/lib/stargate-relay";
+import { persistHostReport } from "@/lib/personal-host-readiness";
+import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
+import { notifyRunStatusListeners } from "./host-runtime-do/run-status-fanout";
 import { traceOperation } from "@/lib/tracing";
 import {
   DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
+  RUNTIME_LEASE_CLEANUP_RETRY_MS,
+  HOST_HELLO_TIMEOUT_MS,
+  MAX_PENDING_HOST_SOCKETS,
+  MAX_STATUS_SOCKETS,
+  MAX_STATUS_SOCKETS_PER_USER,
+  STATUS_SOCKET_LIFETIME_MS,
   HostRuntimeBase,
   type RunProjectionOutcome,
   type RunStatusSocketAttachment,
   type SocketAttachment,
 } from "./host-runtime-do/base";
-import { and, eq, exists, isNull, sql } from "drizzle-orm";
+import { and, eq, exists, sql } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   parseBridgeMessageV8,
@@ -16,6 +27,7 @@ import {
   accessAllowlist,
   agentHosts,
   hostActualState,
+  hostDesiredState,
   hostResourceReservations,
   type RuntimeExecutionState,
 } from "@/db/schema";
@@ -27,7 +39,7 @@ import {
   applyHostReportToRunState,
   applyVmReportToRunState,
 } from "@/lib/run-lifecycle";
-import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
+import { loadOrCreateHostDesiredState, mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import {
   maintainHostBuildAssignments,
   recordHostBuildReports,
@@ -42,13 +54,12 @@ import {
 import { StargateTerminalAttachError } from "@/lib/stargate";
 import {
   isReportedHostRoleAllowed,
-  resolveScenarioEnabledForHostRole,
 } from "@/lib/scenario-hosts";
 import type {
   BridgeMessageV8,
   HostCapabilitiesV2,
+  HostRelayCredentials,
   HostDesiredStateV2,
-  HostStateReportV2,
   VmActualStateV2,
   VmReportV2,
 } from "@/generated/bridge";
@@ -82,13 +93,18 @@ export class HostRuntimeDO extends HostRuntimeBase {
   private cpuReservationQueue: Promise<void> = Promise.resolve();
   private desiredDispatchQueue: Promise<void> = Promise.resolve();
   private clientHelloQueue: Promise<void> = Promise.resolve();
+  private readonly pendingClientHellos = new Set<WebSocket>();
   private nextScenarioImageCacheReconciliationAtMs: number | null = null;
+  private sendingStatusNotifications = false;
+  private readonly pendingStatusNotifications = new Map<
+    string, { runId: string; hostId: string; revision: number }
+  >();
 
   override async fetch(request: Request): Promise<Response> {
-    if (controlPlaneMaintenanceEnabled(this.env)) {
+    const url = new URL(request.url);
+    if (controlPlaneMaintenanceEnabled(this.env) && url.pathname !== "/_internal/retire") {
       return maintenanceJsonResponse();
     }
-    const url = new URL(request.url);
 
     if (url.pathname === "/connect") {
       return traceOperation("host.handleConnect", () => this.handleConnect(request));
@@ -110,8 +126,15 @@ export class HostRuntimeDO extends HostRuntimeBase {
   }
 
   override async alarm(): Promise<void> {
+    this.closeExpiredSockets();
     if (controlPlaneMaintenanceEnabled(this.env)) {
+      // Maintenance must not leave accepted sockets alive without a deadline.
+      for (const socket of this.ctx.getWebSockets()) socket.close(1012, "maintenance");
       await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    if (!(await this.runtimeAlarmIsDue())) {
+      await this.scheduleSocketExpiry();
       return;
     }
     const hostId = await this.loadKnownHostId();
@@ -199,6 +222,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return jsonResponse({ error: "missing host id" }, 400);
     }
 
+    const credentialGeneration = Number(request.headers.get("x-agent-credential-generation"));
+    if (!Number.isSafeInteger(credentialGeneration) || credentialGeneration < 1) {
+      return jsonResponse({ error: "invalid credential generation" }, 401);
+    }
     const parsedBetaAdmission = parseBetaAdmissionHeaders(request.headers);
     if (!parsedBetaAdmission.valid) {
       return jsonResponse({ error: "invalid beta admission" }, 401);
@@ -208,11 +235,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
     if (!admission) {
       return jsonResponse({ error: "host not found" }, 404);
     }
+    if (!admission.scope || admission.credentialGeneration !== credentialGeneration) {
+      return jsonResponse({ error: "server credentials changed" }, 401);
+    }
     if (admission.disabled) {
       await this.retireRuntimeState(hostId, "host disabled");
       return jsonResponse({ error: "host is disabled" }, 403);
     }
-    if (admission.organizationId === null) {
+    if (admission.scope === "personal") {
       if (admission.betaAdmission === null) {
         await this.retireRuntimeState(hostId, "beta access revoked");
         return jsonResponse({ error: "beta access is revoked" }, 403);
@@ -222,13 +252,22 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
     } else if (betaAdmission !== null) {
       return jsonResponse(
-        { error: "invalid organization host admission" },
+        { error: "invalid platform host admission" },
         401,
       );
     }
 
     await this.persistKnownHostId(hostId);
 
+    this.closeExpiredSockets();
+    const hostSockets = this.ctx.getWebSockets("host");
+    if (
+      hostSockets.length >= MAX_PENDING_HOST_SOCKETS + 1 ||
+      hostSockets.filter(socket => !this.readSocketAttachment(socket)?.helloReceived).length >= MAX_PENDING_HOST_SOCKETS
+    ) {
+      return jsonResponse({ error: "too many pending host connections" }, 429);
+    }
+    // No await between the count and accept: concurrent upgrades share this cap.
     const connectedAt = Date.now();
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -239,6 +278,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     server.serializeAttachment({
       kind: "agent",
       hostId,
+      credentialGeneration,
       sessionId: null,
       betaSourceInviteId: betaAdmission?.sourceInviteId ?? null,
       betaSourceLeaseId: betaAdmission?.sourceLeaseId ?? null,
@@ -250,7 +290,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       lastDesiredDispatchAtMs: null,
     } satisfies SocketAttachment);
 
-    await this.scheduleNextAlarm(hostId);
+    await this.scheduleSocketExpiry();
 
     return new Response(null, {
       status: 101,
@@ -266,22 +306,40 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return jsonResponse({ error: "expected websocket upgrade" }, 426);
     }
 
-    const attachment = parseRunStatusStreamAttachment(request.headers);
-    if (!attachment) {
+    const subscription = parseRunStatusStreamAttachment(request.headers);
+    if (!subscription) {
       return jsonResponse({ error: "invalid run status subscription" }, 400);
     }
     const knownHostId = await this.loadKnownHostId();
-    if (knownHostId && knownHostId !== attachment.hostId) {
+    if (knownHostId && knownHostId !== subscription.hostId) {
       return jsonResponse(
         { error: "host id does not match durable object" },
         409,
       );
     }
-    if (!(await this.isRunStatusSubscriberCurrent(attachment))) {
+    const sessionExpiresAt = await this.loadRunStatusSessionExpiry(subscription);
+    if (sessionExpiresAt === null) {
       return jsonResponse({ error: "run status access is no longer active" }, 403);
     }
 
+    const attachment: RunStatusSocketAttachment = {
+      ...subscription,
+      expiresAt: Math.min(sessionExpiresAt, Date.now() + STATUS_SOCKET_LIFETIME_MS),
+    };
     await this.persistKnownHostId(attachment.hostId);
+    this.closeExpiredSockets();
+    if (attachment.expiresAt <= Date.now()) {
+      return jsonResponse({ error: "run status session expired" }, 403);
+    }
+    const listeners = this.ctx.getWebSockets("run-status");
+    if (
+      listeners.length >= MAX_STATUS_SOCKETS ||
+      listeners.filter(socket => this.readRunStatusSocketAttachment(socket)?.userId === attachment.userId).length >= MAX_STATUS_SOCKETS_PER_USER
+    ) {
+      return jsonResponse({ error: "too many run status connections" }, 429);
+    }
+    // Count all retained sockets, including closing ones, across this user's
+    // runs and sessions. Status listeners cannot consume agent socket capacity.
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
@@ -292,6 +350,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     ]);
     server.serializeAttachment(attachment);
     try {
+      await this.scheduleSocketExpiry();
       server.send(
         JSON.stringify({ type: "subscribed", runId: attachment.runId }),
       );
@@ -312,18 +371,38 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string;
     revision: number;
   }): void {
-    this.ctx.waitUntil(
-      this.notifyRunStatusInvalidation(input).catch((error) => {
-        console.error(
-          JSON.stringify({
+    const pending = this.pendingStatusNotifications.get(input.runId);
+    if (pending) {
+      pending.revision = Math.max(pending.revision, input.revision);
+      return;
+    }
+    this.pendingStatusNotifications.set(input.runId, { ...input });
+    if (this.sendingStatusNotifications) return;
+    this.sendingStatusNotifications = true;
+    this.ctx.waitUntil(this.flushRunStatusInvalidations());
+  }
+
+  private async flushRunStatusInvalidations(): Promise<void> {
+    try {
+      // One broadcast per host, including when several runs change together.
+      // Reinserted runs go to the tail, so a busy run cannot starve the rest.
+      for (;;) {
+        const input = this.pendingStatusNotifications.values().next().value;
+        if (!input) return;
+        this.pendingStatusNotifications.delete(input.runId);
+        try {
+          await this.notifyRunStatusInvalidation(input);
+        } catch (error) {
+          console.error(JSON.stringify({
             message: "failed to notify scenario status subscribers",
-            runId: input.runId,
-            hostId: input.hostId,
+            runId: input.runId, hostId: input.hostId,
             error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      }),
-    );
+          }));
+        }
+      }
+    } finally {
+      this.sendingStatusNotifications = false;
+    }
   }
 
   private async notifyRunStatusInvalidation(input: {
@@ -331,51 +410,19 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string;
     revision: number;
   }): Promise<void> {
-    const listeners = this.ctx.getWebSockets(`run-status:${input.runId}`);
-    await Promise.all(
-      listeners.map(async (ws) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        const attachment = this.readRunStatusSocketAttachment(ws);
-        if (
-          !attachment ||
-          attachment.runId !== input.runId ||
-          attachment.hostId !== input.hostId
-        ) {
-          closeRunStatusSocket(ws, 1008, "invalid run status subscription");
-          return;
-        }
-        let current = false;
-        try {
-          current = await this.isRunStatusSubscriberCurrent(attachment);
-        } catch {
-          closeRunStatusSocket(ws, 1011, "run status authorization failed");
-          return;
-        }
-        if (!current) {
-          closeRunStatusSocket(ws, 1008, "run status access is no longer active");
-          return;
-        }
-        if (ws.readyState !== WebSocket.OPEN) return;
-        try {
-          ws.send(
-            JSON.stringify({
-              type: "invalidate",
-              runId: input.runId,
-              revision: input.revision,
-            }),
-          );
-        } catch {
-          closeRunStatusSocket(ws, 1011, "run status notification failed");
-        }
-      }),
+    await notifyRunStatusListeners(
+      this.env.DB,
+      this.ctx.getWebSockets(`run-status:${input.runId}`),
+      socket => this.readRunStatusSocketAttachment(socket),
+      input,
     );
   }
 
-  private async isRunStatusSubscriberCurrent(
-    attachment: RunStatusSocketAttachment,
-  ): Promise<boolean> {
+  private async loadRunStatusSessionExpiry(
+    attachment: Omit<RunStatusSocketAttachment, "expiresAt">,
+  ): Promise<number | null> {
     const row = await this.env.DB.prepare(
-      `SELECT run.run_id
+      `SELECT auth_session.expires_at
        FROM scenario_runs run
        INNER JOIN session auth_session
          ON auth_session.id = ?1
@@ -402,8 +449,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
         attachment.userId,
         attachment.hostId,
       )
-      .first<{ run_id: string }>();
-    return row !== null;
+      .first<{ expires_at: number }>();
+    return row?.expires_at ?? null;
   }
 
   private async handleWake(request: Request): Promise<Response> {
@@ -452,8 +499,16 @@ export class HostRuntimeDO extends HostRuntimeBase {
       request.headers.get("x-agent-host-id")?.trim() ??
       (await this.loadKnownHostId()) ??
       "";
-    await this.retireRuntimeState(hostId, "host retired", 1001);
-    return jsonResponse({ ok: true, hostId });
+    try {
+      await this.retireRuntimeState(hostId, "host retired", 1001);
+    } catch (error) {
+      console.error(JSON.stringify({
+        message: "host retirement incomplete", hostId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      return jsonResponse({ error: "host retirement incomplete" }, 503);
+    }
+    return jsonResponse({ ok: true, hostId, alarmCleared: await this.ctx.storage.getAlarm() === null });
   }
 
   private async withCpuReservationLock<T>(
@@ -478,9 +533,18 @@ export class HostRuntimeDO extends HostRuntimeBase {
     message: BridgeMessageV8,
   ): Promise<void> {
     if (message.type === "client_hello") {
-      await this.withClientHelloLock(() =>
-        this.handleBridgeClientHello(ws, attachment, message),
-      );
+      if (attachment.helloReceived || this.pendingClientHellos.has(ws)) {
+        ws.close(1008, "client hello already received");
+        return;
+      }
+      this.pendingClientHellos.add(ws);
+      try {
+        await this.withClientHelloLock(() =>
+          this.handleBridgeClientHello(ws, attachment, message),
+        );
+      } finally {
+        this.pendingClientHellos.delete(ws);
+      }
       return;
     }
 
@@ -511,6 +575,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         attachment.hostId,
         attachment.sessionId,
         betaAdmissionFromAttachment(attachment),
+        attachment.credentialGeneration,
       ))
     ) {
       await this.rejectClientHelloAdmission(
@@ -526,6 +591,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         message.host_id,
         message.report,
         attachment.sessionId,
+        attachment.credentialGeneration,
       );
       // State-report projection already reconciles CPU reservations.
       await this.reconcileHost(message.host_id, {
@@ -536,6 +602,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         message.host_id,
         message.report,
         attachment.sessionId,
+        attachment.credentialGeneration,
       );
       // VM-report projection owns this latency path. Desired-state commits
       // explicitly wake the host runtime; this alarm remains the durable
@@ -548,6 +615,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         message.host_id,
         message.report,
         attachment.sessionId,
+        attachment.credentialGeneration,
       );
       await this.reconcileHost(message.host_id);
     } else if (message.type === "sync_request") {
@@ -570,6 +638,11 @@ export class HostRuntimeDO extends HostRuntimeBase {
     attachment: SocketAttachment,
     message: Extract<BridgeMessageV8, { type: "client_hello" }>,
   ): Promise<void> {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (attachment.connectedAt + HOST_HELLO_TIMEOUT_MS <= Date.now()) {
+      ws.close(1008, "client hello expired");
+      return;
+    }
     if (message.host_id !== attachment.hostId) {
       try {
         ws.close(1008, "host mismatch");
@@ -607,45 +680,29 @@ export class HostRuntimeDO extends HostRuntimeBase {
     await this.persistKnownHostId(message.host_id);
     const db = drizzle(this.env.DB);
     const socketBetaAdmission = betaAdmissionFromAttachment(attachment);
-    const personalAdmission =
-      host.organizationId === null && socketBetaAdmission !== null
-        ? exists(
-            db
-              .select({ userId: accessAllowlist.userId })
-              .from(accessAllowlist)
-              .where(
-                and(
-                  eq(accessAllowlist.userId, host.userId),
-                  eq(accessAllowlist.state, "active"),
-                  eq(
-                    accessAllowlist.sourceInviteId,
-                    socketBetaAdmission.sourceInviteId,
-                  ),
-                  eq(
-                    accessAllowlist.sourceLeaseId,
-                    socketBetaAdmission.sourceLeaseId,
-                  ),
-                  eq(accessAllowlist.grantedAt, socketBetaAdmission.grantedAt),
-                ),
-              ),
-          )
+    const admissionFence = host.scope === "personal" && socketBetaAdmission
+      ? exists(
+          db.select({ userId: accessAllowlist.userId }).from(accessAllowlist).where(and(
+            eq(accessAllowlist.userId, host.userId),
+            eq(accessAllowlist.state, "active"),
+            eq(accessAllowlist.sourceInviteId, socketBetaAdmission.sourceInviteId),
+            eq(accessAllowlist.sourceLeaseId, socketBetaAdmission.sourceLeaseId),
+            eq(accessAllowlist.grantedAt, socketBetaAdmission.grantedAt),
+          )),
+        )
+      : host.scope === "platform" && socketBetaAdmission === null
+        ? sql`1 = 1`
         : undefined;
-    const activationFence =
-      host.organizationId === null
-        ? personalAdmission
-          ? and(
-              eq(agentHosts.id, message.host_id),
-              eq(agentHosts.userId, host.userId),
-              isNull(agentHosts.organizationId),
-              eq(agentHosts.disabled, false),
-              personalAdmission,
-            )
-          : undefined
-        : and(
-            eq(agentHosts.id, message.host_id),
-            eq(agentHosts.organizationId, host.organizationId),
-            eq(agentHosts.disabled, false),
-          );
+    const activationFence = admissionFence && host.scope
+      ? and(
+          eq(agentHosts.id, message.host_id),
+          eq(agentHosts.userId, host.userId),
+          eq(agentHosts.scope, host.scope),
+          eq(agentHosts.credentialGeneration, attachment.credentialGeneration),
+          eq(agentHosts.disabled, false),
+          admissionFence,
+        )
+      : undefined;
     if (!activationFence) {
       await this.rejectClientHelloAdmission(
         ws,
@@ -659,12 +716,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
         .update(agentHosts)
         .set({
           activeSessionId: sessionId,
-          scenarioEnabled: resolveScenarioEnabledForHostRole(
-            host.role,
-            host.scenarioEnabled,
-          ),
+          scenarioEnabled: sql`case when ${agentHosts.role} = 'builder' then 0 else ${agentHosts.scenarioEnabled} end`,
           connected: true,
-          connectedAt: host.connectedAt ?? now,
+          connectedAt: sql`max(coalesce(${agentHosts.connectedAt}, 0) + 1, ${now})`,
           disconnectedAt: null,
           lastClientHelloAt: now,
           lastServerHelloAt: now,
@@ -729,6 +783,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       message.host_id,
       sessionId,
       socketBetaAdmission,
+      attachment.credentialGeneration,
     );
     if (!admissionStillCurrent) {
       await this.rollbackPendingClientHello(db, host, sessionId);
@@ -742,7 +797,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
     if (
       !desiredState ||
       reconciliation.outcome === "stale_host_snapshot" ||
-      ws.readyState !== WebSocket.OPEN
+      ws.readyState !== WebSocket.OPEN ||
+      attachment.connectedAt + HOST_HELLO_TIMEOUT_MS <= Date.now()
     ) {
       await this.rollbackPendingClientHello(db, host, sessionId);
       try {
@@ -770,7 +826,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
           type: "server_hello",
           protocol_version: message.protocol_version,
           host_id: message.host_id,
+          session_id: sessionId,
           desired_version: desiredState.version,
+          relay: null,
         }),
       );
     } catch (error) {
@@ -817,12 +875,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
     attachment: SocketAttachment,
     hostId: string,
     state: HostDesiredStateV2,
+    relay: HostRelayCredentials | null,
   ): Promise<void> {
     const serialized = serializeBridgeMessageV8({
       type: "desired_state",
       protocol_version: 8,
       host_id: hostId,
       desired_state: state,
+      relay,
     });
     const dispatchedAtUnixMs = Date.now();
     ws.send(serialized);
@@ -837,73 +897,24 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string,
     report: Extract<BridgeMessageV8, { type: "state_report" }>["report"],
     expectedSessionId: string,
+    expectedCredentialGeneration: number,
   ): Promise<void> {
     const db = drizzle(this.env.DB);
     const now = Date.now();
-    const acceptedActualState = await db
-      .insert(hostActualState)
-      .select(
-        db
-          .select({
-            hostId: agentHosts.id,
-            appliedDesiredVersion:
-              sql<number>`${report.applied_desired_version}`.as(
-                "applied_desired_version",
-              ),
-            observedAt: sql<number>`${report.observed_at_unix_ms}`.as(
-              "observed_at",
-            ),
-            reportJson: sql<HostStateReportV2>`${JSON.stringify(report)}`.as(
-              "report_json",
-            ),
-            createdAt: sql<number>`${now}`.as("created_at"),
-            updatedAt: sql<number>`${now}`.as("updated_at"),
-          })
-          .from(agentHosts)
-          .where(
-            and(
-              eq(agentHosts.id, hostId),
-              eq(agentHosts.activeSessionId, expectedSessionId),
-            ),
-          ),
-      )
-      .onConflictDoUpdate({
-        target: hostActualState.hostId,
-        set: {
-          appliedDesiredVersion: report.applied_desired_version,
-          observedAt: report.observed_at_unix_ms,
-          reportJson: report,
-          updatedAt: now,
-        },
-      })
-      .returning({ hostId: hostActualState.hostId });
-    if (!acceptedActualState.length) {
-      return;
-    }
-
-    const heartbeat = await db
-      .update(agentHosts)
-      .set({
-        connected: true,
-        disconnectedAt: null,
-        lastHeartbeatAt: now,
-        lastInventoryAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(agentHosts.id, hostId),
-          eq(agentHosts.activeSessionId, expectedSessionId),
-        ),
-      )
-      .returning({ id: agentHosts.id });
-    if (!heartbeat.length) return;
+    const accepted = await persistHostReport({
+      d1: this.env.DB, hostId, report, now,
+      sessionId: expectedSessionId,
+      credentialGeneration: expectedCredentialGeneration,
+      requireRunCli: learnerRunCliV1EnforcementEnabled(this.env),
+    });
+    if (!accepted) return;
 
     const buildUpdates = await recordHostBuildReports(
       db,
       hostId,
       report.builds,
       now,
+      { sessionId: expectedSessionId, credentialGeneration: expectedCredentialGeneration },
     );
     await this.removeTerminalBuildsFromDesiredState(
       hostId,
@@ -913,6 +924,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
     const runs = await this.listOpenRunsForHost(hostId);
     for (const run of runs) {
+      if (report.vms.some(vm => vm.run_id === run.runId && (vm.runtime_execution_id !== run.executionId ||
+        vm.generation !== run.executionGeneration || vm.owner_user_id !== run.userId))) continue;
       const projectionOutcome = await this.withRunProjectionLock(
         run.runId,
         async () => {
@@ -934,9 +947,11 @@ export class HostRuntimeDO extends HostRuntimeBase {
             {
               keepDeleteRequestedAt: true,
               initialRow: current,
+              expectedExecution: { id: run.executionId, ownerUserId: run.userId, generation: run.executionGeneration },
               expectedHostSession: {
                 hostId,
                 activeSessionId: expectedSessionId,
+                credentialGeneration: expectedCredentialGeneration,
               },
             },
           );
@@ -980,7 +995,11 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string,
     report: Extract<BridgeMessageV8, { type: "vm_report" }>["report"],
     expectedSessionId: string,
+    expectedCredentialGeneration: number,
   ): Promise<void> {
+    const execution = await this.loadRuntimeVmReportContext(hostId, report.runtime_execution_id, report.vm_name);
+    if (!execution || execution.domainId !== report.run_id || execution.userId !== report.owner_user_id ||
+      execution.generation !== report.generation || execution.state === "archived") return;
     const projectionOutcome = await this.withRunProjectionLock(
       report.run_id,
       async (): Promise<RunProjectionOutcome> => {
@@ -998,9 +1017,11 @@ export class HostRuntimeDO extends HostRuntimeBase {
                 {
                   keepDeleteRequestedAt: true,
                   initialRow: run,
+                  expectedExecution: { id: report.runtime_execution_id, ownerUserId: report.owner_user_id, generation: report.generation },
                   expectedHostSession: {
                     hostId,
                     activeSessionId: expectedSessionId,
+                    credentialGeneration: expectedCredentialGeneration,
                   },
                 },
               )
@@ -1024,6 +1045,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
               runtimeActualStateFromReport(report),
               report.observed_at_unix_ms,
               expectedSessionId,
+              expectedCredentialGeneration,
             );
           } catch (error) {
             // Scenario projection remains authoritative during the shared-runtime
@@ -1064,6 +1086,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
         and(
           eq(agentHosts.id, hostId),
           eq(agentHosts.activeSessionId, expectedSessionId),
+          eq(agentHosts.credentialGeneration, expectedCredentialGeneration),
+          eq(agentHosts.disabled, false),
         ),
       );
   }
@@ -1073,13 +1097,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
     report: VmActualStateV2,
     observedAt: number,
     expectedSessionId: string,
+    expectedCredentialGeneration: number,
   ): Promise<void> {
     const context = await this.loadRuntimeVmReportContext(
       hostId,
-      report.run_id,
+      report.runtime_execution_id,
       report.vm_name,
     );
-    if (!context) return;
+    if (!context || context.userId !== report.owner_user_id || context.generation !== report.generation || context.domainId !== report.run_id || context.state === "archived") return;
     const outcome = await recordRuntimeVmActualState({
       executionId: context.executionId,
       expectedGeneration: context.generation,
@@ -1088,6 +1113,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       report,
       observedAt,
       expectedHostSessionId: expectedSessionId,
+      expectedHostCredentialGeneration: expectedCredentialGeneration,
     });
     if (outcome === "stale") return;
 
@@ -1223,6 +1249,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string,
     report: Extract<BridgeMessageV8, { type: "build_report" }>["report"],
     expectedSessionId: string,
+    expectedCredentialGeneration: number,
   ): Promise<void> {
     const db = drizzle(this.env.DB);
     const now = Date.now();
@@ -1238,6 +1265,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
         and(
           eq(agentHosts.id, hostId),
           eq(agentHosts.activeSessionId, expectedSessionId),
+          eq(agentHosts.credentialGeneration, expectedCredentialGeneration),
+          eq(agentHosts.disabled, false),
         ),
       )
       .returning({ id: agentHosts.id });
@@ -1247,6 +1276,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       hostId,
       [report],
       now,
+      { sessionId: expectedSessionId, credentialGeneration: expectedCredentialGeneration },
     );
     await this.removeTerminalBuildsFromDesiredState(
       hostId,
@@ -1331,11 +1361,29 @@ export class HostRuntimeDO extends HostRuntimeBase {
         return;
       }
 
-      const desiredState = await loadOrCreateHostDesiredState(
+      const desiredState = await enforceHostWorkloadAccess(await loadOrCreateHostDesiredState(
         drizzle(this.env.DB),
         hostId,
         Date.now(),
-      );
+      ));
+      const lastSent = attachment.lastDesiredVersionSent;
+      if (lastSent !== null && desiredState.version < lastSent) return;
+      const relayRefreshDue = desiredState.scope === "personal" &&
+        (attachment.lastDesiredDispatchAtMs === null || Date.now() - attachment.lastDesiredDispatchAtMs >= 45_000);
+      if (!options?.force && !relayRefreshDue && lastSent === desiredState.version) return;
+      let relay: HostRelayCredentials | null;
+      try {
+        relay = await refreshStargateHostRelay({ hostId, sessionId: attachment.sessionId,
+          credentialGeneration: attachment.credentialGeneration });
+      } catch (error) {
+        // A failed grant is revoked at Stargate. Reusing this control session
+        // would retry a revoked identity; reconnect to obtain a fresh one.
+        console.warn(JSON.stringify({ event: "host_relay_reconnect_required", hostId,
+          error: error instanceof Error ? error.message : String(error) }));
+        try { ws.close(1012, "relay session must reconnect"); } catch { /* already closed */ }
+        await this.scheduleAlarmNoLaterThan(Date.now() + RUNTIME_LEASE_CLEANUP_RETRY_MS);
+        return;
+      }
       // Make the host lookup the final await. Re-read the attachment after it
       // resolves, then validate and send synchronously so a replacement socket
       // cannot interleave between the active-session check and delivery.
@@ -1343,6 +1391,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         hostId,
         attachment.sessionId,
         betaAdmissionFromAttachment(attachment),
+        attachment.credentialGeneration,
       );
       const latestAttachment = this.readSocketAttachment(ws);
       if (
@@ -1353,22 +1402,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
         latestAttachment.hostId !== hostId ||
         latestAttachment.sessionId !== attachment.sessionId
       ) {
-        return;
-      }
-
-      const lastSent = latestAttachment.lastDesiredVersionSent;
-      if (lastSent !== null && desiredState.version < lastSent) {
-        console.warn(
-          JSON.stringify({
-            message: "refusing stale desired-state dispatch",
-            hostId,
-            desiredVersion: desiredState.version,
-            lastSent,
-          }),
-        );
-        return;
-      }
-      if (!options?.force && lastSent === desiredState.version) {
+        if (desiredState.scope === "personal") await revokeStargateHostRelay({ hostId, sessionId: attachment.sessionId,
+          credentialGeneration: attachment.credentialGeneration });
         return;
       }
 
@@ -1377,6 +1412,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         latestAttachment,
         hostId,
         desiredState,
+        relay,
       );
     });
   }
@@ -1427,9 +1463,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         // Closing it below forces the agent through a fresh hello/report and
         // prevents ghost readiness based on unowned actual-state evidence.
         activeSessionId: null,
-        scenarioEnabled: previousHost.scenarioEnabled,
         connected: false,
-        connectedAt: previousHost.connectedAt,
         disconnectedAt: now,
         lastClientHelloAt: previousHost.lastClientHelloAt,
         lastServerHelloAt: previousHost.lastServerHelloAt,
@@ -1459,12 +1493,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
   }
 
   private async loadHostConnectionAdmission(hostId: string): Promise<{
-    organizationId: string | null;
+    scope: "personal" | "platform" | null;
+    credentialGeneration: number;
     disabled: boolean;
     betaAdmission: BetaAdmissionEpoch | null;
   } | null> {
     const row = await this.env.DB.prepare(
-      `SELECT host.organization_id,
+      `SELECT host.scope,
+              host.credential_generation,
               host.disabled,
               CASE WHEN access.state = 'active' THEN access.source_invite_id END AS beta_source_invite_id,
               CASE WHEN access.state = 'active' THEN access.source_lease_id END AS beta_source_lease_id,
@@ -1476,7 +1512,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
     )
       .bind(hostId)
       .first<{
-        organization_id: string | null;
+        scope: "personal" | "platform" | null;
+        credential_generation: number;
         disabled: number;
         beta_source_invite_id: string | null;
         beta_source_lease_id: string | null;
@@ -1484,7 +1521,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }>();
     return row
       ? {
-          organizationId: row.organization_id,
+          scope: row.scope,
+          credentialGeneration: row.credential_generation,
           disabled: row.disabled !== 0,
           betaAdmission: admissionFromDatabaseRow(row),
         }
@@ -1499,8 +1537,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
     const admission = await this.loadHostConnectionAdmission(hostId);
     if (
       !admission ||
+      !admission.scope ||
+      admission.credentialGeneration < 1 ||
       admission.disabled ||
-      (admission.organizationId === null && admission.betaAdmission === null)
+      (admission.scope === "personal" && admission.betaAdmission === null)
     ) {
       await this.retireRuntimeState(hostId, reason);
       return;
@@ -1516,6 +1556,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     hostId: string,
     sessionId: string,
     betaAdmission: BetaAdmissionEpoch | null,
+    credentialGeneration: number,
   ): Promise<boolean> {
     const row = await this.env.DB.prepare(
       `SELECT 1 AS admitted
@@ -1523,16 +1564,18 @@ export class HostRuntimeDO extends HostRuntimeBase {
        LEFT JOIN access_allowlist access ON access.user_id = host.user_id
        WHERE host.id = ?1
          AND host.active_session_id = ?2
+         AND host.credential_generation = ?6
+         AND host.credential_generation > 0
          AND host.disabled = 0
          AND (
            (
-             host.organization_id IS NOT NULL
+             host.scope = 'platform'
              AND ?3 IS NULL
              AND ?4 IS NULL
              AND ?5 IS NULL
            )
            OR (
-             host.organization_id IS NULL
+             host.scope = 'personal'
              AND access.state = 'active'
              AND access.source_invite_id = ?3
              AND access.source_lease_id = ?4
@@ -1547,6 +1590,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         betaAdmission?.sourceInviteId ?? null,
         betaAdmission?.sourceLeaseId ?? null,
         betaAdmission?.grantedAt ?? null,
+        credentialGeneration,
       )
       .first<{ admitted: number }>();
     return row?.admitted === 1;
@@ -1557,6 +1601,38 @@ export class HostRuntimeDO extends HostRuntimeBase {
     reason: string,
     closeCode = 1008,
   ): Promise<void> {
+    const relayCleanup = (async () => {
+      const identity = await drizzle(this.env.DB).select({ generation: agentHosts.credentialGeneration, disabled: agentHosts.disabled, scope: agentHosts.scope })
+        .from(agentHosts).where(eq(agentHosts.id, hostId)).get();
+      // The durable credential fence has already advanced on removal. Revoke only old generations.
+      if (identity?.scope === "personal") await revokeStargateHostRelayCredentials({ hostId,
+        credentialGeneration: Math.max(0, identity.generation - (identity.disabled ? 1 : 0)) });
+    })();
+    // Observe failure immediately; close control sockets even if Stargate is unavailable.
+    const relayResult = relayCleanup.then(() => null, (error: unknown) => error);
+    let stopState: HostDesiredStateV2 | undefined;
+    let stopReadFailed = false;
+    try {
+      // Persist a new desired version so an agent can accept the final stop.
+      // Retain VM identities and leases as evidence for physical cleanup.
+      const [retained] = await drizzle(this.env.DB)
+        .select({ version: hostDesiredState.version, state: hostDesiredState.docJson })
+        .from(hostDesiredState)
+        .where(eq(hostDesiredState.hostId, hostId));
+      if (retained) stopState = await mutateStoredHostDesiredState(drizzle(this.env.DB), hostId, Date.now(), draft => {
+        draft.cached_images = [];
+        draft.cached_guest_tools = [];
+        draft.builds = [];
+        for (const vm of draft.vms) vm.desired_phase = "absent";
+      }, retained.state);
+    } catch (error) {
+      stopReadFailed = true;
+      // A failed read must not keep a revoked socket connected.
+      console.warn(JSON.stringify({
+        message: "failed to load host retirement stop state", hostId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
     const sockets = hostId
       ? [
           ...this.ctx.getWebSockets(`host:${hostId}`),
@@ -1565,13 +1641,27 @@ export class HostRuntimeDO extends HostRuntimeBase {
       : this.ctx.getWebSockets();
     for (const socket of sockets) {
       try {
+        const attachment = this.readSocketAttachment(socket);
+        if (
+          stopState && socket.readyState === WebSocket.OPEN && attachment?.hostId === hostId &&
+          attachment.helloReceived && attachment.bridgeProtocol === "v6"
+        ) {
+          socket.send(serializeBridgeMessageV8({
+            type: "desired_state", protocol_version: 8, host_id: hostId, relay: null,
+            desired_state: stopState,
+          }));
+        }
+      } catch {
+        // Delivery is best effort; never wait for a revoked host's report.
+      }
+      try {
         socket.close(closeCode, reason);
       } catch {
         // Retirement is idempotent and the socket may already be closing.
       }
     }
     const now = Date.now();
-    await this.env.DB.prepare(
+    const retired = await this.env.DB.prepare(
       `UPDATE agent_hosts
        SET connected = 0,
            active_session_id = NULL,
@@ -1584,6 +1674,30 @@ export class HostRuntimeDO extends HostRuntimeBase {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     this.knownHostId = null;
+    // The coordinated release already ended every lease in D1. Do not
+    // recreate desired state, recovery work, or an alarm under maintenance.
+    if (controlPlaneMaintenanceEnabled(this.env)) {
+      const relayError = await relayResult;
+      if (relayError) throw relayError;
+      if (stopReadFailed) throw new Error("host retirement stop state could not be read");
+      return;
+    }
+    if (retired.meta.changes > 0) {
+      // A caller can time out while this operation is still running. Restore
+      // lease cleanup here; a concurrent caller's earlier wake can be erased
+      // by deleteAll. Keep only the identity and the normal alarm metadata.
+      await this.persistKnownHostId(hostId);
+      try {
+        await this.scheduleNextAlarm(hostId);
+      } catch (error) {
+        // D1 failure must not strand retained leases after storage was reset.
+        await this.scheduleAlarmNoLaterThan(Date.now() + RUNTIME_LEASE_CLEANUP_RETRY_MS);
+        throw error;
+      }
+    }
+    const relayError = await relayResult;
+    if (relayError) throw relayError;
+    if (stopReadFailed) throw new Error("host retirement stop state could not be read");
   }
 
   private async reconcileScenarioImageCacheIfDue(input: {
@@ -1624,7 +1738,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
 function parseRunStatusStreamAttachment(
   headers: Headers,
-): RunStatusSocketAttachment | null {
+): Omit<RunStatusSocketAttachment, "expiresAt"> | null {
   const runId = requiredRunStatusHeader(headers, "x-run-status-run-id", 240);
   const userId = requiredRunStatusHeader(headers, "x-run-status-user-id");
   const hostId = requiredRunStatusHeader(
@@ -1686,14 +1800,6 @@ function parseRunStatusTimestamp(value: string | null): number | null {
   if (!value || !/^\d{1,16}$/u.test(value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function closeRunStatusSocket(ws: WebSocket, code: number, reason: string): void {
-  try {
-    ws.close(code, reason);
-  } catch {
-    // The client may have closed while authorization was in flight.
-  }
 }
 
 function parseBetaAdmissionHeaders(headers: Headers):
@@ -1787,6 +1893,9 @@ function admissionFromValues(
 
 function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {
   return {
+    owner_user_id: report.owner_user_id,
+    runtime_execution_id: report.runtime_execution_id,
+    generation: report.generation,
     run_id: report.run_id,
     vm_name: report.vm_name,
     phase: report.phase,

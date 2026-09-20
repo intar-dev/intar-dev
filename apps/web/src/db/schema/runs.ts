@@ -86,6 +86,7 @@ export const scenarioRuns = sqliteTable(
     stateJson: text("state_json").notNull(),
     archiveEnteredAt: integer("archive_entered_at"),
     deleteRequestedAt: integer("delete_requested_at"),
+    routeCleanupId: text("route_cleanup_id"),
     solvedAt: integer("solved_at"),
     completedAt: integer("completed_at"),
     failedAt: integer("failed_at"),

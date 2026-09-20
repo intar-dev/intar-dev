@@ -521,15 +521,26 @@ esac
 agent_config=/etc/intar-agent/config.toml
 sed -i \
   -e '/^\[bridge\]$/,/^\[/s/^enabled = false$/enabled = true/' \
-  -e '/^\[bridge\]$/,/^\[/s/^bootstrap_token = ""$/bootstrap_token = "package-smoke-token"/' \
+  -e '/^\[bridge\]$/,/^\[/s|^credential_file = .*|credential_file = "/etc/intar-agent/credential.json"|' \
   "${agent_config}"
+# This is a local fixture, never a live enrollment credential.
+python3 - <<'PY_FIXTURE'
+import json
+from pathlib import Path
+Path('/etc/intar-agent/credential.json').write_text(json.dumps({
+    'hostId': 'package-smoke', 'ownerUserId': 'package-smoke-owner',
+    'scope': 'personal', 'credentialGeneration': 1, 'credential': '0' * 64,
+}) + '\n')
+PY_FIXTURE
+chown root:"${agent_gid}" /etc/intar-agent/credential.json
+chmod 0640 /etc/intar-agent/credential.json
 bridge_fixture=$(awk '
   /^\[bridge\]$/ { in_bridge = 1; next }
   /^\[/ { in_bridge = 0 }
-  in_bridge && ($1 == "enabled" || $1 == "bootstrap_token") { print }
+  in_bridge && ($1 == "enabled" || $1 == "credential_file") { print }
 ' "${agent_config}")
 [ "${bridge_fixture}" = 'enabled = true
-bootstrap_token = "package-smoke-token"' ] || die "smoke agent bridge fixture is invalid"
+credential_file = "/etc/intar-agent/credential.json"' ] || die "smoke agent bridge fixture is invalid"
 case "$(stat -c '%u:%g:%a' "${agent_config}")" in
   "0:${agent_gid}:640") ;;
   *) die "smoke agent config lost trusted ownership or mode" ;;

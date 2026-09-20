@@ -1,60 +1,49 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const agentBridgeMock = vi.hoisted(() => ({
-  buildStoredBridgeStatus: vi.fn(),
-  jsonResponse: vi.fn((body: unknown, init?: ResponseInit) =>
-    Response.json(body, init),
-  ),
-  loadHostForUser: vi.fn(),
-  parseInventory: vi.fn(),
-  requireAdminUserContext: vi.fn(),
-  resolveRequestOrigin: vi.fn(),
-}));
-const dbMock = vi.hoisted(() => ({
-  db: { update: vi.fn() },
+const mocks = vi.hoisted(() => ({
   drizzle: vi.fn(),
+  requireAdminUserContext: vi.fn(),
+  requireUserContext: vi.fn(),
 }));
 
-vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
-vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
+vi.mock("@/lib/agent-bridge", () => ({
+  ...mocks,
+  jsonResponse: (body: unknown, init?: ResponseInit) => Response.json(body, init),
+}));
+vi.mock("drizzle-orm/d1", () => ({ drizzle: mocks.drizzle }));
 vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
+vi.mock("@/lib/organizations", () => ({ resolveOrganizationId: vi.fn() }));
 
-import { POST } from "@/pages/api/agent/hosts";
+import { POST as hostConfig } from "@/pages/api/agent/hosts";
 
-describe("agent host role identity", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    dbMock.drizzle.mockReturnValue(dbMock.db);
-    agentBridgeMock.requireAdminUserContext.mockResolvedValue({
-      ok: true,
-      context: { userId: "user-1" },
-    });
-    agentBridgeMock.loadHostForUser.mockResolvedValue({
-      id: "host-1",
-      role: "agent",
-    });
-  });
+describe("removed legacy host config routes", () => {
+  beforeEach(() => vi.clearAllMocks());
 
-  it("refuses to repurpose an existing agent as a builder", async () => {
-    const request = new Request("https://intar.test/api/agent/hosts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ hostId: "host-1", role: "builder" }),
-    });
+  it.each([
+    ["personal", hostConfig, "/api/agent/hosts"],
+  ] as const)("rejects every %s config request before accessing credentials", async (_label, route, path) => {
+    for (const body of [
+      undefined,
+      "invalid json",
+      JSON.stringify({ name: "New server" }),
+      JSON.stringify({ hostId: "host-1", runnerId: "host-1", role: "agent" }),
+      JSON.stringify({ hostId: "host-1", runnerId: "host-1", role: "builder" }),
+    ]) {
+      const request = new Request(`https://intar.test${path}`, {
+        method: "POST",
+        body: body ?? null,
+      });
+      const response = await route({ request, params: { orgId: "org-1" } } as never);
 
-    const response = await POST({
-      request,
-      url: new URL(request.url),
-    } as never);
-
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "host roles are immutable; create a new host for the requested role",
-      code: "host_role_immutable",
-      hostId: "host-1",
-      currentRole: "agent",
-      requestedRole: "builder",
-    });
-    expect(dbMock.db.update).not.toHaveBeenCalled();
+      expect(response.status).toBe(410);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      await expect(response.json()).resolves.toEqual({
+        error: "Legacy server registration is no longer available. Install and enroll this server again.",
+        code: "fresh_enrollment_required",
+      });
+    }
+    expect(mocks.drizzle).not.toHaveBeenCalled();
+    expect(mocks.requireAdminUserContext).not.toHaveBeenCalled();
+    expect(mocks.requireUserContext).not.toHaveBeenCalled();
   });
 });

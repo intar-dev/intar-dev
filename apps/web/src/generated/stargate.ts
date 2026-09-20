@@ -21,10 +21,27 @@ export interface WorkspaceAppMetadata {
 
 /** The complete SSH endpoint of one scenario VM terminal. Only the admin API
  * carries this value: the guest private key never reaches a browser. */
+export interface HostRelayIdentity {
+  host_id: string;
+  session_id: string;
+  credential_generation: number;
+}
+export type RelayService = "ssh";
+export interface RelayTarget {
+  host: HostRelayIdentity;
+  owner_id: string;
+  execution_id: string;
+  execution_generation: number;
+  vm_id: string;
+  service: RelayService;
+}
+export type SshTargetTransport =
+  | { kind: "direct"; host: string; port: number }
+  | { kind: "relay"; target: RelayTarget };
+
 export interface TerminalTarget {
   username: string;
-  host: string;
-  port: number;
+  transport: SshTargetTransport;
   host_key_openssh: string;
   private_key_openssh: string;
   authorized_client_public_keys_openssh: string[];
@@ -102,8 +119,7 @@ export interface IssueWorkspaceAppSessionRequest {
   route_id: string;
   create_only?: boolean;
   target_username: string;
-  target_ip: string;
-  target_ssh_port: number;
+  transport: SshTargetTransport;
   target_host_key_openssh: string;
   target_private_key_openssh: string;
   target_app_port: number;

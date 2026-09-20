@@ -197,7 +197,7 @@ describe("run lifecycle", () => {
       runId: "run-a",
       current,
       report: hostReport([
-        {
+        { owner_user_id: "user-1", runtime_execution_id: "run-b", generation: 1,
           run_id: "run-b",
           vm_name: "webserver",
           phase: "failed",
@@ -211,7 +211,7 @@ describe("run lifecycle", () => {
           error: "other run failed",
           updated_at_unix_ms: 1_762_041_660_000,
         },
-        {
+        { owner_user_id: "user-1", runtime_execution_id: "run-a", generation: 1,
           run_id: "run-a",
           vm_name: "webserver",
           phase: "ready",
@@ -767,8 +767,8 @@ function vmReport(input: {
   error?: string | null;
   observedAt?: number;
 }): VmReportV2 {
-  return {
-    schema_version: 5,
+  return { owner_user_id: "user-1", runtime_execution_id: input.runId, generation: 1,
+    schema_version: 6,
     host_id: "host-alpha",
     run_id: input.runId,
     vm_name: input.vmName,
@@ -837,8 +837,8 @@ function vmResourceState(): NonNullable<VmReportV2["resource_state"]> {
 }
 
 function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
-  return {
-    schema_version: 6,
+  return { relay_connected: true,
+    schema_version: 7,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 42,

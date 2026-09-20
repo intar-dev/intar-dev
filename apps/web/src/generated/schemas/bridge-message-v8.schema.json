@@ -400,6 +400,16 @@
           "format": "uint16",
           "maximum": 8,
           "minimum": 8
+        },
+        "relay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostRelayCredentials"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -421,6 +431,11 @@
         "desired_phase": {
           "$ref": "#/$defs/DesiredVmPhase"
         },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
         "guest_tools": {
           "$ref": "#/$defs/DesiredGuestToolsV1"
         },
@@ -434,10 +449,16 @@
           "type": "integer",
           "format": "int64"
         },
+        "owner_user_id": {
+          "type": "string"
+        },
         "resources": {
           "$ref": "#/$defs/VmResourcesV3"
         },
         "run_id": {
+          "type": "string"
+        },
+        "runtime_execution_id": {
           "type": "string"
         },
         "ssh_authorized_keys_openssh": {
@@ -446,11 +467,18 @@
             "type": "string"
           }
         },
+        "vm_id": {
+          "type": "string"
+        },
         "vm_name": {
           "type": "string"
         }
       },
       "required": [
+        "vm_id",
+        "owner_user_id",
+        "runtime_execution_id",
+        "generation",
         "run_id",
         "vm_name",
         "desired_phase",
@@ -663,11 +691,17 @@
         "host_id": {
           "type": "string"
         },
+        "owner_user_id": {
+          "type": "string"
+        },
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 5,
-          "minimum": 5
+          "maximum": 6,
+          "minimum": 6
+        },
+        "scope": {
+          "$ref": "#/$defs/HostScope"
         },
         "version": {
           "type": "integer",
@@ -682,6 +716,8 @@
         }
       },
       "required": [
+        "scope",
+        "owner_user_id",
         "schema_version",
         "host_id",
         "version",
@@ -691,11 +727,69 @@
         "builds"
       ]
     },
+    "HostRelayCredentials": {
+      "type": "object",
+      "properties": {
+        "expires_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "gateway_host_key_openssh": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/HostRelayIdentity"
+        },
+        "token": {
+          "type": "string"
+        },
+        "websocket_url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "websocket_url",
+        "token",
+        "gateway_host_key_openssh",
+        "identity",
+        "expires_at_unix_ms"
+      ]
+    },
+    "HostRelayIdentity": {
+      "type": "object",
+      "properties": {
+        "credential_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_id",
+        "session_id",
+        "credential_generation"
+      ]
+    },
     "HostRoleV1": {
       "type": "string",
       "enum": [
         "agent",
         "builder"
+      ]
+    },
+    "HostScope": {
+      "type": "string",
+      "enum": [
+        "personal",
+        "platform"
       ]
     },
     "HostStateReportV2": {
@@ -737,11 +831,14 @@
           "type": "integer",
           "format": "int64"
         },
+        "relay_connected": {
+          "type": "boolean"
+        },
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 6,
-          "minimum": 6
+          "maximum": 7,
+          "minimum": 7
         },
         "vms": {
           "type": "array",
@@ -751,6 +848,7 @@
         }
       },
       "required": [
+        "relay_connected",
         "schema_version",
         "host_id",
         "observed_at_unix_ms",
@@ -821,9 +919,23 @@
           "format": "uint16",
           "maximum": 8,
           "minimum": 8
+        },
+        "relay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostRelayCredentials"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
         }
       },
       "required": [
+        "session_id",
         "protocol_version",
         "host_id",
         "desired_version"
@@ -909,6 +1021,11 @@
             "null"
           ]
         },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
         "guest_tools": {
           "anyOf": [
             {
@@ -945,6 +1062,9 @@
             }
           ]
         },
+        "owner_user_id": {
+          "type": "string"
+        },
         "phase": {
           "$ref": "#/$defs/VmPhase"
         },
@@ -978,6 +1098,9 @@
             }
           ]
         },
+        "runtime_execution_id": {
+          "type": "string"
+        },
         "sandbox": {
           "anyOf": [
             {
@@ -1007,6 +1130,9 @@
         }
       },
       "required": [
+        "owner_user_id",
+        "runtime_execution_id",
+        "generation",
         "run_id",
         "vm_name",
         "phase",
@@ -1197,6 +1323,11 @@
             "null"
           ]
         },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
         "guest_tools": {
           "anyOf": [
             {
@@ -1223,6 +1354,9 @@
         "observed_at_unix_ms": {
           "type": "integer",
           "format": "int64"
+        },
+        "owner_user_id": {
+          "type": "string"
         },
         "phase": {
           "$ref": "#/$defs/VmPhase"
@@ -1256,6 +1390,9 @@
             }
           ]
         },
+        "runtime_execution_id": {
+          "type": "string"
+        },
         "sandbox": {
           "anyOf": [
             {
@@ -1269,8 +1406,8 @@
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 5,
-          "minimum": 5
+          "maximum": 6,
+          "minimum": 6
         },
         "ssh_host_keys_openssh": {
           "type": "array",
@@ -1286,6 +1423,9 @@
         }
       },
       "required": [
+        "owner_user_id",
+        "runtime_execution_id",
+        "generation",
         "schema_version",
         "host_id",
         "run_id",

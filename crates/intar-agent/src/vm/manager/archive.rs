@@ -198,19 +198,6 @@ pub(super) struct RunArchiveStageRequest {
     pub(super) stage: ArchiveStage,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AgentBootstrapRequest<'a> {
-    pub(super) host_id: &'a str,
-    pub(super) bootstrap_token: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AgentBootstrapResponse {
-    pub(super) access_token: String,
-}
-
 pub(super) async fn queue_archive_job(inner: &Inner, prepared: &PreparedVmDeletion) -> Result<()> {
     let now = now_unix_ms();
     inner

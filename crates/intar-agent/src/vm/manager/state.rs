@@ -125,6 +125,10 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
 
     let details = match (&row.root_disk_path, &row.seed_disk_path, &row.mac) {
         (Some(root_disk_path), Some(seed_disk_path), Some(mac)) => Some(VmDetails {
+            owner_user_id: row.owner_user_id.clone(),
+            runtime_execution_id: row.runtime_execution_id.clone(),
+            generation: u64::try_from(row.generation)
+                .context("invalid persisted execution generation")?,
             image_key: row.image_key.clone(),
             image_sha256: row.image_sha256.clone(),
             guest_tools,

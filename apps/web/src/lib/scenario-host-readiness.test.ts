@@ -50,8 +50,8 @@ function report(
     },
   ],
 ): HostStateReportV2 {
-  return {
-    schema_version: 6,
+  return { relay_connected: true,
+    schema_version: 7,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 1,

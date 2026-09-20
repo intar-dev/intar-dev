@@ -483,6 +483,9 @@ jobs:
               cp -R crates/intar-jailerd/deploy "${workdir}/deploy"
               cp crates/intar-agent/deploy/intar-agent.service "${workdir}/deploy/intar-agent.service"
               cp crates/intar-agent/deploy/config.example.toml "${workdir}/deploy/intar-agent.config.example.toml"
+              sudo apt-get update
+              sh deploy/personal-metal/package.sh "${workdir}" "${VERSION}"
+              cp deploy/personal-metal/intar-host "${dist_dir}/intar-agent_${VERSION}_intar-host"
 
               # Bundle the exact upstream license set corresponding to the
               # pinned v53.0 source commit used for the static runtime.
@@ -531,6 +534,36 @@ jobs:
           fi
           cd "${dist_dir}"
           sha256sum "${BINARY}_${VERSION}_"* > "${BINARY}_${VERSION}_checksums.txt"
+
+      - name: Test personal-host installer
+        if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
+        run: |
+          python3 -m unittest discover -s deploy/personal-metal -p 'test_*.py'
+          sh -n apps/web/public/install.sh deploy/personal-metal/package.sh
+
+      - name: Run privileged agent package smoke
+        if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          package_root="$(mktemp -d)"
+          tar -xzf "dist/intar-agent_${VERSION}_linux_amd64.tar.gz" -C "${package_root}"
+          # Use the installer's exact-version lock validation and install path.
+          sudo python3 - "${package_root}" <<'PY'
+          from pathlib import Path
+          import runpy, sys
+          package = Path(sys.argv[1])
+          installer = runpy.run_path(str(package / 'deploy/personal-metal/intar-host'))
+          installer['install_dependencies'](package)
+          PY
+          if ! id intar-agent >/dev/null 2>&1; then
+            sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin intar-agent
+          fi
+          sudo sh deploy/personal-metal/test-mounts-linux.sh
+          sudo sh crates/intar-jailerd/tests/package-smoke.sh \
+            "${PWD}/dist/intar-agent_${VERSION}_linux_amd64.tar.gz"
+          rm -rf "${package_root}"
 
       - name: Smoke-test image CLI release package
         if: inputs.project == 'intar-image-cli' && steps.next.outputs.resume != 'true'

@@ -39,6 +39,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tracing-subscriber.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 

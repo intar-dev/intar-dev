@@ -115,7 +115,7 @@ describe("course routes", () => {
       capacityPressure: 73,
       allowSequenceBypass: true,
     });
-    expect(mocks.loadScenarioCapacityPressure).toHaveBeenCalledWith(null);
+    expect(mocks.loadScenarioCapacityPressure).toHaveBeenCalledWith("admin-1");
   });
 
   it("does not expose a locked public lecture body", async () => {
@@ -162,7 +162,7 @@ describe("course routes", () => {
       allowSequenceBypass: false,
     });
     expect(mocks.loadScenarioCapacityPressure).toHaveBeenCalledWith(
-      "organization-1",
+      "learner-1",
     );
   });
 

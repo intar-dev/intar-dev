@@ -10,6 +10,9 @@ fn test_db_path() -> PathBuf {
 
 fn test_vm_row() -> VmRow {
     VmRow {
+        owner_user_id: "user-1".to_string(),
+        runtime_execution_id: "execution-1".to_string(),
+        generation: 1,
         name: "vm-1".to_string(),
         state: "running".to_string(),
         image_key: Some("ubuntu".to_string()),
@@ -562,5 +565,70 @@ async fn verified_content_upsert_inserts_then_updates_the_same_row() {
     assert_eq!(
         rows[0].verified_at_ms, 1_700_000_009_000,
         "the conflict update replaces the verification timestamp"
+    );
+}
+
+#[tokio::test]
+async fn restart_requires_durable_execution_and_host_identity() {
+    use crate::config::BridgeConfig;
+    use intar_contracts::bridge::{HostDesiredStateV2, HostScope};
+    let db = open_test_db_thread(test_db_path()).await;
+    let mut desired: HostDesiredStateV2 = serde_json::from_str(include_str!(
+        "../../../intar-contracts/fixtures/bridge/host-desired-state-v2.json"
+    ))
+    .expect("valid fixture");
+    let cfg = BridgeConfig {
+        host_id: "host-1".into(),
+        owner_user_id: "user-1".into(),
+        scope: HostScope::Personal,
+        ..BridgeConfig::default()
+    };
+    let row = test_vm_row();
+    desired.host_id = cfg.host_id.clone();
+    desired.owner_user_id = cfg.owner_user_id.clone();
+    desired.scope = cfg.scope;
+    desired.builds.clear();
+    desired.vms.truncate(1);
+    desired.vms[0].vm_name = row.name.clone();
+    desired.vms[0].run_id = row.run_id.clone().expect("fixture identity");
+    desired.vms[0].owner_user_id = row.owner_user_id.clone();
+    desired.vms[0].runtime_execution_id = row.runtime_execution_id.clone();
+    desired.vms[0].generation = row.generation as u64;
+    assert!(
+        crate::bridge::validate_restart(&cfg, &db, std::slice::from_ref(&row))
+            .await
+            .is_err()
+    );
+    db.upsert_desired_state(DesiredStateRow {
+        host_id: cfg.host_id.clone(),
+        version: desired.version as i64,
+        doc_json: serde_json::to_string(&desired).expect("valid fixture"),
+        updated_at_ms: 1,
+    })
+    .await
+    .expect("valid fixture");
+    crate::bridge::validate_restart(&cfg, &db, std::slice::from_ref(&row))
+        .await
+        .expect("valid fixture");
+    for field in ["owner", "execution", "generation"] {
+        let mut wrong = row.clone();
+        match field {
+            "owner" => wrong.owner_user_id = "other".into(),
+            "execution" => wrong.runtime_execution_id = "other".into(),
+            _ => wrong.generation += 1,
+        }
+        assert!(
+            crate::bridge::validate_restart(&cfg, &db, &[wrong])
+                .await
+                .is_err(),
+            "{field}"
+        );
+    }
+    let mut other_host = cfg.clone();
+    other_host.owner_user_id = "other".into();
+    assert!(
+        crate::bridge::validate_restart(&other_host, &db, &[row])
+            .await
+            .is_err()
     );
 }

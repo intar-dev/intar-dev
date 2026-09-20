@@ -176,13 +176,14 @@ async function seedHostNeedingImage(image: SeededChunkedImage): Promise<void> {
   });
   await db.insert(agentHosts).values({
     id: HOST_ID,
+    scope: "platform",
     userId: OWNER_USER_ID,
     name: "Host 1",
     role: "agent",
     scenarioEnabled: true,
     disabled: false,
   });
-  const doc = createEmptyHostDesiredState({ hostId: HOST_ID, nowUnixMs: now });
+  const doc = createEmptyHostDesiredState({ ownerUserId: OWNER_USER_ID, scope: "platform", hostId: HOST_ID, nowUnixMs: now });
   doc.cached_images = [
     {
       image_key: { scenario: SCENARIO_ID, vm: VM_NAME, arch: ARCH },

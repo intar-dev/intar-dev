@@ -8,6 +8,10 @@ use super::*;
 
 fn desired_vm() -> DesiredVmV2 {
     DesiredVmV2 {
+        vm_id: "vm-1".to_string(),
+        owner_user_id: "user-1".to_string(),
+        runtime_execution_id: "execution-1".to_string(),
+        generation: 1,
         run_id: "run-1".to_string(),
         vm_name: "web".to_string(),
         desired_phase: DesiredVmPhase::Running,
@@ -42,6 +46,8 @@ fn host_capabilities_require_an_attested_run_cli_runtime() {
 
 fn empty_desired_state(version: u64) -> HostDesiredStateV2 {
     HostDesiredStateV2 {
+        scope: intar_contracts::bridge::HostScope::Personal,
+        owner_user_id: "user-1".to_string(),
         schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
         host_id: "host-1".to_string(),
         version,
@@ -338,7 +344,7 @@ fn explicit_terminal_contract_exposes_targets_only_when_ready() {
 #[test]
 fn agent_desired_state_rejects_build_assignments() {
     let mut desired = empty_desired_state(1);
-    validate_desired_state("host-1", &desired).expect("empty builds should be valid");
+    validate_desired_state(&test_bridge_config(), &desired).expect("empty builds should be valid");
 
     desired
         .builds
@@ -350,7 +356,7 @@ fn agent_desired_state_rejects_build_assignments() {
             content_hash: "f".repeat(64),
             bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
         });
-    let error = validate_desired_state("host-1", &desired)
+    let error = validate_desired_state(&test_bridge_config(), &desired)
         .expect_err("agents must reject builder assignments");
     assert!(format!("{error:#}").contains("must not contain build assignments"));
 }
@@ -507,6 +513,8 @@ fn desired_peer_aliases_map_runtime_names_to_manifest_vm_names() {
     other_run.image_key.vm = "other".to_string();
 
     let desired = HostDesiredStateV2 {
+        scope: intar_contracts::bridge::HostScope::Personal,
+        owner_user_id: "user-1".to_string(),
         schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
         host_id: "host-1".to_string(),
         version: 1,
@@ -552,6 +560,8 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
     let manifest_path = manifest_dir.join(format!("{manifest_sha256}.json"));
     std::fs::write(&manifest_path, &manifest_bytes).expect("cached manifest");
     let desired = HostDesiredStateV2 {
+        scope: intar_contracts::bridge::HostScope::Personal,
+        owner_user_id: "user-1".to_string(),
         schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
         host_id: "host-1".to_string(),
         version: 1,
@@ -729,11 +739,181 @@ async fn cached_guest_tools_reports_verified_readiness() {
 }
 
 #[test]
-fn desired_lease_duration_has_minimum_one_second() {
+fn expired_desired_lease_is_rejected() {
     let mut vm = desired_vm();
     vm.lease_expires_at_unix_ms = now_ms() - 1_000;
-    assert_eq!(
-        desired_lease_duration_seconds(&vm, now_ms()).expect("lease"),
-        1
-    );
+    assert!(desired_lease_duration_seconds(&vm, now_ms()).is_err());
+}
+
+fn test_bridge_config() -> BridgeConfig {
+    BridgeConfig {
+        host_id: "host-1".into(),
+        owner_user_id: "user-1".into(),
+        ..BridgeConfig::default()
+    }
+}
+
+#[test]
+fn desired_identity_is_mandatory_and_personal_owner_is_bound() {
+    let cfg = test_bridge_config();
+    let mut desired = empty_desired_state(1);
+    desired.vms.push(desired_vm());
+    validate_desired_state(&cfg, &desired).expect("valid fixture");
+    for field in [
+        "owner_user_id",
+        "runtime_execution_id",
+        "generation",
+        "vm_id",
+    ] {
+        let mut value = serde_json::to_value(&desired).expect("valid fixture");
+        value["vms"][0]
+            .as_object_mut()
+            .expect("fixture object")
+            .remove(field);
+        assert!(
+            serde_json::from_value::<HostDesiredStateV2>(value).is_err(),
+            "{field}"
+        );
+    }
+    for field in ["scope", "owner_user_id"] {
+        let mut value = serde_json::to_value(&desired).expect("valid fixture");
+        value.as_object_mut().expect("fixture object").remove(field);
+        assert!(
+            serde_json::from_value::<HostDesiredStateV2>(value).is_err(),
+            "{field}"
+        );
+    }
+    let mut wrong = desired.clone();
+    wrong.vms[0].owner_user_id = "another-user".into();
+    assert!(validate_desired_state(&cfg, &wrong).is_err());
+    wrong = desired.clone();
+    wrong.vms[0].runtime_execution_id.clear();
+    assert!(validate_desired_state(&cfg, &wrong).is_err());
+    wrong = desired.clone();
+    wrong.vms[0].generation = 0;
+    assert!(validate_desired_state(&cfg, &wrong).is_err());
+    wrong = desired.clone();
+    wrong.scope = intar_contracts::bridge::HostScope::Platform;
+    assert!(validate_desired_state(&cfg, &wrong).is_err());
+    wrong = desired;
+    wrong.owner_user_id = "another-owner".into();
+    assert!(validate_desired_state(&cfg, &wrong).is_err());
+}
+
+#[test]
+fn platform_host_accepts_explicit_workload_owners_without_rebinding_host_owner() {
+    let mut cfg = test_bridge_config();
+    cfg.scope = intar_contracts::bridge::HostScope::Platform;
+    let mut desired = empty_desired_state(1);
+    desired.scope = cfg.scope;
+    desired.vms.push(desired_vm());
+    desired.vms[0].owner_user_id = "learner-2".into();
+    validate_desired_state(&cfg, &desired).expect("valid fixture");
+    desired.owner_user_id = "learner-2".into();
+    assert!(validate_desired_state(&cfg, &desired).is_err());
+}
+
+#[test]
+fn execution_transition_rejects_regression_and_identity_reuse() {
+    let mut current = empty_desired_state(4);
+    current.vms.push(desired_vm());
+    current.vms[0].generation = 2;
+    let mut incoming = current.clone();
+    incoming.version += 1;
+    validate_desired_transition(Some(&current), &incoming).expect("valid fixture");
+    incoming.vms[0].generation = 1;
+    assert!(validate_desired_transition(Some(&current), &incoming).is_err());
+    incoming.vms[0].generation = 2;
+    incoming.vms[0].runtime_execution_id = "different".into();
+    assert!(validate_desired_transition(Some(&current), &incoming).is_err());
+    incoming.vms[0].generation = 3;
+    validate_desired_transition(Some(&current), &incoming).expect("valid fixture");
+    incoming.version = current.version;
+    assert!(validate_desired_transition(Some(&current), &incoming).is_err());
+}
+
+#[test]
+fn relay_credentials_are_bound_to_the_current_control_session() {
+    use intar_contracts::{bridge::HostRelayCredentials, stargate::HostRelayIdentity};
+    let cfg = test_bridge_config();
+    let mut credentials = HostRelayCredentials {
+        websocket_url: "wss://relay.example.test/host".into(),
+        token: "secret".into(),
+        gateway_host_key_openssh: "ssh-ed25519 key".into(),
+        expires_at_unix_ms: now_ms() + 60_000,
+        identity: HostRelayIdentity {
+            host_id: cfg.host_id.clone(),
+            session_id: "current".into(),
+            credential_generation: cfg.credential_generation,
+        },
+    };
+    validate_relay_identity(&cfg, "current", Some(&credentials)).expect("valid fixture");
+    assert!(validate_relay_identity(&cfg, "replacement", Some(&credentials)).is_err());
+    credentials.identity.credential_generation += 1;
+    assert!(validate_relay_identity(&cfg, "current", Some(&credentials)).is_err());
+}
+
+#[tokio::test]
+async fn access_refresh_failure_reaches_the_control_connection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test service operation");
+    let address = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/api/agent/bootstrap",
+                axum::routing::post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+            ),
+        )
+        .await
+        .expect("valid fixture");
+    });
+    let mut cfg = test_bridge_config();
+    cfg.base_url = format!("http://{address}");
+    let result = refresh_agent_access(&cfg, &HttpClient::new()).await;
+    server.abort();
+    let error = result
+        .err()
+        .expect("refresh failure must exit the control loop");
+    assert!(format!("{error:#}").contains("HTTP 503"));
+}
+
+#[tokio::test]
+async fn access_refresh_timeout_reaches_the_control_connection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test service operation");
+    let address = listener.local_addr().expect("test listener address");
+    let requested = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = requested.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/api/agent/bootstrap",
+                axum::routing::post(move || {
+                    let signal = signal.clone();
+                    async move {
+                        signal.notify_one();
+                        std::future::pending::<axum::http::StatusCode>().await
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("valid fixture");
+    });
+    let mut cfg = test_bridge_config();
+    cfg.base_url = format!("http://{address}");
+    let refresh = tokio::spawn(async move { refresh_agent_access(&cfg, &HttpClient::new()).await });
+    requested.notified().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(RUN_CLI_ACCESS_REFRESH_TIMEOUT_SECS + 1)).await;
+    let result = refresh.await.expect("refresh task");
+    tokio::time::resume();
+    server.abort();
+    let error = result.err().expect("timeout must exit the control loop");
+    assert!(error.to_string().contains("refresh timed out"));
 }

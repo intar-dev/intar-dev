@@ -363,6 +363,7 @@ async fn run_attached_terminal(
         return Ok(());
     };
     let (controller, mut events) = spawn_pty_bridge(
+        state.host_relays.clone(),
         route,
         PtyBridgeOptions {
             term: DEFAULT_TERM.to_owned(),
@@ -1165,8 +1166,10 @@ mod tests {
                 .expect("client key");
         TerminalTarget {
             username: "ubuntu".to_owned(),
-            host: "127.0.0.1".to_owned(),
-            port: 22,
+            transport: stargate_core::SshTargetTransport::Direct {
+                host: "127.0.0.1".to_owned(),
+                port: 22,
+            },
             host_key_openssh: host_key.public_key().to_openssh().expect("host key"),
             private_key_openssh: private_key
                 .to_openssh(russh::keys::ssh_key::LineEnding::LF)

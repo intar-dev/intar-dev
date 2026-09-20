@@ -34,6 +34,21 @@ export default defineConfig({
           STARGATE_ROUTE_TTL_SECONDS: "14400",
           STARGATE_EGRESS_IPV4_CIDRS: "192.0.2.10/32",
         },
+        serviceBindings: {
+          STARGATE_ADMIN_SERVICE: async (request) => {
+            const path = new URL(request.url).pathname;
+            if (path === "/v1/host-relays/grant") {
+              const grant = await request.json() as { identity: unknown; expires_at_unix_ms: number };
+              return Response.json({
+                websocket_url: "wss://relay.example.test/host", token: "a".repeat(64),
+                gateway_host_key_openssh: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC8RhyqlniULcwGMBBuwmhTSMOZUalITtxBKhuxfuDd4",
+                identity: grant.identity, expires_at_unix_ms: grant.expires_at_unix_ms,
+              });
+            }
+            if (path.startsWith("/v1/host-relays/revoke")) return new Response(null, {status: 204});
+            return new Response("test service has no such route", {status: 404});
+          },
+        },
         d1Databases: ["DB"],
         durableObjects: {
           HOST_RUNTIME: {

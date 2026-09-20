@@ -347,6 +347,8 @@ async function seedObsoleteWarmIntents(input: {
     updatedAt: new Date(now),
   });
   await db.insert(agentHosts).values({
+    scope: "platform",
+    credentialGeneration: 1,
     id: input.hostId,
     userId: "warm-owner",
     name: input.hostId,
@@ -362,7 +364,7 @@ async function seedObsoleteWarmIntents(input: {
   await db.insert(hostDesiredState).values({
     hostId: input.hostId,
     version: 3,
-    docJson: {
+    docJson: { owner_user_id: "warm-owner", scope: "platform",
       schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
       host_id: input.hostIdInDoc ?? input.hostId,
       version: 3,
@@ -398,7 +400,7 @@ async function seedObsoleteWarmIntents(input: {
         },
       ],
       vms: [
-        {
+        { owner_user_id: "warm-owner", runtime_execution_id: "run-warm", generation: 1,
           run_id: "run-warm",
           vm_name: WARM_FAMILY.vm,
           phase: "running",

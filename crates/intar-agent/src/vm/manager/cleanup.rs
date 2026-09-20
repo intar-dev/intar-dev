@@ -918,32 +918,9 @@ pub(super) async fn bootstrap_agent_access_token(
     if !cfg.enabled {
         anyhow::bail!("bridge uploads require bridge.enabled = true");
     }
-    let url = format!("{}/agent/bootstrap", cfg.base_url);
-    let display_url = crate::config::redact_url_userinfo(&url);
-    let request = AgentBootstrapRequest {
-        host_id: &cfg.host_id,
-        bootstrap_token: &cfg.bootstrap_token,
-    };
-
-    let response = http
-        .post(&url)
-        .json(&request)
-        .send()
-        .await
-        .with_context(|| format!("failed to call bootstrap endpoint at {display_url}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        // The bootstrap response carries a bearer credential on success. Do
-        // not copy an untrusted error body into task errors, because callers
-        // may log their complete error chain.
-        anyhow::bail!("bootstrap request failed with status {status}");
-    }
-
-    let payload = response
-        .json::<AgentBootstrapResponse>()
-        .await
-        .context("failed to parse bootstrap response")?;
-    Ok(payload.access_token)
+    Ok(crate::bridge::bootstrap_agent_access(cfg, http)
+        .await?
+        .access_token)
 }
 
 pub(super) fn agent_owned_vm_dir_for_status(vm: &VmStatusResponse) -> Option<PathBuf> {

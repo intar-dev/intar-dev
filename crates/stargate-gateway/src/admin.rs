@@ -328,8 +328,7 @@ fn terminal_route_authorization_changed(
 /// does not parse is a change, so a broken record fails closed.
 fn target_authorization_changed(previous: &TerminalTarget, current: &TerminalTarget) -> bool {
     if previous.username != current.username
-        || previous.host != current.host
-        || previous.port != current.port
+        || previous.transport != current.transport
         || previous.private_key_openssh != current.private_key_openssh
     {
         return true;
@@ -529,7 +528,10 @@ mod tests {
         changes.push(mode);
 
         let mut target = base.clone();
-        active_target(&mut target).host = "127.0.0.2".to_owned();
+        active_target(&mut target).transport = stargate_core::SshTargetTransport::Direct {
+            host: "127.0.0.2".to_owned(),
+            port: 22,
+        };
         changes.push(target);
 
         for current in changes {
@@ -619,8 +621,10 @@ mod tests {
                 attachment_id: "attachment-01".to_owned(),
                 target: TerminalTarget {
                     username: "ubuntu".to_owned(),
-                    host: "127.0.0.1".to_owned(),
-                    port: 22,
+                    transport: stargate_core::SshTargetTransport::Direct {
+                        host: "127.0.0.1".to_owned(),
+                        port: 22,
+                    },
                     host_key_openssh: host_key.public_key().to_openssh().expect("host key"),
                     private_key_openssh: private_key
                         .to_openssh(russh::keys::ssh_key::LineEnding::LF)

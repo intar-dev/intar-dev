@@ -538,7 +538,7 @@ function encodeAdminRunArchiveCursor(cursor: AdminRunArchiveCursor): string {
 function personalActiveHostScope(userId: string) {
   return and(
     eq(agentHosts.userId, userId),
-    isNull(agentHosts.organizationId),
+    eq(agentHosts.scope, "platform"),
     eq(agentHosts.disabled, false),
   );
 }

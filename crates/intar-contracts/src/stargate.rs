@@ -52,8 +52,7 @@ pub enum NativeTerminalAuthMode {
 #[serde(rename_all = "snake_case")]
 pub struct TerminalTarget {
     pub username: String,
-    pub host: String,
-    pub port: u16,
+    pub transport: SshTargetTransport,
     pub host_key_openssh: String,
     pub private_key_openssh: String,
     pub authorized_client_public_keys_openssh: Vec<String>,
@@ -67,7 +66,7 @@ pub struct TerminalTarget {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TerminalTargetState {
     Pending,
-    Ready(TerminalTarget),
+    Ready(Box<TerminalTarget>),
 }
 
 impl TerminalTargetState {
@@ -190,8 +189,7 @@ pub struct IssueWorkspaceAppSessionRequest {
     pub target_username: String,
     /// Literal IP and port of the guest SSH endpoint already exposed to
     /// Stargate by the VM harness.
-    pub target_ip: String,
-    pub target_ssh_port: u16,
+    pub transport: SshTargetTransport,
     pub target_host_key_openssh: String,
     pub target_private_key_openssh: String,
     /// Allowlisted application port inside the guest. Stargate reaches it
@@ -232,4 +230,88 @@ pub struct IssueWorkspaceAppSessionResponse {
     pub url: String,
     pub bootstrap_expires_at: i64,
     pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostRelayIdentity {
+    pub host_id: String,
+    pub session_id: String,
+    pub credential_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayService {
+    Ssh,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayTarget {
+    pub host: HostRelayIdentity,
+    pub owner_id: String,
+    pub execution_id: String,
+    #[schemars(range(min = 1))]
+    pub execution_generation: u64,
+    pub vm_id: String,
+    pub service: RelayService,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SshTargetTransport {
+    Direct { host: String, port: u16 },
+    Relay { target: RelayTarget },
+}
+
+impl HostRelayIdentity {
+    pub fn validate(&self) -> std::io::Result<()> {
+        relay_check(
+            valid_relay_id(&self.host_id)
+                && valid_relay_id(&self.session_id)
+                && self.credential_generation > 0,
+            "invalid relay host identity",
+        )
+    }
+}
+impl RelayTarget {
+    pub fn validate(&self) -> std::io::Result<()> {
+        self.host.validate()?;
+        relay_check(
+            [&self.owner_id, &self.execution_id, &self.vm_id]
+                .into_iter()
+                .all(|id| valid_relay_id(id))
+                && self.execution_generation > 0,
+            "invalid relay workload identity",
+        )
+    }
+}
+impl SshTargetTransport {
+    pub fn validate(&self) -> std::io::Result<()> {
+        match self {
+            Self::Direct { host, port } => relay_check(
+                host.parse::<std::net::IpAddr>().is_ok() && *port > 0,
+                "direct SSH target requires a literal IP and nonzero port",
+            ),
+            Self::Relay { target } => target.validate(),
+        }
+    }
+}
+fn relay_check(valid: bool, message: &str) -> std::io::Result<()> {
+    if valid {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            message,
+        ))
+    }
+}
+fn valid_relay_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }

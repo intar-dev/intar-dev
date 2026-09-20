@@ -216,7 +216,7 @@ async function seedDestroyableRun(runId: string, now: number) {
     now,
   });
   await mutateStoredHostDesiredState(db, "host-1", now, (draft) => {
-    upsertDesiredVm(draft, {
+    upsertDesiredVm(draft, { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: "runtime-a",
       run_id: runId,
       vm_name: "runtime-a",
       desired_phase: "running",

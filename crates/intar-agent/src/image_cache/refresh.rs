@@ -112,24 +112,7 @@ async fn load_retained_pins(context: CacheRefreshContext<'_>) -> Option<Retained
         warn!("image cache has no desired-state source; waiting for a pin set");
         return None;
     };
-    let row = match db.load_desired_state().await {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            warn!("image cache has no desired state yet; waiting for a pin set");
-            return None;
-        }
-        Err(error) => {
-            warn!(error = %error, "failed to load desired state for the image cache");
-            return None;
-        }
-    };
-    let desired = match serde_json::from_str::<HostDesiredStateV2>(&row.doc_json) {
-        Ok(desired) => desired,
-        Err(error) => {
-            warn!(error = %error, "cached desired state is invalid JSON");
-            return None;
-        }
-    };
+    let desired = crate::bridge::load_cached_desired_state(context.bridge?, db).await?;
     let pins = RequiredPins::from_desired_state(&desired);
     Some(RetainedPins { desired, pins })
 }

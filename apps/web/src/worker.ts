@@ -2,6 +2,7 @@ import { traceOperation } from "@/lib/tracing";
 import { recordSecurityResponse } from "@/lib/security-events";
 import { handle } from "@astrojs/cloudflare/handler";
 import { handleAgentBootstrap, handleAgentConnect } from "@/control-plane/auth";
+import { handleHostEnrollment } from "@/control-plane/host-enrollment";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
 import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
@@ -42,6 +43,10 @@ export default {
     if (cleanupGateResponse) return respond(cleanupGateResponse);
 
     const url = new URL(request.url);
+
+    if (url.pathname === "/agent/enroll") {
+      return respond(await traceOperation("agent.enroll", () => handleHostEnrollment(request, env)));
+    }
 
     if (
       url.pathname === "/agent/bootstrap" ||

@@ -30,9 +30,11 @@ import {
   hostResourceReservations,
   runtimeExecutions,
   runtimeVms,
+  agentHosts,
+  organization,
 } from "@/db/schema";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
-import { markRunVmsAbsentInDesiredState } from "@/lib/scenario-runs/start";
+import { assertScenarioLaunchHostForUser, markRunVmsAbsentInDesiredState } from "@/lib/scenario-runs/start";
 
 /**
  * Seed a live run that belongs to another user on `hostId`, holding the host's
@@ -120,6 +122,32 @@ async function seedCommittedCpuReservation(input: {
 
 describe("HostRuntimeDO scheduling and capacity", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+
+  it("hides a personal host from another user before checking readiness", async () => {
+    await seedHost("private-host");
+    await drizzle(env.DB).update(agentHosts).set({ scope: "personal" }).where(eq(agentHosts.id, "private-host"));
+    await drizzle(env.DB).update(user).set({ metalPlacement: "personal" }).where(eq(user.id, "user-1"));
+    await expect(
+      assertScenarioLaunchHostForUser("private-host", "user-2", []),
+    ).rejects.toMatchObject({ code: "scenario_host_not_found" });
+    // The owner reaches the readiness check; the other user cannot see it.
+    await expect(
+      assertScenarioLaunchHostForUser("private-host", "user-1", []),
+    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
+  });
+
+  it("rejects an old organization host even for its recorded user", async () => {
+    await seedHost("old-org-host");
+    const db = drizzle(env.DB);
+    await db.insert(organization).values({
+      id: "old-org", name: "Old organization", slug: "old-org", createdAt: new Date(),
+    });
+    await db.update(agentHosts).set({ scope: null, credentialGeneration: 0 })
+      .where(eq(agentHosts.id, "old-org-host"));
+    await expect(
+      assertScenarioLaunchHostForUser("old-org-host", "user-1", []),
+    ).rejects.toMatchObject({ code: "scenario_host_not_found" });
+  });
 
   it("keeps stale actual-state hosts out of automatic scenario scheduling", async () => {
     const hostId = "host-degraded-scheduling";
@@ -287,6 +315,8 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     const secondHostId = "host-ranked-second";
     await seedHost(firstHostId);
     await seedHost(secondHostId);
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform'").run();
+    await env.DB.prepare("UPDATE user SET metal_placement = 'platform' WHERE id = 'user-1'").run();
     const first = await connectHost(firstHostId);
     const second = await connectHost(secondHostId);
     await seedEnabledScenario(drizzle(env.DB), now);
@@ -476,13 +506,15 @@ describe("HostRuntimeDO scheduling and capacity", () => {
   it("re-pushes a lagging desired version from the alarm loop after the dispatch threshold", async () => {
     const hostId = "host-lag-repush";
     await seedHost(hostId);
+    const db = drizzle(env.DB);
+    // Platform hosts retain manually staged cache entries during reconciliation.
+    await db.update(agentHosts).set({ scope: "platform" }).where(eq(agentHosts.id, hostId));
     const { messages, stub, ws } = await connectHost(hostId);
     await waitForBridgeMessage(
       messages,
       (message) => message.type === "server_hello",
     );
 
-    const db = drizzle(env.DB);
     await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
       upsertDesiredCachedImage(draft, {
         image_key: testImageKey,

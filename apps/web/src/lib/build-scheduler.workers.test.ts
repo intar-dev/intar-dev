@@ -65,7 +65,7 @@ describe("build scheduler bundle supersession", () => {
     await db.insert(imageBuilds).values(oldRows);
 
     const desired = {
-      ...createEmptyHostDesiredState({ hostId: "builder-1", nowUnixMs: now }),
+      ...createEmptyHostDesiredState({ ownerUserId: "user-1", scope: "platform", hostId: "builder-1", nowUnixMs: now }),
       version: 1,
       builds: [
         desiredBuild("assigned-old", "2"),
@@ -145,6 +145,7 @@ describe("build scheduler bundle supersession", () => {
         "builder-1",
         buildReport("assigned-old", "2"),
         now + 1,
+        { sessionId: "builder-session", credentialGeneration: 1 },
       ),
     ).resolves.toEqual({ updated: false, terminal: false });
 
@@ -308,7 +309,7 @@ describe("build scheduler bundle supersession", () => {
       ...oldBuild("assigned-repair", "a", "assigned", "builder-1", now),
       rev: "bundle-repair",
     });
-    const desired = createEmptyHostDesiredState({
+    const desired = createEmptyHostDesiredState({ ownerUserId: "user-1", scope: "platform",
       hostId: "builder-1",
       nowUnixMs: now,
     });
@@ -360,7 +361,7 @@ describe("build scheduler bundle supersession", () => {
       },
     ]);
     const desired = {
-      ...createEmptyHostDesiredState({ hostId: "builder-1", nowUnixMs: now }),
+      ...createEmptyHostDesiredState({ ownerUserId: "user-1", scope: "platform", hostId: "builder-1", nowUnixMs: now }),
       version: 7,
       builds: [
         desiredBuild("current-queued", "a"),
@@ -420,6 +421,7 @@ describe("build scheduler bundle supersession", () => {
           "builder-1",
           buildReport("assigned-old", "1"),
           now + 1,
+          { sessionId: "builder-session", credentialGeneration: 1 },
         ).finally(() => {
           reportSettled = true;
         });
@@ -624,6 +626,9 @@ async function seedBuilder(
     id: "builder-1",
     userId: "user-1",
     name: "Builder 1",
+    scope: "platform",
+    credentialGeneration: 1,
+    activeSessionId: "builder-session",
     role: "builder",
     scenarioEnabled: false,
     disabled: false,

@@ -104,7 +104,7 @@ fn reports_ready_jailed_agent_host() {
     cfg.bridge.enabled = true;
     cfg.bridge.base_url = "https://intar.dev".to_string();
     cfg.bridge.host_id = "agent-1".to_string();
-    cfg.bridge.bootstrap_token = "secret".to_string();
+    cfg.bridge.credential = "secret".to_string();
     cfg.image_registry.url = "https://intar.dev/agent/registry/images".to_string();
     cfg.vm_defaults.work_dir = Some(work);
     let socket_path = temp.path().join("jailerd.sock");

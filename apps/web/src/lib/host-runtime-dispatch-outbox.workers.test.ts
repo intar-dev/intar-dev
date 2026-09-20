@@ -335,7 +335,7 @@ async function seedHosts(seeds: HostSeed[]): Promise<void> {
         hostId: seed.hostId,
         version,
         docJson: {
-          ...createEmptyHostDesiredState({ hostId: seed.hostId, nowUnixMs: now }),
+          ...createEmptyHostDesiredState({ ownerUserId: OWNER_USER_ID, scope: "platform", hostId: seed.hostId, nowUnixMs: now }),
           version,
         },
         createdAt: now,
@@ -347,7 +347,7 @@ async function seedHosts(seeds: HostSeed[]): Promise<void> {
         hostId: seed.hostId,
         appliedDesiredVersion: seed.appliedVersion,
         observedAt: now,
-        reportJson: {
+        reportJson: { relay_connected: true,
           schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
           host_id: seed.hostId,
           observed_at_unix_ms: now,

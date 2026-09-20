@@ -1,0 +1,1 @@
+ALTER TABLE `agent_hosts` ADD `owner_removal_completed_at` integer;

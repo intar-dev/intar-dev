@@ -29,6 +29,113 @@
     "target"
   ],
   "$defs": {
+    "HostRelayIdentity": {
+      "type": "object",
+      "properties": {
+        "credential_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_id",
+        "session_id",
+        "credential_generation"
+      ]
+    },
+    "RelayService": {
+      "type": "string",
+      "enum": [
+        "ssh"
+      ]
+    },
+    "RelayTarget": {
+      "type": "object",
+      "properties": {
+        "execution_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "execution_id": {
+          "type": "string"
+        },
+        "host": {
+          "$ref": "#/$defs/HostRelayIdentity"
+        },
+        "owner_id": {
+          "type": "string"
+        },
+        "service": {
+          "$ref": "#/$defs/RelayService"
+        },
+        "vm_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "owner_id",
+        "execution_id",
+        "execution_generation",
+        "vm_id",
+        "service"
+      ]
+    },
+    "SshTargetTransport": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "direct"
+            },
+            "port": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "host",
+            "port"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "relay"
+            },
+            "target": {
+              "$ref": "#/$defs/RelayTarget"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target"
+          ]
+        }
+      ]
+    },
     "TerminalTarget": {
       "description": "The complete SSH endpoint of one scenario VM terminal. Only the admin API\ncarries this value: `private_key_openssh` is the credential that reaches\nthe guest, and the gateway never sends it to a browser or a native client.",
       "type": "object",
@@ -39,20 +146,14 @@
             "type": "string"
           }
         },
-        "host": {
-          "type": "string"
-        },
         "host_key_openssh": {
           "type": "string"
         },
-        "port": {
-          "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
-        },
         "private_key_openssh": {
           "type": "string"
+        },
+        "transport": {
+          "$ref": "#/$defs/SshTargetTransport"
         },
         "username": {
           "type": "string"
@@ -60,8 +161,7 @@
       },
       "required": [
         "username",
-        "host",
-        "port",
+        "transport",
         "host_key_openssh",
         "private_key_openssh",
         "authorized_client_public_keys_openssh"

@@ -186,6 +186,9 @@ pub(super) fn ensure_baseline_schema(conn: &Connection) -> Result<()> {
 
 pub(super) fn schema_is_compatible(conn: &Connection) -> Result<bool> {
     let requirements = [
+        ("vms", "owner_user_id"),
+        ("vms", "runtime_execution_id"),
+        ("vms", "generation"),
         ("vms", "name"),
         ("vms", "image_key"),
         ("vms", "image_sha256"),
@@ -282,7 +285,10 @@ SELECT
   recording_disk_path,
   spool_dir,
   cpu_millis,
-  ch_executable_sha256
+  ch_executable_sha256,
+  owner_user_id,
+  runtime_execution_id,
+  generation
 FROM vms
 ORDER BY created_at_s ASC;
 "#,
@@ -332,6 +338,9 @@ ORDER BY created_at_s ASC;
                 spool_dir: row.get(37)?,
                 cpu_millis: row.get(38)?,
                 ch_executable_sha256: row.get(39)?,
+                owner_user_id: row.get(40)?,
+                runtime_execution_id: row.get(41)?,
+                generation: row.get(42)?,
             })
         })
         .context("query load_all_vms")?;
@@ -383,9 +392,12 @@ INSERT INTO vms (
   recording_disk_path,
   spool_dir,
   cpu_millis,
-  ch_executable_sha256
+  ch_executable_sha256,
+  owner_user_id,
+  runtime_execution_id,
+  generation
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
@@ -426,7 +438,10 @@ ON CONFLICT(name) DO UPDATE SET
   recording_disk_path = excluded.recording_disk_path,
   spool_dir = excluded.spool_dir,
   cpu_millis = excluded.cpu_millis,
-  ch_executable_sha256 = excluded.ch_executable_sha256;
+  ch_executable_sha256 = excluded.ch_executable_sha256,
+  owner_user_id = excluded.owner_user_id,
+  runtime_execution_id = excluded.runtime_execution_id,
+  generation = excluded.generation;
 "#,
         params![
             row.name,
@@ -469,6 +484,9 @@ ON CONFLICT(name) DO UPDATE SET
             row.spool_dir,
             row.cpu_millis,
             row.ch_executable_sha256,
+            row.owner_user_id,
+            row.runtime_execution_id,
+            row.generation,
         ],
     )
     .context("upsert vms row")?;

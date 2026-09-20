@@ -1,0 +1,1 @@
+ALTER TABLE `agent_hosts` ADD `owner_removal_id` text;

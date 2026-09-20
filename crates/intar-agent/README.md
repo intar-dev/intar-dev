@@ -110,8 +110,7 @@ request_timeout_seconds = 10
 [bridge]
 enabled = false
 base_url = "https://intar.dev"
-host_id = "my-dedicated-host-1"
-bootstrap_token = ""
+credential_file = "/etc/intar-agent/credential.json"
 heartbeat_interval_seconds = 30
 
 [vm_defaults]

@@ -13,7 +13,7 @@ import {
   desiredVmFromRunVm,
   markDesiredVmAbsent,
   mutateDesiredState,
-  upgradeStoredHostDesiredState,
+  validateStoredHostDesiredState,
   upsertDesiredCachedImage,
   upsertDesiredBuild,
   upsertDesiredVm,
@@ -24,10 +24,14 @@ describe("desired state", () => {
   it("creates an empty version zero host document", () => {
     expect(createEmptyHostDesiredState({
       hostId: "host-alpha",
+      scope: "personal",
+      ownerUserId: "user-1",
       nowUnixMs: 1_762_041_600_000,
     })).toEqual({
-      schema_version: 5,
+      schema_version: 6,
       host_id: "host-alpha",
+      scope: "personal",
+      owner_user_id: "user-1",
       version: 0,
       generated_at_unix_ms: 1_762_041_600_000,
       cached_images: [],
@@ -39,50 +43,21 @@ describe("desired state", () => {
 
   it("keeps a current stored desired state unchanged", () => {
     const current = hostDesiredState({ version: 7 });
-    expect(upgradeStoredHostDesiredState({
+    expect(validateStoredHostDesiredState({
       document: current,
       hostId: "host-alpha",
       rowVersion: 7,
       nowUnixMs: 1_762_041_660_000,
-    })).toEqual({ desiredState: current, migrated: false });
-  });
-
-  it("migrates a drained v4 desired state and drops obsolete work", () => {
-    const legacy = {
-      schema_version: 4,
-      host_id: "host-alpha",
-      version: 235,
-      generated_at_unix_ms: 1_762_041_600_000,
-      cached_images: [{ image_sha256: "1".repeat(64) }],
-      vms: [{ desired_phase: "absent", image_sha256: "2".repeat(64) }],
-      builds: [{ build_id: "obsolete-v9-build", kino_version: "0.2.6" }],
-    };
-
-    expect(upgradeStoredHostDesiredState({
-      document: legacy,
-      hostId: "host-alpha",
-      rowVersion: 235,
-      nowUnixMs: 1_762_041_660_000,
-    })).toEqual({
-      migrated: true,
-      desiredState: {
-        schema_version: 5,
-        host_id: "host-alpha",
-        version: 236,
-        generated_at_unix_ms: 1_762_041_660_000,
-        cached_images: [],
-        cached_guest_tools: [],
-        vms: [],
-        builds: [],
-      },
-    });
+    })).toEqual(current);
   });
 
   it("refuses to migrate a v4 desired state with a running VM", () => {
-    expect(() => upgradeStoredHostDesiredState({
+    expect(() => validateStoredHostDesiredState({
       document: {
         schema_version: 4,
         host_id: "host-alpha",
+        scope: "personal",
+        owner_user_id: "user-1",
         version: 9,
         generated_at_unix_ms: 1_762_041_600_000,
         cached_images: [],
@@ -92,19 +67,21 @@ describe("desired state", () => {
       hostId: "host-alpha",
       rowVersion: 9,
       nowUnixMs: 1_762_041_660_000,
-    })).toThrow("still contains a running or malformed VM");
+    })).toThrow("schema or ownership is invalid");
   });
 
   it("bumps the version and timestamp when desired content changes", () => {
     const current = createEmptyHostDesiredState({
       hostId: "host-alpha",
+      scope: "personal",
+      ownerUserId: "user-1",
       nowUnixMs: 1_762_041_600_000,
     });
     const next = mutateDesiredState(
       current,
       (draft) => {
-        upsertDesiredCachedImage(draft, cachedImage("webserver", "sha-a"));
-        upsertDesiredVm(draft, desiredVm("run-a", "webserver", "sha-a"));
+        upsertDesiredCachedImage(draft, cachedImage("webserver", "a".repeat(64)));
+        upsertDesiredVm(draft, desiredVm("run-a", "webserver", "a".repeat(64)));
         upsertDesiredBuild(draft, desiredBuild("build-a"));
       },
       { nowUnixMs: 1_762_041_660_000 },
@@ -123,16 +100,16 @@ describe("desired state", () => {
   it("returns the original document for no-op mutations", () => {
     const current = hostDesiredState({
       version: 7,
-      cachedImages: [cachedImage("webserver", "sha-a")],
-      vms: [desiredVm("run-a", "webserver", "sha-a")],
+      cachedImages: [cachedImage("webserver", "a".repeat(64))],
+      vms: [desiredVm("run-a", "webserver", "a".repeat(64))],
       builds: [desiredBuild("build-a")],
     });
 
     const next = mutateDesiredState(
       current,
       (draft) => {
-        upsertDesiredCachedImage(draft, cachedImage("webserver", "sha-a"));
-        upsertDesiredVm(draft, desiredVm("run-a", "webserver", "sha-a"));
+        upsertDesiredCachedImage(draft, cachedImage("webserver", "a".repeat(64)));
+        upsertDesiredVm(draft, desiredVm("run-a", "webserver", "a".repeat(64)));
         upsertDesiredBuild(draft, desiredBuild("build-a"));
       },
       { nowUnixMs: 1_762_041_660_000 },
@@ -144,35 +121,37 @@ describe("desired state", () => {
   it("deduplicates by image key and vm identity with last write winning", () => {
     const current = createEmptyHostDesiredState({
       hostId: "host-alpha",
+      scope: "personal",
+      ownerUserId: "user-1",
       nowUnixMs: 1_762_041_600_000,
     });
     const next = mutateDesiredState(
       current,
       (draft) => {
-        draft.cached_images.push(cachedImage("webserver", "sha-a"));
-        draft.cached_images.push(cachedImage("webserver", "sha-b"));
-        draft.vms.push(desiredVm("run-a", "webserver", "sha-a"));
-        draft.vms.push(desiredVm("run-a", "webserver", "sha-b"));
-        draft.builds.push(desiredBuild("build-a", "hash-a"));
-        draft.builds.push(desiredBuild("build-a", "hash-b"));
+        draft.cached_images.push(cachedImage("webserver", "a".repeat(64)));
+        draft.cached_images.push(cachedImage("webserver", "b".repeat(64)));
+        draft.vms.push(desiredVm("run-a", "webserver", "a".repeat(64)));
+        draft.vms.push(desiredVm("run-a", "webserver", "b".repeat(64)));
+        draft.builds.push(desiredBuild("build-a", "a".repeat(64)));
+        draft.builds.push(desiredBuild("build-a", "b".repeat(64)));
       },
       { nowUnixMs: 1_762_041_660_000 },
     );
 
     expect(next.cached_images).toEqual([
-      cachedImage("webserver", "sha-a"),
-      cachedImage("webserver", "sha-b"),
+      cachedImage("webserver", "a".repeat(64)),
+      cachedImage("webserver", "b".repeat(64)),
     ]);
-    expect(next.vms).toEqual([desiredVm("run-a", "webserver", "sha-b")]);
-    expect(next.builds).toEqual([desiredBuild("build-a", "hash-b")]);
+    expect(next.vms).toEqual([desiredVm("run-a", "webserver", "b".repeat(64))]);
+    expect(next.builds).toEqual([desiredBuild("build-a", "b".repeat(64))]);
   });
 
   it("marks only the matching run and vm absent", () => {
     const current = hostDesiredState({
       version: 3,
       vms: [
-        desiredVm("run-a", "webserver", "sha-a"),
-        desiredVm("run-b", "webserver", "sha-a"),
+        desiredVm("run-a", "webserver", "a".repeat(64)),
+        desiredVm("run-b", "database", "a".repeat(64)),
       ],
     });
     const next = mutateDesiredState(
@@ -196,7 +175,7 @@ describe("desired state", () => {
   it("does not bump when marking a missing vm absent", () => {
     const current = hostDesiredState({
       version: 3,
-      vms: [desiredVm("run-a", "webserver", "sha-a")],
+      vms: [desiredVm("run-a", "webserver", "a".repeat(64))],
     });
     const next = mutateDesiredState(
       current,
@@ -215,8 +194,8 @@ describe("desired state", () => {
   it("clears role-incompatible desired work", () => {
     const current = hostDesiredState({
       version: 3,
-      cachedImages: [cachedImage("webserver", "sha-a")],
-      vms: [desiredVm("run-a", "webserver", "sha-a")],
+      cachedImages: [cachedImage("webserver", "a".repeat(64))],
+      vms: [desiredVm("run-a", "webserver", "a".repeat(64))],
       builds: [desiredBuild("build-a")],
     });
     const next = mutateDesiredState(
@@ -252,6 +231,9 @@ describe("desired state", () => {
 
     expect(desiredVmFromRunVm({
       runId: "run-a",
+      ownerUserId: "user-1",
+      runtimeExecutionId: "execution-1",
+      generation: 1,
       vm,
       nowUnixMs: 1_762_041_600_000,
       sshAuthorizedKeysOpenssh: [
@@ -259,8 +241,11 @@ describe("desired state", () => {
         " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example ",
       ],
       guestTools: guestTools(),
-    })).toEqual({
+    })).toEqual({ vm_id: "vm-row-1",
       run_id: "run-a",
+      owner_user_id: "user-1",
+      runtime_execution_id: "execution-1",
+      generation: 1,
       vm_name: "webserver",
       desired_phase: "running",
       image_key: {
@@ -295,6 +280,9 @@ describe("desired state", () => {
 
     expect(desiredVmFromRunVm({
       runId: "run-a",
+      ownerUserId: "user-1",
+      runtimeExecutionId: "execution-1",
+      generation: 1,
       vm,
       nowUnixMs: 1_762_041_600_000,
       sshAuthorizedKeysOpenssh: [
@@ -321,6 +309,9 @@ describe("desired state", () => {
 
     expect(desiredVmFromRunVm({
       runId: "run-a",
+      ownerUserId: "user-1",
+      runtimeExecutionId: "execution-1",
+      generation: 1,
       vm,
       nowUnixMs: 1_762_041_600_000,
       sshAuthorizedKeysOpenssh: [],
@@ -336,8 +327,10 @@ function hostDesiredState(input: {
   builds?: DesiredBuildV1[];
 }): HostDesiredStateV2 {
   return {
-    schema_version: 5,
+    schema_version: 6,
     host_id: "host-alpha",
+    scope: "personal",
+    owner_user_id: "user-1",
     version: input.version,
     generated_at_unix_ms: 1_762_041_600_000,
     cached_images: input.cachedImages ?? [],
@@ -376,8 +369,11 @@ function desiredVm(
   vmName: string,
   sha256: string,
 ): DesiredVmV2 {
-  return {
+  return { vm_id: vmName,
     run_id: runId,
+    owner_user_id: "user-1",
+    runtime_execution_id: "execution-1",
+    generation: 1,
     vm_name: vmName,
     desired_phase: "running",
     image_key: {

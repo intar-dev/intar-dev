@@ -10,7 +10,7 @@ pub(super) fn command_exists(command: &str) -> bool {
         .is_some()
 }
 
-pub(super) async fn bootstrap_agent_access(
+pub(crate) async fn bootstrap_agent_access(
     cfg: &BridgeConfig,
     http: &HttpClient,
 ) -> Result<AgentBootstrapResponse> {
@@ -19,7 +19,7 @@ pub(super) async fn bootstrap_agent_access(
         .post(&url)
         .json(&AgentBootstrapRequest {
             host_id: &cfg.host_id,
-            bootstrap_token: &cfg.bootstrap_token,
+            bootstrap_token: &cfg.credential,
         })
         .send()
         .await
@@ -27,14 +27,28 @@ pub(super) async fn bootstrap_agent_access(
 
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("agent bootstrap failed with HTTP {status}: {body}");
+        anyhow::bail!("agent bootstrap failed with HTTP {status}");
     }
 
-    response
+    let access = response
         .json::<AgentBootstrapResponse>()
         .await
-        .context("failed to parse bootstrap response")
+        .context("failed to parse bootstrap response")?;
+    validate_bootstrap_identity(cfg, &access)?;
+    Ok(access)
+}
+
+pub(super) async fn refresh_agent_access(
+    cfg: &BridgeConfig,
+    http: &HttpClient,
+) -> Result<AgentBootstrapResponse> {
+    timeout(
+        Duration::from_secs(RUN_CLI_ACCESS_REFRESH_TIMEOUT_SECS),
+        bootstrap_agent_access(cfg, http),
+    )
+    .await
+    .context("agent access refresh timed out")?
+    .context("agent access refresh failed")
 }
 
 pub(super) fn default_ws_url(base_url: &str, host_id: &str) -> String {
@@ -95,7 +109,11 @@ pub(super) fn validate_bridge_message(message: &BridgeMessageV8, host_id: &str) 
     Ok(())
 }
 
-pub(super) fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2) -> Result<()> {
+pub(super) fn validate_desired_state(
+    cfg: &BridgeConfig,
+    desired: &HostDesiredStateV2,
+) -> Result<()> {
+    let host_id = &cfg.host_id;
     if desired.schema_version != HOST_DESIRED_STATE_SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported desired state schema version {}; expected {}",
@@ -103,11 +121,39 @@ pub(super) fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2
             HOST_DESIRED_STATE_SCHEMA_VERSION
         );
     }
-    if desired.host_id != host_id {
+    if desired.host_id != *host_id {
         anyhow::bail!(
             "desired state host mismatch: expected {host_id}, got {}",
             desired.host_id
         );
+    }
+    anyhow::ensure!(
+        desired.scope == cfg.scope
+            && desired.owner_user_id == cfg.owner_user_id
+            && !desired.owner_user_id.trim().is_empty(),
+        "desired host ownership mismatch"
+    );
+    let mut names = BTreeSet::new();
+    let mut runs = BTreeMap::new();
+    for vm in &desired.vms {
+        cfg.validate_owner(&vm.owner_user_id, &vm.runtime_execution_id, vm.generation)?;
+        anyhow::ensure!(
+            !vm.run_id.trim().is_empty()
+                && !vm.vm_name.trim().is_empty()
+                && !vm.vm_id.trim().is_empty(),
+            "VM identity is empty"
+        );
+        anyhow::ensure!(
+            names.insert(&vm.vm_name),
+            "duplicate VM name in desired state"
+        );
+        let identity = (&vm.owner_user_id, &vm.runtime_execution_id, vm.generation);
+        if let Some(previous) = runs.insert(&vm.run_id, identity) {
+            anyhow::ensure!(
+                identity == previous,
+                "run has inconsistent execution identity"
+            );
+        }
     }
     if !desired.builds.is_empty() {
         anyhow::bail!(
@@ -233,6 +279,7 @@ pub(super) fn resources_from_desired(resources: &VmResourcesV3) -> CreateVmResou
 
 pub(super) fn desired_lease_duration_seconds(vm: &DesiredVmV2, now_ms: i64) -> Result<u64> {
     let remaining_ms = vm.lease_expires_at_unix_ms.saturating_sub(now_ms);
+    anyhow::ensure!(remaining_ms > 0, "desired VM lease expired");
     let seconds = u64::try_from((remaining_ms / 1_000).max(1)).unwrap_or(u64::MAX);
     Ok(seconds)
 }
@@ -278,4 +325,53 @@ pub(super) fn parse_rfc3339_ms(value: &str) -> Option<i64> {
 pub(super) fn now_ms() -> i64 {
     let millis = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
     i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+fn validate_bootstrap_identity(cfg: &BridgeConfig, access: &AgentBootstrapResponse) -> Result<()> {
+    anyhow::ensure!(
+        access.host_id == cfg.host_id
+            && access.owner_user_id == cfg.owner_user_id
+            && access.scope == cfg.scope
+            && access.credential_generation == cfg.credential_generation,
+        "bootstrap host identity mismatch"
+    );
+    anyhow::ensure!(
+        !access.access_token.is_empty(),
+        "bootstrap access token is empty"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[test]
+    fn bootstrap_response_must_match_the_enrolled_identity() {
+        let cfg = BridgeConfig {
+            host_id: "host-1".into(),
+            owner_user_id: "user-1".into(),
+            credential_generation: 1,
+            ..BridgeConfig::default()
+        };
+        let valid = serde_json::json!({"accessToken":"secret", "hostId":"host-1", "ownerUserId":"user-1", "scope":"personal", "credentialGeneration":1});
+        let response = serde_json::from_value(valid.clone()).expect("valid fixture");
+        validate_bootstrap_identity(&cfg, &response).expect("valid fixture");
+        for (field, wrong) in [
+            ("hostId", serde_json::json!("other")),
+            ("ownerUserId", serde_json::json!("other")),
+            ("scope", serde_json::json!("platform")),
+            ("credentialGeneration", serde_json::json!(2)),
+        ] {
+            let mut value = valid.clone();
+            value[field] = wrong;
+            let response = serde_json::from_value(value).expect("valid fixture");
+            assert!(validate_bootstrap_identity(&cfg, &response).is_err());
+            let mut missing = valid.clone();
+            missing
+                .as_object_mut()
+                .expect("fixture object")
+                .remove(field);
+            assert!(serde_json::from_value::<AgentBootstrapResponse>(missing).is_err());
+        }
+    }
 }

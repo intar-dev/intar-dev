@@ -2,9 +2,7 @@ import {
   and,
   eq,
   exists,
-  inArray,
   isNull,
-  or,
   sql,
   type SQL,
 } from "drizzle-orm";
@@ -35,13 +33,16 @@ import {
   upsertDesiredCachedImage,
 } from "@/lib/desired-state";
 import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
+import { assignedPersonalScenarioImageAccess } from "@/control-plane/image-registry/image-access";
 
 const RECONCILE_MAX_ATTEMPTS = 8;
 
 type CacheHost = Pick<
   typeof agentHosts.$inferSelect,
   | "id"
-  | "organizationId"
+  | "scope"
+  | "userId"
+  | "credentialGeneration"
   | "role"
   | "disabled"
   | "scenarioEnabled"
@@ -106,7 +107,7 @@ export async function reconcileHostScenarioImages(
       host.id,
       input.nowUnixMs,
     );
-    if (!isRuntimeImageCacheHost(host)) {
+    if (!isRuntimeImageCacheHost(host) || (host.scope !== "personal" && host.scope !== "platform")) {
       return { outcome: "ineligible", desiredState: current };
     }
     if (!sessionMatches(host, input)) {
@@ -115,7 +116,7 @@ export async function reconcileHostScenarioImages(
 
     const intent = await loadScenarioCacheIntent(
       db,
-      host.organizationId,
+      host,
       input.architecture,
     );
     const next = mutateDesiredState(
@@ -128,12 +129,12 @@ export async function reconcileHostScenarioImages(
         // Without a V2 catalog, no scenario key is linked and cache intent
         // fails closed. Running VM SHAs remain independently protected by
         // desired.vms.
-        draft.cached_images = draft.cached_images.filter(
+        draft.cached_images = host.scope === "personal" ? [] : draft.cached_images.filter(
           (image) => {
             const identity = imageKeyIdentity(image.image_key);
             return (
               image.image_key.arch === input.architecture &&
-              (!intent.scenarioIds.has(image.image_key.scenario) ||
+              ((host.scope === "platform" && !intent.scenarioIds.has(image.image_key.scenario)) ||
                 intent.linkedImageKeys.has(identity))
             );
           },
@@ -169,7 +170,7 @@ export async function reconcileHostScenarioImages(
             desiredState: null,
           };
         }
-        if (!isRuntimeImageCacheHost(latestHost)) {
+        if (!isRuntimeImageCacheHost(latestHost) || (latestHost.scope !== "personal" && latestHost.scope !== "platform")) {
           return {
             outcome: "ineligible",
             desiredState: await loadOrCreateHostDesiredState(
@@ -204,7 +205,7 @@ export async function reconcileHostScenarioImages(
     // the new generation before returning.
     const latestIntent = await loadScenarioCacheIntent(
       db,
-      host.organizationId,
+      host,
       input.architecture,
     );
     if (
@@ -246,9 +247,7 @@ export async function reconcileScenarioImagesForPublicationScope(
       and(
         eq(agentHosts.role, "agent"),
         eq(agentHosts.disabled, false),
-        input.publicationOrganizationId
-          ? eq(agentHosts.organizationId, input.publicationOrganizationId)
-          : undefined,
+        eq(agentHosts.scope, "platform"),
       ),
     );
 
@@ -400,25 +399,18 @@ export async function tryReconcileHostScenarioImagesFromActualState(
 
 async function loadScenarioCacheIntent(
   db: DrizzleD1Database,
-  organizationId: string | null,
+  host: CacheHost,
   architecture: ImageArchitecture,
 ): Promise<ScenarioCacheIntent> {
-  const scopeKeys = [
-    "public",
-    ...(organizationId ? [`organization:${organizationId}`] : []),
-  ];
-  const visibleScope = organizationId
-    ? or(
-        isNull(vmScenarios.organizationId),
-        eq(vmScenarios.organizationId, organizationId),
-      )
-    : isNull(vmScenarios.organizationId);
+  // Personal hosts receive only an exact owner workload or a bounded start
+  // preparation. Publication readiness and full catalog warming are platform-only.
+  const personal = host.scope === "personal";
+  const visibleScope = personal ? assignedPersonalScenarioImageAccess(host.id) : undefined;
   const [catalogRows, scenarioRows, rows] = await Promise.all([
-    db
+    personal ? Promise.resolve([]) : db
       .select({ catalog: courseCatalogs.catalogJson })
-      .from(courseCatalogs)
-      .where(inArray(courseCatalogs.scopeKey, scopeKeys)),
-    db
+      .from(courseCatalogs),
+    personal ? Promise.resolve([]) : db
       .select({ scenarioId: vmScenarios.scenarioId })
       .from(vmScenarios)
       .where(visibleScope),
@@ -443,7 +435,7 @@ async function loadScenarioCacheIntent(
       .where(visibleScope)
       .orderBy(vmScenarios.scenarioId, vmScenarioVms.ordinal),
   ]);
-  const linkedScenarioIds = linkedScenarioIdsFromCatalogs(
+  const linkedScenarioIds = personal ? new Set(rows.map(row => row.scenarioId)) : linkedScenarioIdsFromCatalogs(
     catalogRows.map((row) => row.catalog),
   );
   const byKey = new Map<string, DesiredCachedImageV1>();
@@ -528,7 +520,9 @@ async function loadCacheHost(
   const rows = await db
     .select({
       id: agentHosts.id,
-      organizationId: agentHosts.organizationId,
+      scope: agentHosts.scope,
+      userId: agentHosts.userId,
+      credentialGeneration: agentHosts.credentialGeneration,
       role: agentHosts.role,
       disabled: agentHosts.disabled,
       scenarioEnabled: agentHosts.scenarioEnabled,
@@ -555,9 +549,9 @@ function cacheHostWriteFence(
           eq(agentHosts.id, host.id),
           eq(agentHosts.role, "agent"),
           eq(agentHosts.disabled, false),
-          host.organizationId
-            ? eq(agentHosts.organizationId, host.organizationId)
-            : isNull(agentHosts.organizationId),
+          eq(agentHosts.scope, host.scope!),
+          eq(agentHosts.userId, host.userId),
+          eq(agentHosts.credentialGeneration, host.credentialGeneration),
           sessionFence,
         ),
       ),
@@ -586,7 +580,9 @@ function sessionMatches(
 function sameCacheHostScope(left: CacheHost, right: CacheHost): boolean {
   return (
     left.id === right.id &&
-    left.organizationId === right.organizationId &&
+    left.scope === right.scope &&
+    left.userId === right.userId &&
+    left.credentialGeneration === right.credentialGeneration &&
     left.role === right.role &&
     left.disabled === right.disabled
   );

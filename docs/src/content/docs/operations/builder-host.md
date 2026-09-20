@@ -413,6 +413,19 @@ sudo chown root:root /etc/intar-builder/config.toml
 sudo chmod 0600 /etc/intar-builder/config.toml
 ```
 
+To revoke a platform host, an active platform administrator can send a bodyless
+`POST /api/admin/hosts/{hostId}/revoke` with the current browser session and
+same-origin request headers. The administrator does not need to be the host
+creator. This also works while the host is connected.
+
+Revocation disables the host, invalidates its credentials, and fails its active
+builds. The endpoint then closes control sessions and requests workload and
+remote-access cleanup. A `202` response confirms access revocation and reports
+`physicalCleanup: "unconfirmed"`. A `503 platform_host_cleanup_pending` response means
+access is already revoked; repeat the same request to finish cleanup. Historical
+host and build records remain. An offline host can continue work until its local
+lease expires. This endpoint does not erase the host's storage.
+
 ## systemd Service
 
 Create `/etc/systemd/system/intar-builder.service`:

@@ -405,20 +405,22 @@ pub(super) fn terminal_state_from_vm(
                 .quota_verified_at_unix_ms
                 .is_some_and(|time| time > 0)
     });
-    let terminal_target = if vm.state == VmLifecycleState::Running
-        && ssh_access.enabled
-        && ssh_ready
-        && steady_quota_verified
-    {
-        details.ssh_public_port.map(|port| VmTerminalTarget {
-            host: advertised_host,
-            port,
-            username: "ubuntu".to_string(),
-            checked_at: observed_at,
-        })
-    } else {
-        None
-    };
+    let terminal_target =
+        if vm.state == VmLifecycleState::Running && ssh_ready && steady_quota_verified {
+            let endpoint = if ssh_access.enabled {
+                details.ssh_public_port.map(|port| (advertised_host, port))
+            } else {
+                details.guest_ip.as_ref().map(|ip| (Some(ip.clone()), 22))
+            };
+            endpoint.map(|(host, port)| VmTerminalTarget {
+                host,
+                port,
+                username: "ubuntu".to_string(),
+                checked_at: observed_at,
+            })
+        } else {
+            None
+        };
     let (state, reason) = if terminal_target.is_some() {
         (VmTerminalStateKind::Ready, None)
     } else {

@@ -330,10 +330,27 @@ export interface WorkspaceAppMetadata {
 
 /** The complete SSH endpoint of one scenario VM terminal. Only the admin API
  * carries this value: the guest private key never reaches a browser. */
+export interface HostRelayIdentity {
+  host_id: string;
+  session_id: string;
+  credential_generation: number;
+}
+export type RelayService = "ssh";
+export interface RelayTarget {
+  host: HostRelayIdentity;
+  owner_id: string;
+  execution_id: string;
+  execution_generation: number;
+  vm_id: string;
+  service: RelayService;
+}
+export type SshTargetTransport =
+  | { kind: "direct"; host: string; port: number }
+  | { kind: "relay"; target: RelayTarget };
+
 export interface TerminalTarget {
   username: string;
-  host: string;
-  port: number;
+  transport: SshTargetTransport;
   host_key_openssh: string;
   private_key_openssh: string;
   authorized_client_public_keys_openssh: string[];
@@ -411,8 +428,7 @@ export interface IssueWorkspaceAppSessionRequest {
   route_id: string;
   create_only?: boolean;
   target_username: string;
-  target_ip: string;
-  target_ssh_port: number;
+  transport: SshTargetTransport;
   target_host_key_openssh: string;
   target_private_key_openssh: string;
   target_app_port: number;
@@ -565,13 +581,24 @@ export interface ClientHelloV8 {
   capabilities: HostCapabilitiesV2;
 }
 
+export interface HostRelayCredentials {
+  websocket_url: string;
+  token: string;
+  gateway_host_key_openssh: string;
+  identity: import("./stargate").HostRelayIdentity;
+  expires_at_unix_ms: number;
+}
+
 export interface ServerHelloV8 {
+  session_id: string;
+  relay?: HostRelayCredentials | null;
   protocol_version: number;
   host_id: string;
   desired_version: number;
 }
 
 export interface DesiredStateV8 {
+  relay?: HostRelayCredentials | null;
   protocol_version: number;
   host_id: string;
   desired_state: HostDesiredStateV2;
@@ -610,7 +637,11 @@ export type BridgeMessageV8 =
   | ({ type: "build_report" } & BuildReportV8)
   | ({ type: "sync_request" } & SyncRequestV8);
 
+export type HostScope = "personal" | "platform";
+
 export interface HostDesiredStateV2 {
+  scope: HostScope;
+  owner_user_id: string;
   schema_version: number;
   host_id: string;
   version: number;
@@ -638,6 +669,10 @@ export interface DesiredBuildV1 {
 export type DesiredVmPhase = "running" | "absent";
 
 export interface DesiredVmV2 {
+  vm_id: string;
+  owner_user_id: string;
+  runtime_execution_id: string;
+  generation: number;
   run_id: string;
   vm_name: string;
   desired_phase: DesiredVmPhase;
@@ -663,6 +698,7 @@ export interface VmResourcesV3 {
 }
 
 export interface HostStateReportV2 {
+  relay_connected: boolean;
   schema_version: number;
   host_id: string;
   observed_at_unix_ms: number;
@@ -772,6 +808,9 @@ export type VmPhase =
   | "absent";
 
 export interface VmActualStateV2 {
+  owner_user_id: string;
+  runtime_execution_id: string;
+  generation: number;
   run_id: string;
   vm_name: string;
   desired_version?: number | null;
@@ -855,6 +894,9 @@ export interface VmArchiveStateV1 {
 }
 
 export interface VmReportV2 {
+  owner_user_id: string;
+  runtime_execution_id: string;
+  generation: number;
   schema_version: number;
   host_id: string;
   run_id: string;

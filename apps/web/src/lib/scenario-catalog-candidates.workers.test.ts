@@ -23,6 +23,7 @@ import {
   candidateScenarioId,
   stageCandidateScenarioManifest,
   stageReusableCandidateManifests,
+  warmCandidateScenarioManifest,
 } from "@/lib/scenario-catalog-candidates";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -34,6 +35,49 @@ const scenarioIds = Array.from(
 
 describe("reused candidate presentation", () => {
   beforeEach(resetD1Database);
+
+  describe.each(["new", "reused"])("%s candidate host selection", (kind) => {
+    it.each([null, "private-org"])("warms only enabled platform agents for catalog %s", async (organizationId) => {
+      const db = drizzle(env.DB);
+      await seedReusedBuilds(db, ["task"]);
+      await seedAgentHost(db, [], false);
+      await db.insert(organization).values(["private-org", "legacy-org"].map((id) => ({
+        id, name: id, slug: id, createdAt: new Date(0),
+      })));
+      const hosts = [
+        { id: "platform-legacy-org", scope: "platform", role: "agent", organizationId: "legacy-org" },
+        { id: "personal", scope: "personal", role: "agent", organizationId },
+        { id: "disabled", scope: "platform", role: "agent", disabled: true },
+        { id: "builder", scope: "platform", role: "builder" },
+        { id: "other-arch", scope: "platform", role: "agent" },
+      ] as const;
+      for (const host of hosts) {
+        await db.insert(agentHosts).values({ userId: "owner", name: host.id, ...host });
+        const report = hostReport();
+        report.host_id = host.id;
+        if (host.id === "other-arch") report.capabilities.arch = "aarch64";
+        await db.insert(hostActualState).values({
+          hostId: host.id, appliedDesiredVersion: 0, observedAt: 1, reportJson: report,
+        });
+      }
+      const wakeHost = vi.fn(async (_hostId: string) => undefined);
+      if (kind === "new") {
+        expect(await warmCandidateScenarioManifest(db, {
+          organizationId, manifest: technicalManifest(), nowUnixMs: 2, wakeHost,
+        })).toEqual(["agent-1", "platform-legacy-org"]);
+      } else {
+        expect(await stageReusableCandidateManifests(db, {
+          organizationId, revision: "warm-reuse", meta: reusedMeta(["task"]), nowUnixMs: 2, wakeHost,
+        })).toEqual(["task"]);
+      }
+      expect(wakeHost.mock.calls.map(([host]) => host).sort()).toEqual(["agent-1", "platform-legacy-org"]);
+      const desired = await db.select().from(hostDesiredState);
+      expect(desired.map((row) => row.hostId).sort()).toEqual(["agent-1", "platform-legacy-org"]);
+      for (const row of desired) expect(row.docJson.cached_images).toEqual([
+        { image_key: technicalManifest().vms[0]!.image_key, image_id: technicalManifest().vms[0]!.image_id },
+      ]);
+    });
+  });
 
   it("overlays current lecture Markdown without queueing another image build", async () => {
     const db = drizzle(env.DB);
@@ -500,6 +544,7 @@ async function seedAgentHost(
   });
   await db.insert(agentHosts).values({
     id: "agent-1",
+    scope: "platform",
     userId: "owner",
     name: "agent-1",
     role: "agent",
@@ -517,7 +562,7 @@ async function seedAgentHost(
   });
   if (!alreadyReady) return;
 
-  const desired = createEmptyHostDesiredState({
+  const desired = createEmptyHostDesiredState({ ownerUserId: "owner", scope: "platform",
     hostId: "agent-1",
     nowUnixMs: 1,
   });
@@ -548,8 +593,8 @@ function reusedMeta(ids: string[]): ImageBuildBundleMeta {
 }
 
 function hostReport(): HostStateReportV2 {
-  return {
-    schema_version: 6,
+  return { relay_connected: true,
+    schema_version: 7,
     host_id: "agent-1",
     observed_at_unix_ms: 1,
     applied_desired_version: 0,

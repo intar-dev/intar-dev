@@ -1,10 +1,12 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
+import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import {
   ACTIVE_RUNTIME_EXECUTION_STATES,
   agentHosts,
   hostActualState,
   hostDesiredState,
+  imageBuilds,
   runtimeExecutions,
   runtimeVms,
   scenarioCatalogSnapshots,
@@ -43,6 +45,10 @@ export interface ScenarioCatalogRollbackV1 {
 export type ScenarioCatalogRows = ReturnType<
   typeof catalogRowsFromScenarioManifest
 >;
+
+function catalogWriteGuard(guard?: SQL) {
+  return new SQLiteSyncDialect().sqlToQuery(guard ?? sql`1`);
+}
 
 /**
  * Reads the full previous state of the given scenarios: the catalog rows, the
@@ -99,12 +105,14 @@ export function catalogRollbackSnapshotStatement(
     rollback: ScenarioCatalogRollbackV1;
     createdAt: number;
   },
+  writeGuard?: SQL,
 ): D1PreparedStatement {
+  const guard = catalogWriteGuard(writeGuard);
   return database
     .prepare(
       `INSERT OR IGNORE INTO scenario_catalog_snapshots
          (id, revision, organization_id, snapshot_json, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ? WHERE (${guard.sql})`,
     )
     .bind(
       input.id,
@@ -112,6 +120,7 @@ export function catalogRollbackSnapshotStatement(
       input.organizationId,
       JSON.stringify(input.rollback),
       input.createdAt,
+      ...guard.params,
     );
 }
 
@@ -119,18 +128,20 @@ export function catalogRollbackSnapshotStatement(
 export function catalogReplacementStatements(
   database: D1Database,
   rows: ScenarioCatalogRows,
+  writeGuard?: SQL,
 ): D1PreparedStatement[] {
+  const guard = catalogWriteGuard(writeGuard);
   const statements: D1PreparedStatement[] = [
-    scenarioUpsert(database, rows.scenario),
+    scenarioUpsert(database, rows.scenario, writeGuard),
     database
-      .prepare("DELETE FROM vm_scenario_probes WHERE scenario_id = ?")
-      .bind(rows.scenario.scenarioId),
+      .prepare(`DELETE FROM vm_scenario_probes WHERE scenario_id = ? AND (${guard.sql})`)
+      .bind(rows.scenario.scenarioId, ...guard.params),
     database
-      .prepare("DELETE FROM vm_scenario_vms WHERE scenario_id = ?")
-      .bind(rows.scenario.scenarioId),
+      .prepare(`DELETE FROM vm_scenario_vms WHERE scenario_id = ? AND (${guard.sql})`)
+      .bind(rows.scenario.scenarioId, ...guard.params),
   ];
-  for (const vm of rows.vms) statements.push(vmInsert(database, vm));
-  for (const probe of rows.probes) statements.push(probeInsert(database, probe));
+  for (const vm of rows.vms) statements.push(vmInsert(database, vm, writeGuard));
+  for (const probe of rows.probes) statements.push(probeInsert(database, probe, writeGuard));
   return statements;
 }
 
@@ -327,6 +338,8 @@ export async function replaceScenarioCatalogWithRollback(
     organizationId: string | null;
     sourceRevision: string | null;
     nowUnixMs: number;
+    writeGuard?: SQL;
+    buildId?: string;
   },
 ): Promise<LiveCatalogReplacement> {
   const rows = catalogRowsFromScenarioManifest(input.manifest, {
@@ -384,6 +397,10 @@ export async function replaceScenarioCatalogWithRollback(
     ? liveCatalogTransitionId(input.nowUnixMs)
     : null;
   const statements: D1PreparedStatement[] = [];
+  if (input.writeGuard) {
+    const guard = catalogWriteGuard(input.writeGuard);
+    statements.push(database.prepare(`SELECT (${guard.sql}) AS authorized`).bind(...guard.params));
+  }
   let transitionAtUnixMs = Math.trunc(input.nowUnixMs);
   if (transitionId) {
     transitionAtUnixMs = await nextCatalogRollbackTimestamp(db, {
@@ -399,11 +416,24 @@ export async function replaceScenarioCatalogWithRollback(
         organizationId: input.organizationId,
         rollback: previous,
         createdAt: transitionAtUnixMs,
-      }),
+      }, input.writeGuard),
     );
   }
-  statements.push(...catalogReplacementStatements(database, rows));
-  await database.batch(statements);
+  statements.push(...catalogReplacementStatements(database, rows, input.writeGuard));
+  if (input.writeGuard && input.buildId) {
+    const receipt = db.update(imageBuilds).set({
+      publishedManifestJson: input.manifest,
+      artifactsRetiredAt: null,
+      updatedAt: input.nowUnixMs,
+    }).where(and(eq(imageBuilds.id, input.buildId), input.writeGuard)).toSQL();
+    statements.push(database.prepare(receipt.sql).bind(...receipt.params));
+  }
+  // Every mutation carries the same guard. D1 executes the whole batch as one
+  // transaction, so revocation cannot occur between these checks and writes.
+  const committed = await database.batch<{ authorized: number }>(statements);
+  if (input.writeGuard && committed[0]?.results[0]?.authorized !== 1) {
+    throw appError(409, "catalog_publication_revoked", "build is not active for this builder");
+  }
 
   return {
     rows,
@@ -426,7 +456,9 @@ export function catalogSnapshotRowId(
 /**
  * Outgoing-reference policy, shared by every live catalog replacement:
  *  - an active runtime execution whose VM still boots an outgoing image,
- *  - a host with an active VM or an unfinished transfer for an outgoing image.
+ *  - a platform host with an active VM or an unfinished transfer.
+ * Personal reports cannot block publication. Their active execution records
+ * still block here, and the artifact collector retains host references.
  * Ready local cache entries that desired state no longer requires are not
  * blockers; the replacement evicts them through the desired-state path.
  */
@@ -475,11 +507,9 @@ export async function loadOutgoingReferenceBlockers(
       .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
       .where(
         and(
+          eq(agentHosts.scope, "platform"),
           eq(agentHosts.role, "agent"),
           eq(agentHosts.disabled, false),
-          input.organizationId
-            ? eq(agentHosts.organizationId, input.organizationId)
-            : undefined,
         ),
       ),
   ]);
@@ -528,7 +558,9 @@ async function assertScenarioCatalogOwnership(
 export function scenarioUpsert(
   database: D1Database,
   row: ScenarioCatalogRows["scenario"],
+  writeGuard?: SQL,
 ): D1PreparedStatement {
+  const guard = catalogWriteGuard(writeGuard);
   return database
     .prepare(
       `INSERT INTO vm_scenarios (
@@ -536,7 +568,7 @@ export function scenarioUpsert(
          description, difficulty, estimated_minutes, tags_json,
          briefing_markdown, solution_markdown, hints_json, enabled, enabled_at,
          created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (${guard.sql})
        ON CONFLICT(scenario_id) DO UPDATE SET
          organization_id = excluded.organization_id,
          source_revision = excluded.source_revision,
@@ -570,13 +602,16 @@ export function scenarioUpsert(
       row.enabledAt ?? null,
       row.createdAt,
       row.updatedAt,
+      ...guard.params,
     );
 }
 
 export function vmInsert(
   database: D1Database,
   row: ScenarioCatalogRows["vms"][number],
+  writeGuard?: SQL,
 ): D1PreparedStatement {
+  const guard = catalogWriteGuard(writeGuard);
   return database
     .prepare(
       `INSERT INTO vm_scenario_vms (
@@ -585,7 +620,7 @@ export function vmInsert(
          chunk_manifest_sha256, guest_bootstrap_abi, kernel_sha256,
          initrd_sha256, boot_cmdline, cpu_millis, memory_mib,
          disk_mib
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (${guard.sql})`,
     )
     .bind(
       row.id,
@@ -605,19 +640,22 @@ export function vmInsert(
       row.cpuMillis,
       row.memoryMib,
       row.diskMib,
+      ...guard.params,
     );
 }
 
 export function probeInsert(
   database: D1Database,
   row: ScenarioCatalogRows["probes"][number],
+  writeGuard?: SQL,
 ): D1PreparedStatement {
+  const guard = catalogWriteGuard(writeGuard);
   return database
     .prepare(
       `INSERT INTO vm_scenario_probes (
          id, scenario_id, scenario_vm_id, ordinal, name, description, title,
          body_markdown, hints_json, phase, kind
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (${guard.sql})`,
     )
     .bind(
       row.id,
@@ -631,5 +669,6 @@ export function probeInsert(
       JSON.stringify(row.hintsJson),
       row.phase,
       row.kind,
+      ...guard.params,
     );
 }

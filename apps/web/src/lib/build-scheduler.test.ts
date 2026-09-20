@@ -305,6 +305,7 @@ describe("build scheduler", () => {
           contentHash: "f".repeat(64),
         }),
         2_000,
+        { sessionId: "builder-session", credentialGeneration: 1 },
       ),
     ).resolves.toEqual({ updated: false, terminal: false });
     await expect(
@@ -316,6 +317,7 @@ describe("build scheduler", () => {
           contentHash: "a".repeat(64),
         }),
         2_000,
+        { sessionId: "builder-session", credentialGeneration: 1 },
       ),
     ).resolves.toEqual({ updated: false, terminal: false });
 
@@ -346,6 +348,7 @@ describe("build scheduler", () => {
           contentHash: "f".repeat(64),
         }),
         2_000,
+        { sessionId: "builder-session", credentialGeneration: 1 },
       ),
     ).resolves.toEqual({ updated: true, terminal: true });
 
@@ -397,6 +400,7 @@ describe("build scheduler", () => {
           }),
         ],
         2_000,
+        { sessionId: "builder-session", credentialGeneration: 1 },
       ),
     ).resolves.toEqual({ terminalBuildIds: ["build-1"] });
     expect(db.updateSet).toHaveBeenCalledTimes(2);
@@ -427,6 +431,7 @@ describe("build scheduler", () => {
           }),
         ],
         2_000,
+        { sessionId: "builder-session", credentialGeneration: 1 },
       ),
     ).resolves.toEqual({ terminalBuildIds: ["build-1"] });
     expect(db.updateSet).not.toHaveBeenCalled();
@@ -456,6 +461,7 @@ describe("build scheduler", () => {
             contentHash: "f".repeat(64),
           }),
           2_000,
+          { sessionId: "builder-session", credentialGeneration: 1 },
         ),
       ).resolves.toEqual({ updated: false, terminal: false });
       expect(db.updateSet).not.toHaveBeenCalled();
@@ -546,8 +552,8 @@ function queueSchedulerDb(input: {
 }
 
 function emptyDesiredState(hostId: string): HostDesiredStateV2 {
-  return {
-    schema_version: 5,
+  return { owner_user_id: "user-1", scope: "platform",
+    schema_version: 6,
     host_id: hostId,
     version: 0,
     generated_at_unix_ms: 0,

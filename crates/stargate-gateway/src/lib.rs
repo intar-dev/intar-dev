@@ -1,6 +1,8 @@
 mod admin;
 mod auth;
+mod host_relay;
 mod outbound;
+mod relay_api;
 mod runtime;
 mod session_registry;
 mod ssh;
@@ -25,6 +27,7 @@ use stargate_core::{
 use crate::outbound::WorkspaceAppTunnelPool;
 
 pub use auth::AssertionValidator;
+pub use host_relay::{HostRelayRegistry, HostRelayStream};
 pub use runtime::{load_settings, run};
 pub use session_registry::{SessionLease, SessionRegistry};
 pub use ssh::run_public_ssh_server;
@@ -53,6 +56,9 @@ pub struct PublicGatewayState {
 
 #[derive(Clone)]
 pub struct GatewayState {
+    pub host_relays: HostRelayRegistry,
+    pub(crate) relay_grants: relay_api::RelayGrants,
+    pub(crate) relay_key: Arc<russh::keys::PrivateKey>,
     pub store: SqliteRouteStore,
     pub sessions: SessionRegistry,
     // Terminal route updates replace authorization as well as connection
@@ -85,13 +91,21 @@ impl GatewayState {
         public_host_key: russh::keys::ssh_key::PublicKey,
         terminal_tokens: TerminalTokenSettings,
     ) -> Result<Self> {
+        let host_relays = HostRelayRegistry::default();
+        let relay_key = russh::keys::PrivateKey::random(
+            &mut russh::keys::key::safe_rng(),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )?;
         Ok(Self {
+            workspace_app_tunnels: WorkspaceAppTunnelPool::new(host_relays.clone()),
+            host_relays,
+            relay_grants: relay_api::RelayGrants::default(),
+            relay_key: Arc::new(relay_key),
             store,
             sessions: SessionRegistry::default(),
             terminal_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             terminal_route_targets: TerminalRouteTargetRegistry::default(),
             terminal_sockets: TerminalSocketRegistry::default(),
-            workspace_app_tunnels: WorkspaceAppTunnelPool::default(),
             admin_auth: AssertionValidator::new(admin_auth)?,
             public_web: PublicGatewayState {
                 public_base_url: web.public_base_url.clone(),
@@ -171,6 +185,12 @@ impl GatewayState {
 
 pub fn build_admin_router(state: GatewayState) -> Router {
     Router::new()
+        .route("/v1/host-relays/grant", post(relay_api::grant))
+        .route("/v1/host-relays/revoke", post(relay_api::revoke))
+        .route(
+            "/v1/host-relays/revoke-credentials",
+            post(relay_api::revoke_credentials),
+        )
         .route("/healthz", get(admin::healthz))
         .route("/v1/terminal-sessions", post(admin::issue_terminal_session))
         .route(
@@ -195,6 +215,7 @@ pub fn build_admin_router(state: GatewayState) -> Router {
 
 pub fn build_public_router(state: GatewayState) -> Router {
     let mut router = Router::new()
+        .route("/v1/host-relay/ws", get(relay_api::websocket))
         .route("/healthz", get(admin::healthz))
         .route(TERMINAL_WS_PATH, get(webssh::terminal_websocket));
     // Path multiplexing is intentionally a local-HTTP development fallback.

@@ -5,10 +5,10 @@ export const TOOLS_DISK_LABEL = "INTARTOOLS";
 export const RUNTIME_ENV_FILENAME = "runtime.env";
 export const GUEST_USERNAME = "user";
 export const BRIDGE_PROTOCOL_VERSION = 8;
-export const HOST_DESIRED_STATE_SCHEMA_VERSION = 5;
-export const HOST_STATE_REPORT_SCHEMA_VERSION = 6;
+export const HOST_DESIRED_STATE_SCHEMA_VERSION = 6;
+export const HOST_STATE_REPORT_SCHEMA_VERSION = 7;
 export const BUILD_REPORT_SCHEMA_VERSION = 1;
-export const VM_REPORT_SCHEMA_VERSION = 5;
+export const VM_REPORT_SCHEMA_VERSION = 6;
 
 export const runtimeEnvKeys = {
   sshAuthorizedKeysB64: "INTAR_SSH_AUTHORIZED_KEYS_B64",

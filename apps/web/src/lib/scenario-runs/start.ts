@@ -1,5 +1,7 @@
+import { personalHostReportReady } from "@/lib/personal-host-readiness";
 import { env } from "cloudflare:workers";
-import { and, desc, eq, gte, inArray, isNull, or } from "drizzle-orm";
+import { metalPlacementForUser } from "@/lib/metal-placement";
+import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import { AppError, appError, errorChainMatches } from "@/lib/app-error";
 import {
@@ -45,6 +47,7 @@ export type HostSelectionResult =
   | {
       ok: false;
       reason: "unavailable" | "image_not_ready" | "resource_capacity";
+      message?: string;
     };
 
 export type ScenarioRouteType =
@@ -74,32 +77,38 @@ export async function assertScenarioLaunchHostForUser(
   hostId: string,
   userId: string,
   requiredImages: RequiredScenarioImage[],
-  organizationId: string | null = null,
 ): Promise<void> {
+  await loadScenarioLaunchHostForUser(hostId, userId, requiredImages);
+}
+
+/** Returns the exact host/report snapshot checked for admission. */
+export async function loadScenarioLaunchHostForUser(
+  hostId: string,
+  userId: string,
+  requiredImages: RequiredScenarioImage[],
+) {
   const now = Date.now();
   const db = drizzle(env.DB);
   const rows = await db
     .select({
+      scope: agentHosts.scope,
       role: agentHosts.role,
       disabled: agentHosts.disabled,
       scenarioEnabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
+      credentialGeneration: agentHosts.credentialGeneration,
+      activeSessionId: agentHosts.activeSessionId,
       actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
-      organizationId: agentHosts.organizationId,
+      actualReportText: sql<string | null>`${hostActualState.reportJson}`,
     })
     .from(agentHosts)
     .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(
       and(
         eq(agentHosts.id, hostId),
-        organizationId
-          ? eq(agentHosts.organizationId, organizationId)
-          : and(
-              eq(agentHosts.userId, userId),
-              isNull(agentHosts.organizationId),
-            ),
+        metalPlacementForUser(userId),
       ),
     )
     .limit(1);
@@ -137,6 +146,9 @@ export async function assertScenarioLaunchHostForUser(
   ) {
     throw appError(409, "scenario_host_unavailable", "host is not connected");
   }
+  if (host.scope === "personal" && !personalHostReportReady(host.actualReport, learnerRunCliV1EnforcementEnabled(env))) {
+    throw appError(409, "personal_server_not_ready", "Your server is not Ready. Open Profile → My servers and run the repair action.");
+  }
   if (!hostHasImagesReady(host.actualReport, requiredImages)) {
     throw appError(
       409,
@@ -168,6 +180,7 @@ export async function assertScenarioLaunchHostForUser(
       "host does not attest the required template, CPU-limit, and fast-filesystem launch path",
     );
   }
+  return host;
 }
 
 export function isActiveKeyUniqueViolation(error: unknown): boolean {
@@ -380,7 +393,7 @@ async function revokeScenarioRouteTypesForUser(
  * cannot say a host is usable when admission would reject it.
  */
 async function loadEligibleScenarioLaunchHosts(
-  organizationId: string | null = null,
+  userId: string,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
 ) {
@@ -388,6 +401,7 @@ async function loadEligibleScenarioLaunchHosts(
   const rows = await db
     .select({
       id: agentHosts.id,
+      scope: agentHosts.scope,
       updatedAt: agentHosts.updatedAt,
       connected: agentHosts.connected,
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
@@ -403,9 +417,7 @@ async function loadEligibleScenarioLaunchHosts(
         eq(agentHosts.role, "agent"),
         eq(agentHosts.scenarioEnabled, true),
         eq(agentHosts.connected, true),
-        organizationId
-          ? eq(agentHosts.organizationId, organizationId)
-          : isNull(agentHosts.organizationId),
+        metalPlacementForUser(userId),
       ),
     )
     .orderBy(desc(agentHosts.updatedAt));
@@ -447,6 +459,7 @@ async function loadEligibleScenarioLaunchHosts(
           HOST_HEARTBEAT_TTL_MS,
         ) &&
         hostHealth(row.actualReportedAt ?? null, now) === "healthy" &&
+        (row.scope !== "personal" || personalHostReportReady(row.actualReport, requireRunCli)) &&
         strictCpuCapacity(row.actualReport) !== null &&
         hostSupportsSpeedRedesign(row.actualReport) &&
         (!requireRunCli || hostSupportsRunCliV1(row.actualReport)),
@@ -460,12 +473,12 @@ async function loadEligibleScenarioLaunchHosts(
  * A high disk allowance must not hide exhausted CPU or memory.
  */
 export async function loadScenarioCapacityPressure(
-  organizationId: string | null = null,
+  userId: string,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
 ): Promise<number | null> {
   const hosts = await loadEligibleScenarioLaunchHosts(
-    organizationId,
+    userId,
     now,
     requireRunCli,
   );
@@ -563,7 +576,7 @@ function isPositiveSafeInteger(value: number): boolean {
 
 export async function selectScenarioHosts(
   requiredImages: RequiredScenarioImage[],
-  organizationId: string | null = null,
+  userId: string,
   requiredResources?: RuntimeResourceDemand,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
@@ -571,13 +584,13 @@ export async function selectScenarioHosts(
   return traceOperation("scenario.select_host", async () => {
   const db = drizzle(env.DB);
   const candidates = await loadEligibleScenarioLaunchHosts(
-    organizationId,
+    userId,
     now,
     requireRunCli,
   );
 
   if (!candidates.length) {
-    return { ok: false, reason: "unavailable" };
+    return hostSelectionFailure(userId, "unavailable");
   }
 
   let imageReadyCandidates = candidates.filter((candidate) =>
@@ -585,7 +598,7 @@ export async function selectScenarioHosts(
   );
 
   if (!imageReadyCandidates.length) {
-    return { ok: false, reason: "image_not_ready" };
+    return hostSelectionFailure(userId, "image_not_ready");
   }
 
   const availableResourcesByHost = new Map<string, RuntimeResourceDemand>();
@@ -606,7 +619,7 @@ export async function selectScenarioHosts(
       return runtimeResourcesFit(requiredResources, available);
     });
     if (!imageReadyCandidates.length) {
-      return { ok: false, reason: "resource_capacity" };
+      return hostSelectionFailure(userId, "resource_capacity");
     }
   }
 
@@ -670,4 +683,14 @@ export async function selectScenarioHosts(
     : { ok: false, reason: "unavailable" };
 
   });
+}
+
+async function hostSelectionFailure(userId: string, reason: "unavailable" | "image_not_ready" | "resource_capacity"): Promise<HostSelectionResult> {
+  const owner = await env.DB.prepare("SELECT metal_placement FROM user WHERE id = ?").bind(userId).first<{ metal_placement: string }>();
+  if (owner?.metal_placement !== "personal") return { ok: false, reason };
+  return { ok: false, reason, message: reason === "resource_capacity"
+    ? "Your servers do not have enough free CPU, memory, or storage. Wait for a run to finish."
+    : reason === "image_not_ready"
+      ? "Your server is preparing the required images. Wait, then start the run again."
+      : "Your servers are offline, paused, or need repair. Open Profile → My servers to restore a Ready server." };
 }

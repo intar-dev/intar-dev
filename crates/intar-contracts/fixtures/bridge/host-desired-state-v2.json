@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "host_id": "host-alpha",
   "version": 42,
   "generated_at_unix_ms": 1762041600000,
@@ -38,7 +38,11 @@
       "ssh_authorized_keys_openssh": [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example"
       ],
-      "lease_expires_at_unix_ms": 1762045200000
+      "lease_expires_at_unix_ms": 1762045200000,
+      "owner_user_id": "user-1",
+      "runtime_execution_id": "execution-1",
+      "generation": 1,
+      "vm_id": "vm-webserver"
     }
   ],
   "builds": [
@@ -50,5 +54,7 @@
       "content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "bundle_ref": "builds/bundles/0123456789abcdef0123456789abcdef01234567.tar.gz"
     }
-  ]
+  ],
+  "scope": "personal",
+  "owner_user_id": "user-1"
 }

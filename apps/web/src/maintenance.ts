@@ -16,6 +16,9 @@ export async function handleMaintenanceMode(
   if (!controlPlaneMaintenanceEnabled(workerEnv)) return null;
 
   const pathname = new URL(request.url).pathname;
+  if (pathname === "/api/maintenance/personal-metal/retire") {
+    return retireReleaseHost(request, workerEnv);
+  }
   if (pathname === "/api/maintenance/bypass" && request.method === "POST") {
     return establishMaintenanceBypass(request, workerEnv);
   }
@@ -38,6 +41,40 @@ export async function handleMaintenanceMode(
 }
 
 export const REGISTRY_CLEANUP_GATE_PATH = "/api/maintenance/registry-cleanup";
+
+async function retireReleaseHost(request: Request, workerEnv: Cloudflare.Env): Promise<Response> {
+  const secret = workerEnv.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET;
+  const supplied = request.headers.get("authorization")?.replace(/^Bearer /u, "") ?? "";
+  const origin = request.headers.get("origin");
+  if (request.method !== "POST" || typeof secret !== "string" || secret.length < 32 ||
+      (origin !== null && origin !== safeOrigin(workerEnv.BETTER_AUTH_URL)) ||
+      !(await equalSecrets(supplied, secret))) {
+    return maintenanceJsonResponse(403, "release retirement denied");
+  }
+  const bytes = await readBoundedBody(request.body, 1024);
+  const body = bytes ? parseJson(bytes) as { hostId?: unknown } | null : null;
+  if (typeof body?.hostId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(body.hostId)) {
+    return maintenanceJsonResponse(400, "hostId is required");
+  }
+  const { hostId } = body;
+  // This action can only clear a retired identity after the D1 retirement
+  // transaction. It cannot change placement, credentials, or admission gates.
+  const ready = await workerEnv.DB.prepare(`SELECT id FROM agent_hosts
+    WHERE id = ?1 AND scope IS NULL AND disabled = 1 AND active_session_id IS NULL
+      AND (SELECT count(*) FROM runtime_operation_gates WHERE key IN
+        ('image_cutover', 'personal_metal_registration', 'platform_metal_registration') AND state = 'drained') = 3
+      AND NOT EXISTS (SELECT 1 FROM host_desired_state WHERE host_id = ?1)
+      AND NOT EXISTS (SELECT 1 FROM runtime_executions WHERE host_id = ?1 AND state <> 'archived')
+      AND NOT EXISTS (SELECT 1 FROM runtime_vms vm JOIN runtime_executions e ON e.id = vm.execution_id
+        WHERE e.host_id = ?1 AND vm.artifact_writes_sealed <> 1)`)
+    .bind(hostId).first();
+  if (!ready) return maintenanceJsonResponse(409, "host retirement checks failed");
+  return workerEnv.HOST_RUNTIME.get(workerEnv.HOST_RUNTIME.idFromName(hostId)).fetch(
+    new Request("https://host-runtime.internal/_internal/retire", {
+      method: "POST", headers: { "x-agent-host-id": hostId },
+    }),
+  );
+}
 const REGISTRY_CLEANUP_GATE_MAX_WAIT_MS = 10 * 60 * 1000;
 
 /**

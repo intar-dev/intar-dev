@@ -390,7 +390,7 @@ describe("host CPU reservations", () => {
       .set({ state: "committed", expiresAt: null, updatedAt: now })
       .where(eq(hostCpuReservations.runId, runId));
 
-    const desired = createEmptyHostDesiredState({ hostId, nowUnixMs: now });
+    const desired = createEmptyHostDesiredState({ ownerUserId: "user-1", scope: "platform", hostId, nowUnixMs: now });
     const desiredAtVersionOne = { ...desired, version: 1 };
     await db.insert(hostDesiredState).values({
       hostId,
@@ -509,8 +509,8 @@ function strictReport(
   committedCpuMillis: number,
   vms: VmActualStateV2[] = [],
 ): typeof hostActualState.$inferInsert.reportJson {
-  return {
-    schema_version: 6,
+  return { relay_connected: true,
+    schema_version: 7,
     host_id: hostId,
     observed_at_unix_ms: Date.now(),
     applied_desired_version: appliedDesiredVersion,
@@ -551,7 +551,7 @@ function strictReport(
 
 function runningVmReport(runId: string, cpuMillis: number): VmActualStateV2 {
   const observedAt = Date.now();
-  return {
+  return { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1,
     run_id: runId,
     vm_name: `${runId}-vm`,
     phase: "running",
@@ -648,12 +648,12 @@ async function seedRunningDesiredState(
   now: number,
   cpuMillis = 1_000,
 ): Promise<void> {
-  const empty = createEmptyHostDesiredState({ hostId, nowUnixMs: now });
+  const empty = createEmptyHostDesiredState({ ownerUserId: "user-1", scope: "platform", hostId, nowUnixMs: now });
   const desired = {
     ...empty,
     version: 1,
     vms: [
-      {
+      { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: vmName,
         run_id: runId,
         vm_name: vmName,
         desired_phase: "running" as const,
@@ -731,7 +731,7 @@ function quotaVmReport(input: {
   quotaVerifiedAt: number | null;
   updatedAt: number;
 }): VmActualStateV2 {
-  return {
+  return { owner_user_id: "user-1", runtime_execution_id: input.runId, generation: 1,
     run_id: input.runId,
     vm_name: input.vmName,
     phase: input.phase,

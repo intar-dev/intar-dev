@@ -20,7 +20,6 @@ import {
   OrganizationOverview,
   ProgressSection,
 } from "./organization-detail/people";
-import { OrganizationRunnersSection } from "./organization-detail/runners";
 import { OrganizationSettingsSection } from "./organization-detail/settings";
 import { OrganizationBundleUpload } from "./organization-detail/BundleUpload";
 import {
@@ -166,7 +165,6 @@ export function OrganizationDetail() {
             {admin ? (
               <TabsTrigger value="progress">Progress</TabsTrigger>
             ) : null}
-            <TabsTrigger value="runners">Runners</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
         </div>
@@ -197,9 +195,6 @@ export function OrganizationDetail() {
             <ProgressSection detail={detail} />
           </TabsContent>
         ) : null}
-        <TabsContent value="runners" className="min-w-0">
-          <OrganizationRunnersSection detail={detail} />
-        </TabsContent>
         <TabsContent value="settings" className="min-w-0">
           <OrganizationSettingsSection detail={detail} />
         </TabsContent>
