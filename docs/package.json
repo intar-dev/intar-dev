@@ -18,6 +18,9 @@
     "@astrojs/starlight": "0.38.2",
     "astro": "6.1.2"
   },
+  "overrides": {
+    "devalue": "5.9.2"
+  },
   "devDependencies": {
     "@astrojs/check": "0.9.9",
     "typescript": "6.0.3",
