@@ -577,6 +577,11 @@ pub(super) fn prepare_smoke_image(
     config: &JailerdConfig,
     artifacts: &SelfTestArtifacts,
 ) -> Result<PreparedImageV2Result> {
+    let capabilities = core.capabilities();
+    ensure!(
+        capabilities.supports_jailer_v2,
+        "package-smoke image preparation requires jailer v2 readiness: {capabilities:?}"
+    );
     let request = PrepareImageV2Request {
         // The package self-test has no registry descriptor, so the verified
         // raw-root digest is its stable content-addressed image identity.

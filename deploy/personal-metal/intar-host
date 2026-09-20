@@ -21,6 +21,7 @@ import tarfile
 import tempfile
 import termios
 import time
+import tomllib
 import urllib.error
 import urllib.request
 
@@ -560,6 +561,36 @@ def enroll(gid):
         atomic(ENROLLMENT, json.dumps(enrollment) + '\n')
 
 
+def available_identity_range():
+    # Include subordinate IDs used by rootless containers, not only accounts.
+    occupied = [(entry.pw_uid, entry.pw_uid) for entry in pwd.getpwall()]
+    occupied += [(entry.gr_gid, entry.gr_gid) for entry in grp.getgrall()]
+    for name in ('/etc/subuid', '/etc/subgid'):
+        path = Path(name)
+        if not path.exists():
+            continue
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            fields = line.split(':')
+            require(len(fields) == 3 and fields[1].isascii() and fields[1].isdigit()
+                    and fields[2].isascii() and fields[2].isdigit() and int(fields[2]) > 0,
+                    f'Invalid identity allocation in {name}. Repair this file, then repeat setup.')
+            start, count = int(fields[1]), int(fields[2])
+            require(start <= 2 ** 32 - 1 and count <= 2 ** 32 - 1 and start + count <= 2 ** 32,
+                    f'Invalid identity allocation in {name}. Repair this file, then repeat setup.')
+            occupied.append((start, start + count - 1))
+    start = 200_000
+    for low, high in sorted(occupied):
+        if start + 65_535 < low:
+            break
+        if start <= high:
+            start = high + 1
+    require(start + 65_535 <= 2 ** 31 - 1,
+            'No free VM identity range. Reserve 65,536 user and group IDs, then repeat setup.')
+    return start, start + 65_535
+
+
 def configure(package, account):
     mkdir(CONFIG.parent, 0o750, account.pw_gid)
     atomic(CONFIG, f'''[server]
@@ -585,7 +616,15 @@ max_bytes = {20 * GIB}
 ''', 0o640, account.pw_gid)
     mkdir(JAILER_CONFIG.parent, 0o700)
     jailer = (package / 'deploy/config.example.toml').read_text()
+    if JAILER_CONFIG.exists():
+        # Existing jail data keeps its identities across retries and updates.
+        secure_path(JAILER_CONFIG, mode=0o600)
+        previous = tomllib.loads(JAILER_CONFIG.read_text())
+        identity_start, identity_end = previous['uid_gid_start'], previous['uid_gid_end']
+    else:
+        identity_start, identity_end = available_identity_range()
     for key, value in {'agent_uid': account.pw_uid, 'agent_gid': account.pw_gid,
+                       'uid_gid_start': identity_start, 'uid_gid_end': identity_end,
                        'template_budget_bytes': 30 * GIB, 'minimum_free_space_bytes': RESERVE}.items():
         jailer, count = re.subn(rf'(?m)^{key} = .*$', f'{key} = {value}', jailer)
         require(count == 1, f'Release jailer config is missing {key}.')

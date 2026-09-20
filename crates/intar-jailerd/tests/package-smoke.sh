@@ -510,6 +510,25 @@ rm -f -- /var/cache/intar-agent/intar-agent/images
 # A one-vCPU CI runner needs an explicit zero host reserve for the disposable
 # 125-millicore proof. Production keeps the 1000m default.
 sed -i 's/^cpu_reserved_millis = .*/cpu_reserved_millis = 0/' /etc/intar-jailerd/config.toml
+# Use the personal installer's allocation on this fresh disposable host. The
+# runner can reserve the default range for rootless containers in /etc/subuid.
+# Keep the normal jailerd collision check enabled.
+python3 - "${package_root}" <<'PY_IDENTITIES'
+from pathlib import Path
+import re
+import runpy
+import sys
+
+installer = runpy.run_path(str(Path(sys.argv[1]) / 'deploy/personal-metal/intar-host'))
+start, end = installer['available_identity_range']()
+config = Path('/etc/intar-jailerd/config.toml')
+text = config.read_text()
+for key, value in {'uid_gid_start': start, 'uid_gid_end': end}.items():
+    text, count = re.subn(rf'(?m)^{key} = .*$', f'{key} = {value}', text)
+    assert count == 1
+config.write_text(text)
+print(f'Package-smoke VM identity range: {start}..{end}')
+PY_IDENTITIES
 case "$(stat -c '%u:%g:%a' /etc/intar-jailerd/config.toml)" in
   0:0:400|0:0:600) ;;
   *) die "smoke config lost trusted ownership or mode" ;;
@@ -571,7 +590,7 @@ systemctl is-active --quiet intar-jailerd.service || \
 # blocks either operation again.
 install -d -o root -g root -m 0755 "${agent_probe_dropin_dir}"
 agent_runtime_probe_root=/var/lib/intar/jails/cloud-hypervisor/agent-service-probe
-agent_runtime_probe_vm_uid=265535
+agent_runtime_probe_vm_uid=$(awk '$1 == "uid_gid_end" { print $3 }' /etc/intar-jailerd/config.toml)
 agent_runtime_probe_socket=${agent_runtime_probe_root}/root/run/kino.vsock_10000
 install -d -o root -g root -m 0700 \
   "${agent_runtime_probe_root}" \
@@ -595,6 +614,7 @@ import ctypes
 import os
 import socket
 import stat
+import sys
 
 SYS_OPENAT2_X86_64 = 437
 AT_FDCWD = -100
@@ -643,7 +663,8 @@ if parent_fd < 0:
     error_number = ctypes.get_errno()
     raise OSError(error_number, os.strerror(error_number))
 parent_metadata = os.fstat(parent_fd)
-if parent_metadata.st_uid != 265535 or parent_metadata.st_gid != 265535:
+vm_uid = int(sys.argv[1])
+if parent_metadata.st_uid != vm_uid or parent_metadata.st_gid != vm_uid:
     raise SystemExit("runtime listener parent does not belong to the VM identity")
 socket_how = (ctypes.c_ulonglong * 3)(
     os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -683,7 +704,7 @@ Type=oneshot
 RemainAfterExit=yes
 Restart=no
 ExecStart=
-ExecStart=/usr/bin/python3 ${agent_openat2_probe}
+ExecStart=/usr/bin/python3 ${agent_openat2_probe} ${agent_runtime_probe_vm_uid}
 EOF
 chmod 0644 "${agent_probe_dropin_dir}/openat2-probe.conf"
 systemctl daemon-reload

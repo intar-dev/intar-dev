@@ -42,6 +42,37 @@ class InstallerTests(unittest.TestCase):
         self.stack.enter_context(patch.object(host.os, 'chown'))
         self.identity = {'hostId': 'host_1', 'ownerUserId': 'user_1', 'scope': 'personal', 'credentialGeneration': 1}
 
+    def test_identity_range_avoids_accounts_groups_and_subordinate_ids(self):
+        with patch.object(host.pwd, 'getpwall', return_value=[types.SimpleNamespace(pw_uid=320000)]), \
+             patch.object(host.grp, 'getgrall', return_value=[types.SimpleNamespace(gr_gid=300000)]), \
+             patch.object(Path, 'exists', return_value=True), \
+             patch.object(Path, 'read_text', side_effect=[
+                 'ubuntu:100000:65536\nrunner:165536:65536\n', 'runner:231072:65536\n']):
+            self.assertEqual(host.available_identity_range(), (320001, 385536))
+
+    def test_identity_range_rejects_invalid_subordinate_allocation(self):
+        with patch.object(host.pwd, 'getpwall', return_value=[]), \
+             patch.object(host.grp, 'getgrall', return_value=[]), \
+             patch.object(Path, 'exists', return_value=True), \
+             patch.object(Path, 'read_text', return_value='runner:165536:invalid\n'):
+            with self.assertRaisesRegex(host.HostError, 'Invalid identity allocation'):
+                host.available_identity_range()
+
+    def test_configure_preserves_allocated_identities_on_retry_and_update(self):
+        package = self.root / 'package'
+        (package / 'deploy').mkdir(parents=True)
+        (package / 'deploy/config.example.toml').write_text(
+            (REPO / 'crates/intar-jailerd/deploy/config.example.toml').read_text())
+        account = types.SimpleNamespace(pw_uid=42, pw_gid=42)
+        with patch.object(host, 'enroll'), \
+             patch.object(host, 'available_identity_range', return_value=(320001, 385536)) as allocate:
+            host.configure(package, account)
+            host.configure(package, account)
+            allocate.assert_called_once()
+        config = host.tomllib.loads(host.JAILER_CONFIG.read_text())
+        self.assertEqual((config['uid_gid_start'], config['uid_gid_end']), (320001, 385536))
+        self.assertFalse(config['allow_uid_gid_collisions'])
+
     def test_credential_and_token_are_durable_before_http(self):
         checkpoints = []
         real_sync = host.sync_dir
