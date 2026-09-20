@@ -2062,14 +2062,6 @@ impl Harness {
             "native SSH authentication failed"
         );
 
-        self.ssh_exec_on_session(&session, command).await
-    }
-
-    async fn ssh_exec_on_session(
-        &self,
-        session: &client::Handle<TestClient>,
-        command: &str,
-    ) -> Result<String> {
         let mut channel = session.channel_open_session().await?;
         channel.exec(true, command).await?;
         let mut output = String::new();

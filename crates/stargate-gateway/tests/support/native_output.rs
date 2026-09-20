@@ -201,13 +201,12 @@ async fn temporary_backpressure_preserves_output_and_exit_while_another_relay_cl
         .await?;
     let (_host, _guard) = relay_wss::connect_test_relay(&mut h, &target, &credentials).await?;
     h.issue_native_terminal_session(true).await?;
-    // Establish the other client's SSH transport before timing forwarding.
+    // Establish both public and guest SSH transports before timing forwarding.
     // Key exchange and authentication can exceed the short hold on CI runners.
-    let mut other_client = h.open_public_ssh_session().await?;
-    assert!(
-        h.authenticate_public_key(&mut other_client, &h.profile_client_private_key_openssh)
-            .await?
-    );
+    let (_other_client, mut other_channel) = h
+        .open_public_shell_with_private_key(&h.profile_client_private_key_openssh)
+        .await?;
+    wait_for_native_channel_data(&mut other_channel, "shell ready").await?;
     let mut config = client_config(&h.public_host_public);
     let settings = Arc::get_mut(&mut config).expect("unshared client config");
     settings.window_size = 16 * 1024;
@@ -256,15 +255,14 @@ async fn temporary_backpressure_preserves_output_and_exit_while_another_relay_cl
     .await
     .context("burst did not fill the bridge queue before the second command")?;
     let hold = tokio::time::sleep(Duration::from_millis(500));
-    let other = tokio::time::timeout(
-        Duration::from_millis(400),
-        h.ssh_exec_on_session(&other_client, "output-both-once"),
-    );
+    let other = tokio::time::timeout(Duration::from_millis(400), async {
+        other_channel
+            .data_bytes(b"other-client-progress\n".to_vec())
+            .await?;
+        wait_for_native_channel_data(&mut other_channel, "other-client-progress").await
+    });
     let (_, output) = tokio::join!(hold, other);
-    assert_eq!(
-        output.context("stalled stream blocked another relay client")??,
-        "stdout-ok\nstderr-ok\n"
-    );
+    output.context("stalled stream blocked another relay client")??;
 
     let exit = tokio::time::timeout(Duration::from_secs(4), async {
         let mut exit = None;
