@@ -212,7 +212,8 @@ describe("agent run artifact sealing", () => {
         },
       };
       const bucket = {
-        head: async () => null,
+        head: vi.fn(async (): Promise<R2Object | null> => object)
+          .mockResolvedValueOnce(null),
         createMultipartUpload: async () => {
           await wait();
           return multipart;
@@ -267,6 +268,59 @@ describe("agent run artifact sealing", () => {
         "SELECT artifact_writes_sealed,archive_stage_rank FROM runtime_vms",
       ).first(),
     ).toEqual({ artifact_writes_sealed: 1, archive_stage_rank: 4 });
+  });
+
+  it("completes an upload without retrying when R2 completion omits metadata", async () => {
+    const { token, object } = await pendingMultipartFixture();
+    const head = vi.fn(async (): Promise<R2Object | null> => object)
+      .mockResolvedValueOnce(null);
+    const complete = vi.fn(async () => ({
+      ...object,
+      customMetadata: {},
+      httpMetadata: {},
+      writeHttpMetadata: object.writeHttpMetadata,
+    }));
+
+    const response = await completeArtifact(
+      token,
+      completionBucket(head, complete),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(complete).toHaveBeenCalledOnce();
+    expect(head).toHaveBeenCalledTimes(2);
+    for (const table of ["runtime_artifacts", "scenario_run_artifacts"]) {
+      expect(
+        (await env.DB.prepare(`SELECT upload_status FROM ${table}`).all()).results,
+      ).toEqual([{ upload_status: "uploaded" }]);
+    }
+    for (const table of [
+      "runtime_artifact_uploads",
+      "scenario_run_artifact_uploads",
+    ]) {
+      expect(
+        (await env.DB.prepare(`SELECT * FROM ${table}`).all()).results,
+      ).toHaveLength(0);
+    }
+  });
+
+  it("keeps the pending ledger when the completed R2 object is missing", async () => {
+    const { token, object } = await pendingMultipartFixture();
+    const head = vi.fn(async () => null);
+    const complete = vi.fn(async () => object);
+    const before = await uploadLedgerSnapshot();
+
+    const response = await completeArtifact(
+      token,
+      completionBucket(head, complete),
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await response?.json()).toMatchObject({
+      code: "artifact_object_conflict",
+    });
+    expect(complete).toHaveBeenCalledOnce();
+    expect(await uploadLedgerSnapshot()).toEqual(before);
   });
 
   it("recovers a completed R2 upload after all eight metadata CAS attempts conflict", async () => {
@@ -363,28 +417,28 @@ describe("agent run artifact sealing", () => {
   });
 
   it.each(
-    ["head", "complete"].flatMap((source) =>
+    ["existing", "new"].flatMap((source) =>
       ["ownerId", "executionGeneration", "sha256", "size", "contentType"].map(
         (field) => ({ source, field }),
       ),
     ),
   )(
-    "rejects $source object with wrong $field and keeps the pending ledger",
+    "rejects $source stored object with wrong $field and keeps the pending ledger",
     async ({ source, field }) => {
       const { token, object } = await pendingMultipartFixture();
       const wrong = {
         ...object,
         customMetadata: { ...object.customMetadata },
         httpMetadata: { ...object.httpMetadata },
+        writeHttpMetadata: object.writeHttpMetadata,
       };
       if (field === "size") wrong.size += 1;
       else if (field === "contentType")
         wrong.httpMetadata.contentType = "application/wrong";
       else wrong.customMetadata[field] = "wrong";
-      const complete = vi.fn(async () => wrong as R2Object);
-      const head = vi.fn(async () =>
-        source === "head" ? (wrong as R2Object) : null,
-      );
+      const complete = vi.fn(async () => object);
+      const head = vi.fn(async (): Promise<R2Object | null> => wrong);
+      if (source === "new") head.mockResolvedValueOnce(null);
       const before = await uploadLedgerSnapshot();
       const response = await completeArtifact(
         token,
@@ -394,7 +448,7 @@ describe("agent run artifact sealing", () => {
       expect(await response?.json()).toMatchObject({
         code: "artifact_object_conflict",
       });
-      expect(complete).toHaveBeenCalledTimes(source === "head" ? 0 : 1);
+      expect(complete).toHaveBeenCalledTimes(source === "existing" ? 0 : 1);
       expect(await uploadLedgerSnapshot()).toEqual(before);
     },
   );

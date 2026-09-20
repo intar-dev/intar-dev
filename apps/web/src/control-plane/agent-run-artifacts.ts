@@ -626,10 +626,15 @@ async function handleArtifactComplete(
     // R2 may have committed before a lost response or a D1 state conflict.
     // Recover only this exact artifact; a completed multipart ID cannot be
     // assumed to remain usable. The D1 write still checks current access.
-    const object = await env.VM_RUN_ARTIFACTS_BUCKET.head(artifact.r2Key)
-      ?? await multipart.complete(uploadedParts);
+    let object = await env.VM_RUN_ARTIFACTS_BUCKET.head(artifact.r2Key);
+    if (!object) {
+      await multipart.complete(uploadedParts);
+      // R2 completion can omit metadata. Validate the stored object instead.
+      // https://github.com/cloudflare/developer-platform/issues/3
+      object = await env.VM_RUN_ARTIFACTS_BUCKET.head(artifact.r2Key);
+    }
     const metadata = artifactObjectMetadata(runVm, artifact);
-    if (object.key !== artifact.r2Key || object.size !== artifact.sizeBytes ||
+    if (!object || object.key !== artifact.r2Key || object.size !== artifact.sizeBytes ||
         object.httpMetadata?.contentType !== artifact.contentType ||
         !Object.entries(metadata).every(([key, value]) => object.customMetadata?.[key] === value)) {
       return jsonResponse({ error: "Stored artifact does not match this upload", code: "artifact_object_conflict" }, 409);
