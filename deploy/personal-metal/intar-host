@@ -522,7 +522,7 @@ def claim(enrollment):
     body = json.dumps({'enrollmentToken': enrollment['enrollmentToken'],
                        'credential': enrollment['credential']}).encode()
     request = urllib.request.Request(ORIGIN + '/agent/enroll', data=body,
-                                     headers={'Content-Type': 'application/json'})
+                                     headers={'Content-Type': 'application/json', 'User-Agent': 'intar-host'})
     try:
         client = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         with client.open(request, timeout=30) as response:
