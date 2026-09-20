@@ -201,6 +201,13 @@ async fn temporary_backpressure_preserves_output_and_exit_while_another_relay_cl
         .await?;
     let (_host, _guard) = relay_wss::connect_test_relay(&mut h, &target, &credentials).await?;
     h.issue_native_terminal_session(true).await?;
+    // Establish the other client's SSH transport before timing forwarding.
+    // Key exchange and authentication can exceed the short hold on CI runners.
+    let mut other_client = h.open_public_ssh_session().await?;
+    assert!(
+        h.authenticate_public_key(&mut other_client, &h.profile_client_private_key_openssh)
+            .await?
+    );
     let mut config = client_config(&h.public_host_public);
     let settings = Arc::get_mut(&mut config).expect("unshared client config");
     settings.window_size = 16 * 1024;
@@ -238,19 +245,25 @@ async fn temporary_backpressure_preserves_output_and_exit_while_another_relay_cl
     })
     .await??;
 
-    // Stop consuming for 500 ms. The one-message receive queue fills and the
-    // client SSH loop stops replenishing its window. Draining it restores
-    // credit. Both clients below share the same host relay and VM.
+    // Stop consuming until the burst fills the bridge queue, then keep it
+    // blocked while the other client runs. Both clients share a host relay and
+    // VM. The unread period stays below the two-second production timeout.
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while h.output_probe.burst_sent.load(Ordering::SeqCst) <= 32 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .context("burst did not fill the bridge queue before the second command")?;
     let hold = tokio::time::sleep(Duration::from_millis(500));
-    let other = tokio::time::timeout(Duration::from_millis(400), h.ssh_exec("output-both-once"));
+    let other = tokio::time::timeout(
+        Duration::from_millis(400),
+        h.ssh_exec_on_session(&other_client, "output-both-once"),
+    );
     let (_, output) = tokio::join!(hold, other);
     assert_eq!(
         output.context("stalled stream blocked another relay client")??,
         "stdout-ok\nstderr-ok\n"
-    );
-    assert!(
-        h.output_probe.burst_sent.load(Ordering::SeqCst) > 32,
-        "burst did not fill the bridge queue during the hold"
     );
 
     let exit = tokio::time::timeout(Duration::from_secs(4), async {
