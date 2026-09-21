@@ -13,8 +13,8 @@ install -d -m 0755 "$staging/deploy/personal-metal"
 install -m 0755 deploy/personal-metal/intar-host "$staging/deploy/personal-metal/intar-host"
 install -m 0644 deploy/personal-metal/README.md "$staging/deploy/personal-metal/README.md"
 install -m 0644 apps/web/public/install.sh "$staging/deploy/personal-metal/install.sh"
-# apt authenticates the repository metadata. Save exact versions in the release.
-# Missing versions fail closed; publish a new agent package when Ubuntu retires them.
+# apt authenticates the repository metadata. Record build-host versions as minimums.
+# Setup accepts equal or newer versions from the host's repositories.
 python3 - "$staging/deploy/personal-metal/dependencies.lock" <<'PY'
 from pathlib import Path
 import re

@@ -549,7 +549,7 @@ jobs:
           set -euo pipefail
           package_root="$(mktemp -d)"
           tar -xzf "dist/intar-agent_${VERSION}_linux_amd64.tar.gz" -C "${package_root}"
-          # Use the installer's exact-version lock validation and install path.
+          # Use the installer's minimum-version validation and install path.
           sudo python3 - "${package_root}" <<'PY'
           from pathlib import Path
           import runpy, sys

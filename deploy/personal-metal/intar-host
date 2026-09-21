@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Personal host management. Ubuntu 24.04, x86_64; Python standard library only."""
+"""Personal host management. Ubuntu 24.04 or later, x86_64; Python standard library only."""
 import argparse
 import errno
 import fcntl
@@ -247,10 +247,12 @@ def cancel_update(state):
 
 def preflight():
     require(platform.system() == 'Linux' and platform.machine() == 'x86_64',
-            'Use an Ubuntu 24.04 x86_64 host.')
+            'Use an Ubuntu 24.04 or later x86_64 host.')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+    version = release.get('VERSION_ID', '').strip('"')
     require(release.get('ID', '').strip('"') == 'ubuntu'
-            and release.get('VERSION_ID', '').strip('"') == '24.04', 'Ubuntu 24.04 is required.')
+            and re.fullmatch(r'[0-9]+\.[0-9]+', version)
+            and tuple(map(int, version.split('.'))) >= (24, 4), 'Ubuntu 24.04 or later is required.')
     require(Path('/proc/1/comm').read_text().strip() == 'systemd', 'systemd must be PID 1.')
     run('systemctl', 'show', '--property=Version', capture=True)
     require(len(os.sched_getaffinity(0)) >= 2, 'At least 2 CPU threads are required.')
@@ -333,7 +335,8 @@ def install_dependencies(package):
     require(locked and all(re.fullmatch(r'[a-z0-9][a-z0-9+.-]*=[A-Za-z0-9.+:~\-]+', item) for item in locked),
             'Invalid package dependency lock.')
     run('apt-get', 'update')
-    run('apt-get', 'install', '--yes', '--no-install-recommends', *locked)
+    minimums = [f'{name} (>= {version})' for name, version in (item.split('=', 1) for item in locked)]
+    run('apt-get', 'satisfy', '--yes', '--no-install-recommends', *minimums)
 
 
 def ensure_user():
@@ -731,7 +734,7 @@ def setup(state, args):
     state['phase'] = 'dependencies'
     save(state)
     install_dependencies(package)
-    # A missing pinned dependency needs a newer release. Keep that choice
+    # An unavailable dependency minimum can need a newer release. Keep that choice
     # possible until storage/configuration/runtime installation starts.
     state['pendingStarted'] = True
     save(state)

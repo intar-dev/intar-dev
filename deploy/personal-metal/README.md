@@ -10,7 +10,7 @@ Paste the token when asked. Input is hidden. The token must not be put in a comm
 
 ## Host requirements
 
-- Ubuntu 24.04, x86_64, systemd, cgroup v2, and working `/dev/kvm` and `/dev/net/tun`.
+- Ubuntu 24.04 or later, x86_64, systemd, cgroup v2, and working `/dev/kvm` and `/dev/net/tun`.
 - At least 2 CPU threads and 4 GiB of usable RAM. A VM with exactly 4 GiB assigned can have less than 4 GiB usable; assign more RAM in that case.
 - An empty Intar deployment. Setup refuses existing unmanaged configuration or data and refuses active VMs. It does not migrate an old host.
 - Reflink storage with at least 10 GiB free. If the filesystem cannot make reflinks, setup needs at least 110 GiB free to create its own preallocated 100 GiB XFS file and retain 10 GiB free outside that file.
@@ -48,7 +48,7 @@ This explicit command waits for runs to stop, checks the recorded storage-file i
 
 ## Release and recovery files
 
-The public launcher resolves a published `agent/v<version>` GitHub release, checks the manager asset SHA-256, then runs that version. The manager pins and verifies the matching archive and every packaged file. SHA-256 protects transfer integrity; the HTTPS GitHub release and its publishers are the trust source. Release packaging also records exact Ubuntu dependency versions in `dependencies.lock`. If an exact version is no longer available, installation fails and needs a new agent release. OS security updates remain the operator's responsibility.
+The public launcher resolves a published `agent/v<version>` GitHub release, checks the manager asset SHA-256, then runs that version. The manager pins and verifies the matching archive and every packaged file. SHA-256 protects transfer integrity; the HTTPS GitHub release and its publishers are the trust source. Release packaging records Ubuntu dependency versions in `dependencies.lock` as minimum requirements. Setup accepts equal or newer versions from the host's APT repositories. If a minimum cannot be met, installation fails. OS security updates remain the operator's responsibility.
 
 | Path | Use |
 | --- | --- |

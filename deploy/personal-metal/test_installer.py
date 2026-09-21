@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 SOURCE = Path(__file__).with_name('intar-host')
 loader = importlib.machinery.SourceFileLoader('intar_host', str(SOURCE))
@@ -41,6 +41,52 @@ class InstallerTests(unittest.TestCase):
         self.stack.enter_context(patch.object(host.os, 'fchown'))
         self.stack.enter_context(patch.object(host.os, 'chown'))
         self.identity = {'hostId': 'host_1', 'ownerUserId': 'user_1', 'scope': 'personal', 'credentialGeneration': 1}
+
+    def test_preflight_requires_ubuntu_at_least_24_04(self):
+        files = {
+            '/proc/1/comm': 'systemd\n', '/proc/meminfo': 'MemTotal: 4194304 kB\n',
+            '/sys/fs/cgroup/cgroup.controllers': 'cpu memory\n',
+        }
+        for distribution, version, accepted in (
+            ('ubuntu', '24.04', True), ('ubuntu', '24.10', True), ('ubuntu', '26.04', True),
+            ('ubuntu', '100.04', True), ('ubuntu', '22.04', False), ('ubuntu', '24.03', False),
+            ('ubuntu', '9.10', False), ('ubuntu', '', False), ('ubuntu', '24.x', False),
+            ('ubuntu', '26.04extra', False), ('debian', '26.04', False),
+        ):
+            files['/etc/os-release'] = f'ID={distribution}\nVERSION_ID="{version}"\n'
+            with self.subTest(distribution=distribution, version=version), \
+                 patch.object(host.platform, 'system', return_value='Linux'), \
+                 patch.object(host.platform, 'machine', return_value='x86_64'), \
+                 patch.object(Path, 'read_text', autospec=True, side_effect=lambda path: files[str(path)]), \
+                 patch.object(host, 'run'), \
+                 patch.object(host.os, 'sched_getaffinity', return_value={0, 1}, create=True), \
+                 patch.object(Path, 'exists', return_value=True), \
+                 patch.object(Path, 'stat', return_value=types.SimpleNamespace(st_mode=stat.S_IFCHR)), \
+                 patch('builtins.open', mock_open()), \
+                 patch.object(host.fcntl, 'ioctl', return_value=12):
+                if accepted:
+                    host.preflight()
+                else:
+                    with self.assertRaisesRegex(host.HostError, 'Ubuntu 24.04 or later is required'):
+                        host.preflight()
+
+    def test_dependencies_use_minimum_versions_and_reject_invalid_locks(self):
+        lock = self.root / 'deploy/personal-metal/dependencies.lock'
+        lock.parent.mkdir(parents=True)
+        lock.write_text('python3=3.12.3-0ubuntu2\nxfsprogs=6.6.0-1ubuntu2\n')
+        with patch.object(host, 'run') as run:
+            host.install_dependencies(self.root)
+        self.assertEqual(run.call_args_list, [
+            unittest.mock.call('apt-get', 'update'),
+            unittest.mock.call('apt-get', 'satisfy', '--yes', '--no-install-recommends',
+                               'python3 (>= 3.12.3-0ubuntu2)', 'xfsprogs (>= 6.6.0-1ubuntu2)'),
+        ])
+        for invalid in ('', 'python3', 'python3=3.12 | other', 'python3=3.12\n--allow-unauthenticated'):
+            with self.subTest(invalid=invalid), patch.object(host, 'run') as run:
+                lock.write_text(invalid)
+                with self.assertRaisesRegex(host.HostError, 'Invalid package dependency lock'):
+                    host.install_dependencies(self.root)
+                run.assert_not_called()
 
     def test_identity_range_avoids_accounts_groups_and_subordinate_ids(self):
         with patch.object(host.pwd, 'getpwall', return_value=[types.SimpleNamespace(pw_uid=320000)]), \

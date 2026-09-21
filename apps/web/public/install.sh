@@ -4,7 +4,7 @@ set -eu
 set +x
 [ "$(id -u)" -eq 0 ] || { echo 'Run: curl -fsSL https://intar.dev/install.sh | sudo sh' >&2; exit 1; }
 [ "$#" -eq 0 ] || { echo 'This launcher takes no arguments.' >&2; exit 1; }
-command -v python3 >/dev/null || { echo 'Install Python 3 on Ubuntu 24.04 first.' >&2; exit 1; }
+command -v python3 >/dev/null || { echo 'Install Python 3 on Ubuntu 24.04 or later first.' >&2; exit 1; }
 exec python3 -I - <<'PY'
 import hashlib
 import json
