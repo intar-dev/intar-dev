@@ -404,8 +404,11 @@ WantedBy=local-fs.target
     run('systemctl', 'daemon-reload')
     run('systemctl', 'enable', '--now', unit)
     require(is_mounted(target), f'Storage is not mounted: {target}')
-    if options == 'bind':
+    if 'bind' in options.split(','):
         require(os.path.samefile(source, target), f'A different filesystem is mounted at {target}.')
+        if 'dev' in options.split(','):
+            # Apply to an existing mount too; systemctl does not remount active units.
+            run('mount', '-o', f'remount,{options}', target)
 
 
 def disable_loop_discard(read_only=False):
@@ -493,7 +496,7 @@ def storage(state):
             require(os.path.samefile(source, target), f'A different filesystem is mounted at {target}.')
         else:
             require(not any(target.iterdir()), f'Refusing to cover existing data at {target}.')
-        mount_unit(source, target, 'bind')
+        mount_unit(source, target, 'bind,dev,nosuid' if name == 'jails' else 'bind')
     require(reflink(MOUNTS['cache'], MOUNTS['jails'])
             and reflink(MOUNTS['self-test'], MOUNTS['jails']), 'Storage does not support exact reflinks.')
     require(shutil.disk_usage(STORAGE).free >= RESERVE, 'Intar storage has less than 10 GiB free.')

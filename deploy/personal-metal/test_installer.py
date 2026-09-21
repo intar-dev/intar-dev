@@ -608,6 +608,21 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaises(host.HostError):
                 host.mount_unit('/source/cache', '/var/cache/intar-agent', 'bind')
 
+    def test_jail_bind_remounts_devices_only_after_verifying_its_source(self):
+        for same_source in (True, False):
+            with self.subTest(same_source=same_source), \
+                 patch.object(host, 'atomic'), patch.object(host, 'mount_name', return_value='jails.mount'), \
+                 patch.object(host, 'is_mounted', return_value=True), \
+                 patch.object(host.os.path, 'samefile', return_value=same_source), \
+                 patch.object(host, 'run') as run:
+                if same_source:
+                    host.mount_unit('/source/jails', '/jails', 'bind,dev,nosuid')
+                    run.assert_called_with('mount', '-o', 'remount,bind,dev,nosuid', '/jails')
+                else:
+                    with self.assertRaises(host.HostError):
+                        host.mount_unit('/source/jails', '/jails', 'bind,dev,nosuid')
+                    self.assertFalse(any(call.args[0] == 'mount' for call in run.call_args_list))
+
     def test_doctor_accepts_same_filesystem_bind_mounts_and_refuses_missing_mount(self):
         state = {'version': '1.2.3', 'storage': {'kind': 'directory'}}
         table = {'filesystems': [{'target': str(p)} for p in host.MOUNTS.values()]}
