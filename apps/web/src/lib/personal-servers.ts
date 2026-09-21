@@ -2,12 +2,13 @@ import { env } from "cloudflare:workers";
 import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, hostActualState, scenarioRuns, user } from "@/db/schema";
+import type { HostStateReportV2 } from "@/generated/bridge";
 import type { UserContext } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
 import { hostHealth, HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { personalHostReportReady } from "@/lib/personal-host-readiness";
 import { currentPersonalOwnerSql } from "@/lib/personal-host-retirement";
-import { availableRuntimeHostResources, loadActiveRuntimeResourceSnapshot } from "@/lib/runtime-capacity";
+import { availableRuntimeHostResources, loadActiveRuntimeResourceSnapshot, type ActiveRuntimeResourceSnapshot } from "@/lib/runtime-capacity";
 import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import { isFreshHostHeartbeat } from "@/lib/scenario-hosts";
 
@@ -36,30 +37,41 @@ export async function listPersonalServers(context: UserContext) {
     registrationOpen: gate?.state === "open",
     installerCommand: "curl -fsSL https://intar.dev/install.sh | sudo sh",
     enrollments: enrollments.results,
-    servers: hosts.map(({ host, report, reportedAt }) => {
-      const connected = !host.disabled && host.connected && isFreshHostHeartbeat(host.lastHeartbeatAt, now, 90_000);
-      const fresh = connected && hostHealth(reportedAt, now) === "healthy";
-      const ready = fresh && personalHostReportReady(report, learnerRunCliV1EnforcementEnabled(env));
-      const resources = ready && report ? availableRuntimeHostResources({ hostId: host.id, report, snapshot: reservations }) : null;
-      const status = host.disabled ? host.ownerRemovalId ? "removing" : "revoked"
-        : !host.scenarioEnabled ? "paused" : !host.lastHeartbeatAt ? "setting_up" : !fresh ? "offline" : ready ? "ready" : "needs_attention";
-      const full = resources && (resources.cpuMillis <= 0 || resources.memoryMib <= 0 || resources.worstCaseDiskMib <= 0);
-      const message = status === "removing" ? "Access is revoked. Retry removal to finish closing sessions."
-        : status === "revoked" ? "Server access was revoked. Remove this server, then register it again to use it."
-        : status === "paused" ? "New runs are paused. Current runs can finish."
-        : status === "setting_up" ? "Waiting for installation and the first health check."
-        : status === "offline" ? "No recent connection. New runs cannot start on this server."
-        : status === "needs_attention" ? "The server did not pass its readiness checks."
-        : full ? "The server is full. Wait for a run to finish."
-        : "Ready for your runs. Only your workloads can use this server.";
-      return {
-        id: host.id, name: host.name, status, message,
-        repairAction: status === "offline" || status === "needs_attention" || status === "setting_up" ? "Run sudo intar-host doctor on this server." : null,
-        connected, createdAt: host.createdAt, lastSeenAt: host.lastHeartbeatAt,
-        capacity: ready && report && resources ? { total: report.capacity.schedulable_cpu_millis / 1000, available: resources.cpuMillis / 1000 } : null,
-        activeRuns: activeRuns.find(row => row.hostId === host.id)?.count ?? 0,
-      };
-    }),
+    servers: hosts.map(row => serializeManagedServer(row, now, reservations,
+      activeRuns.find(run => run.hostId === row.host.id)?.count ?? 0)),
+  };
+}
+
+/** Keep personal and shared server status, capacity, and repair guidance identical. */
+export function serializeManagedServer(
+  { host, report, reportedAt }: { host: typeof agentHosts.$inferSelect; report: HostStateReportV2 | null; reportedAt: number | null },
+  now: number,
+  reservations: ActiveRuntimeResourceSnapshot,
+  activeRuns: number,
+) {
+  const connected = !host.disabled && host.connected && isFreshHostHeartbeat(host.lastHeartbeatAt, now, 90_000);
+  const fresh = connected && hostHealth(reportedAt, now) === "healthy";
+  const ready = fresh && personalHostReportReady(report, learnerRunCliV1EnforcementEnabled(env));
+  const resources = ready && report ? availableRuntimeHostResources({ hostId: host.id, report, snapshot: reservations }) : null;
+  const status = host.disabled ? host.ownerRemovalId ? "removing" : "revoked"
+    : !host.scenarioEnabled ? "paused" : !host.lastHeartbeatAt ? "setting_up" : !fresh ? "offline" : ready ? "ready" : "needs_attention";
+  const full = resources && (resources.cpuMillis <= 0 || resources.memoryMib <= 0 || resources.worstCaseDiskMib <= 0);
+  const message = status === "removing" ? "Access is revoked. Retry removal to finish closing sessions."
+    : status === "revoked" ? "Server access was revoked. Remove this server, then register it again to use it."
+    : status === "paused" ? "New runs are paused. Current runs can finish."
+    : status === "setting_up" ? "Waiting for installation and the first health check."
+    : status === "offline" ? "No recent connection. New runs cannot start on this server."
+    : status === "needs_attention" ? "The server did not pass its readiness checks."
+    : full ? "The server is full. Wait for a run to finish."
+    : host.scope === "organization"
+      ? "Ready for organization runs. Only this organization can use this server."
+      : "Ready for your runs. Only your workloads can use this server.";
+  return {
+    id: host.id, name: host.name, status, message,
+    repairAction: status === "offline" || status === "needs_attention" || status === "setting_up" ? "Run sudo intar-host doctor on this server." : null,
+    connected, createdAt: host.createdAt, lastSeenAt: host.lastHeartbeatAt,
+    capacity: ready && report && resources ? { total: report.capacity.schedulable_cpu_millis / 1000, available: resources.cpuMillis / 1000 } : null,
+    activeRuns,
   };
 }
 

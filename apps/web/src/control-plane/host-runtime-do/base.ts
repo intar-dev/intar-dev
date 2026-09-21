@@ -39,8 +39,10 @@ export interface SocketAttachment {
   kind: "agent";
   hostId: string;
   credentialGeneration: number;
+  scope?: HostDesiredStateV2["scope"];
+  organizationId?: string | null;
   sessionId: string | null;
-  /** Exact beta grant carried by a personal-host JWT; null for platform hosts. */
+  /** Exact beta grant carried by a personal-host JWT; null for platform and organization hosts. */
   betaSourceInviteId: string | null;
   betaSourceLeaseId: string | null;
   betaAdmissionGrantedAt: number | null;
@@ -245,7 +247,15 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
                           eq(agentHosts.credentialGeneration, expectedHostSession.credentialGeneration),
                           eq(agentHosts.disabled, false),
                           sql`(${agentHosts.scope} = 'platform' OR (${agentHosts.scope} = 'personal'
-                            AND ${agentHosts.userId} = ${scenarioRuns.userId}))`,
+                            AND ${agentHosts.userId} = ${scenarioRuns.userId})
+                            OR (${agentHosts.scope} = 'organization' AND ${agentHosts.role} = 'agent'
+                              AND ${agentHosts.organizationId} = ${scenarioRuns.organizationId}
+                              AND EXISTS (SELECT 1 FROM member membership
+                                JOIN user member_user ON member_user.id = membership.user_id
+                                JOIN access_allowlist access ON access.user_id = member_user.id AND access.state = 'active'
+                                WHERE membership.organization_id = ${agentHosts.organizationId}
+                                  AND membership.user_id = ${scenarioRuns.userId}
+                                  AND member_user.deleted_at IS NULL AND coalesce(member_user.banned, 0) = 0)))`,
                           eq(
                             agentHosts.activeSessionId,
                             expectedHostSession.activeSessionId,
@@ -499,7 +509,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       eq(agentHosts.credentialGeneration, attachment.credentialGeneration),
     )).returning({ id: agentHosts.id });
     try {
-      if (attachment.betaSourceInviteId !== null) await revokeStargateHostRelay({ hostId: attachment.hostId, sessionId: attachment.sessionId,
+      if ((attachment.scope === "organization" || attachment.betaSourceInviteId !== null)) await revokeStargateHostRelay({ hostId: attachment.hostId, sessionId: attachment.sessionId,
         credentialGeneration: attachment.credentialGeneration });
     } finally {
       if (updated.length) await this.scheduleNextAlarm(attachment.hostId);
@@ -523,7 +533,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         continue;
       }
       try {
-        if (attachment.sessionId && attachment.betaSourceInviteId !== null) await revokeStargateHostRelay({ hostId,
+        if (attachment.sessionId && (attachment.scope === "organization" || attachment.betaSourceInviteId !== null)) await revokeStargateHostRelay({ hostId,
           sessionId: attachment.sessionId, credentialGeneration: attachment.credentialGeneration });
       } catch (error) {
         console.warn(JSON.stringify({ event: "relay_session_revoke_failed", hostId }));
@@ -613,6 +623,8 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         kind: "agent",
         hostId: parsed.hostId,
         credentialGeneration: parsed.credentialGeneration,
+        organizationId: typeof parsed.organizationId === "string" ? parsed.organizationId : null,
+        scope: parsed.scope === "organization" ? "organization" : parsed.scope === "personal" ? "personal" : "platform",
         sessionId:
           typeof parsed.sessionId === "string" && parsed.sessionId
             ? parsed.sessionId

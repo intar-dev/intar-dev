@@ -23,9 +23,31 @@ When your first server becomes **Ready**, all **new runs** use your personal ser
 
 If your servers are offline, full, or paused, new starts are refused. Runs do not fall back to cloud servers. Only your work runs on your servers.
 
+## Shared organization servers
+
+Open an organization and select **Servers**. Owners and admins can add, rename,
+pause, resume, and remove shared servers. Members can view server status.
+Create a token with **Add server**, then use the same installer command and
+server requirements shown above.
+
+When the first shared server becomes **Ready**, new runs from that organization's
+courses use its servers. A member with personal servers continues to use their
+personal servers. Public course runs outside the organization use the member's
+normal server placement.
+
+Shared servers accept only current members' runs from the same organization.
+They receive images only for authorized runs or pending starts. If all shared
+servers are offline, paused, or full, new organization runs cannot start. They
+do not move to the cloud. Existing runs stay on the server where they started.
+
+Removing the last shared server requires confirmation that new organization
+runs will use the cloud. Members with personal servers keep their personal
+placement. Use the same repair and local removal commands below. Manage the
+registration from **Organization → Servers** instead of **Profile → My servers**.
+
 ## Manage your servers
 
-In **Profile → My servers**, you can rename, pause, resume, or remove a server. Pausing stops new starts; existing runs can finish. When you remove your last server, you must explicitly confirm that new runs will use cloud servers.
+In **Profile → My servers**, you can rename, pause, resume, or remove a server. Pausing stops new starts; existing runs can finish. When you remove your last personal server, you must confirm that new runs will use cloud servers or the shared servers of the selected organization.
 
 | State | Meaning and next step |
 | --- | --- |

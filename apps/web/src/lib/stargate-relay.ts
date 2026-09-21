@@ -1,3 +1,4 @@
+import { organizationHostAdmissionCondition } from "@/control-plane/auth";
 import { env } from "cloudflare:workers";
 import type { HostRelayCredentials } from "@/generated/bridge";
 import type { HostRelayIdentity, RelayTarget, SshTargetTransport } from "@/generated/stargate";
@@ -15,16 +16,18 @@ function identity(input: HostRelaySession): HostRelayIdentity {
 const LEASE_MS = 120_000;
 
 async function snapshot(input: HostRelaySession) {
-  const host = await env.DB.prepare(`SELECT host.scope, host.connected_at,
+  const host = await env.DB.prepare(`SELECT host.scope, host.organization_id, host.connected_at,
       access.source_invite_id, access.source_lease_id, access.granted_at
     FROM agent_hosts host
-    INNER JOIN user owner ON owner.id = host.user_id AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
-    LEFT JOIN access_allowlist access ON access.user_id = host.user_id
+    LEFT JOIN user owner ON owner.id = host.user_id
+    LEFT JOIN access_allowlist access ON access.user_id = host.user_id AND host.scope = 'personal'
     WHERE host.id = ?1 AND host.active_session_id = ?2 AND host.credential_generation = ?3
       AND host.credential_generation > 0 AND host.disabled = 0 AND host.connected = 1
-      AND (host.scope = 'platform' OR (host.scope = 'personal' AND access.state = 'active'))`)
+      AND ((host.scope = 'organization' AND host.role = 'agent' AND (${organizationHostAdmissionCondition()}))
+        OR (owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
+          AND (host.scope = 'platform' OR (host.scope = 'personal' AND access.state = 'active'))))`)
     .bind(input.hostId, input.sessionId, input.credentialGeneration)
-    .first<{ scope: "platform" | "personal"; connected_at: number; source_invite_id: string | null; source_lease_id: string | null; granted_at: number | null }>();
+    .first<{ scope: "platform" | "personal" | "organization"; organization_id: string | null; connected_at: number; source_invite_id: string | null; source_lease_id: string | null; granted_at: number | null }>();
   if (!host) return null;
   if (host.scope === "platform") return { host, rows: [], targets: [] };
   const { results } = await env.DB.prepare(`SELECT execution.id AS execution_id,
@@ -43,8 +46,13 @@ async function snapshot(input: HostRelaySession) {
     INNER JOIN scenario_runs run ON run.runtime_execution_id = execution.id AND run.run_id = execution.domain_id
       AND run.host_id = host.id AND run.user_id = execution.user_id
     INNER JOIN access_allowlist access ON access.user_id = execution.user_id AND access.state = 'active'
+    INNER JOIN user runner ON runner.id = execution.user_id AND runner.deleted_at IS NULL AND coalesce(runner.banned, 0) = 0
     WHERE host.id = ?1 AND host.active_session_id = ?2 AND host.credential_generation = ?3
-      AND host.scope = 'personal' AND host.user_id = execution.user_id AND host.disabled = 0 AND host.connected = 1
+      AND ((host.scope = 'personal' AND host.user_id = execution.user_id)
+        OR (host.scope = 'organization' AND host.role = 'agent' AND host.organization_id = run.organization_id
+          AND EXISTS (SELECT 1 FROM member membership WHERE membership.organization_id = host.organization_id
+            AND membership.user_id = execution.user_id)))
+      AND host.disabled = 0 AND host.connected = 1
       AND execution.domain_kind = 'scenario' AND execution.state IN ('queued', 'provisioning', 'ready')
       AND execution.archive_requested_at IS NULL
       AND run.delete_requested_at IS NULL AND run.completed_at IS NULL AND run.failed_at IS NULL
@@ -68,7 +76,7 @@ export async function refreshStargateHostRelay(input: HostRelaySession): Promise
   const before = await snapshot(input);
   if (!before) {
     const host = await env.DB.prepare("SELECT scope FROM agent_hosts WHERE id = ?1").bind(input.hostId).first<{scope:string}>();
-    if (host?.scope === "personal") await revokeStargateHostRelay(input);
+    if (host?.scope === "personal" || host?.scope === "organization") await revokeStargateHostRelay(input);
     return null;
   }
   if (before.host.scope === "platform") return null;
@@ -106,17 +114,25 @@ export async function revokeStargateHostRelayCredentials(input: { hostId: string
   if (!response.ok) throw new Error(`host relay credential revoke failed (${response.status})`);
 }
 
-/** Personal hosts never receive a Direct target, even if they report a public address. */
+/** Personal and organization hosts always use the outbound relay. */
 export async function loadStargateSshTransport(input: {
   hostId: string; ownerId: string; executionId: string; executionGeneration: number;
   vmId: string; directHost: string; directPort: number;
 }): Promise<SshTargetTransport> {
   const host = await env.DB.prepare(`SELECT scope, user_id, active_session_id, credential_generation
     FROM agent_hosts WHERE id = ?1 AND disabled = 0 AND credential_generation > 0`)
-    .bind(input.hostId).first<{ scope: "personal" | "platform"; user_id: string; active_session_id: string | null; credential_generation: number }>();
+    .bind(input.hostId).first<{ scope: "personal" | "platform" | "organization"; user_id: string; active_session_id: string | null; credential_generation: number }>();
   if (!host) throw new Error("terminal host is not available");
   if (host.scope === "platform") return { kind: "direct", host: input.directHost, port: input.directPort };
-  if (host.scope !== "personal" || host.user_id !== input.ownerId || !host.active_session_id) throw new Error("personal host is not available");
+  if (!host.active_session_id || (host.scope !== "personal" && host.scope !== "organization")
+    || (host.scope === "personal" && host.user_id !== input.ownerId)) throw new Error("host relay is not available");
+  if (host.scope === "organization") {
+    const authorized = await snapshot({ hostId: input.hostId, sessionId: host.active_session_id,
+      credentialGeneration: host.credential_generation });
+    if (!authorized?.targets.some(target => target.owner_id === input.ownerId
+      && target.execution_id === input.executionId && target.execution_generation === input.executionGeneration
+      && target.vm_id === input.vmId)) throw new Error("organization relay target is not available");
+  }
   return { kind: "relay", target: {
     host: { host_id: input.hostId, session_id: host.active_session_id, credential_generation: host.credential_generation },
     owner_id: input.ownerId, execution_id: input.executionId,

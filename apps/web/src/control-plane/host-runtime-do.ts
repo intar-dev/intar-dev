@@ -1,3 +1,4 @@
+import { organizationHostAdmissionCondition } from "./auth";
 import { enforceHostWorkloadAccess } from "@/lib/host-workload-access";
 import { refreshStargateHostRelay, revokeStargateHostRelay, revokeStargateHostRelayCredentials } from "@/lib/stargate-relay";
 import { persistHostReport } from "@/lib/personal-host-readiness";
@@ -238,6 +239,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
     if (!admission.scope || admission.credentialGeneration !== credentialGeneration) {
       return jsonResponse({ error: "server credentials changed" }, 401);
     }
+    if (admission.scope === "organization" && request.headers.get("x-agent-organization-id") !== admission.organizationId) {
+      return jsonResponse({ error: "organization credentials changed" }, 401);
+    }
     if (admission.disabled) {
       await this.retireRuntimeState(hostId, "host disabled");
       return jsonResponse({ error: "host is disabled" }, 403);
@@ -252,7 +256,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
     } else if (betaAdmission !== null) {
       return jsonResponse(
-        { error: "invalid platform host admission" },
+        { error: "invalid host admission" },
         401,
       );
     }
@@ -279,6 +283,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
       kind: "agent",
       hostId,
       credentialGeneration,
+      scope: admission.scope,
+      organizationId: admission.organizationId,
       sessionId: null,
       betaSourceInviteId: betaAdmission?.sourceInviteId ?? null,
       betaSourceLeaseId: betaAdmission?.sourceLeaseId ?? null,
@@ -576,6 +582,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         attachment.sessionId,
         betaAdmissionFromAttachment(attachment),
         attachment.credentialGeneration,
+        attachment.organizationId,
       ))
     ) {
       await this.rejectClientHelloAdmission(
@@ -690,7 +697,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
             eq(accessAllowlist.grantedAt, socketBetaAdmission.grantedAt),
           )),
         )
-      : host.scope === "platform" && socketBetaAdmission === null
+      : host.scope === "organization" && socketBetaAdmission === null && attachment.organizationId === host.organizationId
+        ? sql`${agentHosts.role} = 'agent' AND ${agentHosts.organizationId} = ${host.organizationId}
+            AND ${sql.raw(organizationHostAdmissionCondition("agent_hosts.organization_id"))}`
+        : host.scope === "platform" && socketBetaAdmission === null
         ? sql`1 = 1`
         : undefined;
     const activationFence = admissionFence && host.scope
@@ -784,6 +794,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       sessionId,
       socketBetaAdmission,
       attachment.credentialGeneration,
+      attachment.organizationId,
     );
     if (!admissionStillCurrent) {
       await this.rollbackPendingClientHello(db, host, sessionId);
@@ -1368,7 +1379,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       ));
       const lastSent = attachment.lastDesiredVersionSent;
       if (lastSent !== null && desiredState.version < lastSent) return;
-      const relayRefreshDue = desiredState.scope === "personal" &&
+      const relayRefreshDue = desiredState.scope !== "platform" &&
         (attachment.lastDesiredDispatchAtMs === null || Date.now() - attachment.lastDesiredDispatchAtMs >= 45_000);
       if (!options?.force && !relayRefreshDue && lastSent === desiredState.version) return;
       let relay: HostRelayCredentials | null;
@@ -1392,6 +1403,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         attachment.sessionId,
         betaAdmissionFromAttachment(attachment),
         attachment.credentialGeneration,
+        attachment.organizationId,
       );
       const latestAttachment = this.readSocketAttachment(ws);
       if (
@@ -1402,7 +1414,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         latestAttachment.hostId !== hostId ||
         latestAttachment.sessionId !== attachment.sessionId
       ) {
-        if (desiredState.scope === "personal") await revokeStargateHostRelay({ hostId, sessionId: attachment.sessionId,
+        if (desiredState.scope !== "platform") await revokeStargateHostRelay({ hostId, sessionId: attachment.sessionId,
           credentialGeneration: attachment.credentialGeneration });
         return;
       }
@@ -1493,15 +1505,17 @@ export class HostRuntimeDO extends HostRuntimeBase {
   }
 
   private async loadHostConnectionAdmission(hostId: string): Promise<{
-    scope: "personal" | "platform" | null;
+    scope: "personal" | "platform" | "organization" | null;
+    organizationId: string | null;
     credentialGeneration: number;
     disabled: boolean;
     betaAdmission: BetaAdmissionEpoch | null;
   } | null> {
     const row = await this.env.DB.prepare(
-      `SELECT host.scope,
+      `SELECT host.scope, host.organization_id,
               host.credential_generation,
-              host.disabled,
+              (host.disabled OR (host.scope = 'organization' AND (host.role <> 'agent'
+                OR NOT (${organizationHostAdmissionCondition()})))) AS disabled,
               CASE WHEN access.state = 'active' THEN access.source_invite_id END AS beta_source_invite_id,
               CASE WHEN access.state = 'active' THEN access.source_lease_id END AS beta_source_lease_id,
               CASE WHEN access.state = 'active' THEN access.granted_at END AS beta_granted_at
@@ -1512,7 +1526,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
     )
       .bind(hostId)
       .first<{
-        scope: "personal" | "platform" | null;
+        scope: "personal" | "platform" | "organization" | null;
+        organization_id: string | null;
         credential_generation: number;
         disabled: number;
         beta_source_invite_id: string | null;
@@ -1522,6 +1537,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     return row
       ? {
           scope: row.scope,
+          organizationId: row.organization_id,
           credentialGeneration: row.credential_generation,
           disabled: row.disabled !== 0,
           betaAdmission: admissionFromDatabaseRow(row),
@@ -1557,6 +1573,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     sessionId: string,
     betaAdmission: BetaAdmissionEpoch | null,
     credentialGeneration: number,
+    organizationId: string | null | undefined,
   ): Promise<boolean> {
     const row = await this.env.DB.prepare(
       `SELECT 1 AS admitted
@@ -1569,13 +1586,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
          AND host.disabled = 0
          AND (
            (
-             host.scope = 'platform'
+             ((host.scope = 'platform' AND ?7 IS NULL) OR (host.scope = 'organization' AND host.role = 'agent' AND host.organization_id = ?7
+               AND (${organizationHostAdmissionCondition()})))
              AND ?3 IS NULL
              AND ?4 IS NULL
              AND ?5 IS NULL
            )
            OR (
-             host.scope = 'personal'
+             host.scope = 'personal' AND ?7 IS NULL
              AND access.state = 'active'
              AND access.source_invite_id = ?3
              AND access.source_lease_id = ?4
@@ -1591,6 +1609,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         betaAdmission?.sourceLeaseId ?? null,
         betaAdmission?.grantedAt ?? null,
         credentialGeneration,
+        organizationId ?? null,
       )
       .first<{ admitted: number }>();
     return row?.admitted === 1;
@@ -1605,7 +1624,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       const identity = await drizzle(this.env.DB).select({ generation: agentHosts.credentialGeneration, disabled: agentHosts.disabled, scope: agentHosts.scope })
         .from(agentHosts).where(eq(agentHosts.id, hostId)).get();
       // The durable credential fence has already advanced on removal. Revoke only old generations.
-      if (identity?.scope === "personal") await revokeStargateHostRelayCredentials({ hostId,
+      if (identity?.scope === "personal" || identity?.scope === "organization") await revokeStargateHostRelayCredentials({ hostId,
         credentialGeneration: Math.max(0, identity.generation - (identity.disabled ? 1 : 0)) });
     })();
     // Observe failure immediately; close control sockets even if Stargate is unavailable.

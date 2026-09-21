@@ -420,8 +420,8 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     anyhow::ensure!(
-        !(cfg.bridge.enabled && cfg.bridge.scope == HostScope::Personal && cfg.ssh_access.enabled),
-        "personal hosts require outbound relay; disable ssh_access"
+        !(cfg.bridge.enabled && cfg.bridge.scope != HostScope::Platform && cfg.ssh_access.enabled),
+        "personal and organization hosts require outbound relay; disable ssh_access"
     );
     if cfg.ssh_access.enabled {
         if cfg.ssh_access.public_port_start == 0 || cfg.ssh_access.public_port_end == 0 {
@@ -832,6 +832,12 @@ mod ownership_tests {
         assert_eq!(cfg.scope, HostScope::Personal);
         assert_eq!(cfg.credential_generation, 1);
         assert!(!format!("{cfg:?}").contains(&secret));
+        let mut organization_identity = identity.clone();
+        organization_identity["scope"] = serde_json::json!("organization");
+        std::fs::write(&credential_file, organization_identity.to_string())?;
+        cfg.load_credential()?;
+        assert_eq!(cfg.scope, HostScope::Organization);
+        cfg.validate_owner("another-member", "execution-1", 1)?;
         std::fs::set_permissions(&credential_file, std::fs::Permissions::from_mode(0o644))?;
         assert!(cfg.load_credential().is_err());
         std::fs::set_permissions(&credential_file, std::fs::Permissions::from_mode(0o600))?;
@@ -844,6 +850,39 @@ mod ownership_tests {
             std::fs::write(&credential_file, invalid.to_string())?;
             assert!(cfg.load_credential().is_err(), "{field}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn organization_hosts_reject_public_ssh_access() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let credential_file = dir.path().join("credential.json");
+        std::fs::write(
+            &credential_file,
+            serde_json::json!({
+                "hostId": "org-host", "ownerUserId": "creator", "scope": "organization",
+                "credentialGeneration": 1, "credential": "a".repeat(64)
+            })
+            .to_string(),
+        )?;
+        std::fs::set_permissions(&credential_file, std::fs::Permissions::from_mode(0o600))?;
+        let config_file = dir.path().join("config.toml");
+        let config = format!(
+            "[bridge]\nenabled = true\nbase_url = 'https://intar.dev'\ncredential_file = '{}'\n[ssh_access]\nenabled = true\n[image_registry]\nurl = 'https://intar.dev/agent/registry/images'\n",
+            credential_file.display()
+        );
+        std::fs::write(&config_file, &config)?;
+        let error = load(&config_file).expect_err("organization hosts cannot expose public SSH");
+        assert!(error.to_string().contains("require outbound relay"));
+        std::fs::write(
+            &config_file,
+            config.replace(
+                "[ssh_access]\nenabled = true",
+                "[ssh_access]\nenabled = false",
+            ),
+        )?;
+        assert_eq!(load(&config_file)?.bridge.scope, HostScope::Organization);
         Ok(())
     }
 

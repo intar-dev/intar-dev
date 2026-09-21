@@ -1,3 +1,4 @@
+import { currentRunHostScopeCondition } from "@/lib/metal-placement";
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import type { HostDesiredStateV2 } from "@/generated/bridge";
@@ -11,7 +12,8 @@ import { requestScenarioRunRouteCleanup } from "@/lib/scenario-runs/route-cleanu
 /** Also runs after hibernation/reconnect. A saved desired document is not an access grant. */
 export async function enforceHostWorkloadAccess(state: HostDesiredStateV2): Promise<HostDesiredStateV2> {
   const { results } = await env.DB.prepare(`WITH permitted_runs AS MATERIALIZED (
-    SELECT run.run_id, run.user_id, run.runtime_execution_id
+    SELECT run.run_id, run.user_id, run.runtime_execution_id, run.organization_id,
+      run.scenario_id, run.course_scope_key, run.course_id, run.lecture_id, run.request_scope_json
     FROM scenario_runs run JOIN user owner ON owner.id = run.user_id
     JOIN access_allowlist access ON access.user_id = owner.id AND access.state = 'active'
     WHERE ?2 = 1 AND run.host_id = ?1 AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
@@ -24,7 +26,7 @@ export async function enforceHostWorkloadAccess(state: HostDesiredStateV2): Prom
     WHERE host.id = ?1 AND host.disabled = 0 AND execution.domain_id = run.run_id
       AND execution.user_id = run.user_id AND execution.state IN ('queued','provisioning','ready')
       AND execution.archive_requested_at IS NULL
-      AND (host.scope = 'platform' OR (host.scope = 'personal' AND host.user_id = execution.user_id))
+      AND ${currentRunHostScopeCondition()}
       AND NOT EXISTS (SELECT 1 FROM runtime_executions newer WHERE newer.domain_kind = execution.domain_kind
         AND newer.domain_id = execution.domain_id AND newer.generation > execution.generation)
     UNION ALL

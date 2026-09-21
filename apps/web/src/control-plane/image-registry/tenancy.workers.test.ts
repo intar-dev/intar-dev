@@ -300,11 +300,22 @@ describe("personal image access", () => {
     expect(rows).toEqual([]);
   });
 
-  it.each([undefined, null, "organization"])("denies even public images for unsupported scope %s", async scope => {
+  it.each([undefined, null, "unknown"])("denies even public images for unsupported scope %s", async scope => {
     const agent = { hostId: "personal", userId: "runner-owner", credentialGeneration: 1, scope } as unknown as VerifiedAgentHost;
     const rows = await drizzle(env.DB).select({ id: vmScenarioVms.id }).from(vmScenarioVms)
       .innerJoin(vmScenarios, eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId))
       .where(agentScenarioImageAccess(agent));
+    expect(rows).toEqual([]);
+  });
+
+  it("does not treat a personal credential as organization authority", async () => {
+    const verified = await requireVerifiedAgentRequest(new Request("https://intar.test", {
+      headers: { authorization: `Bearer ${token}` },
+    }), env);
+    if (!verified.ok) throw new Error("fixture authentication failed");
+    const rows = await drizzle(env.DB).select({ id: vmScenarioVms.id }).from(vmScenarioVms)
+      .innerJoin(vmScenarios, eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId))
+      .where(agentScenarioImageAccess({ ...verified.agent, scope: "organization", organizationId: "org-a" }));
     expect(rows).toEqual([]);
   });
 

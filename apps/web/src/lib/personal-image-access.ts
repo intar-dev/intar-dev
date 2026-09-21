@@ -13,15 +13,19 @@ export function preparationAuthoritySql(): string {
   // Small grouped predicates keep this correlated query below D1's expression
   // depth limit when image, manifest, and artifact routes add their own fences.
   return `EXISTS (SELECT 1 FROM agent_hosts host
-    JOIN user owner ON owner.id = host.user_id
+    JOIN user owner ON owner.id = prep.user_id
     JOIN access_allowlist access ON access.user_id = owner.id
     JOIN vm_scenarios scenario ON scenario.scenario_id = ${field("scenarioId")}
     JOIN course_catalogs catalog ON catalog.scope_key = ${field("courseScopeKey")}
     JOIN json_each(catalog.catalog_json, '$.courses') course
     JOIN json_each(course.value, '$.lectures') lecture
-    WHERE (host.id, host.user_id, host.scope, host.role, host.disabled, host.scenario_enabled,
-        host.credential_generation) = (prep.host_id, prep.user_id, 'personal', 'agent', 0, 1, prep.credential_generation)
-      AND (owner.metal_placement = 'personal' AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0)
+    WHERE (host.id, host.role, host.disabled, host.scenario_enabled,
+        host.credential_generation) = (prep.host_id, 'agent', 0, 1, prep.credential_generation)
+      AND ((host.scope = 'personal' AND host.user_id = prep.user_id AND owner.metal_placement = 'personal')
+        OR (host.scope = 'organization' AND host.organization_id = ${field("organizationId")}
+          AND owner.metal_placement = 'platform' AND EXISTS (SELECT 1 FROM organization org
+            WHERE org.id = host.organization_id AND org.metal_placement = 'organization')))
+      AND (owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0)
       AND (access.state, access.source_invite_id, access.source_lease_id, access.granted_at) =
         ('active', json_extract(prep.beta_json, '$.sourceInviteId'), json_extract(prep.beta_json, '$.sourceLeaseId'),
           json_extract(prep.beta_json, '$.grantedAt'))
@@ -53,12 +57,12 @@ export function preparationAuthoritySql(): string {
 /** Correlated with vmScenarios/vmScenarioVms, just like the workload grant. */
 export function personalPreparationImageAccess(hostId: string) {
   return sql`EXISTS (SELECT 1 FROM personal_image_preparations prep
-    JOIN agent_hosts host ON host.id = prep.host_id AND prep.user_id = host.user_id
+    JOIN agent_hosts host ON host.id = prep.host_id
     JOIN json_each(prep.images_json) image
     JOIN host_desired_state desired ON desired.host_id = prep.host_id
     JOIN json_each(desired.doc_json, '$.cached_images') intent
     WHERE prep.host_id = ${hostId} AND ${sql.raw(preparationAuthoritySql())}
-      AND (json_extract(desired.doc_json, '$.scope'), json_extract(desired.doc_json, '$.owner_user_id')) = ('personal', prep.user_id)
+      AND (json_extract(desired.doc_json, '$.scope'), json_extract(desired.doc_json, '$.owner_user_id')) = (host.scope, host.user_id)
       AND json_extract(prep.access_json, '$.scenarioId') = ${vmScenarios.scenarioId}
       AND (json_extract(image.value, '$.imageSha256'), json_extract(image.value, '$.imageKey.scenario'),
         json_extract(image.value, '$.imageKey.vm'), json_extract(image.value, '$.imageKey.arch')) =

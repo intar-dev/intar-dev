@@ -29,7 +29,8 @@ async function input() {
 
 async function agent(hostId = "personal", userId = "owner"): Promise<VerifiedAgentHost> {
   const { betaAdmission: beta } = await input();
-  return { hostId, userId, scope: "personal", role: "agent", credentialGeneration: 1,
+  const [host] = await db.select().from(agentHosts).where(eq(agentHosts.id, hostId));
+  return { hostId, userId, scope: host!.scope!, organizationId: host!.organizationId, role: "agent", credentialGeneration: 1,
     betaSourceInviteId: beta.sourceInviteId, betaSourceLeaseId: beta.sourceLeaseId, betaAdmissionGrantedAt: beta.grantedAt };
 }
 
@@ -287,4 +288,59 @@ describe("personal image preparation", () => {
     expect(await visible()).toEqual([]);
     await expect(preparePersonalScenarioImages(second)).rejects.toMatchObject({ code: "scenario_preparation_changed" });
   });
+
+  async function useOrganizationHost() {
+    await env.DB.prepare("UPDATE user SET metal_placement = 'platform'").run();
+    await env.DB.prepare("UPDATE organization SET metal_placement = 'organization' WHERE id = 'org'").run();
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'organization', organization_id = 'org' WHERE id = 'personal'").run();
+  }
+
+  it("prepares organization images for a member other than the host creator", async () => {
+    await useOrganizationHost();
+    await db.insert(member).values({ id: "other-membership", userId: "other", organizationId: "org", role: "member", createdAt: new Date() });
+    const [beta] = await db.select().from(accessAllowlist).where(eq(accessAllowlist.userId, "other"));
+    const prep = { ...await input(), access: { ...access, userId: "other" },
+      betaAdmission: { sourceInviteId: beta!.sourceInviteId, sourceLeaseId: beta!.sourceLeaseId, grantedAt: beta!.grantedAt } };
+    expect(await preparePersonalScenarioImages(prep)).toBe("personal");
+    expect(await visible()).toEqual(["private"]);
+    await env.DB.prepare("DELETE FROM member WHERE user_id = 'other'").run();
+    expect(await visible()).toEqual([]);
+    await expect(preparePersonalScenarioImages(prep)).resolves.toBeUndefined();
+  });
+
+  it("keeps other members' preparations and refuses another organization's images", async () => {
+    await useOrganizationHost();
+    await db.insert(member).values({ id: "other-membership", userId: "other", organizationId: "org", role: "member", createdAt: new Date() });
+    await preparePersonalScenarioImages(await input());
+    const [beta] = await db.select().from(accessAllowlist).where(eq(accessAllowlist.userId, "other"));
+    const prep = { ...await input(), requestKey: "other-start", access: { ...access, userId: "other", scenarioId: "other-private", lectureId: "other-private" },
+      requiredImages: [{ ...image, imageKey: { ...image.imageKey, scenario: "other-private" } }],
+      betaAdmission: { sourceInviteId: beta!.sourceInviteId, sourceLeaseId: beta!.sourceLeaseId, grantedAt: beta!.grantedAt } };
+    await preparePersonalScenarioImages(prep);
+    expect((await visible()).sort()).toEqual(["other-private", "private"]);
+    const result = await reconcileHostScenarioImages(db, { hostId: "personal", architecture: "x86_64", nowUnixMs: Date.now() });
+    expect(result.desiredState!.cached_images).toHaveLength(2);
+    await db.insert(organization).values({ id: "foreign-org", name: "Foreign", slug: "foreign", createdAt: new Date() });
+    await env.DB.prepare("UPDATE vm_scenarios SET organization_id = 'foreign-org' WHERE scenario_id = 'other-private'").run();
+    expect(await visible()).toEqual(["private"]);
+    await expect(preparePersonalScenarioImages(prep)).rejects.toMatchObject({ code: "scenario_preparation_changed" });
+  });
+
+  it("starts an organization run and keeps its exact image grant until membership ends", async () => {
+    await useOrganizationHost();
+    const prep = await input();
+    const start = { scenarioId: "private", userId: "owner", organizationId: "org",
+      betaAdmission: prep.betaAdmission, idempotencyKey: prep.requestKey };
+    await expect(beginScenarioRun(start)).rejects.toMatchObject({ code: "image_not_ready" });
+    expect(await visible()).toEqual(["private"]);
+    await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json, '$.cached_images', json(?)) WHERE host_id = 'personal'")
+      .bind(JSON.stringify([{ image_key: image.imageKey, image_id: image.imageSha256, phase: "ready" }])).run();
+    const run = await beginScenarioRun(start);
+    await run.deliveryHint;
+    expect(run.hostId).toBe("personal");
+    expect(await visible()).toEqual(["private"]);
+    await env.DB.prepare("DELETE FROM member WHERE user_id = 'owner'").run();
+    expect(await visible()).toEqual([]);
+  });
+
 });

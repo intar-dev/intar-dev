@@ -212,8 +212,15 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn('secret', str(error.exception))
                 self.assertIn('#register-again' if status == 401 else 'Repeat setup', str(error.exception))
 
+    def test_organization_claim_keeps_creator_identity_and_outbound_relay(self):
+        identity = {**self.identity, 'scope': 'organization'}
+        response = io.BytesIO(json.dumps({**identity, 'organizationId': 'org_1'}).encode())
+        client = types.SimpleNamespace(open=lambda *a, **k: response)
+        with patch.object(host.urllib.request, 'build_opener', return_value=client):
+            self.assertEqual(host.claim({'credential': 'a' * 64, 'enrollmentToken': 'b' * 64}), identity)
+
     def test_claim_validates_identity_scope_and_generation(self):
-        for change in ({'scope': 'platform'}, {'hostId': '../bad'}, {'ownerUserId': ''}, {'credentialGeneration': 2}):
+        for change in ({'scope': 'platform'}, {'scope': 'unknown'}, {'hostId': '../bad'}, {'ownerUserId': ''}, {'credentialGeneration': 2}):
             response = io.BytesIO(json.dumps({**self.identity, **change}).encode())
             client = types.SimpleNamespace(open=lambda *a, **k: response)
             with self.subTest(change=change), patch.object(host.urllib.request, 'build_opener', return_value=client):
@@ -237,7 +244,7 @@ class InstallerTests(unittest.TestCase):
                 with patch('builtins.open', side_effect=terminal_open):
                     result = executor.submit(host.read_token)
                     self.assertTrue(select.select([master], [], [], 5)[0], 'Token prompt was not flushed')
-                    self.assertEqual(os.read(master, 1024), b'Paste the token from My servers: ')
+                    self.assertEqual(os.read(master, 1024), b'Paste the token from My servers or organization Servers: ')
                     self.assertFalse(host.termios.tcgetattr(slave)[3] & host.termios.ECHO)
                     os.write(master, b'a' * 64 + b'\n')
                     self.assertEqual(result.result(timeout=5), 'a' * 64)

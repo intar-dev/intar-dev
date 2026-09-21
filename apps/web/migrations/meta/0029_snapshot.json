@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "55d7f344-a2f5-461e-a773-e2e75382e42e",
-  "prevId": "206edc4a-0584-4d17-85d8-7d73fdd12066",
+  "id": "5c941ff1-1136-444f-838a-3380bed60d0a",
+  "prevId": "a65e320e-24fb-42d7-a278-ebecf699b7b3",
   "tables": {
     "access_allowlist": {
       "name": "access_allowlist",
@@ -974,6 +974,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "owner_removal_id": {
           "name": "owner_removal_id",
           "type": "text",
@@ -1116,6 +1123,13 @@
           ],
           "isUnique": false
         },
+        "agent_hosts_organization_idx": {
+          "name": "agent_hosts_organization_idx",
+          "columns": [
+            "organization_id"
+          ],
+          "isUnique": false
+        },
         "agent_hosts_role_idx": {
           "name": "agent_hosts_role_idx",
           "columns": [
@@ -1146,6 +1160,19 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "agent_hosts_organization_id_organization_id_fk": {
+          "name": "agent_hosts_organization_id_organization_id_fk",
+          "tableFrom": "agent_hosts",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1153,11 +1180,15 @@
       "checkConstraints": {
         "agent_hosts_scope_valid": {
           "name": "agent_hosts_scope_valid",
-          "value": "\"scope\" is null OR \"scope\" in ('personal', 'platform')"
+          "value": "\"scope\" is null OR \"scope\" in ('personal', 'platform', 'organization')"
         },
         "agent_hosts_personal_role_valid": {
           "name": "agent_hosts_personal_role_valid",
-          "value": "\"scope\" is null OR \"scope\" <> 'personal' OR \"role\" = 'agent'"
+          "value": "\"scope\" is null OR \"scope\" not in ('personal', 'organization') OR \"role\" = 'agent'"
+        },
+        "agent_hosts_organization_valid": {
+          "name": "agent_hosts_organization_valid",
+          "value": "(\"scope\" is 'organization' AND \"organization_id\" is not null) OR (\"scope\" is not 'organization' AND \"organization_id\" is null)"
         }
       }
     },
@@ -1608,6 +1639,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "host_id": {
           "name": "host_id",
           "type": "text",
@@ -1700,9 +1738,29 @@
             "host_id"
           ],
           "isUnique": true
+        },
+        "host_enrollments_organization_idx": {
+          "name": "host_enrollments_organization_idx",
+          "columns": [
+            "organization_id"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
+        "host_enrollments_organization_id_organization_id_fk": {
+          "name": "host_enrollments_organization_id_organization_id_fk",
+          "tableFrom": "host_enrollments",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
         "host_enrollments_user_id_user_id_fk": {
           "name": "host_enrollments_user_id_user_id_fk",
           "tableFrom": "host_enrollments",
@@ -1719,7 +1777,20 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "host_enrollments_scope_valid": {
+          "name": "host_enrollments_scope_valid",
+          "value": "\"scope\" in ('personal', 'platform', 'organization')"
+        },
+        "host_enrollments_user_managed_role_valid": {
+          "name": "host_enrollments_user_managed_role_valid",
+          "value": "\"scope\" = 'platform' OR \"role\" = 'agent'"
+        },
+        "host_enrollments_organization_valid": {
+          "name": "host_enrollments_organization_valid",
+          "value": "(\"scope\" = 'organization' AND \"organization_id\" is not null) OR (\"scope\" <> 'organization' AND \"organization_id\" is null)"
+        }
+      }
     },
     "host_resource_reservations": {
       "name": "host_resource_reservations",
@@ -4123,6 +4194,14 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "metal_placement": {
+          "name": "metal_placement",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'platform'"
         }
       },
       "indexes": {

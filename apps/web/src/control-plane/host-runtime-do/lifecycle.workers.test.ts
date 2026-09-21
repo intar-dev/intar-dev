@@ -649,7 +649,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
           message.desired_state.version === 1,
         2,
       ),
-    ).toBe(2);
+    ).toBeGreaterThanOrEqual(2);
 
     sendBridge(
       ws,

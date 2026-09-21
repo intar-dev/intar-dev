@@ -69,7 +69,7 @@ export async function cleanupBetaRevocation(params: {
         ),
       );
     const activeUserRuns = await db
-      .select({ runId: scenarioRuns.runId })
+      .select({ runId: scenarioRuns.runId, hostId: scenarioRuns.hostId })
       .from(scenarioRuns)
       .where(
         and(
@@ -121,8 +121,9 @@ export async function cleanupBetaRevocation(params: {
       cleanupAttemptId,
     );
 
-    // Every run is a user-owned capability even when a platform server
-    // hosts it. Tear down only that user's VMs.
+    // One failed shutdown must not block other runs or independent host wakes.
+    // Every run remains a user-owned capability, including on shared hosts.
+    const failures: unknown[] = [];
     for (const run of activeUserRuns) {
       await assertRevocationFence(
         params.userId,
@@ -133,7 +134,7 @@ export async function cleanupBetaRevocation(params: {
       await destroyScenarioRunForUser({
         runId: run.runId,
         userId: params.userId,
-      });
+      }).catch(error => { failures.push(error); });
     }
     await assertRevocationFence(
       params.userId,
@@ -141,7 +142,7 @@ export async function cleanupBetaRevocation(params: {
       cleanupAttemptId,
     );
     externalCleanupDispatched = true;
-    await revokeScenarioRoutesForUser(params.userId);
+    await revokeScenarioRoutesForUser(params.userId).catch(error => { failures.push(error); });
 
     for (const host of personalHosts) {
       await assertRevocationFence(
@@ -149,14 +150,17 @@ export async function cleanupBetaRevocation(params: {
         params.revocationId,
         cleanupAttemptId,
       );
-      try {
-        await retireHostRuntime(host.id);
-      } finally {
-        // Retirement clears DO storage. Restore finite-lease cleanup after it,
-        // including when the retirement response was lost.
-        await wakeHostRuntime(host.id);
-      }
+      await retireHostRuntime(host.id).catch(error => { failures.push(error); });
     }
+
+    // Retirement clears DO storage. Restore finite-lease cleanup even after a
+    // lost response, and wake shared hosts without retiring other users' VMs.
+    const hostIds = new Set([...personalHosts.map(host => host.id), ...activeUserRuns.map(run => run.hostId)]);
+    for (const hostId of hostIds) {
+      await assertRevocationFence(params.userId, params.revocationId, cleanupAttemptId);
+      await wakeHostRuntime(hostId).catch(error => { failures.push(error); });
+    }
+    if (failures.length) throw failures[0];
 
     await completeBetaRevocationCleanup({
       d1: env.DB,

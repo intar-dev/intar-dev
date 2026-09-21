@@ -125,7 +125,7 @@ test("profile shows cloud placement and a closed registration gate", async ({
     serverData({ placement: "platform", servers: [], registrationOpen: false }),
   );
   await ui.open(routeCase("profile"));
-  await expect(section(page)).toContainText("Your runs use the cloud.");
+  await expect(section(page)).toContainText("Your runs use the cloud or organization servers.");
   await expect(section(page)).toContainText(
     "When your first server is Ready, all new runs use your servers.",
   );
@@ -193,7 +193,7 @@ for (const viewport of [
         await expect(servers.getByText(status, { exact: true })).toBeVisible();
       }
       await expect(servers).toContainText(
-        "Runs stay on your personal servers. They do not move to the cloud.",
+        "Runs stay on your personal servers. They do not move to the cloud or organization servers.",
       );
       await expect(servers).toContainText("0 of 8 vCPUs available · Full");
       await expect(servers).toContainText(
@@ -232,7 +232,7 @@ test("enrollment keeps secrets out of storage and the command, supports reveal a
   await ui.open(routeCase("profile"));
   await createToken(page);
   await expect(section(page)).toContainText(
-    "Ubuntu 24.04 (x86_64) with KVM. At least 2 logical CPUs and 4 GiB RAM.",
+    "Ubuntu 24.04 or later (x86_64) with KVM. At least 2 logical CPUs and 4 GiB RAM.",
   );
   await expect(section(page)).toContainText("110 GiB free to create its own 100 GiB storage file");
   await expect(section(page)).toContainText(
@@ -398,6 +398,9 @@ test("last server removal needs explicit cloud consent and reports unconfirmed c
   const remove = dialog.getByRole("button", { name: "Remove server" });
   await expect(remove).toBeDisabled();
   await expect(dialog).toContainText("1 active run on this server.");
+  await expect(dialog.getByRole("checkbox")).toHaveAccessibleName(
+    "No other available personal server remains. I agree to use the cloud or organization servers for new runs.",
+  );
   await dialog.getByRole("checkbox").check();
   await expect(remove).toBeEnabled();
   await expectNoAxeViolations(page, testInfo);
@@ -409,7 +412,7 @@ test("last server removal needs explicit cloud consent and reports unconfirmed c
   await expect(remove).toBeDisabled();
   await dialog.getByRole("checkbox").check();
   await remove.click();
-  await expect(section(page)).toContainText("Your runs use the cloud.");
+  await expect(section(page)).toContainText("Your runs use the cloud or organization servers.");
   await expect(section(page)).toContainText(
     "Cleanup on the server could not be confirmed.",
   );
@@ -597,6 +600,6 @@ test("the owner can confirm cloud placement after the last server is revoked", a
   await dialog.getByRole("checkbox").check();
   await dialog.getByRole("button", { name: "Remove server", exact: true }).click();
   await expect(dialog).toBeHidden();
-  await expect(section(page)).toContainText("All new runs use the cloud.");
+  await expect(section(page)).toContainText("New runs use the cloud or organization servers.");
   expect(requests.find(request => request.method === "DELETE")?.body).toEqual({ confirmReturnToCloud: true });
 });

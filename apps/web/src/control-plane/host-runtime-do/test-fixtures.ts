@@ -161,7 +161,7 @@ export async function connectHost(
 }> {
   const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
   const admission = await env.DB.prepare(
-    `SELECT host.scope, host.credential_generation,
+    `SELECT host.scope, host.organization_id, host.credential_generation,
             access.source_invite_id,
             access.source_lease_id,
             access.granted_at
@@ -172,7 +172,8 @@ export async function connectHost(
   )
     .bind(hostId)
     .first<{
-      scope: "personal" | "platform";
+      scope: "personal" | "platform" | "organization";
+      organization_id: string | null;
       credential_generation: number;
       source_invite_id: string | null;
       source_lease_id: string | null;
@@ -192,6 +193,7 @@ export async function connectHost(
     "x-agent-host-id": hostId,
     "x-agent-credential-generation": String(admission.credential_generation),
   });
+  if (admission.scope === "organization") headers.set("x-agent-organization-id", admission.organization_id!);
   if (admission.scope === "personal" && admission.granted_at !== null) {
     headers.set(
       "x-agent-beta-source-invite-id",

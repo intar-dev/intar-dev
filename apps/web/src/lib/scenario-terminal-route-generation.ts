@@ -1,3 +1,4 @@
+import { currentRunHostScopeCondition } from "@/lib/metal-placement";
 import { env } from "cloudflare:workers";
 import { appError } from "@/lib/app-error";
 
@@ -52,7 +53,7 @@ export async function loadScenarioTerminalRouteGeneration(input: {
       " AND vm.vm_id = ?3" +
       " AND host.disabled = 0" +
       " AND host.credential_generation > 0" +
-      " AND (host.scope = 'platform' OR (host.scope = 'personal' AND host.user_id = execution.user_id))" +
+      " AND " + currentRunHostScopeCondition() +
       " AND execution.state IN ('queued', 'provisioning', 'ready')" +
       " AND run.runtime_execution_id = execution.id" +
       " AND run.host_id = execution.host_id AND run.user_id = execution.user_id" +

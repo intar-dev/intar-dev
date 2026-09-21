@@ -151,8 +151,14 @@ export const organization = sqliteTable(
     logo: text("logo"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     metadata: text("metadata"),
+    metalPlacement: text("metal_placement")
+      .$type<"platform" | "organization">()
+      .default("platform")
+      .notNull(),
   },
-  (table) => [uniqueIndex("organization_slug_uidx").on(table.slug)],
+  (table) => [
+    uniqueIndex("organization_slug_uidx").on(table.slug),
+  ],
 );
 
 export const member = sqliteTable(

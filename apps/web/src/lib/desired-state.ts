@@ -16,7 +16,7 @@ export type DesiredStateMutator = (draft: DesiredStateDraft) => void;
 
 export function createEmptyHostDesiredState(input: {
   hostId: string;
-  scope: "personal" | "platform";
+  scope: HostDesiredStateV2["scope"];
   ownerUserId: string;
   nowUnixMs: number;
 }): HostDesiredStateV2 {

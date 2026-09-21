@@ -194,7 +194,7 @@ function isDesiredState(
     isRecord(desiredState) &&
     desiredState.schema_version === HOST_DESIRED_STATE_SCHEMA_VERSION &&
     desiredState.host_id === hostId &&
-    (desiredState.scope === "personal" || desiredState.scope === "platform") &&
+    (desiredState.scope === "personal" || desiredState.scope === "platform" || desiredState.scope === "organization") &&
     readString(desiredState.owner_user_id) !== null &&
     isNonNegativeInteger(desiredState.version) &&
     isInteger(desiredState.generated_at_unix_ms) &&

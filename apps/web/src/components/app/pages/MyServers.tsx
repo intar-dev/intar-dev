@@ -23,13 +23,20 @@ import {
 } from "@/components/ui/dialog";
 
 export interface MyServersResponse {
-  placement: "platform" | "personal";
+  placement: "platform" | "personal" | "organization";
   registrationOpen: boolean;
   installerCommand: string;
   servers: Array<{
     id: string;
     name: string;
-    status: "setting_up" | "ready" | "paused" | "offline" | "needs_attention" | "removing" | "revoked";
+    status:
+      | "setting_up"
+      | "ready"
+      | "paused"
+      | "offline"
+      | "needs_attention"
+      | "removing"
+      | "revoked";
     message: string;
     repairAction: string | null;
     connected: boolean;
@@ -41,7 +48,7 @@ export interface MyServersResponse {
   enrollments: Array<{ id: string; name: string; expiresAt: number }>;
 }
 
-type PersonalServer = MyServersResponse["servers"][number];
+type Server = MyServersResponse["servers"][number];
 type Enrollment = {
   hostId: string;
   enrollmentToken: string;
@@ -49,13 +56,10 @@ type Enrollment = {
 };
 type Removal = {
   removed: true;
-  placement: "platform" | "personal";
+  placement: "platform" | "personal" | "organization";
   physicalCleanup: "confirmed" | "unconfirmed";
 };
-const statuses: Record<
-  PersonalServer["status"],
-  { word: string; tone: StatusTone }
-> = {
+const statuses: Record<Server["status"], { word: string; tone: StatusTone }> = {
   setting_up: { word: "Setting up", tone: "pending" },
   ready: { word: "Ready", tone: "success" },
   paused: { word: "Paused", tone: "muted" },
@@ -66,7 +70,7 @@ const statuses: Record<
 };
 
 async function serverRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api/servers${path}`, {
+  const response = await fetch(path, {
     credentials: "include",
     cache: "no-store",
     ...init,
@@ -74,26 +78,43 @@ async function serverRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const body = (await response.json().catch(() => null)) as
     (T & { error?: unknown; code?: unknown }) | null;
   if (!response.ok || !body) {
-    throw Object.assign(new HttpResponseError(
-      response.status,
-      typeof body?.error === "string"
-        ? body.error
-        : "The server request failed. Try again.",
-    ), { code: body?.code });
+    throw Object.assign(
+      new HttpResponseError(
+        response.status,
+        typeof body?.error === "string"
+          ? body.error
+          : "The server request failed. Try again.",
+      ),
+      { code: body?.code },
+    );
   }
   return body as T;
 }
 
-export function MyServers({ userId }: { userId: string }) {
+export function MyServers(
+  props:
+    | { userId: string; organizationId?: never; canManage?: never }
+    | { organizationId: string; canManage: boolean; userId?: never },
+) {
+  const { organizationId } = props;
+  const organization = organizationId !== undefined;
+  const canManage = !organization || props.canManage === true;
+  const apiBase = organization
+    ? `/api/organizations/${encodeURIComponent(organizationId)}/servers`
+    : "/api/servers";
+  const title = organization ? "Organization servers" : "My servers";
   const queryClient = useQueryClient();
-  const queryKey = ["profile", userId, "servers"];
+  const queryKey = organization
+    ? ["organizations", props.organizationId, "servers"]
+    : ["profile", props.userId, "servers"];
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [canceledHostId, setCanceledHostId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const servers = useQuery({
     queryKey,
-    queryFn: ({ signal }) => serverRequest<MyServersResponse>("", { signal }),
+    queryFn: ({ signal }) =>
+      serverRequest<MyServersResponse>(apiBase, { signal }),
     enabled: !removing,
     refetchInterval: (query) =>
       pollingIntervalUnlessAccessError(query.state.error, 15_000),
@@ -104,7 +125,7 @@ export function MyServers({ userId }: { userId: string }) {
   const cancelSetup = useMutation({
     mutationFn: (id: string) =>
       serverRequest<{ canceled: true }>(
-        `/enrollments/${encodeURIComponent(id)}`,
+        `${apiBase}/enrollments/${encodeURIComponent(id)}`,
         { method: "DELETE" },
       ),
     onSuccess: async (_, id) => {
@@ -114,16 +135,21 @@ export function MyServers({ userId }: { userId: string }) {
     },
   });
   const data = servers.data;
-  const enabledServerCount = data?.servers.filter(
-    (server) => server.status !== "removing" && server.status !== "revoked",
-  ).length ?? 0;
+  const enabledServerCount =
+    data?.servers.filter(
+      (server) => server.status !== "removing" && server.status !== "revoked",
+    ).length ?? 0;
 
   return (
     <Section
-      title="My servers"
-      description="Use your own servers for all your runs, including organization courses."
+      title={title}
+      description={
+        organization
+          ? "Shared servers are used only for this organization's runs. Users with personal servers always use their own servers."
+          : "Use your own servers for all your runs, including organization courses."
+      }
       actions={
-        data?.registrationOpen && !adding ? (
+        canManage && data?.registrationOpen && !adding ? (
           <Button
             onClick={() => {
               setNotice(null);
@@ -157,28 +183,40 @@ export function MyServers({ userId }: { userId: string }) {
           <>
             <div className="space-y-1 text-sm">
               <p className="font-medium">
-                {data.placement === "personal"
-                  ? "Your runs use your personal servers."
-                  : "Your runs use the cloud."}
+                {organization
+                  ? data.placement === "organization"
+                    ? "Organization runs use shared servers unless the user has personal servers."
+                    : "Organization runs use the cloud unless the user has personal servers."
+                  : data.placement === "personal"
+                    ? "Your runs use your personal servers."
+                    : "Your runs use the cloud or organization servers."}
               </p>
               <p className="text-muted-foreground">
-                {data.placement === "personal"
-                  ? "If your servers are offline, paused, or full, new runs cannot start. Runs stay on your personal servers. They do not move to the cloud."
-                  : "When your first server is Ready, all new runs use your servers. Existing runs stay where they started."}
+                {organization
+                  ? data.placement === "organization"
+                    ? "If shared servers are offline, paused, or full, new runs assigned to them cannot start. They do not move to the cloud."
+                    : "When the first shared server is Ready, new organization runs use shared servers unless the user has personal servers. Existing runs stay where they started."
+                  : data.placement === "personal"
+                    ? "If your servers are offline, paused, or full, new runs cannot start. Runs stay on your personal servers. They do not move to the cloud or organization servers."
+                    : "When your first server is Ready, all new runs use your servers. Existing runs stay where they started."}
               </p>
             </div>
             {notice ? (
               <InlineFeedback tone="success">{notice}</InlineFeedback>
             ) : null}
             {data.servers.length ? (
-              <ul aria-label="My servers" className="divide-y border-y">
+              <ul aria-label={title} className="divide-y border-y">
                 {data.servers.map((server) => (
                   <ServerRow
                     key={server.id}
                     server={server}
+                    apiBase={apiBase}
+                    organization={organization}
+                    canManage={canManage}
                     lastServer={
                       server.status !== "removing" &&
-                      enabledServerCount <= (server.status === "revoked" ? 0 : 1)
+                      enabledServerCount <=
+                        (server.status === "revoked" ? 0 : 1)
                     }
                     onChanged={refresh}
                     onRemoved={setNotice}
@@ -191,7 +229,9 @@ export function MyServers({ userId }: { userId: string }) {
               </ul>
             ) : (
               <p className="text-sm text-muted-foreground">
-                No personal servers connected yet.
+                {organization
+                  ? "No organization servers connected yet."
+                  : "No personal servers connected yet."}
               </p>
             )}
             {data.enrollments.length ? (
@@ -211,23 +251,25 @@ export function MyServers({ userId }: { userId: string }) {
                           {formatTimestamp(enrollment.expiresAt)}
                         </span>
                       </p>
-                      <Button
-                        variant="outline"
-                        disabled={cancelSetup.isPending}
-                        onClick={() => cancelSetup.mutate(enrollment.id)}
-                      >
-                        {cancelSetup.isPending &&
-                        cancelSetup.variables === enrollment.id
-                          ? "Canceling…"
-                          : "Cancel setup"}
-                      </Button>
+                      {canManage ? (
+                        <Button
+                          variant="outline"
+                          disabled={cancelSetup.isPending}
+                          onClick={() => cancelSetup.mutate(enrollment.id)}
+                        >
+                          {cancelSetup.isPending &&
+                          cancelSetup.variables === enrollment.id
+                            ? "Canceling…"
+                            : "Cancel setup"}
+                        </Button>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
                 <p className="text-sm text-muted-foreground">
-                  Tokens are shown only when you create them. If you lost an
-                  unused token, cancel its pending setup, then add the server
-                  again.
+                  {canManage
+                    ? "Tokens are shown only when you create them. If you lost an unused token, cancel its pending setup, then add the server again."
+                    : "Only owners and admins can add and manage organization servers."}
                 </p>
               </div>
             ) : null}
@@ -238,12 +280,14 @@ export function MyServers({ userId }: { userId: string }) {
             ) : null}
             {!data.registrationOpen ? (
               <p className="text-sm text-muted-foreground">
-                New server registration is not available yet. You can still
-                manage your servers.
+                New server registration is not available yet.
+                {canManage ? " You can still manage your servers." : ""}
               </p>
             ) : null}
-            {adding && data.registrationOpen ? (
+            {canManage && adding && data.registrationOpen ? (
               <AddServer
+                apiBase={apiBase}
+                organization={organization}
                 installerCommand={data.installerCommand}
                 servers={data.servers}
                 canceledHostId={canceledHostId}
@@ -259,14 +303,18 @@ export function MyServers({ userId }: { userId: string }) {
 }
 
 function AddServer({
+  apiBase,
+  organization,
   installerCommand,
   servers,
   canceledHostId,
   onCreated,
   onClose,
 }: {
+  apiBase: string;
+  organization: boolean;
   installerCommand: string;
-  servers: PersonalServer[];
+  servers: Server[];
   canceledHostId: string | null;
   onCreated: () => Promise<void>;
   onClose: () => void;
@@ -330,7 +378,11 @@ function AddServer({
   return (
     <div className="space-y-4 border-t pt-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-card-title">Add a personal server</h3>
+        <h3 className="text-card-title">
+          {organization
+            ? "Add an organization server"
+            : "Add a personal server"}
+        </h3>
         <Button variant="ghost" onClick={onClose}>
           {enrollment ? "Clear token and close" : "Close setup"}
         </Button>
@@ -338,7 +390,8 @@ function AddServer({
       <div className="space-y-1 text-sm">
         <h4 className="font-medium">Server requirements</h4>
         <p className="text-muted-foreground">
-          Ubuntu 24.04 or later (x86_64) with KVM. At least 2 logical CPUs and 4 GiB RAM.
+          Ubuntu 24.04 or later (x86_64) with KVM. At least 2 logical CPUs and 4
+          GiB RAM.
         </p>
         <p className="text-muted-foreground">
           The installer uses compatible storage when available. Otherwise, it
@@ -348,7 +401,10 @@ function AddServer({
           No inbound ports or public IP address are required. Browser terminals
           and SSH connect through Intar.
         </p>
-        <a className="underline underline-offset-4" href="https://docs.intar.dev/operations/personal-host/">
+        <a
+          className="underline underline-offset-4"
+          href="https://docs.intar.dev/operations/personal-host/"
+        >
           Installation and repair guide
         </a>
       </div>
@@ -419,12 +475,15 @@ function AddServer({
             setError(null);
             setNotice(null);
             try {
-              const result = await serverRequest<Enrollment>("/enrollments", {
-                method: "POST",
-                signal: abort.current?.signal ?? null,
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ name: name.trim() }),
-              });
+              const result = await serverRequest<Enrollment>(
+                `${apiBase}/enrollments`,
+                {
+                  method: "POST",
+                  signal: abort.current?.signal ?? null,
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ name: name.trim() }),
+                },
+              );
               if (abort.current?.signal.aborted) return;
               setEnrollment(result);
               setRevealed(false);
@@ -442,20 +501,24 @@ function AddServer({
           }}
         >
           <label
-            htmlFor="personal-server-name"
+            htmlFor={
+              organization ? "organization-server-name" : "personal-server-name"
+            }
             className="block text-sm font-medium"
           >
             Server name
           </label>
           <Input
-            id="personal-server-name"
+            id={
+              organization ? "organization-server-name" : "personal-server-name"
+            }
             className="max-w-sm"
             value={name}
             onChange={(event) => setName(event.target.value)}
             required
             maxLength={80}
             disabled={pending}
-            placeholder="Home server"
+            placeholder={organization ? "Team server" : "Home server"}
           />
           <p className="text-sm text-muted-foreground">
             Create a token, then run the installer on your server. The installer
@@ -473,13 +536,19 @@ function AddServer({
 }
 
 function ServerRow({
+  apiBase,
+  organization,
+  canManage,
   server,
   lastServer,
   onChanged,
   onRemoved,
   onRemovalOpen,
 }: {
-  server: PersonalServer;
+  apiBase: string;
+  organization: boolean;
+  canManage: boolean;
+  server: Server;
   lastServer: boolean;
   onChanged: () => Promise<void>;
   onRemoved: (notice: string) => void;
@@ -496,7 +565,7 @@ function ServerRow({
   const [notice, setNotice] = useState<string | null>(null);
   const change = useMutation({
     mutationFn: (body: { name: string } | { paused: boolean }) =>
-      serverRequest(`/${encodeURIComponent(server.id)}`, {
+      serverRequest(`${apiBase}/${encodeURIComponent(server.id)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -516,7 +585,7 @@ function ServerRow({
   });
   const remove = useMutation({
     mutationFn: () =>
-      serverRequest<Removal>(`/${encodeURIComponent(server.id)}`, {
+      serverRequest<Removal>(`${apiBase}/${encodeURIComponent(server.id)}`, {
         method: "DELETE",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -527,12 +596,24 @@ function ServerRow({
       setAction(null);
       onRemovalOpen(false);
       onRemoved(
-        `Server removed. ${result.placement === "platform" ? "All new runs use the cloud." : "Your runs still use your personal servers."} ${result.physicalCleanup === "unconfirmed" ? "Cleanup on the server could not be confirmed. Stop the agent and remove remaining virtual machines on that server." : "Cleanup on the server is confirmed."}`,
+        `Server removed. ${
+          organization
+            ? result.placement === "platform"
+              ? "New organization runs use the cloud. Users with personal servers keep using their own servers."
+              : "Organization runs still use shared servers unless the user has personal servers."
+            : result.placement === "platform"
+              ? "New runs use the cloud or organization servers."
+              : "Your runs still use your personal servers."
+        } ${result.physicalCleanup === "unconfirmed" ? "Cleanup on the server could not be confirmed. Stop the agent and remove remaining virtual machines on that server." : "Cleanup on the server is confirmed."}`,
       );
       await onChanged();
     },
     onError: (error) => {
-      if (error instanceof HttpResponseError && "code" in error && error.code === "last_server_confirmation_required") {
+      if (
+        error instanceof HttpResponseError &&
+        "code" in error &&
+        error.code === "last_server_confirmation_required"
+      ) {
         setLastServerConflict(true);
         setCloudConsent(false);
       }
@@ -560,37 +641,48 @@ function ServerRow({
             {server.message}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            disabled={busy || renaming || server.status === "removing" || server.status === "revoked"}
-            onClick={() => {
-              change.reset();
-              setNotice(null);
-              setName(server.name);
-              setRenaming(true);
-            }}
-          >
-            Rename
-          </Button>
-          <Button
-            variant="outline"
-            disabled={busy || server.status === "removing" || server.status === "revoked"}
-            onClick={() =>
-              openAction(server.status === "paused" ? "resume" : "pause")
-            }
-          >
-            {server.status === "paused" ? "Resume" : "Pause"}
-          </Button>
-          <Button
-            variant="ghost"
-            className="text-destructive"
-            disabled={busy}
-            onClick={() => openAction("remove")}
-          >
-            {server.status === "removing" ? "Retry removal" : "Remove"}
-          </Button>
-        </div>
+        {canManage ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              disabled={
+                busy ||
+                renaming ||
+                server.status === "removing" ||
+                server.status === "revoked"
+              }
+              onClick={() => {
+                change.reset();
+                setNotice(null);
+                setName(server.name);
+                setRenaming(true);
+              }}
+            >
+              Rename
+            </Button>
+            <Button
+              variant="outline"
+              disabled={
+                busy ||
+                server.status === "removing" ||
+                server.status === "revoked"
+              }
+              onClick={() =>
+                openAction(server.status === "paused" ? "resume" : "pause")
+              }
+            >
+              {server.status === "paused" ? "Resume" : "Pause"}
+            </Button>
+            <Button
+              variant="ghost"
+              className="text-destructive"
+              disabled={busy}
+              onClick={() => openAction("remove")}
+            >
+              {server.status === "removing" ? "Retry removal" : "Remove"}
+            </Button>
+          </div>
+        ) : null}
       </div>
       <p className="font-mono text-xs text-muted-foreground break-words">
         {server.connected ? "Connected" : "Disconnected"} · {server.activeRuns}{" "}
@@ -671,7 +763,8 @@ function ServerRow({
             </DialogTitle>
             <DialogDescription>
               {action === "remove"
-                ? server.status === "removing" ? "Access is already revoked. Retry removal to close remaining sessions."
+                ? server.status === "removing"
+                  ? "Access is already revoked. Retry removal to close remaining sessions."
                   : "This revokes the server's access and ends access to its runs. You must register it again to use it later."
                 : action === "pause"
                   ? "New runs will not start on this server. Current runs stay on this server."
@@ -694,13 +787,18 @@ function ServerRow({
                     disabled={busy}
                   />
                   <span>
-                    No other available server remains. I agree to use the cloud for all new
-                    runs, including organization courses.
+                    {organization
+                      ? "No other available shared server remains. I agree to use the cloud for new organization runs. Users with personal servers keep using their own servers."
+                      : "No other available personal server remains. I agree to use the cloud or organization servers for new runs."}
                   </span>
                 </label>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  {server.status === "removing" ? "This retry does not change where new runs start." : "New runs will still use your other personal servers."}
+                  {server.status === "removing"
+                    ? "This retry does not change where new runs start."
+                    : organization
+                      ? "New organization runs will still use the other shared servers. Users with personal servers keep using their own servers."
+                      : "New runs will still use your other personal servers."}
                 </p>
               )}
             </>
@@ -724,7 +822,8 @@ function ServerRow({
             <Button
               variant={action === "remove" ? "destructive" : "default"}
               disabled={
-                busy || (action === "remove" && needsCloudConsent && !cloudConsent)
+                busy ||
+                (action === "remove" && needsCloudConsent && !cloudConsent)
               }
               onClick={() => {
                 if (action === "remove") remove.mutate();

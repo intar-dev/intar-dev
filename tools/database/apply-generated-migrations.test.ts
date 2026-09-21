@@ -43,6 +43,8 @@ describe("generated migration apply", () => {
         "0025_cheerful_sway",
         "0026_groovy_doctor_octopus",
         "0027_real_big_bertha",
+        "0028_married_rogue",
+        "0029_powerful_zzzax",
       ]);
     } finally {
       fixture.database.close(false);
@@ -94,6 +96,8 @@ describe("generated migration apply", () => {
         "0025_cheerful_sway",
         "0026_groovy_doctor_octopus",
         "0027_real_big_bertha",
+        "0028_married_rogue",
+        "0029_powerful_zzzax",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);
@@ -165,6 +169,33 @@ describe("generated migration apply", () => {
       expect(() => insertRun(client.database, "run-4", "key-aaaaaaaa")).toThrow(
         /UNIQUE/,
       );
+    } finally {
+      fixture.database.close(false);
+    }
+  });
+
+  test("organization host migration preserves registrations, preparations, and members", async () => {
+    const fixture = prefixDatabase(28);
+    try {
+      const db = fixture.database;
+      db.exec(`INSERT INTO user (id, name, email) VALUES ('owner', 'Owner', 'owner@example.test');
+        INSERT INTO organization (id, name, slug, created_at) VALUES ('org', 'Org', 'org', 1);
+        INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('member', 'org', 'owner', 'owner', 1);
+        INSERT INTO agent_hosts (id, user_id, name, scope, credential_generation) VALUES ('host', 'owner', 'Host', 'personal', 1);
+        INSERT INTO agent_bootstrap_tokens (id, host_id, token_hash, credential_generation) VALUES ('credential', 'host', 'hash', 1);
+        INSERT INTO personal_image_preparations (user_id, host_id, credential_generation, request_key, access_json, beta_json, images_json, expires_at)
+          VALUES ('owner', 'host', 1, 'request', '{}', '{}', '[]', 9999999999999);
+        INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, source_invite_id, source_lease_id, granted_at, expires_at)
+          VALUES ('pending', 'pending-host', 'owner', 'Pending', 'personal', 'agent', 'invite', 'lease', 1, 9999999999999);`);
+      const tables = ["member", "personal_image_preparations", "agent_bootstrap_tokens"];
+      const before = tables.map(table => db.query(`SELECT * FROM ${table}`).all());
+      await applyGeneratedMigrations(fixture.client);
+      expect(tables.map(table => db.query(`SELECT * FROM ${table}`).all())).toEqual(before);
+      expect(db.query("SELECT host_id, organization_id FROM host_enrollments").all())
+        .toEqual([{ host_id: "pending-host", organization_id: null }]);
+      expect(db.query("SELECT metal_placement FROM organization").get()).toEqual({ metal_placement: "platform" });
+      db.exec("UPDATE agent_hosts SET scope = 'organization', organization_id = 'org' WHERE id = 'host'");
+      expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
     } finally {
       fixture.database.close(false);
     }

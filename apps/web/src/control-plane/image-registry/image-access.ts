@@ -7,25 +7,28 @@ import { personalPreparationImageAccess } from "@/lib/personal-image-access";
 
 /** Recheck the identity snapshot at each content read, including platform reads. */
 export function currentAgentHost(agent: VerifiedAgentHost) {
-  if ((agent.scope !== "platform" && agent.scope !== "personal") ||
+  if ((agent.scope !== "platform" && agent.scope !== "personal" && agent.scope !== "organization") ||
       !Number.isSafeInteger(agent.credentialGeneration) || agent.credentialGeneration < 1) return sql`0 = 1`;
   return sql`EXISTS (SELECT 1 FROM agent_hosts current_host
     WHERE current_host.id = ${agent.hostId} AND current_host.user_id = ${agent.userId}
       AND current_host.scope = ${agent.scope} AND current_host.role = ${agent.role}
       AND current_host.credential_generation = ${agent.credentialGeneration}
       AND current_host.disabled = 0
-      AND (${agent.scope} = 'platform' OR EXISTS (
+      AND (${agent.scope} = 'platform' OR (${agent.scope} = 'organization'
+        AND current_host.organization_id = ${agent.organizationId ?? null} AND current_host.role = 'agent'
+        AND EXISTS (SELECT 1 FROM organization org WHERE org.id = current_host.organization_id))
+        OR (${agent.scope} = 'personal' AND EXISTS (
         SELECT 1 FROM access_allowlist access WHERE access.user_id = current_host.user_id
           AND access.state = 'active' AND access.source_invite_id = ${agent.betaSourceInviteId}
           AND access.source_lease_id = ${agent.betaSourceLeaseId}
           AND access.granted_at = ${agent.betaAdmissionGrantedAt}
-      )))`;
+      ))))`;
 }
 
 /** Correlated with vmScenarios and vmScenarioVms in the caller's query. */
 export function agentScenarioImageAccess(agent: VerifiedAgentHost) {
   if (agent.scope === "platform") return currentAgentHost(agent);
-  if (agent.scope !== "personal") return sql`0 = 1`;
+  if (agent.scope !== "personal" && agent.scope !== "organization") return sql`0 = 1`;
 
   return and(currentAgentHost(agent), assignedPersonalScenarioImageAccess(agent.hostId));
 }
@@ -45,19 +48,23 @@ export function assignedPersonalScenarioImageAccess(hostId: string) {
     JOIN agent_hosts host ON host.id = execution.host_id
     JOIN host_desired_state desired ON desired.host_id = host.id
     JOIN json_each(desired.doc_json, '$.vms') intent
-    WHERE (host.id, host.scope, host.disabled) = (${hostId}, 'personal', 0)
-      AND (json_extract(desired.doc_json, '$.scope'), json_extract(desired.doc_json, '$.owner_user_id')) = ('personal', host.user_id)
+    WHERE host.id = ${hostId} AND host.disabled = 0
+      AND ((host.scope = 'personal' AND host.user_id = execution.user_id)
+        OR (host.scope = 'organization' AND host.organization_id = run.organization_id
+          AND EXISTS (SELECT 1 FROM member membership WHERE membership.organization_id = host.organization_id
+            AND membership.user_id = execution.user_id)))
+      AND (json_extract(desired.doc_json, '$.scope'), json_extract(desired.doc_json, '$.owner_user_id')) = (host.scope, host.user_id)
       AND EXISTS (SELECT 1 FROM user owner JOIN access_allowlist access ON access.user_id = owner.id
-        WHERE owner.id = host.user_id AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
+        WHERE owner.id = execution.user_id AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
           AND access.state = 'active')
       AND (execution.user_id, run.user_id, run.host_id, execution.domain_kind, execution.domain_id) =
-        (host.user_id, host.user_id, host.id, 'scenario', run.run_id)
+        (run.user_id, execution.user_id, host.id, 'scenario', run.run_id)
       AND (execution.state IN ('provisioning', 'ready') AND execution.ended_at IS NULL
         AND execution.archive_requested_at IS NULL AND execution.lease_expires_at > CAST(unixepoch('subsecond') * 1000 AS INTEGER))
       AND NOT EXISTS (SELECT 1 FROM runtime_executions newer
         WHERE newer.domain_kind = execution.domain_kind AND newer.domain_id = execution.domain_id
           AND newer.generation > execution.generation)
-      AND (run.active_key = host.user_id AND run.hidden_at IS NULL AND run.completed_at IS NULL
+      AND (run.active_key = execution.user_id AND run.hidden_at IS NULL AND run.completed_at IS NULL
         AND run.failed_at IS NULL AND run.delete_requested_at IS NULL)
       AND run.scenario_id = ${vmScenarios.scenarioId}
       AND (vm.image_sha256, json_extract(vm.image_key_json, '$.scenario'), json_extract(vm.image_key_json, '$.vm'),
@@ -67,7 +74,7 @@ export function assignedPersonalScenarioImageAccess(hostId: string) {
       AND (json_extract(intent.value, '$.run_id'), json_extract(intent.value, '$.owner_user_id'),
         json_extract(intent.value, '$.runtime_execution_id'), json_extract(intent.value, '$.generation'),
         json_extract(intent.value, '$.vm_name'), json_extract(intent.value, '$.desired_phase')) =
-        (run.run_id, host.user_id, execution.id, execution.generation, vm.runtime_vm_name, 'running')
+        (run.run_id, execution.user_id, execution.id, execution.generation, vm.runtime_vm_name, 'running')
       AND json_extract(intent.value, '$.lease_expires_at_unix_ms') > CAST(unixepoch('subsecond') * 1000 AS INTEGER)
       AND (json_extract(intent.value, '$.image_id'), json_extract(intent.value, '$.image_key.scenario'),
         json_extract(intent.value, '$.image_key.vm'), json_extract(intent.value, '$.image_key.arch')) =

@@ -45,6 +45,26 @@ import {
 describe("HostRuntimeDO bridge dispatch and sessions", () => {
   beforeEach(resetHostRuntimeTestDatabase);
 
+  it("connects organization hosts after creator deletion and binds the organization identity", async () => {
+    const hostId = "org-host";
+    await seedHost(hostId);
+    await env.DB.prepare("INSERT INTO organization(id,name,slug,created_at) VALUES('org-1','Org','org-1',1)").run();
+    await env.DB.prepare("UPDATE agent_hosts SET scope='organization', organization_id='org-1' WHERE id=?").bind(hostId).run();
+    await env.DB.prepare("DELETE FROM access_allowlist WHERE user_id='user-1'").run();
+    await env.DB.prepare("UPDATE user SET banned=1, deleted_at=1 WHERE id='user-1'").run();
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    const rejected = await stub.fetch("http://host-runtime/connect", { headers: {
+      upgrade: "websocket", "x-agent-host-id": hostId, "x-agent-credential-generation": "1", "x-agent-organization-id": "other-org",
+    } });
+    expect(rejected.status).toBe(401);
+    const connection = await connectHost(hostId);
+    const desired = await waitForBridgeMessage(connection.messages, message => message.type === "desired_state");
+    if (desired.type !== "desired_state") throw new Error("expected desired state");
+    expect(desired.desired_state).toMatchObject({ scope: "organization", owner_user_id: "user-1" });
+    expect(desired.relay?.identity.host_id).toBe(hostId);
+    connection.ws.close();
+  });
+
   it("retires durable runtime state and cancels its alarm", async () => {
     const hostId = "host-retired";
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));

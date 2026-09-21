@@ -2,10 +2,13 @@ import { env } from "cloudflare:workers";
 import { and, count, desc, eq, inArray, ne, notInArray, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
+  agentHosts,
+  hostEnrollments,
   imageBuildBundles,
   imageBuilds,
   member,
   organization,
+  personalImagePreparations,
   scenarioRuns,
   ssoProvider,
   user,
@@ -301,7 +304,7 @@ export async function deleteOrganization(params: {
     throw appError(
       409,
       "organization_not_empty",
-      "remove the organization scenarios, builds, and runs before deleting it",
+      "remove the organization servers, scenarios, builds, and runs before deleting it",
     );
   }
   await drizzle(env.DB)
@@ -332,6 +335,8 @@ export async function leaveOrganization(params: {
       ),
     ).returning({ id: member.id }),
     requestRemovedMemberRunShutdown(db, params),
+    revokeUnauthorizedOrganizationEnrollments(db, params),
+    deleteRemovedMemberImagePreparation(db, params),
   ]);
   if (removed.length !== 1) {
     throw appError(409, "organization_membership_changed", "organization membership changed while it was being removed");
@@ -460,7 +465,7 @@ export async function updateOrganizationMemberRole(params: {
       "transfer ownership to change the owner role",
     );
   }
-  const updated = await db
+  const [updated] = await db.batch([db
     .update(member)
     .set({ role: params.role })
     .where(
@@ -468,9 +473,13 @@ export async function updateOrganizationMemberRole(params: {
         eq(member.id, params.memberId),
         eq(member.organizationId, params.organizationId),
         ne(member.role, "owner"),
+        sql`EXISTS (SELECT 1 FROM member actor WHERE actor.organization_id = ${params.organizationId}
+          AND actor.user_id = ${params.actorUserId} AND actor.role IN ('owner', 'admin'))`,
       ),
     )
-    .returning({ id: member.id });
+    .returning({ id: member.id }),
+    revokeUnauthorizedOrganizationEnrollments(db, { organizationId: params.organizationId, userId: rows[0].userId }),
+  ]);
   if (updated.length !== 1) {
     throw appError(
       409,
@@ -522,11 +531,39 @@ export async function removeOrganizationMember(params: {
     )
     .returning({ id: member.id }),
     requestRemovedMemberRunShutdown(db, { organizationId: params.organizationId, userId: rows[0].userId }),
+    revokeUnauthorizedOrganizationEnrollments(db, { organizationId: params.organizationId, userId: rows[0].userId }),
+    deleteRemovedMemberImagePreparation(db, { organizationId: params.organizationId, userId: rows[0].userId }),
   ]);
   if (removed.length !== 1) {
     throw appError(409, "organization_membership_changed", "organization membership changed while it was being removed");
   }
   await finishRemovedMemberRunShutdown(rows[0].userId, runs);
+}
+
+function revokeUnauthorizedOrganizationEnrollments(
+  db: ReturnType<typeof drizzle>,
+  params: { organizationId: string; userId: string },
+) {
+  return db.update(hostEnrollments).set({ revokedAt: Date.now() }).where(and(
+    eq(hostEnrollments.organizationId, params.organizationId),
+    eq(hostEnrollments.userId, params.userId),
+    eq(hostEnrollments.scope, "organization"),
+    sql`${hostEnrollments.claimedAt} IS NULL AND ${hostEnrollments.revokedAt} IS NULL`,
+    sql`NOT EXISTS (SELECT 1 FROM member remaining WHERE remaining.organization_id = ${params.organizationId}
+      AND remaining.user_id = ${params.userId} AND remaining.role IN ('owner', 'admin'))`,
+  ));
+}
+
+function deleteRemovedMemberImagePreparation(
+  db: ReturnType<typeof drizzle>,
+  params: { organizationId: string; userId: string },
+) {
+  return db.delete(personalImagePreparations).where(and(
+    eq(personalImagePreparations.userId, params.userId),
+    sql`json_extract(${personalImagePreparations.accessJson}, '$.organizationId') = ${params.organizationId}`,
+    sql`NOT EXISTS (SELECT 1 FROM member remaining WHERE remaining.organization_id = ${params.organizationId}
+      AND remaining.user_id = ${params.userId})`,
+  ));
 }
 
 function requestRemovedMemberRunShutdown(
@@ -571,6 +608,8 @@ async function organizationHasOwnedResources(
 ): Promise<boolean> {
   const db = drizzle(env.DB);
   const results = await db.batch([
+    db.select({ id: agentHosts.id }).from(agentHosts)
+      .where(eq(agentHosts.organizationId, organizationId)).limit(1),
     db
       .select({ id: ssoProvider.id })
       .from(ssoProvider)

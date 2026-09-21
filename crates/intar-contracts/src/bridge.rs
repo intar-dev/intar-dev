@@ -597,6 +597,7 @@ pub enum HostScope {
     #[default]
     Personal,
     Platform,
+    Organization,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

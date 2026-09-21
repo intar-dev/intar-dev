@@ -19,6 +19,8 @@ export async function persistHostReport(input: {
   const { d1, hostId, sessionId, credentialGeneration, report, now } = input;
   if (report.host_id !== hostId) return false;
   const currentHost = `id = ?1 AND active_session_id = ?2 AND credential_generation = ?3 AND disabled = 0`;
+  // Reports include stopping VMs after access is revoked. Check their identity
+  // here; dispatch and content operations check current learner access.
   const [accepted] = await d1.batch([
     d1.prepare(`INSERT INTO host_actual_state
       (host_id, applied_desired_version, observed_at, report_json, created_at, updated_at)
@@ -26,13 +28,17 @@ export async function persistHostReport(input: {
         AND NOT EXISTS (SELECT 1 FROM json_each(?6, '$.vms') reported
           WHERE NOT EXISTS (SELECT 1 FROM runtime_executions execution
             JOIN runtime_vms vm ON vm.execution_id = execution.id
+            JOIN agent_hosts host ON host.id = execution.host_id
+            LEFT JOIN scenario_runs run ON run.runtime_execution_id = execution.id
+              AND run.run_id = execution.domain_id AND run.host_id = execution.host_id AND run.user_id = execution.user_id
             WHERE execution.id = json_extract(reported.value, '$.runtime_execution_id')
               AND execution.generation = json_extract(reported.value, '$.generation')
               AND execution.user_id = json_extract(reported.value, '$.owner_user_id')
               AND execution.domain_id = json_extract(reported.value, '$.run_id')
               AND execution.host_id = ?1 AND execution.state <> 'archived'
               AND vm.runtime_vm_name = json_extract(reported.value, '$.vm_name')
-              AND (agent_hosts.scope = 'platform' OR (agent_hosts.scope = 'personal' AND agent_hosts.user_id = execution.user_id))
+              AND (host.scope = 'platform' OR (host.scope = 'personal' AND host.user_id = execution.user_id)
+                OR (host.scope = 'organization' AND host.organization_id = run.organization_id))
               AND NOT EXISTS (SELECT 1 FROM runtime_executions newer WHERE newer.domain_kind = execution.domain_kind
                 AND newer.domain_id = execution.domain_id AND newer.generation > execution.generation)))
       ON CONFLICT(host_id) DO UPDATE SET applied_desired_version = excluded.applied_desired_version,
@@ -50,6 +56,14 @@ export async function persistHostReport(input: {
           AND host.scope = 'personal' AND host.role = 'agent' AND host.scenario_enabled = 1 AND host.user_id = user.id)
         AND EXISTS (SELECT 1 FROM host_actual_state WHERE host_id = ?1 AND report_json = ?5 AND updated_at = ?6)
         AND EXISTS (SELECT 1 FROM access_allowlist access WHERE access.user_id = user.id AND access.state = 'active')`)
+      .bind(hostId, sessionId, credentialGeneration, personalHostReportReady(report, input.requireRunCli) ? 1 : 0, JSON.stringify(report), now),
+    d1.prepare(`UPDATE organization SET metal_placement = 'organization'
+      WHERE metal_placement = 'platform' AND ?4 = 1
+        AND EXISTS (SELECT 1 FROM agent_hosts host
+          WHERE host.id = ?1 AND host.active_session_id = ?2 AND host.credential_generation = ?3 AND host.disabled = 0
+            AND host.scope = 'organization' AND host.role = 'agent' AND host.scenario_enabled = 1
+            AND host.organization_id = organization.id)
+        AND EXISTS (SELECT 1 FROM host_actual_state WHERE host_id = ?1 AND report_json = ?5 AND updated_at = ?6)`)
       .bind(hostId, sessionId, credentialGeneration, personalHostReportReady(report, input.requireRunCli) ? 1 : 0, JSON.stringify(report), now),
   ]);
   return accepted?.results.length === 1;

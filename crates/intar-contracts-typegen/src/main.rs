@@ -637,7 +637,7 @@ export type BridgeMessageV8 =
   | ({ type: "build_report" } & BuildReportV8)
   | ({ type: "sync_request" } & SyncRequestV8);
 
-export type HostScope = "personal" | "platform";
+export type HostScope = "personal" | "platform" | "organization";
 
 export interface HostDesiredStateV2 {
   scope: HostScope;

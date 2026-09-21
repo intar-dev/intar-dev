@@ -42,7 +42,8 @@ export const agentHosts = sqliteTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
-    scope: text("scope").$type<"personal" | "platform">(),
+    scope: text("scope").$type<"personal" | "platform" | "organization">(),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "restrict" }),
     ownerRemovalId: text("owner_removal_id"),
     ownerRemovalCompletedAt: integer("owner_removal_completed_at"),
     credentialGeneration: integer("credential_generation").default(0).notNull(),
@@ -68,8 +69,10 @@ export const agentHosts = sqliteTable(
   },
   (table) => [
     index("agent_hosts_user_idx").on(table.userId),
-    check("agent_hosts_scope_valid", sql`"scope" is null OR "scope" in ('personal', 'platform')`),
-    check("agent_hosts_personal_role_valid", sql`"scope" is null OR "scope" <> 'personal' OR "role" = 'agent'`),
+    check("agent_hosts_scope_valid", sql`"scope" is null OR "scope" in ('personal', 'platform', 'organization')`),
+    check("agent_hosts_personal_role_valid", sql`"scope" is null OR "scope" not in ('personal', 'organization') OR "role" = 'agent'`),
+    check("agent_hosts_organization_valid", sql`("scope" is 'organization' AND "organization_id" is not null) OR ("scope" is not 'organization' AND "organization_id" is null)`),
+    index("agent_hosts_organization_idx").on(table.organizationId),
     index("agent_hosts_role_idx").on(table.role, table.connected),
     index("agent_hosts_connected_idx").on(table.connected, table.updatedAt),
   ],
@@ -257,10 +260,11 @@ export const agentBootstrapTokens = sqliteTable(
 
 export const hostEnrollments = sqliteTable("host_enrollments", {
   tokenHash: text("token_hash").primaryKey(),
+  organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
   hostId: text("host_id").notNull().unique(),
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
-  scope: text("scope").$type<"personal" | "platform">().notNull(),
+  scope: text("scope").$type<"personal" | "platform" | "organization">().notNull(),
   role: text("role").$type<AgentHostRole>().notNull(),
   sourceInviteId: text("source_invite_id").notNull(),
   sourceLeaseId: text("source_lease_id").notNull(),
@@ -269,7 +273,12 @@ export const hostEnrollments = sqliteTable("host_enrollments", {
   claimedAt: integer("claimed_at"),
   credentialHash: text("credential_hash"),
   revokedAt: integer("revoked_at"),
-});
+}, (table) => [
+  index("host_enrollments_organization_idx").on(table.organizationId),
+  check("host_enrollments_scope_valid", sql`"scope" in ('personal', 'platform', 'organization')`),
+  check("host_enrollments_user_managed_role_valid", sql`"scope" = 'platform' OR "role" = 'agent'`),
+  check("host_enrollments_organization_valid", sql`("scope" = 'organization' AND "organization_id" is not null) OR ("scope" <> 'organization' AND "organization_id" is null)`),
+]);
 
 /**
  * Single gate row for the image registry. Shared writers (uploads, publishes,

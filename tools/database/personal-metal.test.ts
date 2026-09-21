@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { expect, mock, test } from "bun:test";
 
-test("automatic placement only selects the owner's personal server", async () => {
+test("automatic placement selects only the personal, organization, or platform fleet", async () => {
   const sqlite = new Database(":memory:");
   const prepared = (query: string, parameters: unknown[] = []) => ({
     bind: (...values: unknown[]) => prepared(query, values),
@@ -20,8 +20,8 @@ test("automatic placement only selects the owner's personal server", async () =>
   const { selectScenarioHosts } = await import("../../apps/web/src/lib/scenario-runs/start");
   const { HOST_STATE_REPORT_SCHEMA_VERSION } = await import("../../apps/web/src/generated/constants");
   try {
-    sqlite.exec("CREATE TABLE user (id TEXT, metal_placement TEXT); CREATE TABLE agent_hosts (id TEXT, user_id TEXT, scope TEXT, disabled INTEGER, role TEXT, scenario_enabled INTEGER, connected INTEGER, updated_at INTEGER, last_heartbeat_at INTEGER, last_inventory_at INTEGER); CREATE TABLE host_actual_state (host_id TEXT, updated_at INTEGER, report_json TEXT); CREATE TABLE scenario_runs (host_id TEXT, completed_at INTEGER, failed_at INTEGER);");
-    sqlite.exec("INSERT INTO user VALUES ('alice', 'personal'), ('bob', 'personal'), ('cloud', 'platform');");
+    sqlite.exec("CREATE TABLE user (id TEXT, metal_placement TEXT, deleted_at INTEGER, banned INTEGER); CREATE TABLE organization (id TEXT, metal_placement TEXT); CREATE TABLE member (user_id TEXT, organization_id TEXT); CREATE TABLE agent_hosts (id TEXT, user_id TEXT, scope TEXT, organization_id TEXT, disabled INTEGER, role TEXT, scenario_enabled INTEGER, connected INTEGER, updated_at INTEGER, last_heartbeat_at INTEGER, last_inventory_at INTEGER); CREATE TABLE host_actual_state (host_id TEXT, updated_at INTEGER, report_json TEXT); CREATE TABLE scenario_runs (host_id TEXT, completed_at INTEGER, failed_at INTEGER);");
+    sqlite.exec("INSERT INTO user (id, metal_placement) VALUES ('alice', 'personal'), ('bob', 'personal'), ('cloud', 'platform'); INSERT INTO organization VALUES ('org', 'organization'), ('other', 'organization'); INSERT INTO member VALUES ('alice', 'org'), ('cloud', 'org');");
     const now = Date.now();
     const report = {
       schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
@@ -38,13 +38,18 @@ test("automatic placement only selects the owner's personal server", async () =>
       },
       vms: [], cached_images: [],
     };
-    for (const [id, owner, scope] of [["alice-host", "alice", "personal"], ["cloud-host", "operator", "platform"]]) {
-      sqlite.prepare("INSERT INTO agent_hosts VALUES (?, ?, ?, 0, 'agent', 1, 1, ?, ?, ?)").run(id!, owner!, scope!, now, now, now);
+    for (const [id, owner, scope, organizationId] of [["alice-host", "alice", "personal", null], ["cloud-host", "operator", "platform", null], ["org-host", "operator", "organization", "org"], ["other-host", "operator", "organization", "other"]]) {
+      sqlite.prepare("INSERT INTO agent_hosts VALUES (?, ?, ?, ?, 0, 'agent', 1, 1, ?, ?, ?)").run(id!, owner!, scope!, organizationId ?? null, now, now, now);
       sqlite.prepare("INSERT INTO host_actual_state VALUES (?, ?, ?)").run(id!, now, JSON.stringify(report));
     }
     expect(await selectScenarioHosts([], "alice", undefined, now, false)).toEqual({ ok: true, hostIds: ["alice-host"] });
     expect(await selectScenarioHosts([], "bob", undefined, now, false)).toMatchObject({ ok: false, reason: "unavailable" });
     expect(await selectScenarioHosts([], "cloud", undefined, now, false)).toEqual({ ok: true, hostIds: ["cloud-host"] });
+    expect(await selectScenarioHosts([], "cloud", undefined, now, false, "org")).toEqual({ ok: true, hostIds: ["org-host"] });
+    expect(await selectScenarioHosts([], "alice", undefined, now, false, "org")).toEqual({ ok: true, hostIds: ["alice-host"] });
+    expect(await selectScenarioHosts([], "cloud", undefined, now, false, "other")).toMatchObject({ ok: false, reason: "unavailable" });
+    sqlite.exec("UPDATE agent_hosts SET connected = 0 WHERE id = 'org-host'");
+    expect(await selectScenarioHosts([], "cloud", undefined, now, false, "org")).toMatchObject({ ok: false, reason: "unavailable" });
     sqlite.exec("UPDATE agent_hosts SET connected = 0 WHERE id = 'alice-host'");
     expect(await selectScenarioHosts([], "alice", undefined, now, false)).toMatchObject({ ok: false, reason: "unavailable" });
   } finally {

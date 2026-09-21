@@ -1017,6 +1017,7 @@ async function admitNewRun(context: {
   for (let attempt = 1; attempt <= ADMISSION_CAS_ATTEMPTS; attempt += 1) {
     const allocated = await allocateAdmissionHost({
       userId: input.userId,
+      organizationId,
       ...(preparedHostId ? { requestedHostId: preparedHostId } : input.hostId ? { requestedHostId: input.hostId } : {}),
       requiredImages,
       reservationResources,
@@ -1193,6 +1194,7 @@ export interface AdmissionHostAllocation {
 
 async function allocateAdmissionHost(input: {
   userId: string;
+  organizationId: string | null;
   requestedHostId?: string;
   requiredImages: RequiredScenarioImage[];
   reservationResources: RuntimeResourceDemand;
@@ -1208,6 +1210,7 @@ async function allocateAdmissionHost(input: {
         input.requestedHostId,
         input.userId,
         input.requiredImages,
+        input.organizationId,
       );
       // No separate capacity precheck: planAdmissionHost reads the desired
       // version, the reported capacity, and the reservation ledger for this
@@ -1220,6 +1223,8 @@ async function allocateAdmissionHost(input: {
         input.userId,
         input.reservationResources,
         input.now,
+        undefined,
+        input.organizationId,
       );
       if (!selection.ok) {
         throw appError(
@@ -1252,6 +1257,7 @@ async function allocateAdmissionHost(input: {
     const allocation = await planAdmissionHost({
       candidateHostIds,
       userId: input.userId,
+      organizationId: input.organizationId,
       requiredImages: input.requiredImages,
       explicitHost: !!input.requestedHostId,
       now: input.now,
@@ -1291,6 +1297,7 @@ async function allocateAdmissionHost(input: {
 async function planAdmissionHost(input: {
   candidateHostIds: readonly string[];
   userId: string;
+  organizationId: string | null;
   requiredImages: RequiredScenarioImage[];
   explicitHost: boolean;
   now: number;
@@ -1308,6 +1315,7 @@ async function planAdmissionHost(input: {
         hostId,
         input.userId,
         input.requiredImages,
+        input.organizationId,
       );
     } catch (error) {
       if (!input.explicitHost && error instanceof AppError && error.status < 500) {
@@ -1923,7 +1931,7 @@ function insertRunStatement(
     String(hostParam) +
     " AND host.disabled = 0 AND host.role = 'agent'" +
     " AND host.scenario_enabled = 1" +
-    " AND " + metalAdmissionSql("?" + String(userParam)) +
+    " AND " + metalAdmissionSql("?" + String(userParam), "?3") +
     " AND " + admissionHostReadinessCondition(readinessParam) +
     " AND " + admissionContentAccessCondition(contentParam) +
     drainGateCondition(input.allowDrainedAdminProof) +
@@ -2077,7 +2085,7 @@ function runtimeExecutionStatement(
       " NULL, NULL, ?7, ?7" +
       " FROM agent_hosts host" +
       " WHERE host.id = ?5 AND host.disabled = 0" +
-      " AND " + metalAdmissionSql("?3") +
+      " AND " + metalAdmissionSql("?3", "?4") +
       " AND EXISTS (SELECT 1 FROM access_allowlist access" +
       " WHERE access.user_id = ?3 AND access.state = 'active'" +
       " AND access.source_invite_id = ?8" +

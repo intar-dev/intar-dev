@@ -162,7 +162,7 @@ describe("course routes", () => {
       allowSequenceBypass: false,
     });
     expect(mocks.loadScenarioCapacityPressure).toHaveBeenCalledWith(
-      "learner-1",
+      "learner-1", undefined, undefined, "organization-1",
     );
   });
 

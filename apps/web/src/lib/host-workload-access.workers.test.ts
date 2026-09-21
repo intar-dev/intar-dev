@@ -1,3 +1,7 @@
+import { loadScenarioTerminalRouteGeneration } from "./scenario-terminal-route-generation";
+import { artifactWriteBatch, resolveRunVm } from "@/control-plane/agent-run-artifacts/storage";
+import { persistHostReport } from "./personal-host-readiness";
+import { actualVm, stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { enforceHostWorkloadAccess } from "./host-workload-access";
 import { loadOrCreateHostDesiredState } from "./desired-state-store";
@@ -200,3 +204,75 @@ async function runRow() {
   if (!row) throw new Error("test run is missing");
   return row;
 }
+
+async function organizationWorkload() {
+  await drizzle(env.DB).insert(user).values({ id: "creator", name: "Creator", email: "creator@example.test", banned: true, deletedAt: new Date(1) });
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO organization (id, name, slug, created_at) VALUES ('org', 'Org', 'org', 1)"),
+    env.DB.prepare("INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('membership', 'org', 'user-1', 'member', 1)"),
+    env.DB.prepare("UPDATE agent_hosts SET scope = 'organization', organization_id = 'org', user_id = 'creator', active_session_id = 'session' WHERE id = 'host-1'"),
+    env.DB.prepare("UPDATE host_desired_state SET doc_json = json_set(doc_json, '$.scope', 'organization', '$.owner_user_id', 'creator') WHERE host_id = 'host-1'"),
+    env.DB.prepare("UPDATE scenario_runs SET organization_id = 'org' WHERE run_id = 'run-1'"),
+    env.DB.prepare("UPDATE runtime_executions SET organization_id = 'org' WHERE id = 'run-1'"),
+    env.DB.prepare("INSERT INTO agent_bootstrap_tokens (id,host_id,token_hash,credential_generation) VALUES ('credential','host-1','fixture',1)"),
+  ]);
+  return loadOrCreateHostDesiredState(drizzle(env.DB), "host-1", Date.now());
+}
+
+it("keeps shared organization work on its assigned host after placement and creator access change", async () => {
+  const state = await organizationWorkload();
+  expect(await enforceHostWorkloadAccess(state)).toBe(state);
+  expect(await loadScenarioTerminalRouteGeneration({ runId: "run-1", vmId: "vm-1" })).toMatchObject({ hostId: "host-1", userId: "user-1" });
+  const runVm = await resolveRunVm({ db: drizzle(env.DB), runId: "run-1", vmName: "runtime-1", agent: {
+    scope: "organization", organizationId: "org", credentialGeneration: 1, hostId: "host-1", userId: "creator", role: "agent",
+    betaSourceInviteId: null, betaSourceLeaseId: null, betaAdmissionGrantedAt: null,
+  } });
+  expect(runVm).toMatchObject({ userId: "user-1", hostId: "host-1" });
+  const now = Date.now();
+  const message = stateReport("host-1", { observedAt: now, appliedDesiredVersion: state.version, vms: [actualVm("run-1", "runtime-1", now)] });
+  if (message.type !== "state_report") throw new Error("Expected state report");
+  expect(await persistHostReport({ d1: env.DB, hostId: "host-1", sessionId: "session", credentialGeneration: 1, report: message.report, now, requireRunCli: false })).toBe(true);
+  expect(gateway.deleteRoute).not.toHaveBeenCalled();
+
+  // The initial artifact resolution does not authorize a later write.
+  await env.DB.prepare("DELETE FROM member WHERE user_id = 'user-1'").run();
+  await expect(artifactWriteBatch(env.DB, runVm!, [])).rejects.toThrow("Artifact write identity is no longer current");
+});
+
+it.each([
+  ["membership removed", "DELETE FROM member WHERE user_id = 'user-1'"],
+  ["public-context run", "UPDATE scenario_runs SET organization_id = NULL WHERE run_id = 'run-1'"],
+  ["different organization", "UPDATE scenario_runs SET organization_id = 'other' WHERE run_id = 'run-1'"],
+  ["content removed", "DELETE FROM course_catalogs"],
+  ["learner banned", "UPDATE user SET banned = 1 WHERE id = 'user-1'"],
+])("denies organization workload and terminal access after %s", async (_name, mutation) => {
+  const state = await organizationWorkload();
+  await env.DB.prepare("INSERT INTO organization (id,name,slug,created_at) VALUES ('other','Other','other',1)").run();
+  await env.DB.prepare(mutation).run();
+  await expect(loadScenarioTerminalRouteGeneration({ runId: "run-1", vmId: "vm-1" })).rejects.toMatchObject({ code: "scenario_terminal_target_unavailable" });
+  const stopped = await enforceHostWorkloadAccess(state);
+  expect(stopped.vms[0]?.desired_phase).toBe("absent");
+  expect(gateway.deleteRoute).toHaveBeenCalledTimes(3);
+});
+
+it("accepts a removed member's VM report so cleanup cannot make the shared host unavailable", async () => {
+  const state = await organizationWorkload();
+  await env.DB.prepare("DELETE FROM member WHERE user_id = 'user-1'").run();
+  const now = Date.now();
+  const message = stateReport("host-1", { observedAt: now, appliedDesiredVersion: state.version, vms: [actualVm("run-1", "runtime-1", now)] });
+  if (message.type !== "state_report") throw new Error("Expected state report");
+  const save = () => persistHostReport({ d1: env.DB, hostId: "host-1", sessionId: "session", credentialGeneration: 1, report: message.report, now, requireRunCli: false });
+  expect(await save()).toBe(true);
+  expect(await env.DB.prepare("SELECT connected FROM agent_hosts WHERE id = 'host-1'").first()).toEqual({ connected: 1 });
+  const stopped = await enforceHostWorkloadAccess(state);
+  expect(stopped.vms[0]?.desired_phase).toBe("absent");
+  message.report.observed_at_unix_ms += 1;
+  message.report.vms[0]!.phase = "absent";
+  expect(await save()).toBe(true);
+  message.report.observed_at_unix_ms += 1;
+  message.report.vms[0]!.generation += 1;
+  expect(await save()).toBe(false);
+  message.report.vms[0]!.generation -= 1;
+  await env.DB.prepare("UPDATE scenario_runs SET organization_id = NULL WHERE run_id = 'run-1'").run();
+  expect(await save()).toBe(false);
+});

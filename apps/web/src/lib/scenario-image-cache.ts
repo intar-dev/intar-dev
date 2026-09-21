@@ -41,6 +41,7 @@ type CacheHost = Pick<
   typeof agentHosts.$inferSelect,
   | "id"
   | "scope"
+  | "organizationId"
   | "userId"
   | "credentialGeneration"
   | "role"
@@ -107,7 +108,7 @@ export async function reconcileHostScenarioImages(
       host.id,
       input.nowUnixMs,
     );
-    if (!isRuntimeImageCacheHost(host) || (host.scope !== "personal" && host.scope !== "platform")) {
+    if (!isRuntimeImageCacheHost(host) || (host.scope !== "personal" && host.scope !== "platform" && host.scope !== "organization")) {
       return { outcome: "ineligible", desiredState: current };
     }
     if (!sessionMatches(host, input)) {
@@ -129,7 +130,7 @@ export async function reconcileHostScenarioImages(
         // Without a V2 catalog, no scenario key is linked and cache intent
         // fails closed. Running VM SHAs remain independently protected by
         // desired.vms.
-        draft.cached_images = host.scope === "personal" ? [] : draft.cached_images.filter(
+        draft.cached_images = host.scope !== "platform" ? [] : draft.cached_images.filter(
           (image) => {
             const identity = imageKeyIdentity(image.image_key);
             return (
@@ -170,7 +171,7 @@ export async function reconcileHostScenarioImages(
             desiredState: null,
           };
         }
-        if (!isRuntimeImageCacheHost(latestHost) || (latestHost.scope !== "personal" && latestHost.scope !== "platform")) {
+        if (!isRuntimeImageCacheHost(latestHost) || (latestHost.scope !== "personal" && latestHost.scope !== "platform" && latestHost.scope !== "organization")) {
           return {
             outcome: "ineligible",
             desiredState: await loadOrCreateHostDesiredState(
@@ -402,15 +403,15 @@ async function loadScenarioCacheIntent(
   host: CacheHost,
   architecture: ImageArchitecture,
 ): Promise<ScenarioCacheIntent> {
-  // Personal hosts receive only an exact owner workload or a bounded start
+  // User-managed hosts receive only an exact workload or a bounded start
   // preparation. Publication readiness and full catalog warming are platform-only.
-  const personal = host.scope === "personal";
-  const visibleScope = personal ? assignedPersonalScenarioImageAccess(host.id) : undefined;
+  const scoped = host.scope !== "platform";
+  const visibleScope = scoped ? assignedPersonalScenarioImageAccess(host.id) : undefined;
   const [catalogRows, scenarioRows, rows] = await Promise.all([
-    personal ? Promise.resolve([]) : db
+    scoped ? Promise.resolve([]) : db
       .select({ catalog: courseCatalogs.catalogJson })
       .from(courseCatalogs),
-    personal ? Promise.resolve([]) : db
+    scoped ? Promise.resolve([]) : db
       .select({ scenarioId: vmScenarios.scenarioId })
       .from(vmScenarios)
       .where(visibleScope),
@@ -435,7 +436,7 @@ async function loadScenarioCacheIntent(
       .where(visibleScope)
       .orderBy(vmScenarios.scenarioId, vmScenarioVms.ordinal),
   ]);
-  const linkedScenarioIds = personal ? new Set(rows.map(row => row.scenarioId)) : linkedScenarioIdsFromCatalogs(
+  const linkedScenarioIds = scoped ? new Set(rows.map(row => row.scenarioId)) : linkedScenarioIdsFromCatalogs(
     catalogRows.map((row) => row.catalog),
   );
   const byKey = new Map<string, DesiredCachedImageV1>();
@@ -521,6 +522,7 @@ async function loadCacheHost(
     .select({
       id: agentHosts.id,
       scope: agentHosts.scope,
+      organizationId: agentHosts.organizationId,
       userId: agentHosts.userId,
       credentialGeneration: agentHosts.credentialGeneration,
       role: agentHosts.role,
@@ -550,6 +552,7 @@ function cacheHostWriteFence(
           eq(agentHosts.role, "agent"),
           eq(agentHosts.disabled, false),
           eq(agentHosts.scope, host.scope!),
+          host.organizationId === null ? isNull(agentHosts.organizationId) : eq(agentHosts.organizationId, host.organizationId),
           eq(agentHosts.userId, host.userId),
           eq(agentHosts.credentialGeneration, host.credentialGeneration),
           sessionFence,
@@ -581,6 +584,7 @@ function sameCacheHostScope(left: CacheHost, right: CacheHost): boolean {
   return (
     left.id === right.id &&
     left.scope === right.scope &&
+    left.organizationId === right.organizationId &&
     left.userId === right.userId &&
     left.credentialGeneration === right.credentialGeneration &&
     left.role === right.role &&

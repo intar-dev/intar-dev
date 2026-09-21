@@ -14,9 +14,10 @@ export async function loadOrCreateHostDesiredState(
   hostId: string,
   nowUnixMs: number,
 ): Promise<HostDesiredStateV2> {
-  const [host] = await db.select({ scope: agentHosts.scope, ownerUserId: agentHosts.userId })
+  const [host] = await db.select({ scope: agentHosts.scope, ownerUserId: agentHosts.userId, organizationId: agentHosts.organizationId, role: agentHosts.role })
     .from(agentHosts).where(eq(agentHosts.id, hostId)).limit(1);
   if (!host || !host.scope || !host.ownerUserId) throw new Error("host ownership is not enrolled");
+  if (host.scope === "organization" && (!host.organizationId || host.role !== "agent")) throw new Error("invalid organization host");
   for (let attempt = 0; attempt < MUTATE_DESIRED_STATE_MAX_ATTEMPTS; attempt++) {
     const rows = await db
       .select({

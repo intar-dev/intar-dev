@@ -77,8 +77,9 @@ export async function assertScenarioLaunchHostForUser(
   hostId: string,
   userId: string,
   requiredImages: RequiredScenarioImage[],
+  organizationId: string | null = null,
 ): Promise<void> {
-  await loadScenarioLaunchHostForUser(hostId, userId, requiredImages);
+  await loadScenarioLaunchHostForUser(hostId, userId, requiredImages, organizationId);
 }
 
 /** Returns the exact host/report snapshot checked for admission. */
@@ -86,6 +87,7 @@ export async function loadScenarioLaunchHostForUser(
   hostId: string,
   userId: string,
   requiredImages: RequiredScenarioImage[],
+  organizationId: string | null = null,
 ) {
   const now = Date.now();
   const db = drizzle(env.DB);
@@ -108,7 +110,7 @@ export async function loadScenarioLaunchHostForUser(
     .where(
       and(
         eq(agentHosts.id, hostId),
-        metalPlacementForUser(userId),
+        metalPlacementForUser(userId, organizationId),
       ),
     )
     .limit(1);
@@ -146,8 +148,10 @@ export async function loadScenarioLaunchHostForUser(
   ) {
     throw appError(409, "scenario_host_unavailable", "host is not connected");
   }
-  if (host.scope === "personal" && !personalHostReportReady(host.actualReport, learnerRunCliV1EnforcementEnabled(env))) {
-    throw appError(409, "personal_server_not_ready", "Your server is not Ready. Open Profile → My servers and run the repair action.");
+  if (host.scope !== "platform" && !personalHostReportReady(host.actualReport, learnerRunCliV1EnforcementEnabled(env))) {
+    throw appError(409, host.scope === "organization" ? "organization_server_not_ready" : "personal_server_not_ready",
+      host.scope === "organization" ? "The organization server is not Ready. Ask an organization administrator to repair it."
+        : "Your server is not Ready. Open Profile → My servers and run the repair action.");
   }
   if (!hostHasImagesReady(host.actualReport, requiredImages)) {
     throw appError(
@@ -396,6 +400,7 @@ async function loadEligibleScenarioLaunchHosts(
   userId: string,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
+  organizationId: string | null = null,
 ) {
   const db = drizzle(env.DB);
   const rows = await db
@@ -417,7 +422,7 @@ async function loadEligibleScenarioLaunchHosts(
         eq(agentHosts.role, "agent"),
         eq(agentHosts.scenarioEnabled, true),
         eq(agentHosts.connected, true),
-        metalPlacementForUser(userId),
+        metalPlacementForUser(userId, organizationId),
       ),
     )
     .orderBy(desc(agentHosts.updatedAt));
@@ -459,7 +464,7 @@ async function loadEligibleScenarioLaunchHosts(
           HOST_HEARTBEAT_TTL_MS,
         ) &&
         hostHealth(row.actualReportedAt ?? null, now) === "healthy" &&
-        (row.scope !== "personal" || personalHostReportReady(row.actualReport, requireRunCli)) &&
+        (row.scope === "platform" || personalHostReportReady(row.actualReport, requireRunCli)) &&
         strictCpuCapacity(row.actualReport) !== null &&
         hostSupportsSpeedRedesign(row.actualReport) &&
         (!requireRunCli || hostSupportsRunCliV1(row.actualReport)),
@@ -476,11 +481,13 @@ export async function loadScenarioCapacityPressure(
   userId: string,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
+  organizationId: string | null = null,
 ): Promise<number | null> {
   const hosts = await loadEligibleScenarioLaunchHosts(
     userId,
     now,
     requireRunCli,
+    organizationId,
   );
   if (!hosts.length) return null;
 
@@ -580,6 +587,7 @@ export async function selectScenarioHosts(
   requiredResources?: RuntimeResourceDemand,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
+  organizationId: string | null = null,
 ): Promise<HostSelectionResult> {
   return traceOperation("scenario.select_host", async () => {
   const db = drizzle(env.DB);
@@ -587,10 +595,11 @@ export async function selectScenarioHosts(
     userId,
     now,
     requireRunCli,
+    organizationId,
   );
 
   if (!candidates.length) {
-    return hostSelectionFailure(userId, "unavailable");
+    return hostSelectionFailure(userId, organizationId, "unavailable");
   }
 
   let imageReadyCandidates = candidates.filter((candidate) =>
@@ -598,7 +607,7 @@ export async function selectScenarioHosts(
   );
 
   if (!imageReadyCandidates.length) {
-    return hostSelectionFailure(userId, "image_not_ready");
+    return hostSelectionFailure(userId, organizationId, "image_not_ready");
   }
 
   const availableResourcesByHost = new Map<string, RuntimeResourceDemand>();
@@ -619,7 +628,7 @@ export async function selectScenarioHosts(
       return runtimeResourcesFit(requiredResources, available);
     });
     if (!imageReadyCandidates.length) {
-      return hostSelectionFailure(userId, "resource_capacity");
+      return hostSelectionFailure(userId, organizationId, "resource_capacity");
     }
   }
 
@@ -685,9 +694,17 @@ export async function selectScenarioHosts(
   });
 }
 
-async function hostSelectionFailure(userId: string, reason: "unavailable" | "image_not_ready" | "resource_capacity"): Promise<HostSelectionResult> {
+async function hostSelectionFailure(userId: string, organizationId: string | null, reason: "unavailable" | "image_not_ready" | "resource_capacity"): Promise<HostSelectionResult> {
   const owner = await env.DB.prepare("SELECT metal_placement FROM user WHERE id = ?").bind(userId).first<{ metal_placement: string }>();
-  if (owner?.metal_placement !== "personal") return { ok: false, reason };
+  if (owner?.metal_placement !== "personal") {
+    const org = organizationId ? await env.DB.prepare("SELECT metal_placement FROM organization WHERE id = ?").bind(organizationId).first<{ metal_placement: string }>() : null;
+    if (org?.metal_placement !== "organization") return { ok: false, reason };
+    return { ok: false, reason, message: reason === "resource_capacity"
+      ? "The organization servers do not have enough free CPU, memory, or storage. Wait for a run to finish."
+      : reason === "image_not_ready"
+        ? "The organization server is preparing the required images. Wait, then start the run again."
+        : "The organization servers are offline, paused, or need repair. Ask an organization administrator to restore a Ready server." };
+  }
   return { ok: false, reason, message: reason === "resource_capacity"
     ? "Your servers do not have enough free CPU, memory, or storage. Wait for a run to finish."
     : reason === "image_not_ready"

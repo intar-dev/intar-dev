@@ -17,23 +17,28 @@ export function randomHostSecret(): string {
 
 export async function createHostEnrollment(db: D1Database, context: UserContext, input: {
   name: string;
-  scope: "personal" | "platform";
+  scope: "personal" | "platform" | "organization";
+  organizationId?: string;
   role: "agent" | "builder";
 }) {
   if (input.scope === "platform" && !context.isAdmin) throw new Error("Platform admin required");
-  if (input.scope === "personal" && input.role !== "agent") throw new Error("Personal servers cannot build images");
+  if (input.scope !== "platform" && input.role !== "agent") throw new Error("User-managed servers cannot build images");
+  if ((input.scope === "organization") !== Boolean(input.organizationId)) {
+    throw appError(400, "invalid_server_organization", "Organization servers must belong to an organization.");
+  }
   const token = randomHostSecret();
   const hostId = createAppId();
   const expiresAt = Date.now() + 15 * 60_000;
   const epoch = context.betaAdmission;
   const row = await db.prepare(
-    "INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, source_invite_id, source_lease_id, granted_at, expires_at) " +
-    "SELECT ?1, ?2, user_id, ?3, ?4, ?5, source_invite_id, source_lease_id, granted_at, ?6 FROM access_allowlist " +
+    "INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, source_invite_id, source_lease_id, granted_at, expires_at, organization_id) " +
+    "SELECT ?1, ?2, user_id, ?3, ?4, ?5, source_invite_id, source_lease_id, granted_at, ?6, ?11 FROM access_allowlist " +
     "WHERE user_id = ?7 AND state = 'active' AND source_invite_id = ?8 AND source_lease_id = ?9 AND granted_at = ?10 " +
     "AND EXISTS (SELECT 1 FROM user WHERE id = ?7 AND coalesce(banned, 0) = 0 AND deleted_at IS NULL) " +
+    "AND (?4 <> 'organization' OR EXISTS (SELECT 1 FROM member WHERE user_id = ?7 AND organization_id = ?11 AND role IN ('owner', 'admin'))) " +
     "AND (?4 <> 'platform' OR EXISTS (SELECT 1 FROM user WHERE id = ?7 AND instr(',' || replace(lower(coalesce(role, '')), ' ', '') || ',', ',admin,') > 0 AND coalesce(banned, 0) = 0 AND deleted_at IS NULL)) AND " + registrationOpen("?4") + " RETURNING host_id",
   ).bind(await sha256Hex(token), hostId, input.name, input.scope, input.role, expiresAt,
-    context.userId, epoch.sourceInviteId, epoch.sourceLeaseId, epoch.grantedAt).first();
+    context.userId, epoch.sourceInviteId, epoch.sourceLeaseId, epoch.grantedAt, input.organizationId ?? null).first();
   if (!row) throw appError(409, "host_enrollment_changed", "Registration changed. Reload My servers and try again.");
   return { hostId, enrollmentToken: token, expiresAt };
 }
@@ -48,6 +53,8 @@ export async function claimHostEnrollment(db: D1Database, token: string, credent
     "AND access.state = 'active' AND access.source_invite_id = enrollment.source_invite_id " +
     "AND access.source_lease_id = enrollment.source_lease_id AND access.granted_at = enrollment.granted_at) " +
     "AND EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id AND coalesce(banned, 0) = 0 AND deleted_at IS NULL) " +
+    "AND (enrollment.scope <> 'organization' OR (enrollment.role = 'agent' AND EXISTS (SELECT 1 FROM member " +
+    "WHERE user_id = enrollment.user_id AND organization_id = enrollment.organization_id AND role IN ('owner', 'admin')))) " +
     "AND (enrollment.scope <> 'platform' OR EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id " +
     "AND instr(',' || replace(lower(coalesce(role, '')), ' ', '') || ',', ',admin,') > 0 AND coalesce(banned, 0) = 0 AND deleted_at IS NULL))";
   const eligible = "enrollment.token_hash = ?1 AND enrollment.credential_hash = ?2 AND enrollment.revoked_at IS NULL AND " + active;
@@ -55,8 +62,8 @@ export async function claimHostEnrollment(db: D1Database, token: string, credent
     db.prepare("UPDATE host_enrollments AS enrollment SET credential_hash = ?2, claimed_at = ?3 " +
       "WHERE token_hash = ?1 AND claimed_at IS NULL AND expires_at > ?3 AND revoked_at IS NULL AND " + active)
       .bind(tokenHash, credentialHash, now),
-    db.prepare("INSERT INTO agent_hosts (id, user_id, name, scope, role, credential_generation, scenario_enabled, disabled, connected, created_at, updated_at) " +
-      "SELECT enrollment.host_id, enrollment.user_id, enrollment.name, enrollment.scope, enrollment.role, 1, CASE WHEN enrollment.role = 'agent' THEN 1 ELSE 0 END, 0, 0, ?3, ?3 " +
+    db.prepare("INSERT INTO agent_hosts (id, user_id, name, scope, role, organization_id, credential_generation, scenario_enabled, disabled, connected, created_at, updated_at) " +
+      "SELECT enrollment.host_id, enrollment.user_id, enrollment.name, enrollment.scope, enrollment.role, enrollment.organization_id, 1, CASE WHEN enrollment.role = 'agent' THEN 1 ELSE 0 END, 0, 0, ?3, ?3 " +
       "FROM host_enrollments enrollment WHERE " + eligible + " AND enrollment.claimed_at = ?3 " +
       "ON CONFLICT (id) DO NOTHING").bind(tokenHash, credentialHash, now),
     db.prepare("INSERT INTO agent_bootstrap_tokens (id, host_id, token_hash, credential_generation, created_at) " +
@@ -66,7 +73,7 @@ export async function claimHostEnrollment(db: D1Database, token: string, credent
       "ON CONFLICT (id) DO NOTHING").bind(tokenHash, credentialHash, now),
   ]);
   // A lost-response retry can recover the claim, but cannot replace or revive credentials.
-  return db.prepare("SELECT host.id AS hostId, host.user_id AS ownerUserId, host.scope, host.credential_generation AS credentialGeneration " +
+  return db.prepare("SELECT host.id AS hostId, host.user_id AS ownerUserId, host.scope, host.organization_id AS organizationId, host.credential_generation AS credentialGeneration " +
     "FROM host_enrollments enrollment JOIN agent_hosts host ON host.id = enrollment.host_id " +
     "JOIN agent_bootstrap_tokens credential ON credential.host_id = host.id AND credential.token_hash = ?2 " +
     "WHERE " + eligible + " AND host.disabled = 0 AND host.credential_generation = 1 " +

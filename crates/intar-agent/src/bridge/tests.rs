@@ -814,6 +814,26 @@ fn platform_host_accepts_explicit_workload_owners_without_rebinding_host_owner()
 }
 
 #[test]
+fn organization_host_accepts_members_without_rebinding_host_identity() {
+    let mut cfg = test_bridge_config();
+    cfg.scope = intar_contracts::bridge::HostScope::Organization;
+    let mut desired = empty_desired_state(1);
+    desired.scope = cfg.scope;
+    desired.vms.push(desired_vm());
+    desired.vms[0].owner_user_id = "learner-2".into();
+    validate_desired_state(&cfg, &desired).expect("valid fixture");
+    let value = serde_json::to_value(&desired).expect("serialize organization state");
+    assert_eq!(value["scope"], "organization");
+    let decoded: HostDesiredStateV2 = serde_json::from_value(value).expect("organization scope");
+    validate_desired_state(&cfg, &decoded).expect("organization round trip");
+    desired.scope = intar_contracts::bridge::HostScope::Platform;
+    assert!(validate_desired_state(&cfg, &desired).is_err());
+    desired.scope = cfg.scope;
+    desired.owner_user_id = "learner-2".into();
+    assert!(validate_desired_state(&cfg, &desired).is_err());
+}
+
+#[test]
 fn execution_transition_rejects_regression_and_identity_reuse() {
     let mut current = empty_desired_state(4);
     current.vms.push(desired_vm());

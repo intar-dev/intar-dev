@@ -1,3 +1,4 @@
+import { currentRunHostScopeCondition } from "@/lib/metal-placement";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
@@ -61,8 +62,8 @@ export interface ResolvedRunVm {
 /** The original JWT identity must survive every body/R2 await. Never refresh it. */
 function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
   return sql`${currentAgentHost(runVm.agent)}
-    AND EXISTS (SELECT 1 FROM user host_owner WHERE host_owner.id = ${runVm.agent.userId}
-      AND host_owner.deleted_at IS NULL AND coalesce(host_owner.banned, 0) = 0)
+    AND (${runVm.agent.scope} = 'organization' OR EXISTS (SELECT 1 FROM user host_owner WHERE host_owner.id = ${runVm.agent.userId}
+      AND host_owner.deleted_at IS NULL AND coalesce(host_owner.banned, 0) = 0))
     AND EXISTS (SELECT 1 FROM agent_bootstrap_tokens credential WHERE credential.host_id = ${runVm.agent.hostId}
       AND credential.credential_generation = ${runVm.agent.credentialGeneration} AND credential.revoked_at IS NULL
       AND (credential.expires_at IS NULL OR credential.expires_at > CAST(unixepoch('subsecond') * 1000 AS INTEGER)))
@@ -70,6 +71,7 @@ function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
     SELECT 1 FROM runtime_executions execution
     JOIN runtime_vms vm ON vm.execution_id = execution.id
     JOIN scenario_runs run ON run.runtime_execution_id = execution.id
+    JOIN agent_hosts host ON host.id = execution.host_id
     JOIN user owner ON owner.id = execution.user_id
     WHERE execution.id = ${runVm.runId} AND execution.host_id = ${runVm.agent.hostId}
       AND execution.user_id = ${runVm.userId} AND execution.generation = ${runVm.generation}
@@ -79,7 +81,7 @@ function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
       AND vm.id = ${runVm.runtimeVmId} AND vm.vm_id = ${runVm.vmId}
       AND vm.runtime_vm_name = ${runVm.runtimeVmName}
       AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
-      AND (${runVm.agent.scope} = 'platform' OR execution.user_id = ${runVm.agent.userId})
+      AND ${sql.raw(currentRunHostScopeCondition())}
       AND NOT EXISTS (SELECT 1 FROM runtime_executions newer
         WHERE newer.domain_kind = execution.domain_kind AND newer.domain_id = execution.domain_id
           AND newer.generation > execution.generation)

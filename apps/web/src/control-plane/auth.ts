@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   accessAllowlist,
@@ -6,6 +6,11 @@ import {
   agentHosts,
 } from "@/db/schema";
 import { createAppId } from "@/lib/id";
+
+/** Organization credentials belong to the organization, not the enrollment creator. */
+export function organizationHostAdmissionCondition(organizationIdSql = "host.organization_id"): string {
+  return `EXISTS (SELECT 1 FROM organization WHERE id = ${organizationIdSql})`;
+}
 
 const JWT_TTL_SECONDS = 15 * 60;
 const MIN_AGENT_JWT_SECRET_BYTES = 32;
@@ -19,6 +24,7 @@ interface BootstrapRequest {
 
 interface JwtPayload {
   credential_generation: number;
+  organization_id?: string | null;
   iss: string;
   aud: string;
   sub: string;
@@ -26,14 +32,15 @@ interface JwtPayload {
   nbf: number;
   exp: number;
   jti: string;
-  /** Exact beta admission that minted a personal-host token; null for platform hosts. */
+  /** Exact beta admission that minted a personal-host token; null for platform and organization hosts. */
   beta_source_invite_id: string | null;
   beta_source_lease_id: string | null;
   beta_admission_granted_at: number | null;
 }
 
 export interface VerifiedAgentHost {
-  scope: "personal" | "platform";
+  scope: "personal" | "platform" | "organization";
+  organizationId?: string | null;
   credentialGeneration: number;
   hostId: string;
   userId: string;
@@ -81,7 +88,10 @@ export async function handleAgentBootstrap(
       revokedAt: agentBootstrapTokens.revokedAt,
       hostDisabled: agentHosts.disabled,
       hostUserId: agentHosts.userId,
+      role: agentHosts.role,
       scope: agentHosts.scope,
+      organizationId: agentHosts.organizationId,
+      organizationAdmitted: sql<number>`${sql.raw(organizationHostAdmissionCondition("agent_hosts.organization_id"))}`,
       credentialGeneration: agentHosts.credentialGeneration,
       tokenCredentialGeneration: agentBootstrapTokens.credentialGeneration,
       betaState: accessAllowlist.state,
@@ -111,6 +121,9 @@ export async function handleAgentBootstrap(
   if (!match.scope || match.credentialGeneration < 1 ||
       match.tokenCredentialGeneration !== match.credentialGeneration) {
     return jsonResponse({ error: "Install and register this server again" }, 401);
+  }
+  if (match.scope === "organization" && (!match.organizationAdmitted || match.role !== "agent")) {
+    return jsonResponse({ error: "invalid organization host" }, 403);
   }
   if (match.hostDisabled) {
     return jsonResponse({ error: "host is disabled" }, 403);
@@ -142,6 +155,7 @@ export async function handleAgentBootstrap(
 
   const payload: JwtPayload = {
     credential_generation: match.credentialGeneration,
+    organization_id: match.scope === "organization" ? match.organizationId : null,
     iss: issuer,
     aud: audience,
     sub: hostId,
@@ -167,6 +181,7 @@ export async function handleAgentBootstrap(
     {
       hostId,
       ownerUserId: match.hostUserId,
+      ...(match.scope === "organization" ? { organizationId: match.organizationId } : {}),
       scope: match.scope,
       credentialGeneration: match.credentialGeneration,
       accessToken,
@@ -204,6 +219,11 @@ export async function handleAgentConnect(
 
   const headers = new Headers(request.headers);
   headers.set("x-agent-host-id", hostId);
+  if (verified.agent.scope === "organization") {
+    headers.set("x-agent-organization-id", verified.agent.organizationId!);
+  } else {
+    headers.delete("x-agent-organization-id");
+  }
   headers.set("x-agent-credential-generation", String(verified.agent.credentialGeneration));
   if (verified.agent.betaAdmissionGrantedAt !== null) {
     headers.set(
@@ -285,6 +305,8 @@ export async function requireVerifiedAgentRequest(
       id: agentHosts.id,
       userId: agentHosts.userId,
       scope: agentHosts.scope,
+      organizationId: agentHosts.organizationId,
+      organizationAdmitted: sql<number>`${sql.raw(organizationHostAdmissionCondition("agent_hosts.organization_id"))}`,
       credentialGeneration: agentHosts.credentialGeneration,
       role: agentHosts.role,
       disabled: agentHosts.disabled,
@@ -310,6 +332,12 @@ export async function requireVerifiedAgentRequest(
   }
   if (!host.scope || host.credentialGeneration < 1 || payload.credential_generation !== host.credentialGeneration) {
     return { ok: false, response: jsonResponse({ error: "Server credentials are no longer valid" }, 401) };
+  }
+  if (host.scope === "organization" && (!host.organizationAdmitted || host.role !== "agent" || payload.organization_id !== host.organizationId)) {
+    return { ok: false, response: jsonResponse({ error: "invalid organization host" }, 403) };
+  }
+  if (host.scope !== "organization" && payload.organization_id != null) {
+    return { ok: false, response: jsonResponse({ error: "invalid token" }, 401) };
   }
   if (host.disabled) {
     return {
@@ -341,7 +369,7 @@ export async function requireVerifiedAgentRequest(
     };
   }
   if (
-    host.scope === "platform" &&
+    host.scope !== "personal" &&
     (payload.beta_source_invite_id !== null ||
       payload.beta_source_lease_id !== null ||
       payload.beta_admission_granted_at !== null)
@@ -356,6 +384,7 @@ export async function requireVerifiedAgentRequest(
     ok: true,
     agent: {
       scope: host.scope,
+      organizationId: host.organizationId,
       credentialGeneration: host.credentialGeneration,
       hostId: host.id,
       userId: host.userId,

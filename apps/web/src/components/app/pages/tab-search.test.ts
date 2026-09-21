@@ -7,6 +7,13 @@ import {
 } from "./tab-search";
 
 describe("organization detail tab search", () => {
+  it("keeps shared server links and drops unrelated query state", () => {
+    expect(
+      validateOrganizationDetailSearch({ tab: "servers", host: "old" }),
+    ).toEqual({ tab: "servers" });
+    expect(ORGANIZATION_DETAIL_TABS).toContain("servers");
+  });
+
   it("drops the former course panel and its drill-down query state", () => {
     expect(
       validateOrganizationDetailSearch({
@@ -24,9 +31,7 @@ describe("organization detail tab search", () => {
   });
 
   it("falls legacy scenario tab links back to overview", () => {
-    expect(validateOrganizationDetailSearch({ tab: "scenarios" })).toEqual(
-      {},
-    );
+    expect(validateOrganizationDetailSearch({ tab: "scenarios" })).toEqual({});
     expect(ORGANIZATION_DETAIL_TABS).not.toContain("scenarios");
   });
 });

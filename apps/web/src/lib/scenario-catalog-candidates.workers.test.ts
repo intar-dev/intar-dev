@@ -45,8 +45,9 @@ describe("reused candidate presentation", () => {
         id, name: id, slug: id, createdAt: new Date(0),
       })));
       const hosts = [
-        { id: "platform-legacy-org", scope: "platform", role: "agent", organizationId: "legacy-org" },
-        { id: "personal", scope: "personal", role: "agent", organizationId },
+        { id: "platform-second", scope: "platform", role: "agent" },
+        { id: "organization", scope: "organization", role: "agent", organizationId: "private-org" },
+        { id: "personal", scope: "personal", role: "agent" },
         { id: "disabled", scope: "platform", role: "agent", disabled: true },
         { id: "builder", scope: "platform", role: "builder" },
         { id: "other-arch", scope: "platform", role: "agent" },
@@ -64,15 +65,15 @@ describe("reused candidate presentation", () => {
       if (kind === "new") {
         expect(await warmCandidateScenarioManifest(db, {
           organizationId, manifest: technicalManifest(), nowUnixMs: 2, wakeHost,
-        })).toEqual(["agent-1", "platform-legacy-org"]);
+        })).toEqual(["agent-1", "platform-second"]);
       } else {
         expect(await stageReusableCandidateManifests(db, {
           organizationId, revision: "warm-reuse", meta: reusedMeta(["task"]), nowUnixMs: 2, wakeHost,
         })).toEqual(["task"]);
       }
-      expect(wakeHost.mock.calls.map(([host]) => host).sort()).toEqual(["agent-1", "platform-legacy-org"]);
+      expect(wakeHost.mock.calls.map(([host]) => host).sort()).toEqual(["agent-1", "platform-second"]);
       const desired = await db.select().from(hostDesiredState);
-      expect(desired.map((row) => row.hostId).sort()).toEqual(["agent-1", "platform-legacy-org"]);
+      expect(desired.map((row) => row.hostId).sort()).toEqual(["agent-1", "platform-second"]);
       for (const row of desired) expect(row.docJson.cached_images).toEqual([
         { image_key: technicalManifest().vms[0]!.image_key, image_id: technicalManifest().vms[0]!.image_id },
       ]);

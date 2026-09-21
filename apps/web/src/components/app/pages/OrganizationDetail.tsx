@@ -31,6 +31,8 @@ import {
   type OrganizationDetailTab,
 } from "./tab-search";
 
+import { MyServers } from "./MyServers";
+
 export function OrganizationDetail() {
   const { orgId } = useParams({ from: "/app/organizations/$orgId" });
   const routeSearch = useSearch({ from: "/app/organizations/$orgId" });
@@ -57,7 +59,7 @@ export function OrganizationDetail() {
   const requestedTab = isOrganizationDetailTab(routeSearch.tab)
     ? routeSearch.tab
     : "overview";
-  const admin = detail?.role !== "member";
+  const admin = detail?.role === "owner" || detail?.role === "admin";
   const activeTab: OrganizationDetailTab =
     (requestedTab === "progress" || requestedTab === "settings") && !admin
       ? requestedTab === "settings"
@@ -165,6 +167,7 @@ export function OrganizationDetail() {
             {admin ? (
               <TabsTrigger value="progress">Progress</TabsTrigger>
             ) : null}
+            <TabsTrigger value="servers">Servers</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
         </div>
@@ -195,6 +198,13 @@ export function OrganizationDetail() {
             <ProgressSection detail={detail} />
           </TabsContent>
         ) : null}
+        <TabsContent value="servers" className="min-w-0">
+          <MyServers
+            key={`${detail.id}:${detail.role}`}
+            organizationId={detail.id}
+            canManage={admin}
+          />
+        </TabsContent>
         <TabsContent value="settings" className="min-w-0">
           <OrganizationSettingsSection detail={detail} />
         </TabsContent>

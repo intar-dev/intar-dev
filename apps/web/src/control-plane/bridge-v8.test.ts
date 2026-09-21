@@ -585,6 +585,8 @@ describe("execution ownership contract", () => {
     expect(parse()).toBeNull();
     desired.scope = "platform";
     expect(parse()?.type).toBe("desired_state");
+    desired.scope = "organization";
+    expect(parse()?.type).toBe("desired_state");
     desired.vms[0]!.generation = 0;
     expect(parse()).toBeNull();
   });

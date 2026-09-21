@@ -511,13 +511,13 @@ def read_token():
         hidden[3] &= ~termios.ECHO
         try:
             termios.tcsetattr(tty.fileno(), termios.TCSAFLUSH, hidden)
-            output.write('Paste the token from My servers: ')
+            output.write('Paste the token from My servers or organization Servers: ')
             output.flush()
             token = tty.readline(256).strip()
         finally:
             termios.tcsetattr(tty.fileno(), termios.TCSAFLUSH, previous)
             output.write('\n')
-    require(re.fullmatch('[a-f0-9]{64}', token), 'Invalid enrollment token. Copy it again from My servers.')
+    require(re.fullmatch('[a-f0-9]{64}', token), 'Invalid enrollment token. Copy it again from My servers or organization Servers.')
     return token
 
 
@@ -542,10 +542,10 @@ def claim(enrollment):
     except (OSError, ValueError, urllib.error.URLError):
         # Never print the request, response, or exception: they can contain secrets.
         raise HostError('Enrollment failed. The saved claim is intact. Repeat setup to recover it.') from None
-    require(isinstance(result, dict) and result.get('scope') == 'personal'
+    require(isinstance(result, dict) and result.get('scope') in ('personal', 'organization')
             and type(result.get('credentialGeneration')) is int and result['credentialGeneration'] == 1
             and all(isinstance(result.get(k), str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', result[k])
-                    for k in ('hostId', 'ownerUserId')), 'Invalid personal enrollment response.')
+                    for k in ('hostId', 'ownerUserId')), 'Invalid host enrollment response.')
     return {key: result[key] for key in ('hostId', 'ownerUserId', 'scope', 'credentialGeneration')}
 
 
@@ -707,7 +707,7 @@ def wait_ready(timeout=120):
         except HostError:
             pass
         require(time.monotonic() < deadline,
-                'Installed, but the control connection or tunnel is not ready. Check My servers and repeat setup.')
+                'Installed, but the control connection or tunnel is not ready. Check My servers or organization Servers and repeat setup.')
         time.sleep(2)
 
 
@@ -719,7 +719,7 @@ def setup(state, args):
         status = json.loads(agent('--status'))
         require(status.get('draining') is False, 'Agent is drained. Run intar-host update to resume it.')
         wait_ready()
-        print('Ready. Open My servers at https://intar.dev.')
+        print('Ready. Open My servers or organization Servers at https://intar.dev.')
         return
     if state.get('version'):
         print('Drain active runs before maintenance.')
@@ -782,7 +782,7 @@ def setup(state, args):
     state.pop('pendingVersion', None)
     state.pop('pendingStarted', None)
     save(state)
-    print('Ready. Open My servers at https://intar.dev.')
+    print('Ready. Open My servers or organization Servers at https://intar.dev.')
 
 
 def remove_data(state):
@@ -841,7 +841,7 @@ def remove_data(state):
     shutil.rmtree(ROOT)
     secure_path(COMMAND)
     COMMAND.unlink()
-    print('Intar data and local credentials removed. Remove this server in My servers to revoke its server credential.')
+    print('Intar data and local credentials removed. Remove this server in My servers or organization Servers to revoke its server credential.')
 
 
 def remove_runtime():
@@ -884,7 +884,7 @@ def uninstall(state, timeout, purge=False):
         remove_data(state)
         return
     print('Services and runtime binaries removed. Data, credentials, storage mounts, and intar-host are kept.')
-    print('Remove this server in My servers to revoke its credential. Run intar-host setup to restore it.')
+    print('Remove this server in My servers or organization Servers to revoke its credential. Run intar-host setup to restore it.')
 
 
 def main():

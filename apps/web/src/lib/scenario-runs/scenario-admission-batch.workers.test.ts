@@ -78,6 +78,31 @@ describe("admission batch", () => {
     ).resolves.toEqual([{ version: input.desired.nextVersion }]);
   });
 
+  it("admits organization work on the organization's host", async () => {
+    const db = await seedAdmissionFixture();
+    const input = await admissionInput();
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'organization', organization_id = ? WHERE id = ?").bind(ORG_ID, HOST_ID).run();
+    await env.DB.prepare("UPDATE organization SET metal_placement = 'organization' WHERE id = ?").bind(ORG_ID).run();
+    await env.DB.batch(admissionStatements(input).statements);
+    expect(await count(db, scenarioRuns)).toBe(1);
+  });
+
+  it.each([
+    ["organization placement changed", "UPDATE organization SET metal_placement = 'platform'"],
+    ["membership removed", "DELETE FROM member"],
+    ["personal placement enabled", "UPDATE user SET metal_placement = 'personal' WHERE id = 'admission-user'"],
+    ["relay disconnected", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.relay_connected', 0)"],
+  ])("rejects a prepared organization admission after %s", async (_name, mutation) => {
+    await seedAdmissionFixture();
+    const input = await admissionInput();
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'organization', organization_id = ? WHERE id = ?").bind(ORG_ID, HOST_ID).run();
+    await env.DB.prepare("UPDATE organization SET metal_placement = 'organization' WHERE id = ?").bind(ORG_ID).run();
+    const batch = admissionStatements(input);
+    await env.DB.prepare(mutation).run();
+    await expect(env.DB.batch(batch.statements)).rejects.toThrow(/runtime_executions_generation_positive|CHECK/i);
+    await assertNoAdmissionWrites();
+  });
+
   it("aborts the whole batch when the desired-state compare-and-set is lost", async () => {
     const db = await seedAdmissionFixture();
     const parts = await admissionInput();

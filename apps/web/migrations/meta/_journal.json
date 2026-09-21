@@ -197,6 +197,20 @@
       "when": 1789860736007,
       "tag": "0027_real_big_bertha",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1790034279011,
+      "tag": "0028_married_rogue",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1790034284409,
+      "tag": "0029_powerful_zzzax",
+      "breakpoints": true
     }
   ]
 }

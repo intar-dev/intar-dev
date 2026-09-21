@@ -789,7 +789,8 @@
       "type": "string",
       "enum": [
         "personal",
-        "platform"
+        "platform",
+        "organization"
       ]
     },
     "HostStateReportV2": {

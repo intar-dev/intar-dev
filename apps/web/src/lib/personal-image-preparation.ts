@@ -2,7 +2,7 @@ import { preparationAuthoritySql } from "@/lib/personal-image-access";
 import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts, personalImagePreparations, user } from "@/db/schema";
+import { agentHosts, personalImagePreparations, organization, user } from "@/db/schema";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import { appError } from "@/lib/app-error";
 import { mutateDesiredState, upsertDesiredCachedImage } from "@/lib/desired-state";
@@ -27,34 +27,53 @@ export async function preparePersonalScenarioImages(input: {
   const db = drizzle(env.DB);
   const [owner] = await db.select({ placement: user.metalPlacement }).from(user)
     .where(eq(user.id, input.access.userId)).limit(1);
-  if (owner?.placement !== "personal") return undefined;
+  if (owner?.placement !== "personal") {
+    if (!input.access.organizationId) return undefined;
+    const [org] = await db.select({ placement: organization.metalPlacement }).from(organization)
+      .where(eq(organization.id, input.access.organizationId)).limit(1);
+    if (org?.placement !== "organization") return undefined;
+  }
 
   const [pending] = await db.select().from(personalImagePreparations)
     .where(eq(personalImagePreparations.userId, input.access.userId)).limit(1);
   let hostId = input.requestedHostId;
   if (hostId) {
-    await loadScenarioLaunchHostForUser(hostId, input.access.userId, []);
+    await loadScenarioLaunchHostForUser(hostId, input.access.userId, [], input.access.organizationId);
   } else {
     // Prefer a host which already has the images, then keep an eligible
     // pending host stable across retries. Only one host receives a grant.
-    let selection = await selectScenarioHosts(input.requiredImages, input.access.userId, input.requiredResources);
-    if (!selection.ok) selection = await selectScenarioHosts([], input.access.userId, input.requiredResources);
+    let selection = await selectScenarioHosts(input.requiredImages, input.access.userId, input.requiredResources, undefined, undefined, input.access.organizationId);
+    if (!selection.ok) selection = await selectScenarioHosts([], input.access.userId, input.requiredResources, undefined, undefined, input.access.organizationId);
     if (!selection.ok) return undefined; // The normal admission path supplies the error copy.
     hostId = pending?.requestKey === input.requestKey && selection.hostIds.includes(pending.hostId)
       ? pending.hostId : selection.hostIds[0];
   }
   if (!hostId) return undefined;
   const [host] = await db.select().from(agentHosts)
-    .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, input.access.userId), eq(agentHosts.scope, "personal"))).limit(1);
+    .where(and(eq(agentHosts.id, hostId), owner?.placement === "personal"
+      ? and(eq(agentHosts.userId, input.access.userId), eq(agentHosts.scope, "personal"))
+      : and(eq(agentHosts.organizationId, input.access.organizationId!), eq(agentHosts.scope, "organization")))).limit(1);
   if (!host) throw preparationChanged();
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const now = Date.now();
     const current = await loadOrCreateHostDesiredState(db, host.id, now);
+    // Preserve other members' current preparations on the same shared host.
+    // The desired version guards concurrent grants; content reads recheck authority.
+    const otherPreparations = host.scope === "organization"
+      ? await env.DB.prepare(`SELECT images_json FROM personal_image_preparations prep
+          WHERE prep.host_id = ?1 AND prep.user_id <> ?2 AND ${preparationAuthoritySql()}`)
+        .bind(host.id, input.access.userId).all<{ images_json: string }>()
+      : { results: [] };
     const next = mutateDesiredState(current, draft => {
       // Preparation is one exact requested workload. Running VMs keep their
       // own image references; an old preparation must not retain access.
       draft.cached_images = [];
+      for (const preparation of otherPreparations.results) {
+        for (const image of JSON.parse(preparation.images_json) as RequiredScenarioImage[]) {
+          upsertDesiredCachedImage(draft, { image_key: image.imageKey, image_id: image.imageSha256 });
+        }
+      }
       for (const image of input.requiredImages) {
         upsertDesiredCachedImage(draft, { image_key: image.imageKey, image_id: image.imageSha256 });
       }

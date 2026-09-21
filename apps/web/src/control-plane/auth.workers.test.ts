@@ -107,6 +107,35 @@ describe("agent JWT secret validation", () => {
     });
   });
 
+  it("authenticates organization credentials independently of the creator", async () => {
+    const hostId = "organization-host";
+    await seedBootstrapToken(hostId, "organization-secret");
+    await env.DB.prepare("INSERT INTO organization(id,name,slug,created_at) VALUES('org-1','Org','org-1',1)").run();
+    await env.DB.prepare("UPDATE agent_hosts SET scope='organization', organization_id='org-1' WHERE id=?").bind(hostId).run();
+    await env.DB.prepare("DELETE FROM access_allowlist WHERE user_id='user-valid-secret'").run();
+    await env.DB.prepare("UPDATE user SET banned=1, deleted_at=1 WHERE id='user-valid-secret'").run();
+    const runtimeEnv = agentEnv(STRONG_SECRET);
+    const response = await handleAgentBootstrap(bootstrapRequest(hostId, "organization-secret"), runtimeEnv);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { accessToken: string; organizationId: string };
+    expect(body.organizationId).toBe("org-1");
+    const verify = () => requireVerifiedAgentRequest(new Request("http://localhost/agent/connect", {
+      headers: { authorization: `Bearer ${body.accessToken}` },
+    }), runtimeEnv, hostId);
+    expect(await verify()).toMatchObject({ ok: true, agent: { scope: "organization", organizationId: "org-1",
+      userId: "user-valid-secret", betaSourceInviteId: null, betaSourceLeaseId: null, betaAdmissionGrantedAt: null } });
+    await env.DB.prepare("INSERT INTO organization(id,name,slug,created_at) VALUES('org-2','Other','org-2',1)").run();
+    await env.DB.prepare("UPDATE agent_hosts SET organization_id='org-2' WHERE id=?").bind(hostId).run();
+    expect((await verify()).ok).toBe(false);
+    await env.DB.prepare("UPDATE agent_hosts SET organization_id='org-1', disabled=1 WHERE id=?").bind(hostId).run();
+    expect((await verify()).ok).toBe(false);
+    expect((await handleAgentBootstrap(bootstrapRequest(hostId, "organization-secret"), runtimeEnv)).status).toBe(403);
+    await env.DB.prepare("UPDATE agent_hosts SET disabled=0 WHERE id=?").bind(hostId).run();
+    expect((await verify()).ok).toBe(true);
+    await env.DB.prepare("UPDATE agent_hosts SET scope='platform', organization_id=NULL WHERE id=?").bind(hostId).run();
+    expect((await verify()).ok).toBe(false);
+  });
+
   it("rejects both an issued JWT and the old durable secret after generation changes", async () => {
     const hostId = "host-credential-generation";
     await seedBootstrapToken(hostId, "old-secret");

@@ -11,7 +11,7 @@ export const HOST_REFERENCE_TABLES = [
   "runtime_executions", "runtime_vm_actual_state", "scenario_runs",
 ] as const;
 
-export function preserveHostReferences(statements: readonly string[]): D1Statement[] {
+export function preserveHostReferences(statements: readonly string[], referenceTables: readonly string[] = HOST_REFERENCE_TABLES): D1Statement[] {
   if (!statements.includes("DROP TABLE `agent_hosts`;")) {
     throw new Error("host migration does not contain the expected generated rebuild");
   }
@@ -21,12 +21,12 @@ export function preserveHostReferences(statements: readonly string[]): D1Stateme
     // Overflow aborts the transaction if a stored host ID could collide with
     // a temporary reference. No host identity is changed, even temporarily.
     { sql: "SELECT CASE WHEN EXISTS (SELECT 1 FROM agent_hosts WHERE substr(id, 1, ?1) = ?2) THEN abs(-9223372036854775808) ELSE 0 END", params: [prefix.length, prefix] },
-    ...HOST_REFERENCE_TABLES.map(table => ({
+    ...referenceTables.map(table => ({
       sql: `UPDATE ${table} SET host_id = ?1 || host_id WHERE host_id IS NOT NULL`,
       params: [prefix],
     })),
     ...statements.filter(sql => !/^PRAGMA defer_foreign_keys=/u.test(sql)).map(sql => ({ sql })),
-    ...HOST_REFERENCE_TABLES.map(table => ({
+    ...referenceTables.map(table => ({
       sql: `UPDATE ${table} SET host_id = substr(host_id, ?1) WHERE host_id IS NOT NULL`,
       params: [prefix.length + 1],
     })),

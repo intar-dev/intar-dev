@@ -33,7 +33,7 @@ export function admissionHostReadinessCondition(parameter: number): string {
         AND actual.updated_at = ${field("actualReportedAt")}
         AND actual.updated_at >= ${now} - ${HOST_DEGRADED_AFTER_MS}
         AND actual.report_json = ${field("actualReportText")}
-        AND (host.scope <> 'personal' OR json_extract(actual.report_json, '$.relay_connected') = 1))`;
+        AND (host.scope = 'platform' OR json_extract(actual.report_json, '$.relay_connected') = 1))`;
 }
 
 export { admissionContentAccessCondition, currentScenarioRunContentAccessCondition } from "./content-access";
