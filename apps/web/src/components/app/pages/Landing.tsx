@@ -7,6 +7,7 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import hetznerLogo from "@/assets/hetzner-logo.webp";
+import hosttechLogo from "@/assets/hosttech-logo.svg?url";
 import namespaceLogo from "@/assets/namespace-logo.png";
 import { BrandMark } from "../patterns/BrandMark";
 import { InlineFeedback } from "../patterns/InlineFeedback";
@@ -203,6 +204,20 @@ function SponsorMarks() {
             height={namespaceLogo.height}
             alt="namespace"
             className="h-10 w-auto dark:invert"
+          />
+        </a>
+        <a
+          href="https://www.hosttech.eu"
+          target="_blank"
+          rel="noreferrer"
+          className={sponsorLinkClassName}
+        >
+          <img
+            src={hosttechLogo}
+            width={1000}
+            height={195.1}
+            alt="hosttech"
+            className="h-12 w-44 rounded-md bg-terminal-background object-contain p-3"
           />
         </a>
       </div>
