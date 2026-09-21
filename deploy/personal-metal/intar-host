@@ -501,18 +501,19 @@ def storage(state):
 
 def read_token():
     # Explicit terminal only: getpass fallback to stdin would consume a pipe.
-    with open('/dev/tty', 'r+', buffering=1) as tty:
+    with open('/dev/tty', 'r') as tty, open('/dev/tty', 'w', buffering=1) as output:
         require(tty.isatty(), 'Enrollment requires a terminal.')
         previous = termios.tcgetattr(tty.fileno())
         hidden = previous.copy()
         hidden[3] &= ~termios.ECHO
         try:
             termios.tcsetattr(tty.fileno(), termios.TCSAFLUSH, hidden)
-            tty.write('Paste the token from My servers: ')
+            output.write('Paste the token from My servers: ')
+            output.flush()
             token = tty.readline(256).strip()
         finally:
             termios.tcsetattr(tty.fileno(), termios.TCSAFLUSH, previous)
-            tty.write('\n')
+            output.write('\n')
     require(re.fullmatch('[a-f0-9]{64}', token), 'Invalid enrollment token. Copy it again from My servers.')
     return token
 

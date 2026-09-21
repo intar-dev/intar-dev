@@ -1,10 +1,12 @@
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import select
 import stat
 import tarfile
 import tempfile
@@ -223,6 +225,28 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 host.read_token()
             self.assertEqual(host.sys.stdin.tell(), 0)
+
+    def test_token_prompt_uses_a_real_terminal_without_echo(self):
+        master, slave = os.openpty()
+        original_open = open
+        previous = host.termios.tcgetattr(slave)
+        def terminal_open(path, *args, **kwargs):
+            return original_open(os.ttyname(slave) if path == '/dev/tty' else path, *args, **kwargs)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                with patch('builtins.open', side_effect=terminal_open):
+                    result = executor.submit(host.read_token)
+                    self.assertTrue(select.select([master], [], [], 5)[0], 'Token prompt was not flushed')
+                    self.assertEqual(os.read(master, 1024), b'Paste the token from My servers: ')
+                    self.assertFalse(host.termios.tcgetattr(slave)[3] & host.termios.ECHO)
+                    os.write(master, b'a' * 64 + b'\n')
+                    self.assertEqual(result.result(timeout=5), 'a' * 64)
+                    self.assertEqual(host.termios.tcgetattr(slave), previous)
+                    self.assertTrue(select.select([master], [], [], 5)[0])
+                    self.assertEqual(os.read(master, 1024).replace(b'\r', b''), b'\n')
+            finally:
+                os.close(master)
+                os.close(slave)
 
     def test_archive_rejects_links_devices_traversal_and_duplicates(self):
         cases = [('../outside', tarfile.REGTYPE), ('/outside', tarfile.REGTYPE),
