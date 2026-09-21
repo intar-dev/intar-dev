@@ -663,7 +663,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    const sessionId = `v6:${createAppId()}`;
+    const sessionId = createAppId();
     const pendingAttachment: SocketAttachment = {
       ...attachment,
       sessionId,

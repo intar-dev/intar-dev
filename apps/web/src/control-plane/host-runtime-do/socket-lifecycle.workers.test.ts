@@ -105,6 +105,8 @@ describe("HostRuntimeDO socket lifecycle", () => {
     const firstIdentity = await env.DB.prepare("SELECT connected_at, active_session_id FROM agent_hosts WHERE id = ?")
       .bind(hostId).first<{ connected_at: number; active_session_id: string }>();
     expect(firstIdentity?.connected_at).toBe(now);
+    // Stargate accepts only these characters in a host relay identity.
+    expect(firstIdentity?.active_session_id).toMatch(/^[A-Za-z0-9_.-]{1,128}$/);
     // Connect the replacement after the first hello; the first hello closes older pending sockets.
     const second = accept(await (await pendingHostRequest(hostId))());
     await hello();
