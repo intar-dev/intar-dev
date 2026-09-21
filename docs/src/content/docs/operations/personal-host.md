@@ -3,7 +3,7 @@ title: Personal host
 description: Add and manage a server for your own scenarios.
 ---
 
-Open **Profile → My servers → Add server** and copy the token. On your Ubuntu 24.04 x86_64 server with KVM, systemd, at least 2 CPU threads, and at least 4 GiB of usable RAM, run:
+Open **Profile → My servers → Add server** and copy the token. On your Ubuntu 24.04 or later x86_64 server with KVM, systemd, at least 2 CPU threads, and at least 4 GiB of usable RAM, run:
 
 ```sh
 curl -fsSL https://intar.dev/install.sh | sudo sh

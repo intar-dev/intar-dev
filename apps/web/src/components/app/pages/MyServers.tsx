@@ -338,7 +338,7 @@ function AddServer({
       <div className="space-y-1 text-sm">
         <h4 className="font-medium">Server requirements</h4>
         <p className="text-muted-foreground">
-          Ubuntu 24.04 (x86_64) with KVM. At least 2 logical CPUs and 4 GiB RAM.
+          Ubuntu 24.04 or later (x86_64) with KVM. At least 2 logical CPUs and 4 GiB RAM.
         </p>
         <p className="text-muted-foreground">
           The installer uses compatible storage when available. Otherwise, it
