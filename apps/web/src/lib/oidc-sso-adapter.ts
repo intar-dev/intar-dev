@@ -2,9 +2,6 @@ import type {
   DBAdapter,
   DBTransactionAdapter,
 } from "@better-auth/core/db/adapter";
-import {
-  decryptOidcClientSecret,
-} from "./oidc-sso-secret";
 
 const SSO_PROVIDER_MODEL = "ssoProvider";
 const SSO_PROVIDER_CIPHERTEXT_FIELD = "oidcClientSecretCiphertext";
@@ -26,10 +23,6 @@ const SSO_WRITE_METHODS = new Set([
   "incrementOne",
 ]);
 
-export type OidcSsoSecretAdapterRuntime = {
-  encryptionKey: string | undefined;
-};
-
 export class OidcSsoProviderWriteDisabledError extends Error {
   constructor() {
     super("SSO provider writes are disabled in Better Auth");
@@ -37,46 +30,33 @@ export class OidcSsoProviderWriteDisabledError extends Error {
   }
 }
 
-export class OidcSsoProviderSecretUnavailableError extends Error {
+export class OidcSsoProviderConfigurationError extends Error {
   constructor() {
     super("OIDC provider configuration is unavailable");
-    this.name = "OidcSsoProviderSecretUnavailableError";
+    this.name = "OidcSsoProviderConfigurationError";
   }
 }
 
-export function decorateOidcSsoSecretAdapter(
-  adapter: DBAdapter,
-  getRuntime: () => OidcSsoSecretAdapterRuntime,
-): DBAdapter {
-  return decorateAdapter(adapter, getRuntime);
-}
-
-export function createOidcSsoSecretAdapterFactory<Options>(
+export function createOidcSsoAdapterFactory<Options>(
   factory: (options: Options) => DBAdapter,
-  getRuntime: () => OidcSsoSecretAdapterRuntime,
 ): (options: Options) => DBAdapter {
-  return (options) => decorateOidcSsoSecretAdapter(factory(options), getRuntime);
+  return (options) => decorateOidcSsoAdapter(factory(options));
 }
 
-function decorateAdapter<T extends DBAdapter | DBTransactionAdapter>(
-  adapter: T,
-  getRuntime: () => OidcSsoSecretAdapterRuntime,
-): T {
+export function decorateOidcSsoAdapter<
+  T extends DBAdapter | DBTransactionAdapter,
+>(adapter: T): T {
   return new Proxy(adapter, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
       if (property === "transaction" && typeof value === "function") {
-        return async <Result>(
+        return async <Result,>(
           callback: (transaction: DBTransactionAdapter) => Promise<Result>,
         ): Promise<Result> =>
-          Reflect.apply(
-            value as (...args: never[]) => unknown,
-            target,
-            [
-              async (transaction: DBTransactionAdapter) =>
-                callback(decorateAdapter(transaction, getRuntime)),
-            ],
-          ) as Promise<Result>;
+          Reflect.apply(value as (...args: never[]) => unknown, target, [
+            async (transaction: DBTransactionAdapter) =>
+              callback(decorateOidcSsoAdapter(transaction)),
+          ]) as Promise<Result>;
       }
       if (typeof property !== "string" || typeof value !== "function") {
         return value;
@@ -97,31 +77,22 @@ function decorateAdapter<T extends DBAdapter | DBTransactionAdapter>(
           args as never[],
         );
         return RESULT_METHODS.has(property)
-          ? hydrateAdapterResult(model, result, getRuntime)
+          ? hydrateAdapterResult(model, result)
           : result;
       };
     },
   }) as T;
 }
 
-async function hydrateAdapterResult(
-  model: string | null,
-  result: unknown,
-  getRuntime: () => OidcSsoSecretAdapterRuntime,
-): Promise<unknown> {
+function hydrateAdapterResult(model: string | null, result: unknown): unknown {
   if (model !== SSO_PROVIDER_MODEL) return result;
   if (Array.isArray(result)) {
-    return Promise.all(
-      result.map((provider) => hydrateSsoProvider(provider, getRuntime)),
-    );
+    return result.map(hydrateSsoProvider);
   }
-  return hydrateSsoProvider(result, getRuntime);
+  return hydrateSsoProvider(result);
 }
 
-async function hydrateSsoProvider(
-  provider: unknown,
-  getRuntime: () => OidcSsoSecretAdapterRuntime,
-): Promise<unknown> {
+function hydrateSsoProvider(provider: unknown): unknown {
   if (!isRecord(provider)) return stripCiphertext(provider);
   const ciphertext = provider[SSO_PROVIDER_CIPHERTEXT_FIELD];
   const sanitized = stripCiphertext(provider);
@@ -129,35 +100,23 @@ async function hydrateSsoProvider(
     return sanitized;
   }
   const config = parseOidcConfig(sanitized.oidcConfig);
-  const runtime = getRuntime();
-  if (typeof ciphertext !== "string" || !ciphertext) {
-    throw new OidcSsoProviderSecretUnavailableError();
+  if (
+    config.tokenEndpointAuthentication !== "none" ||
+    ciphertext != null ||
+    config.clientSecret != null ||
+    // Keep runtime discovery from restoring a UserInfo fallback.
+    !["authorizationEndpoint", "tokenEndpoint", "jwksEndpoint"].every(
+      (key) => typeof config[key] === "string" && config[key],
+    )
+  ) {
+    throw new OidcSsoProviderConfigurationError();
   }
-
-  const id = typeof sanitized.id === "string" ? sanitized.id : null;
-  const providerId =
-    typeof sanitized.providerId === "string" ? sanitized.providerId : null;
-  const organizationId =
-    typeof sanitized.organizationId === "string"
-      ? sanitized.organizationId
-      : null;
-  if (!id || !providerId || !organizationId) {
-    throw new OidcSsoProviderSecretUnavailableError();
-  }
-
-  let clientSecret: string;
-  try {
-    clientSecret = await decryptOidcClientSecret({
-      encryptionKey: runtime.encryptionKey,
-      ciphertext,
-      identity: { id, providerId, organizationId },
-    });
-  } catch {
-    throw new OidcSsoProviderSecretUnavailableError();
-  }
+  // Require a signed ID token; the SSO library otherwise prefers UserInfo.
+  delete config.userInfoEndpoint;
+  // Enforce PKCE for every provider, including older stored configurations.
   return {
     ...sanitized,
-    oidcConfig: JSON.stringify({ ...config, clientSecret }),
+    oidcConfig: JSON.stringify({ ...config, pkce: true }),
   };
 }
 
@@ -168,7 +127,7 @@ function parseOidcConfig(value: string): Record<string, unknown> {
   } catch {
     // The adapter turns invalid stored configuration into one stable failure.
   }
-  throw new OidcSsoProviderSecretUnavailableError();
+  throw new OidcSsoProviderConfigurationError();
 }
 
 function stripCiphertext(value: unknown): unknown {

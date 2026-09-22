@@ -2,24 +2,20 @@
 
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { organization, ssoProvider, user } from "@/db/schema/core";
 import { resetD1Database } from "@/test/d1-migrations";
-
-const sso = vi.hoisted(() => ({ discoverOIDCConfig: vi.fn() }));
-
-vi.mock("@better-auth/sso", () => sso);
 
 import { registerOrganizationOidc } from "./organization-oidc";
 
 const ACTOR_ID = "oidc-organization-admin";
 const ORGANIZATION_ID = "oidc-organization";
 
-describe("organization OIDC secret registration", () => {
+describe("organization OIDC public client registration", () => {
+  afterEach(() => vi.restoreAllMocks());
   beforeEach(async () => {
     await resetD1Database();
-    sso.discoverOIDCConfig.mockReset();
-    sso.discoverOIDCConfig.mockResolvedValue(discovery());
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(discovery()));
     const db = drizzle(env.DB);
     const now = new Date();
     await db.insert(user).values({
@@ -38,50 +34,70 @@ describe("organization OIDC secret registration", () => {
     });
   });
 
-  it("stores a bound ciphertext without plaintext or returned secret material", async () => {
-    const clientSecret = "registration-secret";
-    const result = await registerOrganizationOidc({
-      organizationId: ORGANIZATION_ID,
-      actorUserId: ACTOR_ID,
-      issuer: "https://login.example.test",
-      domain: "example.test",
+  it("registers only a public client with PKCE and no secret material", async () => {
+    const result = await registerOrganizationOidc(registration());
+    const [row] = await drizzle(env.DB).select().from(ssoProvider);
+    expect(row?.oidcClientSecretCiphertext).toBeNull();
+    expect(JSON.parse(row?.oidcConfig ?? "{}")).toMatchObject({
+      tokenEndpointAuthentication: "none",
+      pkce: true,
       clientId: "client-id",
-      clientSecret,
-      baseUrl: "https://intar.dev",
     });
-    const row = await drizzle(env.DB)
-      .select()
-      .from(ssoProvider)
-      .limit(1)
-      .then((rows) => rows[0]);
-
-    expect(row?.oidcClientSecretCiphertext).toMatch(
-      /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u,
-    );
     expect(JSON.parse(row?.oidcConfig ?? "{}")).not.toHaveProperty(
       "clientSecret",
     );
-    expect(row?.oidcConfig).not.toContain(clientSecret);
-    expect(JSON.stringify(result)).not.toContain(clientSecret);
-    expect(JSON.stringify(result)).not.toContain(
-      row?.oidcClientSecretCiphertext ?? "",
-    );
+    expect(result.pkce).toBe(true);
   });
+
+  it.each([
+    { code_challenge_methods_supported: undefined },
+    { code_challenge_methods_supported: ["plain"] },
+    { code_challenge_methods_supported: "S256" },
+    { response_types_supported: ["token", "id_token", "code id_token"] },
+  ])("rejects unsupported authorization flow %j", async (metadata) => {
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json({ ...discovery(), ...metadata }),
+    );
+    await expect(
+      registerOrganizationOidc(registration()),
+    ).rejects.toMatchObject({
+      code: "unsupported_oidc_authorization_flow",
+    });
+    expect(await drizzle(env.DB).select().from(ssoProvider)).toEqual([]);
+  });
+
+  it.each([
+    undefined,
+    ["client_secret_basic"],
+    ["client_secret_post"],
+    ["private_key_jwt"],
+    "none",
+  ])(
+    "rejects token authentication without explicit public client support: %j",
+    async (methods) => {
+      vi.mocked(fetch).mockResolvedValue(
+        Response.json({
+          ...discovery(),
+          token_endpoint_auth_methods_supported: methods,
+        }),
+      );
+      await expect(
+        registerOrganizationOidc(registration()),
+      ).rejects.toMatchObject({
+        code: "unsupported_oidc_token_authentication",
+      });
+      expect(await drizzle(env.DB).select().from(ssoProvider)).toEqual([]);
+    },
+  );
 
   it("uses one fixed public discovery failure and one structured log event", async () => {
     const upstreamDetail = "https://private.idp.example.test returned 503";
-    sso.discoverOIDCConfig.mockRejectedValue(new Error(upstreamDetail));
+    vi.mocked(fetch).mockRejectedValue(new Error(upstreamDetail));
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const failure = await registerOrganizationOidc({
-      organizationId: ORGANIZATION_ID,
-      actorUserId: ACTOR_ID,
-      issuer: "https://login.example.test",
-      domain: "example.test",
-      clientId: "client-id",
-      clientSecret: "client-secret",
-      baseUrl: "https://intar.dev",
-    }).catch((error: unknown) => error);
+    const failure = await registerOrganizationOidc(registration()).catch(
+      (error: unknown) => error,
+    );
 
     expect(failure).toMatchObject({
       status: 400,
@@ -94,32 +110,28 @@ describe("organization OIDC secret registration", () => {
       JSON.stringify({ event: "oidc_discovery_failed" }),
     );
   });
-
-  it("rejects a client secret over 4 KiB of UTF-8 input before discovery", async () => {
-    await expect(
-      registerOrganizationOidc({
-        organizationId: ORGANIZATION_ID,
-        actorUserId: ACTOR_ID,
-        issuer: "https://login.example.test",
-        domain: "example.test",
-        clientId: "client-id",
-        clientSecret: "😀".repeat(1025),
-        baseUrl: "https://intar.dev",
-      }),
-    ).rejects.toMatchObject({ code: "invalid_oidc_client_secret" });
-    expect(sso.discoverOIDCConfig).not.toHaveBeenCalled();
-  });
 });
+
+function registration() {
+  return {
+    organizationId: ORGANIZATION_ID,
+    actorUserId: ACTOR_ID,
+    issuer: "https://login.example.test",
+    domain: "example.test",
+    clientId: "client-id",
+    baseUrl: "https://intar.dev",
+  };
+}
 
 function discovery() {
   return {
     issuer: "https://login.example.test",
-    discoveryEndpoint:
-      "https://login.example.test/.well-known/openid-configuration",
-    authorizationEndpoint: "https://login.example.test/oauth/authorize",
-    tokenEndpoint: "https://login.example.test/oauth/token",
-    tokenEndpointAuthentication: "client_secret_basic",
-    jwksEndpoint: "https://login.example.test/.well-known/jwks.json",
-    userInfoEndpoint: "https://login.example.test/oauth/userinfo",
+    authorization_endpoint: "https://login.example.test/oauth/authorize",
+    token_endpoint: "https://login.example.test/oauth/token",
+    token_endpoint_auth_methods_supported: ["none", "client_secret_basic"],
+    code_challenge_methods_supported: ["S256"],
+    response_types_supported: ["code"],
+    jwks_uri: "https://login.example.test/.well-known/jwks.json",
+    userinfo_endpoint: "https://login.example.test/oauth/userinfo",
   };
 }

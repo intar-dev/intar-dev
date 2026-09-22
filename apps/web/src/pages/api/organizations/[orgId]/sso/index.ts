@@ -4,7 +4,7 @@ import {
   requireUserContext,
   resolveRequestOrigin,
 } from "@/lib/agent-bridge";
-import { toErrorResponse } from "@/lib/app-error";
+import { appError, toErrorResponse } from "@/lib/app-error";
 import {
   deleteOrganizationOidc,
   getOrganizationOidc,
@@ -66,14 +66,19 @@ export const POST: APIRoute = async ({ request, params }) => {
       clientId?: unknown;
       clientSecret?: unknown;
     } | null;
+    if (body?.clientSecret != null) {
+      throw appError(
+        400,
+        "oidc_client_secret_not_allowed",
+        "use a public OIDC client without a client secret",
+      );
+    }
     const provider = await registerOrganizationOidc({
       organizationId: access.organizationId,
       actorUserId: access.context.userId,
       issuer: typeof body?.issuer === "string" ? body.issuer : "",
       domain: typeof body?.domain === "string" ? body.domain : "",
       clientId: typeof body?.clientId === "string" ? body.clientId : "",
-      clientSecret:
-        typeof body?.clientSecret === "string" ? body.clientSecret : "",
       baseUrl: resolveRequestOrigin(request),
     });
     return jsonResponse({ provider }, { status: 201 });

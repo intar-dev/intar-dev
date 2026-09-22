@@ -224,9 +224,6 @@ jq -e '
   ([.resources.bindings[] | select(
     .type == "secret_text" and .name == "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"
   )] | length) == 1 and
-  ([.resources.bindings[] | select(
-    .type == "secret_text" and .name == "OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"
-  )] | length) == 1 and
   ([.resources.bindings[] | select(.name == "BETTER_AUTH_TRUSTED_ORIGINS")]
     | length) == 0
 ' "${after_version}" >/dev/null

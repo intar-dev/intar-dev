@@ -7,6 +7,29 @@ import {
 } from "./tab-search";
 
 describe("organization detail tab search", () => {
+  it("keeps only known OIDC test results in Settings", () => {
+    expect(validateOrganizationDetailSearch({ error: "oidc_sign_in_failed" }))
+      .toEqual({ tab: "settings", oidcTest: "failed" });
+    expect(
+      validateOrganizationDetailSearch({
+        tab: "settings",
+        oidcTest: "passed",
+        error_description: "untrusted",
+      }),
+    ).toEqual({ tab: "settings", oidcTest: "passed" });
+    expect(
+      validateOrganizationDetailSearch({ tab: "settings", oidcTest: "failed" }),
+    ).toEqual({ tab: "settings", oidcTest: "failed" });
+    expect(
+      validateOrganizationDetailSearch({
+        tab: "settings",
+        oidcTest: "unknown",
+      }),
+    ).toEqual({ tab: "settings" });
+    expect(
+      validateOrganizationDetailSearch({ tab: "people", oidcTest: "passed" }),
+    ).toEqual({ tab: "people" });
+  });
   it("keeps shared server links and drops unrelated query state", () => {
     expect(
       validateOrganizationDetailSearch({ tab: "servers", host: "old" }),

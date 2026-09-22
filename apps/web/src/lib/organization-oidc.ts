@@ -1,14 +1,17 @@
 import { env } from "cloudflare:workers";
-import { discoverOIDCConfig } from "@better-auth/sso";
+import {
+  computeDiscoveryUrl,
+  fetchDiscoveryDocument,
+  normalizeDiscoveryUrls,
+  validateDiscoveryDocument,
+  validateDiscoveryUrl,
+  type OIDCDiscoveryDocument,
+} from "@better-auth/sso";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { account, ssoProvider, verification } from "@/db/schema";
 import { appError, errorChainMatches } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
-import {
-  encryptOidcClientSecret,
-  isOidcClientSecretLengthValid,
-} from "@/lib/oidc-sso-secret";
 
 const VERIFICATION_PREFIX = "intar-oidc";
 const VERIFICATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -22,7 +25,6 @@ interface RegisterOrganizationOidcInput {
   issuer: string;
   domain: string;
   clientId: string;
-  clientSecret: string;
   baseUrl: string;
 }
 
@@ -48,16 +50,8 @@ export async function registerOrganizationOidc(
   const issuer = normalizeIssuer(input.issuer);
   const domain = normalizeDomain(input.domain);
   const clientId = input.clientId.trim();
-  const clientSecret = input.clientSecret.trim();
   if (!clientId || clientId.length > 512) {
     throw appError(400, "invalid_oidc_client_id", "OIDC client ID is required");
-  }
-  if (!clientSecret || !isOidcClientSecretLengthValid(clientSecret)) {
-    throw appError(
-      400,
-      "invalid_oidc_client_secret",
-      "OIDC client secret is required",
-    );
   }
 
   const db = drizzle(env.DB);
@@ -74,13 +68,21 @@ export async function registerOrganizationOidc(
     );
   }
 
-  let discovered: Awaited<ReturnType<typeof discoverOIDCConfig>>;
+  const discoveryEndpoint = computeDiscoveryUrl(issuer);
+  let discovered: OIDCDiscoveryDocument;
   try {
-    discovered = await discoverOIDCConfig({
+    validateDiscoveryUrl(discoveryEndpoint, isSafePublicHttpsEndpoint);
+    const document = await fetchDiscoveryDocument(
+      discoveryEndpoint,
+      10_000,
+      isSafePublicHttpsEndpoint,
+    );
+    validateDiscoveryDocument(document, issuer);
+    discovered = normalizeDiscoveryUrls(
+      document,
       issuer,
-      timeout: 10_000,
-      isTrustedOrigin: isSafePublicHttpsEndpoint,
-    });
+      isSafePublicHttpsEndpoint,
+    );
   } catch {
     // Keep upstream URLs, HTTP status text, and body excerpts out of both the
     // response and observability output.
@@ -89,21 +91,33 @@ export async function registerOrganizationOidc(
   }
 
   if (
-    discovered.tokenEndpointAuthentication !== "client_secret_basic" &&
-    discovered.tokenEndpointAuthentication !== "client_secret_post"
+    !Array.isArray(discovered.code_challenge_methods_supported) ||
+    !discovered.code_challenge_methods_supported.includes("S256") ||
+    !Array.isArray(discovered.response_types_supported) ||
+    !discovered.response_types_supported.includes("code")
+  ) {
+    throw appError(
+      400,
+      "unsupported_oidc_authorization_flow",
+      "the identity provider must advertise authorization code flow with PKCE S256",
+    );
+  }
+  if (
+    !Array.isArray(discovered.token_endpoint_auth_methods_supported) ||
+    !discovered.token_endpoint_auth_methods_supported.includes("none")
   ) {
     throw appError(
       400,
       "unsupported_oidc_token_authentication",
-      "the identity provider must support client_secret_basic or client_secret_post",
+      "the identity provider must advertise token authentication method none for a public client",
     );
   }
   for (const endpoint of [
-    discovered.discoveryEndpoint,
-    discovered.authorizationEndpoint,
-    discovered.tokenEndpoint,
-    discovered.jwksEndpoint,
-    discovered.userInfoEndpoint,
+    discoveryEndpoint,
+    discovered.authorization_endpoint,
+    discovered.token_endpoint,
+    discovered.jwks_uri,
+    discovered.userinfo_endpoint,
   ]) {
     if (endpoint && !isSafePublicHttpsEndpoint(endpoint)) {
       throw appError(
@@ -119,36 +133,16 @@ export async function registerOrganizationOidc(
   const now = Date.now();
   const verificationToken = randomToken();
   const verificationIdentifier = verificationIdentifierFor(providerId);
-  const secretRuntime = oidcSsoSecretRuntime();
-  let oidcClientSecretCiphertext: string;
-  try {
-    oidcClientSecretCiphertext = await encryptOidcClientSecret({
-      encryptionKey: secretRuntime.encryptionKey,
-      clientSecret,
-      identity: {
-        id: providerRowId,
-        providerId,
-        organizationId: input.organizationId,
-      },
-    });
-  } catch {
-    throw appError(
-      503,
-      "oidc_secret_encryption_unavailable",
-      "OIDC provider configuration is unavailable",
-    );
-  }
   const oidcConfig = JSON.stringify({
     issuer: discovered.issuer,
     clientId,
-    authorizationEndpoint: discovered.authorizationEndpoint,
-    tokenEndpoint: discovered.tokenEndpoint,
-    tokenEndpointAuthentication: discovered.tokenEndpointAuthentication,
-    jwksEndpoint: discovered.jwksEndpoint,
+    authorizationEndpoint: discovered.authorization_endpoint,
+    tokenEndpoint: discovered.token_endpoint,
+    tokenEndpointAuthentication: "none",
+    jwksEndpoint: discovered.jwks_uri,
     pkce: true,
-    discoveryEndpoint: discovered.discoveryEndpoint,
+    discoveryEndpoint,
     scopes: OIDC_SCOPES,
-    userInfoEndpoint: discovered.userInfoEndpoint,
   });
 
   try {
@@ -158,7 +152,7 @@ export async function registerOrganizationOidc(
         issuer,
         domain,
         oidcConfig,
-        oidcClientSecretCiphertext,
+        oidcClientSecretCiphertext: null,
         samlConfig: null,
         userId: input.actorUserId,
         providerId,
@@ -516,18 +510,6 @@ function randomToken(): string {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
-}
-
-function oidcSsoSecretRuntime(): {
-  encryptionKey: string | undefined;
-} {
-  const bindings = env as unknown as Record<string, unknown>;
-  return {
-    encryptionKey:
-      typeof bindings.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 === "string"
-        ? bindings.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1
-        : undefined,
-  };
 }
 
 function parseRecord(value: string | null): Record<string, unknown> | null {

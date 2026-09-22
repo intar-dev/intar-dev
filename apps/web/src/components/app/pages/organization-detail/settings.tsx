@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeftRight,
   CheckCircle2,
@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
+import { startOrganizationSignIn } from "@/lib/auth-client";
 import {
   type OrganizationDetailResponse,
   fetchJson,
@@ -53,13 +54,13 @@ interface OrganizationOidcProvider {
 export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const { oidcTest } = useSearch({ from: "/app/organizations/$orgId" });
   const admin = detail.role !== "member";
   const owner = detail.role === "owner";
   const [name, setName] = useState(detail.name);
   const [issuer, setIssuer] = useState("");
   const [domain, setDomain] = useState("");
   const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   const [transferTarget, setTransferTarget] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -102,7 +103,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ issuer, domain, clientId, clientSecret }),
+        body: JSON.stringify({ issuer, domain, clientId }),
       });
       const body = (await response.json().catch(() => null)) as {
         provider?: OrganizationOidcProvider;
@@ -116,9 +117,13 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       return body.provider;
     },
     onSuccess: async () => {
-      setClientSecret("");
       await invalidateOidc();
     },
+  });
+  const testSignIn = useMutation({
+    mutationFn: () => startOrganizationSignIn(detail.slug, { test: true }),
+    onMutate: () =>
+      navigate({ to: ".", replace: true, search: { tab: "settings" } }),
   });
   const verify = useMutation({
     mutationFn: async () => {
@@ -384,10 +389,50 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   <AlertTitle>OIDC sign-in is active</AlertTitle>
                   <AlertDescription>
                     Share the member sign-in URL. Intar requests{" "}
-                    <code>openid email profile offline_access</code> with PKCE.
+                    <code>openid email profile offline_access</code> with PKCE S256.
                   </AlertDescription>
                 </Alert>
               )}
+              {owner ? (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!provider.domainVerified || testSignIn.isPending}
+                      onClick={() => testSignIn.mutate()}
+                    >
+                      <ShieldCheck className="size-3.5" aria-hidden="true" />
+                      {testSignIn.isPending ? "Opening provider…" : "Test sign-in"}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      PKCE S256 · No client secret
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {provider.domainVerified
+                      ? "Sign in at your provider to test access and connect your account."
+                      : "Verify DNS before testing sign-in."}
+                  </p>
+                  {testSignIn.isPending ? (
+                    <InlineFeedback tone="pending">
+                      Opening your identity provider…
+                    </InlineFeedback>
+                  ) : testSignIn.error ? (
+                    <InlineFeedback tone="error">
+                      {testSignIn.error.message}
+                    </InlineFeedback>
+                  ) : oidcTest ? (
+                    <InlineFeedback
+                      tone={oidcTest === "passed" ? "success" : "error"}
+                    >
+                      {oidcTest === "passed"
+                        ? "PKCE S256 sign-in passed."
+                        : "Sign-in test failed. Check the provider settings and try again."}
+                    </InlineFeedback>
+                  ) : null}
+                </div>
+              ) : null}
               {copyFeedback ? (
                 <InlineFeedback
                   tone={copyFeedback.endsWith("copied.") ? "success" : "error"}
@@ -438,15 +483,11 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   required
                 />
               </Field>
-              <Field label="Client secret">
-                <Input
-                  value={clientSecret}
-                  onChange={(event) => setClientSecret(event.target.value)}
-                  type="password"
-                  autoComplete="new-password"
-                  required
-                />
-              </Field>
+              <p className="text-sm text-muted-foreground sm:col-span-2">
+                Use a public client without a client secret. The provider must
+                support authorization code flow with PKCE S256 and token
+                authentication method none.
+              </p>
               <div className="sm:col-span-2">
                 <Button
                   type="submit"
@@ -454,7 +495,6 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     !issuer ||
                     !domain ||
                     !clientId ||
-                    !clientSecret ||
                     register.isPending
                   }
                 >

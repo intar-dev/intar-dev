@@ -95,13 +95,25 @@ cannot use an invite to recover or link a GitHub identity. Already-active users
 can still explicitly connect OIDC, and already-linked active OIDC identities
 can sign in normally. SAML routes are disabled; organization SSO is OIDC-only.
 
-For Rawkode Academy, use issuer `https://id.rawkode.academy`. Discovery maps
-that issuer to `/auth/oauth2/authorize`, `/auth/oauth2/token`,
-`/auth/oauth2/userinfo`, and `/auth/jwks`. Register Intar at the Rawkode
-identity service as a confidential client using the callback URI shown by
-Intar and either `client_secret_basic` or `client_secret_post`; PKCE remains
-enabled. Rawkode's existing public-client entries use token authentication
-`none`, which the Better Auth SSO client does not support.
+Register Intar at the identity provider as a public client without a client
+secret. Use the callback URI shown in organization settings. Discovery must
+advertise response type `code`, PKCE method `S256`, and token authentication
+method `none`. Intar always uses authorization code flow with PKCE S256 and
+validates the signed ID token against the provider's JWKS, issuer, and client ID.
+Implicit flow, hybrid flow, plain PKCE, and clients with secrets are not supported.
+
+After DNS verification, owners can select **Test sign-in** in organization
+settings. The test connects their OIDC account through the normal PKCE flow and
+returns to settings with the result.
+
+For Rawkode Academy, use issuer `https://id.rawkode.academy` and a public-client
+entry with token authentication `none`. The SSO dependency patch in `patches/`
+enables this token exchange in the pinned Better Auth release.
+
+Existing providers that use secrets cannot sign in. Remove their organization
+OIDC configuration and register a public client. Removal deletes linked OIDC
+accounts, so members must connect the new provider from their active GitHub
+beta accounts. The organization OIDC flow no longer needs an encryption key.
 
 Private scenarios use the `<organization-slug>-<local-scenario-id>` namespace.
 They are built by platform builders and can run only on agent runners owned by
@@ -116,8 +128,6 @@ The control plane expects these Worker secrets/vars:
 - `AGENT_JWT_SECRET` (a randomly generated secret of at least 32 UTF-8 bytes)
 - `BETTER_AUTH_SECRET`
 - `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
-- `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1` (unpadded base64url for exactly 32 random
-  bytes; it encrypts organization OIDC client secrets at rest)
 - `REGISTRY_PUBLISH_TOKEN`
 - `SCENARIO_RUN_KEY_ENCRYPTION_SECRET`
 - `STARGATE_ADMIN_AUTH_SECRET`

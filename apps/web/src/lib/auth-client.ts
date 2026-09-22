@@ -52,6 +52,7 @@ export async function startOrganizationSignIn(
   options?: {
     callbackURL?: string;
     errorCallbackURL?: string;
+    test?: boolean;
   },
 ) {
   const slug = organizationSlug.trim();
@@ -70,7 +71,10 @@ export async function startOrganizationSignIn(
       credentials: "same-origin",
       cache: "no-store",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ organizationSlug: slug }),
+      body: JSON.stringify({
+        organizationSlug: slug,
+        ...(options?.test ? { test: true } : {}),
+      }),
     });
     const body = (await response.json().catch(() => null)) as {
       redirectUrl?: unknown;
@@ -86,6 +90,9 @@ export async function startOrganizationSignIn(
     const redirectUrl = requireHttpsSsoRedirect(body.redirectUrl);
     window.location.assign(redirectUrl);
     return { ...body, redirectUrl };
+  }
+  if (options?.test) {
+    throw new Error("Sign in again to test organization access.");
   }
 
   const result = await authClient.signIn.sso({

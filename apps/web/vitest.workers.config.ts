@@ -19,8 +19,6 @@ export default defineConfig({
           BETTER_AUTH_URL: "http://localhost",
           ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1:
             "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1:
-            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",

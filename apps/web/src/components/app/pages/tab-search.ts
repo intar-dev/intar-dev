@@ -10,6 +10,7 @@ export type AdminPeopleTab = "beta" | "users" | "organizations";
 
 export interface OrganizationDetailSearch {
   tab?: OrganizationDetailTab;
+  oidcTest?: "passed" | "failed";
 }
 
 export interface AdminPeopleSearch {
@@ -34,8 +35,21 @@ export const ADMIN_PEOPLE_TABS: readonly AdminPeopleTab[] = [
 export function validateOrganizationDetailSearch(
   search: Record<string, unknown>,
 ): OrganizationDetailSearch {
+  // SSO appends error parameters; its failure URL must not have a query string.
+  if (
+    search.error === "oidc_sign_in_failed" ||
+    search.error === "oidc_discovery_failed"
+  ) {
+    return { tab: "settings", oidcTest: "failed" };
+  }
   if (!isOrganizationDetailTab(search.tab) || search.tab === "overview") {
     return {};
+  }
+  if (
+    search.tab === "settings" &&
+    (search.oidcTest === "passed" || search.oidcTest === "failed")
+  ) {
+    return { tab: "settings", oidcTest: search.oidcTest };
   }
   return { tab: search.tab };
 }

@@ -1,0 +1,13 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index b62dd8f6706f8efe36df35f9609bf406896dafda..fdd091e25cb059f046e9a0ced609d6d8899d5ac8 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -3236,7 +3236,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData) {
+ 	};
+ 	if (!config.tokenEndpoint) throw ctx.redirect(`${errorURL || callbackURL}?error=invalid_provider&error_description=token_endpoint_not_found`);
+ 	const tokenEndpoint = config.tokenEndpoint;
+-	let tokenEndpointAuth = config.tokenEndpointAuthentication === "client_secret_post" ? { method: "client_secret_post" } : { method: "client_secret_basic" };
++	let tokenEndpointAuth = config.tokenEndpointAuthentication === "none" ? { method: "none" } : config.tokenEndpointAuthentication === "client_secret_post" ? { method: "client_secret_post" } : { method: "client_secret_basic" };
+ 	if (config.tokenEndpointAuthentication === "private_key_jwt") {
+ 		let resolved;
+ 		const matchingDefault = options?.defaultSSO?.find((p) => p.providerId === provider.providerId && "privateKey" in p && p.privateKey);

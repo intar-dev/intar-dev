@@ -31,10 +31,7 @@ import {
 } from "./allowlist";
 import { getUserRole, isAdminRole } from "./authz";
 import { createAppId } from "./id";
-import {
-  createOidcSsoSecretAdapterFactory,
-  type OidcSsoSecretAdapterRuntime,
-} from "./oidc-sso-secret-adapter";
+import { createOidcSsoAdapterFactory } from "./oidc-sso-adapter";
 import {
   canCreateOrganization,
   hasReachedOwnedOrganizationLimit,
@@ -1342,9 +1339,8 @@ function buildAuthInstance() {
       env.BETTER_AUTH_APP_NAME ??
       "Astro App",
     baseURL,
-    database: createOidcSsoSecretAdapterFactory(
+    database: createOidcSsoAdapterFactory(
       drizzleAdapter(db, { provider: "sqlite", schema }),
-      oidcSsoSecretRuntime,
     ),
     // Tenant IdP endpoints are server-side fetch targets, not trusted browser
     // origins. Public OIDC endpoints pass the SSO plugin's fetch checks without
@@ -1718,19 +1714,6 @@ export function assertNoAdditionalBetterAuthTrustedOrigins(
   if (typeof value === "string" && value.trim() !== "") {
     throw new Error("better_auth_additional_trusted_origins_forbidden");
   }
-}
-
-function oidcSsoSecretRuntime(): OidcSsoSecretAdapterRuntime {
-  return {
-    encryptionKey: runtimeBinding("OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"),
-  };
-}
-
-function runtimeBinding(name: string): string | undefined {
-  const nodeValue = runtimeEnv?.[name];
-  if (typeof nodeValue === "string") return nodeValue;
-  const workerValue = (env as unknown as Record<string, unknown>)[name];
-  return typeof workerValue === "string" ? workerValue : undefined;
 }
 
 function isLocalhostBaseUrl(value: string): boolean {

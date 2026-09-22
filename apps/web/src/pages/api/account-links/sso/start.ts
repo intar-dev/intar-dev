@@ -20,6 +20,10 @@ import {
   rateLimitPublicAccessInvite,
 } from "@/lib/request-security";
 import { copySetCookies } from "@/lib/response-cookies";
+import {
+  requireOrganizationRole,
+  resolveOrganizationId,
+} from "@/lib/organizations";
 
 export const prerender = false;
 
@@ -45,6 +49,25 @@ export const POST: APIRoute = async ({ request }) => {
       );
     }
     const provider = await resolveBetaOidcProvider(body.organizationSlug);
+    const testSignIn = body.test === true;
+    if (testSignIn) {
+      const organizationId = await resolveOrganizationId(
+        provider.organizationSlug,
+      );
+      const role =
+        organizationId &&
+        (await requireOrganizationRole({
+          organizationId,
+          userId: authz.context.userId,
+        }));
+      if (role !== "owner") {
+        throw appError(
+          403,
+          "organization_owner_required",
+          "only the organization owner can test sign-in",
+        );
+      }
+    }
     const admission = await getBetaAccess(authz.context.userId);
     if (admission?.state !== "active") {
       throw appError(
@@ -65,13 +88,18 @@ export const POST: APIRoute = async ({ request }) => {
     const headers = new Headers(request.headers);
     headers.set(INVITE_OAUTH_HANDOFF_HEADER, handoff);
     const origin = canonicalApplicationOrigin();
-    const callbackURL = `${origin}/organizations/${encodeURIComponent(provider.organizationSlug)}`;
+    const organizationURL = `${origin}/organizations/${encodeURIComponent(provider.organizationSlug)}`;
+    const callbackURL = testSignIn
+      ? `${organizationURL}?tab=settings&oidcTest=passed`
+      : organizationURL;
     const authResponse = await auth.api.signInSSO({
       body: {
         providerId: provider.providerId,
         providerType: "oidc",
         callbackURL,
-        errorCallbackURL: `${origin}/organizations/${encodeURIComponent(provider.organizationSlug)}/sign-in`,
+        errorCallbackURL: testSignIn
+          ? organizationURL
+          : `${organizationURL}/sign-in`,
         newUserCallbackURL: callbackURL,
         requestSignUp: false,
         scopes: ["openid", "email", "profile", "offline_access"],
