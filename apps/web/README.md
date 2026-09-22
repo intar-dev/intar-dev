@@ -106,9 +106,8 @@ After DNS verification, owners can select **Test sign-in** in organization
 settings. The test connects their OIDC account through the normal PKCE flow and
 returns to settings with the result.
 
-For Rawkode Academy, use issuer `https://id.rawkode.academy` and a public-client
-entry with token authentication `none`. The SSO dependency patch in `patches/`
-enables this token exchange in the pinned Better Auth release.
+The SSO dependency patch in `patches/` enables token authentication `none`
+in the pinned Better Auth release.
 
 Existing providers that use secrets cannot sign in. Remove their organization
 OIDC configuration and register a public client. Removal deletes linked OIDC

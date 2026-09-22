@@ -95,7 +95,7 @@ export function OrganizationSignIn() {
                 id="organization-slug"
                 value={slug}
                 onChange={(event) => setSlug(event.target.value)}
-                placeholder="rawkode-academy-ab12cd"
+                placeholder="example-org-ab12cd"
                 maxLength={128}
                 pattern="[a-z0-9][a-z0-9-]{0,127}"
                 autoComplete="organization"

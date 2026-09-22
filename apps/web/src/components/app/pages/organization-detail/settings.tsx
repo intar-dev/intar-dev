@@ -463,7 +463,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                 <Input
                   value={issuer}
                   onChange={(event) => setIssuer(event.target.value)}
-                  placeholder="https://id.rawkode.academy"
+                  placeholder="https://id.example.com"
                   type="url"
                   required
                 />
@@ -472,7 +472,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                 <Input
                   value={domain}
                   onChange={(event) => setDomain(event.target.value)}
-                  placeholder="rawkode.academy"
+                  placeholder="example.com"
                   required
                 />
               </Field>
