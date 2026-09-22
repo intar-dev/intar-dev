@@ -7,6 +7,7 @@ export function Markdown({
   className,
   headingOffset = 0,
   pageContent = false,
+  textOnly = false,
 }: {
   children: string;
   className?: string;
@@ -14,6 +15,8 @@ export function Markdown({
   headingOffset?: 0 | 1;
   /** Keep authored h1 and h2 headings below the app bar's route h1. */
   pageContent?: boolean;
+  /** User posts may contain text, links, and code, but no embedded media. */
+  textOnly?: boolean;
 }) {
   const Heading1 = pageContent ? "h2" : headingOffset ? "h2" : "h1";
   const Heading2 = pageContent ? "h2" : headingOffset ? "h3" : "h2";
@@ -21,6 +24,8 @@ export function Markdown({
   return (
     <div className={cn("space-y-4", className ?? "text-body")}>
       <ReactMarkdown
+        skipHtml={textOnly}
+        disallowedElements={textOnly ? ["img"] : undefined}
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (

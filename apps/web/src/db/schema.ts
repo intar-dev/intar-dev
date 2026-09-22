@@ -101,3 +101,4 @@ export type {
 } from "./schema/runtime";
 export { ACTIVE_RUNTIME_EXECUTION_STATES } from "./schema/runtime";
 export { personalImagePreparations } from "./schema/personal-image-preparations";
+export { supportTopics, supportComments } from "./schema/support";

@@ -24,6 +24,7 @@ import {
   appQueryClient,
 } from "@/lib/app-bootstrap";
 import { isAdminUser } from "@/lib/authz";
+import { supportPage, validateSupportSearch, type SupportSearch } from "@/lib/support-types";
 
 const rootRoute = createRootRoute({
   component: RootRouteLayout,
@@ -107,6 +108,29 @@ const appLayoutRoute = createRoute({
   // Renders inside AppShell's <main>, whose bar already owns the h1 — the
   // root RouteNotFound would nest a second main/h1 here.
   notFoundComponent: AppRouteNotFound,
+});
+
+const supportForumRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "support",
+  head: () => routeHead("Forum", "Report bugs, ask for help, and share feedback."),
+  validateSearch: (search: Record<string, unknown>): Partial<SupportSearch> => validateSupportSearch(search),
+  component: lazyRouteComponent(() => import("./pages/support/SupportForum"), "SupportForum"),
+});
+
+const supportNewTopicRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "support/new",
+  head: () => routeHead("New topic", "Start a community support topic."),
+  component: lazyRouteComponent(() => import("./pages/support/SupportNewTopic"), "SupportNewTopic"),
+});
+
+const supportTopicRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "support/$topicId",
+  head: () => routeHead("Support topic", "Read and discuss this support topic."),
+  validateSearch: (search: Record<string, unknown>): { page?: number } => ({ page: supportPage(search.page) }),
+  component: lazyRouteComponent(() => import("./pages/support/SupportTopic"), "SupportTopic"),
 });
 
 const courseCatalogRoute = createRoute({
@@ -395,6 +419,9 @@ const routeTree = rootRoute.addChildren([
     organizationDirectSignInRoute,
   ]),
   appLayoutRoute.addChildren([
+    supportForumRoute,
+    supportNewTopicRoute,
+    supportTopicRoute,
     courseCatalogRoute,
     courseDetailRoute,
     courseLectureRoute,

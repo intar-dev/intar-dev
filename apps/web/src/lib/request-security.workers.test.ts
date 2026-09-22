@@ -453,6 +453,12 @@ describe("worker API request security", () => {
   });
 
   it("uses the shared 20-per-minute namespace for every expensive action", () => {
+    for (const method of ["POST", "PATCH", "DELETE"]) {
+      for (const path of ["/api/support/topics", "/api/support/topics/topic", "/api/support/topics/topic/comments", "/api/support/topics/topic/comments/comment"]) {
+        expect(sensitiveRateLimitActionFor(customMutation(path, { method }))).toBe("support-write");
+      }
+    }
+    expect(sensitiveRateLimitActionFor(new Request("https://intar.dev/api/support/topics"))).toBeNull();
     expect(
       sensitiveRateLimitActionFor(customMutation("/api/scenarios/demo/start")),
     ).toBe("scenario-start");

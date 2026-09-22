@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "5c941ff1-1136-444f-838a-3380bed60d0a",
-  "prevId": "a65e320e-24fb-42d7-a278-ebecf699b7b3",
+  "id": "518430aa-0dd6-46c1-be6c-7f1e9963efab",
+  "prevId": "5c941ff1-1136-444f-838a-3380bed60d0a",
   "tables": {
     "access_allowlist": {
       "name": "access_allowlist",
@@ -6916,6 +6916,260 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "support_comments": {
+      "name": "support_comments",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "topic_id": {
+          "name": "topic_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "author_id": {
+          "name": "author_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "body": {
+          "name": "body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "support_comments_topic_idx": {
+          "name": "support_comments_topic_idx",
+          "columns": [
+            "topic_id",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "support_comments_author_idx": {
+          "name": "support_comments_author_idx",
+          "columns": [
+            "author_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "support_comments_topic_id_support_topics_id_fk": {
+          "name": "support_comments_topic_id_support_topics_id_fk",
+          "tableFrom": "support_comments",
+          "tableTo": "support_topics",
+          "columnsFrom": [
+            "topic_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "support_comments_author_id_user_id_fk": {
+          "name": "support_comments_author_id_user_id_fk",
+          "tableFrom": "support_comments",
+          "tableTo": "user",
+          "columnsFrom": [
+            "author_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "support_topics": {
+      "name": "support_topics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "author_id": {
+          "name": "author_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "body": {
+          "name": "body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'open'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "last_activity_at": {
+          "name": "last_activity_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "solved_at": {
+          "name": "solved_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "solved_by_id": {
+          "name": "solved_by_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "support_topics_activity_idx": {
+          "name": "support_topics_activity_idx",
+          "columns": [
+            "last_activity_at",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "support_topics_author_idx": {
+          "name": "support_topics_author_idx",
+          "columns": [
+            "author_id",
+            "last_activity_at"
+          ],
+          "isUnique": false
+        },
+        "support_topics_status_idx": {
+          "name": "support_topics_status_idx",
+          "columns": [
+            "status",
+            "last_activity_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "support_topics_author_id_user_id_fk": {
+          "name": "support_topics_author_id_user_id_fk",
+          "tableFrom": "support_topics",
+          "tableTo": "user",
+          "columnsFrom": [
+            "author_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "support_topics_solved_by_id_user_id_fk": {
+          "name": "support_topics_solved_by_id_user_id_fk",
+          "tableFrom": "support_topics",
+          "tableTo": "user",
+          "columnsFrom": [
+            "solved_by_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "support_topic_type": {
+          "name": "support_topic_type",
+          "value": "\"support_topics\".\"type\" in ('bug', 'help', 'feedback')"
+        },
+        "support_topic_status": {
+          "name": "support_topic_status",
+          "value": "\"support_topics\".\"status\" in ('open', 'solved')"
+        },
+        "support_topic_resolution": {
+          "name": "support_topic_resolution",
+          "value": "(\"support_topics\".\"status\" = 'open' and \"support_topics\".\"solved_at\" is null and \"support_topics\".\"solved_by_id\" is null) or (\"support_topics\".\"status\" = 'solved' and \"support_topics\".\"solved_at\" is not null)"
+        }
+      }
     },
     "user": {
       "name": "user",

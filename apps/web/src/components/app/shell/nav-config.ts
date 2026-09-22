@@ -123,6 +123,13 @@ export const NAV_SECTIONS: NavSection[] = [
     requires: "signedIn",
     items: [
       {
+        id: "forum",
+        label: "Forum",
+        to: "/support",
+        icon: MessageCircle,
+        requires: "signedIn",
+      },
+      {
         id: "discord",
         label: "Discord",
         to: "https://discord.gg/BgknKxJKa",

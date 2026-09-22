@@ -58,6 +58,9 @@ function isLecturePage(pathname: string): boolean {
 }
 
 export function safeDynamicPageLabel(pathname: string): string | null {
+  if (/^\/support\/(?!new$)[^/]+$/.test(pathname)) {
+    return "Topic";
+  }
   if (/^\/runs\/[^/]+$/.test(pathname)) {
     return "Scenario run";
   }

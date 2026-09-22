@@ -19,6 +19,7 @@ type RequestSecurityEnv = Pick<
 
 type SensitiveRateLimitAction =
   | "auth-start"
+  | "support-write"
   | "scenario-start"
   | "ssh-issuance"
   | "build-start"
@@ -307,6 +308,7 @@ export function sensitiveRateLimitActionFor(
   if (!isMutatingMethod(request.method)) return null;
   const pathname = new URL(request.url).pathname;
 
+  if (/^\/api\/support\/topics(?:\/|$)/u.test(pathname)) return "support-write";
   if (isBetterAuthStartPath(pathname)) return "auth-start";
   if (/^\/api\/scenarios\/[^/]+\/start$/u.test(pathname)) {
     return "scenario-start";
