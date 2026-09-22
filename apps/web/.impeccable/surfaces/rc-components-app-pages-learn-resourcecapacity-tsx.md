@@ -8,7 +8,7 @@ related_targets:
 
 ## Scope and mode
 
-Operate. Public and organization course catalog indexes show available allocation capacity in the user's selected host pool. This is an ordinary extension of the existing system in `apps/web/DESIGN.md`, with product context from `apps/web/PRODUCT.md`. No new visual system or world was created. `DESIGN.md` remains unchanged.
+Operate. Public and organization course catalog indexes show combined allocation capacity across platform hosts, the user's personal hosts, and hosts in the user's organizations. Host health, readiness, and reservations determine available capacity. Catalog totals are independent of the placement preference for a new run. This is an ordinary extension of the existing system in `apps/web/DESIGN.md`, with product context from `apps/web/PRODUCT.md`. No new visual system or world was created. `DESIGN.md` remains unchanged.
 
 ## Direction contract
 

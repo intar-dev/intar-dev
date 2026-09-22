@@ -2,7 +2,7 @@ import { currentScenarioRunContentAccessCondition } from "@/lib/scenario-runs/co
 import { sql } from "drizzle-orm";
 import { agentHosts, member, organization, user } from "@/db/schema";
 
-/** Used by selection and capacity displays. Admission repeats it at commit. */
+/** Used by selection. Admission repeats it at commit. */
 export function metalPlacementForUser(userId: string, organizationId: string | null = null) {
   return sql`EXISTS (SELECT 1 FROM ${user}
     WHERE ${user.id} = ${userId} AND ${user.deletedAt} IS NULL AND coalesce(${user.banned}, 0) = 0
@@ -16,6 +16,18 @@ export function metalPlacementForUser(userId: string, organizationId: string | n
               AND ((${organization.metalPlacement} = 'platform' AND ${agentHosts.scope} = 'platform')
                 OR (${organization.metalPlacement} = 'organization' AND ${agentHosts.scope} = 'organization'
                   AND ${agentHosts.organizationId} = ${organizationId})))))))`;
+}
+
+/** Catalog totals include every accessible pool, regardless of placement preference. */
+export function capacityHostAccessForUser(userId: string, organizationId: string | null = null) {
+  return sql`EXISTS (SELECT 1 FROM ${user}
+    WHERE ${user.id} = ${userId} AND ${user.deletedAt} IS NULL AND coalesce(${user.banned}, 0) = 0
+      AND (${organizationId} IS NULL OR EXISTS (SELECT 1 FROM ${member}
+        WHERE ${member.userId} = ${userId} AND ${member.organizationId} = ${organizationId}))
+      AND (${agentHosts.scope} = 'platform'
+        OR (${agentHosts.scope} = 'personal' AND ${agentHosts.userId} = ${userId})
+        OR (${agentHosts.scope} = 'organization' AND EXISTS (SELECT 1 FROM ${member}
+          WHERE ${member.userId} = ${userId} AND ${member.organizationId} = ${agentHosts.organizationId}))))`;
 }
 
 /** Parameters must be numbered SQLite placeholders, never request text. */

@@ -1,6 +1,6 @@
 import { personalHostReportReady } from "@/lib/personal-host-readiness";
 import { env } from "cloudflare:workers";
-import { metalPlacementForUser } from "@/lib/metal-placement";
+import { capacityHostAccessForUser, metalPlacementForUser } from "@/lib/metal-placement";
 import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import { AppError, appError, errorChainMatches } from "@/lib/app-error";
@@ -393,15 +393,15 @@ async function revokeScenarioRouteTypesForUser(
 }
 
 /**
- * Loads hosts that can accept a learner scenario before image and resource
- * checks. Keep this shared with the catalog capacity signal so its policy
- * cannot say a host is usable when admission would reject it.
+ * Shares host health and readiness checks between placement and catalog totals.
+ * Catalog totals pass a broader access scope to combine the user's pools.
  */
 async function loadEligibleScenarioLaunchHosts(
   userId: string,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
   organizationId: string | null = null,
+  hostScope = metalPlacementForUser(userId, organizationId),
 ) {
   const db = drizzle(env.DB);
   const rows = await db
@@ -423,7 +423,7 @@ async function loadEligibleScenarioLaunchHosts(
         eq(agentHosts.role, "agent"),
         eq(agentHosts.scenarioEnabled, true),
         eq(agentHosts.connected, true),
-        metalPlacementForUser(userId, organizationId),
+        hostScope,
       ),
     )
     .orderBy(desc(agentHosts.updatedAt));
@@ -500,6 +500,7 @@ export async function loadScenarioCapacity(
     now,
     requireRunCli,
     organizationId,
+    capacityHostAccessForUser(userId, organizationId),
   );
   if (!hosts.length) return { capacityPressure: null, resourceCapacity: null };
 
