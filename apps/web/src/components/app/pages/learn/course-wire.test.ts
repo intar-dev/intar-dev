@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isAccessResponseError, pollingIntervalUnlessAccessError, retryHttpResponseError } from "@/components/app/lib/http-response-error";
 import {
   completeCourseLecture,
   CourseLectureLockedError,
@@ -29,6 +30,16 @@ afterEach(() => {
 });
 
 describe("course learner wire contract", () => {
+  it.each([401, 403, 404])("stops catalog retries and polling after HTTP %s", async (status) => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ error: "Access unavailable" }, { status }),
+    ));
+    const error = await fetchCourseCatalog("team-a").catch((error: unknown) => error);
+    expect(isAccessResponseError(error, true)).toBe(true);
+    expect(retryHttpResponseError(0, error)).toBe(false);
+    expect(pollingIntervalUnlessAccessError(error, 15_000)).toBe(false);
+  });
+
   it("uses separate public, organization-public, and organization-private routes", () => {
     expect(courseRouteForCatalogCourse(publicCourse, null)).toEqual({
       scope: "public",

@@ -36,8 +36,8 @@ interface UiFixtures {
   ui: UiHarness;
 }
 
-const EXPECTED_MOCK_503_CONSOLE_ERROR =
-  "Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
+const EXPECTED_MOCK_HTTP_CONSOLE_ERROR =
+  /^Failed to load resource: the server responded with a status of (401|403|404|503) \([^)]+\)$/;
 const EXPECTED_MOCK_409_CONSOLE_ERROR =
   "Failed to load resource: the server responded with a status of 409 (Conflict)";
 
@@ -46,7 +46,7 @@ function actionableConsoleError(
   variant: DataVariant,
   server: MockApiServer,
 ) {
-  if (variant === "error" && text === EXPECTED_MOCK_503_CONSOLE_ERROR) {
+  if (variant === "error" && EXPECTED_MOCK_HTTP_CONSOLE_ERROR.test(text)) {
     return false;
   }
   if (

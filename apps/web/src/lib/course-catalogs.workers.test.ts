@@ -41,6 +41,32 @@ const learnerId = "learner";
 describe("V2 course catalogs", () => {
   beforeEach(resetD1Database);
 
+  it("defaults capacity to unknown and preserves pressure-only callers", async () => {
+    const input = { db: drizzle(env.DB), userId: learnerId, organizationId: null };
+    await expect(listCourseCatalogForUser(input)).resolves.toEqual({
+      courses: [], capacityPressure: null, resourceCapacity: null,
+    });
+    await expect(listCourseCatalogForUser({ ...input, capacityPressure: 0 })).resolves.toEqual({
+      courses: [], capacityPressure: 0, resourceCapacity: null,
+    });
+  });
+
+  it.each([null, "org-a"])("returns both capacity signals for scope %s", async (organizationId) => {
+    await seedLearnerAndHost();
+    if (organizationId) {
+      await insertOrganization(organizationId);
+      await insertMembership(organizationId);
+    }
+    const resourceCapacity = {
+      cpu: { availableMillis: 0, totalMillis: 4_000 },
+      memory: { availableMib: 512, totalMib: 8_192 },
+    };
+    await expect(listCourseCatalogForUser({
+      db: drizzle(env.DB), userId: learnerId, organizationId,
+      capacityPressure: 100, resourceCapacity,
+    })).resolves.toEqual({ courses: [], capacityPressure: 100, resourceCapacity });
+  });
+
   it("fully replaces a scope snapshot and backfills its first linked unit", async () => {
     const db = drizzle(env.DB);
     await seedLearnerAndHost();

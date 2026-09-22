@@ -1,4 +1,6 @@
 import type { ScenarioDifficulty } from "@/generated/catalog";
+import type { ResourceCapacity } from "@/lib/resource-capacity";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 
 /**
  * Learner-facing normalization of the generated V2 snapshot contract.
@@ -66,6 +68,7 @@ export interface CourseCatalogCourse {
 export interface CourseCatalogResponse {
   courses: CourseCatalogCourse[];
   capacityPressure: number | null;
+  resourceCapacity: ResourceCapacity | null;
 }
 
 export interface CourseLectureDetail extends CourseLectureSummary {
@@ -269,7 +272,7 @@ async function parseCourseResponse<T>(response: Response, label: string): Promis
     );
   }
   if (!response.ok || !body) {
-    throw new Error(body?.error ?? `Could not load ${label} (${response.status})`);
+    throw new HttpResponseError(response.status, body?.error ?? `Could not load ${label} (${response.status})`);
   }
   return body as T;
 }

@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   listCourseCatalogForUser: vi.fn(),
   loadCourseLectureDetailForUser: vi.fn(),
   completePureCourseLectureForUser: vi.fn(),
-  loadScenarioCapacityPressure: vi.fn(),
+  loadScenarioCapacity: vi.fn(),
 }));
 
 vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
@@ -31,7 +31,7 @@ vi.mock("@/lib/course-catalogs", () => ({
   completePureCourseLectureForUser: mocks.completePureCourseLectureForUser,
 }));
 vi.mock("@/lib/scenario-runs/start", () => ({
-  loadScenarioCapacityPressure: mocks.loadScenarioCapacityPressure,
+  loadScenarioCapacity: mocks.loadScenarioCapacity,
 }));
 
 import { GET as publicCatalog } from "@/pages/api/courses";
@@ -40,6 +40,11 @@ import { GET as publicLecture } from "@/pages/api/courses/[courseId]/lectures/[l
 import { GET as organizationCatalog } from "@/pages/api/organizations/[orgId]/courses";
 import { POST as organizationComplete } from "@/pages/api/organizations/[orgId]/courses/[courseId]/lectures/[lectureId]/complete";
 import { GET as organizationLecture } from "@/pages/api/organizations/[orgId]/courses/[courseId]/lectures/[lectureId]";
+
+const resourceCapacity = {
+  cpu: { availableMillis: 2_000, totalMillis: 8_000 },
+  memory: { availableMib: 4_096, totalMib: 16_384 },
+};
 
 const detail = {
   course: {
@@ -83,10 +88,11 @@ describe("course routes", () => {
     });
     mocks.resolveOrganizationId.mockResolvedValue("organization-1");
     mocks.requireOrganizationRole.mockResolvedValue("member");
-    mocks.loadScenarioCapacityPressure.mockResolvedValue(73);
+    mocks.loadScenarioCapacity.mockResolvedValue({ capacityPressure: 73, resourceCapacity });
     mocks.listCourseCatalogForUser.mockResolvedValue({
       courses: [],
       capacityPressure: 73,
+      resourceCapacity,
     });
     mocks.loadCourseLectureDetailForUser.mockResolvedValue({
       ok: true,
@@ -107,15 +113,41 @@ describe("course routes", () => {
     await expect(response.json()).resolves.toEqual({
       courses: [],
       capacityPressure: 73,
+      resourceCapacity,
     });
     expect(mocks.listCourseCatalogForUser).toHaveBeenCalledWith({
       db: mocks.db,
       userId: "admin-1",
       organizationId: null,
       capacityPressure: 73,
+      resourceCapacity,
       allowSequenceBypass: true,
     });
-    expect(mocks.loadScenarioCapacityPressure).toHaveBeenCalledWith("admin-1");
+    expect(mocks.loadScenarioCapacity).toHaveBeenCalledTimes(1);
+    expect(mocks.loadScenarioCapacity).toHaveBeenCalledWith("admin-1");
+  });
+
+  it.each([
+    ["public", publicCatalog, "/api/courses", {}],
+    ["organization", organizationCatalog, "/api/organizations/academy/courses", { orgId: "academy" }],
+  ] as const)("returns unknown capacity for the %s catalog", async (_, route, path, params) => {
+    const capacity = { capacityPressure: null, resourceCapacity: null };
+    mocks.loadScenarioCapacity.mockResolvedValueOnce(capacity);
+    mocks.listCourseCatalogForUser.mockResolvedValueOnce({ courses: [], ...capacity });
+
+    const response = await route(context(path, params));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ courses: [], ...capacity });
+    expect(mocks.loadScenarioCapacity).toHaveBeenCalledTimes(1);
+    expect(mocks.listCourseCatalogForUser).toHaveBeenCalledWith(expect.objectContaining(capacity));
+  });
+
+  it("does not load capacity when organization access is denied", async () => {
+    mocks.requireOrganizationRole.mockRejectedValueOnce(new Error("access denied"));
+    await organizationCatalog(context("/api/organizations/academy/courses", { orgId: "academy" }));
+    expect(mocks.loadScenarioCapacity).not.toHaveBeenCalled();
+    expect(mocks.listCourseCatalogForUser).not.toHaveBeenCalled();
   });
 
   it("does not expose a locked public lecture body", async () => {
@@ -149,6 +181,11 @@ describe("course routes", () => {
     );
 
     expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      courses: [],
+      capacityPressure: 73,
+      resourceCapacity,
+    });
     expect(mocks.resolveOrganizationId).toHaveBeenCalledWith("academy");
     expect(mocks.requireOrganizationRole).toHaveBeenCalledWith({
       organizationId: "organization-1",
@@ -159,9 +196,11 @@ describe("course routes", () => {
       userId: "learner-1",
       organizationId: "organization-1",
       capacityPressure: 73,
+      resourceCapacity,
       allowSequenceBypass: false,
     });
-    expect(mocks.loadScenarioCapacityPressure).toHaveBeenCalledWith(
+    expect(mocks.loadScenarioCapacity).toHaveBeenCalledTimes(1);
+    expect(mocks.loadScenarioCapacity).toHaveBeenCalledWith(
       "learner-1", undefined, undefined, "organization-1",
     );
   });

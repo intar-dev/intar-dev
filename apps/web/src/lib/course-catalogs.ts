@@ -21,6 +21,7 @@ import {
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { appError } from "@/lib/app-error";
 import type { ScenarioBriefing } from "@/lib/scenario-model";
+import type { ResourceCapacity } from "@/lib/resource-capacity";
 
 export type {
   CourseCatalogCourseV2,
@@ -75,6 +76,7 @@ export interface CourseCatalogCourseForUser {
 export interface CourseCatalogForUser {
   courses: CourseCatalogCourseForUser[];
   capacityPressure: number | null;
+  resourceCapacity: ResourceCapacity | null;
 }
 
 export interface CourseLectureDetailForUser extends CourseCatalogLectureSummary {
@@ -378,12 +380,14 @@ export async function listCourseCatalogForUser(input: {
   userId: string;
   organizationId: string | null;
   capacityPressure?: number | null;
+  resourceCapacity?: ResourceCapacity | null;
   allowSequenceBypass?: boolean;
 }): Promise<CourseCatalogForUser> {
   const views = await loadCourseViews(input);
   return {
     courses: views.map(toCourseCatalogCourseForUser),
     capacityPressure: input.capacityPressure ?? null,
+    resourceCapacity: input.resourceCapacity ?? null,
   };
 }
 

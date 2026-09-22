@@ -76,6 +76,7 @@ type CourseLectureFixture = CourseFixture["lectures"][number];
 function courseCatalogResponse(
   courses: readonly CourseFixture[],
   capacityPressure: number | null,
+  resourceCapacity: MockApiState["resourceCapacity"],
 ) {
   return {
     courses: courses.map(({ lectures, ...course }) => ({
@@ -83,6 +84,7 @@ function courseCatalogResponse(
       lectures: lectures.map(courseLectureSummary),
     })),
     capacityPressure: courses.length ? capacityPressure : null,
+    resourceCapacity,
   };
 }
 
@@ -685,6 +687,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           courseCatalogResponse(
             server.state.courseCatalog,
             server.state.capacityPressure,
+            server.state.resourceCapacity,
           ),
         );
         return;
@@ -1085,6 +1088,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           courseCatalogResponse(
             server.state.organizationCourseCatalog,
             server.state.capacityPressure,
+            server.state.resourceCapacity,
           ),
         );
         return;

@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
 import { listCourseCatalogForUser } from "@/lib/course-catalogs";
-import { loadScenarioCapacityPressure } from "@/lib/scenario-runs/start";
+import { loadScenarioCapacity } from "@/lib/scenario-runs/start";
 
 export const prerender = false;
 
@@ -17,7 +17,7 @@ export const GET: APIRoute = async ({ request }) => {
       db: drizzle(env.DB),
       userId: authz.context.userId,
       organizationId: null,
-      capacityPressure: await loadScenarioCapacityPressure(authz.context.userId),
+      ...await loadScenarioCapacity(authz.context.userId),
       allowSequenceBypass: authz.context.isAdmin,
     });
     return jsonResponse(catalog);

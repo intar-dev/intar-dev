@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeft,
@@ -37,6 +37,13 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import type { ResourceCapacity as Capacity } from "@/lib/resource-capacity";
+import {
+  isAccessResponseError,
+  pollingIntervalUnlessAccessError,
+  retryHttpResponseError,
+} from "@/components/app/lib/http-response-error";
+import { ResourceCapacity } from "./ResourceCapacity";
 import { CourseLink, LectureLink } from "./course-links";
 import { LectureScenarioLabel } from "./LectureScenarioLabel";
 import {
@@ -124,6 +131,7 @@ function CourseCatalogPage({
   requestedScope?: CourseRouteScope;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const routeSearch = useSearch({ strict: false });
   const searchState = useMemo(
     () => normalizeCatalogSearch(routeSearch),
@@ -132,8 +140,22 @@ function CourseCatalogPage({
   const [searchText, setSearchText] = useState(searchState.q);
   const catalog = useQuery({
     queryKey: courseCatalogQueryKey(organizationId),
-    queryFn: () => fetchCourseCatalog(organizationId),
+    queryFn: async ({ queryKey, signal }) => {
+      try {
+        return await fetchCourseCatalog(organizationId);
+      } catch (error) {
+        if (!signal.aborted && isAccessResponseError(error, true)) {
+          // Discard denied data before a later retry can reuse it.
+          queryClient.getQueryCache().find({ queryKey, exact: true })
+            ?.setState({ data: undefined, dataUpdatedAt: 0 });
+        }
+        throw error;
+      }
+    },
     staleTime: 10_000,
+    refetchInterval: (query) =>
+      pollingIntervalUnlessAccessError(query.state.error, courseId ? false : 15_000),
+    retry: retryHttpResponseError,
   });
   const assignments = useQuery({
     queryKey: ["organizations", "my-assignments"],
@@ -246,9 +268,12 @@ function CourseCatalogPage({
   ) : null;
 
   if (catalog.isLoading && !catalog.data) {
-    return <CourseCatalogLoading />;
+    return <CourseCatalogLoading showCapacity={!courseId} />;
   }
-  if (catalog.error) {
+  if (
+    catalog.error &&
+    (courseId || !catalog.data || isAccessResponseError(catalog.error, true))
+  ) {
     return (
       <PageShell>
         <ErrorState
@@ -287,6 +312,8 @@ function CourseCatalogPage({
   }
   return (
     <CourseIndex
+      capacity={catalog.data?.resourceCapacity ?? null}
+      capacityUpdateFailed={catalog.isError}
       courses={visibleCourses}
       organizationId={organizationId}
       filters={filters}
@@ -302,6 +329,8 @@ function CourseCatalogPage({
 }
 
 function CourseIndex({
+  capacity,
+  capacityUpdateFailed,
   courses,
   organizationId,
   filters,
@@ -310,6 +339,8 @@ function CourseIndex({
   assignments,
   search,
 }: {
+  capacity: Capacity | null;
+  capacityUpdateFailed: boolean;
   courses: readonly CourseCatalogCourse[];
   organizationId: string | null;
   filters: ReactNode;
@@ -325,6 +356,7 @@ function CourseIndex({
         titleClassName="max-sm:sr-only"
         summary="Learn the idea first, then apply it in a scenario."
       />
+      <ResourceCapacity capacity={capacity} updateFailed={capacityUpdateFailed} />
       {assignments.length ? <CourseAssignments assignments={assignments} /> : null}
       {filters}
       {courses.length ? (
@@ -924,13 +956,19 @@ function matchesText(query: string, values: readonly string[]): boolean {
   return values.some((value) => value.toLocaleLowerCase().includes(normalized));
 }
 
-function CourseCatalogLoading() {
+function CourseCatalogLoading({ showCapacity }: { showCapacity: boolean }) {
   return (
     <PageShell>
       <div role="status" className="space-y-6">
         <span className="sr-only">Loading courses…</span>
         <Skeleton className="h-8 w-72 max-w-full" />
         <Skeleton className="h-5 w-96 max-w-full" />
+        {showCapacity ? (
+          <div className="grid gap-4 sm:grid-cols-2 sm:gap-8" aria-hidden="true">
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-16 w-full" />
+          </div>
+        ) : null}
         <div className="divide-y overflow-hidden rounded-xl border bg-card">
           <Skeleton className="h-28 w-full rounded-none" />
           <Skeleton className="h-28 w-full rounded-none" />

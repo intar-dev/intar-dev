@@ -381,15 +381,16 @@ test("a theory-only lecture completes and exposes the next unit", async ({
   );
 });
 
-test("course browsing keeps infrastructure load out of the learner view", async ({
+test("course browsing shows available CPU and memory allocation", async ({
   page,
   ui,
 }) => {
-  ui.server.state.capacityPressure = 68;
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
 
-  await expect(page.getByText("68% pool use", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Scenario capacity", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("meter", { name: "CPU", exact: true })).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(page.getByRole("meter", { name: "Memory", exact: true })).toHaveAttribute("aria-valuenow", "62.5");
+  await expect(page.getByText("5.25 / 8 vCPUs", { exact: true })).toBeVisible();
+  await expect(page.getByText("10 / 16 GiB", { exact: true })).toBeVisible();
 });
 
 test("course filters stay compact until the learner needs them", async ({

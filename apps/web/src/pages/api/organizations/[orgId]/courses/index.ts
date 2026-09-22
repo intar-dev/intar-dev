@@ -8,7 +8,7 @@ import {
   resolveOrganizationId,
 } from "@/lib/organizations";
 import { listCourseCatalogForUser } from "@/lib/course-catalogs";
-import { loadScenarioCapacityPressure } from "@/lib/scenario-runs/start";
+import { loadScenarioCapacity } from "@/lib/scenario-runs/start";
 
 export const prerender = false;
 
@@ -30,7 +30,7 @@ export const GET: APIRoute = async ({ request, params }) => {
       db: drizzle(env.DB),
       userId: authz.context.userId,
       organizationId,
-      capacityPressure: await loadScenarioCapacityPressure(authz.context.userId, undefined, undefined, organizationId),
+      ...await loadScenarioCapacity(authz.context.userId, undefined, undefined, organizationId),
       allowSequenceBypass: authz.context.isAdmin,
     });
     return jsonResponse(catalog);

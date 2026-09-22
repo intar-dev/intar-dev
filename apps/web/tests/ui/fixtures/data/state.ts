@@ -491,6 +491,10 @@ export function createMockApiState(input?: {
           ? "error"
           : "connected",
     capacityPressure: empty ? null : 68,
+    resourceCapacity: empty ? null : {
+      cpu: { availableMillis: 5250, totalMillis: 8000 },
+      memory: { availableMib: 10240, totalMib: 16384 },
+    },
     courseCatalog: empty ? [] : courseCatalog,
     organizationCourseCatalog: empty ? [] : organizationCourseCatalog,
     runs: empty ? [] : runs,

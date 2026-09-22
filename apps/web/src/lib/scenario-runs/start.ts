@@ -19,6 +19,7 @@ import {
   type RuntimeResourceDemand,
 } from "@/lib/runtime-capacity";
 import type { RuntimeVmSpec } from "@/lib/runtime-executions";
+import type { ResourceCapacity } from "@/lib/resource-capacity";
 import { revokeAllRoutes } from "@/lib/route-revocation";
 import type { RunStateDocument, RunVmStateDocument } from "@/lib/run-state";
 import {
@@ -473,23 +474,34 @@ async function loadEligibleScenarioLaunchHosts(
   return candidates;
 }
 
-/**
- * Sums the usable runner fleet, then reports the fullest shared resource pool.
- * A high disk allowance must not hide exhausted CPU or memory.
- */
+/** Compatibility entry point for callers that only need pressure. */
 export async function loadScenarioCapacityPressure(
   userId: string,
   now = Date.now(),
   requireRunCli = learnerRunCliV1EnforcementEnabled(env),
   organizationId: string | null = null,
 ): Promise<number | null> {
+  return (await loadScenarioCapacity(userId, now, requireRunCli, organizationId))
+    .capacityPressure;
+}
+
+/** Sums usable fleet resources after reservations; pressure still includes disk. */
+export async function loadScenarioCapacity(
+  userId: string,
+  now = Date.now(),
+  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
+  organizationId: string | null = null,
+): Promise<{
+  capacityPressure: number | null;
+  resourceCapacity: ResourceCapacity | null;
+}> {
   const hosts = await loadEligibleScenarioLaunchHosts(
     userId,
     now,
     requireRunCli,
     organizationId,
   );
-  if (!hosts.length) return null;
+  if (!hosts.length) return { capacityPressure: null, resourceCapacity: null };
 
   const snapshot = await loadActiveRuntimeResourceSnapshot(
     now,
@@ -502,6 +514,7 @@ export async function loadScenarioCapacityPressure(
   let availableMemoryMib = 0;
   let totalDiskMib = 0;
   let availableDiskMib = 0;
+  let resourceCapacityValid = true;
 
   for (const host of hosts) {
     const report = host.actualReport;
@@ -512,9 +525,22 @@ export async function loadScenarioCapacityPressure(
       !cpu ||
       !capacity ||
       !isPositiveSafeInteger(capacity.memory_total_mib) ||
-      !isPositiveSafeInteger(capacity.disk_total_mib)
+      !isPositiveSafeInteger(capacity.disk_total_mib) ||
+      !Array.isArray(report.vms)
     ) {
       continue;
+    }
+    // Keep the legacy pressure calculation, but do not publish resource
+    // amounts derived from coerced, negative, or out-of-range availability.
+    if (
+      !Number.isSafeInteger(capacity.memory_available_mib) ||
+      capacity.memory_available_mib < 0 ||
+      capacity.memory_available_mib > capacity.memory_total_mib ||
+      !Number.isSafeInteger(capacity.disk_available_mib) ||
+      capacity.disk_available_mib < 0 ||
+      capacity.disk_available_mib > capacity.disk_total_mib
+    ) {
+      resourceCapacityValid = false;
     }
     const available = availableRuntimeHostResources({
       hostId: host.id,
@@ -543,17 +569,23 @@ export async function loadScenarioCapacityPressure(
       availableDiskMib,
     ].every(Number.isSafeInteger)
   ) {
-    return null;
+    return { capacityPressure: null, resourceCapacity: null };
   }
 
-  return capacityPressurePercent({
-    totalCpuMillis,
-    availableCpuMillis,
-    totalMemoryMib,
-    availableMemoryMib,
-    totalDiskMib,
-    availableDiskMib,
-  });
+  return {
+    capacityPressure: capacityPressurePercent({
+      totalCpuMillis,
+      availableCpuMillis,
+      totalMemoryMib,
+      availableMemoryMib,
+      totalDiskMib,
+      availableDiskMib,
+    }),
+    resourceCapacity: resourceCapacityValid ? {
+      cpu: { availableMillis: availableCpuMillis, totalMillis: totalCpuMillis },
+      memory: { availableMib: availableMemoryMib, totalMib: totalMemoryMib },
+    } : null,
+  };
 }
 
 function capacityPressurePercent(input: {

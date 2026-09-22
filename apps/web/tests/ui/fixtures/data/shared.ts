@@ -1,4 +1,5 @@
 import type { SessionRole } from "../sessions";
+import type { ResourceCapacity } from "../../../../src/lib/resource-capacity";
 
 export const FIXED_NOW = Date.parse("2026-07-10T09:00:00.000Z");
 
@@ -62,6 +63,7 @@ export interface MockApiState {
   runState: RunFixtureState;
   terminalMode: TerminalMode;
   capacityPressure: number | null;
+  resourceCapacity: ResourceCapacity | null;
   courseCatalog: CourseFixture[];
   organizationCourseCatalog: CourseFixture[];
   runs: Array<Record<string, unknown>>;

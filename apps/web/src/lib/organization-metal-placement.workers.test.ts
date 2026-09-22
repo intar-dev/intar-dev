@@ -2,7 +2,7 @@ import { beforeEach, expect, it } from "vitest";
 import { agentHosts, member, organization, user } from "@/db/schema";
 import { drizzle, env, seedHost, stateReport, resetHostRuntimeTestDatabase } from "@/control-plane/host-runtime-do/test-fixtures";
 import { persistHostReport } from "./personal-host-readiness";
-import { loadScenarioCapacityPressure, loadScenarioLaunchHostForUser, selectScenarioHosts } from "./scenario-runs/start";
+import { loadScenarioCapacity, loadScenarioCapacityPressure, loadScenarioLaunchHostForUser, selectScenarioHosts } from "./scenario-runs/start";
 import { metalAdmissionSql } from "./metal-placement";
 
 beforeEach(async () => {
@@ -65,6 +65,7 @@ it("does not fall back when the organization fleet is offline, full, or lacks a 
   await env.DB.prepare("UPDATE agent_hosts SET connected = 0 WHERE id = 'organization-host'").run();
   expect(await select()).toMatchObject({ ok: false, reason: "unavailable" });
   expect(await loadScenarioCapacityPressure("learner", undefined, false, "org")).toBeNull();
+  expect(await loadScenarioCapacity("learner", undefined, false, "org")).toEqual({ capacityPressure: null, resourceCapacity: null });
   await env.DB.prepare("UPDATE agent_hosts SET connected = 1 WHERE id = 'organization-host'").run();
   await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json, '$.relay_connected', json('false')) WHERE host_id = 'organization-host'").run();
   expect(await select()).toMatchObject({ ok: false, reason: "unavailable" });
@@ -76,6 +77,34 @@ it("shows only the selected fleet capacity", async () => {
   await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json, '$.capacity.committed_cpu_millis', 4000) WHERE host_id = 'organization-host'").run();
   expect(await loadScenarioCapacityPressure("learner", undefined, false, "org")).toBe(100);
   expect(await loadScenarioCapacityPressure("learner", undefined, false, null)).toBe(50);
+  expect(await loadScenarioCapacity("learner", undefined, false, "org")).toEqual({
+    capacityPressure: 100,
+    resourceCapacity: {
+      cpu: { availableMillis: 0, totalMillis: 4000 },
+      memory: { availableMib: 4096, totalMib: 8192 },
+    },
+  });
+  const platformCapacity = await loadScenarioCapacity("learner", undefined, false);
+  expect(platformCapacity).toEqual({
+    capacityPressure: 50,
+    resourceCapacity: {
+      cpu: { availableMillis: 4000, totalMillis: 4000 },
+      memory: { availableMib: 4096, totalMib: 8192 },
+    },
+  });
+  await env.DB.prepare("UPDATE organization SET metal_placement = 'platform' WHERE id = 'org'").run();
+  expect(await loadScenarioCapacity("learner", undefined, false, "org")).toEqual(platformCapacity);
+  await env.DB.prepare("UPDATE user SET metal_placement = 'personal' WHERE id = 'learner'").run();
+  await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json, '$.capacity.memory_available_mib', 1024) WHERE host_id = 'personal-host'").run();
+  const personalCapacity = await loadScenarioCapacity("learner", undefined, false, "org");
+  expect(personalCapacity.resourceCapacity).toEqual({
+    cpu: { availableMillis: 4000, totalMillis: 4000 },
+    memory: { availableMib: 1024, totalMib: 8192 },
+  });
+  expect(await loadScenarioCapacity("learner", undefined, false)).toEqual(personalCapacity);
+  expect(await loadScenarioCapacity("learner", undefined, false, "other")).toEqual({ capacityPressure: null, resourceCapacity: null });
+  await env.DB.prepare("DELETE FROM member WHERE user_id = 'learner'").run();
+  expect(await loadScenarioCapacity("learner", undefined, false, "org")).toEqual({ capacityPressure: null, resourceCapacity: null });
 });
 
 it("sets organization placement on first Ready, independent of the creator, and keeps it after disconnect", async () => {
