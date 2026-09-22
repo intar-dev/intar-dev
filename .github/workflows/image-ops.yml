@@ -407,12 +407,12 @@ jobs:
           rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
 
       - name: Set up Rust cache
-        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
 
       - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2
         with:
           tool: cargo-zigbuild@0.23.0
 
@@ -744,7 +744,7 @@ jobs:
 
       - name: Set up Node
         if: needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: apps/web/.node-version
 
