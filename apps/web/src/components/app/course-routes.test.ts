@@ -66,12 +66,18 @@ describe("course learner routes", () => {
     );
   });
 
-  it("keeps Discord in a signed-in Support section", () => {
+  it("keeps Forum and Discord in a signed-in Support section", () => {
     const support = NAV_SECTIONS.find((section) => section.id === "support");
 
     expect(support?.label).toBe("Support");
     expect(support?.requires).toBe("signedIn");
     expect(support?.items).toEqual([
+      expect.objectContaining({
+        id: "forum",
+        label: "Forum",
+        to: "/support",
+        requires: "signedIn",
+      }),
       expect.objectContaining({
         id: "discord",
         label: "Discord",
