@@ -338,8 +338,10 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
       data-run-learning-panel-content
       className={cn("space-y-5 bg-card pb-6", props.className)}
     >
+      {/* Both scroll containers have 1rem top padding; pin over it so text
+          never scrolls through the band above the checks. */}
       <div
-        className="sticky top-0 z-20 -mx-1 isolate bg-card px-1 pb-3"
+        className="sticky -top-4 z-20 -mx-1 -mt-4 isolate bg-card px-1 pt-4 pb-3"
         data-run-pinned-checks
       >
         <Checks
