@@ -172,16 +172,21 @@ function usePreviewClock(target: RefObject<HTMLElement | null>, still: boolean) 
     const element = target.current;
     if (!element || still) return;
     let timer: number | undefined;
-    const observer = new IntersectionObserver(([entry]) => {
-      window.clearInterval(timer);
-      timer = undefined;
-      if (!entry?.isIntersecting) return;
-      const start = performance.now();
-      setT(0);
-      timer = window.setInterval(() => {
-        setT((performance.now() - start) % LOOP_MS);
-      }, 40);
-    });
+    // The run starts once the workspace is a quarter of the way up the
+    // viewport, so the first command is typed where the reader can see it.
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        window.clearInterval(timer);
+        timer = undefined;
+        if (!entry?.isIntersecting) return;
+        const start = performance.now();
+        setT(0);
+        timer = window.setInterval(() => {
+          setT((performance.now() - start) % LOOP_MS);
+        }, 40);
+      },
+      { rootMargin: "0px 0px -25% 0px" },
+    );
     observer.observe(element);
     return () => {
       observer.disconnect();
@@ -205,7 +210,7 @@ export function RunPreview({ className }: { className?: string }) {
   const remaining = LEASE_SECONDS - Math.floor(t / 1_000);
 
   return (
-    <figure className={cn("m-0 flex-col", className)}>
+    <figure className={cn("m-0 flex flex-col", className)}>
       <figcaption className="sr-only">
         Example run: the learner starts nginx, restores the default site, and
         reloads the server while the three checks turn verified.

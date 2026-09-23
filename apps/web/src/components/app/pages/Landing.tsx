@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight } from "lucide-react";
+import { ArrowDown, ArrowRight } from "lucide-react";
 import hetznerLogo from "@/assets/hetzner-logo.webp";
 import hosttechLogo from "@/assets/hosttech-logo.svg?url";
 import hosttechLogoLight from "@/assets/hosttech-logo-light.svg?url";
@@ -52,13 +52,12 @@ export function Landing() {
       }),
   });
 
-  // From sm up the whole page, run preview included, fits one viewport;
-  // below 40rem of height it falls back to scrolling.
   return (
-    <div className="relative isolate flex min-h-svh flex-col overflow-hidden bg-canvas sm:h-svh sm:min-h-[40rem]">
+    <div className="relative isolate flex min-h-svh flex-col overflow-hidden bg-canvas">
+      {/* The graph paper belongs to page one only. */}
       <div
         aria-hidden="true"
-        className="dot-grid pointer-events-none absolute inset-0 -z-10 hidden lg:block"
+        className="dot-grid pointer-events-none absolute inset-x-0 top-0 -z-10 hidden h-svh lg:block"
       />
       <header className="mx-auto flex min-h-14 w-full max-w-7xl shrink-0 items-center justify-between gap-4 px-[var(--page-inset)] sm:min-h-[4.75rem]">
         <BrandMark />
@@ -74,98 +73,132 @@ export function Landing() {
         </div>
       ) : null}
 
-      <main className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-8 px-[var(--page-inset)] pt-4 pb-6 sm:gap-6 sm:pt-2 sm:pb-2 lg:gap-8 lg:pt-4">
-        <section className="grid items-end gap-6 motion-safe:animate-rise lg:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] lg:gap-12">
-          <h1 className="text-display text-balance">
-            <span className="block">Repair real systems.</span>
-            <span className="block text-faint-foreground">Prove the fix.</span>
-          </h1>
+      <main className="flex flex-1 flex-col">
+        {/* Page one is the primer: with the header it fills the first
+            viewport, so the heights below track the header's min heights. */}
+        <section className="mx-auto flex min-h-[calc(100svh-3.5rem)] w-full max-w-7xl flex-col px-[var(--page-inset)] sm:min-h-[calc(100svh-4.75rem)]">
+          <div className="flex flex-1 flex-col justify-center py-10">
+            <div className="flex flex-col items-start gap-6 motion-safe:animate-rise sm:gap-8">
+              <div className="space-y-5 sm:space-y-6">
+                <h1 className="text-display text-balance">
+                  <span className="block">Repair real systems.</span>
+                  <span className="block text-faint-foreground">
+                    Prove the fix.
+                  </span>
+                </h1>
+                <p className="prose-measure max-w-xl text-[1.0625rem] leading-relaxed text-muted-foreground sm:text-lg lg:text-xl">
+                  Diagnose a live sandbox, repair it in the shell, and watch
+                  the checks turn green.
+                </p>
+              </div>
 
-          <div className="flex flex-col items-start gap-6">
-            <p className="prose-measure text-[1.0625rem] leading-relaxed text-muted-foreground sm:text-lg">
-              Diagnose a live sandbox, repair it in the shell, and watch the
-              checks turn green.
-            </p>
-
-            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:gap-3">
-              {signedIn ? (
-                <Button
-                  size="lg"
-                  className="w-full sm:w-auto"
-                  disabled={runs.isLoading}
-                  render={
-                    runs.isLoading ? undefined : (
-                      <Link
-                        to={activeRun ? "/runs/$runId" : "/courses"}
-                        params={activeRun ? { runId: activeRun.runId } : {}}
-                      />
-                    )
-                  }
-                >
-                  {runs.isLoading
-                    ? "Finding your work…"
-                    : activeRun
-                      ? "Resume run"
-                      : "Browse courses"}
-                  {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
-                </Button>
-              ) : (
-                <>
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:gap-3">
+                {signedIn ? (
                   <Button
                     size="lg"
                     className="w-full sm:w-auto"
-                    onClick={() => signIn.mutate()}
-                    disabled={signIn.isPending}
+                    disabled={runs.isLoading}
+                    render={
+                      runs.isLoading ? undefined : (
+                        <Link
+                          to={activeRun ? "/runs/$runId" : "/courses"}
+                          params={activeRun ? { runId: activeRun.runId } : {}}
+                        />
+                      )
+                    }
                   >
-                    {signIn.isPending
-                      ? "Opening GitHub…"
-                      : "Sign in with GitHub"}
-                    {!signIn.isPending ? (
-                      <ArrowRight className="size-4" />
-                    ) : null}
+                    {runs.isLoading
+                      ? "Finding your work…"
+                      : activeRun
+                        ? "Resume run"
+                        : "Browse courses"}
+                    {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
                   </Button>
-                  <Button
-                    size="lg"
-                    variant="outline"
-                    className="w-full sm:w-auto"
-                    render={<Link to="/organization-sign-in" />}
-                  >
-                    Organization sign-in
-                  </Button>
-                </>
-              )}
+                ) : (
+                  <>
+                    <Button
+                      size="lg"
+                      className="w-full sm:w-auto"
+                      onClick={() => signIn.mutate()}
+                      disabled={signIn.isPending}
+                    >
+                      {signIn.isPending
+                        ? "Opening GitHub…"
+                        : "Sign in with GitHub"}
+                      {!signIn.isPending ? (
+                        <ArrowRight className="size-4" />
+                      ) : null}
+                    </Button>
+                    <Button
+                      size="lg"
+                      variant="outline"
+                      className="w-full sm:w-auto"
+                      render={<Link to="/organization-sign-in" />}
+                    >
+                      Organization sign-in
+                    </Button>
+                  </>
+                )}
+              </div>
+
+              {signIn.error ? (
+                <InlineFeedback tone="error">
+                  {signIn.error instanceof Error
+                    ? signIn.error.message
+                    : "GitHub sign-in could not be started."}
+                </InlineFeedback>
+              ) : null}
             </div>
+          </div>
 
-            {signIn.error ? (
-              <InlineFeedback tone="error">
-                {signIn.error instanceof Error
-                  ? signIn.error.message
-                  : "GitHub sign-in could not be started."}
-              </InlineFeedback>
-            ) : null}
+          <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-4 border-t py-5 sm:py-6">
+            <SponsorMarks />
+            <a href="#run" className={scrollCueClassName}>
+              Watch a run
+              <ArrowDown className="size-4" aria-hidden="true" />
+            </a>
           </div>
         </section>
 
-        <RunPreview className="hidden min-h-0 flex-1 motion-safe:animate-rise sm:flex" />
+        {/* Sized so the heading and the whole workspace land in one viewport
+            when the cue scrolls here. */}
+        <section
+          id="run"
+          aria-labelledby="landing-run-heading"
+          className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-12 pb-16 sm:pt-16 sm:pb-24 lg:pt-20"
+        >
+          <div className="grid items-end gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] lg:gap-12">
+            <div className="space-y-3">
+              <p className="text-label">Inside a run</p>
+              <h2 id="landing-run-heading" className="text-feature-title text-balance">
+                The shell is real. So are the checks.
+              </h2>
+            </div>
+            <p className="text-support text-muted-foreground sm:text-base sm:leading-relaxed">
+              Each run boots its own Linux sandbox, and you repair it from the
+              browser. Checks watch the system while you work and turn green
+              the moment your fix lands.
+            </p>
+          </div>
+
+          <RunPreview className="mt-8 h-[clamp(24rem,calc(100svh-17rem),32rem)] sm:mt-10 lg:h-[clamp(26rem,calc(100svh-14rem),34rem)]" />
+        </section>
       </main>
 
-      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-wrap items-center justify-between gap-x-8 gap-y-3 px-[var(--page-inset)] py-3 text-[0.8125rem] text-faint-foreground">
-        <SponsorMarks />
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-          <span>Built by Stefan Ruzitschka</span>
-          <span aria-hidden="true" className="text-border-strong">
-            ·
-          </span>
-          <a href="https://github.com/intar-dev" className={footerLinkClassName}>
-            GitHub
-          </a>
-          <a href="https://docs.intar.dev" className={footerLinkClassName}>
-            Documentation
-          </a>
-          <a href="mailto:hello@intar.dev" className={footerLinkClassName}>
-            Sponsorships
-          </a>
-        </div>
+      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-wrap items-center gap-x-4 gap-y-1 px-[var(--page-inset)] py-3 text-[0.8125rem] text-faint-foreground">
+        <span>Built by Stefan Ruzitschka</span>
+        <span aria-hidden="true" className="text-border-strong">
+          ·
+        </span>
+        <a href="https://github.com/intar-dev" className={footerLinkClassName}>
+          GitHub
+        </a>
+        <a href="https://docs.intar.dev" className={footerLinkClassName}>
+          Documentation
+        </a>
+        <a href="mailto:hello@intar.dev" className={footerLinkClassName}>
+          Sponsorships
+        </a>
       </footer>
     </div>
   );
@@ -195,7 +228,7 @@ function SponsorMarks() {
             width={hetznerLogo.width}
             height={hetznerLogo.height}
             alt="Hetzner"
-            className="h-8 w-auto rounded-md"
+            className="h-9 w-auto rounded-md"
           />
         </a>
         <a
@@ -209,7 +242,7 @@ function SponsorMarks() {
             width={namespaceLogo.width}
             height={namespaceLogo.height}
             alt="namespace"
-            className="h-6 w-auto dark:invert"
+            className="h-7 w-auto dark:invert"
           />
         </a>
         <a
@@ -223,14 +256,14 @@ function SponsorMarks() {
             width={1000}
             height={195.1}
             alt="hosttech"
-            className="h-5 w-auto dark:hidden"
+            className="h-6 w-auto dark:hidden"
           />
           <img
             src={hosttechLogo}
             width={1000}
             height={195.1}
             alt="hosttech"
-            className="hidden h-5 w-auto dark:block"
+            className="hidden h-6 w-auto dark:block"
           />
         </a>
       </div>
@@ -240,6 +273,9 @@ function SponsorMarks() {
 
 const footerLinkClassName =
   "inline-flex items-center justify-center text-muted-foreground underline decoration-border underline-offset-4 transition-colors duration-150 hover:text-foreground hover:decoration-border-strong pointer-coarse:min-h-11 pointer-coarse:min-w-11";
+
+const scrollCueClassName =
+  "inline-flex min-h-11 items-center gap-2 rounded-md text-support font-medium text-muted-foreground transition-colors duration-150 hover:text-foreground";
 
 const sponsorLinkClassName =
   "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-1 opacity-80 transition-opacity duration-200 hover:opacity-100 focus-visible:opacity-100";
