@@ -1,4 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
+import { ArrowUpRight } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -33,7 +34,7 @@ export function AppSidebar() {
   );
 
   return (
-    <Sidebar collapsible="icon">
+    <Sidebar collapsible="icon" variant="inset">
       <SidebarHeader>
         <BrandMark
           to="/courses"
@@ -50,7 +51,7 @@ export function AppSidebar() {
           return (
             <SidebarGroup key={section.id}>
               {section.label ? (
-                <SidebarGroupLabel className="text-label text-sidebar-foreground/75">
+                <SidebarGroupLabel>
                   {section.label}
                 </SidebarGroupLabel>
               ) : null}
@@ -82,6 +83,12 @@ export function AppSidebar() {
                         <Icon />
                         <span>{item.label}</span>
                         {item.external ? (
+                          <ArrowUpRight
+                            aria-hidden="true"
+                            className="ml-auto size-3.5! opacity-60"
+                          />
+                        ) : null}
+                        {item.external ? (
                           <span className="sr-only">
                             (opens in a new tab)
                           </span>
@@ -93,7 +100,11 @@ export function AppSidebar() {
                         ) : null}
                       </SidebarMenuButton>
                       {badgeCount > 0 ? (
-                        <SidebarMenuBadge className="text-primary" aria-hidden="true">
+                        <SidebarMenuBadge
+                          className="gap-1.5 font-semibold text-brand-text"
+                          aria-hidden="true"
+                        >
+                          <span className="size-1.5 rounded-full bg-primary text-primary motion-safe:animate-live" />
                           {badgeCount}
                         </SidebarMenuBadge>
                       ) : null}

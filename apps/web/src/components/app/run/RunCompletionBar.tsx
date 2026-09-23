@@ -22,12 +22,12 @@ export function RunCompletionBar({
     <section
       aria-labelledby="run-completion-heading"
       data-run-completion-bar
-      className="shrink-0 rounded-lg border border-success-border bg-success-subtle px-4 py-4 lg:px-6 [@media(max-height:500px)]:!px-3 [@media(max-height:500px)]:!py-3"
+      className="shrink-0 rounded-xl border border-success-border bg-success-subtle px-4 py-3.5 shadow-(--shadow-raised) motion-safe:animate-rise lg:px-5 [@media(max-height:500px)]:!px-3 [@media(max-height:500px)]:!py-3"
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div className="flex min-w-0 items-center gap-2.5">
           <CheckCircle2
-            className="size-5 shrink-0 text-success"
+            className="size-5 shrink-0 text-success motion-safe:animate-pop [animation-delay:120ms]"
             aria-hidden="true"
           />
           <p
@@ -41,7 +41,7 @@ export function RunCompletionBar({
           type="button"
           size="sm"
           data-run-finish-and-save
-          className="w-full bg-success text-success-foreground hover:bg-success/90 focus-visible:ring-success sm:w-auto"
+          className="w-full bg-success text-success-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.25)] hover:bg-[color-mix(in_oklch,var(--success),white_12%)] focus-visible:outline-success sm:w-auto"
           disabled={!canFinish || pending}
           onClick={onFinish}
         >

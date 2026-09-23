@@ -1262,7 +1262,7 @@ test("legacy one-segment course scenario path is not redirected", async ({
   ).toBeVisible();
 });
 
-test("Recursive Mono keeps terminal cell geometry stable", async ({
+test("Geist Mono keeps terminal cell geometry stable", async ({
   page,
   ui,
 }) => {
@@ -1272,7 +1272,7 @@ test("Recursive Mono keeps terminal cell geometry stable", async ({
     .poll(() =>
       page.evaluate(async () => {
         const faces = await document.fonts.load(
-          '400 14px "Recursive Mono"',
+          '400 14px "Geist Mono Variable"',
           "Mi0W ",
         );
         return faces.filter((face) => face.status === "loaded").length;
@@ -1282,17 +1282,17 @@ test("Recursive Mono keeps terminal cell geometry stable", async ({
 
   const metrics = await page.evaluate(async () => {
     const faces = await document.fonts.load(
-      '400 14px "Recursive Mono"',
+      '400 14px "Geist Mono Variable"',
       "Mi0W ",
     );
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) throw new Error("2D canvas context unavailable");
-    context.font = '14px "Recursive Mono"';
+    context.font = '14px "Geist Mono Variable"';
     const glyphs = ["M", "i", "0", "W", " "];
     const widths = glyphs.map((glyph) => context.measureText(glyph).width);
     return {
-      loaded: document.fonts.check('14px "Recursive Mono"'),
+      loaded: document.fonts.check('14px "Geist Mono Variable"'),
       faceCount: faces.length,
       widths,
     };

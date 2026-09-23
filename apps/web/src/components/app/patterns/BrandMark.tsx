@@ -14,16 +14,16 @@ export function BrandMark({
 }) {
   const content = (
     <>
-      <img src="/favicon.svg" alt="" className="size-8 shrink-0" />
+      <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
       {!compact ? (
-        <span className="text-card-title">
+        <span className="text-[0.9375rem] leading-none font-semibold tracking-[-0.015em]">
           intar<span className="text-brand-text">.dev</span>
         </span>
       ) : null}
     </>
   );
   const linkClassName = cn(
-    "inline-flex min-h-11 items-center gap-2.5 rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+    "inline-flex min-h-11 items-center gap-2.5 rounded-lg",
     className,
   );
 

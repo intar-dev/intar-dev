@@ -8,8 +8,10 @@ import {
   useState,
 } from "react";
 import { Terminal } from "@xterm/xterm";
+import { Terminal as TerminalIcon } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogClose,
@@ -555,11 +557,28 @@ export function WebSshTerminal({
     return (
       <div
         data-terminal-status={status}
-        className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm"
+        className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]"
       >
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">{title}</p>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-2 py-1.5">
+          <div className="flex min-w-0 items-center gap-3">
+            <p className="inline-flex h-7 min-w-0 items-center gap-2 rounded-md bg-muted px-2.5 text-[0.8125rem] font-medium ring-1 ring-border dark:bg-accent/60">
+              <TerminalIcon
+                className="size-3.5 shrink-0 text-faint-foreground"
+                aria-hidden="true"
+              />
+              <span className="truncate">{title}</span>
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "size-1.5 shrink-0 rounded-full",
+                  status === "connected"
+                    ? "bg-success"
+                    : needsRecovery
+                      ? "bg-destructive"
+                      : "bg-warning text-warning motion-safe:animate-live",
+                )}
+              />
+            </p>
             {/* Stays in the DOM as the transport live region; only shown
                 while the connection needs attention. */}
             <p
@@ -582,7 +601,7 @@ export function WebSshTerminal({
           ) : null}
         </div>
 
-        <div className="min-h-0 flex-1 bg-terminal-background p-2">
+        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3">
           <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}
@@ -654,7 +673,7 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 bg-terminal-background p-2">
+        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3">
           <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}

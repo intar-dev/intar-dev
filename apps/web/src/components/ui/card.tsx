@@ -22,9 +22,9 @@ function Card({
       data-variant={variant}
       className={cn(
         "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-xl border border-border bg-card py-(--card-spacing) text-sm text-card-foreground [--card-spacing:var(--space-lg)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:var(--space-md)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
-        variant === "default" && "shadow-xs",
+        variant === "default" && "shadow-[var(--highlight),var(--shadow-raised)]",
         variant === "flat" && "rounded-lg bg-transparent shadow-none",
-        variant === "interactive" && "shadow-xs transition-[border-color,box-shadow,transform] duration-150 hover:border-brand-border hover:shadow-sm motion-reduce:transition-none",
+        variant === "interactive" && "shadow-[var(--highlight),var(--shadow-raised)] transition-[border-color,background-color,box-shadow] duration-150 ease-standard hover:border-border-strong hover:bg-[color-mix(in_oklch,var(--card),var(--foreground)_3%)] motion-reduce:transition-none",
         className
       )}
       {...props}
@@ -89,7 +89,7 @@ function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card-footer"
       className={cn(
-        "flex items-center rounded-b-xl border-t bg-muted/50 p-(--card-spacing)",
+        "flex items-center rounded-b-xl border-t bg-muted/40 p-(--card-spacing)",
         className
       )}
       {...props}

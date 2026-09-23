@@ -56,12 +56,14 @@ test("catalog meters retain exact shares, fit mobile, and respect reduced motion
   await ui.open({ ...routeCase("course-catalog"), theme: "dark" });
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
   await expect(cpu).toHaveAttribute("aria-valuetext", "65.6% available, 5.25 / 8 vCPUs");
-  await expect(cpu.locator(":scope > span")).toHaveCount(20);
-  const partial = cpu.locator(":scope > span > span").nth(13);
-  await expect(partial).toHaveCSS("transform", "matrix(0.125, 0, 0, 1, 0, 0)");
-  await expect(partial).toHaveCSS("transition-property", "none");
+  // One continuous fill carries the exact share; it eases in on arrival and
+  // holds still under reduced motion.
+  await expect(cpu.locator(":scope > span")).toHaveCount(1);
+  const fill = cpu.locator(":scope > span");
+  await expect(fill).toHaveCSS("transform", "matrix(0.65625, 0, 0, 1, 0, 0)");
+  await expect(fill).toHaveCSS("transition-property", "none");
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  await expect(partial).toHaveCSS("transition-duration", "0.25s");
+  await expect(fill).toHaveCSS("transition-duration", "0.5s");
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.getByRole("textbox", { name: "Search courses and lectures" }).fill("nothing-matches-this-course");
   await expect(page.getByText("No courses match your filters", { exact: true })).toBeVisible();

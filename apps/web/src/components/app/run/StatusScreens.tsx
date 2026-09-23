@@ -162,7 +162,7 @@ export function ScenarioStepScreen(props: {
                     step.state === "done"
                       ? "text-success"
                       : step.state === "active"
-                        ? "text-primary"
+                        ? "text-brand-text"
                         : step.state === "failed"
                           ? "text-destructive"
                           : "text-muted-foreground",

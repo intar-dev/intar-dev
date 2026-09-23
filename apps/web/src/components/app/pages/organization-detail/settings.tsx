@@ -591,7 +591,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
               Cancel
             </Button>
             <Button
-              variant="destructive"
+              variant="danger"
               disabled={
                 deleteConfirm !== detail.name || deleteOrganization.isPending
               }

@@ -300,6 +300,9 @@ export function ScenarioRunStart() {
     >
       <div
         data-run-start-sequence
+        role="region"
+        aria-label="Run start progress"
+        tabIndex={0}
         className="flex min-h-0 flex-1 overflow-y-auto p-3 sm:p-4"
       >
         <div className="m-auto w-full" data-run-sequence-frame>
@@ -1057,6 +1060,7 @@ export function ScenarioRun() {
           compactWord="Live"
           startedAt={attemptData.createdAt}
           leaseDeadlineMs={leaseDeadlineMs}
+          pulse
         />
       );
     }
@@ -1356,6 +1360,9 @@ export function ScenarioRun() {
       >
         <div
           data-run-shutdown-sequence
+          role="region"
+          aria-label="Run saving progress"
+          tabIndex={0}
           className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 sm:p-4"
         >
           <div className="shrink-0 space-y-2 empty:hidden">{errorAlerts}</div>
@@ -1386,7 +1393,7 @@ export function ScenarioRun() {
       returnTarget={getRunReturnTarget(attemptData.courseLocation)}
       guidance={guidanceProps}
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-3 [@media(max-height:500px)]:!p-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 pt-1.5 pb-3 [@media(max-height:500px)]:!p-3">
             <div className="shrink-0 space-y-2 empty:hidden">
               {errorAlerts}
             </div>
@@ -1525,7 +1532,7 @@ function RunWorkspaceShell({
       >
         <div
           data-run-work-area
-          className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+          className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-canvas"
         >
           <RunWorkspaceHeader
             title={title}
@@ -1546,7 +1553,7 @@ function RunPageFrame({ children }: { children: ReactNode }) {
   return (
     <div
       data-run-page
-      className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+      className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-canvas"
     >
       {children}
     </div>
@@ -1568,7 +1575,7 @@ function RunWorkspaceHeader({
 }) {
   return (
     <header
-      className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2"
+      className="flex shrink-0 flex-wrap items-center gap-2 bg-canvas px-3 pt-2.5 pb-1"
       data-run-navigation
       data-run-workspace-header
     >
@@ -1587,7 +1594,7 @@ function RunWorkspaceHeader({
         <ArrowLeft className="size-4" aria-hidden="true" />
         {returnTarget.text}
       </a>
-      <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-section-title">
+      <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-[0.9375rem] leading-snug font-semibold tracking-[-0.01em]">
         {title}
       </h1>
       <div className="flex max-w-full flex-wrap items-center gap-2">

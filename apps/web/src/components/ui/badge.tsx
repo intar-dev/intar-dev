@@ -22,7 +22,7 @@ const badgeVariants = cva(
           "border-success-border bg-success-subtle text-success [a]:hover:bg-success [a]:hover:text-success-foreground",
         warning:
           "border-warning-border bg-warning-subtle text-warning [a]:hover:bg-warning [a]:hover:text-warning-foreground",
-        link: "text-primary underline-offset-4 hover:underline",
+        link: "text-brand-text underline-offset-4 hover:underline",
       },
     },
     defaultVariants: {

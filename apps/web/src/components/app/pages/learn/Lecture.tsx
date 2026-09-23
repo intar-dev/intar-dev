@@ -6,6 +6,7 @@ import {
   BookOpen,
   LockKeyhole,
   RotateCcw,
+  SquareTerminal,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
@@ -243,7 +244,7 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
           />
         </div>
 
-        <section aria-label="Lecture content" className="text-body leading-7">
+        <section aria-label="Lecture content" className="text-body">
           <Markdown pageContent>{detail.lecture.bodyMarkdown}</Markdown>
         </section>
 
@@ -309,8 +310,19 @@ function LectureActionPanel({
   return (
     <section
       aria-labelledby="lecture-next-action"
-      className="w-full space-y-5 border-t pt-6 pb-2"
+      className="flex w-full flex-col gap-4 rounded-2xl border bg-card px-5 py-5 shadow-[var(--highlight),var(--shadow-raised)] motion-safe:animate-rise sm:flex-row sm:items-start sm:gap-5 sm:px-6"
     >
+      <span
+        aria-hidden="true"
+        className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60"
+      >
+        {isTheoryOnly ? (
+          <BookOpen className="size-5" />
+        ) : (
+          <SquareTerminal className="size-5" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1 space-y-4">
       <h2 id="lecture-next-action" className="text-section-title">
         {isTheoryOnly
           ? lecture.state === "completed"
@@ -377,6 +389,7 @@ function LectureActionPanel({
             : "Could not complete this lecture."}
         </InlineFeedback>
       ) : null}
+      </div>
     </section>
   );
 }

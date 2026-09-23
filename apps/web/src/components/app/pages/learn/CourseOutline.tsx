@@ -11,6 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
 import { LectureScenarioLabel } from "./LectureScenarioLabel";
+import { LectureProgressTrack } from "./LectureProgressTrack";
 import {
   lectureStatePresentation,
   type CourseCatalogCourse,
@@ -32,7 +33,7 @@ export function CourseOutlineRail(props: CourseOutlineProps) {
       data-course-outline-rail
     >
       <div
-        className="sticky top-[calc(var(--app-bar-h)+1.5rem)] max-h-[calc(100dvh-var(--app-bar-h)-3rem)] overflow-y-auto overscroll-contain border-l pl-6 pr-1"
+        className="sticky top-[calc(var(--app-bar-h)+2rem)] max-h-[calc(100dvh-var(--app-bar-h)-3.5rem)] overflow-y-auto overscroll-contain pl-2 pr-1"
         role="region"
         aria-label="Course outline navigation"
         tabIndex={0}
@@ -106,18 +107,22 @@ function CourseOutlineContent({
 
   return (
     <nav aria-label={`${course.title} lectures`}>
-      <div className={cn("space-y-2", compact && "sr-only")}>
+      <div className={cn("space-y-1 px-2.5", compact && "sr-only")}>
         <CourseLink
           route={route}
-          className="inline-flex rounded-sm text-card-title transition-colors hover:text-primary"
+          className="inline-flex rounded-sm text-card-title transition-colors duration-150 hover:text-brand-text"
         >
           {course.title}
         </CourseLink>
         <p className="text-caption tabular-nums">
           Lecture {position} of {total} · {completed} complete
         </p>
+        <LectureProgressTrack
+          lectures={course.lectures}
+          className="pt-2.5 *:h-1 *:flex-1"
+        />
       </div>
-      <ol className={cn("divide-y", compact ? "border-y" : "mt-4 border-y")}>
+      <ol className={cn("space-y-0.5", compact ? "" : "mt-4")}>
         {course.lectures.map((lecture, index) => (
           <CourseOutlineItem
             key={lecture.lectureId}
@@ -146,14 +151,19 @@ function CourseOutlineItem({
   const state = lectureStatePresentation(lecture.state);
   const content = (
     <>
-      <span className="pt-0.5 text-xs text-muted-foreground tabular-nums">
+      <span
+        className={cn(
+          "pt-0.5 text-xs font-medium tabular-nums",
+          current ? "text-brand-text" : "text-faint-foreground",
+        )}
+      >
         {String(ordinal).padStart(2, "0")}
       </span>
       <span className="min-w-0 space-y-1">
         <span className="block text-sm font-medium leading-5 [overflow-wrap:anywhere]">
           {lecture.title}
         </span>
-        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-faint-foreground">
           {lecture.state === "completed" ? (
             <CheckCircle2 className="size-3.5 text-success" aria-hidden="true" />
           ) : lecture.state === "locked" ? (
@@ -162,7 +172,9 @@ function CourseOutlineItem({
             <span
               className={cn(
                 "size-2 rounded-full",
-                current ? "bg-primary" : "border border-current",
+                current
+                  ? "bg-primary text-primary motion-safe:animate-live"
+                  : "border border-current",
               )}
               aria-hidden="true"
             />
@@ -175,9 +187,10 @@ function CourseOutlineItem({
     </>
   );
   const className = cn(
-    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2.5 px-2 py-3 text-left transition-colors",
-    current && "bg-brand-subtle text-brand-text",
-    !current && lecture.state !== "locked" && "hover:bg-muted",
+    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2.5 rounded-[0.625rem] px-2.5 py-2.5 text-left transition-colors duration-150 ease-standard",
+    current &&
+      "bg-card text-foreground shadow-[inset_0_0_0_1px_var(--border),var(--shadow-control)]",
+    !current && lecture.state !== "locked" && "hover:bg-muted dark:hover:bg-accent/60",
     lecture.state === "locked" && "text-muted-foreground",
   );
 
@@ -193,7 +206,7 @@ function CourseOutlineItem({
           lectureId={lecture.lectureId}
           className={cn(
             className,
-            "rounded-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+            "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
           )}
         >
           {content}

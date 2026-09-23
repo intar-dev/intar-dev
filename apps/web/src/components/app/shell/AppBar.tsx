@@ -164,7 +164,7 @@ export function AppBar() {
       className={
         ancestors.length
           ? "min-w-0 truncate text-sm font-semibold text-foreground"
-          : "min-w-0 truncate text-card-title"
+          : "min-w-0 truncate text-[0.9375rem] font-semibold tracking-[-0.01em] text-foreground"
       }
     >
       {final.label}
@@ -172,7 +172,11 @@ export function AppBar() {
   ) : null;
 
   return (
-    <header className="sticky top-0 z-30 grid h-[var(--app-bar-h)] shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b bg-background px-[var(--page-inset)]">
+    // On desktop the inset panel's rounded top edge lives here: an 8px canvas
+    // band hides scrolled content above the bar, and the bar redraws the
+    // panel's top corners and side borders so it stays attached while sticky.
+    <header className="sticky top-0 z-30 shrink-0 bg-background lg:-mx-px lg:bg-sidebar lg:pt-2">
+      <div className="grid h-[var(--app-bar-h)] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b bg-background px-[var(--page-inset)] lg:rounded-t-xl lg:border-x lg:border-t lg:border-sidebar-border lg:border-b-border">
       <div className="flex min-w-0 items-center gap-2" data-app-bar-leading>
         <SidebarTrigger className="-ml-1" />
         <Separator
@@ -185,7 +189,7 @@ export function AppBar() {
           <Link
             to={parent.to}
             aria-label={`Back to ${parent.label}`}
-            className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40 sm:hidden [@media(pointer:coarse)]:size-11"
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground sm:hidden [@media(pointer:coarse)]:size-11"
           >
             <ArrowLeft className="size-4" aria-hidden="true" />
           </Link>
@@ -202,13 +206,13 @@ export function AppBar() {
                   >
                     <Link
                       to={ancestor.to}
-                      className="rounded-sm text-sm text-muted-foreground transition-colors hover:text-foreground"
+                      className="rounded-sm text-sm text-muted-foreground transition-colors duration-150 hover:text-foreground"
                     >
                       {ancestor.label}
                     </Link>
                     <ChevronRight
                       aria-hidden="true"
-                      className="size-3.5 text-muted-foreground/60"
+                      className="size-3.5 text-faint-foreground/70"
                     />
                   </li>
                 ) : null,
@@ -242,6 +246,7 @@ export function AppBar() {
             <DropdownMenuContent align="end">{chrome.menu}</DropdownMenuContent>
           </DropdownMenu>
         ) : null}
+      </div>
       </div>
     </header>
   );

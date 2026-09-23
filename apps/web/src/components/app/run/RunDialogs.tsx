@@ -61,7 +61,7 @@ export function ScenarioCancelDialog(props: {
             Keep going
           </Button>
           <Button
-            variant="destructive"
+            variant="danger"
             onClick={props.onConfirm}
             disabled={props.pending}
           >
@@ -120,7 +120,7 @@ export function DeleteRunDialog(props: {
             Keep run
           </Button>
           <Button
-            variant="destructive"
+            variant="danger"
             onClick={props.onConfirm}
             disabled={props.pending}
           >

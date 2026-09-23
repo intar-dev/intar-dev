@@ -253,7 +253,7 @@ export function Organizations() {
                           <Building2 className="size-5" />
                         </span>
                         <div className="min-w-0 flex-1">
-                          <h2 className="text-card-title transition-colors group-hover:text-primary">
+                          <h2 className="text-card-title transition-colors group-hover:text-brand-text">
                             {organization.name}
                           </h2>
                           <p className="mt-1 flex flex-wrap items-center gap-1.5 text-metadata">

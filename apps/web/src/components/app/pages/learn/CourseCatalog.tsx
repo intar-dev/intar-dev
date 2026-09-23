@@ -46,6 +46,7 @@ import {
 import { ResourceCapacity } from "./ResourceCapacity";
 import { CourseLink, LectureLink } from "./course-links";
 import { LectureScenarioLabel } from "./LectureScenarioLabel";
+import { LectureProgressTrack } from "./LectureProgressTrack";
 import {
   compactCatalogSearch,
   normalizeCatalogSearch,
@@ -415,13 +416,13 @@ function CourseIndexItem({
     <CourseLink
       route={route}
       search={search}
-      className="group grid min-h-28 gap-4 px-4 py-5 outline-none transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:px-6"
+      className="group grid min-h-24 gap-4 px-4 py-4.5 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-5 dark:hover:bg-accent/60"
     >
-      <span className="min-w-0 space-y-2">
-        <span className="block text-page-title text-balance [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text">
+      <span className="min-w-0 space-y-1.5">
+        <span className="block text-base font-semibold tracking-[-0.01em] text-balance [overflow-wrap:anywhere]">
           {course.title}
         </span>
-        <span className="block text-body text-muted-foreground text-pretty">
+        <span className="block text-sm text-muted-foreground text-pretty">
           {course.summary}
         </span>
         <span className="block pt-1">
@@ -435,14 +436,17 @@ function CourseIndexItem({
           />
         </span>
       </span>
-      <span className="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:justify-self-end">
-        {course.lectures.length > 0 && completed === course.lectures.length
-          ? "Review course"
-          : "Open course"}
-        <ArrowRight
-          className="size-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
-          aria-hidden
-        />
+      <span className="flex flex-col gap-2.5 sm:items-end sm:justify-self-end">
+        <LectureProgressTrack lectures={course.lectures} />
+        <span className="inline-flex min-h-8 items-center gap-2 text-sm font-semibold text-brand-text">
+          {course.lectures.length > 0 && completed === course.lectures.length
+            ? "Review course"
+            : "Open course"}
+          <ArrowRight
+            className="size-4 transition-transform duration-200 ease-enter group-hover:translate-x-0.5 motion-reduce:transition-none"
+            aria-hidden
+          />
+        </span>
       </span>
     </CourseLink>
   );
@@ -574,9 +578,9 @@ function LectureListItem({
       <span
         aria-hidden="true"
         className={cn(
-          "flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary font-mono text-sm font-semibold tabular-nums text-secondary-foreground",
-          lecture.state === "completed" && "bg-success text-success-foreground",
-          lecture.state === "in_progress" && "bg-brand-text text-primary-foreground",
+          "flex size-9 shrink-0 items-center justify-center rounded-[0.5625rem] bg-secondary text-sm font-semibold tabular-nums text-muted-foreground",
+          lecture.state === "completed" && "bg-success-subtle text-success ring-1 ring-success-border",
+          lecture.state === "in_progress" && "bg-brand-subtle text-brand-text ring-1 ring-brand-border",
         )}
       >
         {lecture.state === "completed" ? (
@@ -587,7 +591,7 @@ function LectureListItem({
       </span>
       <span className="min-w-0 flex-1 space-y-1.5">
         <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="text-card-title [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text">
+          <span className="text-card-title [overflow-wrap:anywhere]">
             {lecture.title}
           </span>
           <LectureStatus lecture={lecture} />
@@ -616,7 +620,7 @@ function LectureListItem({
             <LectureLink
               route={{ ...route, courseId: lecture.blockedBy.courseId }}
               lectureId={lecture.blockedBy.lectureId}
-              className="rounded-sm font-medium text-primary underline underline-offset-4 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+              className="rounded-sm font-medium text-brand-text underline underline-offset-4"
             >
               “{lecture.blockedBy.title}”
             </LectureLink>{" "}
@@ -630,7 +634,7 @@ function LectureListItem({
           <LockKeyhole className="size-4" aria-hidden />
         ) : (
           <ArrowRight
-            className="size-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
+            className="size-4 transition-transform duration-200 ease-enter group-hover:translate-x-0.5 motion-reduce:transition-none"
             aria-hidden
           />
         )}
@@ -639,10 +643,10 @@ function LectureListItem({
   );
 
   const className = cn(
-    "group grid min-h-20 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 outline-none sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-6",
+    "group grid min-h-20 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-5",
     lecture.state === "locked"
       ? "bg-muted/35 text-muted-foreground"
-      : "transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40",
+      : "transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring dark:hover:bg-accent/60",
   );
   return lecture.state === "locked" ? (
     <div className={className} data-lecture-state="locked">
@@ -733,7 +737,7 @@ function AssignmentLink({
   const locked = lecture?.state === "locked";
   const content = (
     <>
-      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-[0.5625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
         <Users className="size-4" aria-hidden />
       </span>
       <span className="min-w-0 flex-1 space-y-1">
@@ -748,11 +752,14 @@ function AssignmentLink({
       </span>
       <span className="col-start-2 inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:col-start-auto">
         {locked ? "Open requirement" : "Open lecture"}
-        <ArrowRight className="size-4" aria-hidden />
+        <ArrowRight
+          className="size-4 transition-transform duration-200 ease-enter group-hover:translate-x-0.5 motion-reduce:transition-none"
+          aria-hidden
+        />
       </span>
     </>
   );
-  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-4 outline-none transition-colors hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/40 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-6";
+  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3.5 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
 
   return route && target ? (
     <LectureLink route={route} lectureId={target.lectureId} className={className}>

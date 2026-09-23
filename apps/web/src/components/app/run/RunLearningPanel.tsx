@@ -8,7 +8,7 @@ import {
 } from "react";
 import {
   CheckCircle2,
-  CircleAlert,
+  CircleDashed,
   Eye,
   Lightbulb,
   LoaderCircle,
@@ -159,13 +159,13 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
       aria-label="Lecture theory and hints"
       data-run-learning-panel
       className={cn(
-        "hidden h-full min-h-0 min-w-0 w-full border-l bg-card min-[960px]:flex min-[960px]:flex-col",
+        "hidden h-full min-h-0 min-w-0 w-full bg-canvas min-[960px]:flex min-[960px]:flex-col min-[960px]:pt-2.5 min-[960px]:pr-3 min-[960px]:pb-3",
         className,
       )}
     >
       <div
         data-run-learning-panel-scroll
-        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-card px-4 py-4"
+        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain rounded-xl border bg-card px-4 py-4 shadow-[var(--highlight),var(--shadow-raised)]"
         role="region"
         aria-label="Lecture theory and hints content"
         tabIndex={0}
@@ -413,21 +413,64 @@ function LearningPanelClose() {
   );
 }
 
-function CheckStatusIcon({ status }: { status: LearnerCheckStatus }) {
+// Needs repair is an open task, not an error: a dashed amber ring. Checking
+// spins in the informational blue. Verified settles into a green check that
+// pops only at the moment it turns, never on first paint.
+function CheckStatusIcon({
+  status,
+  justVerified = false,
+}: {
+  status: LearnerCheckStatus;
+  justVerified?: boolean;
+}) {
   if (status === "verified") {
     return (
-      <CheckCircle2 className="size-4 text-success" aria-hidden="true" />
+      <CheckCircle2
+        className={cn(
+          "size-4 text-success",
+          justVerified && "motion-safe:animate-pop",
+        )}
+        aria-hidden="true"
+      />
     );
   }
   if (status === "checking") {
     return (
       <LoaderCircle
-        className="size-4 text-warning motion-safe:animate-spin"
+        className="size-4 text-info motion-safe:animate-spin"
         aria-hidden="true"
       />
     );
   }
-  return <CircleAlert className="size-4 text-destructive" aria-hidden="true" />;
+  return <CircleDashed className="size-4 text-warning" aria-hidden="true" />;
+}
+
+const CHECK_SEGMENT_TONES: Record<LearnerCheckStatus, string> = {
+  verified: "bg-success",
+  checking: "bg-info/60",
+  needs_repair: "bg-border-strong/70",
+};
+
+const CHECK_LABEL_TONES: Record<LearnerCheckStatus, string> = {
+  verified: "text-success",
+  checking: "text-info",
+  needs_repair: "text-warning",
+};
+
+/** Keys of checks that turned verified since the previous render. */
+function useJustVerified(checks: readonly LearnerCheck[]) {
+  const previous = useRef<ReadonlyMap<string, LearnerCheckStatus>>(new Map());
+  const justVerified = new Set<string>();
+  for (const check of checks) {
+    const before = previous.current.get(check.key);
+    if (before && before !== "verified" && check.status === "verified") {
+      justVerified.add(check.key);
+    }
+  }
+  useEffect(() => {
+    previous.current = new Map(checks.map((check) => [check.key, check.status]));
+  });
+  return justVerified;
 }
 
 function LectureTheory(props: {
@@ -471,16 +514,16 @@ function WorkOrder(props: {
         <p id={props.headingId} className="text-label">
           Work order
         </p>
-        <Lightbulb className="size-4 text-primary" aria-hidden="true" />
+        <Lightbulb className="size-4 text-brand-text" aria-hidden="true" />
       </div>
       {props.objectives.length ? (
         <ol className="mt-3 divide-y border-y">
           {props.objectives.map((objective, index) => (
             <li
               key={`${objective.probeName}:${index}`}
-              className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-3 py-4"
+              className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-3 py-3.5"
             >
-              <span className="font-heading text-sm font-semibold text-primary tabular-nums">
+              <span className="text-sm font-semibold text-brand-text tabular-nums">
                 {String(index + 1).padStart(2, "0")}
               </span>
               <span className="text-sm font-medium leading-6">
@@ -507,6 +550,7 @@ function Checks(props: {
   pinned?: boolean;
 }) {
   const checks = getLearnerChecks(props.probes, props.objectives);
+  const justVerified = useJustVerified(checks);
 
   return (
     <section
@@ -517,7 +561,7 @@ function Checks(props: {
       )}
     >
       <div className="flex shrink-0 items-center justify-between gap-3">
-        <p id={props.headingId} className="text-label">
+        <p id={props.headingId} className="text-sm font-semibold text-foreground">
           Checks
         </p>
         {props.pending ? (
@@ -526,7 +570,7 @@ function Checks(props: {
           </span>
         ) : (
           <span
-            className="shrink-0 text-xs text-muted-foreground tabular-nums"
+            className="shrink-0 text-xs text-faint-foreground tabular-nums"
             aria-label={`${props.passedChecks} of ${checks.length} checks verified`}
           >
             {props.passedChecks}/{checks.length} verified
@@ -534,23 +578,43 @@ function Checks(props: {
         )}
       </div>
       {checks.length ? (
+        <span aria-hidden="true" className="mt-3 flex shrink-0 gap-1">
+          {checks.map((check) => (
+            <span
+              key={check.key}
+              className={cn(
+                "h-1 flex-1 rounded-full transition-colors duration-500 ease-standard",
+                CHECK_SEGMENT_TONES[check.status],
+              )}
+            />
+          ))}
+        </span>
+      ) : null}
+      {checks.length ? (
         <ol
           tabIndex={props.pinned ? 0 : undefined}
           aria-label={props.pinned ? "Checks list" : undefined}
           className={cn(
-            "mt-4 divide-y border-y",
+            "-mx-2 mt-2.5 space-y-0.5",
             props.pinned &&
-              "min-h-0 overflow-y-auto overscroll-contain pr-1",
+              "min-h-0 overflow-y-auto overscroll-contain border-b pr-1 pb-2",
           )}
         >
           {checks.map((check) => {
             return (
               <li
                 key={check.key}
-                className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 py-4"
+                data-check-status={check.status}
+                className={cn(
+                  "grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 rounded-lg px-2 py-2.5",
+                  justVerified.has(check.key) && "motion-safe:animate-verified",
+                )}
               >
-                <span className="mt-0.5">
-                  <CheckStatusIcon status={check.status} />
+                <span className="mt-1">
+                  <CheckStatusIcon
+                    status={check.status}
+                    justVerified={justVerified.has(check.key)}
+                  />
                 </span>
                 <span className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1">
                   <span className="min-w-0 flex-1 text-sm font-medium leading-6 [overflow-wrap:anywhere]">
@@ -558,12 +622,8 @@ function Checks(props: {
                   </span>
                   <span
                     className={cn(
-                      "pt-0.5 text-xs font-medium whitespace-nowrap",
-                      check.status === "verified"
-                        ? "text-success"
-                        : check.status === "checking"
-                          ? "text-warning"
-                          : "text-destructive",
+                      "pt-0.5 text-xs font-medium whitespace-nowrap transition-colors duration-300",
+                      CHECK_LABEL_TONES[check.status],
                     )}
                   >
                     {check.statusLabel}
@@ -606,7 +666,7 @@ function Hints(props: {
           Hints
         </p>
         {props.hints.length ? (
-          <span className="text-xs text-muted-foreground tabular-nums">
+          <span className="text-xs text-faint-foreground tabular-nums">
             {props.revealedHints}/{props.hints.length} used
           </span>
         ) : null}
@@ -656,11 +716,11 @@ function HintLadder(props: {
         <p className="text-label">
           {props.group.label}
         </p>
-        <span className="text-xs text-muted-foreground tabular-nums">
+        <span className="text-xs text-faint-foreground tabular-nums">
           {revealed}/{props.group.hints.length}
         </span>
       </div>
-      <ol className="divide-y border-y">
+      <ol className="divide-y overflow-hidden rounded-lg border bg-muted/30 dark:bg-background/40">
         {props.group.hints.map((hint, index) => {
           const ordinal = `Hint ${index + 1}`;
           const canReveal = nextHint?.key === hint.key && nextHint.unlocked;
@@ -672,8 +732,12 @@ function HintLadder(props: {
 
           if (hint.revealed) {
             return (
-              <li key={hint.key} className="space-y-2 py-4">
-                <p className="text-sm font-medium">
+              <li
+                key={hint.key}
+                className="space-y-2 px-3 py-3 motion-safe:animate-rise"
+              >
+                <p className="flex items-center gap-2 text-sm font-medium">
+                  <Lightbulb className="size-3.5 shrink-0 text-warning" aria-hidden="true" />
                   {hint.title?.trim() || ordinal}
                 </p>
                 {hint.bodyMarkdown ? (
@@ -687,16 +751,22 @@ function HintLadder(props: {
 
           if (canReveal) {
             return (
-              <li key={hint.key} className="py-4">
-                <div className="flex min-h-10 items-center justify-between gap-3">
+              <li key={hint.key} className="px-3 py-2.5">
+                <div className="flex min-h-9 items-center justify-between gap-3">
                   {/* Sealed hints expose no authored title or body. */}
                   <p className="text-sm font-medium">{ordinal}</p>
                   <Button
                     type="button"
                     variant="outline"
+                    size="sm"
                     disabled={props.pendingHintKey === hint.key}
                     onClick={() => props.onRevealHint(hint.key)}
                   >
+                    {props.pendingHintKey === hint.key ? (
+                      <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Eye aria-hidden="true" />
+                    )}
                     {props.pendingHintKey === hint.key
                       ? "Revealing…"
                       : "Reveal"}
@@ -714,7 +784,7 @@ function HintLadder(props: {
           return (
             <li
               key={hint.key}
-              className="flex min-h-10 items-center gap-2.5 py-4 text-muted-foreground"
+              className="flex min-h-9 items-center gap-2.5 px-3 py-2.5 text-faint-foreground"
             >
               <LockKeyhole className="size-4 shrink-0" aria-hidden="true" />
               {/* This ordinal is not an authored hint title. */}

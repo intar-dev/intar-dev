@@ -538,7 +538,7 @@ function RevokeInviteDialog({
           <Button variant="outline" disabled={pending} onClick={onClose}>
             Keep invite
           </Button>
-          <Button variant="destructive" disabled={pending} onClick={onConfirm}>
+          <Button variant="danger" disabled={pending} onClick={onConfirm}>
             {pending ? "Revoking…" : "Revoke invite"}
           </Button>
         </DialogFooter>
@@ -585,7 +585,7 @@ function RevokeUserDialog({
           <Button variant="outline" disabled={pending} onClick={onClose}>
             Keep access
           </Button>
-          <Button variant="destructive" disabled={pending} onClick={onConfirm}>
+          <Button variant="danger" disabled={pending} onClick={onConfirm}>
             {pending ? "Revoking…" : "Revoke access"}
           </Button>
         </DialogFooter>

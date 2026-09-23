@@ -548,7 +548,7 @@ function BuildCount({
       <p
         className={cn(
           "mt-1 text-section-title tabular-nums",
-          tone === "brand" && "text-primary",
+          tone === "brand" && "text-brand-text",
           tone === "success" && "text-success",
           tone === "error" && "text-destructive",
         )}

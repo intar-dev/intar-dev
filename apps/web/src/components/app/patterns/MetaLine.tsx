@@ -14,9 +14,10 @@ interface MetaLineProps {
   className?: string;
 }
 
-// The one metadata treatment: a single muted mono line of interpunct-separated
-// facts (`ubuntu-24.04 · ~45 min · 3 VMs`). Replaces chip rows; chips remain
-// only where they are interactive (filters).
+// The one metadata treatment: a single quiet line of interpunct-separated
+// facts (`3 lectures · ~45 min · 1 VM`) in tabular sans. Mono is reserved for
+// commands, IDs, logs, and timers. Chips remain only where they are
+// interactive (filters).
 export function MetaLine({ items, className }: MetaLineProps) {
   const visible = items.filter(
     (item): item is ReactNode => item !== null && item !== undefined && item !== false,
@@ -25,7 +26,7 @@ export function MetaLine({ items, className }: MetaLineProps) {
   return (
     <p
       className={cn(
-        "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs leading-4 text-muted-foreground",
+        "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] leading-5 text-faint-foreground tabular-nums",
         className,
       )}
     >
@@ -34,7 +35,11 @@ export function MetaLine({ items, className }: MetaLineProps) {
           key={index}
           className="inline-flex min-w-0 items-start gap-1.5"
         >
-          {index > 0 ? <span aria-hidden="true">·</span> : null}
+          {index > 0 ? (
+            <span aria-hidden="true" className="text-border-strong">
+              ·
+            </span>
+          ) : null}
           <span className="min-w-0 [overflow-wrap:anywhere]">{item}</span>
         </span>
       ))}

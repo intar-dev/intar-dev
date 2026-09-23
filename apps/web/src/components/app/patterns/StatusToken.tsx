@@ -4,12 +4,13 @@ import { formatClockSeconds } from "../lib/format";
 
 export type StatusTone = "pending" | "live" | "success" | "danger" | "muted";
 
+// The text color feeds the live ring (currentColor), so each tone sets both.
 const DOT_TONES: Record<StatusTone, string> = {
-  pending: "bg-warning",
-  live: "bg-primary",
-  success: "bg-success",
-  danger: "bg-destructive",
-  muted: "bg-muted-foreground",
+  pending: "bg-warning text-warning",
+  live: "bg-primary text-primary",
+  success: "bg-success text-success",
+  danger: "bg-destructive text-destructive",
+  muted: "bg-faint-foreground text-faint-foreground",
 };
 
 interface StatusTokenProps {
@@ -22,7 +23,7 @@ interface StatusTokenProps {
   elapsed?: string | null;
   /** Self-ticking clock; freezes at frozenMs when set. Overrides `elapsed`. */
   clock?: { startedAt: number; frozenMs?: number | null } | undefined;
-  /** Amber "becoming" states only — at most one pulsing element per view. */
+  /** The one live or becoming state in a view — a soft ring, never a blink. */
   pulse?: boolean;
   /**
    * Announce word changes to screen readers. Reserve for THE one live status
@@ -51,12 +52,12 @@ export function StatusToken({
         className={cn(
           "size-2 shrink-0 rounded-full",
           DOT_TONES[tone],
-          pulse && "motion-safe:animate-pulse",
+          pulse && "motion-safe:animate-live",
         )}
       />
       <span
         role={live ? "status" : undefined}
-        className="truncate text-sm font-medium"
+        className="truncate text-[0.8125rem] font-medium"
       >
         {compactWord ? (
           <>
@@ -72,7 +73,7 @@ export function StatusToken({
       ) : elapsed ? (
         <span
           aria-hidden="true"
-          className="font-mono text-xs text-muted-foreground tabular-nums"
+          className="font-mono text-xs text-faint-foreground tabular-nums"
         >
           {elapsed}
         </span>
@@ -101,7 +102,7 @@ function TickingClock(props: {
   return (
     <span
       aria-hidden="true"
-      className="font-mono text-xs text-muted-foreground tabular-nums"
+      className="font-mono text-xs text-faint-foreground tabular-nums"
     >
       {formatClockSeconds(seconds)}
     </span>

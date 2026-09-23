@@ -13,9 +13,9 @@ export function ResourceCapacity({
 }) {
   const titleId = useId();
   return (
-    <section aria-labelledby={titleId} className="space-y-3 border-b pb-5">
+    <section aria-labelledby={titleId} className="space-y-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h2 id={titleId} className="text-sm font-semibold">Available for new runs</h2>
+        <h2 id={titleId} className="text-card-title">Available for new runs</h2>
         {updateFailed ? (
           <p role="status" className="text-caption text-muted-foreground">
             Update failed · {capacity ? "Showing last values" : "Try again shortly"}
@@ -23,7 +23,7 @@ export function ResourceCapacity({
         ) : null}
       </div>
       {capacity ? (
-        <div className="grid gap-4 sm:grid-cols-2 sm:gap-8">
+        <div className="grid gap-3 sm:grid-cols-2">
           <CapacityMeter label="CPU" available={capacity.cpu.availableMillis} total={capacity.cpu.totalMillis} divisor={1000} unit="vCPUs" />
           <CapacityMeter label="Memory" available={capacity.memory.availableMib} total={capacity.memory.totalMib} divisor={1024} unit="GiB" />
         </div>
@@ -46,10 +46,10 @@ function CapacityMeter({ label, available, total, divisor, unit }: {
   const fraction = total > 0 ? value / total : 0;
   const valueText = `${amount.format(value / divisor)} / ${amount.format(total / divisor)} ${unit}`;
   return (
-    <div className="min-w-0 space-y-2">
+    <div className="min-w-0 space-y-3 rounded-xl border bg-card px-4.5 py-4 shadow-[var(--highlight),var(--shadow-raised)]">
       <div className="flex items-baseline justify-between gap-3 text-sm">
         <span id={labelId} className="font-medium">{label}</span>
-        <span className="tabular-nums text-brand-text">{percent.format(fraction * 100)}% available</span>
+        <span className="font-medium tabular-nums text-success">{percent.format(fraction * 100)}% available</span>
       </div>
       <div
         role="meter"
@@ -58,18 +58,15 @@ function CapacityMeter({ label, available, total, divisor, unit }: {
         aria-valuemax={100}
         aria-valuenow={fraction * 100}
         aria-valuetext={`${percent.format(fraction * 100)}% available, ${valueText}`}
-        className="grid h-2 grid-cols-20 gap-1"
+        className="h-1.5 overflow-hidden rounded-full bg-muted dark:bg-accent"
       >
-        {Array.from({ length: 20 }, (_, index) => (
-          <span key={index} aria-hidden="true" className="overflow-hidden rounded-xs bg-border">
-            <span
-              className="block h-full origin-left bg-brand-text transition-transform duration-250 ease-out motion-reduce:transition-none"
-              style={{ transform: `scaleX(${Math.max(0, Math.min(1, fraction * 20 - index))})` }}
-            />
-          </span>
-        ))}
+        <span
+          aria-hidden="true"
+          className="block h-full origin-left rounded-full bg-success transition-transform duration-500 ease-enter motion-safe:animate-meter motion-reduce:transition-none"
+          style={{ transform: `scaleX(${Math.max(0, Math.min(1, fraction))})` }}
+        />
       </div>
-      <p className="text-caption tabular-nums text-muted-foreground">{valueText}</p>
+      <p className="text-caption tabular-nums">{valueText}</p>
     </div>
   );
 }

@@ -66,18 +66,21 @@ export function SidebarUserMenu() {
                 size="lg"
                 className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
               >
-                <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-sidebar-accent text-sidebar-accent-foreground">
-                  <UserIcon className="size-4" />
+                <span
+                  aria-hidden="true"
+                  className="flex size-7.5 shrink-0 items-center justify-center rounded-full bg-accent text-[0.8125rem] font-semibold text-foreground ring-1 ring-border"
+                >
+                  {username.slice(0, 1).toUpperCase()}
                 </span>
                 <span className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-medium">{username}</span>
+                  <span className="truncate font-medium text-foreground">{username}</span>
                   {user.email ? (
-                    <span className="truncate text-xs text-muted-foreground">
+                    <span className="truncate text-xs font-normal text-faint-foreground">
                       {user.email}
                     </span>
                   ) : null}
                 </span>
-                <ChevronsUpDown className="ml-auto size-4" />
+                <ChevronsUpDown className="ml-auto size-4 text-faint-foreground" />
               </SidebarMenuButton>
             }
           />

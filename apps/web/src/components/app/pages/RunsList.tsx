@@ -3,7 +3,6 @@ import {
   ArrowRight,
   BookOpen,
   ChevronDown,
-  CircleDot,
   History,
   LoaderCircle,
 } from "lucide-react";
@@ -278,9 +277,12 @@ function SettledRunGroupCard({ group }: { group: SettledRunGroup }) {
 // accent cards with one big Resume action.
 function ActiveRunCard({ run }: { run: MyRunEntry }) {
   return (
-    <article className="flex flex-col gap-3 rounded-xl border border-brand-border bg-brand-subtle p-4 sm:flex-row sm:items-center sm:p-5">
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-card text-brand-text">
-        <CircleDot className="size-5 motion-safe:animate-pulse" aria-hidden />
+    <article className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-[var(--highlight),var(--shadow-raised)] sm:flex-row sm:items-center sm:gap-4 sm:p-5">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
+        <span
+          className="size-2 rounded-full bg-primary text-primary motion-safe:animate-live"
+          aria-hidden
+        />
       </span>
       <div className="min-w-0 flex-1 space-y-1">
         <h3 className="text-card-title text-balance">{run.title}</h3>

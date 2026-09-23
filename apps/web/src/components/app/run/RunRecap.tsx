@@ -11,12 +11,17 @@ import {
 import { Link } from "@tanstack/react-router";
 import {
   ArrowLeft,
+  Check,
   ArrowRight,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  CircleDashed,
+  CircleStop,
   Clock3,
+  Lightbulb,
+  LockKeyhole,
   PlayCircle,
 } from "lucide-react";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
@@ -180,20 +185,23 @@ export function RunRecap({
   return (
     <section
       aria-labelledby="run-recap-heading"
-      className="w-full space-y-6 py-6 md:space-y-8 md:py-8"
+      className="w-full space-y-7 py-6 md:space-y-8 md:py-8"
     >
-      <header className="border-b border-primary/15 pb-6">
-        <h2
-          id="run-recap-heading"
-          ref={headingRef}
-          tabIndex={-1}
-          className="mt-2 text-feature-title outline-none"
-        >
-          {recap.title}
-        </h2>
-        <p className="mt-2 text-support text-muted-foreground">
-          {recap.description}
-        </p>
+      <header className="flex items-start gap-4 sm:items-center sm:gap-5">
+        <RecapBadge kind={recap.kind} />
+        <div className="min-w-0 motion-safe:animate-rise">
+          <h2
+            id="run-recap-heading"
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-feature-title outline-none"
+          >
+            {recap.title}
+          </h2>
+          <p className="mt-1.5 text-support text-muted-foreground">
+            {recap.description}
+          </p>
+        </div>
       </header>
 
       {objectives.length ? (
@@ -210,20 +218,22 @@ export function RunRecap({
             objectives={objectives}
             verifiedObjectives={verifiedObjectives}
           />
-          <ol className="mt-4 divide-y">
-            {objectives.map((objective) => (
+          <ol className="mt-3.5 divide-y overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]">
+            {objectives.map((objective, index) => (
               <li
                 key={objective.key}
-                className="grid min-h-11 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 py-4"
+                className="grid min-h-12 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 px-4 py-3.5 motion-safe:animate-rise"
+                style={{ animationDelay: `${120 + index * 70}ms` }}
               >
                 {objective.status === "verified" ? (
                   <CheckCircle2
-                    className="size-4 text-success"
+                    className="mt-0.5 size-4 text-success motion-safe:animate-pop"
+                    style={{ animationDelay: `${200 + index * 70}ms` }}
                     aria-hidden="true"
                   />
                 ) : (
-                  <CircleAlert
-                    className="size-4 text-destructive"
+                  <CircleDashed
+                    className="mt-0.5 size-4 text-warning"
                     aria-hidden="true"
                   />
                 )}
@@ -233,10 +243,10 @@ export function RunRecap({
                   </span>
                   <span
                     className={cn(
-                      "text-support font-medium whitespace-nowrap",
+                      "text-[0.8125rem] font-medium whitespace-nowrap",
                       objective.status === "verified"
                         ? "text-success"
-                        : "text-destructive",
+                        : "text-warning",
                     )}
                   >
                     {objective.status === "verified"
@@ -250,28 +260,34 @@ export function RunRecap({
         </section>
       ) : null}
 
-      <section aria-label="Learning summary">
-        <dl className="grid gap-x-8 gap-y-4 text-support sm:grid-cols-3">
+      <section aria-label="Learning summary" className="motion-safe:animate-rise [animation-delay:80ms]">
+        <dl className="grid overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)] max-sm:divide-y sm:auto-cols-fr sm:grid-flow-col sm:divide-x">
           {recap.kind === "solved" && run.solveDurationMs !== null ? (
-            <div>
-              <dt className="inline-flex items-center gap-2 text-caption">
-                <Clock3 className="size-4" aria-hidden="true" />
+            <div className="px-5 py-4">
+              <dt className="inline-flex items-center gap-2 text-caption font-medium">
+                <Clock3 className="size-3.5" aria-hidden="true" />
                 Solve time
               </dt>
-              <dd className="mt-1 font-medium tabular-nums">
+              <dd className="mt-1.5 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
                 {formatScenarioDurationMs(run.solveDurationMs)}
               </dd>
             </div>
           ) : null}
-          <div>
-            <dt className="text-caption">Hints used</dt>
-            <dd className="mt-1 font-medium">
+          <div className="px-5 py-4">
+            <dt className="inline-flex items-center gap-2 text-caption font-medium">
+              <Lightbulb className="size-3.5" aria-hidden="true" />
+              Hints used
+            </dt>
+            <dd className="mt-1.5 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
               {revealedHints === 1 ? "1 hint" : `${revealedHints} hints`}
             </dd>
           </div>
-          <div>
-            <dt className="text-caption">Full solution</dt>
-            <dd className="mt-1 font-medium">
+          <div className="px-5 py-4">
+            <dt className="inline-flex items-center gap-2 text-caption font-medium">
+              <LockKeyhole className="size-3.5" aria-hidden="true" />
+              Full solution
+            </dt>
+            <dd className="mt-1.5 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em]">
               {solutionUsed ? "Used" : "Not used"}
             </dd>
           </div>
@@ -282,7 +298,7 @@ export function RunRecap({
 
       <section
         aria-labelledby="run-recap-next-heading"
-        className="w-full border-t pt-6"
+        className="w-full rounded-2xl border bg-card px-5 py-5 shadow-[var(--highlight),var(--shadow-raised)] sm:px-6"
       >
         <h2 id="run-recap-next-heading" className="text-section-title">
           {recap.kind === "solved" ? "Keep learning" : "Give it another try"}
@@ -388,7 +404,7 @@ function RunRecapProgress({
       aria-valuenow={verifiedObjectives}
       aria-valuetext={`${verifiedObjectives} of ${objectives.length} final checks verified`}
       data-run-recap-progress
-      className="mt-5 flex flex-wrap gap-2"
+      className="mt-3 flex gap-1"
     >
       {objectives.map((objective) => (
         <span
@@ -397,14 +413,45 @@ function RunRecapProgress({
           data-run-recap-progress-segment
           data-status={objective.status}
           className={cn(
-            "size-3 rounded-full border",
-            objective.status === "verified"
-              ? "border-success bg-success"
-              : "border-destructive bg-transparent",
+            "h-1 flex-1 rounded-full",
+            objective.status === "verified" ? "bg-success" : "bg-warning/50",
           )}
         />
       ))}
     </div>
+  );
+}
+
+// The solved moment gets one confirm motion: the check pops and a single ring
+// settles around it. Other outcomes stay still.
+function RecapBadge({ kind }: { kind: ReturnType<typeof getRunRecapState>["kind"] }) {
+  if (kind === "solved") {
+    return (
+      <span
+        aria-hidden="true"
+        className="flex size-13 shrink-0 items-center justify-center rounded-full bg-success-subtle text-success ring-1 ring-success-border motion-safe:[animation:intar-live_1.4s_var(--ease-standard)_350ms_1_both]"
+      >
+        <Check className="size-6 stroke-[2.25] motion-safe:animate-pop [animation-delay:120ms]" />
+      </span>
+    );
+  }
+  const failed = kind === "could_not_finish";
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "flex size-13 shrink-0 items-center justify-center rounded-full ring-1",
+        failed
+          ? "bg-destructive-subtle text-destructive ring-destructive-border"
+          : "bg-muted text-muted-foreground ring-border",
+      )}
+    >
+      {failed ? (
+        <CircleAlert className="size-6" />
+      ) : (
+        <CircleStop className="size-6" />
+      )}
+    </span>
   );
 }
 

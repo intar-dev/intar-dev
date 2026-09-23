@@ -30,8 +30,8 @@ const TECHNICAL_LEARNER_RUN_COPY = [
   "Command log",
 ] as const;
 
-const FINE_POINTER_DEFAULT_CONTROL_HEIGHT = 40;
-const FINE_POINTER_COMPACT_CONTROL_HEIGHT = 36;
+const FINE_POINTER_DEFAULT_CONTROL_HEIGHT = 36;
+const FINE_POINTER_COMPACT_CONTROL_HEIGHT = 32;
 const COARSE_POINTER_TARGET_SIZE = 44;
 
 async function expectNoVisibleBoxShadow(locator: Locator) {

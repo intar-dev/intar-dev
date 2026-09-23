@@ -372,7 +372,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                         <LectureLink
                           route={route}
                           lectureId={target.lectureId}
-                          className="text-sm font-semibold hover:text-primary"
+                          className="text-sm font-semibold hover:text-brand-text"
                         >
                           {target.title}
                         </LectureLink>
