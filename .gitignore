@@ -12,3 +12,6 @@ config.vm.local.toml
 
 # wrangler local state
 .wrangler/
+
+# impeccable review screenshots (ephemeral)
+.impeccable/review/

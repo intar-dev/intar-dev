@@ -29,6 +29,32 @@ function onOpen(websocket: WebSocketRoute, server: MockApiServer) {
   }
 }
 
+// The real gateway accepts the socket while the VM boots and sends `ready`
+// only once the target can take a shell. Mirror that, so a boot screen stays
+// on screen until the fixture run actually reaches a usable terminal.
+function terminalTargetReady(server: MockApiServer) {
+  const vms = (server.state.run as { vms?: Array<Record<string, unknown>> }).vms;
+  return Boolean(
+    vms?.some((vm) => {
+      const target = vm.terminalTarget as { host?: unknown } | undefined;
+      return vm.canOpenTerminal === true && Boolean(target?.host);
+    }),
+  );
+}
+
+function openWhenTargetReady(
+  websocket: WebSocketRoute,
+  server: MockApiServer,
+  isClosed: () => boolean,
+) {
+  if (isClosed()) return;
+  if (terminalTargetReady(server)) {
+    onOpen(websocket, server);
+    return;
+  }
+  setTimeout(() => openWhenTargetReady(websocket, server, isClosed), 100);
+}
+
 export async function installTerminalWebSocketMock(
   page: Page,
   server: MockApiServer,
@@ -41,6 +67,10 @@ export async function installTerminalWebSocketMock(
   await page.routeWebSocket("ws://terminal.example.test/terminal/**", (ws) => {
     connectionCount += 1;
     const connectionOrdinal = connectionCount;
+    let closed = false;
+    ws.onClose(() => {
+      closed = true;
+    });
     ws.onMessage((message) => {
       if (typeof message !== "string") return;
       try {
@@ -50,9 +80,12 @@ export async function installTerminalWebSocketMock(
             server.state.terminalMode === "delayed-first-ready" &&
             connectionOrdinal === 1
           ) {
-            setTimeout(() => onOpen(ws, server), 1_000);
+            setTimeout(
+              () => openWhenTargetReady(ws, server, () => closed),
+              1_000,
+            );
           } else {
-            onOpen(ws, server);
+            openWhenTargetReady(ws, server, () => closed);
           }
         }
       } catch {

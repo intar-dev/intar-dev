@@ -21,7 +21,7 @@ Keep the established Intar visual system. Use the full available page width, a v
 
 THESIS: One ordered reading path teaches the model before the scenario; it refuses a catalog of equal-weight scenario cards.
 
-OWN-WORLD: Warm neutral ground, the existing Intar sidebar frame, quiet borders, direct status text, rust actions, fluid content, and a persistent course outline.
+OWN-WORLD: Graphite and paper grounds, the inset Intar app frame, quiet borders, direct status text, oxide actions, fluid content, a persistent course outline with a progress track, and a trailing action card.
 
 STORY: The learner sees the course position, reads the theory, understands the unit state, and then starts or completes one unit.
 

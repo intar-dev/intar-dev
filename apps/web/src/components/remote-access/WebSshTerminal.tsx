@@ -538,7 +538,12 @@ export function WebSshTerminal({
       // the clock starts instead of measuring the pre-fit fallback grid. The
       // font load must never gate this.
       fitGridRef.current?.();
-      terminalRef.current?.focus();
+      // Take focus only when nothing else holds it: a learner who moved to
+      // the back link or the guidance while the VM booted keeps their place.
+      const active = document.activeElement;
+      if (!active || active === document.body) {
+        terminalRef.current?.focus();
+      }
       markTerminalStage("terminal-visible");
       const benchmark = startScenarioRunBootBenchmark({
         ...bootEvidence,

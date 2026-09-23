@@ -221,7 +221,7 @@ test("dashboard fetches the native SSH module only after its dialog opens", asyn
   }
 });
 
-test("run workspace only fetches the terminal after live status makes a VM ready", async ({
+test("run workspace warms the terminal during boot and reveals it only when the VM is ready", async ({
   page,
   ui,
 }) => {
@@ -234,10 +234,16 @@ test("run workspace only fetches the terminal after live status makes a VM ready
       theme: "light",
     });
     await expect(page.locator("[data-run-workspace]")).toBeVisible();
-    expect(modules.count("terminal")).toBe(0);
+    // The transport loads and connects while the VM boots, hidden, so the
+    // shell is ready the moment the target is.
+    await expect.poll(() => modules.count("terminal")).toBeGreaterThan(0);
+    await expect(page.locator("[data-scenario-terminal-ready]")).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: "Preparing your workspace" }),
+    ).toBeVisible();
 
     ui.server.setRunState("running");
-    await expect.poll(() => modules.count("terminal")).toBeGreaterThan(0);
+    await expect(page.locator("[data-scenario-terminal-ready]")).toBeVisible();
   } finally {
     modules.dispose();
   }
