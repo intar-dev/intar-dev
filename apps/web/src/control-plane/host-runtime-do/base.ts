@@ -39,13 +39,10 @@ export interface SocketAttachment {
   kind: "agent";
   hostId: string;
   credentialGeneration: number;
-  scope?: HostDesiredStateV2["scope"];
+  /** Host scope admitted at connect; every later admission check requires the host to still have it. */
+  scope: HostDesiredStateV2["scope"];
   organizationId?: string | null;
   sessionId: string | null;
-  /** Exact beta grant carried by a personal-host JWT; null for platform and organization hosts. */
-  betaSourceInviteId: string | null;
-  betaSourceLeaseId: string | null;
-  betaAdmissionGrantedAt: number | null;
   connectedAt: number;
   helloReceived: boolean;
   bridgeProtocol: "v6" | null;
@@ -64,9 +61,6 @@ export interface RunStatusSocketAttachment {
   userId: string;
   hostId: string;
   sessionId: string;
-  betaSourceInviteId: string;
-  betaSourceLeaseId: string;
-  betaAdmissionGrantedAt: number;
   expiresAt: number;
 }
 
@@ -252,7 +246,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
                               AND ${agentHosts.organizationId} = ${scenarioRuns.organizationId}
                               AND EXISTS (SELECT 1 FROM member membership
                                 JOIN user member_user ON member_user.id = membership.user_id
-                                JOIN access_allowlist access ON access.user_id = member_user.id AND access.state = 'active'
                                 WHERE membership.organization_id = ${agentHosts.organizationId}
                                   AND membership.user_id = ${scenarioRuns.userId}
                                   AND member_user.deleted_at IS NULL AND coalesce(member_user.banned, 0) = 0)))`,
@@ -509,7 +502,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       eq(agentHosts.credentialGeneration, attachment.credentialGeneration),
     )).returning({ id: agentHosts.id });
     try {
-      if ((attachment.scope === "organization" || attachment.betaSourceInviteId !== null)) await revokeStargateHostRelay({ hostId: attachment.hostId, sessionId: attachment.sessionId,
+      if (attachment.scope !== "platform") await revokeStargateHostRelay({ hostId: attachment.hostId, sessionId: attachment.sessionId,
         credentialGeneration: attachment.credentialGeneration });
     } finally {
       if (updated.length) await this.scheduleNextAlarm(attachment.hostId);
@@ -533,7 +526,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         continue;
       }
       try {
-        if (attachment.sessionId && (attachment.scope === "organization" || attachment.betaSourceInviteId !== null)) await revokeStargateHostRelay({ hostId,
+        if (attachment.sessionId && attachment.scope !== "platform") await revokeStargateHostRelay({ hostId,
           sessionId: attachment.sessionId, credentialGeneration: attachment.credentialGeneration });
       } catch (error) {
         console.warn(JSON.stringify({ event: "relay_session_revoke_failed", hostId }));
@@ -610,12 +603,15 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected readSocketAttachment(ws: WebSocket): SocketAttachment | null {
     try {
       const parsed = ws.deserializeAttachment() as SocketAttachment | null;
+      // An attachment without a known scope cannot be checked against its
+      // host. Treat it as missing so the socket closes and reconnects.
       if (
         !parsed ||
         parsed.kind !== "agent" ||
         !Number.isSafeInteger(parsed.credentialGeneration) ||
         parsed.credentialGeneration < 1 ||
-        typeof parsed.hostId !== "string"
+        typeof parsed.hostId !== "string" ||
+        (parsed.scope !== "personal" && parsed.scope !== "platform" && parsed.scope !== "organization")
       ) {
         return null;
       }
@@ -624,28 +620,10 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         hostId: parsed.hostId,
         credentialGeneration: parsed.credentialGeneration,
         organizationId: typeof parsed.organizationId === "string" ? parsed.organizationId : null,
-        scope: parsed.scope === "organization" ? "organization" : parsed.scope === "personal" ? "personal" : "platform",
+        scope: parsed.scope,
         sessionId:
           typeof parsed.sessionId === "string" && parsed.sessionId
             ? parsed.sessionId
-            : null,
-        betaSourceInviteId:
-          typeof parsed.betaSourceInviteId === "string" &&
-          parsed.betaSourceInviteId.length > 0 &&
-          parsed.betaSourceInviteId.length <= 256
-            ? parsed.betaSourceInviteId
-            : null,
-        betaSourceLeaseId:
-          typeof parsed.betaSourceLeaseId === "string" &&
-          parsed.betaSourceLeaseId.length > 0 &&
-          parsed.betaSourceLeaseId.length <= 256
-            ? parsed.betaSourceLeaseId
-            : null,
-        betaAdmissionGrantedAt:
-          typeof parsed.betaAdmissionGrantedAt === "number" &&
-          Number.isSafeInteger(parsed.betaAdmissionGrantedAt) &&
-          parsed.betaAdmissionGrantedAt >= 0
-            ? parsed.betaAdmissionGrantedAt
             : null,
         connectedAt:
           typeof parsed.connectedAt === "number" &&
@@ -685,22 +663,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       const userId = requiredAttachmentId(parsed.userId);
       const hostId = requiredAttachmentId(parsed.hostId);
       const sessionId = requiredAttachmentId(parsed.sessionId);
-      const betaSourceInviteId = requiredAttachmentId(
-        parsed.betaSourceInviteId,
-      );
-      const betaSourceLeaseId = requiredAttachmentId(parsed.betaSourceLeaseId);
-      const betaAdmissionGrantedAt = requiredAttachmentTimestamp(
-        parsed.betaAdmissionGrantedAt,
-      );
-      if (
-        !runId ||
-        !userId ||
-        !hostId ||
-        !sessionId ||
-        !betaSourceInviteId ||
-        !betaSourceLeaseId ||
-        betaAdmissionGrantedAt === null
-      ) {
+      if (!runId || !userId || !hostId || !sessionId) {
         return null;
       }
 
@@ -710,9 +673,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         userId,
         hostId,
         sessionId,
-        betaSourceInviteId,
-        betaSourceLeaseId,
-        betaAdmissionGrantedAt,
         // Pre-upgrade subscriptions have no bounded lifetime. Close them on
         // the next event instead of assigning them a new lifetime on wake.
         expiresAt: requiredAttachmentTimestamp(parsed.expiresAt) ?? 0,

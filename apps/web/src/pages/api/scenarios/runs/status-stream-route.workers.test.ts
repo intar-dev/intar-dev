@@ -18,7 +18,6 @@ vi.mock("@/lib/agent-bridge", () => ({
 
 import { session } from "@/db/schema";
 import {
-  betaAdmissionForHostFixture,
   drizzle,
   env,
   resetHostRuntimeTestDatabase,
@@ -72,13 +71,11 @@ describe("scenario run status stream route", () => {
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    const admission = await betaAdmissionForHostFixture("user-1");
     auth.mockResolvedValue({
       ok: true as const,
       context: {
         userId: "user-1",
         sessionId: "status-route-session",
-        betaAdmission: admission,
       },
     });
 
@@ -119,13 +116,11 @@ describe("scenario run status stream route", () => {
     await seedHost(hostId);
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now });
-    const admission = await betaAdmissionForHostFixture("user-1");
     auth.mockResolvedValue({
       ok: true as const,
       context: {
         userId: "user-2",
         sessionId: "other-session",
-        betaAdmission: admission,
       },
     });
 

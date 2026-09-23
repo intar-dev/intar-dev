@@ -78,7 +78,7 @@ describe("host relay lease",()=>{
   it("revokes the issued grant if access changes during the admin call",async()=>{
     const original=mocks.admin.getMockImplementation()!;
     mocks.admin.mockImplementation(async(action,body)=>{
-      if(action==="grant")await env.DB.prepare("DELETE FROM access_allowlist WHERE user_id='user-1'").run();
+      if(action==="grant")await env.DB.prepare("UPDATE user SET banned=1 WHERE id='user-1'").run();
       return original(action,body);
     });
     await expect(refreshStargateHostRelay(session)).rejects.toThrow("authorization changed");

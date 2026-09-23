@@ -1,16 +1,18 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import {
-  accessAllowlist,
-  agentBootstrapTokens,
-  agentHosts,
-} from "@/db/schema";
+import { agentBootstrapTokens, agentHosts, user } from "@/db/schema";
 import { createAppId } from "@/lib/id";
 
 /** Organization credentials belong to the organization, not the enrollment creator. */
 export function organizationHostAdmissionCondition(organizationIdSql = "host.organization_id"): string {
   return `EXISTS (SELECT 1 FROM organization WHERE id = ${organizationIdSql})`;
 }
+
+// Personal credentials last only while the owner's account is active. Spelled
+// out here because this module also loads outside the Worker runtime.
+const hostOwnerActive = sql<number>`EXISTS (SELECT 1 FROM ${user}
+  WHERE ${user.id} = ${agentHosts.userId}
+    AND ${user.deletedAt} IS NULL AND coalesce(${user.banned}, 0) = 0)`;
 
 const JWT_TTL_SECONDS = 15 * 60;
 const MIN_AGENT_JWT_SECRET_BYTES = 32;
@@ -32,10 +34,6 @@ interface JwtPayload {
   nbf: number;
   exp: number;
   jti: string;
-  /** Exact beta admission that minted a personal-host token; null for platform and organization hosts. */
-  beta_source_invite_id: string | null;
-  beta_source_lease_id: string | null;
-  beta_admission_granted_at: number | null;
 }
 
 export interface VerifiedAgentHost {
@@ -45,9 +43,6 @@ export interface VerifiedAgentHost {
   hostId: string;
   userId: string;
   role: "agent" | "builder";
-  betaSourceInviteId: string | null;
-  betaSourceLeaseId: string | null;
-  betaAdmissionGrantedAt: number | null;
 }
 
 export async function handleAgentBootstrap(
@@ -94,17 +89,10 @@ export async function handleAgentBootstrap(
       organizationAdmitted: sql<number>`${sql.raw(organizationHostAdmissionCondition("agent_hosts.organization_id"))}`,
       credentialGeneration: agentHosts.credentialGeneration,
       tokenCredentialGeneration: agentBootstrapTokens.credentialGeneration,
-      betaState: accessAllowlist.state,
-      betaSourceInviteId: accessAllowlist.sourceInviteId,
-      betaSourceLeaseId: accessAllowlist.sourceLeaseId,
-      betaGrantedAt: accessAllowlist.grantedAt,
+      ownerActive: hostOwnerActive,
     })
     .from(agentBootstrapTokens)
     .innerJoin(agentHosts, eq(agentHosts.id, agentBootstrapTokens.hostId))
-    .leftJoin(
-      accessAllowlist,
-      eq(accessAllowlist.userId, agentHosts.userId),
-    )
     .where(
       and(
         eq(agentBootstrapTokens.hostId, hostId),
@@ -128,14 +116,8 @@ export async function handleAgentBootstrap(
   if (match.hostDisabled) {
     return jsonResponse({ error: "host is disabled" }, 403);
   }
-  if (
-    match.scope === "personal" &&
-    (match.betaState !== "active" ||
-      !match.betaSourceInviteId ||
-      !match.betaSourceLeaseId ||
-      match.betaGrantedAt === null)
-  ) {
-    return jsonResponse({ error: "beta access is revoked" }, 403);
+  if (match.scope === "personal" && !match.ownerActive) {
+    return jsonResponse({ error: "account access is revoked" }, 403);
   }
 
   const nowMs = Date.now();
@@ -163,12 +145,6 @@ export async function handleAgentBootstrap(
     nbf: nowSeconds,
     exp: nowSeconds + JWT_TTL_SECONDS,
     jti: createAppId(),
-    beta_source_invite_id:
-      match.scope === "personal" ? match.betaSourceInviteId : null,
-    beta_source_lease_id:
-      match.scope === "personal" ? match.betaSourceLeaseId : null,
-    beta_admission_granted_at:
-      match.scope === "personal" ? match.betaGrantedAt : null,
   };
 
   const accessToken = await signJwt(payload, jwtSecret);
@@ -225,24 +201,6 @@ export async function handleAgentConnect(
     headers.delete("x-agent-organization-id");
   }
   headers.set("x-agent-credential-generation", String(verified.agent.credentialGeneration));
-  if (verified.agent.betaAdmissionGrantedAt !== null) {
-    headers.set(
-      "x-agent-beta-source-invite-id",
-      verified.agent.betaSourceInviteId!,
-    );
-    headers.set(
-      "x-agent-beta-source-lease-id",
-      verified.agent.betaSourceLeaseId!,
-    );
-    headers.set(
-      "x-agent-beta-admission-granted-at",
-      String(verified.agent.betaAdmissionGrantedAt),
-    );
-  } else {
-    headers.delete("x-agent-beta-source-invite-id");
-    headers.delete("x-agent-beta-source-lease-id");
-    headers.delete("x-agent-beta-admission-granted-at");
-  }
 
   const proxiedRequest = new Request("https://host-runtime.internal/connect", {
     method: "GET",
@@ -310,16 +268,9 @@ export async function requireVerifiedAgentRequest(
       credentialGeneration: agentHosts.credentialGeneration,
       role: agentHosts.role,
       disabled: agentHosts.disabled,
-      betaState: accessAllowlist.state,
-      betaSourceInviteId: accessAllowlist.sourceInviteId,
-      betaSourceLeaseId: accessAllowlist.sourceLeaseId,
-      betaGrantedAt: accessAllowlist.grantedAt,
+      ownerActive: hostOwnerActive,
     })
     .from(agentHosts)
-    .leftJoin(
-      accessAllowlist,
-      eq(accessAllowlist.userId, agentHosts.userId),
-    )
     .where(eq(agentHosts.id, hostId))
     .limit(1);
 
@@ -345,38 +296,10 @@ export async function requireVerifiedAgentRequest(
       response: jsonResponse({ error: "host is disabled" }, 403),
     };
   }
-  if (
-    host.scope === "personal" &&
-    (host.betaState !== "active" ||
-      !host.betaSourceInviteId ||
-      !host.betaSourceLeaseId ||
-      host.betaGrantedAt === null)
-  ) {
+  if (host.scope === "personal" && !host.ownerActive) {
     return {
       ok: false,
-      response: jsonResponse({ error: "beta access is revoked" }, 403),
-    };
-  }
-  if (
-    host.scope === "personal" &&
-    (payload.beta_source_invite_id !== host.betaSourceInviteId ||
-      payload.beta_source_lease_id !== host.betaSourceLeaseId ||
-      payload.beta_admission_granted_at !== host.betaGrantedAt)
-  ) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "stale beta admission" }, 401),
-    };
-  }
-  if (
-    host.scope !== "personal" &&
-    (payload.beta_source_invite_id !== null ||
-      payload.beta_source_lease_id !== null ||
-      payload.beta_admission_granted_at !== null)
-  ) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "invalid token" }, 401),
+      response: jsonResponse({ error: "account access is revoked" }, 403),
     };
   }
 
@@ -389,12 +312,6 @@ export async function requireVerifiedAgentRequest(
       hostId: host.id,
       userId: host.userId,
       role: host.role,
-      betaSourceInviteId:
-        host.scope === "personal" ? host.betaSourceInviteId : null,
-      betaSourceLeaseId:
-        host.scope === "personal" ? host.betaSourceLeaseId : null,
-      betaAdmissionGrantedAt:
-        host.scope === "personal" ? host.betaGrantedAt : null,
     },
   };
 }
@@ -478,8 +395,7 @@ async function verifyJwt(
     typeof payload.exp !== "number" ||
     typeof payload.jti !== "string" ||
     !Number.isSafeInteger(payload.credential_generation) ||
-    (payload.credential_generation ?? 0) < 1 ||
-    !isValidBetaAdmissionClaims(payload)
+    (payload.credential_generation ?? 0) < 1
   ) {
     return null;
   }
@@ -494,26 +410,6 @@ async function verifyJwt(
   }
 
   return payload as JwtPayload;
-}
-
-function isValidBetaAdmissionClaims(payload: Partial<JwtPayload>): boolean {
-  const inviteId = payload.beta_source_invite_id;
-  const leaseId = payload.beta_source_lease_id;
-  const grantedAt = payload.beta_admission_granted_at;
-  if (inviteId === null && leaseId === null && grantedAt === null) {
-    return true;
-  }
-  return (
-    typeof inviteId === "string" &&
-    inviteId.length > 0 &&
-    inviteId.length <= 256 &&
-    typeof leaseId === "string" &&
-    leaseId.length > 0 &&
-    leaseId.length <= 256 &&
-    typeof grantedAt === "number" &&
-    Number.isSafeInteger(grantedAt) &&
-    grantedAt >= 0
-  );
 }
 
 async function importHmacKey(secret: string): Promise<CryptoKey> {

@@ -2,6 +2,7 @@ import { organizationHostAdmissionCondition } from "@/control-plane/auth";
 import { env } from "cloudflare:workers";
 import type { HostRelayCredentials } from "@/generated/bridge";
 import type { HostRelayIdentity, RelayTarget, SshTargetTransport } from "@/generated/stargate";
+import { activeAccountExistsSql } from "@/lib/account-access";
 import { stargateRelayAdminRequest } from "@/lib/stargate";
 import { currentScenarioRunContentAccessCondition } from "@/lib/scenario-runs/admission-guards";
 
@@ -16,24 +17,19 @@ function identity(input: HostRelaySession): HostRelayIdentity {
 const LEASE_MS = 120_000;
 
 async function snapshot(input: HostRelaySession) {
-  const host = await env.DB.prepare(`SELECT host.scope, host.organization_id, host.connected_at,
-      access.source_invite_id, access.source_lease_id, access.granted_at
+  const host = await env.DB.prepare(`SELECT host.scope, host.organization_id, host.connected_at
     FROM agent_hosts host
-    LEFT JOIN user owner ON owner.id = host.user_id
-    LEFT JOIN access_allowlist access ON access.user_id = host.user_id AND host.scope = 'personal'
     WHERE host.id = ?1 AND host.active_session_id = ?2 AND host.credential_generation = ?3
       AND host.credential_generation > 0 AND host.disabled = 0 AND host.connected = 1
       AND ((host.scope = 'organization' AND host.role = 'agent' AND (${organizationHostAdmissionCondition()}))
-        OR (owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
-          AND (host.scope = 'platform' OR (host.scope = 'personal' AND access.state = 'active'))))`)
+        OR (host.scope IN ('platform', 'personal') AND ${activeAccountExistsSql("host.user_id")}))`)
     .bind(input.hostId, input.sessionId, input.credentialGeneration)
-    .first<{ scope: "platform" | "personal" | "organization"; organization_id: string | null; connected_at: number; source_invite_id: string | null; source_lease_id: string | null; granted_at: number | null }>();
+    .first<{ scope: "platform" | "personal" | "organization"; organization_id: string | null; connected_at: number }>();
   if (!host) return null;
   if (host.scope === "platform") return { host, rows: [], targets: [] };
   const { results } = await env.DB.prepare(`SELECT execution.id AS execution_id,
       execution.generation, execution.user_id, vm.vm_id,
-      json_extract(desired.value, '$.lease_expires_at_unix_ms') AS lease_expires_at,
-      access.source_invite_id, access.source_lease_id, access.granted_at
+      json_extract(desired.value, '$.lease_expires_at_unix_ms') AS lease_expires_at
     FROM agent_hosts host
     INNER JOIN host_desired_state desired_state ON desired_state.host_id = host.id
     INNER JOIN json_each(desired_state.doc_json, '$.vms') desired
@@ -45,7 +41,6 @@ async function snapshot(input: HostRelaySession) {
       AND vm.vm_id = json_extract(desired.value, '$.vm_id')
     INNER JOIN scenario_runs run ON run.runtime_execution_id = execution.id AND run.run_id = execution.domain_id
       AND run.host_id = host.id AND run.user_id = execution.user_id
-    INNER JOIN access_allowlist access ON access.user_id = execution.user_id AND access.state = 'active'
     INNER JOIN user runner ON runner.id = execution.user_id AND runner.deleted_at IS NULL AND coalesce(runner.banned, 0) = 0
     WHERE host.id = ?1 AND host.active_session_id = ?2 AND host.credential_generation = ?3
       AND ((host.scope = 'personal' AND host.user_id = execution.user_id)
@@ -63,7 +58,7 @@ async function snapshot(input: HostRelaySession) {
       AND (${currentScenarioRunContentAccessCondition()})
     ORDER BY execution.id, vm.vm_id LIMIT 65`)
     .bind(input.hostId, input.sessionId, input.credentialGeneration, Date.now())
-    .all<{ execution_id: string; generation: number; user_id: string; vm_id: string; lease_expires_at: number; source_invite_id: string; source_lease_id: string; granted_at: number }>();
+    .all<{ execution_id: string; generation: number; user_id: string; vm_id: string; lease_expires_at: number }>();
   if (results.length > 64) throw new Error("host relay assignment limit reached");
   return { host, rows: results, targets: results.map((row): RelayTarget => ({
     host: identity(input), owner_id: row.user_id, execution_id: row.execution_id,

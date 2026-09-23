@@ -21,7 +21,7 @@ import {
   vmScenarios,
   vmScenarioVms,
 } from "@/db/schema";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
 import { handleAgentImageIndex, handleAgentArtifactDownload, handleAgentImageDownload } from "./agent";
@@ -42,7 +42,7 @@ describe("personal image access", () => {
     const db = drizzle(env.DB);
     for (const id of ["runner-owner", "other-owner"]) {
       await db.insert(user).values({ id, name: id, email: `${id}@example.test` });
-      await grantActiveBetaAccess(id);
+      await ensureFixtureMember({ d1: env.DB, userId: id });
     }
     await db.insert(organization).values({ id: "org-a", name: "A", slug: "a", createdAt: new Date() });
     await db.insert(member).values({ id: "membership", organizationId: "org-a", userId: "runner-owner", role: "member", createdAt: new Date() });
@@ -467,14 +467,6 @@ async function seedAgentAndBootstrap(input: {
   expect(response.status).toBe(200);
   const body = (await response.json()) as { accessToken: string };
   return body.accessToken;
-}
-
-async function grantActiveBetaAccess(userId: string): Promise<void> {
-  await grantFixtureBetaAccess({
-    d1: env.DB,
-    userId,
-    githubUsername: userId,
-  });
 }
 
 function download(token: string, scenario: SeededScenario): Promise<Response> {

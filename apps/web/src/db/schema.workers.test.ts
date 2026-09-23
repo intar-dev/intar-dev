@@ -148,25 +148,28 @@ describe("Drizzle-managed production D1 schema", () => {
       expect.arrayContaining([
         "user",
         "organization",
-        "access_invite_codes",
-        "access_invite_removals",
-        "access_allowlist",
         "access_events",
+        "access_revocations",
+        "signup_settings",
+        "signup_reservations",
         "scenario_runs",
         "course_unit_completions",
         "runtime_executions",
       ]),
     );
-    expect(names).not.toEqual(
-      expect.arrayContaining([
-        "clean_d1_commissioning",
-        "access_requests",
-        "hetzner_allocations",
-        "organization_provider_connections",
-        "scenario_course_catalogs",
-        "scenario_sources",
-      ]),
-    );
+    for (const removed of [
+      "clean_d1_commissioning",
+      "access_requests",
+      "access_allowlist",
+      "access_invite_codes",
+      "access_invite_removals",
+      "hetzner_allocations",
+      "organization_provider_connections",
+      "scenario_course_catalogs",
+      "scenario_sources",
+    ]) {
+      expect(names).not.toContain(removed);
+    }
 
     const foreignKeyViolations = await env.DB.prepare(
       "PRAGMA foreign_key_check",
@@ -187,9 +190,21 @@ describe("Drizzle-managed production D1 schema", () => {
   });
 
   it("retains typed checks, foreign keys, and indexes", async () => {
-    const inviteSchema = await tableSql("access_invite_codes");
-    expect(inviteSchema).toContain("172800000");
-    expect(inviteSchema).toContain("1209600000");
+    const revocationSchema = await tableSql("access_revocations");
+    expect(revocationSchema).toContain("access_revocations_cleanup_valid");
+    expect(revocationSchema).toMatch(
+      /REFERENCES `user`\(`id`\) ON UPDATE no action ON DELETE restrict/u,
+    );
+    const signupSchema = await tableSql("signup_settings");
+    expect(signupSchema).toContain("signup_settings_singleton");
+    expect(signupSchema).toContain("BETWEEN 0 AND 1000000");
+
+    const enrollmentColumns = await env.DB.prepare(
+      "PRAGMA table_info('host_enrollments')",
+    ).all<{ name: string }>();
+    expect(enrollmentColumns.results.map((column) => column.name)).not.toEqual(
+      expect.arrayContaining(["source_invite_id"]),
+    );
 
     const runtimeVmColumns = await env.DB.prepare(
       "PRAGMA table_info('runtime_vms')",

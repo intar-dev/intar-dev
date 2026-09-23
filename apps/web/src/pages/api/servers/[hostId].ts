@@ -26,7 +26,7 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     }
     const hostId = params.hostId ?? "";
     const result = await retirePersonalHost({ d1: env.DB, hostId, userId: auth.context.userId,
-      betaAdmission: auth.context.betaAdmission, confirmReturnToCloud: input.confirmReturnToCloud });
+      confirmReturnToCloud: input.confirmReturnToCloud });
     try { await cleanupRemovedHost(hostId); }
     catch {
       throw appError(503, "server_cleanup_pending", "Server access is revoked. Retry removal to finish closing sessions.");

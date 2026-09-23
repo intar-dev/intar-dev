@@ -2,10 +2,8 @@
 
 import { env } from "cloudflare:workers";
 import type { Session, User } from "better-auth";
-import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { accessInviteCodes } from "@/db/schema/application";
 import {
   account,
   organization,
@@ -18,46 +16,29 @@ import {
   oauthClient,
   oauthRefreshToken,
 } from "@/db/schema/oauth";
-import {
-  acquireBetaRevocationCleanup,
-  completeBetaRevocationCleanup,
-  revokeBetaUser,
-} from "@/lib/beta-access-revocation-store";
-import {
-  BETA_INVITE_LIFETIME_MS,
-  createBetaInvite,
-  redeemBetaInvite,
-  revokeBetaInvite,
-} from "@/lib/beta-invites";
+import { getSignupStatus, setSignupLimit } from "@/lib/signups";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  ensureFixtureBetaAdmin,
-  FIXTURE_BETA_ADMIN_ID,
-  FIXTURE_INVITE_ENCRYPTION_KEY,
-} from "@/test/beta-access-fixtures";
+  ensureFixtureAdmin,
+  FIXTURE_ADMIN_ID,
+  revokeFixtureAccount,
+} from "@/test/account-fixtures";
 import {
   auth,
   authCookiePolicy,
   assertNoAdditionalBetterAuthTrustedOrigins,
-  captureBetaAdmissionEpoch,
-  captureOAuthIssuanceAdmission,
-  createAdmissionBoundRefreshToken,
-  createInviteOAuthHandoff,
   createSsoLinkOAuthHandoff,
-  enforceCreatedAuthorizationCodeAdmission,
-  enforceCreatedGithubAccountAdmission,
-  enforceCreatedSessionAdmission,
-  enforceOAuthIssuanceAdmission,
-  getBetaOAuthAccessTokenClaims,
-  INVITE_OAUTH_HANDOFF_HEADER,
-  readAdmissionBoundRefreshToken,
+  enforceActiveOAuthIssuance,
+  enforceCreatedSessionStillActive,
+  getOAuthAccessTokenClaims,
+  SSO_LINK_HANDOFF_HEADER,
   trustedBrowserOrigin,
 } from "./auth";
 
 describe("auth policy", () => {
   beforeEach(async () => {
     await resetD1Database();
-    await ensureFixtureBetaAdmin(env.DB, Date.now());
+    await ensureFixtureAdmin(env.DB, Date.now());
   });
 
   it("uses host-only secure cookies and trusts only the app origin", () => {
@@ -127,7 +108,7 @@ describe("auth policy", () => {
           scopes: ["openid", "email", "profile"],
         }),
         oidcClientSecretCiphertext: null,
-        userId: FIXTURE_BETA_ADMIN_ID,
+        userId: FIXTURE_ADMIN_ID,
         providerId,
         organizationId,
         domainVerified: true,
@@ -172,17 +153,16 @@ describe("auth policy", () => {
   });
 
   it.each(["valid", "missing", "invalid-signature", "wrong-audience"])(
-    "exchanges a public client code with PKCE S256 and checks the ID token: %s",
+    "links OIDC from a member's GitHub session with PKCE S256 and checks the ID token: %s",
     async (tokenCase) => {
       const now = Date.now();
       const userId = "public-oidc-link-user";
       const organizationId = "public-oidc-link-organization";
       const providerRowId = "public-oidc-link-provider-row";
       const providerId = "public-oidc-link-provider";
-      await seedActiveBetaUser({
+      await seedMember({
         id: userId,
-        accountId: "public-oidc-link-github",
-        username: userId,
+        githubAccountId: "public-oidc-link-github",
         now,
       });
       await drizzle(env.DB)
@@ -210,29 +190,22 @@ describe("auth policy", () => {
             pkce: false,
           }),
           oidcClientSecretCiphertext: null,
-          userId: FIXTURE_BETA_ADMIN_ID,
+          userId: FIXTURE_ADMIN_ID,
           providerId,
           organizationId,
           domainVerified: true,
         });
-      const admission = await captureBetaAdmissionEpoch(userId);
       const handoff = await createSsoLinkOAuthHandoff({
-        ...admission,
+        userId,
         providerId,
         expiresAt: now + 600_000,
       });
-      const sessionToken = "public-oidc-link-session";
-      await drizzle(env.DB)
-        .insert(session)
-        .values({
-          id: "public-oidc-link-session-row",
-          token: sessionToken,
-          userId,
-          expiresAt: new Date(now + 3_600_000),
-          createdAt: new Date(now),
-          updatedAt: new Date(now),
-        });
-      const sessionCookie = await signedSessionCookie(sessionToken);
+      const sessionCookie = await seedSessionCookie({
+        id: "public-oidc-link-session-row",
+        token: "public-oidc-link-session",
+        userId,
+        now,
+      });
       const started = await auth.handler(
         authRequest(
           "/api/auth/sign-in/sso",
@@ -245,7 +218,7 @@ describe("auth policy", () => {
           },
           {
             cookie: sessionCookie,
-            [INVITE_OAUTH_HANDOFF_HEADER]: handoff,
+            [SSO_LINK_HANDOFF_HEADER]: handoff,
           },
         ),
       );
@@ -268,13 +241,8 @@ describe("auth policy", () => {
         true,
         ["sign", "verify"],
       );
-      const base64Url = (bytes: Uint8Array) =>
-        btoa(String.fromCharCode(...bytes))
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=+$/g, "");
       const encode = (value: unknown) =>
-        base64Url(new TextEncoder().encode(JSON.stringify(value)));
+        bytesToBase64Url(new TextEncoder().encode(JSON.stringify(value)));
       const tokenPayload = `${encode({ alg: "RS256", kid: "test-key" })}.${encode(
         {
           iss: "https://login.example.test",
@@ -298,7 +266,7 @@ describe("auth policy", () => {
       const idToken =
         tokenCase === "missing"
           ? undefined
-          : `${tokenPayload}.${base64Url(new Uint8Array(signature))}`;
+          : `${tokenPayload}.${bytesToBase64Url(new Uint8Array(signature))}`;
       const jwk = {
         ...(await crypto.subtle.exportKey("jwk", signingKey.publicKey)),
         kid: "test-key",
@@ -311,12 +279,7 @@ describe("auth policy", () => {
       const fetchSpy = vi
         .spyOn(globalThis, "fetch")
         .mockImplementation(async (request, init): Promise<Response> => {
-          const url =
-            typeof request === "string"
-              ? request
-              : request instanceof URL
-                ? request.href
-                : request.url;
+          const url = requestUrl(request);
           if (url === "https://login.example.test/oauth/token") {
             tokenRequest = new Request(request, init);
             tokenParams = new URLSearchParams(await tokenRequest.text());
@@ -358,7 +321,7 @@ describe("auth policy", () => {
         "SHA-256",
         new TextEncoder().encode(verifier!),
       );
-      const challenge = base64Url(new Uint8Array(digest));
+      const challenge = bytesToBase64Url(new Uint8Array(digest));
       expect(challenge).toBe(
         new URL(startedBody.url!).searchParams.get("code_challenge"),
       );
@@ -385,6 +348,13 @@ describe("auth policy", () => {
           .bind(providerId, "public-oidc-link-subject")
           .first(),
       ).resolves.toEqual({ userId });
+      await expect(
+        env.DB.prepare(
+          "SELECT role FROM member WHERE organization_id = ? AND user_id = ?",
+        )
+          .bind(organizationId, userId)
+          .first(),
+      ).resolves.toEqual({ role: "member" });
     },
   );
 
@@ -446,7 +416,7 @@ describe("auth policy", () => {
         auth.handler(
           authRequest("/api/auth/link-social", {
             provider: "github",
-            callbackURL: "http://localhost/join",
+            callbackURL: "http://localhost/courses",
           }),
         ),
         auth.handler(new Request("http://localhost/api/auth/token")),
@@ -521,297 +491,254 @@ describe("auth policy", () => {
     });
   });
 
-  it("maps GitHub profiles but rejects untrusted creation and silent linking before mutation", async () => {
+  it("maps GitHub profiles and gates identities before mutation", async () => {
     const github = auth.options.socialProviders?.github;
     const mappedUser = github?.mapProfileToUser?.({
-      login: "beta-candidate",
+      login: "new-member",
     } as never);
     expect(mappedUser).toMatchObject({
-      username: "beta-candidate",
-      displayUsername: "beta-candidate",
+      username: "new-member",
+      displayUsername: "new-member",
     });
 
     const validate = auth.options.user?.validateUserInfo;
     expect(validate).toBeTypeOf("function");
 
+    // No saved limit means sign-ups are closed.
     await expect(
-      validate?.(
-        {
-          user: { name: "Candidate" },
-          source: {
-            action: "create-user",
-            method: "oauth",
-            oauth: { providerId: "github", profile: {} },
-          },
+      validate?.({
+        user: { name: "Candidate" },
+        source: {
+          action: "create-user",
+          method: "oauth",
+          oauth: { providerId: "github", profile: {} },
         },
-      ),
-    ).resolves.toMatchObject({ error: "valid_beta_invite_required" });
+      }),
+    ).resolves.toMatchObject({ error: "signups_full" });
+
+    await setTestSignupLimit(2);
+    await expect(
+      validate?.({
+        user: { name: "Candidate" },
+        source: {
+          action: "create-user",
+          method: "oauth",
+          oauth: { providerId: "github", profile: {} },
+        },
+      }),
+    ).resolves.toBeUndefined();
 
     await expect(
-      validate?.(
-        {
-          user: { id: "existing-user" },
-          source: {
-            action: "link-account",
-            method: "oauth",
-            oauth: { providerId: "github", profile: {} },
-          },
+      validate?.({
+        user: { name: "Candidate" },
+        source: {
+          action: "create-user",
+          method: "oauth",
+          oauth: { providerId: "gitlab", profile: {} },
         },
-      ),
-    ).resolves.toMatchObject({ error: "explicit_github_link_required" });
+      }),
+    ).resolves.toMatchObject({ error: "unsupported_oauth_provider" });
 
     await expect(
-      validate?.(
-        {
-          user: { name: "SSO Candidate" },
-          source: {
-            action: "create-user",
-            method: "sso-oidc",
-            sso: { providerId: "example-sso", profile: {} },
-          },
+      validate?.({
+        user: { id: "missing-user" },
+        source: {
+          action: "link-account",
+          method: "oauth",
+          oauth: { providerId: "github", profile: {} },
         },
-      ),
+      }),
+    ).resolves.toMatchObject({ error: "access_revoked" });
+
+    await expect(
+      validate?.({
+        user: { name: "SSO Candidate" },
+        source: {
+          action: "create-user",
+          method: "sso-oidc",
+          sso: { providerId: "example-sso", profile: {} },
+        },
+      }),
     ).resolves.toMatchObject({ error: "github_identity_required" });
+
+    await expect(
+      validate?.({
+        user: { id: FIXTURE_ADMIN_ID },
+        source: {
+          action: "link-account",
+          method: "sso-oidc",
+          sso: { providerId: "example-sso", profile: {} },
+        },
+      }),
+    ).resolves.toMatchObject({ error: "explicit_sso_link_required" });
   });
 
-  it("accepts only a signed server handoff for an active GitHub invite", async () => {
-    const now = Date.now();
-    const fixtureAdmin = await ensureFixtureBetaAdmin(env.DB, now - 120_000);
-    await drizzle(env.DB).insert(accessInviteCodes).values({
-      id: "invite-auth-test",
-      codeHash: "a".repeat(64),
-      codePrefix: "auth-test",
-      tokenCiphertext: `v1.${"A".repeat(16)}.${"B".repeat(32)}`,
-      kind: "standard",
-      state: "pending",
-      createdBy: fixtureAdmin,
-      createdAt: now - 60_000,
-      expiresAt: now - 60_000 + 14 * 24 * 60 * 60_000,
-      claimExpiresAt: now - 60_000 + BETA_INVITE_LIFETIME_MS,
-      updatedAt: now,
-    });
-
-    const handoff = await createInviteOAuthHandoff({
-      inviteId: "invite-auth-test",
-      attemptId: "attempt-auth-test",
-      expiresAt: now + 600_000,
-    });
-    const forged = `${handoff.slice(0, -1)}${handoff.endsWith("a") ? "b" : "a"}`;
-
-    const forgedResponse = await auth.handler(
-      authRequest(
-        "/api/auth/sign-in/social",
-        {
-          provider: "github",
-          callbackURL: "http://localhost/join",
-          errorCallbackURL: "http://localhost/join",
-          additionalData: {
-            intarBetaAuth: {
-              inviteId: "invite-auth-test",
-              attemptId: "attempt-auth-test",
-            },
-          },
-        },
-        { [INVITE_OAUTH_HANDOFF_HEADER]: forged },
-      ),
-    );
-    expect(forgedResponse.status).toBe(403);
-
-    const validResponse = await auth.handler(
-      authRequest(
-        "/api/auth/sign-in/social",
-        {
-          provider: "github",
-          callbackURL: "http://localhost/join",
-          errorCallbackURL: "http://localhost/join",
-          // Client data may ride OAuth state but is never read as authority.
-          additionalData: {
-            intarBetaAuth: {
-              inviteId: "attacker-controlled",
-              attemptId: "attacker-controlled",
-            },
-          },
-        },
-        { [INVITE_OAUTH_HANDOFF_HEADER]: handoff },
-      ),
-    );
-    expect(validResponse.status).toBe(200);
-    await expect(validResponse.json()).resolves.toMatchObject({
-      redirect: true,
-      url: expect.stringContaining("github.com/login/oauth/authorize"),
-    });
-  });
-
-  it("links a same-email OIDC user only through a live GitHub invite callback", async () => {
-    const now = Date.now();
-    const target = await seedOidcOnlyUser({
-      id: "same-email-invite-target",
-      email: "same-email-invite@example.test",
-      now,
-    });
-    const flow = await beginGithubInviteFlow("same-email-live", now);
+  it("signs up a new member with GitHub while a spot is open", async () => {
+    await setTestSignupLimit(2);
+    const flow = await beginGithubFlow();
 
     const callback = await completeGithubCallback({
       ...flow,
-      email: target.email,
-      githubAccountId: "4242001",
-      githubLogin: "same-email-github",
+      email: "new-member@example.test",
+      githubAccountId: "4242101",
+      githubLogin: "new-member",
     });
 
     expect(callback.status).toBe(302);
-    expect(callback.headers.get("location")).toBe("http://localhost/join");
+    expect(callback.headers.get("location")).toBe("http://localhost/courses");
+    const created = await env.DB.prepare(
+      `SELECT identity.id AS userId, github.account_id AS githubAccountId
+       FROM user AS identity
+       JOIN account AS github
+         ON github.user_id = identity.id AND github.provider_id = 'github'
+       WHERE identity.email = ?`,
+    )
+      .bind("new-member@example.test")
+      .first<{ userId: string; githubAccountId: string }>();
+    expect(created?.githubAccountId).toBe("4242101");
     await expect(
-      env.DB.prepare(
-        `SELECT account_id AS accountId, user_id AS userId
-         FROM account
-         WHERE provider_id = 'github' AND account_id = ?`,
-      )
-        .bind("4242001")
+      env.DB.prepare("SELECT id FROM session WHERE user_id = ? LIMIT 1")
+        .bind(created!.userId)
         .first(),
-    ).resolves.toEqual({
-      accountId: "4242001",
-      userId: target.id,
+    ).resolves.not.toBeNull();
+    await expect(
+      env.DB.prepare("SELECT count(*) AS count FROM signup_reservations").first(),
+    ).resolves.toEqual({ count: 0 });
+    await expect(getSignupStatus(env.DB)).resolves.toMatchObject({
+      limit: 2,
+      taken: 2,
+      remaining: 0,
+      open: false,
     });
+  });
+
+  it("refuses a GitHub sign-up at the limit without creating a user", async () => {
+    await setTestSignupLimit(1);
+    const flow = await beginGithubFlow();
+
+    const callback = await completeGithubCallback({
+      ...flow,
+      email: "late-member@example.test",
+      githubAccountId: "4242102",
+      githubLogin: "late-member",
+    });
+
+    expectOauthCallbackError(callback, "signups_full");
     await expect(
-      env.DB.prepare(
-        "SELECT user_id AS userId FROM session WHERE user_id = ? LIMIT 1",
-      )
-        .bind(target.id)
-        .first(),
-    ).resolves.toEqual({ userId: target.id });
-    await expect(
-      env.DB.prepare(
-        "SELECT user_id FROM access_allowlist WHERE user_id = ? LIMIT 1",
-      )
-        .bind(target.id)
+      env.DB.prepare("SELECT id FROM user WHERE email = ?")
+        .bind("late-member@example.test")
         .first(),
     ).resolves.toBeNull();
+    await expectGithubAccountAbsent("4242102");
+  });
+
+  it("admits exactly one of two concurrent sign-ups for the last spot", async () => {
+    await setTestSignupLimit(2);
+    const first = await beginGithubFlow();
+    const second = await beginGithubFlow();
+    const fetchSpy = mockGithubProfiles({
+      "code-first": {
+        email: "race-first@example.test",
+        githubAccountId: "4242111",
+        githubLogin: "race-first",
+      },
+      "code-second": {
+        email: "race-second@example.test",
+        githubAccountId: "4242112",
+        githubLogin: "race-second",
+      },
+    });
+    let callbacks: Response[];
+    try {
+      callbacks = await Promise.all([
+        auth.handler(githubCallbackRequest(first, "code-first")),
+        auth.handler(githubCallbackRequest(second, "code-second")),
+      ]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    const outcomes = callbacks.map((callback) => {
+      expect(callback.status).toBe(302);
+      return new URL(callback.headers.get("location")!).searchParams.get(
+        "error",
+      );
+    });
+    expect(outcomes.toSorted()).toEqual(["signups_full", null].toSorted());
+    const members = await env.DB.prepare(
+      `SELECT count(*) AS count FROM account
+       WHERE provider_id = 'github' AND account_id IN ('4242111', '4242112')`,
+    ).first<{ count: number }>();
+    expect(members?.count).toBe(1);
+    await expect(getSignupStatus(env.DB)).resolves.toMatchObject({
+      taken: 2,
+      remaining: 0,
+    });
+  });
+
+  it("links an account-less leftover user once a spot opens", async () => {
+    const now = Date.now();
+    const leftoverId = "leftover-user";
+    await drizzle(env.DB).insert(user).values({
+      id: leftoverId,
+      name: "Leftover",
+      email: "leftover@example.test",
+      emailVerified: true,
+      username: "leftover",
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    await setTestSignupLimit(1);
+
+    const refused = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: "leftover@example.test",
+      githubAccountId: "4242121",
+      githubLogin: "leftover",
+    });
+    expectOauthCallbackError(refused, "signups_full");
+    await expectGithubLinkAndSessionAbsent(leftoverId, "4242121");
+
+    await setTestSignupLimit(2);
+    const linked = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: "leftover@example.test",
+      githubAccountId: "4242121",
+      githubLogin: "leftover",
+    });
+    expect(linked.status).toBe(302);
+    expect(linked.headers.get("location")).toBe("http://localhost/courses");
     await expect(
       env.DB.prepare(
-        `SELECT state, redeemer_user_id AS redeemerUserId
-         FROM access_invite_codes WHERE id = ?`,
+        `SELECT user_id AS userId FROM account
+         WHERE provider_id = 'github' AND account_id = ?`,
       )
-        .bind(flow.inviteId)
+        .bind("4242121")
         .first(),
-    ).resolves.toEqual({ state: "pending", redeemerUserId: null });
+    ).resolves.toEqual({ userId: leftoverId });
+    await expect(
+      env.DB.prepare("SELECT count(*) AS count FROM user").first(),
+    ).resolves.toEqual({ count: 2 });
   });
 
-  it("rejects a same-email implicit GitHub link without an invite flow", async () => {
+  it("rejects a same-email implicit GitHub link to a user with other accounts", async () => {
     const target = await seedOidcOnlyUser({
-      id: "same-email-no-flow-target",
-      email: "same-email-no-flow@example.test",
+      id: "same-email-oidc-target",
+      email: "same-email-oidc@example.test",
       now: Date.now(),
     });
-    const flow = await beginGithubFlowWithoutInvite();
+    await setTestSignupLimit(10);
 
     const callback = await completeGithubCallback({
-      ...flow,
+      ...(await beginGithubFlow()),
       email: target.email,
-      githubAccountId: "4242002",
-      githubLogin: "same-email-no-flow",
+      githubAccountId: "4242131",
+      githubLogin: "same-email-oidc",
     });
 
     expectOauthCallbackError(callback, "explicit_github_link_required");
-    await expectGithubLinkAndSessionAbsent(target.id, "4242002");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242131");
   });
-
-  it("rejects a same-email implicit GitHub link after its invite expires", async () => {
-    const now = Date.now();
-    const target = await seedOidcOnlyUser({
-      id: "same-email-expired-target",
-      email: "same-email-expired@example.test",
-      now,
-    });
-    const flow = await beginGithubInviteFlow("same-email-expired", now);
-    const expiredAt = Date.now() - 1;
-    await drizzle(env.DB)
-      .update(accessInviteCodes)
-      .set({
-        claimExpiresAt: expiredAt,
-      })
-      .where(eq(accessInviteCodes.id, flow.inviteId));
-
-    const callback = await completeGithubCallback({
-      ...flow,
-      email: target.email,
-      githubAccountId: "4242003",
-      githubLogin: "same-email-expired",
-    });
-
-    expectOauthCallbackError(callback, "explicit_github_link_required");
-    await expectGithubLinkAndSessionAbsent(target.id, "4242003");
-  });
-
-  it("rejects a same-email implicit GitHub link after its invite is revoked", async () => {
-    const now = Date.now();
-    const target = await seedOidcOnlyUser({
-      id: "same-email-revoked-target",
-      email: "same-email-revoked@example.test",
-      now,
-    });
-    const flow = await beginGithubInviteFlow("same-email-revoked", now);
-    await revokeBetaInvite({
-      d1: env.DB,
-      inviteId: flow.inviteId,
-      expectedVersion: flow.inviteVersion,
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      now: now + 1,
-    });
-
-    const callback = await completeGithubCallback({
-      ...flow,
-      email: target.email,
-      githubAccountId: "4242004",
-      githubLogin: "same-email-revoked",
-    });
-
-    expectOauthCallbackError(callback, "explicit_github_link_required");
-    await expectGithubLinkAndSessionAbsent(target.id, "4242004");
-  });
-
-  it.each(["active", "blocked"] as const)(
-    "rejects a same-email implicit GitHub link for a %s beta target",
-    async (accessState) => {
-      const now = Date.now();
-      const target = await seedOidcOnlyUser({
-        id: `same-email-${accessState}-target`,
-        email: `same-email-${accessState}@example.test`,
-        now,
-      });
-      await grantBetaAccessWithoutLinkedGithub({
-        userId: target.id,
-        githubAccountId: `historical-${accessState}-github`,
-        githubUsername: `historical-${accessState}`,
-        now,
-      });
-      if (accessState === "blocked") {
-        await revokeBetaUser({
-          d1: env.DB,
-          userId: target.id,
-          actorUserId: FIXTURE_BETA_ADMIN_ID,
-          reason: "same_email_policy_test",
-          now: now + 4,
-        });
-      }
-      const flow = await beginGithubInviteFlow(
-        `same-email-${accessState}-access`,
-        now + 5,
-      );
-
-      const callback = await completeGithubCallback({
-        ...flow,
-        email: target.email,
-        githubAccountId: accessState === "active" ? "4242005" : "4242006",
-        githubLogin: `same-email-${accessState}`,
-      });
-
-      expectOauthCallbackError(callback, "explicit_github_link_required");
-      await expectGithubLinkAndSessionAbsent(
-        target.id,
-        accessState === "active" ? "4242005" : "4242006",
-      );
-    },
-  );
 
   it("rejects a same-email target that already has another GitHub account", async () => {
     const now = Date.now();
@@ -828,20 +755,17 @@ describe("auth policy", () => {
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    const flow = await beginGithubInviteFlow(
-      "same-email-existing-github",
-      now,
-    );
+    await setTestSignupLimit(10);
 
     const callback = await completeGithubCallback({
-      ...flow,
+      ...(await beginGithubFlow()),
       email: target.email,
-      githubAccountId: "4242007",
+      githubAccountId: "4242132",
       githubLogin: "same-email-second-github",
     });
 
     expectOauthCallbackError(callback, "explicit_github_link_required");
-    await expectGithubLinkAndSessionAbsent(target.id, "4242007");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242132");
     await expect(
       env.DB.prepare(
         `SELECT account_id AS accountId
@@ -855,83 +779,187 @@ describe("auth policy", () => {
     });
   });
 
-  it("rejects previously issued invite-recovery handoff kinds", async () => {
-    const expiresAt = Date.now() + 300_000;
-    const legacyHandoffs = [
-      {
-        kind: "github-recovery-link",
-        inviteId: "legacy-recovery-invite",
-        leaseId: "legacy-recovery-lease",
-        userId: "legacy-recovery-user",
-        aud: "intar.beta-auth-handoff.v1",
-        expiresAt,
-        version: 1,
-      },
-      {
-        kind: "sso-recovery",
-        inviteId: "legacy-recovery-invite",
-        leaseId: "legacy-recovery-lease",
-        providerId: "legacy-recovery-provider",
-        aud: "intar.beta-auth-handoff.v1",
-        expiresAt,
-        version: 1,
-      },
-    ];
-
-    for (const payload of legacyHandoffs) {
-      const response = await auth.handler(
-        authRequest(
-          payload.kind === "sso-recovery"
-            ? "/api/auth/sign-in/sso"
-            : "/api/auth/link-social",
-          payload.kind === "sso-recovery"
-            ? {
-                providerId: payload.providerId,
-                providerType: "oidc",
-                callbackURL: "http://localhost/join",
-              }
-            : {
-                provider: "github",
-                callbackURL: "http://localhost/join",
-              },
-          {
-            [INVITE_OAUTH_HANDOFF_HEADER]: await signLegacyHandoff(payload),
-          },
-        ),
-      );
-      expect(response.status).toBe(403);
-      await expect(response.json()).resolves.toMatchObject({
-        code: "invalid_beta_oauth_handoff",
-      });
-    }
-  });
-
-  it("confines a pre-access session to inspection, sign-out, and invite callbacks", async () => {
+  it("rejects a same-email implicit GitHub link to a revoked user", async () => {
     const now = Date.now();
-    const userId = "restricted-session-user";
-    const token = "restricted-session-token";
+    const targetId = "same-email-revoked-target";
     await drizzle(env.DB).insert(user).values({
-      id: userId,
-      name: "Restricted Admin",
-      email: "restricted@example.test",
+      id: targetId,
+      name: "Revoked leftover",
+      email: "same-email-revoked@example.test",
       emailVerified: true,
-      role: "admin",
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    await drizzle(env.DB).insert(session).values({
-      id: "restricted-session-id",
-      token,
+    await banMember(targetId);
+    await setTestSignupLimit(10);
+
+    const callback = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: "same-email-revoked@example.test",
+      githubAccountId: "4242133",
+      githubLogin: "same-email-revoked",
+    });
+
+    expectOauthCallbackError(callback, "access_revoked");
+    await expectGithubLinkAndSessionAbsent(targetId, "4242133");
+  });
+
+  it("lets members sign in while sign-ups are full", async () => {
+    const now = Date.now();
+    await seedMember({ id: "full-cap-member", githubAccountId: "4242141", now });
+    await setTestSignupLimit(1);
+    await expect(getSignupStatus(env.DB)).resolves.toMatchObject({
+      open: false,
+    });
+
+    const callback = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: "full-cap-member@example.test",
+      githubAccountId: "4242141",
+      githubLogin: "full-cap-member",
+    });
+
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("http://localhost/courses");
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE user_id = ? LIMIT 1")
+        .bind("full-cap-member")
+        .first(),
+    ).resolves.not.toBeNull();
+  });
+
+  it("refuses GitHub sign-in for a revoked member", async () => {
+    const now = Date.now();
+    await seedMember({ id: "revoked-member", githubAccountId: "4242151", now });
+    await banMember("revoked-member");
+    await setTestSignupLimit(10);
+
+    const callback = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: "revoked-member@example.test",
+      githubAccountId: "4242151",
+      githubLogin: "revoked-member",
+    });
+
+    expectOauthCallbackError(callback, "access_revoked");
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE user_id = ? LIMIT 1")
+        .bind("revoked-member")
+        .first(),
+    ).resolves.toBeNull();
+  });
+
+  it("reserves a spot in the account hook and refuses links it cannot fence", async () => {
+    const now = Date.now();
+    await drizzle(env.DB).insert(user).values({
+      id: "hook-user",
+      name: "Hook user",
+      email: "hook-user@example.test",
+      emailVerified: true,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    const hooks = auth.options.databaseHooks?.account?.create;
+    const before = hooks?.before;
+    const after = hooks?.after;
+    if (!before || !after) throw new Error("account create hooks are required");
+    const hookContext = {} as Parameters<typeof before>[1];
+    const githubAccount = {
+      id: "hook-github-row",
+      providerId: "github",
+      accountId: "hook-github",
+      userId: "hook-user",
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    };
+
+    await expect(before(githubAccount, null)).rejects.toMatchObject({
+      body: { code: "account_context_missing" },
+    });
+    // Sign-ups are closed: the authoritative cap refuses the link.
+    await expect(before(githubAccount, hookContext)).rejects.toMatchObject({
+      body: { code: "signups_full", message: "No sign-up spots are open right now" },
+    });
+
+    await setTestSignupLimit(2);
+    await expect(before(githubAccount, hookContext)).resolves.toBeUndefined();
+    await expect(
+      env.DB.prepare("SELECT user_id AS userId FROM signup_reservations").all(),
+    ).resolves.toMatchObject({ results: [{ userId: "hook-user" }] });
+    await drizzle(env.DB).insert(account).values(githubAccount);
+    await expect(after(githubAccount)).resolves.toBeUndefined();
+    await expect(
+      env.DB.prepare("SELECT count(*) AS count FROM signup_reservations").first(),
+    ).resolves.toEqual({ count: 0 });
+
+    await expect(
+      before({ ...githubAccount, accountId: "hook-second-github" }, hookContext),
+    ).rejects.toMatchObject({ body: { code: "explicit_github_link_required" } });
+    await expect(
+      before(
+        { ...githubAccount, providerId: "tenant-oidc", accountId: "subject" },
+        hookContext,
+      ),
+    ).rejects.toMatchObject({ body: { code: "explicit_sso_link_required" } });
+  });
+
+  it("refuses to create a session for a banned account", async () => {
+    const now = Date.now();
+    await seedMember({ id: "banned-session-user", githubAccountId: "4242161", now });
+    await banMember("banned-session-user");
+    const context = await auth.$context;
+
+    await expect(
+      context.internalAdapter.createSession("banned-session-user"),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE user_id = ?")
+        .bind("banned-session-user")
+        .first(),
+    ).resolves.toBeNull();
+  });
+
+  it("deletes a session inserted after its account was revoked", async () => {
+    const now = Date.now();
+    const userId = "session-issuance-race-user";
+    await seedMember({ id: userId, githubAccountId: "4242171", now });
+    const created: Session = {
+      id: "session-race-row",
+      token: "session-race-token",
       userId,
       expiresAt: new Date(now + 3_600_000),
       createdAt: new Date(now),
       updatedAt: new Date(now),
-    });
-    const cookie = await signedSessionCookie(token);
+      ipAddress: null,
+      userAgent: null,
+    };
+    await drizzle(env.DB).insert(session).values(created);
 
-    const inspection = await auth.handler(
-      authGetRequest("/api/auth/get-session", cookie),
-    );
+    await expect(enforceCreatedSessionStillActive(created)).resolves.toBeUndefined();
+    await banMember(userId);
+    await expect(enforceCreatedSessionStillActive(created)).rejects.toMatchObject({
+      body: { code: "access_revoked" },
+    });
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE id = ?")
+        .bind(created.id)
+        .first(),
+    ).resolves.toBeNull();
+  });
+
+  it("confines a revoked account's session to sign-out and callbacks", async () => {
+    const now = Date.now();
+    const userId = "revoked-session-user";
+    await seedMember({ id: userId, githubAccountId: "4242181", role: "admin", now });
+    const cookie = await seedSessionCookie({
+      id: "revoked-session-row",
+      token: "revoked-session-token",
+      userId,
+      now,
+    });
+    await banMember(userId);
+
+    const inspection = await auth.handler(inspectionRequest(cookie));
     expect(inspection.status).toBe(200);
     await expect(inspection.json()).resolves.toMatchObject({
       user: { id: userId },
@@ -951,11 +979,18 @@ describe("auth policy", () => {
           cookie,
         ),
       ),
+      auth.handler(
+        authRequest(
+          "/api/auth/sign-in/social",
+          { provider: "github", callbackURL: "http://localhost/courses" },
+          { cookie },
+        ),
+      ),
     ]);
     for (const response of denied) {
       expect(response.status).toBe(403);
       await expect(response.json()).resolves.toMatchObject({
-        code: "restricted_beta_session",
+        code: "access_revoked",
       });
     }
 
@@ -966,282 +1001,243 @@ describe("auth policy", () => {
     await expect(signOut.json()).resolves.toMatchObject({ success: true });
   });
 
-  it("keeps the session inspection response identical without the handoff header", async () => {
+  it("answers session inspection without reading account state", async () => {
     const now = Date.now();
-    const sessionLifetimeMs = 7 * 24 * 60 * 60_000;
+    await seedMember({ id: "inspection-member", githubAccountId: "4242191", now });
+    await seedMember({ id: "inspection-revoked", githubAccountId: "4242192", now });
+    const memberCookie = await seedSessionCookie({
+      id: "inspection-member-session",
+      token: "inspection-member-token",
+      userId: "inspection-member",
+      now,
+    });
+    const revokedCookie = await seedSessionCookie({
+      id: "inspection-revoked-session",
+      token: "inspection-revoked-token",
+      userId: "inspection-revoked",
+      now,
+    });
+    await banMember("inspection-revoked");
+    const handoff = await createSsoLinkOAuthHandoff({
+      userId: "inspection-member",
+      providerId: "inspection-provider",
+      expiresAt: now + 600_000,
+    });
 
-    async function seedInspectionState(
-      state: "active" | "restricted" | "expired" | "anonymous",
-    ): Promise<string | null> {
-      if (state === "anonymous") return null;
-      const userId = `${state}-inspection-user`;
-      const token = `${state}-inspection-token`;
-      if (state === "active") {
-        await seedActiveBetaUser({
-          id: userId,
-          accountId: `${userId}-github`,
-          username: userId,
-          now,
-        });
-      } else {
-        await seedGithubIdentity({
-          id: userId,
-          accountId: `${userId}-github`,
-          username: userId,
-          now,
-        });
-      }
-      await drizzle(env.DB).insert(session).values({
-        id: `${state}-inspection-session`,
-        token,
-        userId,
-        expiresAt: new Date(
-          state === "expired" ? now - 60_000 : now + sessionLifetimeMs,
-        ),
-        createdAt: new Date(now),
-        updatedAt: new Date(now),
-      });
-      return signedSessionCookie(token);
-    }
-
-    async function readInspection(
-      cookie: string | null,
-      handoffHeader: string | undefined,
-    ) {
-      const response = await auth.handler(
-        inspectionRequest(cookie, handoffHeader),
-      );
-      return {
-        status: response.status,
-        setCookie: response.headers.get("set-cookie"),
-        body: await response.json(),
-      };
-    }
-
-    for (const state of [
-      "active",
-      "restricted",
-      "expired",
-      "anonymous",
+    for (const [cookie, header] of [
+      [memberCookie, undefined],
+      [memberCookie, handoff],
+      [revokedCookie, undefined],
+      [null, "not-a-handoff"],
     ] as const) {
-      const cookie = await seedInspectionState(state);
-      const withoutHeader = await readInspection(cookie, undefined);
-
-      await resetD1Database();
-      await ensureFixtureBetaAdmin(env.DB, now);
-      const repeatedCookie = await seedInspectionState(state);
-      const withEmptyHeader = await readInspection(repeatedCookie, "");
-
-      expect(repeatedCookie).toBe(cookie);
-      expect(withEmptyHeader).toEqual(withoutHeader);
+      const statements = await capturePreparedSql(async () => {
+        const response = await auth.handler(inspectionRequest(cookie, header));
+        expect(response.status).toBe(200);
+      });
+      // Better Auth's own session lookup still runs. Account state reads use
+      // coalesce(banned), which that lookup does not.
+      if (cookie) {
+        expect(statements.some((sql) => /session/iu.test(sql))).toBe(true);
+      }
+      expect(statements.filter((sql) => /coalesce\(/iu.test(sql))).toEqual([]);
+      expect(
+        statements.filter((sql) => /from\s+["`]?account["`]?/iu.test(sql)),
+      ).toEqual([]);
     }
   });
 
-  it("keeps handoff verification on the session inspection route", async () => {
+  it("accepts an SSO-link handoff only for its signed-in member and OIDC provider", async () => {
     const now = Date.now();
-    const fixtureAdmin = await ensureFixtureBetaAdmin(env.DB, now - 120_000);
-    await drizzle(env.DB).insert(accessInviteCodes).values({
-      id: "invite-inspection-test",
-      codeHash: "b".repeat(64),
-      codePrefix: "inspection-test",
-      tokenCiphertext: `v1.${"A".repeat(16)}.${"B".repeat(32)}`,
-      kind: "standard",
-      state: "pending",
-      createdBy: fixtureAdmin,
-      createdAt: now - 60_000,
-      expiresAt: now - 60_000 + 14 * 24 * 60 * 60_000,
-      claimExpiresAt: now - 60_000 + BETA_INVITE_LIFETIME_MS,
-      updatedAt: now,
+    const userId = "handoff-member";
+    await seedMember({ id: userId, githubAccountId: "4242201", now });
+    await seedMember({ id: "handoff-other", githubAccountId: "4242202", now });
+    await seedOidcProvider("handoff-provider");
+    const cookie = await seedSessionCookie({
+      id: "handoff-member-session",
+      token: "handoff-member-token",
+      userId,
+      now,
     });
-    const handoff = await createInviteOAuthHandoff({
-      inviteId: "invite-inspection-test",
-      attemptId: "attempt-inspection-test",
+    const otherCookie = await seedSessionCookie({
+      id: "handoff-other-session",
+      token: "handoff-other-token",
+      userId: "handoff-other",
+      now,
+    });
+    const handoff = await createSsoLinkOAuthHandoff({
+      userId,
+      providerId: "handoff-provider",
       expiresAt: now + 600_000,
     });
     const forged = `${handoff.slice(0, -1)}${handoff.endsWith("a") ? "b" : "a"}`;
+    const ssoBody = {
+      providerId: "handoff-provider",
+      providerType: "oidc",
+      callbackURL: "http://localhost/organizations/example",
+    };
 
-    // Positive control: the same handoff opens its own route.
     const accepted = await auth.handler(
-      authRequest(
-        "/api/auth/sign-in/social",
-        {
-          provider: "github",
-          callbackURL: "http://localhost/join",
-          errorCallbackURL: "http://localhost/join",
-        },
-        { [INVITE_OAUTH_HANDOFF_HEADER]: handoff },
-      ),
+      authRequest("/api/auth/sign-in/sso", ssoBody, {
+        cookie,
+        [SSO_LINK_HANDOFF_HEADER]: handoff,
+      }),
     );
     expect(accepted.status).toBe(200);
 
-    for (const header of [forged, "not-a-handoff", handoff]) {
-      const response = await auth.handler(inspectionRequest(null, header));
-      expect(response.status).toBe(403);
-      await expect(response.json()).resolves.toMatchObject({
-        code: "invalid_beta_oauth_handoff",
-      });
-    }
-  });
-
-  it("keeps restricted sessions out of every route except inspection", async () => {
-    const now = Date.now();
-    const userId = "restricted-route-user";
-    const token = "restricted-route-token";
-    await seedGithubIdentity({
-      id: userId,
-      accountId: `${userId}-github`,
-      username: userId,
-      now,
-    });
-    await drizzle(env.DB).insert(session).values({
-      id: "restricted-route-session",
-      token,
-      userId,
-      expiresAt: new Date(now + 7 * 24 * 60 * 60_000),
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-    const cookie = await signedSessionCookie(token);
-
-    const inspection = await auth.handler(
-      inspectionRequest(cookie, undefined),
-    );
-    expect(inspection.status).toBe(200);
-
-    const denied = await Promise.all([
-      auth.handler(authGetRequest("/api/auth/organization/list", cookie)),
+    const rejected = await Promise.all([
       auth.handler(
-        authGetRequest(
-          "/api/auth/oauth2/authorize?client_id=blocked&response_type=code",
+        authRequest("/api/auth/sign-in/sso", ssoBody, {
           cookie,
+          [SSO_LINK_HANDOFF_HEADER]: forged,
+        }),
+      ),
+      auth.handler(
+        authRequest("/api/auth/sign-in/sso", ssoBody, {
+          cookie: otherCookie,
+          [SSO_LINK_HANDOFF_HEADER]: handoff,
+        }),
+      ),
+      auth.handler(
+        authRequest(
+          "/api/auth/sign-in/sso",
+          { ...ssoBody, providerId: "another-provider" },
+          { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
         ),
+      ),
+      auth.handler(
+        authRequest("/api/auth/sign-in/sso", ssoBody, {
+          [SSO_LINK_HANDOFF_HEADER]: handoff,
+        }),
       ),
       auth.handler(
         authRequest(
           "/api/auth/sign-in/social",
-          {
-            provider: "github",
-            callbackURL: "http://localhost/join",
-          },
-          { cookie },
+          { provider: "github", callbackURL: "http://localhost/courses" },
+          { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
         ),
       ),
     ]);
-    for (const response of denied) {
+    for (const response of rejected) {
       expect(response.status).toBe(403);
       await expect(response.json()).resolves.toMatchObject({
-        code: "restricted_beta_session",
+        code: "invalid_sso_link_handoff",
       });
     }
   });
 
-  it("reads beta admission only when the handoff header is present", async () => {
+  it("rejects handoffs signed for another audience or flow", async () => {
     const now = Date.now();
-    const userId = "inspection-query-user";
-    const token = "inspection-query-token";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: `${userId}-github`,
-      username: userId,
+    const userId = "legacy-handoff-member";
+    await seedMember({ id: userId, githubAccountId: "4242211", now });
+    await seedOidcProvider("legacy-handoff-provider");
+    const cookie = await seedSessionCookie({
+      id: "legacy-handoff-session",
+      token: "legacy-handoff-token",
+      userId,
       now,
     });
-    await drizzle(env.DB).insert(session).values({
-      id: "inspection-query-session",
-      token,
-      userId,
-      expiresAt: new Date(now + 7 * 24 * 60 * 60_000),
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-    const cookie = await signedSessionCookie(token);
+    const expiresAt = now + 300_000;
+    const handoffs = [
+      // The retired beta handoff carried the same flow under another audience.
+      await signHandoff("intar.beta-auth-handoff.v1", {
+        kind: "sso-link",
+        userId,
+        providerId: "legacy-handoff-provider",
+        sourceInviteId: "legacy-invite",
+        sourceLeaseId: "legacy-lease",
+        grantedAt: now - 1_000,
+        aud: "intar.beta-auth-handoff.v1",
+        expiresAt,
+        version: 1,
+      }),
+      await signHandoff("intar.sso-link-handoff.v1", {
+        kind: "github-invite",
+        inviteId: "legacy-invite",
+        attemptId: "legacy-attempt",
+        userId,
+        providerId: "legacy-handoff-provider",
+        aud: "intar.sso-link-handoff.v1",
+        expiresAt,
+        version: 1,
+      }),
+    ];
 
-    const withoutHeader = await capturePreparedSql(async () => {
+    for (const handoff of handoffs) {
       const response = await auth.handler(
-        inspectionRequest(cookie, undefined),
+        authRequest(
+          "/api/auth/sign-in/sso",
+          {
+            providerId: "legacy-handoff-provider",
+            providerType: "oidc",
+            callbackURL: "http://localhost/organizations/example",
+          },
+          { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
+        ),
       );
-      expect(response.status).toBe(200);
-    });
-    const withEmptyHeader = await capturePreparedSql(async () => {
-      const response = await auth.handler(inspectionRequest(cookie, ""));
-      expect(response.status).toBe(200);
-    });
-
-    const admissionReads = (statements: string[]) =>
-      statements.filter((sql) => sql.includes("access_allowlist"));
-    expect(admissionReads(withoutHeader)).toEqual([]);
-    expect(admissionReads(withEmptyHeader)).toHaveLength(1);
-    expect(withoutHeader.length).toBeLessThan(withEmptyHeader.length);
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        code: "invalid_sso_link_handoff",
+      });
+    }
   });
 
-  it("dynamically rejects a blocked user's OAuth credentials after authenticating the request", async () => {
+  it("rejects an SSO-link handoff once the account is revoked", async () => {
     const now = Date.now();
-    const fixtureAdmin = await ensureFixtureBetaAdmin(env.DB, now - 1_000);
-    const userId = "blocked-oauth-user";
-    await drizzle(env.DB).insert(user).values({
-      id: userId,
-      name: "Blocked OAuth User",
-      email: "blocked-oauth@example.test",
-      emailVerified: true,
-      username: "blocked-oauth-user",
-      displayUsername: "blocked-oauth-user",
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-    await drizzle(env.DB).insert(account).values({
-      id: "blocked-oauth-github-link",
-      providerId: "github",
-      accountId: "blocked-oauth-github-id",
+    const userId = "revoked-sso-link-user";
+    await seedMember({ id: userId, githubAccountId: "4242221", now });
+    await seedOidcProvider("revoked-sso-provider");
+    const handoff = await createSsoLinkOAuthHandoff({
       userId,
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
+      providerId: "revoked-sso-provider",
+      expiresAt: now + 600_000,
     });
-    const invite = await createBetaInvite({
-      d1: env.DB,
-      actorUserId: fixtureAdmin,
-      encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
+    const cookie = await seedSessionCookie({
+      id: "revoked-sso-session-row",
+      token: "revoked-sso-session-token",
+      userId,
       now,
     });
-    await redeemBetaInvite({
-      d1: env.DB,
-      inviteId: invite.id,
-      attemptId: "blocked-oauth-attempt",
-      userId,
-      githubAccountId: "blocked-oauth-github-id",
-      githubUsername: "blocked-oauth-user",
-      now: now + 1,
+    await banMember(userId);
+
+    const response = await auth.handler(
+      authRequest(
+        "/api/auth/sign-in/sso",
+        {
+          providerId: "revoked-sso-provider",
+          providerType: "oidc",
+          callbackURL: "http://localhost/organizations/example",
+        },
+        { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
+      ),
+    );
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "invalid_sso_link_handoff",
     });
-    const blockedAdmission = await captureBetaAdmissionEpoch(userId);
-    await revokeBetaUser({
-      d1: env.DB,
-      userId,
-      actorUserId: fixtureAdmin,
-      reason: "oauth_revocation_test",
-      now: now + 2,
-    });
+  });
+
+  it("refuses to mint an already-expired OAuth handoff", async () => {
+    await expect(
+      createSsoLinkOAuthHandoff({
+        userId: "handoff-user",
+        providerId: "handoff-provider",
+        expiresAt: Date.now() - 1,
+      }),
+    ).rejects.toThrow("handoff expiry is outside the allowed window");
+  });
+
+  it("dynamically rejects a revoked user's OAuth credentials after authenticating the request", async () => {
+    const now = Date.now();
+    const userId = "revoked-oauth-user";
+    await seedMember({ id: userId, githubAccountId: "4242231", now });
 
     const clientId = "oauth-test-client";
-    const clientSecret = "oauth-test-client-secret";
-    const accessToken = "blocked-user-access-token";
-    const storedRefreshToken = "blocked-user-refresh-token";
-    const refreshToken = await createAdmissionBoundRefreshToken({
-      admission: blockedAdmission,
-      token: storedRefreshToken,
-    });
-    await drizzle(env.DB).insert(oauthClient).values({
-      id: "oauth-test-client-row",
-      clientId,
-      clientSecret: await hashOAuthToken(clientSecret),
-      redirectUris: ["http://localhost/callback"],
-      tokenEndpointAuthMethod: "client_secret_basic",
-      grantTypes: ["authorization_code", "refresh_token"],
-      responseTypes: ["code"],
-      scopes: ["openid", "profile", "offline_access"],
-      requirePKCE: false,
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
+    const clientSecret = `${clientId}-secret`;
+    const accessToken = "revoked-user-access-token";
+    const refreshToken = "revoked-user-refresh-token";
+    await seedOAuthClient(clientId, now, ["openid", "profile", "offline_access"]);
     await drizzle(env.DB).insert(oauthRefreshToken).values({
-      id: "blocked-refresh-row",
+      id: "revoked-refresh-row",
       token: await hashOAuthToken(refreshToken),
       clientId,
       userId,
@@ -1250,7 +1246,7 @@ describe("auth policy", () => {
       expiresAt: new Date(now + 3_600_000),
     });
     await drizzle(env.DB).insert(oauthAccessToken).values({
-      id: "blocked-access-row",
+      id: "revoked-access-row",
       token: await hashOAuthToken(accessToken),
       clientId,
       userId,
@@ -1258,6 +1254,7 @@ describe("auth policy", () => {
       createdAt: new Date(now),
       expiresAt: new Date(now + 3_600_000),
     });
+    await banMember(userId);
 
     const introspectionBody = new URLSearchParams({
       token: refreshToken,
@@ -1299,107 +1296,79 @@ describe("auth policy", () => {
     );
     expect(refresh.status).toBeGreaterThanOrEqual(400);
     await expect(refresh.json()).resolves.toMatchObject({
-      code: "beta_access_revoked",
+      code: "access_revoked",
     });
     const storedRefresh = await env.DB.prepare(
       "SELECT revoked, rotated_at FROM oauth_refresh_token WHERE id = ?",
     )
-      .bind("blocked-refresh-row")
+      .bind("revoked-refresh-row")
       .first<{ revoked: number | null; rotated_at: number | null }>();
     expect(storedRefresh).toEqual({ revoked: null, rotated_at: null });
   });
 
-  it("suppresses and removes OAuth credentials minted across revoke and fresh readmission", async () => {
+  it("removes exactly the OAuth tokens issued while the account was revoked", async () => {
     const now = Date.now();
     const userId = "oauth-issuance-race-user";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: "oauth-issuance-race-github",
-      username: "oauth-issuance-race-user",
-      now,
-    });
-    const expected = await captureBetaAdmissionEpoch(userId);
-    const boundStaleRefreshToken = await createAdmissionBoundRefreshToken({
-      admission: expected,
-      token: "stale-race-refresh-token",
-    });
-    await revokeAndReadmitBetaUser(userId, now + 10_000);
-    const current = await captureBetaAdmissionEpoch(userId);
-    expect(current).not.toEqual(expected);
-
+    await seedMember({ id: userId, githubAccountId: "4242241", now });
     const clientId = "oauth-issuance-race-client";
     await seedOAuthClient(clientId, now);
-    const staleAccessToken = "stale-race-access-token";
-    const currentAccessToken = "current-race-access-token";
-    const currentRefreshToken = "current-race-refresh-token";
+    const issuedAccessToken = "issued-race-access-token";
+    const issuedRefreshToken = "issued-race-refresh-token";
+    const otherAccessToken = "other-race-access-token";
+    const otherRefreshToken = "other-race-refresh-token";
     await Promise.all([
       drizzle(env.DB).insert(oauthAccessToken).values({
-        id: "stale-race-access-row",
-        token: await hashOAuthToken(staleAccessToken),
+        id: "issued-race-access-row",
+        token: await hashOAuthToken(issuedAccessToken),
         clientId,
         userId,
         scopes: ["openid"],
-        createdAt: new Date(now + 20_000),
+        createdAt: new Date(now),
         expiresAt: new Date(now + 3_600_000),
       }),
       drizzle(env.DB).insert(oauthRefreshToken).values({
-        id: "stale-race-refresh-row",
-        token: await hashOAuthToken(boundStaleRefreshToken),
+        id: "issued-race-refresh-row",
+        token: await hashOAuthToken(issuedRefreshToken),
         clientId,
         userId,
         scopes: ["openid", "offline_access"],
-        createdAt: new Date(now + 20_000),
+        createdAt: new Date(now),
         expiresAt: new Date(now + 3_600_000),
       }),
       drizzle(env.DB).insert(oauthAccessToken).values({
-        id: "current-race-access-row",
-        token: await hashOAuthToken(currentAccessToken),
+        id: "other-race-access-row",
+        token: await hashOAuthToken(otherAccessToken),
         clientId,
         userId,
         scopes: ["openid"],
-        createdAt: new Date(now + 20_001),
+        createdAt: new Date(now),
         expiresAt: new Date(now + 3_600_000),
       }),
       drizzle(env.DB).insert(oauthRefreshToken).values({
-        id: "current-race-refresh-row",
-        token: await hashOAuthToken(currentRefreshToken),
+        id: "other-race-refresh-row",
+        token: await hashOAuthToken(otherRefreshToken),
         clientId,
         userId,
         scopes: ["openid", "offline_access"],
-        createdAt: new Date(now + 20_001),
+        createdAt: new Date(now),
         expiresAt: new Date(now + 3_600_000),
       }),
     ]);
+    const returned = {
+      access_token: issuedAccessToken,
+      refresh_token: issuedRefreshToken,
+    };
 
+    // An account that is still active held access for the whole issuance.
     await expect(
-      captureOAuthIssuanceAdmission({
-        grantType: "refresh_token",
-        refreshAdmission: (
-          await readAdmissionBoundRefreshToken(boundStaleRefreshToken)
-        ).admission,
-        userId,
-      }),
-    ).rejects.toMatchObject({
-      body: { code: "beta_oauth_authorization_epoch_mismatch" },
-    });
-    const tamperedRefreshToken = `${boundStaleRefreshToken.slice(0, -1)}${
-      boundStaleRefreshToken.endsWith("a") ? "b" : "a"
-    }`;
-    await expect(
-      readAdmissionBoundRefreshToken(tamperedRefreshToken),
-    ).rejects.toThrow("invalid admission-bound refresh token");
+      enforceActiveOAuthIssuance({ userId, returned }),
+    ).resolves.toBeUndefined();
+    await expect(countOAuthTokens(userId)).resolves.toBe(4);
 
+    await banMember(userId);
     await expect(
-      enforceOAuthIssuanceAdmission({
-        expected,
-        returned: {
-          access_token: staleAccessToken,
-          refresh_token: boundStaleRefreshToken,
-        },
-      }),
-    ).rejects.toMatchObject({
-      body: { code: "beta_access_changed_during_oauth_issuance" },
-    });
+      enforceActiveOAuthIssuance({ userId, returned }),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
     const remaining = await env.DB.prepare(
       `SELECT id FROM oauth_access_token WHERE user_id = ?
        UNION ALL
@@ -1409,38 +1378,31 @@ describe("auth policy", () => {
       .bind(userId, userId)
       .all<{ id: string }>();
     expect(remaining.results.map(({ id }) => id)).toEqual([
-      "current-race-access-row",
-      "current-race-refresh-row",
+      "other-race-access-row",
+      "other-race-refresh-row",
     ]);
 
-    // A JWT access token has no opaque row to remove. The same final fence
+    // A JWT access token has no opaque row to remove. The same final check
     // still suppresses the entire credential response before it reaches the
     // caller.
     await expect(
-      enforceOAuthIssuanceAdmission({
-        expected,
+      enforceActiveOAuthIssuance({
+        userId,
         returned: { access_token: "header.payload.signature" },
       }),
-    ).rejects.toMatchObject({
-      body: { code: "beta_access_changed_during_oauth_issuance" },
-    });
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
   });
 
   it("rejects resource audiences so OAuth access tokens remain opaque and revocable", async () => {
     const now = Date.now();
     const userId = "oauth-resource-user";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: "oauth-resource-github",
-      username: "oauth-resource-user",
-      now,
-    });
+    await seedMember({ id: userId, githubAccountId: "4242251", now });
     const oauthUser = await env.DB.prepare("SELECT * FROM user WHERE id = ?")
       .bind(userId)
       .first<User>();
 
     await expect(
-      getBetaOAuthAccessTokenClaims({
+      getOAuthAccessTokenClaims({
         resources: ["https://resource.example.test"],
         scopes: ["openid"],
         user: oauthUser!,
@@ -1452,33 +1414,36 @@ describe("auth policy", () => {
       },
     });
     await expect(
-      getBetaOAuthAccessTokenClaims({
+      getOAuthAccessTokenClaims({
         scopes: ["openid"],
         user: oauthUser!,
       }),
     ).resolves.toEqual({});
   });
 
-  it("rotates only an admission-bound refresh token for the same active admission", async () => {
+  it("accepts a refresh token from the retired dotted format and rotates it to a plain one", async () => {
     const now = Date.now();
-    const userId = "oauth-refresh-epoch-user";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: "oauth-refresh-epoch-github",
-      username: "oauth-refresh-epoch-user",
-      now,
-    });
-    const admission = await captureBetaAdmissionEpoch(userId);
-    const clientId = "oauth-refresh-epoch-client";
+    const userId = "oauth-legacy-refresh-user";
+    await seedMember({ id: userId, githubAccountId: "4242261", now });
+    const clientId = "oauth-legacy-refresh-client";
     const clientSecret = `${clientId}-secret`;
     await seedOAuthClient(clientId, now);
-    const storedToken = "oauth-refresh-epoch-inner-token";
-    const presentedToken = await createAdmissionBoundRefreshToken({
-      admission,
-      token: storedToken,
+    // The retired admission envelope: signed JSON and signature, dot-joined.
+    // The provider stores and looks up the hash of the full presented string.
+    const presentedToken = await signHandoff("intar.beta-refresh-token.v1", {
+      admission: {
+        userId,
+        sourceInviteId: "legacy-invite",
+        sourceLeaseId: "legacy-lease",
+        grantedAt: now - 1_000,
+      },
+      aud: "intar.beta-refresh-token.v1",
+      token: "legacy-inner-refresh-token",
+      version: 1,
     });
+    expect(presentedToken.split(".")).toHaveLength(2);
     await drizzle(env.DB).insert(oauthRefreshToken).values({
-      id: "oauth-refresh-epoch-row",
+      id: "oauth-legacy-refresh-row",
       token: await hashOAuthToken(presentedToken),
       clientId,
       userId,
@@ -1505,322 +1470,79 @@ describe("auth policy", () => {
     };
     expect(body.access_token).toBeTruthy();
     expect(body.id_token.split(".")).toHaveLength(3);
+    expect(body.refresh_token).toMatch(/^[A-Za-z]{32}$/u);
+    const legacyRow = await env.DB.prepare(
+      "SELECT revoked FROM oauth_refresh_token WHERE id = ?",
+    )
+      .bind("oauth-legacy-refresh-row")
+      .first<{ revoked: number | null }>();
+    expect(legacyRow?.revoked).not.toBeNull();
     await expect(
-      readAdmissionBoundRefreshToken(body.refresh_token),
-    ).resolves.toMatchObject({ admission });
+      env.DB.prepare(
+        "SELECT user_id AS userId FROM oauth_refresh_token WHERE token = ?",
+      )
+        .bind(await hashOAuthToken(body.refresh_token))
+        .first(),
+    ).resolves.toEqual({ userId });
     await expect(
       env.DB.prepare("SELECT COUNT(*) AS count FROM jwks").first<{
         count: number;
       }>(),
     ).resolves.toEqual({ count: 1 });
   });
-
-  it("deletes a session inserted after cleanup when its captured admission is stale", async () => {
-    const now = Date.now();
-    const userId = "session-issuance-race-user";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: "session-issuance-race-github",
-      username: "session-issuance-race-user",
-      now,
-    });
-    const expected = await captureBetaAdmissionEpoch(userId);
-    await revokeAndReadmitBetaUser(userId, now + 10_000);
-    const staleSession: Session = {
-      id: "stale-session-race-row",
-      token: "stale-session-race-token",
-      userId,
-      expiresAt: new Date(now + 3_600_000),
-      createdAt: new Date(now + 20_000),
-      updatedAt: new Date(now + 20_000),
-      ipAddress: null,
-      userAgent: null,
-    };
-    await drizzle(env.DB).insert(session).values(staleSession);
-
-    await expect(
-      enforceCreatedSessionAdmission({ session: staleSession, expected }),
-    ).rejects.toMatchObject({
-      body: { code: "beta_access_changed_during_session_creation" },
-    });
-    await expect(
-      env.DB.prepare("SELECT id FROM session WHERE id = ?")
-        .bind(staleSession.id)
-        .first(),
-    ).resolves.toBeNull();
-  });
-
-  it("carries the session admission fence on the Better Auth hook context", async () => {
-    const now = Date.now();
-    const userId = "context-fenced-session-user";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: "context-fenced-session-github",
-      username: "context-fenced-session-user",
-      now,
-    });
-    const createdSession: Session = {
-      id: "context-fenced-session-row",
-      token: "context-fenced-session-token",
-      userId,
-      expiresAt: new Date(now + 3_600_000),
-      createdAt: new Date(now + 10_000),
-      updatedAt: new Date(now + 10_000),
-      ipAddress: null,
-      userAgent: null,
-    };
-    const hooks = auth.options.databaseHooks?.session?.create;
-    const before = hooks?.before;
-    const after = hooks?.after;
-    if (!before || !after) throw new Error("session create hooks are required");
-    const hookContext = {} as Parameters<typeof before>[1];
-
-    // Database after hooks can be queued beyond Better Auth's request-state
-    // ALS scope. The exact endpoint-context object remains stable across both
-    // callbacks and is the fence carrier.
-    await expect(before(createdSession, hookContext)).resolves.toBeUndefined();
-    await drizzle(env.DB).insert(session).values(createdSession);
-    await expect(after(createdSession, hookContext)).resolves.toBeUndefined();
-    await expect(
-      env.DB.prepare("SELECT id FROM session WHERE id = ?")
-        .bind(createdSession.id)
-        .first<{ id: string }>(),
-    ).resolves.toEqual({ id: createdSession.id });
-  });
-
-  it("removes a linked account when its hook-context fence is missing", async () => {
-    const now = Date.now();
-    const userId = "missing-account-fence-user";
-    await drizzle(env.DB).insert(user).values({
-      id: userId,
-      name: "Missing Account Fence",
-      email: "missing-account-fence@example.test",
-      emailVerified: true,
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-    const linkedAccount = {
-      id: "missing-account-fence-row",
-      providerId: "github",
-      accountId: "missing-account-fence-github",
-      userId,
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    };
-    await drizzle(env.DB).insert(account).values(linkedAccount);
-    const after = auth.options.databaseHooks?.account?.create?.after;
-    if (!after) throw new Error("account create after hook is required");
-    const hookContext = {} as Parameters<typeof after>[1];
-
-    await expect(after(linkedAccount, hookContext)).rejects.toMatchObject({
-      body: { code: "valid_beta_invite_required" },
-    });
-    await expect(
-      env.DB.prepare("SELECT id FROM account WHERE id = ?")
-        .bind(linkedAccount.id)
-        .first(),
-    ).resolves.toBeNull();
-  });
-
-  it("deletes a GitHub link inserted after its invite is revoked", async () => {
-    const now = Date.now();
-    const userId = "github-link-race-user";
-    await drizzle(env.DB).insert(user).values({
-      id: userId,
-      name: "GitHub Link Race User",
-      email: "github-link-race@example.test",
-      emailVerified: true,
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-    const invite = await createBetaInvite({
-      d1: env.DB,
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
-      now,
-    });
-    const linkedAccount = {
-      id: "github-link-race-row",
-      providerId: "github",
-      accountId: "github-link-race-account",
-      userId,
-      createdAt: new Date(now + 2),
-      updatedAt: new Date(now + 2),
-    };
-    await drizzle(env.DB).insert(account).values(linkedAccount);
-    await revokeBetaInvite({
-      d1: env.DB,
-      inviteId: invite.id,
-      expectedVersion: invite.version,
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      now: now + 3,
-    });
-
-    await expect(
-      enforceCreatedGithubAccountAdmission({
-        account: linkedAccount,
-        expected: {
-          kind: "github-invite",
-          inviteId: invite.id,
-          attemptId: "github-link-race-attempt",
-          userId,
-        },
-      }),
-    ).rejects.toMatchObject({
-      body: { code: "beta_invite_changed_during_github_link" },
-    });
-    await expect(
-      env.DB.prepare("SELECT id FROM account WHERE id = ?")
-        .bind(linkedAccount.id)
-        .first(),
-    ).resolves.toBeNull();
-  });
-
-  it("binds authorization codes to the admission that created them", async () => {
-    const now = Date.now();
-    const userId = "authorization-code-race-user";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: "authorization-code-race-github",
-      username: "authorization-code-race-user",
-      now,
-    });
-    const context = await auth.$context;
-    await context.internalAdapter.createVerificationValue({
-      identifier: "authorization-code-race-hash",
-      value: JSON.stringify({
-        type: "authorization_code",
-        query: { client_id: "client", scope: "openid" },
-        sessionId: "authorization-code-session",
-        userId,
-      }),
-      expiresAt: new Date(now + 600_000),
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-    const stored = await env.DB.prepare(
-      "SELECT value FROM verification WHERE identifier = ?",
-    )
-      .bind("authorization-code-race-hash")
-      .first<{ value: string }>();
-    expect(stored?.value).toContain('"intarBetaAdmission"');
-
-    await revokeAndReadmitBetaUser(userId, now + 10_000);
-    await expect(
-      captureOAuthIssuanceAdmission({
-        grantType: "authorization_code",
-        userId,
-        verificationValue: JSON.parse(stored!.value),
-      }),
-    ).rejects.toMatchObject({
-      body: { code: "beta_oauth_authorization_epoch_mismatch" },
-    });
-
-    await env.DB.prepare(
-      `INSERT INTO verification
-         (id, identifier, value, expires_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
-        "paused-authorization-code-row",
-        "paused-authorization-code-hash",
-        stored!.value,
-        now + 600_000,
-        now,
-        now,
-      )
-      .run();
-    await expect(
-      enforceCreatedAuthorizationCodeAdmission({
-        id: "paused-authorization-code-row",
-        value: stored!.value,
-      }),
-    ).rejects.toMatchObject({
-      body: { code: "beta_access_changed_during_oauth_authorization" },
-    });
-    await expect(
-      env.DB.prepare("SELECT id FROM verification WHERE id = ?")
-        .bind("paused-authorization-code-row")
-        .first(),
-    ).resolves.toBeNull();
-  });
-
-  it("rejects an explicit SSO-link handoff after revoke and fresh readmission", async () => {
-    const now = Date.now();
-    const userId = "stale-sso-link-user";
-    await seedActiveBetaUser({
-      id: userId,
-      accountId: "stale-sso-link-github",
-      username: "stale-sso-link-user",
-      now,
-    });
-    const admission = await captureBetaAdmissionEpoch(userId);
-    const handoff = await createSsoLinkOAuthHandoff({
-      ...admission,
-      providerId: "stale-sso-provider",
-      expiresAt: now + 600_000,
-    });
-    await revokeAndReadmitBetaUser(userId, now + 10_000);
-    await drizzle(env.DB).insert(ssoProvider).values({
-      id: "stale-sso-provider-row",
-      issuer: "https://sso.example.test",
-      domain: "example.test",
-      oidcConfig: JSON.stringify({
-        clientId: "client",
-        clientSecret: "secret",
-        discoveryEndpoint:
-          "https://sso.example.test/.well-known/openid-configuration",
-      }),
-      userId: FIXTURE_BETA_ADMIN_ID,
-      providerId: "stale-sso-provider",
-      domainVerified: true,
-    });
-    await drizzle(env.DB).insert(session).values({
-      id: "stale-sso-current-session-row",
-      token: "stale-sso-current-session-token",
-      userId,
-      expiresAt: new Date(now + 3_600_000),
-      createdAt: new Date(now + 20_000),
-      updatedAt: new Date(now + 20_000),
-    });
-    const cookie = await signedSessionCookie("stale-sso-current-session-token");
-    const response = await auth.handler(
-      authRequest(
-        "/api/auth/sign-in/sso",
-        {
-          providerId: "stale-sso-provider",
-          providerType: "oidc",
-          callbackURL: "http://localhost/organizations/example",
-        },
-        {
-          cookie,
-          [INVITE_OAUTH_HANDOFF_HEADER]: handoff,
-        },
-      ),
-    );
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({
-      code: "invalid_beta_oauth_handoff",
-    });
-  });
-
-  it("refuses to mint an already-expired OAuth handoff", async () => {
-    await expect(
-      createInviteOAuthHandoff({
-        inviteId: "invite-expired",
-        attemptId: "attempt-expired",
-        expiresAt: Date.now() - 1,
-      }),
-    ).rejects.toThrow("handoff expiry is outside the allowed window");
-  });
 });
 
 type StartedGithubFlow = {
   cookie: string;
-  inviteId?: string;
-  inviteVersion?: number;
   state: string;
 };
+
+type GithubProfile = {
+  email: string;
+  githubAccountId: string;
+  githubLogin: string;
+};
+
+async function seedMember(input: {
+  id: string;
+  githubAccountId: string;
+  role?: string;
+  now: number;
+}): Promise<void> {
+  await drizzle(env.DB).insert(user).values({
+    id: input.id,
+    name: input.id,
+    email: `${input.id}@example.test`,
+    emailVerified: true,
+    username: input.id,
+    displayUsername: input.id,
+    role: input.role,
+    createdAt: new Date(input.now),
+    updatedAt: new Date(input.now),
+  });
+  await drizzle(env.DB).insert(account).values({
+    id: `${input.id}-github-link`,
+    providerId: "github",
+    accountId: input.githubAccountId,
+    userId: input.id,
+    createdAt: new Date(input.now),
+    updatedAt: new Date(input.now),
+  });
+}
+
+async function banMember(userId: string): Promise<void> {
+  await revokeFixtureAccount({ d1: env.DB, userId });
+}
+
+async function setTestSignupLimit(limit: number): Promise<void> {
+  const { version } = await getSignupStatus(env.DB);
+  await setSignupLimit({
+    d1: env.DB,
+    actorUserId: FIXTURE_ADMIN_ID,
+    limit,
+    expectedVersion: version,
+  });
+}
 
 async function seedOidcOnlyUser(input: {
   id: string;
@@ -1846,44 +1568,51 @@ async function seedOidcOnlyUser(input: {
   return { id: input.id, email: input.email };
 }
 
-async function beginGithubInviteFlow(
-  attemptId: string,
-  now: number,
-): Promise<StartedGithubFlow & { inviteId: string; inviteVersion: number }> {
-  const invite = await createBetaInvite({
-    d1: env.DB,
-    actorUserId: FIXTURE_BETA_ADMIN_ID,
-    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
-    now: now - 2_000,
+async function seedOidcProvider(providerId: string): Promise<void> {
+  await drizzle(env.DB).insert(ssoProvider).values({
+    id: `${providerId}-row`,
+    issuer: "https://sso.example.test",
+    domain: "example.test",
+    oidcConfig: JSON.stringify({
+      issuer: "https://sso.example.test",
+      clientId: `${providerId}-client`,
+      authorizationEndpoint: "https://sso.example.test/oauth/authorize",
+      tokenEndpoint: "https://sso.example.test/oauth/token",
+      tokenEndpointAuthentication: "none",
+      jwksEndpoint: "https://sso.example.test/.well-known/jwks.json",
+      pkce: true,
+    }),
+    oidcClientSecretCiphertext: null,
+    userId: FIXTURE_ADMIN_ID,
+    providerId,
+    domainVerified: true,
   });
-  const handoff = await createInviteOAuthHandoff({
-    inviteId: invite.id,
-    attemptId,
-    expiresAt: now + 600_000,
-  });
-  const started = await beginGithubFlow(handoff);
-  return {
-    ...started,
-    inviteId: invite.id,
-    inviteVersion: invite.version,
-  };
 }
 
-async function beginGithubFlowWithoutInvite(): Promise<StartedGithubFlow> {
-  return beginGithubFlow();
+async function seedSessionCookie(input: {
+  id: string;
+  token: string;
+  userId: string;
+  now: number;
+}): Promise<string> {
+  await drizzle(env.DB).insert(session).values({
+    id: input.id,
+    token: input.token,
+    userId: input.userId,
+    expiresAt: new Date(input.now + 7 * 24 * 60 * 60_000),
+    createdAt: new Date(input.now),
+    updatedAt: new Date(input.now),
+  });
+  return signedSessionCookie(input.token);
 }
 
-async function beginGithubFlow(handoff?: string): Promise<StartedGithubFlow> {
+async function beginGithubFlow(): Promise<StartedGithubFlow> {
   const response = await auth.handler(
-    authRequest(
-      "/api/auth/sign-in/social",
-      {
-        provider: "github",
-        callbackURL: "http://localhost/join",
-        errorCallbackURL: "http://localhost/join",
-      },
-      handoff ? { [INVITE_OAUTH_HANDOFF_HEADER]: handoff } : undefined,
-    ),
+    authRequest("/api/auth/sign-in/social", {
+      provider: "github",
+      callbackURL: "http://localhost/courses",
+      errorCallbackURL: "http://localhost/",
+    }),
   );
   expect(response.status).toBe(200);
   const body = (await response.json()) as { url?: string };
@@ -1897,57 +1626,69 @@ async function beginGithubFlow(handoff?: string): Promise<StartedGithubFlow> {
   return { cookie, state };
 }
 
-async function completeGithubCallback(
-  input: StartedGithubFlow & {
-    email: string;
-    githubAccountId: string;
-    githubLogin: string;
-  },
-): Promise<Response> {
-  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
-    async (request): Promise<Response> => {
-      const url =
-        typeof request === "string"
-          ? request
-          : request instanceof URL
-            ? request.href
-            : request.url;
-      if (url === "https://github.com/login/oauth/access_token") {
+function githubCallbackRequest(flow: StartedGithubFlow, code: string): Request {
+  return new Request(
+    `http://localhost/api/auth/callback/github?code=${encodeURIComponent(code)}&state=${encodeURIComponent(flow.state)}`,
+    { headers: { cookie: flow.cookie } },
+  );
+}
+
+/**
+ * Serves GitHub's token and profile endpoints for each authorization code, so
+ * concurrent callbacks each receive their own identity.
+ */
+function mockGithubProfiles(profiles: Record<string, GithubProfile>) {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (input, init): Promise<Response> => {
+      const request = new Request(input, init);
+      if (request.url === "https://github.com/login/oauth/access_token") {
+        const code = new URLSearchParams(
+          new TextDecoder().decode(await request.arrayBuffer()),
+        ).get("code");
+        if (!code || !profiles[code]) {
+          throw new Error(`unexpected GitHub authorization code: ${code}`);
+        }
         return Response.json({
-          access_token: `token-${input.githubAccountId}`,
+          access_token: `token-${code}`,
           scope: "read:user,user:email",
           token_type: "bearer",
         });
       }
-      if (url === "https://api.github.com/user") {
+      const code = request.headers
+        .get("authorization")
+        ?.replace(/^Bearer token-/u, "");
+      const profile = code ? profiles[code] : undefined;
+      if (profile && request.url === "https://api.github.com/user") {
         return Response.json({
-          id: Number(input.githubAccountId),
-          login: input.githubLogin,
-          name: input.githubLogin,
-          email: input.email,
+          id: Number(profile.githubAccountId),
+          login: profile.githubLogin,
+          name: profile.githubLogin,
+          email: profile.email,
           avatar_url: null,
         });
       }
-      if (url === "https://api.github.com/user/emails") {
+      if (profile && request.url === "https://api.github.com/user/emails") {
         return Response.json([
           {
-            email: input.email,
+            email: profile.email,
             primary: true,
             verified: true,
             visibility: null,
           },
         ]);
       }
-      throw new Error(`unexpected fetch in GitHub callback test: ${url}`);
+      throw new Error(`unexpected fetch in GitHub callback test: ${request.url}`);
     },
   );
+}
+
+async function completeGithubCallback(
+  input: StartedGithubFlow & GithubProfile,
+): Promise<Response> {
+  const code = `code-${input.githubAccountId}`;
+  const fetchSpy = mockGithubProfiles({ [code]: input });
   try {
-    return await auth.handler(
-      new Request(
-        `http://localhost/api/auth/callback/github?code=test-code&state=${encodeURIComponent(input.state)}`,
-        { headers: { cookie: input.cookie } },
-      ),
-    );
+    return await auth.handler(githubCallbackRequest(input, code));
   } finally {
     fetchSpy.mockRestore();
   }
@@ -1960,10 +1701,7 @@ function expectOauthCallbackError(response: Response, code: string): void {
   expect(new URL(location!).searchParams.get("error")).toBe(code);
 }
 
-async function expectGithubLinkAndSessionAbsent(
-  userId: string,
-  githubAccountId: string,
-): Promise<void> {
+async function expectGithubAccountAbsent(githubAccountId: string): Promise<void> {
   await expect(
     env.DB.prepare(
       `SELECT id FROM account
@@ -1972,6 +1710,13 @@ async function expectGithubLinkAndSessionAbsent(
       .bind(githubAccountId)
       .first(),
   ).resolves.toBeNull();
+}
+
+async function expectGithubLinkAndSessionAbsent(
+  userId: string,
+  githubAccountId: string,
+): Promise<void> {
+  await expectGithubAccountAbsent(githubAccountId);
   await expect(
     env.DB.prepare("SELECT id FROM session WHERE user_id = ? LIMIT 1")
       .bind(userId)
@@ -1979,37 +1724,12 @@ async function expectGithubLinkAndSessionAbsent(
   ).resolves.toBeNull();
 }
 
-async function grantBetaAccessWithoutLinkedGithub(input: {
-  userId: string;
-  githubAccountId: string;
-  githubUsername: string;
-  now: number;
-}): Promise<void> {
-  const githubRowId = `${input.userId}-temporary-github-row`;
-  await drizzle(env.DB).insert(account).values({
-    id: githubRowId,
-    providerId: "github",
-    accountId: input.githubAccountId,
-    userId: input.userId,
-    createdAt: new Date(input.now),
-    updatedAt: new Date(input.now),
-  });
-  const invite = await createBetaInvite({
-    d1: env.DB,
-    actorUserId: FIXTURE_BETA_ADMIN_ID,
-    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
-    now: input.now,
-  });
-  await redeemBetaInvite({
-    d1: env.DB,
-    inviteId: invite.id,
-    attemptId: `access-attempt-${input.userId}`,
-    userId: input.userId,
-    githubAccountId: input.githubAccountId,
-    githubUsername: input.githubUsername,
-    now: input.now + 1,
-  });
-  await drizzle(env.DB).delete(account).where(eq(account.id, githubRowId));
+function requestUrl(request: RequestInfo | URL): string {
+  return typeof request === "string"
+    ? request
+    : request instanceof URL
+      ? request.href
+      : request.url;
 }
 
 function authRequest(
@@ -2035,12 +1755,12 @@ function authGetRequest(path: string, cookie: string): Request {
 
 function inspectionRequest(
   cookie: string | null,
-  handoffHeader: string | undefined,
+  handoffHeader?: string,
 ): Request {
   const headers = new Headers({ origin: "http://localhost" });
   if (cookie) headers.set("cookie", cookie);
   if (handoffHeader !== undefined) {
-    headers.set(INVITE_OAUTH_HANDOFF_HEADER, handoffHeader);
+    headers.set(SSO_LINK_HANDOFF_HEADER, handoffHeader);
   }
   return new Request("http://localhost/api/auth/get-session", { headers });
 }
@@ -2088,7 +1808,8 @@ async function signedSessionCookie(token: string): Promise<string> {
   )}`;
 }
 
-async function signLegacyHandoff(payload: object): Promise<string> {
+/** Signs `payload` the way the app signs its handoffs, for any audience. */
+async function signHandoff(audience: string, payload: object): Promise<string> {
   const context = await auth.$context;
   const encoded = bytesToBase64Url(
     new TextEncoder().encode(JSON.stringify(payload)),
@@ -2103,7 +1824,7 @@ async function signLegacyHandoff(payload: object): Promise<string> {
   const signature = await crypto.subtle.sign(
     "HMAC",
     key,
-    new TextEncoder().encode(`intar.beta-auth-handoff.v1.${encoded}`),
+    new TextEncoder().encode(`${audience}.${encoded}`),
   );
   return `${encoded}.${bytesToBase64Url(new Uint8Array(signature))}`;
 }
@@ -2138,122 +1859,24 @@ async function hashOAuthToken(value: string): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(value),
   );
-  let binary = "";
-  for (const byte of new Uint8Array(digest)) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary)
-    .replace(/\+/gu, "-")
-    .replace(/\//gu, "_")
-    .replace(/=+$/gu, "");
+  return bytesToBase64Url(new Uint8Array(digest));
 }
 
-async function seedActiveBetaUser(input: {
-  id: string;
-  accountId: string;
-  username: string;
-  now: number;
-}): Promise<void> {
-  await seedGithubIdentity(input);
-  const invite = await createBetaInvite({
-    d1: env.DB,
-    actorUserId: FIXTURE_BETA_ADMIN_ID,
-    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
-    now: input.now + 1,
-  });
-  await redeemBetaInvite({
-    d1: env.DB,
-    inviteId: invite.id,
-    attemptId: `auth-attempt-${input.id}`,
-    userId: input.id,
-    githubAccountId: input.accountId,
-    githubUsername: input.username,
-    now: input.now + 2,
-  });
+async function countOAuthTokens(userId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT (SELECT count(*) FROM oauth_access_token WHERE user_id = ?1)
+          + (SELECT count(*) FROM oauth_refresh_token WHERE user_id = ?1) AS count`,
+  )
+    .bind(userId)
+    .first<{ count: number }>();
+  return row?.count ?? 0;
 }
 
-async function seedGithubIdentity(input: {
-  id: string;
-  accountId: string;
-  username: string;
-  role?: string;
-  now: number;
-}): Promise<void> {
-  await drizzle(env.DB).insert(user).values({
-    id: input.id,
-    name: input.username,
-    email: `${input.username}@example.test`,
-    emailVerified: true,
-    username: input.username,
-    displayUsername: input.username,
-    role: input.role,
-    createdAt: new Date(input.now),
-    updatedAt: new Date(input.now),
-  });
-  await drizzle(env.DB).insert(account).values({
-    id: `${input.id}-github-link`,
-    providerId: "github",
-    accountId: input.accountId,
-    userId: input.id,
-    createdAt: new Date(input.now),
-    updatedAt: new Date(input.now),
-  });
-}
-
-async function revokeAndReadmitBetaUser(
-  userId: string,
+async function seedOAuthClient(
+  clientId: string,
   now: number,
+  scopes = ["openid", "offline_access"],
 ): Promise<void> {
-  const revoked = await revokeBetaUser({
-    d1: env.DB,
-    userId,
-    actorUserId: FIXTURE_BETA_ADMIN_ID,
-    reason: "admission_epoch_test",
-    now,
-  });
-  const cleanup = await acquireBetaRevocationCleanup({
-    d1: env.DB,
-    userId,
-    revocationId: revoked.revocationId,
-    now,
-  });
-  expect(cleanup.status).toBe("acquired");
-  await completeBetaRevocationCleanup({
-    d1: env.DB,
-    userId,
-    revocationId: revoked.revocationId,
-    cleanupAttemptId: cleanup.cleanupAttemptId,
-    now: now + 1,
-  });
-  const invite = await createBetaInvite({
-    d1: env.DB,
-    actorUserId: FIXTURE_BETA_ADMIN_ID,
-    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
-    now: now + 3,
-  });
-  const github = await env.DB.prepare(
-    `SELECT account_id FROM account
-     WHERE user_id = ? AND provider_id = 'github' LIMIT 1`,
-  )
-    .bind(userId)
-    .first<{ account_id: string }>();
-  const identity = await env.DB.prepare(
-    "SELECT username FROM user WHERE id = ?",
-  )
-    .bind(userId)
-    .first<{ username: string }>();
-  await redeemBetaInvite({
-    d1: env.DB,
-    inviteId: invite.id,
-    attemptId: `readmit-attempt-${userId}`,
-    userId,
-    githubAccountId: github!.account_id,
-    githubUsername: identity!.username,
-    now: now + 4,
-  });
-}
-
-async function seedOAuthClient(clientId: string, now: number): Promise<void> {
   await drizzle(env.DB).insert(oauthClient).values({
     id: `${clientId}-row`,
     clientId,
@@ -2262,7 +1885,7 @@ async function seedOAuthClient(clientId: string, now: number): Promise<void> {
     tokenEndpointAuthMethod: "client_secret_basic",
     grantTypes: ["authorization_code", "refresh_token"],
     responseTypes: ["code"],
-    scopes: ["openid", "offline_access"],
+    scopes,
     requirePKCE: false,
     createdAt: new Date(now),
     updatedAt: new Date(now),

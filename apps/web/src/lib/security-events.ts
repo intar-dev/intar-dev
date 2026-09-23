@@ -9,7 +9,6 @@ type SecurityEvent = {
   outcome: "accepted" | "rejected" | "error";
   status?: number;
   userId?: string;
-  admission?: "active" | "restricted";
 };
 
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
@@ -48,7 +47,6 @@ export function securityEventRecord(request: Request | undefined, event: Securit
     event: event.event,
     outcome: event.outcome,
     ...(event.status === undefined ? {} : { http_status: event.status }),
-    ...(event.admission ? { admission: event.admission } : {}),
     ...(event.userId && /^[a-zA-Z0-9_-]{1,128}$/u.test(event.userId)
       ? { user_id: event.userId } : {}),
     ...(request ? {

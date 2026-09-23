@@ -8,9 +8,7 @@ import { agentBootstrapTokens, agentHosts, scenarioRuns, user } from "@/db/schem
 import { handleAgentBootstrap, requireVerifiedAgentRequest, sha256Hex } from "@/control-plane/auth";
 import { POST } from "@/pages/api/admin/hosts/[hostId]/revoke";
 import { resetD1Database } from "@/test/d1-migrations";
-import { FIXTURE_BETA_ADMIN_ID, grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
-import { getBetaAccess } from "./allowlist";
-import { revokeBetaUser } from "./beta-access-revocation-store";
+import { FIXTURE_ADMIN_ID, ensureFixtureAdmin, ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 import { seedHost, seedRun, desiredRunningVm } from "@/control-plane/host-runtime-do/test-fixtures";
 import { mutateStoredHostDesiredState, loadOrCreateHostDesiredState } from "./desired-state-store";
 import { destroyScenarioRunForUser } from "./scenario-runs/lifecycle";
@@ -41,8 +39,10 @@ beforeEach(async () => {
   vi.resetAllMocks();
   await resetD1Database();
   const db = drizzle(env.DB);
+  // The creator is an admin too, so the acting fixture admin must exist first.
+  await ensureFixtureAdmin(env.DB);
   await db.insert(user).values({ id: "creator", name: "Creator", email: "creator@example.test", role: "admin" });
-  await grantFixtureBetaAccess({ d1: env.DB, userId: "creator" });
+  await ensureFixtureMember({ d1: env.DB, userId: "creator" });
   for (const scope of ["platform", "personal"] as const) {
     await db.insert(agentHosts).values({
       id: scope, name: scope, userId: "creator", scope,
@@ -52,9 +52,7 @@ beforeEach(async () => {
   await db.insert(agentBootstrapTokens).values({
     id: "credential", hostId: "platform", tokenHash: await sha256Hex("durable-secret"), credentialGeneration: 1,
   });
-  effects.admin.mockResolvedValue({ ok: true, context: {
-    userId: FIXTURE_BETA_ADMIN_ID, betaAdmission: await getBetaAccess(FIXTURE_BETA_ADMIN_ID),
-  } });
+  effects.admin.mockResolvedValue({ ok: true, context: { userId: FIXTURE_ADMIN_ID } });
   effects.retire.mockResolvedValue(undefined);
   effects.destroy.mockResolvedValue(undefined);
   effects.deleteRoute.mockResolvedValue(undefined);
@@ -62,7 +60,7 @@ beforeEach(async () => {
 });
 
 it("lets a different admin revoke a connected platform host after its creator loses access", async () => {
-  await revokeBetaUser({ d1: env.DB, userId: "creator", actorUserId: FIXTURE_BETA_ADMIN_ID, reason: "test" });
+  await revokeFixtureAccount({ d1: env.DB, userId: "creator" });
   const before = await bootstrap();
   expect(before.status).toBe(200);
   const { accessToken } = await before.json() as { accessToken: string };
@@ -161,10 +159,9 @@ it("revokes routes and preserves lease records for a failed run with a live sibl
     .toEqual({ state: "archived" });
 });
 
-it.each(["role", "epoch", "banned"])("rechecks the administrator %s at the database write", async (change) => {
-  if (change === "role") await env.DB.prepare("UPDATE user SET role = 'user' WHERE id = ?").bind(FIXTURE_BETA_ADMIN_ID).run();
-  if (change === "banned") await env.DB.prepare("UPDATE user SET banned = 1 WHERE id = ?").bind(FIXTURE_BETA_ADMIN_ID).run();
-  if (change === "epoch") await env.DB.prepare("UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = ?").bind(FIXTURE_BETA_ADMIN_ID).run();
+it.each(["role", "banned"])("rechecks the administrator %s at the database write", async (change) => {
+  if (change === "role") await env.DB.prepare("UPDATE user SET role = 'user' WHERE id = ?").bind(FIXTURE_ADMIN_ID).run();
+  if (change === "banned") await env.DB.prepare("UPDATE user SET banned = 1 WHERE id = ?").bind(FIXTURE_ADMIN_ID).run();
   expect((await revoke()).status).toBe(409);
   expect(await env.DB.prepare("SELECT disabled, credential_generation FROM agent_hosts WHERE id = 'platform'").first())
     .toEqual({ disabled: 0, credential_generation: 1 });

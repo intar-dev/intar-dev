@@ -74,9 +74,12 @@ export interface MockApiState {
   assignments: Array<Record<string, unknown>>;
   progress: Record<string, unknown>;
   sshKeys: Array<Record<string, unknown>>;
-  accessInvites: Array<Record<string, unknown>>;
-  betaUsers: Array<Record<string, unknown>>;
-  betaClaim: Record<string, unknown>;
+  signups: {
+    limit: number;
+    taken: number;
+    version: number;
+    updatedAt: number | null;
+  };
   users: Array<Record<string, unknown>>;
   adminOrganizations: Array<Record<string, unknown>>;
   organizationRunners: Array<Record<string, unknown>>;

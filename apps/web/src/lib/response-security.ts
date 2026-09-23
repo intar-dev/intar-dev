@@ -10,7 +10,7 @@ type ResponseSecurityEnv = Pick<Cloudflare.Env, "BETTER_AUTH_URL">;
 /**
  * Applies the baseline policy after every Worker dispatcher has produced a
  * response. Route-specific policies are deliberately retained: this gives
- * `/join`, maintenance, and artifact responses room to be stricter.
+ * maintenance and artifact responses room to be stricter.
  */
 export function hardenWorkerResponse(
   request: Request,

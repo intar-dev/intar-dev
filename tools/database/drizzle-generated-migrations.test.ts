@@ -301,7 +301,15 @@ test("selects the removal migration by index when a later migration is appended"
           createdAt,
         );
 
-      for (const entry of journal.entries.slice(2)) {
+      // The invite gate was removed later; stop just before that migration so
+      // the cutover's revocations can still be read back.
+      const removalIndex = journal.entries.findIndex(({ tag }) =>
+        readFileSync(join(migrationsRoot, `${tag}.sql`), "utf8").includes(
+          "DROP TABLE `access_invite_codes`",
+        ),
+      );
+      expect(removalIndex).toBeGreaterThan(2);
+      for (const entry of journal.entries.slice(2, removalIndex)) {
         applyMigration(database, entry.tag);
       }
 
@@ -383,8 +391,90 @@ test("selects the removal migration by index when a later migration is appended"
         },
       ]);
       expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
+
+      for (const entry of journal.entries.slice(removalIndex)) {
+        applyMigration(database, entry.tag);
+      }
+      expect(
+        database
+          .query(
+            `SELECT name FROM sqlite_schema
+             WHERE type = 'table'
+               AND name IN ('access_allowlist', 'access_invite_codes', 'access_invite_removals')`,
+          )
+          .all(),
+      ).toEqual([]);
+      // The audit history outlives the invite tables.
+      expect(
+        database
+          .query("SELECT count(*) AS count FROM access_events WHERE event_type = 'invite.revoked'")
+          .get(),
+      ).toEqual({ count: 3 });
+      expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
     } finally {
       database.close(false);
+    }
+  });
+
+  test("drops the invite gate tables while invite rows still reference each other", () => {
+    const database = new Database(":memory:", { strict: true });
+    try {
+      database.exec("PRAGMA foreign_keys = ON");
+      const journal = readJson<DrizzleJournal>(
+        join(metadataRoot, "_journal.json"),
+      );
+      const removal = journal.entries.find(({ tag }) =>
+        readFileSync(join(migrationsRoot, `${tag}.sql`), "utf8").includes(
+          "DROP TABLE `access_invite_codes`",
+        ),
+      );
+      if (!removal) throw new Error("the invite gate removal migration is missing");
+      for (const entry of journal.entries.slice(0, removal.idx)) {
+        applyMigration(database, entry.tag);
+      }
+      seedRedeemedInvite(database);
+
+      // Production applies each migration as one D1 batch, a single
+      // transaction, where the deferred foreign keys clear once every table
+      // that references access_invite_codes is gone.
+      database.transaction(() => applyMigration(database, removal.tag))();
+      expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
+      expect(
+        database.query("SELECT id FROM user WHERE id = 'member'").get(),
+      ).toEqual({ id: "member" });
+    } finally {
+      database.close(false);
+    }
+
+    const undeferred = new Database(":memory:", { strict: true });
+    try {
+      undeferred.exec("PRAGMA foreign_keys = ON");
+      const journal = readJson<DrizzleJournal>(
+        join(metadataRoot, "_journal.json"),
+      );
+      const removal = journal.entries.find(({ tag }) =>
+        readFileSync(join(migrationsRoot, `${tag}.sql`), "utf8").includes(
+          "DROP TABLE `access_invite_codes`",
+        ),
+      )!;
+      for (const entry of journal.entries.slice(0, removal.idx)) {
+        applyMigration(undeferred, entry.tag);
+      }
+      seedRedeemedInvite(undeferred);
+      const statements = readFileSync(
+        join(migrationsRoot, `${removal.tag}.sql`),
+        "utf8",
+      )
+        .split("--> statement-breakpoint")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry && !entry.startsWith("PRAGMA defer_foreign_keys"));
+      expect(() =>
+        undeferred.transaction(() => {
+          for (const statement of statements) undeferred.exec(statement);
+        })(),
+      ).toThrow(/FOREIGN KEY/u);
+    } finally {
+      undeferred.close(false);
     }
   });
 
@@ -616,6 +706,29 @@ test("selects the removal migration by index when a later migration is appended"
 
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
+}
+
+function seedRedeemedInvite(database: Database): void {
+  const now = 1_000;
+  database.exec(`
+    INSERT INTO user (id, name, email) VALUES ('member', 'Member', 'member@example.test');
+    INSERT INTO access_invite_codes (
+      id, code_hash, code_prefix, kind, state, created_by, created_at, expires_at,
+      lease_id, leased_at, lease_expires_at, redeemer_user_id,
+      redeemer_github_account_id, redeemer_github_username, redeemed_at,
+      version, updated_at
+    ) VALUES (
+      'invite', '${"d".repeat(64)}', 'invite-D', 'standard', 'redeemed', 'admin',
+      ${now}, ${now + 1_209_600_000}, 'lease', ${now}, ${now + 600_000},
+      'member', 'github-member', 'member', ${now}, 2, ${now}
+    );
+    INSERT INTO access_invite_removals (invite_id, invite_version, removed_by, removed_at)
+      VALUES ('invite', 2, 'admin', ${now});
+    INSERT INTO access_allowlist (
+      user_id, state, github_account_id, github_username, source_invite_id,
+      source_lease_id, grant_reason, granted_at
+    ) VALUES ('member', 'active', 'github-member', 'member', 'invite', 'lease', 'invite', ${now});
+  `);
 }
 
 function applyMigration(database: Database, tag: string): void {

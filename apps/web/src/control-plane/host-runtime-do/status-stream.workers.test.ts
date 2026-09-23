@@ -3,15 +3,14 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { session } from "@/db/schema";
+import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 import {
   agentHosts,
-  betaAdmissionForHostFixture,
   connectHost,
   desiredRunningVm,
   drizzle,
   env,
   eq,
-  grantActiveBetaAccessForHostFixture,
   mutateStoredHostDesiredState,
   runNextScheduledAlarm,
   scenarioRuns,
@@ -328,6 +327,49 @@ describe("HostRuntimeDO run status stream", () => {
     agentSocket.close();
   });
 
+  it("refuses a revoked account and closes its subscriber on the next invalidation", async () => {
+    const hostId = "host-status-account-revoked";
+    const runId = "run-status-account-revoked";
+    const now = Date.now();
+    await seedHost(hostId);
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const listener = await openStatusStream({ hostId, runId, now });
+    await waitForStatusMessage(
+      listener.messages,
+      (message): message is Extract<StatusMessage, { type: "subscribed" }> =>
+        message.type === "subscribed",
+    );
+
+    // The session stays valid; only the account loses access.
+    await revokeFixtureAccount({ d1: env.DB, userId: "user-1" });
+    const retry = await createStatusStreamResponse({ hostId, runId, now });
+    expect(retry.status).toBe(403);
+    expect(retry.webSocket).toBeNull();
+
+    await runInDurableObject(listener.stub, async (runtime) => {
+      await (
+        runtime as unknown as {
+          notifyRunStatusInvalidation(input: {
+            runId: string;
+            hostId: string;
+            revision: number;
+          }): Promise<void>;
+        }
+      ).notifyRunStatusInvalidation({
+        runId,
+        hostId,
+        revision: now + 1,
+      });
+    });
+
+    const close = await waitForStatusClose(listener);
+    expect(close.code).toBe(1008);
+    expect(listener.messages.filter((message) => message.type === "invalidate")).toEqual(
+      [],
+    );
+  });
+
   it("does not treat a browser status socket as an agent bridge socket", async () => {
     const hostId = "host-status-attachment";
     const runId = "run-status-attachment";
@@ -399,7 +441,6 @@ async function createStatusStreamResponse(input: {
 }): Promise<Response> {
   const userId = input.userId ?? "user-1";
   const sessionId = `status-session-${userId}`;
-  const admission = await betaAdmissionForHostFixture(userId);
   const db = drizzle(env.DB);
   await db
     .insert(session)
@@ -423,9 +464,6 @@ async function createStatusStreamResponse(input: {
         "x-run-status-user-id": userId,
         "x-run-status-host-id": input.hostId,
         "x-run-status-session-id": sessionId,
-        "x-run-status-beta-source-invite-id": admission.sourceInviteId,
-        "x-run-status-beta-source-lease-id": admission.sourceLeaseId,
-        "x-run-status-beta-admission-granted-at": String(admission.grantedAt),
       },
     }),
   );
@@ -441,7 +479,12 @@ async function seedStatusUser(userId: string, now: number): Promise<void> {
     createdAt: new Date(now),
     updatedAt: new Date(now),
   });
-  await grantActiveBetaAccessForHostFixture(userId, now);
+  await ensureFixtureMember({
+    d1: env.DB,
+    userId,
+    githubAccountId: `host-runtime-github-${userId}`,
+    now,
+  });
 }
 
 async function waitForStatusMessage<T extends StatusMessage>(

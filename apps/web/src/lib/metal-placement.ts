@@ -56,7 +56,6 @@ export function currentRunHostScopeCondition(): string {
     OR (host.scope = 'personal' AND host.user_id = execution.user_id)
     OR (host.scope = 'organization' AND host.organization_id = run.organization_id
       AND EXISTS (SELECT 1 FROM user run_owner
-        JOIN access_allowlist access ON access.user_id = run_owner.id AND access.state = 'active'
         WHERE run_owner.id = run.user_id AND run_owner.deleted_at IS NULL AND coalesce(run_owner.banned, 0) = 0)
       AND (${currentScenarioRunContentAccessCondition()})))`;
 }

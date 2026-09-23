@@ -15,7 +15,6 @@ export async function enforceHostWorkloadAccess(state: HostDesiredStateV2): Prom
     SELECT run.run_id, run.user_id, run.runtime_execution_id, run.organization_id,
       run.scenario_id, run.course_scope_key, run.course_id, run.lecture_id, run.request_scope_json
     FROM scenario_runs run JOIN user owner ON owner.id = run.user_id
-    JOIN access_allowlist access ON access.user_id = owner.id AND access.state = 'active'
     WHERE ?2 = 1 AND run.host_id = ?1 AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
       AND run.delete_requested_at IS NULL AND run.route_cleanup_id IS NULL AND run.failed_at IS NULL AND run.completed_at IS NULL
       AND (${currentScenarioRunContentAccessCondition()}))

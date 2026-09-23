@@ -8,7 +8,7 @@ import type { UserContext } from "@/lib/agent-bridge";
 import { createHostEnrollment, claimHostEnrollment, randomHostSecret } from "@/lib/host-enrollment";
 import { cancelOrganizationEnrollment, listOrganizationServers, removeOrganizationServer, updateOrganizationServer } from "@/lib/organization-servers";
 import { deleteOrganization, leaveOrganization, removeOrganizationMember, updateOrganizationMemberRole } from "@/lib/organizations";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { GET } from "@/pages/api/organizations/[orgId]/servers/index";
 import { POST } from "@/pages/api/organizations/[orgId]/servers/enrollments";
@@ -33,9 +33,9 @@ beforeEach(async () => {
   await db.insert(member).values(["owner", "admin", "reader"].map(id => ({ id, userId: id, organizationId: "org", role: id === "reader" ? "member" : id, createdAt: new Date() })));
   contexts = {};
   for (const userId of ["owner", "admin", "reader", "outsider"]) {
-    await grantFixtureBetaAccess({ d1: env.DB, userId });
-    const epoch = await env.DB.prepare("SELECT source_invite_id AS sourceInviteId, source_lease_id AS sourceLeaseId, granted_at AS grantedAt FROM access_allowlist WHERE user_id = ?").bind(userId).first<UserContext["betaAdmission"]>();
-    contexts[userId] = { userId, sessionId: "browser", betaAdmission: epoch!, role: "user", isAdmin: false, organizationIds: [], activeOrganizationId: null };
+    // "admin" would otherwise reuse the fixture administrator's GitHub account id.
+    await ensureFixtureMember({ d1: env.DB, userId, githubAccountId: `org-servers-github-${userId}` });
+    contexts[userId] = { userId, sessionId: "browser", role: "user", isAdmin: false, organizationIds: [], activeOrganizationId: null };
   }
   mocks.auth.mockResolvedValue({ ok: true, context: contexts.owner });
   await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('personal_metal_registration','open',1)").run();
@@ -64,7 +64,7 @@ it("binds a claim to its organization and permits management by another admin af
   expect(await env.DB.prepare("SELECT disabled, organization_id FROM agent_hosts").first()).toEqual({ disabled: 0, organization_id: "org" });
 });
 
-it("requires current admin membership, beta admission, and the user-managed gate at creation and claim", async () => {
+it("requires current admin membership, an active account, and the user-managed gate at creation and claim", async () => {
   await expect(enrollment(contexts.reader!)).rejects.toMatchObject({ code: "host_enrollment_changed" });
   const setup = await enrollment();
   await env.DB.prepare("UPDATE member SET role = 'member' WHERE id = 'owner'").run();
@@ -74,7 +74,7 @@ it("requires current admin membership, beta admission, and the user-managed gate
   expect(await claimHostEnrollment(env.DB, setup.enrollmentToken, randomHostSecret())).toBeNull();
   await expect(enrollment()).rejects.toMatchObject({ code: "host_enrollment_changed" });
   await env.DB.prepare("UPDATE runtime_operation_gates SET state = 'open'").run();
-  await env.DB.prepare("UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = 'owner'").run();
+  await revokeFixtureAccount({ d1: env.DB, userId: "owner" });
   expect(await claimHostEnrollment(env.DB, setup.enrollmentToken, randomHostSecret())).toBeNull();
   await expect(enrollment()).rejects.toMatchObject({ code: "host_enrollment_changed" });
   expect(await env.DB.prepare("SELECT count(*) AS n FROM agent_hosts").first()).toEqual({ n: 0 });
@@ -105,7 +105,7 @@ it("isolates organization lists, allows member GET, and protects every write rou
   }
   mocks.auth.mockResolvedValue({ ok: true, context: contexts.outsider });
   expect((await route(GET, "GET")).status).toBe(404);
-  mocks.auth.mockResolvedValue({ ok: false, response: new Response("Beta access required", { status: 403 }) });
+  mocks.auth.mockResolvedValue({ ok: false, response: new Response("Account access required", { status: 403 }) });
   expect((await route(GET, "GET")).status).toBe(403);
 });
 
@@ -137,10 +137,10 @@ it("rechecks write authority after route checks and rejects cross-organization h
   expect(mocks.cleanup).not.toHaveBeenCalled();
 });
 
-it("rejects stale beta epochs for all management writes", async () => {
+it("rejects a revoked actor for all management writes", async () => {
   await host();
   const setup = await enrollment();
-  await env.DB.prepare("UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = 'owner'").run();
+  await revokeFixtureAccount({ d1: env.DB, userId: "owner" });
   await expect(updateOrganizationServer(env.DB, contexts.owner!, "org", "host", { paused: true })).rejects.toMatchObject({ status: 404 });
   await expect(cancelOrganizationEnrollment(env.DB, contexts.owner!, "org", setup.hostId)).rejects.toMatchObject({ status: 409 });
   await expect(removeOrganizationServer(env.DB, contexts.owner!, "org", "host", true)).rejects.toMatchObject({ status: 404 });
@@ -234,7 +234,7 @@ it.each(["demote", "remove", "leave"])("permanently revokes pending enrollments 
     userId: "admin", hostId: enrolled.hostId, credentialGeneration: 1, requestKey: "pending",
     accessJson: { userId: "admin", organizationId: "org", scenarioId: "private", courseScopeKey: "organization:org",
       courseId: "course", lectureId: "private", allowSequenceBypass: false, requiresAdmin: false },
-    betaJson: contexts.admin!.betaAdmission, imagesJson: [], expiresAt: Date.now() + 60_000,
+    imagesJson: [], expiresAt: Date.now() + 60_000,
   });
   if (change === "demote") {
     await updateOrganizationMemberRole({ organizationId: "org", actorUserId: "owner", memberId: "admin", role: "member" });
@@ -302,13 +302,13 @@ it.each(["report", "session", "generation", "first report"])("rejects resume if 
   expect(listed.servers[0]?.status).toBe("paused");
 });
 
-it.each(["membership", "admission"])("does not resume or activate after the actor's %s changes", async change => {
+it.each(["membership", "account"])("does not resume or activate after the actor's %s changes", async change => {
   await pausedHostReport();
   const batch = env.DB.batch.bind(env.DB);
   const spy = vi.spyOn(env.DB, "batch").mockImplementationOnce(async statements => {
     spy.mockRestore();
     if (change === "membership") await env.DB.prepare("UPDATE member SET role = 'member' WHERE id = 'admin'").run();
-    else await env.DB.prepare("UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = 'admin'").run();
+    else await revokeFixtureAccount({ d1: env.DB, userId: "admin" });
     return batch(statements);
   });
   try {

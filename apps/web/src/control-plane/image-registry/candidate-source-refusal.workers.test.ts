@@ -27,7 +27,7 @@ import {
 } from "@/lib/image-registry-admission";
 import { candidateScenarioId } from "@/lib/scenario-catalog-candidates";
 import { resetD1Database } from "@/test/d1-migrations";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember } from "@/test/account-fixtures";
 import {
   seedChunkedImage,
   type SeededChunkedImage,
@@ -224,11 +224,10 @@ async function seedFixture(): Promise<void> {
       disabled: false,
     },
   ]);
-  await grantFixtureBetaAccess({
+  await ensureFixtureMember({
     d1: env.DB,
     userId: BUILDER_OWNER_ID,
     githubAccountId: `${BUILDER_OWNER_ID}-github`,
-    githubUsername: BUILDER_OWNER_ID,
     now,
   });
   await db.insert(agentBootstrapTokens).values({

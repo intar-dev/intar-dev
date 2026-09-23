@@ -218,6 +218,20 @@
       "when": 1790119650481,
       "tag": "0030_gifted_miek",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1790175898228,
+      "tag": "0031_open_mariko_yashida",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1790175932994,
+      "tag": "0032_cuddly_cloak",
+      "breakpoints": true
     }
   ]
 }

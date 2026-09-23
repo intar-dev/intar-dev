@@ -2,27 +2,23 @@ import type { APIContext } from "astro";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  userContext: vi.fn(),
+  hasGithub: vi.fn(),
   role: vi.fn(),
   signIn: vi.fn(),
   handoff: vi.fn(),
 }));
 vi.mock("@/lib/agent-bridge", () => ({
-  requireUserContext: async () => ({ ok: true, context: { userId: "owner" } }),
+  requireUserContext: mocks.userContext,
 }));
-vi.mock("@/lib/access-claim", () => ({
-  getAccessClaimIdentity: async () => ({
-    githubAccountId: "github-owner",
-    accessState: "active",
-  }),
+vi.mock("@/lib/account-access", () => ({
+  hasLinkedProviderAccount: mocks.hasGithub,
 }));
 vi.mock("@/lib/access-sso", () => ({
-  resolveBetaOidcProvider: async () => ({
+  resolveOrganizationOidcProvider: async () => ({
     providerId: "provider",
     organizationSlug: "team",
   }),
-}));
-vi.mock("@/lib/allowlist", () => ({
-  getBetaAccess: async () => ({ state: "active", grantedAt: 123 }),
 }));
 vi.mock("@/lib/organizations", () => ({
   resolveOrganizationId: async () => "org-team",
@@ -31,19 +27,23 @@ vi.mock("@/lib/organizations", () => ({
 vi.mock("@/lib/auth", () => ({
   auth: { api: { signInSSO: mocks.signIn } },
   createSsoLinkOAuthHandoff: mocks.handoff,
-  INVITE_OAUTH_HANDOFF_HEADER: "x-intar-invite-oauth-handoff",
+  SSO_LINK_HANDOFF_HEADER: "x-intar-sso-link-handoff",
 }));
 vi.mock("@/lib/request-security", () => ({
   canonicalApplicationOrigin: () => "https://intar.dev",
-  rateLimitPublicAccessInvite: async () => {},
   NO_STORE_HEADERS: { "cache-control": "no-store" },
 }));
 
 import { POST } from "./start";
 
-describe("organization owner sign-in test", () => {
+describe("organization SSO link start", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.userContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "owner" },
+    });
+    mocks.hasGithub.mockResolvedValue(true);
     mocks.role.mockResolvedValue("owner");
     mocks.handoff.mockResolvedValue("signed-link-handoff");
     mocks.signIn.mockImplementation(async () =>
@@ -58,9 +58,15 @@ describe("organization owner sign-in test", () => {
     const response = await POST(context(true));
     expect(response.status).toBe(200);
     expect(response.headers.get("set-cookie")).toContain("state=test");
+    expect(mocks.hasGithub).toHaveBeenCalledWith("owner", "github");
     expect(mocks.role).toHaveBeenCalledWith({
       organizationId: "org-team",
       userId: "owner",
+    });
+    expect(mocks.handoff).toHaveBeenCalledWith({
+      userId: "owner",
+      providerId: "provider",
+      expiresAt: expect.any(Number),
     });
     const args = mocks.signIn.mock.calls[0]![0];
     expect(args.body).toMatchObject({
@@ -72,7 +78,7 @@ describe("organization owner sign-in test", () => {
       newUserCallbackURL:
         "https://intar.dev/organizations/team?tab=settings&oidcTest=passed",
     });
-    expect(args.headers.get("x-intar-invite-oauth-handoff")).toBe(
+    expect(args.headers.get("x-intar-sso-link-handoff")).toBe(
       "signed-link-handoff",
     );
   });
@@ -99,6 +105,35 @@ describe("organization owner sign-in test", () => {
       callbackURL: "https://intar.dev/organizations/team",
       errorCallbackURL: "https://intar.dev/organizations/team/sign-in",
     });
+  });
+
+  it("requires a linked GitHub account before minting a handoff", async () => {
+    mocks.hasGithub.mockResolvedValue(false);
+
+    const response = await POST(context(false));
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({
+      code: "active_github_session_required",
+    });
+    expect(mocks.handoff).not.toHaveBeenCalled();
+    expect(mocks.signIn).not.toHaveBeenCalled();
+  });
+
+  it("returns an inactive session's refusal without starting OAuth", async () => {
+    mocks.userContext.mockResolvedValue({
+      ok: false,
+      response: Response.json({ error: "access revoked" }, { status: 403 }),
+    });
+
+    const response = await POST(context(false));
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ error: "access revoked" });
+    expect(mocks.hasGithub).not.toHaveBeenCalled();
+    expect(mocks.handoff).not.toHaveBeenCalled();
   });
 });
 

@@ -9,20 +9,20 @@ bundle.
 ## Suites
 
 - `bun run test:ui:visual` runs the Chromium visual suites.
-  - `routes.visual.spec.ts`: 17 routes × 2 themes × desktop/mobile = 68.
+  - `routes.visual.spec.ts`: 16 routes × 2 themes × desktop/mobile = 64.
   - `dense.visual.spec.ts`: 8 dense routes × 2 themes × tablet = 16.
-  - `states.visual.spec.ts`: 55 focused run, organization, build,
+  - `states.visual.spec.ts`: 56 focused run, landing, organization, build,
     and people snapshots.
-  - The visual suite is 139 checks against 143 committed baseline images,
+  - The visual suite is 136 checks against 140 committed baseline images,
     because four focused states assert two snapshots each.
-- `bun run test:ui:a11y` runs 155 checks: axe on all 17 routes in both themes;
+- `bun run test:ui:a11y` runs 153 checks: axe on all 16 routes in both themes;
   high-risk empty, error, permission, dialog, operational-detail,
   remote-access, validation, and mobile-sheet states; and keyboard, focus,
   reduced-motion, coarse-pointer, overflow, 200%-text, and terminal-cell
   behavior.
 - `bun run test:ui:smoke` runs 10 workflow archetypes in Chromium, Firefox,
   and WebKit, for 30 checks.
-- `bun run test:ui` runs the complete 372-test release gate, including 29 VM
+- `bun run test:ui` runs the complete 414-test release gate, including 29 VM
   lifecycle checks, 9 VM startup checks, and 10 performance checks, with one
   worker in CI.
 

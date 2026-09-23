@@ -12,7 +12,7 @@ import {
   user,
 } from "@/db/schema";
 import { auth } from "@/lib/auth";
-import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
+import { revokeAccount } from "@/lib/access-revocation-store";
 import {
   createSupportComment,
   createSupportTopic,
@@ -26,7 +26,7 @@ import {
   type SupportTopic,
 } from "@/lib/support-types";
 import { resetDatabase } from "@/test/database-migrations";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember } from "@/test/account-fixtures";
 import * as topics from "./topics/index";
 import * as topic from "./topics/[topicId]/index";
 import * as comments from "./topics/[topicId]/comments/index";
@@ -51,9 +51,10 @@ beforeEach(async () => {
         name: id,
         email: `${id}@example.test`,
         role: id === "moderator" ? "admin" : "user",
+        banned: id === "inactive",
       });
     if (id !== "inactive")
-      await grantFixtureBetaAccess({ d1: env.DB, userId: id });
+      await ensureFixtureMember({ d1: env.DB, userId: id });
     await db
       .insert(session)
       .values({
@@ -214,7 +215,7 @@ describe("support forum API", () => {
   });
 
   it("rejects a session after access is revoked", async () => {
-    await revokeBetaUser({
+    await revokeAccount({
       d1: env.DB,
       userId: "reporter",
       actorUserId: "moderator",

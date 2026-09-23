@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   listUserAuthorizedSshKeysForNativeRoutes: vi.fn(),
   loadScenarioRunSshKey: vi.fn(),
   issueStargateTerminalSession: vi.fn(),
-  issueBetaAccessFencedRoute: vi.fn(),
+  issueAccountFencedRoute: vi.fn(),
   buildRunVmRouteUsername: vi.fn(),
   loadScenarioTerminalRouteGeneration: vi.fn(),
   attachReadyScenarioTerminalTargets: vi.fn(),
@@ -19,8 +19,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/stargate-relay", () => ({
   loadStargateSshTransport: vi.fn(async (input) => ({kind:"direct",host:input.directHost,port:input.directPort})),
 }));
-vi.mock("@/lib/beta-route-issuance", () => ({
-  issueBetaAccessFencedRoute: mocks.issueBetaAccessFencedRoute,
+vi.mock("@/lib/account-route-issuance", () => ({
+  issueAccountFencedRoute: mocks.issueAccountFencedRoute,
 }));
 vi.mock("@/lib/scenario-runs/storage", () => ({
   loadRunRow: mocks.loadRunRow,
@@ -78,7 +78,7 @@ describe("scenario native SSH authorization", () => {
       (_runId: string, _vms: unknown, _vmId: string, routeType: string) =>
         `route-${routeType}`,
     );
-    mocks.issueBetaAccessFencedRoute.mockImplementation(
+    mocks.issueAccountFencedRoute.mockImplementation(
       (input: { issue: () => Promise<unknown> }) => input.issue(),
     );
     mocks.issueStargateTerminalSession.mockResolvedValue({

@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { accessInviteError, accessInviteJson } from "@/lib/access-invite-http";
-import { getBetaAccessState } from "@/lib/allowlist";
+import { isActiveAccount } from "@/lib/account-access";
 import { auth } from "@/lib/auth";
 
 export const prerender = false;
@@ -12,12 +12,12 @@ export const GET: APIRoute = async ({ request }) => {
       authSession?.session && authSession.user
         ? { session: authSession.session, user: authSession.user }
         : null;
-    const betaAccess =
-      session && (await getBetaAccessState(session.user.id)) === "active"
+    const access =
+      session && (await isActiveAccount(session.user.id))
         ? "active"
-        : "restricted";
+        : "inactive";
 
-    return accessInviteJson({ session, betaAccess });
+    return accessInviteJson({ session, access });
   } catch (error) {
     return accessInviteError(
       error,

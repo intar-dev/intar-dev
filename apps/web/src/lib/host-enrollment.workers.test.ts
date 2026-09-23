@@ -8,19 +8,16 @@ import type { UserContext } from "./agent-bridge";
 import { createHostEnrollment, claimHostEnrollment, randomHostSecret } from "./host-enrollment";
 import { handleHostEnrollment } from "@/control-plane/host-enrollment";
 import { resetD1Database } from "@/test/d1-migrations";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 
 let context: UserContext;
 beforeEach(async () => {
   await resetD1Database();
   await env.DB.prepare("INSERT INTO runtime_operation_gates (key, state, updated_at) VALUES ('personal_metal_registration', 'open', 1)").run();
   await drizzle(env.DB).insert(user).values({ id: "owner", name: "Owner", email: "owner@example.test" });
-  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner" });
-  const admission = await env.DB.prepare(
-    "SELECT source_invite_id AS sourceInviteId, source_lease_id AS sourceLeaseId, granted_at AS grantedAt FROM access_allowlist WHERE user_id = 'owner'",
-  ).first<UserContext["betaAdmission"]>();
+  await ensureFixtureMember({ d1: env.DB, userId: "owner" });
   context = {
-    userId: "owner", sessionId: "browser", betaAdmission: admission!,
+    userId: "owner", sessionId: "browser",
     role: "user", isAdmin: false, organizationIds: [], activeOrganizationId: null,
   };
 });
@@ -45,12 +42,14 @@ it("rejects an expired unclaimed token and does not create a host", async () => 
   expect(await env.DB.prepare("SELECT count(*) AS n FROM agent_hosts").first()).toEqual({ n: 0 });
 });
 
-it("rejects a lost-response retry after the owner's admission changes", async () => {
+it("rejects a lost-response retry and new enrollments after the owner's account is revoked", async () => {
   const enrollment = await createHostEnrollment(env.DB, context, { name: "Server", scope: "personal", role: "agent" });
   const credential = randomHostSecret();
   expect(await claimHostEnrollment(env.DB, enrollment.enrollmentToken, credential)).not.toBeNull();
-  await env.DB.prepare("UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = 'owner'").run();
+  await revokeFixtureAccount({ d1: env.DB, userId: "owner" });
   expect(await claimHostEnrollment(env.DB, enrollment.enrollmentToken, credential)).toBeNull();
+  await expect(createHostEnrollment(env.DB, context, { name: "Second", scope: "personal", role: "agent" }))
+    .rejects.toMatchObject({ code: "host_enrollment_changed" });
 });
 
 it("rechecks platform administrator rights when claiming an enrollment", async () => {

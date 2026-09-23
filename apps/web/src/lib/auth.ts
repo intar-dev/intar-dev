@@ -19,23 +19,27 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../db/schema";
 import { db } from "../db/client";
-import { getBetaInvite } from "./beta-invites";
 import {
-  getBetaAccess,
-  getBetaAccessState,
+  hasAnyLinkedAccount,
   hasLinkedProviderAccount,
-  isActiveBetaUser,
-  isValidGithubUsername,
-  toAllowlistKey,
-  type BetaAccessSnapshot,
-} from "./allowlist";
+  isActiveAccount,
+} from "./account-access";
 import { getUserRole, isAdminRole } from "./authz";
+import {
+  isValidGithubUsername,
+  normalizeGithubUsername,
+} from "./github-username";
 import { createAppId } from "./id";
 import { createOidcSsoAdapterFactory } from "./oidc-sso-adapter";
 import {
   canCreateOrganization,
   hasReachedOwnedOrganizationLimit,
 } from "./organization-access";
+import {
+  clearSignupReservation,
+  hasOpenSignupSpot,
+  reserveSignupSpot,
+} from "./signups";
 
 const runtimeEnv =
   "process" in globalThis
@@ -73,152 +77,44 @@ const oauthAdvertisedClaims = [
   "roles",
 ] as const;
 
-export const INVITE_OAUTH_HANDOFF_HEADER = "x-intar-invite-oauth-handoff";
+export const SSO_LINK_HANDOFF_HEADER = "x-intar-sso-link-handoff";
 
-const HANDOFF_AUDIENCE = "intar.beta-auth-handoff.v1";
-const REFRESH_TOKEN_AUDIENCE = "intar.beta-refresh-token.v1";
+const HANDOFF_AUDIENCE = "intar.sso-link-handoff.v1";
 const MAX_HANDOFF_TTL_MS = 10 * 60 * 1000;
-const AUTHORIZATION_CODE_ADMISSION_KEY = "intarBetaAdmission";
+const SSO_LINK_CONTEXT_KEY = "intarSsoLink";
+const SIGNUPS_FULL_MESSAGE = "No sign-up spots are open right now";
 
-export type BetaAdmissionEpoch = Pick<
-  BetaAccessSnapshot,
-  "userId" | "sourceInviteId" | "sourceLeaseId" | "grantedAt"
->;
+// The user an OAuth token response is issued for. The after hook rechecks
+// that account once the provider has stored the tokens.
+const oauthIssuanceUserState = defineRequestState<string | null>(() => null);
 
-type ActiveBetaAdmission = BetaAccessSnapshot & { state: "active" };
-
-type SessionIssuanceFence =
-  | { kind: "active"; admission: BetaAdmissionEpoch }
-  | { kind: "restricted"; flow: BetaAuthFlow };
-
-export type GithubAccountIssuanceFence = {
-  kind: "github-invite";
-  inviteId: string;
-  attemptId: string;
+type SsoLinkFlow = {
+  kind: "sso-link";
   userId: string;
-};
-
-const oauthIssuanceAdmissionState =
-  defineRequestState<BetaAdmissionEpoch | null>(() => null);
-const presentedRefreshAdmissionState =
-  defineRequestState<BetaAdmissionEpoch | null>(() => null);
-
-type DatabaseHookIssuanceFences = {
-  sessions: Map<string, SessionIssuanceFence>;
-  ssoAccounts: Map<string, BetaAdmissionEpoch>;
-  githubAccounts: Map<string, GithubAccountIssuanceFence>;
-};
-
-type AccountIssuanceIdentity = {
   providerId: string;
-  accountId: string;
-  userId: string;
-};
-
-function accountIssuanceFenceKey(account: AccountIssuanceIdentity): string {
-  return JSON.stringify([
-    account.providerId,
-    account.accountId,
-    account.userId,
-  ]);
-}
-
-// Better Auth captures one endpoint-context object for a database create and
-// passes that same object to its before hook and queued after hook. Bind the
-// issuance fence to that unforgeable object rather than request-state ALS:
-// queued after hooks may run after the request-state scope has unwound. Account
-// row ids are generated between the before and after hooks, so account fences
-// use the stable provider-account-user tuple rather than the provisional id.
-const databaseHookIssuanceFences = new WeakMap<
-  object,
-  DatabaseHookIssuanceFences
->();
-
-function getDatabaseHookIssuanceFences(
-  context: object,
-): DatabaseHookIssuanceFences {
-  let fences = databaseHookIssuanceFences.get(context);
-  if (!fences) {
-    fences = {
-      sessions: new Map(),
-      ssoAccounts: new Map(),
-      githubAccounts: new Map(),
-    };
-    databaseHookIssuanceFences.set(context, fences);
-  }
-  return fences;
-}
-
-function readDatabaseHookIssuanceFences(
-  context: object | null,
-): DatabaseHookIssuanceFences | null {
-  return context ? (databaseHookIssuanceFences.get(context) ?? null) : null;
-}
-
-function releaseDatabaseHookIssuanceFences(
-  context: object | null,
-  fences: DatabaseHookIssuanceFences | null,
-): void {
-  if (
-    context &&
-    fences &&
-    fences.sessions.size === 0 &&
-    fences.ssoAccounts.size === 0 &&
-    fences.githubAccounts.size === 0
-  ) {
-    databaseHookIssuanceFences.delete(context);
-  }
-}
-
-type BetaAuthFlow =
-  | {
-      kind: "github-invite";
-      inviteId: string;
-      attemptId: string;
-    }
-  | {
-      kind: "sso-link";
-      userId: string;
-      providerId: string;
-      expiresAt: number;
-      sourceInviteId: string;
-      sourceLeaseId: string;
-      grantedAt: number;
-    };
-
-type HandoffEnvelope = {
-  aud: typeof HANDOFF_AUDIENCE;
   expiresAt: number;
+};
+
+type HandoffPayload = SsoLinkFlow & {
+  aud: typeof HANDOFF_AUDIENCE;
   version: 1;
 };
 
-type AdmissionBoundRefreshToken = {
-  admission: BetaAdmissionEpoch;
-  aud: typeof REFRESH_TOKEN_AUDIENCE;
-  sessionId?: string;
-  token: string;
-  version: 1;
-};
-
-type HandoffPayload =
-  | (Extract<BetaAuthFlow, { kind: "github-invite" }> & HandoffEnvelope)
-  | (Extract<BetaAuthFlow, { kind: "sso-link" }> & HandoffEnvelope);
-
-const rejectBetaAuth = (
+const rejectIdentity = (
   error: string,
-  description = "This identity cannot be used for beta access",
+  description = "This identity cannot be used to sign in",
 ) => ({ error, errorDescription: description });
 
-const throwBetaAuthError = (
+function throwAccessError(
   code: string,
-  message = "Beta access is required",
-): never => {
+  message = "This account no longer has access",
+): never {
   throw new APIError("FORBIDDEN", { code, message });
-};
+}
 
 const getOAuthRoleClaims = async (user: User, scopes: readonly string[]) => {
-  if (!(await isActiveBetaUser(user.id))) {
-    throwBetaAuthError("beta_access_revoked");
+  if (!(await isActiveAccount(user.id))) {
+    throwAccessError("access_revoked");
   }
 
   if (!scopes.includes("roles")) {
@@ -234,15 +130,15 @@ const getOAuthRoleClaims = async (user: User, scopes: readonly string[]) => {
   };
 };
 
-export async function getBetaOAuthAccessTokenClaims(input: {
+export async function getOAuthAccessTokenClaims(input: {
   resources?: readonly string[] | undefined;
   scopes: readonly string[];
   user: User;
 }): Promise<Record<string, unknown>> {
   // oauth-provider makes access tokens self-contained JWTs whenever an RFC
   // 8707 resource/audience is requested. Those tokens cannot be revoked
-  // immediately at Intar's dynamic beta boundary, so beta OAuth supports only
-  // the provider's ordinary opaque access-token mode.
+  // immediately when an account loses access, so OAuth supports only the
+  // provider's ordinary opaque access-token mode.
   if (input.resources?.length) {
     throw new APIError("BAD_REQUEST", {
       code: "oauth_resource_tokens_disabled",
@@ -254,48 +150,17 @@ export async function getBetaOAuthAccessTokenClaims(input: {
   return getOAuthRoleClaims(input.user, input.scopes);
 }
 
-export async function createInviteOAuthHandoff(input: {
-  inviteId: string;
-  attemptId: string;
-  expiresAt: number;
-}): Promise<string> {
-  return signHandoff({
-    kind: "github-invite",
-    inviteId: requireSafeIdentifier(input.inviteId, "inviteId"),
-    attemptId: requireSafeIdentifier(input.attemptId, "attemptId"),
-    expiresAt: requireHandoffExpiry(input.expiresAt),
-  });
-}
-
 export async function createSsoLinkOAuthHandoff(input: {
   userId: string;
   providerId: string;
   expiresAt: number;
-  sourceInviteId: string;
-  sourceLeaseId: string;
-  grantedAt: number;
 }): Promise<string> {
-  return signHandoff({
+  const payload: HandoffPayload = {
     kind: "sso-link",
     userId: requireSafeIdentifier(input.userId, "userId"),
     providerId: requireSafeIdentifier(input.providerId, "providerId"),
-    sourceInviteId: requireSafeIdentifier(
-      input.sourceInviteId,
-      "sourceInviteId",
-    ),
-    sourceLeaseId: requireSafeIdentifier(input.sourceLeaseId, "sourceLeaseId"),
-    grantedAt: requireSafeTimestamp(input.grantedAt, "grantedAt"),
     expiresAt: requireHandoffExpiry(input.expiresAt),
-  });
-}
-
-async function signHandoff(
-  flow: BetaAuthFlow & { expiresAt: number },
-): Promise<string> {
-  const payload: HandoffPayload = {
-    ...flow,
     aud: HANDOFF_AUDIENCE,
-    expiresAt: flow.expiresAt,
     version: 1,
   };
   const encoded = encodeBase64Url(
@@ -309,7 +174,7 @@ async function signHandoff(
   return `${encoded}.${encodeBase64Url(new Uint8Array(signature))}`;
 }
 
-async function verifyHandoff(value: string): Promise<HandoffPayload | null> {
+async function verifyHandoff(value: string): Promise<SsoLinkFlow | null> {
   const [encoded, encodedSignature, extra] = value.split(".");
   if (!encoded || !encodedSignature || extra) return null;
 
@@ -336,78 +201,11 @@ async function verifyHandoff(value: string): Promise<HandoffPayload | null> {
   if (payload.expiresAt <= now || payload.expiresAt > now + MAX_HANDOFF_TTL_MS) {
     return null;
   }
-  return payload;
-}
-
-export async function createAdmissionBoundRefreshToken(input: {
-  admission: BetaAdmissionEpoch;
-  sessionId?: string;
-  token: string;
-}): Promise<string> {
-  const payload: AdmissionBoundRefreshToken = {
-    admission: requireAdmissionEpoch(input.admission),
-    aud: REFRESH_TOKEN_AUDIENCE,
-    ...(input.sessionId
-      ? { sessionId: requireSafeIdentifier(input.sessionId, "sessionId") }
-      : {}),
-    token: requireSafeIdentifier(input.token, "token"),
-    version: 1,
-  };
-  const encoded = encodeBase64Url(
-    new TextEncoder().encode(JSON.stringify(payload)),
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    await handoffKey(),
-    new TextEncoder().encode(`${REFRESH_TOKEN_AUDIENCE}.${encoded}`),
-  );
-  return `${encoded}.${encodeBase64Url(new Uint8Array(signature))}`;
-}
-
-export async function readAdmissionBoundRefreshToken(
-  value: string,
-): Promise<AdmissionBoundRefreshToken> {
-  const [encoded, encodedSignature, extra] = value.split(".");
-  if (!encoded || !encodedSignature || extra) {
-    throw new Error("invalid admission-bound refresh token");
-  }
-
-  let payload: unknown;
-  let signature: Uint8Array;
-  try {
-    payload = JSON.parse(
-      new TextDecoder().decode(decodeBase64Url(encoded)),
-    ) as unknown;
-    signature = decodeBase64Url(encodedSignature);
-  } catch {
-    throw new Error("invalid admission-bound refresh token");
-  }
-  const validSignature = await crypto.subtle.verify(
-    "HMAC",
-    await handoffKey(),
-    copyToArrayBuffer(signature),
-    new TextEncoder().encode(`${REFRESH_TOKEN_AUDIENCE}.${encoded}`),
-  );
-  if (!validSignature || !isRecord(payload)) {
-    throw new Error("invalid admission-bound refresh token");
-  }
-  const admission = readAdmissionEpoch(payload.admission);
-  if (
-    payload.aud !== REFRESH_TOKEN_AUDIENCE ||
-    payload.version !== 1 ||
-    !admission ||
-    !isSafeIdentifier(payload.token) ||
-    (payload.sessionId !== undefined &&
-      !isSafeIdentifier(payload.sessionId))
-  ) {
-    throw new Error("invalid admission-bound refresh token");
-  }
   return {
-    admission,
-    aud: REFRESH_TOKEN_AUDIENCE,
-    ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
-    token: payload.token,
-    version: 1,
+    kind: payload.kind,
+    userId: payload.userId,
+    providerId: payload.providerId,
+    expiresAt: payload.expiresAt,
   };
 }
 
@@ -431,32 +229,15 @@ async function handoffKey(): Promise<CryptoKey> {
 }
 
 function isHandoffPayload(value: unknown): value is HandoffPayload {
-  if (!isRecord(value)) return false;
-  if (
-    value.aud !== HANDOFF_AUDIENCE ||
-    value.version !== 1 ||
-    !Number.isSafeInteger(value.expiresAt) ||
-    !isSafeIdentifier(value.kind)
-  ) {
-    return false;
-  }
-
-  switch (value.kind) {
-    case "github-invite":
-      return (
-        isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.attemptId)
-      );
-    case "sso-link":
-      return (
-        isSafeIdentifier(value.userId) &&
-        isSafeIdentifier(value.providerId) &&
-        isSafeIdentifier(value.sourceInviteId) &&
-        isSafeIdentifier(value.sourceLeaseId) &&
-        isSafeTimestamp(value.grantedAt)
-      );
-    default:
-      return false;
-  }
+  return (
+    isRecord(value) &&
+    value.aud === HANDOFF_AUDIENCE &&
+    value.version === 1 &&
+    value.kind === "sso-link" &&
+    Number.isSafeInteger(value.expiresAt) &&
+    isSafeIdentifier(value.userId) &&
+    isSafeIdentifier(value.providerId)
+  );
 }
 
 function requireSafeIdentifier(value: string, field: string): string {
@@ -485,21 +266,6 @@ function requireHandoffExpiry(value: number): number {
   return value;
 }
 
-function requireSafeTimestamp(value: number, field: string): number {
-  if (!isSafeTimestamp(value)) throw new Error(`${field} is invalid`);
-  return value;
-}
-
-function requireAdmissionEpoch(value: BetaAdmissionEpoch): BetaAdmissionEpoch {
-  const admission = readAdmissionEpoch(value);
-  if (!admission) throw new Error("beta admission is invalid");
-  return admission;
-}
-
-function isSafeTimestamp(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
-}
-
 function encodeBase64Url(value: Uint8Array): string {
   let binary = "";
   for (const byte of value) binary += String.fromCharCode(byte);
@@ -526,142 +292,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isActiveAdmission(
-  access: BetaAccessSnapshot | null,
-): access is ActiveBetaAdmission {
-  return access?.state === "active";
-}
-
-function admissionEpoch(access: ActiveBetaAdmission): BetaAdmissionEpoch {
-  return {
-    userId: access.userId,
-    sourceInviteId: access.sourceInviteId,
-    sourceLeaseId: access.sourceLeaseId,
-    grantedAt: access.grantedAt,
-  };
-}
-
-function sameActiveAdmission(
-  expected: BetaAdmissionEpoch,
-  current: BetaAccessSnapshot | null,
-): boolean {
-  return (
-    current?.state === "active" &&
-    current.userId === expected.userId &&
-    current.sourceInviteId === expected.sourceInviteId &&
-    current.sourceLeaseId === expected.sourceLeaseId &&
-    current.grantedAt === expected.grantedAt
-  );
-}
-
-export async function captureBetaAdmissionEpoch(
-  userId: string,
-): Promise<BetaAdmissionEpoch> {
-  const access = await getBetaAccess(userId);
-  if (!isActiveAdmission(access)) {
-    return throwBetaAuthError("beta_access_revoked");
-  }
-  return admissionEpoch(access);
-}
-
-function readAdmissionEpoch(value: unknown): BetaAdmissionEpoch | null {
-  if (!isRecord(value)) return null;
-  const userId = value.userId;
-  const sourceInviteId = value.sourceInviteId;
-  const sourceLeaseId = value.sourceLeaseId;
-  const grantedAt = value.grantedAt;
-  if (
-    !isSafeIdentifier(userId) ||
-    !isSafeIdentifier(sourceInviteId) ||
-    !isSafeIdentifier(sourceLeaseId) ||
-    !isSafeTimestamp(grantedAt)
-  ) {
-    return null;
-  }
-  return { userId, sourceInviteId, sourceLeaseId, grantedAt };
-}
-
-function readAuthorizationCodeValue(
-  value: unknown,
-): (Record<string, unknown> & { type: "authorization_code"; userId: string }) | null {
-  if (typeof value !== "string") return null;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return isRecord(parsed) &&
-      parsed.type === "authorization_code" &&
-      isSafeIdentifier(parsed.userId)
-      ? (parsed as Record<string, unknown> & {
-          type: "authorization_code";
-          userId: string;
-        })
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-async function prepareAuthorizationCodeVerification(value: unknown): Promise<
-  | {
-      value: string;
-      admission: BetaAdmissionEpoch;
-    }
-  | null
-> {
-  const parsed = readAuthorizationCodeValue(value);
-  if (!parsed) return null;
-  const admission = await captureBetaAdmissionEpoch(parsed.userId);
-  return {
-    value: JSON.stringify({
-      ...parsed,
-      [AUTHORIZATION_CODE_ADMISSION_KEY]: admission,
-    }),
-    admission,
-  };
-}
-
-function admissionFromAuthorizationCodeVerification(
-  verificationValue: unknown,
-): BetaAdmissionEpoch | null {
-  return isRecord(verificationValue)
-    ? readAdmissionEpoch(verificationValue[AUTHORIZATION_CODE_ADMISSION_KEY])
-    : null;
-}
-
-export async function captureOAuthIssuanceAdmission(input: {
-  grantType: string;
-  refreshAdmission?: unknown;
+/**
+ * Runs after the provider stored an OAuth token response. Access only moves
+ * from active to revoked, so an account that is still active held access for
+ * the whole issuance; otherwise the issued tokens are removed and the
+ * response is suppressed.
+ */
+export async function enforceActiveOAuthIssuance(input: {
   userId: string;
-  verificationValue?: unknown;
-}): Promise<BetaAdmissionEpoch> {
-  const current = await getBetaAccess(input.userId);
-  if (!isActiveAdmission(current)) {
-    return throwBetaAuthError("beta_access_revoked");
-  }
-  const expected =
-    input.grantType === "authorization_code"
-      ? admissionFromAuthorizationCodeVerification(input.verificationValue)
-      : input.grantType === "refresh_token"
-        ? readAdmissionEpoch(input.refreshAdmission)
-        : null;
-  if (
-    !expected ||
-    expected.userId !== input.userId ||
-    !sameActiveAdmission(expected, current)
-  ) {
-    return throwBetaAuthError(
-      "beta_oauth_authorization_epoch_mismatch",
-      "The OAuth authorization belongs to an earlier beta admission",
-    );
-  }
-  return expected;
-}
-
-export async function enforceOAuthIssuanceAdmission(input: {
-  expected: BetaAdmissionEpoch;
   returned: unknown;
 }): Promise<void> {
-  const current = await getBetaAccess(input.expected.userId);
-  if (sameActiveAdmission(input.expected, current)) return;
+  if (await isActiveAccount(input.userId)) return;
 
   const returned = isRecord(input.returned) ? input.returned : {};
   const accessToken =
@@ -670,19 +311,19 @@ export async function enforceOAuthIssuanceAdmission(input: {
     typeof returned.refresh_token === "string" ? returned.refresh_token : null;
   try {
     await deleteExactIssuedOAuthTokens({
-      userId: input.expected.userId,
+      userId: input.userId,
       accessToken,
       refreshToken,
     });
   } catch (cleanupError) {
     throw new AggregateError(
       [cleanupError],
-      "beta access changed during OAuth issuance and issued tokens could not be removed",
+      "account access was revoked during OAuth issuance and issued tokens could not be removed",
     );
   }
-  throwBetaAuthError(
-    "beta_access_changed_during_oauth_issuance",
-    "Beta access changed while the OAuth credential was being issued",
+  throwAccessError(
+    "access_revoked",
+    "Account access was revoked while the OAuth credential was being issued",
   );
 }
 
@@ -734,123 +375,25 @@ async function deleteExactSession(session: Session): Promise<void> {
   } catch (fallbackError) {
     throw new AggregateError(
       [lifecycleError, fallbackError],
-      "a stale beta session could not be removed",
+      "a session of a revoked account could not be removed",
     );
   }
 }
 
-export async function enforceCreatedSessionAdmission(input: {
-  session: Session;
-  expected: BetaAdmissionEpoch;
-}): Promise<void> {
-  if (
-    sameActiveAdmission(
-      input.expected,
-      await getBetaAccess(input.session.userId),
-    )
-  ) {
-    return;
-  }
-  await deleteExactSession(input.session);
-  throwBetaAuthError(
-    "beta_access_changed_during_session_creation",
-    "Beta access changed while the session was being created",
+/**
+ * Runs after a session row exists. A revocation that committed between the
+ * create hook's check and the insert has already swept the sessions, so the
+ * late row is removed here.
+ */
+export async function enforceCreatedSessionStillActive(
+  session: Session,
+): Promise<void> {
+  if (await isActiveAccount(session.userId)) return;
+  await deleteExactSession(session);
+  throwAccessError(
+    "access_revoked",
+    "Account access was revoked while the session was being created",
   );
-}
-
-async function deleteExactLinkedAccount(account: {
-  id: string;
-  userId: string;
-}): Promise<void> {
-  let lifecycleError: unknown;
-  try {
-    const context = await getAuthInstance().$context;
-    await context.internalAdapter.deleteAccount(account.id);
-    return;
-  } catch (error) {
-    lifecycleError = error;
-  }
-  try {
-    await env.DB.prepare("DELETE FROM account WHERE id = ? AND user_id = ?")
-      .bind(account.id, account.userId)
-      .run();
-  } catch (fallbackError) {
-    throw new AggregateError(
-      [lifecycleError, fallbackError],
-      "a stale SSO account link could not be removed",
-    );
-  }
-}
-
-async function enforceCreatedSsoAccountAdmission(input: {
-  account: { id: string; userId: string };
-  expected: BetaAdmissionEpoch;
-}): Promise<void> {
-  if (
-    sameActiveAdmission(
-      input.expected,
-      await getBetaAccess(input.account.userId),
-    )
-  ) {
-    return;
-  }
-  await deleteExactLinkedAccount(input.account);
-  throwBetaAuthError(
-    "beta_access_changed_during_sso_link",
-    "Beta access changed while the SSO account was being linked",
-  );
-}
-
-export async function enforceCreatedGithubAccountAdmission(input: {
-  account: { id: string; providerId: string; userId: string };
-  expected: GithubAccountIssuanceFence;
-}): Promise<void> {
-  const validTarget =
-    input.account.providerId === "github" &&
-    input.account.userId === input.expected.userId &&
-    (await getBetaAccessState(input.account.userId)) === null;
-  if (validTarget && (await hasActiveBetaInvite(input.expected.inviteId))) {
-    return;
-  }
-
-  await deleteExactLinkedAccount(input.account);
-  throwBetaAuthError(
-    "beta_invite_changed_during_github_link",
-    "The beta invitation changed while the GitHub account was being linked",
-  );
-}
-
-export async function enforceCreatedAuthorizationCodeAdmission(input: {
-  id: string;
-  value: unknown;
-}): Promise<void> {
-  const parsed = readAuthorizationCodeValue(input.value);
-  if (!parsed) return;
-  const expected = readAdmissionEpoch(parsed[AUTHORIZATION_CODE_ADMISSION_KEY]);
-  if (
-    expected &&
-    expected.userId === parsed.userId &&
-    sameActiveAdmission(expected, await getBetaAccess(parsed.userId))
-  ) {
-    return;
-  }
-
-  await env.DB.prepare("DELETE FROM verification WHERE id = ? AND value = ?")
-    .bind(input.id, input.value)
-    .run();
-  throwBetaAuthError(
-    "beta_access_changed_during_oauth_authorization",
-    "Beta access changed while the OAuth authorization code was being issued",
-  );
-}
-
-async function hasActiveBetaInvite(inviteId: string): Promise<boolean> {
-  try {
-    await getBetaInvite({ d1: env.DB, inviteId });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function isOidcSsoProvider(providerId: string): Promise<boolean> {
@@ -865,43 +408,40 @@ async function isOidcSsoProvider(providerId: string): Promise<boolean> {
   return Boolean(providers[0]?.oidcConfig);
 }
 
-function getTrustedBetaFlowFromState(
+function getTrustedSsoLinkFromState(
   state: Awaited<ReturnType<typeof getOAuthState>>,
-): BetaAuthFlow | null {
+): SsoLinkFlow | null {
   const context = state?.serverContext;
   if (!isRecord(context)) return null;
-  const value = context.intarBetaAuth;
-  if (!isRecord(value) || !isSafeIdentifier(value.kind)) return null;
-
-  switch (value.kind) {
-    case "github-invite":
-      return isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.attemptId)
-        ? {
-            kind: value.kind,
-            inviteId: value.inviteId,
-            attemptId: value.attemptId,
-          }
-        : null;
-    case "sso-link":
-      return isSafeIdentifier(value.userId) &&
-        isSafeIdentifier(value.providerId) &&
-        Number.isSafeInteger(value.expiresAt) &&
-        isSafeIdentifier(value.sourceInviteId) &&
-        isSafeIdentifier(value.sourceLeaseId) &&
-        isSafeTimestamp(value.grantedAt)
-        ? {
-            kind: value.kind,
-            userId: value.userId,
-            providerId: value.providerId,
-            expiresAt: value.expiresAt as number,
-            sourceInviteId: value.sourceInviteId,
-            sourceLeaseId: value.sourceLeaseId,
-            grantedAt: value.grantedAt,
-          }
-        : null;
-    default:
-      return null;
+  const value = context[SSO_LINK_CONTEXT_KEY];
+  if (
+    !isRecord(value) ||
+    value.kind !== "sso-link" ||
+    !isSafeIdentifier(value.userId) ||
+    !isSafeIdentifier(value.providerId) ||
+    !Number.isSafeInteger(value.expiresAt)
+  ) {
+    return null;
   }
+  return {
+    kind: "sso-link",
+    userId: value.userId,
+    providerId: value.providerId,
+    expiresAt: value.expiresAt as number,
+  };
+}
+
+function isLiveSsoLink(
+  flow: SsoLinkFlow | null,
+  userId: string | null,
+  providerId: string,
+): boolean {
+  return (
+    flow !== null &&
+    flow.userId === userId &&
+    flow.providerId === providerId &&
+    flow.expiresAt > Date.now()
+  );
 }
 
 async function readOAuthState(): Promise<
@@ -916,160 +456,91 @@ async function readOAuthState(): Promise<
   }
 }
 
-async function isValidRestrictedSessionFlow(
-  userId: string,
-  flow: BetaAuthFlow | null,
-): Promise<boolean> {
-  if (!flow) return false;
-
-  switch (flow.kind) {
-    case "github-invite":
-      return (
-        (await hasActiveBetaInvite(flow.inviteId)) &&
-        (await hasLinkedProviderAccount(userId, "github"))
-      );
-    case "sso-link":
-      return false;
-  }
-}
-
-const betaAuthBeforeRequest = createAuthMiddleware(async (context) => {
+const accountAccessBeforeRequest = createAuthMiddleware(async (context) => {
   // disabledPaths protects HTTP. This guard also protects direct auth.api
   // calls, including leaveOrganization, which has no member-removal hook.
   if (context.path === "/organization/leave" || context.path === "/organization/remove-member") {
     throw new APIError("FORBIDDEN", { message: "Use the application organization membership routes" });
   }
-  const requestHeaders = context.request?.headers ?? context.headers;
-  const encodedHandoff = requestHeaders?.get(INVITE_OAUTH_HANDOFF_HEADER);
-  // Session inspection carries no credential material beyond the cookie, and
-  // every protected call re-reads the live admission through
-  // requireUserContext. A request without the handoff header cannot enter a
-  // restricted flow, so the session read below is redundant for it. A present
-  // header, including an empty one, keeps that verification path unchanged.
-  if (
-    context.path === "/get-session" &&
-    !requestHeaders?.has(INVITE_OAUTH_HANDOFF_HEADER)
-  ) {
-    return undefined;
+  // Better Auth's id-token link shortcut does not invoke validateUserInfo in
+  // 1.7.0-beta.10. Reject direct social links: GitHub is linked only by
+  // signing up with GitHub, and SSO only through the explicit SSO-link flow.
+  if (context.path === "/link-social") {
+    throwAccessError(
+      "explicit_github_link_required",
+      "GitHub can only be connected by signing up with GitHub",
+    );
   }
+  // Session inspection carries no credential material beyond the cookie, and
+  // every protected call re-reads the account through requireUserContext.
+  if (context.path === "/get-session") return undefined;
+
+  const requestHeaders = context.request?.headers ?? context.headers;
+  const encodedHandoff = requestHeaders?.get(SSO_LINK_HANDOFF_HEADER);
   const session = await getSessionFromCtx(context, {
     disableCookieCache: true,
     disableRefresh: true,
   });
-  let acceptedHandoff = false;
+  const sessionUserId = session?.user.id ?? null;
+  const sessionActive = sessionUserId
+    ? await isActiveAccount(sessionUserId)
+    : false;
 
   if (encodedHandoff) {
     const handoff = await verifyHandoff(encodedHandoff);
     if (!handoff) {
-      throw new APIError("FORBIDDEN", {
-        code: "invalid_beta_oauth_handoff",
-        message: "OAuth handoff is invalid",
-      });
+      throwAccessError(
+        "invalid_sso_link_handoff",
+        "The SSO link handoff is invalid",
+      );
     }
-
-    switch (handoff.kind) {
-      case "github-invite": {
-        const { inviteId, attemptId } = handoff;
-        if (
-          context.path !== "/sign-in/social" ||
-          context.body?.provider !== "github" ||
-          !(await hasActiveBetaInvite(inviteId))
-        ) {
-          throwBetaAuthError(
-            "invalid_beta_oauth_handoff",
-            "OAuth handoff does not match this flow",
-          );
-        }
-        await addOAuthServerContext({
-          intarBetaAuth: { kind: handoff.kind, inviteId, attemptId },
-        });
-        acceptedHandoff = true;
-        break;
-      }
-      case "sso-link": {
-        const {
-          expiresAt,
-          grantedAt,
-          providerId,
-          sourceInviteId,
-          sourceLeaseId,
-          userId,
-        } = handoff;
-        const expectedAdmission: BetaAdmissionEpoch = {
-          userId,
-          sourceInviteId,
-          sourceLeaseId,
-          grantedAt,
-        };
-        if (
-          context.path !== "/sign-in/sso" ||
-          context.body?.providerId !== providerId ||
-          context.body?.providerType === "saml" ||
-          !(await isOidcSsoProvider(providerId)) ||
-          session?.user.id !== userId ||
-          !sameActiveAdmission(
-            expectedAdmission,
-            await getBetaAccess(userId),
-          ) ||
-          !(await hasLinkedProviderAccount(userId, "github"))
-        ) {
-          throwBetaAuthError(
-            "invalid_beta_oauth_handoff",
-            "OAuth handoff does not match this flow",
-          );
-        }
-        await addOAuthServerContext({
-          intarBetaAuth: {
-            kind: handoff.kind,
-            userId,
-            providerId,
-            expiresAt,
-            sourceInviteId,
-            sourceLeaseId,
-            grantedAt,
-          },
-        });
-        acceptedHandoff = true;
-        break;
-      }
+    const { expiresAt, providerId, userId } = handoff;
+    if (
+      context.path !== "/sign-in/sso" ||
+      context.body?.providerId !== providerId ||
+      context.body?.providerType === "saml" ||
+      !(await isOidcSsoProvider(providerId)) ||
+      sessionUserId !== userId ||
+      !sessionActive ||
+      !(await hasLinkedProviderAccount(userId, "github"))
+    ) {
+      throwAccessError(
+        "invalid_sso_link_handoff",
+        "The SSO link handoff does not match this request",
+      );
     }
+    await addOAuthServerContext({
+      [SSO_LINK_CONTEXT_KEY]: {
+        kind: "sso-link",
+        userId,
+        providerId,
+        expiresAt,
+      },
+    });
   }
 
-  // Better Auth's id-token link shortcut does not invoke validateUserInfo in
-  // 1.7.0-beta.10. Reject direct social links so every supported account link
-  // continues through the explicit SSO-link flow and its admission fence.
-  if (context.path === "/link-social" && !acceptedHandoff) {
-    throwBetaAuthError("explicit_github_link_required");
-  }
+  if (!sessionUserId || sessionActive) return undefined;
 
-  if (!session?.user.id || (await isActiveBetaUser(session.user.id))) {
-    return undefined;
-  }
-
+  // A session whose account lost access may only sign out or finish a sign-in
+  // callback. The identity gate checks the callback's own account.
   if (
-    context.path === "/get-session" ||
     context.path === "/sign-out" ||
     context.path === "/callback/github" ||
     context.path === "/sso/callback" ||
-    context.path.startsWith("/sso/callback/") ||
-    context.path.startsWith("/sso/saml2/sp/acs/") ||
-    (acceptedHandoff &&
-      (context.path === "/sign-in/social" ||
-        context.path === "/link-social" ||
-        context.path === "/sign-in/sso"))
+    context.path.startsWith("/sso/callback/")
   ) {
     return undefined;
   }
 
-  return throwBetaAuthError("restricted_beta_session");
+  return throwAccessError("access_revoked");
 });
 
-const betaAuthAfterRequest = createAuthMiddleware(async (context) => {
+const accountAccessAfterRequest = createAuthMiddleware(async (context) => {
   if (context.path === "/oauth2/token") {
-    const expected = await oauthIssuanceAdmissionState.get();
-    if (expected) {
-      await enforceOAuthIssuanceAdmission({
-        expected,
+    const userId = await oauthIssuanceUserState.get();
+    if (userId) {
+      await enforceActiveOAuthIssuance({
+        userId,
         returned: context.context.returned,
       });
     }
@@ -1088,7 +559,7 @@ const betaAuthAfterRequest = createAuthMiddleware(async (context) => {
   // this provider does not enable pairwise subjects.
   const returned = context.context.returned;
   const subject = isRecord(returned) ? returned.sub : null;
-  if (typeof subject !== "string" || (await isActiveBetaUser(subject))) {
+  if (typeof subject !== "string" || (await isActiveAccount(subject))) {
     return undefined;
   }
 
@@ -1096,7 +567,7 @@ const betaAuthAfterRequest = createAuthMiddleware(async (context) => {
     return context.json({ active: false });
   }
   throw new APIError("UNAUTHORIZED", {
-    code: "beta_access_revoked",
+    code: "access_revoked",
     message: "OAuth credential is no longer active",
   });
 });
@@ -1117,7 +588,7 @@ async function validateProviderIdentity(
   },
 ) {
   const state = await readOAuthState();
-  const flow = getTrustedBetaFlowFromState(state);
+  const ssoLink = getTrustedSsoLinkFromState(state);
   const stateTargetUserId =
     typeof state?.link?.userId === "string" ? state.link.userId : null;
   const incomingUserId =
@@ -1126,63 +597,54 @@ async function validateProviderIdentity(
     data.source.action === "create-user"
       ? null
       : (stateTargetUserId ?? incomingUserId);
-  const access = await getBetaAccess(targetUserId);
-  const accessState = access?.state ?? null;
 
   if (data.source.method === "oauth") {
     if (data.source.oauth?.providerId !== "github") {
-      return rejectBetaAuth("unsupported_oauth_provider");
+      return rejectIdentity(
+        "unsupported_oauth_provider",
+        "Sign in with GitHub",
+      );
+    }
+    // GitHub never completes an SSO-link flow or a stock account link.
+    if (ssoLink || state?.link) {
+      return rejectIdentity(
+        "explicit_github_link_required",
+        "GitHub can only be connected by signing up with GitHub",
+      );
     }
 
-    if (
-      data.source.action === "create-user" &&
-      flow?.kind === "github-invite" &&
-      (await hasActiveBetaInvite(flow.inviteId))
-    ) {
-      return;
+    switch (data.source.action) {
+      case "sign-in":
+        return (await isActiveAccount(targetUserId))
+          ? undefined
+          : rejectIdentity("access_revoked", "This account no longer has access");
+      case "create-user":
+        // A cheap pre-check that keeps a full cap from creating account-less
+        // user rows. The account hook's reservation is authoritative.
+        return (await hasOpenSignupSpot({ userId: null }))
+          ? undefined
+          : rejectIdentity("signups_full", SIGNUPS_FULL_MESSAGE);
+      case "link-account":
+        // Better Auth classifies a GitHub callback as `link-account` when its
+        // verified email matches an existing user without this GitHub
+        // identity. Only an account-less user row, left by a sign-up that
+        // lost the race for the last spot, may complete its sign-up this way.
+        if (!targetUserId || !(await isActiveAccount(targetUserId))) {
+          return rejectIdentity(
+            "access_revoked",
+            "This account no longer has access",
+          );
+        }
+        if (await hasAnyLinkedAccount(targetUserId)) {
+          return rejectIdentity(
+            "explicit_github_link_required",
+            "This GitHub account can't be linked to an existing account",
+          );
+        }
+        return (await hasOpenSignupSpot({ userId: targetUserId }))
+          ? undefined
+          : rejectIdentity("signups_full", SIGNUPS_FULL_MESSAGE);
     }
-
-    if (
-      data.source.action === "sign-in" &&
-      !flow &&
-      accessState === "active"
-    ) {
-      return;
-    }
-
-    if (
-      data.source.action === "sign-in" &&
-      flow?.kind === "github-invite" &&
-      (await hasActiveBetaInvite(flow.inviteId))
-    ) {
-      return;
-    }
-
-    // Better Auth classifies a GitHub callback as `link-account` when its
-    // verified email matches an existing user that does not yet have this
-    // GitHub identity. That is still a GitHub-authenticated invite claim, not
-    // an OIDC claim: the trusted server-side OAuth state and live invite remain
-    // the authority. Permit only an unadmitted target with no GitHub account;
-    // the account/session database hooks re-check the same active invite before either
-    // linked identity or restricted session can survive.
-    if (
-      data.source.action === "link-account" &&
-      flow?.kind === "github-invite" &&
-      stateTargetUserId === null &&
-      incomingUserId !== null &&
-      targetUserId === incomingUserId &&
-      accessState === null &&
-      !(await hasLinkedProviderAccount(targetUserId, "github")) &&
-      (await hasActiveBetaInvite(flow.inviteId))
-    ) {
-      return;
-    }
-
-    return rejectBetaAuth(
-      data.source.action === "link-account"
-        ? "explicit_github_link_required"
-        : "valid_beta_invite_required",
-    );
   }
 
   if (
@@ -1190,50 +652,38 @@ async function validateProviderIdentity(
     data.source.method === "sso-saml"
   ) {
     const providerId = data.source.sso?.providerId;
-    if (!providerId) return rejectBetaAuth("sso_provider_missing");
-
-    if (
-      data.source.action === "sign-in" &&
-      !flow &&
-      accessState === "active"
-    ) {
-      return;
+    if (!providerId) {
+      return rejectIdentity(
+        "sso_provider_missing",
+        "The organization identity provider is missing",
+      );
     }
-
-    if (
-      data.source.action === "sign-in" &&
-      flow?.kind === "sso-link" &&
-      flow.providerId === providerId &&
-      flow.userId === targetUserId &&
-      flow.expiresAt > Date.now() &&
-      sameActiveAdmission(flow, access) &&
-      (await hasLinkedProviderAccount(flow.userId, "github"))
-    ) {
-      return;
+    if (data.source.action === "create-user") {
+      return rejectIdentity(
+        "github_identity_required",
+        "Sign up with GitHub first, then connect your organization",
+      );
     }
-
     if (
-      data.source.action === "link-account" &&
-      flow?.kind === "sso-link" &&
-      flow.providerId === providerId &&
-      flow.userId === targetUserId &&
-      flow.expiresAt > Date.now() &&
-      sameActiveAdmission(flow, access) &&
-      (await hasLinkedProviderAccount(flow.userId, "github"))
+      !targetUserId ||
+      !(await isActiveAccount(targetUserId)) ||
+      !(await hasLinkedProviderAccount(targetUserId, "github"))
     ) {
-      return;
+      return rejectIdentity(
+        "access_revoked",
+        "This account no longer has access",
+      );
     }
+    if (data.source.action === "sign-in" && !ssoLink) return;
+    if (isLiveSsoLink(ssoLink, targetUserId, providerId)) return;
 
-    return rejectBetaAuth(
-      data.source.action === "create-user"
-        ? "github_identity_required"
-        : data.source.action === "link-account"
-          ? "explicit_sso_link_required"
-          : "valid_beta_invite_required",
+    return rejectIdentity(
+      "explicit_sso_link_required",
+      "Connect your organization from a signed-in GitHub account",
     );
   }
 
-  return rejectBetaAuth("provider_authentication_required");
+  return rejectIdentity("provider_authentication_required");
 }
 
 function buildAuthInstance() {
@@ -1269,67 +719,19 @@ function buildAuthInstance() {
     customIdTokenClaims: ({ user, scopes }) => getOAuthRoleClaims(user, scopes),
     customAccessTokenClaims: async ({ user, scopes, resources }) =>
       user
-        ? getBetaOAuthAccessTokenClaims({ user, scopes, resources })
+        ? getOAuthAccessTokenClaims({ user, scopes, resources })
         : {},
     // Runs before the provider persists any access/refresh token for both
     // authorization-code and refresh grants, including opaque-token flows.
-    customTokenResponseFields: async ({
-      grantType,
-      user,
-      verificationValue,
-    }) => {
+    // Refresh tokens use the provider defaults: the stored hash covers the
+    // complete presented token.
+    customTokenResponseFields: async ({ user }) => {
       if (!user) return {};
-      const refreshAdmission =
-        grantType === "refresh_token"
-          ? await presentedRefreshAdmissionState.get()
-          : null;
-      const expected = await captureOAuthIssuanceAdmission({
-        grantType,
-        refreshAdmission,
-        userId: user.id,
-        verificationValue,
-      });
-      await oauthIssuanceAdmissionState.set(expected);
-      return {};
-    },
-    // Bind the admission before Better Auth hashes and stores the refresh
-    // token. The installed provider does not await formatRefreshToken.encrypt,
-    // so the async request-state read must happen in this awaited generator.
-    generateRefreshToken: async () => {
-      const admission = await oauthIssuanceAdmissionState.get();
-      if (!admission) {
-        return throwBetaAuthError(
-          "beta_oauth_admission_missing",
-          "The OAuth refresh credential has no beta admission",
-        );
+      if (!(await isActiveAccount(user.id))) {
+        throwAccessError("access_revoked");
       }
-      return createAdmissionBoundRefreshToken({
-        admission,
-        token: createAppId(),
-      });
-    },
-    formatRefreshToken: {
-      // generateRefreshToken already returns the complete signed bearer. Keep
-      // this callback synchronous because Better Auth 1.7.0-beta.10 does not
-      // await it.
-      encrypt: (token) => token,
-      decrypt: async (value) => {
-        let decoded: AdmissionBoundRefreshToken;
-        try {
-          decoded = await readAdmissionBoundRefreshToken(value);
-        } catch {
-          throw new APIError("BAD_REQUEST", {
-            error: "invalid_grant",
-            error_description: "invalid refresh token",
-          });
-        }
-        await presentedRefreshAdmissionState.set(decoded.admission);
-        return {
-          ...(decoded.sessionId ? { sessionId: decoded.sessionId } : {}),
-          // The database stores the hash of the complete signed envelope.
-          token: value,
-        };
-      },
+      await oauthIssuanceUserState.set(user.id);
+      return {};
     },
   }) as unknown as BetterAuthPlugin;
 
@@ -1354,8 +756,8 @@ function buildAuthInstance() {
     onAPIError: { throw: true },
     advanced: authCookiePolicy(baseURL),
     hooks: {
-      before: betaAuthBeforeRequest,
-      after: betaAuthAfterRequest,
+      before: accountAccessBeforeRequest,
+      after: accountAccessAfterRequest,
     },
     disabledPaths: [
       "/token",
@@ -1423,143 +825,78 @@ function buildAuthInstance() {
         }),
       },
     },
+    // These hooks always throw an APIError to refuse. Returning false would
+    // let Better Auth continue with a generic, unexplained failure.
     databaseHooks: {
-      verification: {
-        create: {
-          before: async (verification) => {
-            const prepared = await prepareAuthorizationCodeVerification(
-              verification.value,
-            );
-            return prepared
-              ? { data: { value: prepared.value } }
-              : undefined;
-          },
-          after: async (verification) => {
-            await enforceCreatedAuthorizationCodeAdmission({
-              id: verification.id,
-              value: verification.value,
-            });
-          },
-        },
-      },
       account: {
         create: {
           before: async (account, context) => {
-            if (!context) return false;
-            const flow = getTrustedBetaFlowFromState(await readOAuthState());
-            const fenceKey = accountIssuanceFenceKey(account);
-            if (account.providerId === "github") {
-              const accessState = await getBetaAccessState(account.userId);
-              const expected: GithubAccountIssuanceFence | null =
-                flow?.kind === "github-invite" &&
-                accessState === null &&
-                !(await hasLinkedProviderAccount(account.userId, "github")) &&
-                (await hasActiveBetaInvite(flow.inviteId))
-                  ? {
-                      kind: flow.kind,
-                      inviteId: flow.inviteId,
-                      attemptId: flow.attemptId,
-                      userId: account.userId,
-                    }
-                  : null;
-              if (!expected) return false;
-              getDatabaseHookIssuanceFences(context).githubAccounts.set(
-                fenceKey,
-                expected,
+            if (!context) {
+              throwAccessError(
+                "account_context_missing",
+                "Account links require an endpoint context",
               );
-              return;
             }
-            if (
-              flow?.kind !== "sso-link" ||
-              flow.userId !== account.userId ||
-              flow.providerId !== account.providerId ||
-              !sameActiveAdmission(flow, await getBetaAccess(account.userId))
-            ) {
-              return false;
-            }
-            getDatabaseHookIssuanceFences(context).ssoAccounts.set(
-              fenceKey,
-              flow,
-            );
-            return;
-          },
-          after: async (account, context) => {
-            const fences = readDatabaseHookIssuanceFences(context);
-            const fenceKey = accountIssuanceFenceKey(account);
             if (account.providerId === "github") {
-              const expected = fences?.githubAccounts.get(fenceKey);
-              fences?.githubAccounts.delete(fenceKey);
-              releaseDatabaseHookIssuanceFences(context, fences);
-              if (!expected) {
-                await deleteExactLinkedAccount(account);
-                return throwBetaAuthError("valid_beta_invite_required");
+              if (await hasLinkedProviderAccount(account.userId, "github")) {
+                throwAccessError(
+                  "explicit_github_link_required",
+                  "This account already has a GitHub account",
+                );
               }
-              await enforceCreatedGithubAccountAdmission({ account, expected });
+              // The authoritative cap: one guarded insert, so concurrent
+              // sign-ups for the last spot admit exactly one.
+              if (!(await reserveSignupSpot({ userId: account.userId }))) {
+                throw new APIError("FORBIDDEN", {
+                  code: "signups_full",
+                  message: SIGNUPS_FULL_MESSAGE,
+                });
+              }
               return;
             }
-            const expected = fences?.ssoAccounts.get(fenceKey);
-            fences?.ssoAccounts.delete(fenceKey);
-            releaseDatabaseHookIssuanceFences(context, fences);
-            if (!expected) {
-              await deleteExactLinkedAccount(account);
-              return throwBetaAuthError("explicit_sso_link_required");
+            const flow = getTrustedSsoLinkFromState(await readOAuthState());
+            if (
+              !isLiveSsoLink(flow, account.userId, account.providerId) ||
+              !(await isActiveAccount(account.userId)) ||
+              !(await hasLinkedProviderAccount(account.userId, "github"))
+            ) {
+              throwAccessError(
+                "explicit_sso_link_required",
+                "Connect your organization from a signed-in GitHub account",
+              );
             }
-            await enforceCreatedSsoAccountAdmission({ account, expected });
+          },
+          after: async (account) => {
+            if (account.providerId !== "github") return;
+            // The linked GitHub account now holds the spot; the reservation
+            // stops counting either way, so a failed clear is only logged.
+            try {
+              await clearSignupReservation({ userId: account.userId });
+            } catch (error) {
+              console.warn(
+                JSON.stringify({
+                  event: "signup_reservation_clear_failed",
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              );
+            }
           },
         },
       },
       session: {
         create: {
-          before: async (session: Session, context) => {
-            if (!context) return false;
-            const fences = getDatabaseHookIssuanceFences(context).sessions;
-            const access = await getBetaAccess(session.userId);
-            if (isActiveAdmission(access)) {
-              fences.set(session.token, {
-                kind: "active",
-                admission: admissionEpoch(access),
-              });
-              return;
+          // The admin plugin's banned-user check runs before this hook.
+          before: async (session: Session) => {
+            if (!(await isActiveAccount(session.userId))) {
+              throwAccessError("access_revoked");
             }
-            const flow = getTrustedBetaFlowFromState(await readOAuthState());
-            if (!(await isValidRestrictedSessionFlow(session.userId, flow))) {
-              return false;
-            }
-            fences.set(session.token, { kind: "restricted", flow: flow! });
-            return;
           },
           after: async (session: Session, context) => {
-            const issuanceFences = readDatabaseHookIssuanceFences(context);
-            const fence = issuanceFences?.sessions.get(session.token);
-            issuanceFences?.sessions.delete(session.token);
-            releaseDatabaseHookIssuanceFences(context, issuanceFences);
-            if (fence?.kind === "active") {
-              await enforceCreatedSessionAdmission({
-                session,
-                expected: fence.admission,
-              });
-              recordSecurityEvent(context?.request, {
-                event: "security.session_created", outcome: "accepted",
-                userId: session.userId, admission: "active",
-              });
-              return;
-            }
-            if (
-              fence?.kind === "restricted" &&
-              (await isValidRestrictedSessionFlow(session.userId, fence.flow))
-            ) {
-              recordSecurityEvent(context?.request, {
-                event: "security.session_created", outcome: "accepted",
-                userId: session.userId, admission: "restricted",
-              });
-              return;
-            }
-
-            await deleteExactSession(session);
-            throwBetaAuthError(
-              "beta_access_changed_during_session_creation",
-              "Beta access changed while the session was being created",
-            );
+            await enforceCreatedSessionStillActive(session);
+            recordSecurityEvent(context?.request, {
+              event: "security.session_created", outcome: "accepted",
+              userId: session.userId,
+            });
           },
         },
       },
@@ -1569,7 +906,8 @@ function buildAuthInstance() {
         minUsernameLength: 1,
         maxUsernameLength: 39,
         usernameValidator: isValidGithubUsername,
-        usernameNormalization: (value) => toAllowlistKey(value) ?? value,
+        usernameNormalization: (value) =>
+          normalizeGithubUsername(value) ?? value,
         validationOrder: { username: "post-normalization" },
         immutableUsername: true,
       }),
@@ -1607,10 +945,8 @@ function buildAuthInstance() {
         organizationProvisioning: { disabled: true },
         provisionUserOnEveryLogin: true,
         provisionUser: async ({ user, provider }) => {
-          // Invite sign-in may create a deliberately restricted session. Do
-          // not let that pre-access callback mutate organization tenancy; the
-          // next normal sign-in after confirmation provisions membership.
-          if (!(await isActiveBetaUser(user.id))) return;
+          // An account that lost access must not gain organization tenancy.
+          if (!(await isActiveAccount(user.id))) return;
           if (!provider.organizationId) return;
           await db
             .insert(schema.member)

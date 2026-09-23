@@ -8,7 +8,7 @@ import { retirePersonalHost } from "@/lib/personal-host-retirement";
 import { persistHostReport } from "@/lib/personal-host-readiness";
 import { updatePersonalServer, listPersonalServers } from "@/lib/personal-servers";
 import { createHostEnrollment, claimHostEnrollment, randomHostSecret } from "@/lib/host-enrollment";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import fixture from "@/generated/fixtures/bridge/host-state-report-v2.json";
 import type { HostStateReportV2 } from "@/generated/bridge";
@@ -22,9 +22,8 @@ beforeEach(async () => {
     { id: "owner", name: "Owner", email: "owner@example.test" },
     { id: "other", name: "Other", email: "other@example.test" },
   ]);
-  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner" });
-  const epoch = await env.DB.prepare("SELECT source_invite_id AS sourceInviteId, source_lease_id AS sourceLeaseId, granted_at AS grantedAt FROM access_allowlist WHERE user_id = 'owner'").first<UserContext["betaAdmission"]>();
-  context = { userId: "owner", sessionId: "browser", betaAdmission: epoch!, isAdmin: false, role: "user", organizationIds: [], activeOrganizationId: null };
+  await ensureFixtureMember({ d1: env.DB, userId: "owner" });
+  context = { userId: "owner", sessionId: "browser", isAdmin: false, role: "user", organizationIds: [], activeOrganizationId: null };
   await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('personal_metal_registration','open',1)").run();
 });
 async function host(id = "host", scope: "personal" | "platform" = "personal") {
@@ -37,7 +36,7 @@ function ready(id = "host", snapshot = report(id), sessionId = "session") {
   return persistHostReport({ d1: env.DB, hostId: id, sessionId, credentialGeneration: 1, report: snapshot, now, requireRunCli: false });
 }
 function remove(hostId = "host", confirmReturnToCloud = true) {
-  return retirePersonalHost({ d1: env.DB, hostId, userId: context.userId, betaAdmission: context.betaAdmission, confirmReturnToCloud });
+  return retirePersonalHost({ d1: env.DB, hostId, userId: context.userId, confirmReturnToCloud });
 }
 async function placement() { return env.DB.prepare("SELECT metal_placement AS mode FROM user WHERE id = 'owner'").first<{ mode: string }>(); }
 it("changes placement only when a current personal server is Ready", async () => {
@@ -87,13 +86,13 @@ it("keeps registration, last removal and first Ready consistent when requests ra
   expect(await placement()).toEqual({ mode: "personal" });
   expect((await listPersonalServers(context)).servers.filter(row => row.status !== "removing").map(row => row.id)).toEqual([enrollment.hostId]);
 });
-it("rejects another owner and a stale admission for management", async () => {
+it("rejects another owner and a revoked owner for management", async () => {
   await host();
   const intruder = { ...context, userId: "other" };
   await expect(updatePersonalServer(env.DB, intruder, "host", { name: "stolen" })).rejects.toMatchObject({ status: 404 });
-  await expect(retirePersonalHost({ d1: env.DB, hostId: "host", userId: "other", betaAdmission: context.betaAdmission, confirmReturnToCloud: true })).rejects.toMatchObject({ status: 404 });
+  await expect(retirePersonalHost({ d1: env.DB, hostId: "host", userId: "other", confirmReturnToCloud: true })).rejects.toMatchObject({ status: 404 });
   expect((await listPersonalServers(intruder)).servers).toEqual([]);
-  await env.DB.prepare("UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = 'owner'").run();
+  await revokeFixtureAccount({ d1: env.DB, userId: "owner" });
   await expect(updatePersonalServer(env.DB, context, "host", { paused: true })).rejects.toMatchObject({ status: 404 });
   await expect(remove()).rejects.toMatchObject({ status: 404 });
 });

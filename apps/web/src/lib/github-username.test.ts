@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isValidGithubUsername, toAllowlistKey } from "./github-username";
+import { isValidGithubUsername, normalizeGithubUsername } from "./github-username";
 
 describe("isValidGithubUsername", () => {
   it("accepts real usernames", () => {
@@ -20,14 +20,14 @@ describe("isValidGithubUsername", () => {
   });
 });
 
-describe("toAllowlistKey", () => {
+describe("normalizeGithubUsername", () => {
   it("normalizes to trimmed lowercase", () => {
-    expect(toAllowlistKey("  OctoCat ")).toBe("octocat");
+    expect(normalizeGithubUsername("  OctoCat ")).toBe("octocat");
   });
   it("returns null for empty input", () => {
-    expect(toAllowlistKey("")).toBeNull();
-    expect(toAllowlistKey("   ")).toBeNull();
-    expect(toAllowlistKey(null)).toBeNull();
-    expect(toAllowlistKey(undefined)).toBeNull();
+    expect(normalizeGithubUsername("")).toBeNull();
+    expect(normalizeGithubUsername("   ")).toBeNull();
+    expect(normalizeGithubUsername(null)).toBeNull();
+    expect(normalizeGithubUsername(undefined)).toBeNull();
   });
 });

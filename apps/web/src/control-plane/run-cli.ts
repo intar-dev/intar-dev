@@ -7,7 +7,7 @@ import {
   runtimeVmActualState,
   runtimeVms,
   scenarioRuns,
-  accessAllowlist,
+  user,
 } from "@/db/schema";
 import {
   RUN_CLI_MAX_COMPLETION_ALIASES,
@@ -31,6 +31,7 @@ import {
   type RunCliSolutionStateV1,
   type RunCliViewV1,
 } from "@/generated/run-cli";
+import { activeAccountCondition, isActiveAccount } from "@/lib/account-access";
 import { AppError } from "@/lib/app-error";
 import {
   revealScenarioRunHintForUser,
@@ -198,7 +199,7 @@ async function handleRunCliSubjectRequest(input: {
   subject: RunCliSubject;
 }): Promise<Response> {
   try {
-    if (!(await hasActiveCliAccess(input.subject.userId))) {
+    if (!(await isActiveAccount(input.subject.userId))) {
       throw runCliFailure(
         "unauthorized",
         "This Intar command is no longer authorized.",
@@ -234,17 +235,6 @@ export type RunCliSuccessResultV1 = Exclude<
   RunCliResultV1,
   { kind: "error" }
 >;
-
-async function hasActiveCliAccess(userId: string): Promise<boolean> {
-  const row = await env.DB.prepare(
-    `SELECT 1 FROM access_allowlist
-     WHERE user_id = ? AND state = 'active'
-     LIMIT 1`,
-  )
-    .bind(userId)
-    .first();
-  return Boolean(row);
-}
 
 async function dispatchScenarioRunCliAction(input: {
   action: RunCliActionV1;
@@ -607,11 +597,8 @@ async function resolveKvmRunCliFence(input: {
     .from(runtimeExecutions)
     .innerJoin(runtimeVms, eq(runtimeVms.executionId, runtimeExecutions.id))
     .innerJoin(
-      accessAllowlist,
-      and(
-        eq(accessAllowlist.userId, runtimeExecutions.userId),
-        eq(accessAllowlist.state, "active"),
-      ),
+      user,
+      and(eq(user.id, runtimeExecutions.userId), activeAccountCondition()),
     )
     .innerJoin(
       runtimeVmActualState,

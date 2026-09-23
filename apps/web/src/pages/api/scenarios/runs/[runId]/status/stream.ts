@@ -68,18 +68,6 @@ export const GET: APIRoute = async ({ request, params }) => {
     headers.set("x-run-status-user-id", authz.context.userId);
     headers.set("x-run-status-host-id", target.hostId);
     headers.set("x-run-status-session-id", authz.context.sessionId);
-    headers.set(
-      "x-run-status-beta-source-invite-id",
-      authz.context.betaAdmission.sourceInviteId,
-    );
-    headers.set(
-      "x-run-status-beta-source-lease-id",
-      authz.context.betaAdmission.sourceLeaseId,
-    );
-    headers.set(
-      "x-run-status-beta-admission-granted-at",
-      String(authz.context.betaAdmission.grantedAt),
-    );
 
     const stub = env.HOST_RUNTIME.get(
       env.HOST_RUNTIME.idFromName(target.hostId),

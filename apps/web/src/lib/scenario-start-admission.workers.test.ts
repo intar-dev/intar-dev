@@ -4,8 +4,7 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
-import { accessAllowlist, agentHosts, hostDesiredState, organization, user } from "@/db/schema";
-import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
+import { agentHosts, hostDesiredState, organization, user } from "@/db/schema";
 import {
   admissionStatements,
   type AdmissionCommitInput,
@@ -18,22 +17,23 @@ import {
 import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
 import { buildInitialVmState, type RunVmStateDocument } from "@/lib/run-state";
 import {
-  FIXTURE_BETA_ADMIN_ID,
-  grantFixtureBetaAccess,
-} from "@/test/beta-access-fixtures";
+  FIXTURE_ADMIN_ID,
+  ensureFixtureMember,
+  revokeFixtureAccount,
+} from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { seedAdmissionGuardFixture } from "@/lib/scenario-runs/admission-test-fixtures";
 
 /**
- * The beta-admission fence of the single admission batch. The old per-step
- * API (insertScenarioRunForAdmission, rollbackScenarioStartAfterFailure,
+ * The account fence of the single admission batch. The old per-step API
+ * (insertScenarioRunForAdmission, rollbackScenarioStartAfterFailure,
  * upsertRunVmsIntoDesiredState) is gone, so every refusal is proved against
  * the one transaction that now owns admission.
  */
-describe("scenario start beta-admission fence", () => {
+describe("scenario start account fence", () => {
   beforeEach(resetD1Database);
 
-  it("admits the control workload while its epoch and host placement are valid", async () => {
+  it("admits the control workload while its account and host placement are valid", async () => {
     const parts = await admissionInput();
     const results = await env.DB.batch(admissionStatements(parts).statements);
     expect(admissionWrites(results)).toBeGreaterThan(0);
@@ -43,19 +43,13 @@ describe("scenario start beta-admission fence", () => {
 
   it("cannot insert a run or SSH capability after revocation, including on a platform host", async () => {
     const parts = await admissionInput();
-    await revokeBetaUser({
-      d1: env.DB,
-      userId: "scenario-user",
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "scenario_start_race",
-      now: 20_000,
-    });
+    await revokeFixtureAccount({ d1: env.DB, userId: "scenario-user" });
 
     // The statement batch writes nothing: every admission statement selects
-    // through the live epoch, so a revoked admission leaves the whole batch at
-    // zero rows. The refusal itself is raised by the entry point
-    // (beginScenarioRun returns 403 beta_access_revoked), which the admission
-    // suite covers against the same fixture.
+    // through the owner's active account or the run it gates, so a revoked
+    // account leaves the whole batch at zero rows. The refusal itself is
+    // raised by the entry point (beginScenarioRun returns 403 access_revoked),
+    // which the admission suite covers against the same fixture.
     const results = await env.DB.batch(admissionStatements(parts).statements);
     expect(admissionWrites(results)).toBe(0);
 
@@ -91,12 +85,12 @@ describe("scenario start beta-admission fence", () => {
     ).resolves.toEqual({ disabled: 0 });
   });
 
-  it("admits nothing when the run insert is refused but the epoch is active", async () => {
+  it("admits nothing when the run insert is refused but the account is active", async () => {
     const parts = await admissionInput();
     // Another writer publishes the host desired state after this request read
     // its version. The compare-and-set can no longer land, so the abort
-    // sentinel rolls the whole admission back even though the admission epoch
-    // itself is still current.
+    // sentinel rolls the whole admission back even though the account is
+    // still active.
     await drizzle(env.DB)
       .update(hostDesiredState)
       .set({ version: parts.desired.expectedVersion + 1 })
@@ -122,15 +116,9 @@ describe("scenario start beta-admission fence", () => {
     ).resolves.toEqual([{ version: parts.desired.expectedVersion + 1 }]);
   });
 
-  it("never dispatches desired VMs for an admission whose epoch was revoked in the commit window", async () => {
+  it("never dispatches desired VMs for an admission whose account was revoked in the commit window", async () => {
     const parts = await admissionInput();
-    await revokeBetaUser({
-      d1: env.DB,
-      userId: "scenario-user",
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "scenario_dispatch_race",
-      now: 30_000,
-    });
+    await revokeFixtureAccount({ d1: env.DB, userId: "scenario-user" });
 
     const results = await env.DB.batch(admissionStatements(parts).statements);
     expect(admissionWrites(results)).toBe(0);
@@ -171,11 +159,10 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     createdAt: new Date(now),
     updatedAt: new Date(now),
   });
-  await grantFixtureBetaAccess({
+  await ensureFixtureMember({
     d1: env.DB,
     userId: "scenario-user",
     githubAccountId: "scenario-user-github",
-    githubUsername: "scenario-user",
     now,
   });
   await db.insert(organization).values({
@@ -188,7 +175,7 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     scope: "platform",
     credentialGeneration: 1,
     id: "platform-host",
-    userId: FIXTURE_BETA_ADMIN_ID,
+    userId: FIXTURE_ADMIN_ID,
     name: "Platform host",
     role: "agent",
     scenarioEnabled: true,
@@ -197,17 +184,6 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     createdAt: now,
     updatedAt: now,
   });
-  const [admission] = await db
-    .select({
-      sourceInviteId: accessAllowlist.sourceInviteId,
-      sourceLeaseId: accessAllowlist.sourceLeaseId,
-      grantedAt: accessAllowlist.grantedAt,
-    })
-    .from(accessAllowlist)
-    .where(eq(accessAllowlist.userId, "scenario-user"))
-    .limit(1);
-  if (!admission) throw new Error("fixture admission missing");
-
   const readiness = await seedAdmissionGuardFixture({
     userId: "scenario-user", organizationId: "scenario-organization", hostId: "platform-host",
   });
@@ -314,7 +290,6 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       worstCaseDiskMib: 4_096,
     },
     leaseExpiresAt: now + 3_600_000,
-    betaAdmission: admission,
     now,
   } satisfies AdmissionCommitInput;
 }

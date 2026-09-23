@@ -22,7 +22,6 @@ import type {
   CourseCatalogLectureV2,
 } from "@/db/schema";
 import {
-  accessAllowlist,
   activeRuntimeSlots,
   agentHosts,
   hostActualState,
@@ -40,8 +39,7 @@ import {
   runtimeOperationGates,
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
-import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
-import { setPlatformUserRole } from "@/lib/beta-admin-guard";
+import { setPlatformUserRole } from "@/lib/platform-admin-authority";
 import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
@@ -52,13 +50,13 @@ import {
 } from "@/lib/image-registry-admission";
 import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import { candidateScenarioId } from "@/lib/scenario-catalog-candidates";
 import { beginScenarioRun, type BeginScenarioRunInput } from "@/lib/scenario-runs/begin";
 import {
-  FIXTURE_BETA_ADMIN_ID,
-  grantFixtureBetaAccess,
-} from "@/test/beta-access-fixtures";
+  FIXTURE_ADMIN_ID,
+  ensureFixtureMember,
+  revokeFixtureAccount,
+} from "@/test/account-fixtures";
 import { applyD1Migrations, reset } from "cloudflare:test";
 import { d1Migrations } from "@/test/d1-migrations";
 
@@ -515,7 +513,7 @@ describe("scenario admission batch", () => {
     ["both", true, true],
   ] as const)("rejects a captured %s bypass after admin demotion at commit", async (_name, proof, sequence) => {
     const fixture = await seedAdmissionFixture();
-    await setPlatformUserRole({ d1: env.DB, targetUserId: RUNNER_USER_ID, actorUserId: FIXTURE_BETA_ADMIN_ID, role: "admin" });
+    await setPlatformUserRole({ d1: env.DB, targetUserId: RUNNER_USER_ID, actorUserId: FIXTURE_ADMIN_ID, role: "admin" });
     if (sequence) {
       await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_insert(catalog_json, '$.courses[0].lectures[#]', json_extract(catalog_json, '$.courses[0].lectures[0]')) WHERE scope_key = 'public'").run();
       await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].lectureId', 'locked-prerequisite', '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'").run();
@@ -526,7 +524,7 @@ describe("scenario admission batch", () => {
       await drizzle(env.DB).insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "drained" });
     }
     admissionHarness.armBeforeAdmissionBatch(() => setPlatformUserRole({
-      d1: env.DB, targetUserId: RUNNER_USER_ID, actorUserId: FIXTURE_BETA_ADMIN_ID, role: "user",
+      d1: env.DB, targetUserId: RUNNER_USER_ID, actorUserId: FIXTURE_ADMIN_ID, role: "user",
     }));
     await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, {
       ...(proof ? candidateProofInput() : {}), allowSequenceBypass: sequence,
@@ -874,21 +872,15 @@ describe("scenario admission batch", () => {
     await expect(admissionSnapshot()).resolves.toEqual(before);
   });
 
-  it("leaves no rows when the epoch is revoked before the commit", async () => {
+  it("leaves no rows when the account is revoked before the commit", async () => {
     const fixture = await seedAdmissionFixture();
     admissionHarness.armBeforeAdmissionBatch(async () => {
-      await revokeBetaUser({
-        d1: env.DB,
-        userId: RUNNER_USER_ID,
-        actorUserId: FIXTURE_BETA_ADMIN_ID,
-        reason: "admission_test_revoked_before_commit",
-        now: Date.now(),
-      });
+      await revokeFixtureAccount({ d1: env.DB, userId: RUNNER_USER_ID });
     });
 
     await expect(
       beginScenarioRun(fixture.input(RUNNER_USER_ID)),
-    ).rejects.toMatchObject({ status: 403, code: "beta_access_revoked" });
+    ).rejects.toMatchObject({ status: 403, code: "access_revoked" });
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
 
@@ -1045,18 +1037,12 @@ describe("scenario admission batch", () => {
   it("cancels the run and clears the desired VM when the post-commit fence fails", async () => {
     const fixture = await seedAdmissionFixture();
     admissionHarness.armAfterAdmissionBatch(async () => {
-      await revokeBetaUser({
-        d1: env.DB,
-        userId: RUNNER_USER_ID,
-        actorUserId: FIXTURE_BETA_ADMIN_ID,
-        reason: "admission_test_revoked_after_commit",
-        now: Date.now(),
-      });
+      await revokeFixtureAccount({ d1: env.DB, userId: RUNNER_USER_ID });
     });
 
     await expect(
       beginScenarioRun(fixture.input(RUNNER_USER_ID)),
-    ).rejects.toMatchObject({ status: 403, code: "beta_access_revoked" });
+    ).rejects.toMatchObject({ status: 403, code: "access_revoked" });
 
     const rows = await drizzle(env.DB)
       .select({
@@ -1571,7 +1557,7 @@ interface AdmissionFixture {
   hostId: string;
   organizationId: string;
   keyFor(userId: string): string;
-  /** Seeds one more beta user for this host and returns that user's input. */
+  /** Seeds one more member for this host and returns that user's input. */
   addUser(userId: string): Promise<BeginScenarioRunInput>;
   input(userId: string, overrides?: Partial<BeginScenarioRunInput>): BeginScenarioRunInput;
 }
@@ -1834,23 +1820,6 @@ async function seedHostAndCatalog(input: {
     updatedAt: now,
   });
 
-  const admissions = new Map<string, BetaAdmissionEpoch>();
-  for (const userId of input.userIds) {
-    const [access] = await db
-      .select({
-        sourceInviteId: accessAllowlist.sourceInviteId,
-        sourceLeaseId: accessAllowlist.sourceLeaseId,
-        grantedAt: accessAllowlist.grantedAt,
-      })
-      .from(accessAllowlist)
-      .where(eq(accessAllowlist.userId, userId))
-      .limit(1);
-    if (!access) {
-      throw new Error(`beta admission fixture is missing for ${userId}`);
-    }
-    admissions.set(userId, access);
-  }
-
   const addUser = createUserSeeder(now, organizationId);
 
   return {
@@ -1859,26 +1828,18 @@ async function seedHostAndCatalog(input: {
     keyFor: (userId: string) => `${userId}-admission-key`,
     async addUser(userId: string) {
       await addUser(userId);
-      const betaAdmission = await loadAdmissionEpoch(userId);
-      admissions.set(userId, betaAdmission);
       return {
         scenarioId: SCENARIO_ID,
         userId,
-        betaAdmission,
-      idempotencyKey: `${userId}-admission-key`,
+        idempotencyKey: `${userId}-admission-key`,
         organizationId,
         hostId,
       } satisfies BeginScenarioRunInput;
     },
     input(userId, overrides = {}) {
-      const betaAdmission = admissions.get(userId);
-      if (!betaAdmission) {
-        throw new Error(`beta admission fixture is missing for ${userId}`);
-      }
       return {
         scenarioId: SCENARIO_ID,
         userId,
-        betaAdmission,
         idempotencyKey: `${userId}-admission-key`,
         organizationId,
         hostId,
@@ -1889,9 +1850,8 @@ async function seedHostAndCatalog(input: {
 }
 
 /**
- * Seeds one beta-accessible user for the admission fixtures. Each user gets
- * its own GitHub account and invitation, so one test can admit several
- * users to the same host.
+ * Seeds one member for the admission fixtures. Each user gets its own GitHub
+ * account, so one test can admit several users to the same host.
  */
 function createUserSeeder(
   startNow: number,
@@ -1911,11 +1871,10 @@ function createUserSeeder(
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    await grantFixtureBetaAccess({
+    await ensureFixtureMember({
       d1: env.DB,
       userId,
       githubAccountId: `${userId}-github`,
-      githubUsername: userId,
       now,
     });
     // The course gate resolves the organization catalog through a membership
@@ -1928,23 +1887,6 @@ function createUserSeeder(
       createdAt: new Date(now),
     });
   };
-}
-
-/** Reads the live beta admission epoch of one seeded user. */
-async function loadAdmissionEpoch(userId: string): Promise<BetaAdmissionEpoch> {
-  const [access] = await drizzle(env.DB)
-    .select({
-      sourceInviteId: accessAllowlist.sourceInviteId,
-      sourceLeaseId: accessAllowlist.sourceLeaseId,
-      grantedAt: accessAllowlist.grantedAt,
-    })
-    .from(accessAllowlist)
-    .where(eq(accessAllowlist.userId, userId))
-    .limit(1);
-  if (!access) {
-    throw new Error(`beta admission fixture is missing for ${userId}`);
-  }
-  return access;
 }
 
 async function seedForeignActiveSlot(userId: string): Promise<void> {

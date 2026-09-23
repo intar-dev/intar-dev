@@ -166,14 +166,14 @@ describe("control-plane maintenance fence", () => {
     });
 
     for (const request of [
-      new Request("https://intar.dev/join", {
+      new Request("https://intar.dev/", {
         headers: { cookie: cookie ?? "" },
       }),
       new Request(
         "https://intar.dev/api/auth/callback/github?code=test&state=test",
         { headers: { cookie: cookie ?? "" } },
       ),
-      new Request("https://intar.dev/api/access-invites/current", {
+      new Request("https://intar.dev/api/signups", {
         headers: { cookie: cookie ?? "" },
       }),
     ]) {
@@ -182,13 +182,13 @@ describe("control-plane maintenance fence", () => {
     }
 
     const mutation = await handleMaintenanceMode(
-      new Request("https://intar.dev/api/admin/access-invites", {
-        method: "POST",
+      new Request("https://intar.dev/api/admin/signups", {
+        method: "PUT",
         headers: {
           cookie: cookie ?? "",
           "content-type": "application/json",
         },
-        body: "{}",
+        body: JSON.stringify({ limit: 1, expectedVersion: 0 }),
       }),
       maintenanceEnv,
     );

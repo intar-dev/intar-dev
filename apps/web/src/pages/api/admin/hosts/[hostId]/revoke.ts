@@ -16,7 +16,6 @@ export const POST: APIRoute = async ({ request, params }) => {
     if (!hostId) throw appError(400, "host_id_required", "Host id is required");
     const revoked = await revokePlatformHost({
       d1: env.DB, hostId, actorUserId: authz.context.userId,
-      betaAdmission: authz.context.betaAdmission,
     });
     if (!revoked) {
       throw appError(409, "platform_host_revoke_conflict", "The platform host or administrator access changed. Refresh and retry.");

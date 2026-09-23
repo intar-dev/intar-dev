@@ -11,7 +11,7 @@ import {
 } from "better-auth/client/plugins";
 import { getClientAppBootstrap } from "./app-bootstrap";
 export { getClientAppBootstrap };
-export type { AppBetaAccessState, AppBootstrapData } from "./app-bootstrap";
+export type { AppAccessState, AppBootstrapData } from "./app-bootstrap";
 
 const authClientPlugins = [
   usernameClient(),
@@ -137,16 +137,6 @@ export async function getClientSession(): Promise<AppSessionData | null> {
   }
 
   return "data" in result ? result.data : null;
-}
-
-export async function getClientBetaAccessState(): Promise<
-  "active" | "restricted"
-> {
-  try {
-    return (await getClientAppBootstrap()).betaAccess;
-  } catch {
-    return "restricted";
-  }
 }
 
 export async function startGithubSignIn(options?: {

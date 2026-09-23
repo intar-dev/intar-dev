@@ -6,10 +6,9 @@ vi.mock("@/lib/host-workload-retirement", () => ({ cleanupRemovedHost: mocks.cle
 vi.mock("@/lib/personal-servers", () => ({ updatePersonalServer: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ env: { DB: { prepare: () => ({ bind: () => ({ run: mocks.completed }) }) } } }));
 import { DELETE } from "@/pages/api/servers/[hostId]";
-const epoch = { sourceInviteId: "invite", sourceLeaseId: "lease", grantedAt: 123 };
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.auth.mockResolvedValue({ ok: true, context: { userId: "owner", betaAdmission: epoch } });
+  mocks.auth.mockResolvedValue({ ok: true, context: { userId: "owner" } });
   mocks.retire.mockResolvedValue({ placement: "platform" });
   mocks.cleanup.mockResolvedValue(undefined);
   mocks.completed.mockResolvedValue({ success: true });
@@ -23,11 +22,11 @@ it("requires explicit removal input", async () => {
   expect((await remove()).status).toBe(400);
   expect(mocks.retire).not.toHaveBeenCalled();
 });
-it("lets an admitted owner remove a connected server and keeps physical cleanup honest", async () => {
+it("lets an active owner remove a connected server and keeps physical cleanup honest", async () => {
   const response = await remove({ confirmReturnToCloud: true });
   expect(response.status).toBe(202);
   expect(await response.json()).toEqual({ removed: true, placement: "platform", physicalCleanup: "unconfirmed" });
-  expect(mocks.retire).toHaveBeenCalledWith({ d1: expect.any(Object), userId: "owner", hostId: "host", betaAdmission: epoch, confirmReturnToCloud: true });
+  expect(mocks.retire).toHaveBeenCalledWith({ d1: expect.any(Object), userId: "owner", hostId: "host", confirmReturnToCloud: true });
   expect(mocks.cleanup).toHaveBeenCalledWith("host");
   expect(mocks.completed).toHaveBeenCalledOnce();
 });
@@ -39,7 +38,7 @@ it("reports failed cleanup for a retry after durable revocation", async () => {
   expect(mocks.retire).toHaveBeenCalledOnce();
   expect(mocks.completed).not.toHaveBeenCalled();
 });
-it("does not retire a host without an admitted user", async () => {
+it("does not retire a host without an active user", async () => {
   mocks.auth.mockResolvedValue({ ok: false, response: new Response(null, { status: 403 }) });
   expect((await remove({ confirmReturnToCloud: true })).status).toBe(403);
   expect(mocks.retire).not.toHaveBeenCalled();

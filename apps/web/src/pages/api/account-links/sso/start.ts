@@ -5,20 +5,16 @@ import {
   accessInviteNoStore,
   readJsonObject,
 } from "@/lib/access-invite-http";
-import { getAccessClaimIdentity } from "@/lib/access-claim";
-import { resolveBetaOidcProvider } from "@/lib/access-sso";
+import { hasLinkedProviderAccount } from "@/lib/account-access";
+import { resolveOrganizationOidcProvider } from "@/lib/access-sso";
 import { requireUserContext } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
-import { getBetaAccess } from "@/lib/allowlist";
 import {
   auth,
   createSsoLinkOAuthHandoff,
-  INVITE_OAUTH_HANDOFF_HEADER,
+  SSO_LINK_HANDOFF_HEADER,
 } from "@/lib/auth";
-import {
-  canonicalApplicationOrigin,
-  rateLimitPublicAccessInvite,
-} from "@/lib/request-security";
+import { canonicalApplicationOrigin } from "@/lib/request-security";
 import { copySetCookies } from "@/lib/response-cookies";
 import {
   requireOrganizationRole,
@@ -27,17 +23,16 @@ import {
 
 export const prerender = false;
 
+// The worker charges the shared "sso-link" rate limit before this route runs.
 export const POST: APIRoute = async ({ request }) => {
   try {
-    await rateLimitPublicAccessInvite({ request, action: "sso-link" });
     const authz = await requireUserContext(request);
     if (!authz.ok) return accessInviteNoStore(authz.response);
-    const identity = await getAccessClaimIdentity(request);
-    if (!identity?.githubAccountId || identity.accessState !== "active") {
+    if (!(await hasLinkedProviderAccount(authz.context.userId, "github"))) {
       throw appError(
         403,
         "active_github_session_required",
-        "connect SSO from an active GitHub beta session",
+        "connect SSO from a signed-in GitHub account",
       );
     }
     const body = await readJsonObject(request);
@@ -48,7 +43,9 @@ export const POST: APIRoute = async ({ request }) => {
         "organization slug is required",
       );
     }
-    const provider = await resolveBetaOidcProvider(body.organizationSlug);
+    const provider = await resolveOrganizationOidcProvider(
+      body.organizationSlug,
+    );
     const testSignIn = body.test === true;
     if (testSignIn) {
       const organizationId = await resolveOrganizationId(
@@ -68,25 +65,14 @@ export const POST: APIRoute = async ({ request }) => {
         );
       }
     }
-    const admission = await getBetaAccess(authz.context.userId);
-    if (admission?.state !== "active") {
-      throw appError(
-        403,
-        "active_github_session_required",
-        "connect SSO from an active GitHub beta session",
-      );
-    }
     const expiresAt = Date.now() + 10 * 60 * 1000;
     const handoff = await createSsoLinkOAuthHandoff({
       userId: authz.context.userId,
       providerId: provider.providerId,
       expiresAt,
-      sourceInviteId: admission.sourceInviteId,
-      sourceLeaseId: admission.sourceLeaseId,
-      grantedAt: admission.grantedAt,
     });
     const headers = new Headers(request.headers);
-    headers.set(INVITE_OAUTH_HANDOFF_HEADER, handoff);
+    headers.set(SSO_LINK_HANDOFF_HEADER, handoff);
     const origin = canonicalApplicationOrigin();
     const organizationURL = `${origin}/organizations/${encodeURIComponent(provider.organizationSlug)}`;
     const callbackURL = testSignIn

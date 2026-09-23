@@ -21,7 +21,7 @@ describe("app bootstrap client", () => {
       user: { id: "user-1", email: "learner@example.test" },
     };
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ session, betaAccess: "active" }), {
+      new Response(JSON.stringify({ session, access: "active" }), {
         status: 200,
       }),
     );
@@ -29,7 +29,7 @@ describe("app bootstrap client", () => {
 
     await expect(getClientAppBootstrap()).resolves.toEqual({
       session,
-      betaAccess: "active",
+      access: "active",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith("/api/app/bootstrap", {
@@ -40,16 +40,22 @@ describe("app bootstrap client", () => {
   });
 
   it("fails closed for malformed bootstrap data", () => {
-    expect(parseAppBootstrapData({ betaAccess: "active" })).toEqual({
+    expect(parseAppBootstrapData({ access: "active" })).toEqual({
       session: null,
-      betaAccess: "restricted",
+      access: "inactive",
     });
     expect(
       parseAppBootstrapData({
         session: { session: { id: 1 }, user: { id: "user-1" } },
-        betaAccess: "unexpected",
+        access: "unexpected",
       }),
-    ).toEqual({ session: null, betaAccess: "restricted" });
+    ).toEqual({ session: null, access: "inactive" });
+    expect(
+      parseAppBootstrapData({
+        session: { session: { id: "session-1" }, user: { id: "user-1" } },
+        access: "unexpected",
+      }),
+    ).toMatchObject({ access: "inactive" });
   });
 
   it("rejects an unavailable bootstrap endpoint", async () => {
@@ -69,7 +75,7 @@ describe("app bootstrap client", () => {
         session: { id: "session-1" },
         user: { id: "user-1" },
       },
-      betaAccess: "active",
+      access: "active",
     } as const;
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(bootstrap), { status: 200 }),

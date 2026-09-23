@@ -3,7 +3,6 @@ import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, personalImagePreparations, organization, user } from "@/db/schema";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import { appError } from "@/lib/app-error";
 import { mutateDesiredState, upsertDesiredCachedImage } from "@/lib/desired-state";
 import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
@@ -18,7 +17,6 @@ export const PERSONAL_IMAGE_PREPARATION_TTL_MS = 15 * 60_000;
 /** Called only by an authorized start; it creates no run and starts no polling. */
 export async function preparePersonalScenarioImages(input: {
   access: AdmissionContentAccess;
-  betaAdmission: BetaAdmissionEpoch;
   requestKey: string;
   requestedHostId?: string;
   requiredImages: RequiredScenarioImage[];
@@ -83,13 +81,13 @@ export async function preparePersonalScenarioImages(input: {
     const desired = next === current
       ? { ...next, version: current.version + 1, generated_at_unix_ms: now } : next;
     const values = [input.access.userId, host.id, host.credentialGeneration,
-      input.requestKey, JSON.stringify(input.access), JSON.stringify(input.betaAdmission),
+      input.requestKey, JSON.stringify(input.access),
       JSON.stringify(input.requiredImages), now + PERSONAL_IMAGE_PREPARATION_TTL_MS];
-    const columns = "user_id, host_id, credential_generation, request_key, access_json, beta_json, images_json, expires_at";
+    const columns = "user_id, host_id, credential_generation, request_key, access_json, images_json, expires_at";
     const [updated] = await env.DB.batch([
-      env.DB.prepare(`WITH prep (${columns}) AS (VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8))
-        UPDATE host_desired_state SET version = ?9, doc_json = ?10, updated_at = ?11
-        WHERE host_id = ?2 AND version = ?12 AND EXISTS (SELECT 1 FROM prep
+      env.DB.prepare(`WITH prep (${columns}) AS (VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7))
+        UPDATE host_desired_state SET version = ?8, doc_json = ?9, updated_at = ?10
+        WHERE host_id = ?2 AND version = ?11 AND EXISTS (SELECT 1 FROM prep
           WHERE ${preparationAuthoritySql()}
             AND json_array_length(prep.images_json) > 0
             AND NOT EXISTS (SELECT 1 FROM json_each(prep.images_json) image
@@ -101,10 +99,10 @@ export async function preparePersonalScenarioImages(input: {
                   AND json_extract(vm.image_key_json, '$.arch') = json_extract(image.value, '$.imageKey.arch'))))
         RETURNING host_id`).bind(...values, desired.version, JSON.stringify(desired), now, current.version),
       env.DB.prepare(`INSERT INTO personal_image_preparations (${columns})
-        SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE changes() = 1
+        SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE changes() = 1
         ON CONFLICT(user_id) DO UPDATE SET host_id = excluded.host_id,
           credential_generation = excluded.credential_generation, request_key = excluded.request_key,
-          access_json = excluded.access_json, beta_json = excluded.beta_json,
+          access_json = excluded.access_json,
           images_json = excluded.images_json, expires_at = excluded.expires_at`).bind(...values),
     ]);
     if (!updated?.results.length) continue;

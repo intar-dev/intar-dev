@@ -3,12 +3,12 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { accessAllowlist, agentHosts, courseCatalogs, hostActualState, hostDesiredState, member, organization,
+import { agentHosts, courseCatalogs, hostActualState, hostDesiredState, member, organization,
   personalImagePreparations, runtimeExecutions, scenarioRuns, user, vmScenarios, vmScenarioVms } from "@/db/schema";
 import type { VerifiedAgentHost } from "@/control-plane/auth";
 import { agentScenarioImageAccess, agentCanAccessManifest } from "@/control-plane/image-registry/image-access";
 import { stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { preparePersonalScenarioImages } from "@/lib/personal-image-preparation";
@@ -22,16 +22,13 @@ const access = { userId: "owner", organizationId: "org", scenarioId: "private", 
   courseId: "course", lectureId: "private", allowSequenceBypass: false, requiresAdmin: false };
 
 async function input() {
-  const [beta] = await db.select().from(accessAllowlist).where(eq(accessAllowlist.userId, "owner"));
-  return { access, betaAdmission: { sourceInviteId: beta!.sourceInviteId, sourceLeaseId: beta!.sourceLeaseId, grantedAt: beta!.grantedAt },
-    requestKey: "personal-start-1", requiredImages: [image], requiredResources: { cpuMillis: 1000, memoryMib: 512, worstCaseDiskMib: 4096 } };
+  return { access, requestKey: "personal-start-1", requiredImages: [image],
+    requiredResources: { cpuMillis: 1000, memoryMib: 512, worstCaseDiskMib: 4096 } };
 }
 
 async function agent(hostId = "personal", userId = "owner"): Promise<VerifiedAgentHost> {
-  const { betaAdmission: beta } = await input();
   const [host] = await db.select().from(agentHosts).where(eq(agentHosts.id, hostId));
-  return { hostId, userId, scope: host!.scope!, organizationId: host!.organizationId, role: "agent", credentialGeneration: 1,
-    betaSourceInviteId: beta.sourceInviteId, betaSourceLeaseId: beta.sourceLeaseId, betaAdmissionGrantedAt: beta.grantedAt };
+  return { hostId, userId, scope: host!.scope!, organizationId: host!.organizationId, role: "agent", credentialGeneration: 1 };
 }
 
 async function visible(hostId = "personal", userId = "owner") {
@@ -55,7 +52,7 @@ describe("personal image preparation", () => {
     vi.clearAllMocks();
     for (const id of ["owner", "other"]) {
       await db.insert(user).values({ id, name: id, email: id + "@example.test", metalPlacement: "personal" });
-      await grantFixtureBetaAccess({ d1: env.DB, userId: id });
+      await ensureFixtureMember({ d1: env.DB, userId: id });
     }
     await db.insert(organization).values({ id: "org", name: "Org", slug: "org", createdAt: new Date() });
     await db.insert(member).values({ id: "membership", userId: "owner", organizationId: "org", role: "member", createdAt: new Date() });
@@ -84,8 +81,7 @@ describe("personal image preparation", () => {
 
   it("warms a first private start, then admits exactly once after the host reports ready", async () => {
     const prep = await input();
-    const start = { scenarioId: "private", userId: "owner", organizationId: "org",
-      betaAdmission: prep.betaAdmission, idempotencyKey: prep.requestKey };
+    const start = { scenarioId: "private", userId: "owner", organizationId: "org", idempotencyKey: prep.requestKey };
     await expect(beginScenarioRun(start)).rejects.toMatchObject({ code: "image_not_ready" });
     expect(await db.select().from(scenarioRuns)).toHaveLength(0);
     expect(await db.select().from(runtimeExecutions)).toHaveLength(0);
@@ -116,8 +112,7 @@ describe("personal image preparation", () => {
     { race: "different key", winnerOverrides: { idempotencyKey: "another-personal-start" }, errorCode: "scenario_preparation_changed" },
   ])("recovers a preparation refusal only for an exact replay: $race", async ({ winnerOverrides, errorCode }) => {
     const prep = await input();
-    const start = { scenarioId: "private", userId: "owner", organizationId: "org",
-      betaAdmission: prep.betaAdmission, idempotencyKey: prep.requestKey };
+    const start = { scenarioId: "private", userId: "owner", organizationId: "org", idempotencyKey: prep.requestKey };
     await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json, '$.cached_images', json(?)) WHERE host_id = 'personal'")
       .bind(JSON.stringify([{ image_key: image.imageKey, image_id: image.imageSha256, phase: "ready" }])).run();
 
@@ -178,8 +173,6 @@ describe("personal image preparation", () => {
 
   it.each([
     ["membership", "DELETE FROM member"],
-    ["beta access", "UPDATE access_allowlist SET state = 'blocked', revocation_id = 'revoked', revoked_by = 'owner', revocation_reason = 'test', revoked_at = 1 WHERE user_id = 'owner'"],
-    ["admission epoch", "UPDATE access_allowlist SET granted_at = granted_at + 1 WHERE user_id = 'owner'"],
     ["credentials", "UPDATE agent_hosts SET credential_generation = 2 WHERE id = 'personal'"],
     ["owner", "UPDATE agent_hosts SET user_id = 'other' WHERE id = 'personal'"],
     ["disabled host", "UPDATE agent_hosts SET disabled = 1 WHERE id = 'personal'"],
@@ -298,9 +291,7 @@ describe("personal image preparation", () => {
   it("prepares organization images for a member other than the host creator", async () => {
     await useOrganizationHost();
     await db.insert(member).values({ id: "other-membership", userId: "other", organizationId: "org", role: "member", createdAt: new Date() });
-    const [beta] = await db.select().from(accessAllowlist).where(eq(accessAllowlist.userId, "other"));
-    const prep = { ...await input(), access: { ...access, userId: "other" },
-      betaAdmission: { sourceInviteId: beta!.sourceInviteId, sourceLeaseId: beta!.sourceLeaseId, grantedAt: beta!.grantedAt } };
+    const prep = { ...await input(), access: { ...access, userId: "other" } };
     expect(await preparePersonalScenarioImages(prep)).toBe("personal");
     expect(await visible()).toEqual(["private"]);
     await env.DB.prepare("DELETE FROM member WHERE user_id = 'other'").run();
@@ -312,10 +303,8 @@ describe("personal image preparation", () => {
     await useOrganizationHost();
     await db.insert(member).values({ id: "other-membership", userId: "other", organizationId: "org", role: "member", createdAt: new Date() });
     await preparePersonalScenarioImages(await input());
-    const [beta] = await db.select().from(accessAllowlist).where(eq(accessAllowlist.userId, "other"));
     const prep = { ...await input(), requestKey: "other-start", access: { ...access, userId: "other", scenarioId: "other-private", lectureId: "other-private" },
-      requiredImages: [{ ...image, imageKey: { ...image.imageKey, scenario: "other-private" } }],
-      betaAdmission: { sourceInviteId: beta!.sourceInviteId, sourceLeaseId: beta!.sourceLeaseId, grantedAt: beta!.grantedAt } };
+      requiredImages: [{ ...image, imageKey: { ...image.imageKey, scenario: "other-private" } }] };
     await preparePersonalScenarioImages(prep);
     expect((await visible()).sort()).toEqual(["other-private", "private"]);
     const result = await reconcileHostScenarioImages(db, { hostId: "personal", architecture: "x86_64", nowUnixMs: Date.now() });
@@ -329,8 +318,7 @@ describe("personal image preparation", () => {
   it("starts an organization run and keeps its exact image grant until membership ends", async () => {
     await useOrganizationHost();
     const prep = await input();
-    const start = { scenarioId: "private", userId: "owner", organizationId: "org",
-      betaAdmission: prep.betaAdmission, idempotencyKey: prep.requestKey };
+    const start = { scenarioId: "private", userId: "owner", organizationId: "org", idempotencyKey: prep.requestKey };
     await expect(beginScenarioRun(start)).rejects.toMatchObject({ code: "image_not_ready" });
     expect(await visible()).toEqual(["private"]);
     await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json, '$.cached_images', json(?)) WHERE host_id = 'personal'")

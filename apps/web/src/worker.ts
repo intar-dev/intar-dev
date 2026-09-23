@@ -12,7 +12,6 @@ import {
   handleRegistryCleanupGateRequest,
 } from "@/maintenance";
 import { MaintenanceState } from "@/maintenance-state";
-import { hardenJoinResponse } from "@/lib/join-security";
 import { sweepUndeliveredHostDesiredState } from "@/lib/host-runtime-dispatch-outbox";
 import {
   guardCanonicalRequestPath,
@@ -82,14 +81,7 @@ export default {
     if (!securedRequest.ok) return respond(securedRequest.response);
 
     const response = await traceOperation("app.handle", () => handle(securedRequest.request, env, ctx));
-    const applicationResponse =
-      url.pathname === "/join"
-        ? hardenJoinResponse(response, {
-            localDevelopment:
-              new URL(env.BETTER_AUTH_URL).hostname === "localhost",
-          })
-        : response;
-    return respond(applicationResponse);
+    return respond(response);
   },
   async scheduled(_controller, env) {
     // Planned control-plane maintenance must be database-independent. Cron work

@@ -533,12 +533,27 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "catalog-authored-light-desktop");
   });
 
-  test("beta invite ready", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("join-beta"), theme: "light" });
+  test("landing with every sign-up spot taken", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("landing"), theme: "light" });
+    ui.server.state.signups = { ...ui.server.state.signups, taken: 50 };
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
     await expect(
-      page.getByRole("heading", { name: "Join the intar.dev beta" }),
+      page.getByText("All 50 spots are taken · Members can still sign in"),
     ).toBeVisible();
-    await expectRouteScreenshot(page, "join-beta-ready-light-desktop");
+    await expectRouteScreenshot(page, "landing-signups-full-light-desktop");
+  });
+
+  test("landing with sign-ups closed", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("landing"),
+      theme: "light",
+      variant: "empty",
+    });
+    await expect(
+      page.getByText("Sign-ups are closed · Members can still sign in"),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "landing-signups-closed-light-desktop");
   });
 
   test("landing returning learner", async ({ page, ui }) => {
@@ -613,31 +628,25 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "build-detail-dark-desktop");
   });
 
-  for (const tab of ["Users", "Organizations"] as const) {
-    test(`people · ${tab.toLowerCase()} tab`, async ({ page, ui }) => {
+  for (const tab of [
+    { name: "Sign-ups", id: "signups" },
+    { name: "Organizations", id: "organizations" },
+  ] as const) {
+    test(`people · ${tab.id} tab`, async ({ page, ui }) => {
       await ui.open({ ...routeCase("admin-people"), theme: "light" });
-      await page.getByRole("tab", { name: tab }).click();
-      await expect(page).toHaveURL(new RegExp(`tab=${tab.toLowerCase()}`));
-      await expectRouteScreenshot(
-        page,
-        `people-${tab.toLowerCase()}-light-desktop`,
-      );
+      await page.getByRole("tab", { name: tab.name }).click();
+      await expect(page).toHaveURL(new RegExp(`tab=${tab.id}`));
+      await expectRouteScreenshot(page, `people-${tab.id}-light-desktop`);
     });
   }
 
-  test("people invite revocation", async ({ page, ui }) => {
+  test("people revoke access", async ({ page, ui }) => {
     await ui.open({ ...routeCase("admin-people"), theme: "light" });
-    const inviteRow = page
-      .getByRole("row")
-      .filter({ hasText: "intar_beta_AAAAAAAA" });
-    await inviteRow.getByRole("button", { name: "Revoke" }).click();
-    const dialog = page.getByRole("dialog", { name: "Revoke this invite?" });
-    await dialog.getByRole("button", { name: "Revoke invite" }).click();
-    await page.locator("details > summary").filter({ hasText: "History" }).click();
+    await page.getByRole("button", { name: "Revoke access" }).first().click();
     await expect(
-      page.getByRole("row").filter({ hasText: "intar_beta_AAAAAAAA" }),
-    ).toContainText("Revoked");
-    await expectRouteScreenshot(page, "people-invite-revoked-light-desktop");
+      page.getByRole("dialog", { name: "Revoke access?" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "people-revoke-access-light-desktop");
   });
 
 });

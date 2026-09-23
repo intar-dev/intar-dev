@@ -174,7 +174,6 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     const result = await startScenarioRunForUser({
       scenarioId,
       userId: authz.context.userId,
-      betaAdmission: authz.context.betaAdmission,
       idempotencyKey,
       ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
