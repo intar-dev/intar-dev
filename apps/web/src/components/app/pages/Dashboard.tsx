@@ -567,7 +567,7 @@ export function Dashboard() {
             <Button
               size="xs"
               variant="ghost"
-              className="h-8 min-w-8 px-0 text-caption font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              className="h-5 min-w-8 px-0 text-caption font-medium sm:h-8 text-muted-foreground hover:bg-transparent hover:text-foreground"
               render={<Link to="/admin/hosts" />}
             >
               Review hosts
@@ -589,7 +589,7 @@ export function Dashboard() {
             <Button
               size="xs"
               variant="ghost"
-              className="h-8 min-w-8 px-0 text-caption font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              className="h-5 min-w-8 px-0 text-caption font-medium sm:h-8 text-muted-foreground hover:bg-transparent hover:text-foreground"
               render={<a href="#live-runs" />}
             >
               Inspect live work
@@ -616,7 +616,7 @@ export function Dashboard() {
             <Button
               size="xs"
               variant="ghost"
-              className="h-8 min-w-8 px-0 text-caption font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              className="h-5 min-w-8 px-0 text-caption font-medium sm:h-8 text-muted-foreground hover:bg-transparent hover:text-foreground"
               render={<Link to="/admin/scenarios" />}
             >
               Open registry
@@ -1144,6 +1144,8 @@ function LedgerRow({
         <p className="text-support font-medium">{label}</p>
         <p className="text-metadata">{detail}</p>
       </div>
+      {/* On mobile the value shares the label line and the action the detail
+          line, so rows with and without an action are the same height. */}
       <div className="flex min-w-20 flex-col items-end gap-0.5 self-start text-right sm:contents">
         <p className="text-support font-semibold tabular-nums sm:col-start-3 sm:justify-self-end">
           {value}
