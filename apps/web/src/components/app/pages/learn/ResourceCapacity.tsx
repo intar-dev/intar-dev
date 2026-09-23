@@ -46,7 +46,7 @@ function CapacityMeter({ label, available, total, divisor, unit }: {
   const fraction = total > 0 ? value / total : 0;
   const valueText = `${amount.format(value / divisor)} / ${amount.format(total / divisor)} ${unit}`;
   return (
-    <div className="min-w-0 space-y-3 rounded-xl border bg-card px-4.5 py-4 shadow-[var(--highlight),var(--shadow-raised)]">
+    <div className="min-w-0 space-y-3 rounded-xl border bg-card p-4 shadow-[var(--highlight),var(--shadow-raised)]">
       <div className="flex items-baseline justify-between gap-3 text-sm">
         <span id={labelId} className="font-medium">{label}</span>
         <span className="font-medium tabular-nums text-success">{percent.format(fraction * 100)}% available</span>

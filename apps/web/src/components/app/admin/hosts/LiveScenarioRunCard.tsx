@@ -250,7 +250,7 @@ export function LiveScenarioRunCard(props: {
                 <ProbeRows probes={probeState.probes} />
               )
             ) : (
-              <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
+              <div className="rounded-xl bg-muted/40 px-5 py-6 text-center text-sm text-muted-foreground">
                 No verification results yet for this VM.
               </div>
             )}
@@ -307,7 +307,7 @@ export function VerificationCollectionStatus(props: {
           Updated {formatTimestamp(props.generatedAt)}
         </p>
       </div>
-      <p className="mt-2 text-xs">
+      <p className="mt-1 text-xs">
         We cannot confirm verification progress right now.
       </p>
     </div>

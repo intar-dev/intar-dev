@@ -235,7 +235,7 @@ export function MyServers(
               </p>
             )}
             {data.enrollments.length ? (
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <h3 className="text-card-title">Waiting for installation</h3>
                 <ul className="space-y-2 text-sm">
                   {data.enrollments.map((enrollment) => (
@@ -467,7 +467,7 @@ function AddServer({
         </>
       ) : (
         <form
-          className="space-y-3"
+          className="space-y-4"
           onSubmit={async (event) => {
             event.preventDefault();
             if (pending || !name.trim()) return;
@@ -500,30 +500,32 @@ function AddServer({
             }
           }}
         >
-          <label
-            htmlFor={
-              organization ? "organization-server-name" : "personal-server-name"
-            }
-            className="block text-sm font-medium"
-          >
-            Server name
-          </label>
-          <Input
-            id={
-              organization ? "organization-server-name" : "personal-server-name"
-            }
-            className="max-w-sm"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            required
-            maxLength={80}
-            disabled={pending}
-            placeholder={organization ? "Team server" : "Home server"}
-          />
-          <p className="text-sm text-muted-foreground">
-            Create a token, then run the installer on your server. The installer
-            command contains no secret.
-          </p>
+          <div className="space-y-2">
+            <label
+              htmlFor={
+                organization ? "organization-server-name" : "personal-server-name"
+              }
+              className="block text-sm font-medium"
+            >
+              Server name
+            </label>
+            <Input
+              id={
+                organization ? "organization-server-name" : "personal-server-name"
+              }
+              className="max-w-sm"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              required
+              maxLength={80}
+              disabled={pending}
+              placeholder={organization ? "Team server" : "Home server"}
+            />
+            <p className="text-sm text-muted-foreground">
+              Create a token, then run the installer on your server. The installer
+              command contains no secret.
+            </p>
+          </div>
           <Button type="submit" disabled={pending || !name.trim()}>
             {pending ? "Creating token…" : "Create token"}
           </Button>

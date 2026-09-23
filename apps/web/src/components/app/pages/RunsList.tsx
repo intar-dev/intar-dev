@@ -127,7 +127,7 @@ export function RunsList() {
           }
         />
       ) : (
-        <div className="space-y-6 md:space-y-8">
+        <>
           {activeRuns.length ? (
             <section
               className="space-y-4"
@@ -216,7 +216,7 @@ export function RunsList() {
               </PaginatedCollection>
             </section>
           ) : null}
-        </div>
+        </>
       )}
     </PageShell>
   );
@@ -230,7 +230,7 @@ function SettledRunGroupCard({ group }: { group: SettledRunGroup }) {
       aria-label={`${group.title} run history`}
     >
       {olderAttemptCount ? (
-        <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2 sm:px-6">
+        <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2">
           <p className="text-metadata font-semibold">Latest attempt</p>
           <p className="text-caption tabular-nums">
             {group.totalAttempts} attempts
@@ -242,7 +242,7 @@ function SettledRunGroupCard({ group }: { group: SettledRunGroup }) {
       />
       {olderAttemptCount ? (
         <Collapsible>
-          <div className="border-t px-4 py-3 sm:px-6">
+          <div className="border-t px-4 py-3">
             <CollapsibleTrigger
               render={
                 <Button

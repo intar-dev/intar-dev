@@ -26,7 +26,7 @@ export function Stat({ label, value, detail, size = "lg", className }: StatProps
   return (
     <div
       className={cn(
-        "rounded-xl border bg-card px-5 py-4 shadow-xs",
+        "rounded-xl border bg-card p-5 shadow-xs",
         className,
       )}
     >

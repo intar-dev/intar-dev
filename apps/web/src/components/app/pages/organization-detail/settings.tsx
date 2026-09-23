@@ -217,7 +217,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       {admin ? (
         <Section
           density="compact"
@@ -250,7 +250,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
             </Button>
           </form>
           {rename.error ? (
-            <InlineFeedback tone="error" className="mt-3">
+            <InlineFeedback tone="error" className="mt-2">
               {rename.error.message}
             </InlineFeedback>
           ) : null}
@@ -453,7 +453,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
             </div>
           ) : (
             <form
-              className="grid gap-3 sm:grid-cols-2"
+              className="grid gap-4 sm:grid-cols-2"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (!register.isPending) register.mutate();
@@ -519,7 +519,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         title="Organization lifecycle"
         description="Organization deletion is blocked while it owns identity, scenarios, builds, or run history."
       >
-        <div className="space-y-3">
+        <div className="space-y-2">
           {owner ? (
             <div className="flex flex-wrap items-center gap-2">
               <NativeSelect
@@ -616,7 +616,7 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <label className="space-y-1.5 text-sm font-medium">
+    <label className="space-y-2 text-sm font-medium">
       <span>{label}</span>
       {children}
     </label>

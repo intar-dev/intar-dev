@@ -158,7 +158,7 @@ export function JoinBeta() {
       title={titleFor(claim, status, problem)}
       description={descriptionFor(claim, status, problem)}
     >
-      <div aria-live="polite" className="space-y-6">
+      <div aria-live="polite" className="space-y-5">
         {status === "loading" ? (
           <JoinStatus icon={<LoaderCircle className="motion-safe:animate-spin" />}>
             Checking the invite…
@@ -230,7 +230,7 @@ export function JoinBeta() {
         ) : null}
 
         {canCancel ? (
-          <div className="border-t pt-4">
+          <div className="border-t pt-5">
             <Button
               variant="ghost"
               className="w-full"

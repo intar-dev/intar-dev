@@ -792,7 +792,7 @@ export function Dashboard() {
               }}
             >
               <div
-                className="flex flex-wrap items-center gap-1.5"
+                className="flex flex-wrap items-center gap-2"
                 role="group"
                 aria-label="Filter archived runs by outcome"
               >

@@ -296,10 +296,10 @@ function BuildRow(props: {
   return (
     <div
       data-build-id={build.id}
-      className="grid gap-4 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto]"
+      className="grid gap-4 py-3 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto]"
     >
       <div className="min-w-0 space-y-3">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <StatusBadge status={build.status} canRetry={build.canRetry} />
           <span className="text-metadata">
             <span className="text-label">
@@ -563,7 +563,7 @@ function DetailPair(props: { label: string; value: string }) {
   return (
     <div className="min-w-0">
       <dt className="text-label">{props.label}</dt>
-      <dd className="truncate font-mono text-foreground">{props.value}</dd>
+      <dd className="mt-1 truncate font-mono text-foreground">{props.value}</dd>
     </div>
   );
 }
@@ -601,7 +601,7 @@ function BuildMeta(props: { label: string; value: string }) {
   return (
     <div className="min-w-0">
       <p className="text-label">{props.label}</p>
-      <p className="truncate text-sm font-medium text-foreground">
+      <p className="mt-1 truncate text-sm font-medium text-foreground">
         {props.value}
       </p>
     </div>

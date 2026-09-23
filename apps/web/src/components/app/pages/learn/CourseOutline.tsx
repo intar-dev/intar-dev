@@ -74,7 +74,7 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
           className="max-h-[min(82dvh,48rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] !shadow-none motion-reduce:transition-none"
           data-course-outline-sheet
         >
-          <SheetHeader className="border-b px-4 py-3 pr-14">
+          <SheetHeader className="border-b pr-14">
             <SheetTitle>Course outline</SheetTitle>
             <SheetDescription>
               Lecture {position} of {total} · {completed} complete
@@ -107,7 +107,7 @@ function CourseOutlineContent({
 
   return (
     <nav aria-label={`${course.title} lectures`}>
-      <div className={cn("space-y-1 px-2.5", compact && "sr-only")}>
+      <div className={cn("space-y-1 px-3", compact && "sr-only")}>
         <CourseLink
           route={route}
           className="inline-flex rounded-sm text-card-title transition-colors duration-150 hover:text-brand-text"
@@ -119,10 +119,10 @@ function CourseOutlineContent({
         </p>
         <LectureProgressTrack
           lectures={course.lectures}
-          className="pt-2.5 *:h-1 *:flex-1"
+          className="pt-2 *:h-1 *:flex-1"
         />
       </div>
-      <ol className={cn("space-y-0.5", compact ? "" : "mt-4")}>
+      <ol className={cn("space-y-1", compact ? "" : "mt-4")}>
         {course.lectures.map((lecture, index) => (
           <CourseOutlineItem
             key={lecture.lectureId}
@@ -163,7 +163,7 @@ function CourseOutlineItem({
         <span className="block text-sm font-medium leading-5 [overflow-wrap:anywhere]">
           {lecture.title}
         </span>
-        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-faint-foreground">
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-faint-foreground">
           {lecture.state === "completed" ? (
             <CheckCircle2 className="size-3.5 text-success" aria-hidden="true" />
           ) : lecture.state === "locked" ? (
@@ -187,7 +187,7 @@ function CourseOutlineItem({
     </>
   );
   const className = cn(
-    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2.5 rounded-[0.625rem] px-2.5 py-2.5 text-left transition-colors duration-150 ease-standard",
+    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 rounded-[0.625rem] px-3 py-2 text-left transition-colors duration-150 ease-standard",
     current &&
       "bg-card text-foreground shadow-[inset_0_0_0_1px_var(--border),var(--shadow-control)]",
     !current && lecture.state !== "locked" && "hover:bg-muted dark:hover:bg-accent/60",

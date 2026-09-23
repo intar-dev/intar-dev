@@ -133,7 +133,7 @@ export function CollectionPagination({
     <nav
       aria-label={`${itemLabel} pagination`}
       className={cn(
-        "mt-6 flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between",
+        "mt-5 flex flex-col gap-3 border-t pt-5 sm:flex-row sm:items-center sm:justify-between",
         className,
       )}
     >

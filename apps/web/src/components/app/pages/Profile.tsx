@@ -156,7 +156,7 @@ export function Profile() {
         title="Account"
         description="This identity is recorded on every scenario run you start."
       >
-        <div className="flex flex-col gap-6 sm:flex-row sm:items-start">
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
           <Avatar size="lg">
             {user?.image ? <AvatarImage src={user.image} alt="" /> : null}
             <AvatarFallback>{initials(user?.name)}</AvatarFallback>
@@ -187,7 +187,7 @@ export function Profile() {
             </div>
           </dl>
         </div>
-        <dl className="mt-6 grid gap-4 border-t pt-6 sm:grid-cols-3">
+        <dl className="mt-5 grid gap-4 border-t pt-5 sm:grid-cols-3">
           <div>
             <dt className="text-label">1. Identity</dt>
             <dd className="mt-1 text-sm">Sign in with GitHub.</dd>
@@ -213,7 +213,7 @@ export function Profile() {
         title="SSH keys"
         description="Saved public keys are optional credentials for native SSH routes. They are never added to scenario VMs."
       >
-        <div className="space-y-6">
+        <div className="space-y-5">
           {sshKeys.isLoading ? (
             <div className="flex items-center gap-3 py-6 text-sm text-muted-foreground">
               <LoaderCircle className="size-4 motion-safe:animate-spin" />
@@ -243,7 +243,7 @@ export function Profile() {
                     return (
                       <li
                         key={key.id}
-                        className="flex flex-wrap items-start gap-4 p-4 sm:p-6"
+                        className="flex flex-wrap items-start gap-4 p-4"
                       >
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex flex-wrap items-center gap-2">
@@ -284,7 +284,7 @@ export function Profile() {
               )}
             </PaginatedCollection>
           ) : (
-            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-8 text-center">
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-5 py-6 text-center">
               <KeyRound className="size-6 text-muted-foreground" />
               <div>
                 <p className="text-sm font-medium">No public keys yet</p>
@@ -305,7 +305,7 @@ export function Profile() {
           ) : null}
 
           <form
-            className="space-y-4 border-t pt-6"
+            className="space-y-4 border-t pt-5"
             onSubmit={(event) => {
               event.preventDefault();
               if (addKey.isPending) return;

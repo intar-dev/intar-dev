@@ -96,8 +96,8 @@ export function OrganizationDetail() {
   }
   if (!detail) {
     return (
-      <PageShell>
-        <div role="status" className="space-y-6">
+      <PageShell variant="workspace" density="compact">
+        <div role="status" className="space-y-4">
           <span className="sr-only">Loading organization…</span>
           <Skeleton className="h-8 w-72 max-w-full" />
           <Skeleton className="h-11 w-full" />
@@ -173,7 +173,7 @@ export function OrganizationDetail() {
         </div>
 
         <TabsContent value="overview" className="min-w-0">
-          <div className="space-y-5">
+          <div className="space-y-4">
             <OrganizationOverview
               detail={detail}
               setTab={setTab}

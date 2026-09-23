@@ -23,7 +23,7 @@ export function BrandMark({
     </>
   );
   const linkClassName = cn(
-    "inline-flex min-h-11 items-center gap-2.5 rounded-lg",
+    "inline-flex min-h-11 items-center gap-2 rounded-lg",
     className,
   );
 

@@ -79,7 +79,7 @@ function LectureLayout({
     <PageShell>
       <div
         className={cn(
-          "grid min-w-0 gap-8 xl:gap-10",
+          "grid min-w-0 gap-6 min-[1100px]:gap-8",
           course &&
             "min-[1100px]:grid-cols-[minmax(0,3fr)_minmax(0,1fr)]",
         )}
@@ -310,7 +310,7 @@ function LectureActionPanel({
   return (
     <section
       aria-labelledby="lecture-next-action"
-      className="flex w-full flex-col gap-4 rounded-2xl border bg-card px-5 py-5 shadow-[var(--highlight),var(--shadow-raised)] motion-safe:animate-rise sm:flex-row sm:items-start sm:gap-5 sm:px-6"
+      className="flex w-full flex-col gap-4 rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)] motion-safe:animate-rise sm:flex-row sm:items-start sm:gap-5"
     >
       <span
         aria-hidden="true"
@@ -551,7 +551,7 @@ function courseMatchesRoute(
 
 function LectureLoading() {
   return (
-    <div role="status" className="space-y-8">
+    <div role="status" className="space-y-6">
       <span className="sr-only">Loading lecture…</span>
       <Skeleton className="h-8 w-72 max-w-full" />
       <Skeleton className="h-5 w-full" />

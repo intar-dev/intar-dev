@@ -97,7 +97,7 @@ export function HostOnboardingPanel({
   return (
     <section className="grid gap-4 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
       <div className="space-y-4 rounded-xl border bg-card p-4 shadow-xs">
-        <div className="space-y-2">
+        <div className="space-y-1">
           <p className="text-label">{eyebrow}</p>
           <h2 className="text-section-title">{title}</h2>
         </div>
@@ -138,7 +138,7 @@ export function HostOnboardingPanel({
         ) : null}
 
         <form
-          className="flex flex-col gap-3 sm:flex-row"
+          className="flex flex-col gap-2 sm:flex-row"
           onSubmit={(event) => {
             event.preventDefault();
             onboard.mutate();

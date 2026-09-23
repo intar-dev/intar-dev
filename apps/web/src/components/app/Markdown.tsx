@@ -144,7 +144,7 @@ function CodeBlock({ children }: { children: ReactNode }) {
     <div className="group/code relative">
       <pre
         ref={preRef}
-        className="overflow-x-auto rounded-lg border border-terminal-border bg-terminal-background py-3 pr-20 pl-3.5 text-[0.8125rem] leading-6 text-terminal-foreground [&_code]:border-0 [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-[1em] [&_code]:text-inherit"
+        className="overflow-x-auto rounded-lg border border-terminal-border bg-terminal-background py-3 pr-20 pl-4 text-[0.8125rem] leading-6 text-terminal-foreground [&_code]:border-0 [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-[1em] [&_code]:text-inherit"
       >
         {children}
       </pre>

@@ -184,7 +184,7 @@ export function ScenarioRegistry() {
           description="Upload a scenario bundle through the external pipeline. Published scenarios appear here with their VM inventory, checks, and learner availability."
         />
       ) : (
-        <div className="space-y-4">
+        <>
           <dl className="grid grid-cols-3 gap-3 border-y py-4 sm:gap-4">
             <div className="min-w-0">
               <dt className="text-label">Total scenarios</dt>
@@ -213,7 +213,7 @@ export function ScenarioRegistry() {
             filtersActive={filtersActive}
             onClear={clearFilters}
           >
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               <FilterChip
                 active={stateFilter === "enabled"}
                 onClick={() =>
@@ -235,7 +235,7 @@ export function ScenarioRegistry() {
                 Disabled
               </FilterChip>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               {SCENARIO_DIFFICULTIES.map((level) => (
                 <FilterChip
                   key={level}
@@ -251,7 +251,7 @@ export function ScenarioRegistry() {
               ))}
             </div>
             {categories.length > 1 ? (
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-2">
                 {categories.map((entry) => (
                   <FilterChip
                     key={entry}
@@ -295,7 +295,7 @@ export function ScenarioRegistry() {
               description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
             >
               {setEnabled.error ? (
-                <p className="pb-3 text-sm text-destructive">
+                <p className="pb-4 text-sm text-destructive">
                   {setEnabled.error instanceof Error
                     ? setEnabled.error.message
                     : "Failed to update scenario"}
@@ -338,7 +338,7 @@ export function ScenarioRegistry() {
               </PaginatedCollection>
             </Section>
           )}
-        </div>
+        </>
       )}
     </PageShell>
   );
@@ -370,7 +370,7 @@ function ScenarioRegistryRow({
         : "No build";
 
   return (
-    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+    <div className="grid gap-4 py-3 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
       <div className="min-w-0 space-y-3">
         <h3>
           <Link

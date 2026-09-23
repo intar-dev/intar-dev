@@ -159,7 +159,7 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
       aria-label="Lecture theory and hints"
       data-run-learning-panel
       className={cn(
-        "hidden h-full min-h-0 min-w-0 w-full bg-canvas min-[960px]:flex min-[960px]:flex-col min-[960px]:pt-2.5 min-[960px]:pr-3 min-[960px]:pb-3",
+        "hidden h-full min-h-0 min-w-0 w-full bg-canvas min-[960px]:flex min-[960px]:flex-col min-[960px]:pt-2 min-[960px]:pr-3 min-[960px]:pb-3",
         className,
       )}
     >
@@ -331,7 +331,7 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
   return (
     <div
       data-run-learning-panel-content
-      className={cn("space-y-6 bg-card pb-6", props.className)}
+      className={cn("space-y-5 bg-card pb-6", props.className)}
     >
       <div
         className="sticky top-0 z-20 -mx-1 isolate bg-card px-1 pb-3"
@@ -521,7 +521,7 @@ function WorkOrder(props: {
           {props.objectives.map((objective, index) => (
             <li
               key={`${objective.probeName}:${index}`}
-              className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-3 py-3.5"
+              className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-3 py-3"
             >
               <span className="text-sm font-semibold text-brand-text tabular-nums">
                 {String(index + 1).padStart(2, "0")}
@@ -595,7 +595,7 @@ function Checks(props: {
           tabIndex={props.pinned ? 0 : undefined}
           aria-label={props.pinned ? "Checks list" : undefined}
           className={cn(
-            "-mx-2 mt-2.5 space-y-0.5",
+            "-mx-2 mt-3 space-y-0.5",
             props.pinned &&
               "min-h-0 overflow-y-auto overscroll-contain border-b pr-1 pb-2",
           )}
@@ -606,7 +606,7 @@ function Checks(props: {
                 key={check.key}
                 data-check-status={check.status}
                 className={cn(
-                  "grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 rounded-lg px-2 py-2.5",
+                  "grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 rounded-lg px-2 py-2",
                   justVerified.has(check.key) && "motion-safe:animate-verified",
                 )}
               >
@@ -676,7 +676,7 @@ function Hints(props: {
           No hints are available for this scenario.
         </p>
       ) : (
-        <div className="mt-4 space-y-6">
+        <div className="mt-4 space-y-4">
           {groups.map((group) => (
             <HintLadder
               key={group.key}
@@ -751,7 +751,7 @@ function HintLadder(props: {
 
           if (canReveal) {
             return (
-              <li key={hint.key} className="px-3 py-2.5">
+              <li key={hint.key} className="px-3 py-2">
                 <div className="flex min-h-9 items-center justify-between gap-3">
                   {/* Sealed hints expose no authored title or body. */}
                   <p className="text-sm font-medium">{ordinal}</p>
@@ -784,7 +784,7 @@ function HintLadder(props: {
           return (
             <li
               key={hint.key}
-              className="flex min-h-9 items-center gap-2.5 px-3 py-2.5 text-faint-foreground"
+              className="flex min-h-9 items-center gap-2 px-3 py-2 text-faint-foreground"
             >
               <LockKeyhole className="size-4 shrink-0" aria-hidden="true" />
               {/* This ordinal is not an authored hint title. */}
@@ -814,7 +814,7 @@ function Solution(props: {
   return (
     <section
       aria-labelledby={props.headingId}
-      className="border-t pt-6"
+      className="border-t pt-5"
     >
       <p id={props.headingId} className="text-label">
         Full solution

@@ -94,7 +94,7 @@ export function RunListItem({
   const courseContext = runCourseContextLabel(run.courseLocation);
   const actionLabel = runListItemActionLabel(run);
   return (
-    <article className="flex flex-col gap-3 px-4 py-4 transition-colors sm:flex-row sm:items-center sm:gap-4 sm:px-6">
+    <article className="flex flex-col gap-3 p-4 transition-colors sm:flex-row sm:items-center sm:gap-4">
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <Link
@@ -111,7 +111,7 @@ export function RunListItem({
             <Badge variant="outline">Solution used</Badge>
           ) : null}
         </div>
-        <p className="flex flex-wrap items-center gap-x-3 font-mono text-xs text-muted-foreground">
+        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground">
           <span>
             Started <RelativeTime at={run.createdAt} />
             <span aria-hidden="true"> · </span>

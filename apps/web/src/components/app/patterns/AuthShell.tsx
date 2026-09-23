@@ -15,7 +15,7 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    <main className="relative min-h-svh overflow-hidden px-[var(--page-inset)] py-4 sm:py-6 lg:py-10">
+    <main className="relative min-h-svh overflow-hidden px-[var(--page-inset)] py-4 sm:py-6 lg:py-8">
       <div
         className="pointer-events-none absolute inset-x-0 top-16 border-t opacity-60"
         aria-hidden="true"
@@ -26,17 +26,17 @@ export function AuthShell({
       />
       <div className="relative mx-auto w-full max-w-5xl">
         <BrandMark className="mb-4 sm:mb-6" native={standalone} />
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-12">
-          <section className="order-1 rounded-xl border bg-card p-4 shadow-sm sm:p-8 lg:order-2">
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-8">
+          <section className="order-1 rounded-xl border bg-card p-5 shadow-sm sm:p-6 lg:order-2">
             <header className="space-y-2">
               <p className="text-label">{eyebrow}</p>
               <h1 className="text-page-title">{title}</h1>
               <p className="text-body text-muted-foreground">{description}</p>
             </header>
-            <div className="mt-8">{children}</div>
+            <div className="mt-6">{children}</div>
           </section>
 
-          <div className="order-2 flex max-w-lg flex-col items-start gap-4 lg:order-1 lg:gap-8">
+          <div className="order-2 flex max-w-lg flex-col items-start gap-4 lg:order-1 lg:gap-6">
             <div className="space-y-4">
               <p className="text-label">Systems training access</p>
               <p className="text-feature-title text-balance">

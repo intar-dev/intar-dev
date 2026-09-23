@@ -39,9 +39,9 @@ export function ScenarioStepScreen(props: {
 
   return (
     <Card data-run-sequence-screen>
-      <CardHeader className="space-y-3">
+      <CardHeader>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-2">
+          <div className="space-y-1">
             {props.steps.length ? (
               <p className="text-label" data-run-sequence-position>
                 Stage {currentStepIndex + 1} of {props.steps.length}
@@ -64,7 +64,7 @@ export function ScenarioStepScreen(props: {
           ) : null}
         </div>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent className="space-y-5">
         <p
           role="status"
           aria-live="polite"
@@ -192,7 +192,7 @@ export function ScenarioShellStatusCard(props: {
 
   return (
     <Card as="section" aria-labelledby="scenario-shell-title">
-      <CardHeader className="pb-3">
+      <CardHeader>
         <CardTitle as="h2" id="scenario-shell-title" className="text-base">
           Shell
         </CardTitle>
@@ -210,7 +210,7 @@ export function ScenarioShellStatusCard(props: {
         {isTransient ? (
           <LoaderCircle className="size-8 text-primary motion-safe:animate-spin" />
         ) : null}
-        <div className="space-y-2">
+        <div className="space-y-1">
           <p className="text-sm font-medium text-foreground">
             {props.phase === "failed"
               ? "Scenario run stopped"

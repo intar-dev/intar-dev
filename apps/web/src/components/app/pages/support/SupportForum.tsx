@@ -53,7 +53,7 @@ export function SupportForum() {
       <p className="max-w-prose text-body text-muted-foreground">
         Report a bug, ask for help, or share feedback with the Intar community.
       </p>
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="flex flex-wrap items-end gap-4">
         <form
           className="flex min-w-0 grow basis-64 items-end gap-2"
           onSubmit={(event) => {
@@ -65,7 +65,7 @@ export function SupportForum() {
             });
           }}
         >
-          <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="min-w-0 flex-1 space-y-2">
             <label htmlFor="topic-search" className="text-sm font-medium">
               Search topics
             </label>
@@ -82,7 +82,7 @@ export function SupportForum() {
             Search
           </Button>
         </form>
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           <label htmlFor="topic-type" className="text-sm font-medium">
             Type
           </label>
@@ -101,7 +101,7 @@ export function SupportForum() {
             ))}
           </NativeSelect>
         </div>
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           <label htmlFor="topic-status" className="text-sm font-medium">
             Status
           </label>
@@ -157,7 +157,7 @@ export function SupportForum() {
                 <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
                   <span>{SUPPORT_TYPES[topic.type]}</span>
                   <span className="wrap-anywhere">{topic.author.name}</span>
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex items-center gap-1.5">
                     <MessageSquare className="size-3.5" aria-hidden="true" />
                     {topic.commentCount}{" "}
                     {topic.commentCount === 1 ? "comment" : "comments"}

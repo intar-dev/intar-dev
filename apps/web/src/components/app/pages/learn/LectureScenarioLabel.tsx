@@ -10,7 +10,7 @@ export function LectureScenarioLabel({
 
   return (
     <span
-      className="inline-flex items-center gap-1"
+      className="inline-flex items-center gap-1.5"
       title={
         includesScenario
           ? "This lecture includes a scenario."

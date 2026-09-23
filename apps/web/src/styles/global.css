@@ -236,7 +236,6 @@
   --control-prominent: 2.75rem;
   --replay-control-size: var(--control-compact);
   --page-inset: 1rem;
-  --workspace-inset: 0.75rem;
   --app-bar-h: 3.25rem;
   --canvas: #f5f3f0;
   --background: #fdfdfc;
@@ -316,14 +315,12 @@
 @media (min-width: 40rem) {
   :root {
     --page-inset: 1.5rem;
-    --workspace-inset: 1rem;
   }
 }
 
 @media (min-width: 64rem) {
   :root {
     --page-inset: 2rem;
-    --workspace-inset: 1.5rem;
   }
 }
 

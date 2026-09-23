@@ -1393,7 +1393,7 @@ export function ScenarioRun() {
       returnTarget={getRunReturnTarget(attemptData.courseLocation)}
       guidance={guidanceProps}
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 pt-1.5 pb-3 [@media(max-height:500px)]:!p-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 pt-1 pb-3 [@media(max-height:500px)]:!p-3">
             <div className="shrink-0 space-y-2 empty:hidden">
               {errorAlerts}
             </div>
@@ -1575,7 +1575,7 @@ function RunWorkspaceHeader({
 }) {
   return (
     <header
-      className="flex shrink-0 flex-wrap items-center gap-2 bg-canvas px-3 pt-2.5 pb-1"
+      className="flex shrink-0 flex-wrap items-center gap-2 bg-canvas px-3 pt-2 pb-1"
       data-run-navigation
       data-run-workspace-header
     >
@@ -1790,7 +1790,7 @@ function ActiveRunStatus({
   pulse?: boolean;
 }) {
   return (
-    <span className="inline-flex min-w-max shrink-0 items-center gap-2.5">
+    <span className="inline-flex min-w-max shrink-0 items-center gap-2">
       <StatusToken
         tone={tone}
         word={word}

@@ -416,9 +416,9 @@ function CourseIndexItem({
     <CourseLink
       route={route}
       search={search}
-      className="group grid min-h-24 gap-4 px-4 py-4.5 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-5 dark:hover:bg-accent/60"
+      className="group grid min-h-24 gap-4 px-4 py-4 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-5 dark:hover:bg-accent/60"
     >
-      <span className="min-w-0 space-y-1.5">
+      <span className="min-w-0 space-y-1">
         <span className="block text-base font-semibold tracking-[-0.01em] text-balance [overflow-wrap:anywhere]">
           {course.title}
         </span>
@@ -436,7 +436,7 @@ function CourseIndexItem({
           />
         </span>
       </span>
-      <span className="flex flex-col gap-2.5 sm:items-end sm:justify-self-end">
+      <span className="flex flex-col gap-2 sm:items-end sm:justify-self-end">
         <LectureProgressTrack lectures={course.lectures} />
         <span className="inline-flex min-h-8 items-center gap-2 text-sm font-semibold text-brand-text">
           {course.lectures.length > 0 && completed === course.lectures.length
@@ -589,7 +589,7 @@ function LectureListItem({
           position
         )}
       </span>
-      <span className="min-w-0 flex-1 space-y-1.5">
+      <span className="min-w-0 flex-1 space-y-1">
         <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span className="text-card-title [overflow-wrap:anywhere]">
             {lecture.title}
@@ -759,7 +759,7 @@ function AssignmentLink({
       </span>
     </>
   );
-  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3.5 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
+  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
 
   return route && target ? (
     <LectureLink route={route} lectureId={target.lectureId} className={className}>
@@ -971,7 +971,7 @@ function CourseCatalogLoading({ showCapacity }: { showCapacity: boolean }) {
         <Skeleton className="h-8 w-72 max-w-full" />
         <Skeleton className="h-5 w-96 max-w-full" />
         {showCapacity ? (
-          <div className="grid gap-4 sm:grid-cols-2 sm:gap-8" aria-hidden="true">
+          <div className="grid gap-3 sm:grid-cols-2" aria-hidden="true">
             <Skeleton className="h-16 w-full" />
             <Skeleton className="h-16 w-full" />
           </div>

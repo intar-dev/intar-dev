@@ -185,7 +185,7 @@ export function RunRecap({
   return (
     <section
       aria-labelledby="run-recap-heading"
-      className="w-full space-y-7 py-6 md:space-y-8 md:py-8"
+      className="w-full space-y-6 md:space-y-8"
     >
       <header className="flex items-start gap-4 sm:items-center sm:gap-5">
         <RecapBadge kind={recap.kind} />
@@ -198,7 +198,7 @@ export function RunRecap({
           >
             {recap.title}
           </h2>
-          <p className="mt-1.5 text-support text-muted-foreground">
+          <p className="mt-1 text-support text-muted-foreground">
             {recap.description}
           </p>
         </div>
@@ -218,11 +218,11 @@ export function RunRecap({
             objectives={objectives}
             verifiedObjectives={verifiedObjectives}
           />
-          <ol className="mt-3.5 divide-y overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]">
+          <ol className="mt-3 divide-y overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]">
             {objectives.map((objective, index) => (
               <li
                 key={objective.key}
-                className="grid min-h-12 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 px-4 py-3.5 motion-safe:animate-rise"
+                className="grid min-h-12 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 px-4 py-3 motion-safe:animate-rise"
                 style={{ animationDelay: `${120 + index * 70}ms` }}
               >
                 {objective.status === "verified" ? (
@@ -237,7 +237,7 @@ export function RunRecap({
                     aria-hidden="true"
                   />
                 )}
-                <span className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-1">
+                <span className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1">
                   <span className="min-w-0 flex-1 text-support font-medium [overflow-wrap:anywhere]">
                     {objective.title}
                   </span>
@@ -268,7 +268,7 @@ export function RunRecap({
                 <Clock3 className="size-3.5" aria-hidden="true" />
                 Solve time
               </dt>
-              <dd className="mt-1.5 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
+              <dd className="mt-1 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
                 {formatScenarioDurationMs(run.solveDurationMs)}
               </dd>
             </div>
@@ -278,7 +278,7 @@ export function RunRecap({
               <Lightbulb className="size-3.5" aria-hidden="true" />
               Hints used
             </dt>
-            <dd className="mt-1.5 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
+            <dd className="mt-1 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
               {revealedHints === 1 ? "1 hint" : `${revealedHints} hints`}
             </dd>
           </div>
@@ -287,7 +287,7 @@ export function RunRecap({
               <LockKeyhole className="size-3.5" aria-hidden="true" />
               Full solution
             </dt>
-            <dd className="mt-1.5 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em]">
+            <dd className="mt-1 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em]">
               {solutionUsed ? "Used" : "Not used"}
             </dd>
           </div>
@@ -298,7 +298,7 @@ export function RunRecap({
 
       <section
         aria-labelledby="run-recap-next-heading"
-        className="w-full rounded-2xl border bg-card px-5 py-5 shadow-[var(--highlight),var(--shadow-raised)] sm:px-6"
+        className="w-full rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)]"
       >
         <h2 id="run-recap-next-heading" className="text-section-title">
           {recap.kind === "solved" ? "Keep learning" : "Give it another try"}
@@ -688,7 +688,7 @@ export function ReplayViewer({
 
       <ol
         aria-label="Replay order"
-        className="flex w-full min-w-0 max-w-full gap-3 overflow-x-auto pb-2"
+        className="flex w-full min-w-0 max-w-full gap-2 overflow-x-auto pb-2"
       >
         {parts.map((part, index) => (
           <li key={part.key} className="shrink-0">

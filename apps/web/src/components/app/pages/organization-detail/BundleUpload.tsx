@@ -50,7 +50,7 @@ export function OrganizationBundleUpload({ detail }: { detail: Detail }) {
       description="Upload a bundle made by the image CLI. Browser HCL editing is not available."
     >
       <div className="grid gap-4 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)]">
-        <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/30 p-6 text-center">
+        <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/30 px-5 py-6 text-center">
           <FileArchive className="size-6 text-brand-text" aria-hidden />
           <span className="text-support font-medium">
             {bundle?.name ?? "Choose .tar.gz bundle"}

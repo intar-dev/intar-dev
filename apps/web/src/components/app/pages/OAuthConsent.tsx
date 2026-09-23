@@ -177,7 +177,7 @@ export function OAuthConsent() {
       title="Authorize access"
       description="Review who is asking, which capabilities they need, and where you will return."
     >
-      <div className="space-y-6">
+      <div className="space-y-5">
         {oauthQueryMissing ? (
           <Alert variant="destructive">
             <AlertTitle>Missing OAuth request</AlertTitle>
@@ -207,7 +207,7 @@ export function OAuthConsent() {
         ) : null}
 
         {!oauthQueryMissing ? (
-          <section className="space-y-6 rounded-lg border bg-background p-4">
+          <section className="space-y-4 rounded-lg border bg-background p-4">
             <div className="flex items-start gap-3">
               <ShieldCheck
                 className="mt-0.5 size-5 shrink-0 text-brand-text"
@@ -286,11 +286,11 @@ export function OAuthConsent() {
           </InlineFeedback>
         ) : null}
 
-        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
           <Button variant="ghost" render={<Link to="/" />}>
             Back to intar.dev
           </Button>
-          <div className="flex flex-col-reverse gap-3 sm:flex-row">
+          <div className="flex flex-col-reverse gap-2 sm:flex-row">
             <Button
               type="button"
               variant="outline"

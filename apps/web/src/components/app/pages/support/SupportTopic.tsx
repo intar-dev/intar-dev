@@ -108,12 +108,12 @@ function TopicDetail({ topicId }: { topicId: string }) {
     );
   return (
     <PageShell>
-      <div className="w-full max-w-3xl space-y-8">
+      <div className="w-full max-w-3xl space-y-6">
         <article className="min-w-0 space-y-5" aria-label="Topic">
           <h2 className="text-feature-title text-balance wrap-anywhere">
             {topic.title}
           </h2>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
             <TopicStatus status={topic.status} />
             <span>{SUPPORT_TYPES[topic.type]}</span>
             <span className="wrap-anywhere">{topic.author.name}</span>
@@ -262,7 +262,7 @@ function CommentItem({
   const [editing, setEditing] = useState(false);
   const path = `/${comment.topicId}/comments/${comment.id}`;
   return (
-    <li className="min-w-0 space-y-3 py-5 first:pt-0">
+    <li className="min-w-0 space-y-3 py-4 first:pt-0">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
         <span className="font-medium wrap-anywhere">{comment.author.name}</span>
         <span className="text-muted-foreground">

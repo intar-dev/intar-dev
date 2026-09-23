@@ -28,7 +28,7 @@ export function PageShell({
           ? "gap-(--space-xl)"
           : "gap-(--space-md)",
         variant === "page" && "px-[var(--page-inset)] py-4 sm:py-6",
-        variant === "workspace" && "px-[var(--workspace-inset)] py-3 sm:py-4",
+        variant === "workspace" && "px-[var(--page-inset)] py-4",
       )}
     >
       {children}

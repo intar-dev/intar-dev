@@ -172,7 +172,7 @@ export function RunArtifactViewer({
 
   return (
     <Card className="overflow-hidden">
-      <CardHeader className="gap-4">
+      <CardHeader className="gap-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-2">
             <CardDescription>{title}</CardDescription>
@@ -189,7 +189,7 @@ export function RunArtifactViewer({
           </div>
 
           {viewer ? (
-            <dl className="flex flex-wrap items-start gap-x-4 gap-y-2 text-caption">
+            <dl className="flex flex-wrap items-start gap-x-3 gap-y-1 text-caption">
               <ArtifactMeta label="Size" value={formatBytes(viewer.artifact.sizeBytes)} />
               {!hideInternalMetadata ? (
                 <>
@@ -206,7 +206,7 @@ export function RunArtifactViewer({
         </div>
 
         {viewer && !hideViewerControls ? (
-          <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-3 border-t pt-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
               {canReplay ? (
                 <>
@@ -304,15 +304,15 @@ export function RunArtifactViewer({
       <CardContent className="pt-0">
         <div className="min-h-[22rem] rounded-lg border bg-muted/20">
           {!viewer ? (
-            <div className="flex min-h-[22rem] flex-col items-center justify-center px-6 py-8 text-center">
+            <div className="flex min-h-[22rem] flex-col items-center justify-center px-5 py-6 text-center">
               <p className="text-support font-medium">Artifacts open inline.</p>
-              <p className="mt-2 text-support text-muted-foreground">
+              <p className="mt-1 text-support text-muted-foreground">
                 Logs use a read-only text viewer and cast files replay inline,
                 with a raw fallback when needed.
               </p>
             </div>
           ) : viewer.error ? (
-            <div className="flex min-h-[22rem] items-center justify-center px-6 py-8">
+            <div className="flex min-h-[22rem] items-center justify-center px-5 py-6">
               <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
                 {viewer.error}
               </div>
@@ -377,7 +377,7 @@ export function AsciicastReplaySurface({
   if (playerError) {
     return (
       <div className={minimal ? "p-0" : "p-4"}>
-        <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
+        <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-5">
           <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
             {replayPlayerErrorCopy(playerError, minimal)}
           </div>
@@ -389,7 +389,7 @@ export function AsciicastReplaySurface({
   if (loading) {
     return (
       <div className={minimal ? "p-0" : "p-4"}>
-        <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md bg-muted/20 px-6 text-center">
+        <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md bg-muted/20 px-5 text-center">
           <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
             <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
           </div>

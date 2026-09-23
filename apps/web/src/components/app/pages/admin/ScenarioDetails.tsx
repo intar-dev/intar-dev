@@ -200,7 +200,7 @@ export function ScenarioDetails() {
           onRetry={() => void scenario.refetch()}
         />
       ) : !scenarioRecord ? (
-        <div role="status" className="space-y-6">
+        <div role="status" className="space-y-4">
           <span className="sr-only">Loading…</span>
           <div className="space-y-2">
             <Skeleton className="h-7 w-72 max-w-full" />
@@ -257,18 +257,16 @@ export function ScenarioDetails() {
             </Alert>
           ) : null}
 
-          <div className="space-y-5">
-            <ScenarioLearnerPreview
-              briefingMarkdown={scenarioRecord.briefingMarkdown}
-              hints={scenarioRecord.hints}
-              solutionMarkdown={scenarioRecord.solutionMarkdown}
-            />
-            <ScenarioVerificationContract probes={scenarioRecord.probes} />
-            <ScenarioOperationalRecord
-              scenario={scenarioRecord}
-              enabled={enabled}
-            />
-          </div>
+          <ScenarioLearnerPreview
+            briefingMarkdown={scenarioRecord.briefingMarkdown}
+            hints={scenarioRecord.hints}
+            solutionMarkdown={scenarioRecord.solutionMarkdown}
+          />
+          <ScenarioVerificationContract probes={scenarioRecord.probes} />
+          <ScenarioOperationalRecord
+            scenario={scenarioRecord}
+            enabled={enabled}
+          />
         </>
       )}
     </PageShell>
@@ -422,7 +420,7 @@ export function ScenarioVerificationContract({
     >
       {probes.length ? (
         <>
-          <div className="grid gap-5 lg:grid-cols-2">
+          <div className="grid gap-4 lg:grid-cols-2">
             <VerificationObjectiveGroup
               title="Boot checks"
               emptyCopy="No startup checks are configured."
@@ -470,7 +468,7 @@ function VerificationObjectiveGroup({
   emptyCopy: string;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <p className="text-label">{title}</p>
       {probes.length ? (
         <ol className="divide-y border-y">
@@ -503,7 +501,7 @@ function VerificationObjective({
       : null;
 
   return (
-    <li className="flex gap-3 py-3 first:pt-0 last:pb-0">
+    <li className="flex gap-3 py-3">
       <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold tabular-nums">
         {index + 1}
       </span>
@@ -597,7 +595,7 @@ export function ScenarioOperationalRecord({
           enabled ? "Enabled for learners" : "Disabled",
         ]}
       />
-      <div className="mt-3 divide-y border-t">
+      <div className="mt-4 divide-y border-t">
         <DisclosureRow
           title="Image provenance"
           meta={`${scenario.vms.length} VM${scenario.vms.length === 1 ? "" : "s"}`}
@@ -664,11 +662,11 @@ function HintTile({
   fallbackTitle: string;
 }) {
   return (
-    <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+    <div className="rounded-lg bg-muted/50 p-3">
       <p className="text-sm font-medium">
         {hint.title?.trim() || fallbackTitle}
       </p>
-      <Markdown className="mt-2 text-sm leading-7">
+      <Markdown className="mt-1 text-sm leading-7">
         {hint.body_markdown}
       </Markdown>
     </div>
@@ -677,11 +675,11 @@ function HintTile({
 
 function VmRecord({ vm }: { vm: ScenarioVmRecord }) {
   return (
-    <div className="space-y-4 py-4 first:pt-0 last:pb-0">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+    <div className="space-y-3 py-3 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <p className="font-mono text-sm font-medium">{vm.name}</p>
         <Badge variant="outline">{vm.image}</Badge>
-        <div className="flex flex-wrap gap-x-4 text-sm text-muted-foreground">
+        <div className="flex flex-wrap gap-x-3 text-sm text-muted-foreground">
           <span>{formatCpu(vm.cpuMillis)} CPU</span>
           <span>{formatMemory(vm.memoryMib)}</span>
           <span>{formatDisk(vm.diskMib)}</span>

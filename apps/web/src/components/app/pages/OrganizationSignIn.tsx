@@ -74,34 +74,36 @@ export function OrganizationSignIn() {
               </p>
             </div>
           </CardHeader>
-          <CardContent className="space-y-5 pt-6">
+          <CardContent className="space-y-5">
             {callbackError ? (
               <InlineFeedback tone="error">{callbackError}</InlineFeedback>
             ) : null}
             <form
-              className="space-y-3"
+              className="space-y-4"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (normalizedSlug && !signIn.isPending) signIn.mutate();
               }}
             >
-              <label
-                htmlFor="organization-slug"
-                className="text-label"
-              >
-                Organization slug
-              </label>
-              <Input
-                id="organization-slug"
-                value={slug}
-                onChange={(event) => setSlug(event.target.value)}
-                placeholder="example-org-ab12cd"
-                maxLength={128}
-                pattern="[a-z0-9][a-z0-9-]{0,127}"
-                autoComplete="organization"
-                spellCheck={false}
-                autoFocus={!directSlug}
-              />
+              <div className="space-y-2">
+                <label
+                  htmlFor="organization-slug"
+                  className="text-label"
+                >
+                  Organization slug
+                </label>
+                <Input
+                  id="organization-slug"
+                  value={slug}
+                  onChange={(event) => setSlug(event.target.value)}
+                  placeholder="example-org-ab12cd"
+                  maxLength={128}
+                  pattern="[a-z0-9][a-z0-9-]{0,127}"
+                  autoComplete="organization"
+                  spellCheck={false}
+                  autoFocus={!directSlug}
+                />
+              </div>
               <Button
                 type="submit"
                 size="lg"

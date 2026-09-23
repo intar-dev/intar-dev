@@ -110,7 +110,7 @@ export function TopicForm({
         if (!save.isPending) save.mutate();
       }}
     >
-      <fieldset disabled={save.isPending} className="min-w-0 space-y-5">
+      <fieldset disabled={save.isPending} className="min-w-0 space-y-4">
         <div className="space-y-2">
           <label htmlFor={`${id}-title`} className="text-sm font-medium">
             Title
@@ -203,22 +203,24 @@ export function CommentForm({
         if (!save.isPending) save.mutate();
       }}
     >
-      <fieldset disabled={save.isPending} className="min-w-0 space-y-3">
-        <label htmlFor={id} className="text-sm font-medium">
-          {initial === undefined ? "Add a comment" : "Edit comment"}
-        </label>
-        <Textarea
-          id={id}
-          value={body}
-          onChange={(event) => setBody(event.target.value)}
-          required
-          maxLength={SUPPORT_LIMITS.comment}
-          rows={4}
-          aria-describedby={`${id}-help`}
-        />
-        <p id={`${id}-help`} className="text-sm text-muted-foreground">
-          Markdown, links, and code blocks are supported.
-        </p>
+      <fieldset disabled={save.isPending} className="min-w-0 space-y-4">
+        <div className="space-y-2">
+          <label htmlFor={id} className="text-sm font-medium">
+            {initial === undefined ? "Add a comment" : "Edit comment"}
+          </label>
+          <Textarea
+            id={id}
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+            required
+            maxLength={SUPPORT_LIMITS.comment}
+            rows={4}
+            aria-describedby={`${id}-help`}
+          />
+          <p id={`${id}-help`} className="text-sm text-muted-foreground">
+            Markdown, links, and code blocks are supported.
+          </p>
+        </div>
         <PostError error={save.error} />
         <div className="flex flex-wrap gap-2">
           <Button type="submit" disabled={!body.trim()}>

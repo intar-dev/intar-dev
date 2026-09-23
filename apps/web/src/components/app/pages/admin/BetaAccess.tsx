@@ -198,7 +198,7 @@ export function BetaAccessPanel() {
     revokeUserMutation.isPending;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <Section
         density="compact"
         title="Invite links"
@@ -221,7 +221,7 @@ export function BetaAccessPanel() {
               {activeInvites.map((invite) => (
                 <div
                   key={invite.id}
-                  className="space-y-4 py-4 first:pt-0 last:pb-0"
+                  className="space-y-3 py-3 first:pt-0 last:pb-0"
                 >
                   <p className="font-mono text-sm font-semibold">
                     {invite.codePrefix}…
@@ -297,11 +297,11 @@ export function BetaAccessPanel() {
         )}
 
         {createInvite.error ? (
-          <InlineFeedback tone="error" className="mt-3">
+          <InlineFeedback tone="error" className="mt-4">
             {errorMessage(createInvite.error, "The invite could not be created.")}
           </InlineFeedback>
         ) : feedback ? (
-          <InlineFeedback tone={feedback.tone} className="mt-3">
+          <InlineFeedback tone={feedback.tone} className="mt-4">
             {feedback.message}
           </InlineFeedback>
         ) : null}
@@ -317,7 +317,7 @@ export function BetaAccessPanel() {
             {activeUsers.map((user) => (
               <div
                 key={user.userId}
-                className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
+                className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="min-w-0 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
@@ -361,7 +361,7 @@ export function BetaAccessPanel() {
           </span>
           <ChevronDown className="ml-auto size-4 text-muted-foreground transition-transform group-open:rotate-180 motion-reduce:transition-none" />
         </summary>
-        <div className="space-y-6 pt-4">
+        <div className="space-y-4 pt-4">
           <InviteHistory invites={inviteHistory} />
           <RevokedPeople users={revokedUsers} />
         </div>
@@ -405,7 +405,7 @@ function InviteActions({
       className={
         mobile
           ? "grid grid-cols-2 gap-2"
-          : "flex flex-wrap justify-end gap-1.5"
+          : "flex flex-wrap justify-end gap-2"
       }
     >
       <Button
@@ -443,7 +443,7 @@ function InviteHistory({ invites }: { invites: AdminInvite[] }) {
     return <p className="text-caption">No completed invites.</p>;
   }
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <h3 className="text-sm font-semibold">Invites</h3>
       <Table>
         <TableHeader>
@@ -484,7 +484,7 @@ function InviteHistory({ invites }: { invites: AdminInvite[] }) {
 function RevokedPeople({ users }: { users: BetaUser[] }) {
   if (!users.length) return null;
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <h3 className="text-sm font-semibold">Revoked access</h3>
       <div className="divide-y">
         {users.map((user) => (

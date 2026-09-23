@@ -165,7 +165,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
             {visibleMembers.map((entry) => (
               <li
                 key={entry.memberId}
-                className="flex flex-wrap items-center gap-3 p-3 sm:p-4"
+                className="flex flex-wrap items-center gap-3 px-4 py-3"
               >
                 <Avatar>
                   <AvatarFallback>{initials(entry.name)}</AvatarFallback>
@@ -224,7 +224,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
         )}
       </PaginatedCollection>
       {actionError ? (
-        <InlineFeedback tone="error" className="mt-3">
+        <InlineFeedback tone="error" className="mt-4">
           {actionError instanceof Error ? actionError.message : "Action failed"}
         </InlineFeedback>
       ) : null}
@@ -362,7 +362,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                 return (
                   <li
                     key={entry.id}
-                    className="flex flex-wrap items-center gap-3 p-3 sm:p-4"
+                    className="flex flex-wrap items-center gap-3 px-4 py-3"
                   >
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
                       <BookOpen className="size-4" />
@@ -407,13 +407,13 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
           )}
         </PaginatedCollection>
       ) : (
-        <div className="flex min-h-40 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
+        <div className="flex min-h-40 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
           <Users className="size-5" />
           <p className="text-sm">No scenarios are assigned yet.</p>
         </div>
       )}
       {actionError ? (
-        <InlineFeedback tone="error" className="mt-3">
+        <InlineFeedback tone="error" className="mt-4">
           {actionError instanceof Error
             ? actionError.message
             : "Assignment action failed"}

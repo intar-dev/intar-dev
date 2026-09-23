@@ -37,7 +37,7 @@ export function ProbeRows(props: {
 }) {
   if (!props.probes.length) {
     return (
-      <p className="py-4 text-sm text-muted-foreground">
+      <p className="py-3 text-sm text-muted-foreground">
         No verification results yet.
       </p>
     );

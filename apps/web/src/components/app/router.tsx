@@ -495,7 +495,7 @@ function RoutePending() {
   return (
     <div
       role="status"
-      className="flex min-h-64 items-center justify-center gap-3 p-8 text-muted-foreground"
+      className="flex min-h-64 items-center justify-center gap-2 p-8 text-muted-foreground"
     >
       <LoaderCircle className="size-5 motion-safe:animate-spin" />
       <span>Preparing the workspace…</span>
@@ -506,7 +506,7 @@ function RoutePending() {
 function FullPageRoutePending() {
   return (
     <main className="flex min-h-dvh items-center justify-center p-8 text-muted-foreground">
-      <div role="status" className="flex items-center gap-3">
+      <div role="status" className="flex items-center gap-2">
         <LoaderCircle className="size-5 motion-safe:animate-spin" />
         <span>Preparing the workspace…</span>
       </div>
@@ -522,7 +522,7 @@ function RouteError({ reset }: ErrorComponentProps) {
         <span className="flex size-12 items-center justify-center rounded-xl bg-destructive-subtle text-destructive">
           <CircleAlert className="size-6" />
         </span>
-        <div className="space-y-2">
+        <div className="space-y-1">
           <h1 className="text-page-title">This workspace did not load</h1>
           <p className="text-body text-muted-foreground">
             The route failed before it could prepare your controls. Try loading
@@ -545,7 +545,7 @@ function AppRouteNotFound() {
     <>
       <title>Page not found · intar.dev</title>
       <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-4 px-[var(--page-inset)] py-16 text-center">
-        <div className="space-y-2">
+        <div className="space-y-1">
           <p className="text-label">Unknown work order</p>
           <p className="text-page-title">That route is not in the manual</p>
           <p className="text-sm leading-6 text-muted-foreground">
@@ -572,7 +572,7 @@ function RouteNotFound() {
         <span className="flex size-12 items-center justify-center rounded-xl bg-muted text-muted-foreground">
           <SearchX className="size-6" />
         </span>
-        <div className="space-y-2">
+        <div className="space-y-1">
           <p className="text-label">Unknown work order</p>
           <h1 className="text-page-title">That route is not in the manual</h1>
           <p className="text-body text-muted-foreground">

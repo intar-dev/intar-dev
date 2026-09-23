@@ -76,11 +76,11 @@ export function ScenarioRunArchiveCard(props: {
 
   return (
     <article
-      className="@container/archive-run py-4 first:pt-0 last:pb-0"
+      className="@container/archive-run py-3 first:pt-0 last:pb-0"
       data-archive-run={props.run.id}
     >
       <div className="grid gap-4 xl:grid-cols-[minmax(16rem,0.85fr)_minmax(30rem,1.35fr)_auto] xl:items-center">
-        <div className="min-w-0 space-y-1.5">
+        <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={tone.badgeVariant}>{tone.label}</Badge>
             <Badge variant={outcome.badgeVariant}>{outcome.label}</Badge>
@@ -92,7 +92,7 @@ export function ScenarioRunArchiveCard(props: {
             {props.run.scenarioMeta?.scenarioVmName ?? "Legacy VM"} ·{" "}
             {props.run.vmName}
           </p>
-          <p className="flex flex-wrap items-center gap-x-1.5 text-metadata">
+          <p className="flex flex-wrap items-center gap-x-2 text-metadata">
             <span className="font-medium text-foreground">
               {archiveOwnerLabel(props.run)}
             </span>
@@ -137,7 +137,7 @@ export function ScenarioRunArchiveCard(props: {
           />
         </dl>
 
-        <div className="flex shrink-0 items-center gap-1.5 xl:justify-end">
+        <div className="flex shrink-0 items-center gap-2 xl:justify-end">
           <Button
             type="button"
             size="sm"
@@ -190,7 +190,7 @@ export function ScenarioRunArchiveCard(props: {
       {props.isExpanded ? (
         <div
           id={detailsId}
-          className="mt-3 border-t bg-muted/20 px-4 py-4 sm:px-5"
+          className="mt-4 border-t bg-muted/20 p-4"
         >
           {props.isDetailLoading ? (
             <p role="status" className="text-sm text-muted-foreground">
@@ -262,7 +262,7 @@ function ArchiveRunDetails(props: {
         </div>
       ) : null}
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
         <section aria-labelledby={`run-${props.run.id}-milestones`}>
           <div className="flex items-center justify-between gap-2">
             <h4
@@ -323,7 +323,7 @@ function ArchiveRunDetails(props: {
                 <div className="mt-3 divide-y overflow-hidden rounded-lg border bg-background">
                   {visibleArtifacts.map((artifact) => {
                     const className = cn(
-                      "flex min-h-14 w-full flex-col justify-between gap-2 px-3 py-3 text-left text-sm transition-colors duration-150 motion-reduce:transition-none sm:flex-row sm:items-center",
+                      "flex min-h-14 w-full flex-col justify-between gap-2 px-4 py-3 text-left text-sm transition-colors duration-150 motion-reduce:transition-none sm:flex-row sm:items-center",
                       props.viewer?.artifact.id === artifact.id
                         ? "bg-brand-subtle text-foreground"
                         : "text-muted-foreground hover:bg-muted/50 hover:text-foreground focus-visible:bg-muted/50 focus-visible:text-foreground",

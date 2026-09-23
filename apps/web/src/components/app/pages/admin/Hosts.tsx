@@ -178,10 +178,10 @@ export function AdminHosts() {
                 return (
                   <article
                     key={host.id}
-                    className="@container/host-card space-y-3 p-4"
+                    className="@container/host-card space-y-4 p-4"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 space-y-1.5">
+                      <div className="min-w-0 space-y-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span
                             className={

@@ -272,7 +272,7 @@ export function NativeSshConnectPanel({
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
           {sessionMutation.error.message}
         </div>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
             size="sm"
@@ -419,7 +419,7 @@ export function NativeSshConnectPanel({
       />
 
       {session.native.authMode === "issued_key" ? (
-        <details className="border-t pt-3 text-sm">
+        <details className="border-t pt-4 text-sm">
           <summary className="cursor-pointer font-medium">
             Security details
           </summary>
@@ -449,7 +449,7 @@ export function NativeSshConnectPanel({
         />
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3 text-sm text-muted-foreground">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4 text-sm text-muted-foreground">
         {session.native.authMode === "profile_keys" ? (
           <span className="font-mono text-xs">
             {session.native.publicHostKeyFingerprintSha256}
@@ -467,7 +467,7 @@ function TemporaryKeyFallback(props: {
   onCreateTemporaryKey: () => void;
 }) {
   return (
-    <div className="space-y-4 rounded-lg border bg-muted/30 px-4 py-4">
+    <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
       <div className="space-y-1">
         <p className="text-sm font-medium">No saved SSH key</p>
         <p className="text-sm leading-6 text-muted-foreground">
@@ -476,7 +476,7 @@ function TemporaryKeyFallback(props: {
           through refreshes until the route expires.
         </p>
       </div>
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-2">
         <Button type="button" onClick={props.onCreateTemporaryKey}>
           <KeyRound className="size-4" />
           Create temporary SSH key

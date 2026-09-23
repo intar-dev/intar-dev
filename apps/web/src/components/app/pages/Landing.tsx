@@ -78,8 +78,8 @@ export function Landing() {
       ) : null}
 
       <main className="flex min-h-0 flex-1">
-        <section className="mx-auto grid min-h-0 w-full max-w-7xl flex-1 items-center gap-8 px-[var(--page-inset)] py-2 sm:py-4 lg:grid-cols-[minmax(0,1fr)_minmax(24rem,35rem)] lg:gap-14 lg:py-0 xl:gap-18">
-          <div className="flex flex-col items-start gap-7 motion-safe:animate-rise sm:gap-9">
+        <section className="mx-auto grid min-h-0 w-full max-w-7xl flex-1 items-center gap-8 px-[var(--page-inset)] py-2 sm:py-4 lg:grid-cols-[minmax(0,1fr)_minmax(24rem,35rem)] lg:gap-12 lg:py-0 xl:gap-16">
+          <div className="flex flex-col items-start gap-6 motion-safe:animate-rise sm:gap-8">
             <SponsorMarks />
 
             <div className="space-y-5">
@@ -95,7 +95,7 @@ export function Landing() {
               </p>
             </div>
 
-            <div className="flex w-full flex-col gap-2.5 sm:w-auto sm:flex-row sm:gap-3">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:gap-3">
               {signedIn ? (
                 <Button
                   size="lg"
@@ -180,7 +180,7 @@ function SponsorMarks() {
   return (
     <aside
       aria-labelledby="landing-sponsors-heading"
-      className="flex w-full flex-col items-start gap-2.5 border-b pb-6 sm:pb-7"
+      className="flex w-full flex-col items-start gap-2 border-b pb-6 sm:pb-8"
     >
       <p
         id="landing-sponsors-heading"
@@ -378,14 +378,14 @@ function WorkOrder() {
       aria-label="Work order"
       className="hidden overflow-hidden rounded-2xl border border-terminal-border bg-terminal-surface text-terminal-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.04),var(--shadow-overlay)] motion-safe:animate-rise lg:block"
     >
-      <header className="flex h-12 items-center justify-between gap-4 border-b border-terminal-border px-4.5">
-        <div className="flex items-center gap-2.5 text-[0.8125rem] font-semibold">
+      <header className="flex h-12 items-center justify-between gap-4 border-b border-terminal-border px-5">
+        <div className="flex items-center gap-2 text-[0.8125rem] font-semibold">
           <TerminalSquare className="size-4 text-terminal-brand" aria-hidden="true" />
           Work order · web-204
         </div>
         <span className="font-mono text-caption text-terminal-muted">RUN-0417</span>
       </header>
-      <div className="space-y-5 p-6">
+      <div className="space-y-5 p-5">
         <div className="space-y-2">
           <p
             className={

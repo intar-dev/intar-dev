@@ -54,7 +54,7 @@ export function AdminPeople() {
       <Tabs
         value={activeTab}
         onValueChange={(value) => setTab(value as AdminPeopleTab)}
-        className="gap-6"
+        className="gap-4"
       >
         <div className="overflow-x-auto border-b">
           <TabsList variant="line" className="min-w-max pb-1">
@@ -193,7 +193,7 @@ function UsersPanel() {
                   return (
                     <div
                       key={entry.id}
-                      className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between"
+                      className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
                     >
                       <div className="flex min-w-0 items-center gap-3">
                         <Avatar>
@@ -239,7 +239,7 @@ function UsersPanel() {
                         </div>
                       </div>
 
-                      <div className="flex shrink-0 items-center gap-1.5">
+                      <div className="flex shrink-0 items-center gap-2">
                         <Button
                           size="sm"
                           variant="outline"

@@ -37,7 +37,7 @@ function StateShell({
           contentClassName,
         )}
       >
-        <div className="space-y-1.5">
+        <div className="space-y-1">
           <Heading className="inline-flex items-center gap-2 text-base font-semibold">
             {icon ? (
               <span className="text-muted-foreground [&_svg:not([class*='size-'])]:size-5">
