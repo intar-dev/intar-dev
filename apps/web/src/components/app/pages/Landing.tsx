@@ -497,7 +497,7 @@ function WorkOrderStep({
 }
 
 const footerLinkClassName =
-  "inline-flex min-h-11 min-w-11 items-center justify-center text-muted-foreground underline decoration-border underline-offset-4 transition-colors duration-150 hover:text-foreground hover:decoration-border-strong";
+  "inline-flex items-center justify-center text-muted-foreground underline decoration-border underline-offset-4 transition-colors duration-150 hover:text-foreground hover:decoration-border-strong pointer-coarse:min-h-11 pointer-coarse:min-w-11";
 
 const sponsorLinkClassName =
   "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-1 opacity-80 transition-opacity duration-200 hover:opacity-100 focus-visible:opacity-100";

@@ -27,7 +27,7 @@ export function ContentHeader({
   titleClassName,
 }: ContentHeaderProps) {
   return (
-    <div className="flex flex-wrap items-end justify-between gap-3">
+    <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <p

@@ -146,7 +146,12 @@ export function ScenarioDetails() {
     status: useMemo(
       () =>
         scenarioRecord ? (
-          <Badge variant={enabled ? "success" : "outline"}>
+          // The page body repeats the availability, so the chip yields its
+          // app-bar space to the title on narrow screens.
+          <Badge
+            variant={enabled ? "success" : "outline"}
+            className="hidden sm:inline-flex"
+          >
             {enabled ? "Enabled" : "Disabled"}
           </Badge>
         ) : undefined,

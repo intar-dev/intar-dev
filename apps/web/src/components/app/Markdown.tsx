@@ -87,7 +87,7 @@ export function Markdown({
           ),
           li: ({ children }) => <li className="pl-1">{children}</li>,
           code: ({ children }) => (
-            <code className="rounded-[0.3125rem] border border-border bg-muted px-1.5 py-px font-mono text-[0.85em] text-foreground">
+            <code className="box-decoration-clone rounded-[0.3125rem] border border-border bg-muted px-1.5 py-px font-mono text-[0.85em] text-foreground">
               {children}
             </code>
           ),

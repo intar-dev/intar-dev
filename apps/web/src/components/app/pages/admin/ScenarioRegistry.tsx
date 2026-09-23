@@ -185,7 +185,7 @@ export function ScenarioRegistry() {
         />
       ) : (
         <>
-          <dl className="grid grid-cols-3 gap-3 border-y py-4 sm:gap-4">
+          <dl className="grid grid-cols-3 gap-3 border-b pb-4 sm:gap-4">
             <div className="min-w-0">
               <dt className="text-label">Total scenarios</dt>
               <dd className="mt-1 text-section-title tabular-nums">
@@ -376,7 +376,7 @@ function ScenarioRegistryRow({
           <Link
             to="/admin/scenarios/$scenarioId"
             params={{ scenarioId: scenario.scenarioId }}
-            className="inline-flex min-h-11 items-center text-sm font-semibold hover:underline sm:min-h-9"
+            className="inline-flex items-center text-sm font-semibold hover:underline pointer-coarse:min-h-11"
           >
             {scenario.title}
           </Link>
@@ -439,11 +439,11 @@ function ScenarioRegistryRow({
         </dl>
       </div>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2 lg:flex-col lg:items-stretch">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 lg:w-40 lg:flex-col lg:items-stretch">
         <Button
           size="sm"
           variant="outline"
-          className="min-h-11 lg:min-h-9 lg:w-full"
+          className="min-h-9 lg:w-full"
           disabled={disabled}
           onClick={onToggle}
         >
@@ -461,7 +461,7 @@ function ScenarioRegistryRow({
         <Button
           size="sm"
           variant="ghost"
-          className="min-h-11 lg:min-h-9 lg:w-full"
+          className="min-h-9 lg:w-full"
           render={
             <Link
               to="/admin/scenarios/$scenarioId"

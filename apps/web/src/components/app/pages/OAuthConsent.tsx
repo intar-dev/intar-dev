@@ -221,7 +221,7 @@ export function OAuthConsent() {
               </div>
             </div>
 
-            <dl className="divide-y border-y text-sm">
+            <dl className="divide-y border-t text-sm">
               <ConsentDetail label="Client ID">
                 <code className="break-all">{clientId}</code>
               </ConsentDetail>
@@ -321,7 +321,7 @@ function ConsentDetail({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-1 py-3 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
+    <div className="grid gap-1 py-3 last:pb-0 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="min-w-0 font-medium sm:text-right">{children}</dd>
     </div>

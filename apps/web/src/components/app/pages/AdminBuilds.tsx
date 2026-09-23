@@ -168,7 +168,7 @@ export function AdminBuilds() {
         variant="flat"
         density="compact"
         title="Queue posture"
-        bodyClassName="grid grid-cols-2 gap-4 border-y py-4 sm:grid-cols-4"
+        bodyClassName="grid grid-cols-2 gap-4 border-t pt-4 sm:grid-cols-4"
       >
         <BuildCount label="Total" value={records.length} />
         <BuildCount label="Active" value={activeCount} tone="brand" />

@@ -616,7 +616,7 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <label className="space-y-2 text-sm font-medium">
+    <label className="flex flex-col gap-2 text-sm font-medium">
       <span>{label}</span>
       {children}
     </label>

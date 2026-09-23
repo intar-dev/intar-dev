@@ -98,7 +98,7 @@ export function LiveScenarioRunCard(props: {
             </p>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-5">
             <Stat size="sm"
               label="Guest IP"
               value={props.vmItem.details?.guest_ip ?? "—"}

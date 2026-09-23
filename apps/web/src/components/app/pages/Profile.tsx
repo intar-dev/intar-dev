@@ -323,7 +323,7 @@ export function Profile() {
               </p>
             </div>
             <div className="space-y-2">
-              <label htmlFor="ssh-key-label" className="text-sm font-medium">
+              <label htmlFor="ssh-key-label" className="block text-sm font-medium">
                 Label
               </label>
               <Input
@@ -336,7 +336,7 @@ export function Profile() {
               />
             </div>
             <div className="space-y-2">
-              <label htmlFor="ssh-key-public" className="text-sm font-medium">
+              <label htmlFor="ssh-key-public" className="block text-sm font-medium">
                 Public key
               </label>
               <Textarea

@@ -101,7 +101,6 @@ type TerminalTargetState = "pending" | "ready";
 const SSH_CONNECT_RETRY_ATTEMPTS = 6;
 const SSH_CONNECT_RETRY_BASE_MS = 250;
 const TERMINAL_MIN_COLS = 20;
-const TERMINAL_MIN_ROWS = 5;
 const RESIZE_SEND_DEBOUNCE_MS = 200;
 const textEncoder = new TextEncoder();
 
@@ -291,7 +290,9 @@ export function WebSshTerminal({
         return;
       }
       const cols = Math.max(TERMINAL_MIN_COLS, dims.cols);
-      const rows = Math.max(TERMINAL_MIN_ROWS, dims.rows);
+      // Never grow the grid past the visible area: a floor on rows would
+      // clip the prompt line on short landscape screens.
+      const rows = Math.max(1, dims.rows);
       if (cols !== terminal.cols || rows !== terminal.rows) {
         terminal.resize(cols, rows);
       }
@@ -606,7 +607,7 @@ export function WebSshTerminal({
           ) : null}
         </div>
 
-        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3">
+        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3 [@media(max-height:500px)]:py-1">
           <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}
@@ -678,7 +679,7 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3">
+        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3 [@media(max-height:500px)]:py-1">
           <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}

@@ -15,17 +15,20 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    <main className="relative min-h-svh overflow-hidden px-[var(--page-inset)] py-4 sm:py-6 lg:py-8">
+    <main className="relative min-h-svh overflow-hidden px-[var(--page-inset)] pb-6 lg:pb-8">
       <div
         className="pointer-events-none absolute inset-x-0 top-16 border-t opacity-60"
         aria-hidden="true"
       />
       <div
-        className="pointer-events-none absolute inset-y-0 left-[var(--page-inset)] border-l opacity-40"
+        className="pointer-events-none absolute inset-y-0 left-[calc(max(var(--page-inset),(100%-64rem)/2)-1rem)] hidden border-l opacity-40 lg:block"
         aria-hidden="true"
       />
       <div className="relative mx-auto w-full max-w-5xl">
-        <BrandMark className="mb-4 sm:mb-6" native={standalone} />
+        {/* A 4rem band keeps the mark above the top-16 rule at every width. */}
+        <div className="mb-6 flex h-16 items-center">
+          <BrandMark native={standalone} />
+        </div>
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-8">
           <section className="order-1 rounded-xl border bg-card p-5 shadow-sm sm:p-6 lg:order-2">
             <header className="space-y-2">
@@ -67,7 +70,7 @@ export function AuthShell({
               ].map(([number, label, detail]) => (
                 <li
                   key={number}
-                  className="grid grid-cols-[2.5rem_8rem_1fr] gap-3 border-b py-3 last:border-b-0"
+                  className="grid grid-cols-[2.5rem_8rem_1fr] items-baseline gap-3 border-b py-3 last:border-b-0"
                 >
                   <span className="font-heading text-caption font-semibold text-brand-text tabular-nums">
                     {number}

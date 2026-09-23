@@ -12,6 +12,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
+import { cn } from "@/lib/utils";
 import {
   Table,
   TableBody,
@@ -180,44 +181,62 @@ export function MembersSection({ detail }: { detail: Detail }) {
                     · joined {formatRelativeTime(entry.joinedAt)}
                   </p>
                 </div>
-                {admin && entry.role !== "owner" ? (
-                  <NativeSelect
-                    value={entry.role}
-                    onChange={(event) =>
-                      changeRole.mutate({
-                        memberId: entry.memberId,
-                        role: event.target.value as "admin" | "member",
-                      })
-                    }
-                    disabled={changeRole.isPending}
-                    aria-label={`Role for ${entry.name}`}
+                {/* Fixed role and action columns keep the badge, selects and
+                    Remove buttons on shared edges across rows. */}
+                <div className="ml-auto flex shrink-0 items-center justify-end gap-2">
+                  <div
+                    className={cn(
+                      "flex items-center",
+                      admin ? "w-28 justify-start" : "justify-end",
+                    )}
                   >
-                    <option value="admin">Admin</option>
-                    <option value="member">Member</option>
-                  </NativeSelect>
-                ) : (
-                  <Badge
-                    variant={entry.role === "member" ? "outline" : "secondary"}
-                  >
-                    {entry.role === "owner"
-                      ? "Owner"
-                      : entry.role === "admin"
-                        ? "Admin"
-                        : "Member"}
-                  </Badge>
-                )}
-                {admin && entry.role !== "owner" ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="text-muted-foreground hover:text-destructive"
-                    disabled={remove.isPending}
-                    onClick={() => remove.mutate(entry.memberId)}
-                  >
-                    <UserMinus className="size-3.5" />
-                    Remove
-                  </Button>
-                ) : null}
+                    {admin && entry.role !== "owner" ? (
+                      <NativeSelect
+                        className="w-full"
+                        value={entry.role}
+                        onChange={(event) =>
+                          changeRole.mutate({
+                            memberId: entry.memberId,
+                            role: event.target.value as "admin" | "member",
+                          })
+                        }
+                        disabled={changeRole.isPending}
+                        aria-label={`Role for ${entry.name}`}
+                      >
+                        <option value="admin">Admin</option>
+                        <option value="member">Member</option>
+                      </NativeSelect>
+                    ) : (
+                      <Badge
+                        variant={
+                          entry.role === "member" ? "outline" : "secondary"
+                        }
+                      >
+                        {entry.role === "owner"
+                          ? "Owner"
+                          : entry.role === "admin"
+                            ? "Admin"
+                            : "Member"}
+                      </Badge>
+                    )}
+                  </div>
+                  {admin ? (
+                    <div className="flex w-24 items-center justify-end">
+                      {entry.role !== "owner" ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-muted-foreground hover:text-destructive"
+                          disabled={remove.isPending}
+                          onClick={() => remove.mutate(entry.memberId)}
+                        >
+                          <UserMinus className="size-3.5" />
+                          Remove
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>

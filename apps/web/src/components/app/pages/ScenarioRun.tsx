@@ -1393,7 +1393,7 @@ export function ScenarioRun() {
       returnTarget={getRunReturnTarget(attemptData.courseLocation)}
       guidance={guidanceProps}
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 pt-1 pb-3 [@media(max-height:500px)]:!p-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 pt-1 pb-3 [@media(max-height:500px)]:!pb-2">
             <div className="shrink-0 space-y-2 empty:hidden">
               {errorAlerts}
             </div>
@@ -1478,7 +1478,7 @@ export function ScenarioRun() {
                 >
                   {showSelectedVmPreparation ? (
                     <div
-                      className="m-auto w-full py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:py-6"
+                      className="m-auto w-full py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:px-1 sm:py-6"
                       data-run-sequence-frame
                     >
                       <ScenarioStepScreen
@@ -1597,8 +1597,14 @@ function RunWorkspaceHeader({
       <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-[0.9375rem] leading-snug font-semibold tracking-[-0.01em]">
         {title}
       </h1>
+      {/* Below sm the live status takes its own line so the guidance trigger
+          and run actions share one tidy row instead of wrapping raggedly. */}
       <div className="flex max-w-full flex-wrap items-center gap-2">
-        {status ? <div className="mr-1 min-w-0">{status}</div> : null}
+        {status ? (
+          <div className="mr-1 min-w-0 max-sm:mr-0 max-sm:basis-full">
+            {status}
+          </div>
+        ) : null}
         {mobileGuidance}
         {actions}
       </div>

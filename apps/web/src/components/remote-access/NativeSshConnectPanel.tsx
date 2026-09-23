@@ -526,7 +526,7 @@ function CopyableTextBlock(props: {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-3">
-        <label htmlFor={fieldId} className="text-sm font-medium">
+        <label htmlFor={fieldId} className="block text-sm font-medium">
           {props.label}
         </label>
         <Button

@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import {
   CheckCircle2,
@@ -82,6 +83,8 @@ export interface RunLearningPanelProps {
 export interface RunLearningPanelContentProps
   extends Omit<RunLearningPanelProps, "className"> {
   className?: string;
+  /** Rendered at the end of the pinned Checks header row (mobile sheet close). */
+  checksAction?: ReactNode;
 }
 
 interface HintGroup {
@@ -264,7 +267,7 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
               type="button"
               variant="outline"
               size="sm"
-              className="min-h-11 gap-2 px-3"
+              className="gap-2 px-3 pointer-coarse:min-h-11"
               aria-label={copy.accessibleLabel}
               data-run-learning-panel-trigger
               onClick={rememberOpener}
@@ -281,15 +284,17 @@ export function RunLearningPanelMobile(props: RunLearningPanelProps) {
           className="max-h-[min(78dvh,42rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t bg-card pb-[max(1rem,env(safe-area-inset-bottom))] !shadow-none motion-reduce:transition-none"
         >
           <LearningPanelA11yHeader />
-          <LearningPanelClose />
           <div
             data-run-learning-mobile-scroll
-            className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-card px-4"
+            className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain bg-card px-4 pt-4"
             role="region"
             aria-label="Lecture theory and hints content"
             tabIndex={0}
           >
-            <RunLearningPanelContent {...contentProps} />
+            <RunLearningPanelContent
+              {...contentProps}
+              checksAction={<LearningPanelClose />}
+            />
           </div>
         </SheetContent>
       </Sheet>
@@ -344,6 +349,7 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
           passedChecks={passedChecks}
           pending={props.checksPending === true}
           pinned
+          action={props.checksAction}
         />
       </div>
 
@@ -402,8 +408,8 @@ function LearningPanelClose() {
       render={
         <Button
           variant="ghost"
-          size="icon"
-          className="absolute top-3 right-3 z-30"
+          size="icon-sm"
+          className="-my-1.5 -mr-1.5"
           aria-label="Close lecture theory and hints"
         />
       }
@@ -548,6 +554,7 @@ function Checks(props: {
   passedChecks: number;
   pending?: boolean;
   pinned?: boolean;
+  action?: ReactNode;
 }) {
   const checks = getLearnerChecks(props.probes, props.objectives);
   const justVerified = useJustVerified(checks);
@@ -560,8 +567,11 @@ function Checks(props: {
           "flex max-h-[min(44dvh,24rem)] min-h-0 flex-col bg-card",
       )}
     >
-      <div className="flex shrink-0 items-center justify-between gap-3">
-        <p id={props.headingId} className="text-sm font-semibold text-foreground">
+      <div className="flex shrink-0 items-center gap-3">
+        <p
+          id={props.headingId}
+          className="min-w-0 flex-1 text-sm font-semibold text-foreground"
+        >
           Checks
         </p>
         {props.pending ? (
@@ -576,6 +586,7 @@ function Checks(props: {
             {props.passedChecks}/{checks.length} verified
           </span>
         )}
+        {props.action}
       </div>
       {checks.length ? (
         <span aria-hidden="true" className="mt-3 flex shrink-0 gap-1">
@@ -597,7 +608,7 @@ function Checks(props: {
           className={cn(
             "-mx-2 mt-3 space-y-0.5",
             props.pinned &&
-              "min-h-0 overflow-y-auto overscroll-contain border-b pr-1 pb-2",
+              "min-h-0 overflow-y-auto overscroll-contain border-b pb-2",
           )}
         >
           {checks.map((check) => {
@@ -622,7 +633,7 @@ function Checks(props: {
                   </span>
                   <span
                     className={cn(
-                      "pt-0.5 text-xs font-medium whitespace-nowrap transition-colors duration-300",
+                      "text-xs leading-6 font-medium whitespace-nowrap transition-colors duration-300",
                       CHECK_LABEL_TONES[check.status],
                     )}
                   >

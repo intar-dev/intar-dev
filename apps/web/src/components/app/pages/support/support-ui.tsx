@@ -112,7 +112,7 @@ export function TopicForm({
     >
       <fieldset disabled={save.isPending} className="min-w-0 space-y-4">
         <div className="space-y-2">
-          <label htmlFor={`${id}-title`} className="text-sm font-medium">
+          <label htmlFor={`${id}-title`} className="block text-sm font-medium">
             Title
           </label>
           <Input
@@ -125,7 +125,7 @@ export function TopicForm({
           />
         </div>
         <div className="flex flex-col items-start gap-2">
-          <label htmlFor={`${id}-type`} className="text-sm font-medium">
+          <label htmlFor={`${id}-type`} className="block text-sm font-medium">
             Type
           </label>
           <NativeSelect
@@ -143,7 +143,7 @@ export function TopicForm({
           </NativeSelect>
         </div>
         <div className="space-y-2">
-          <label htmlFor={`${id}-body`} className="text-sm font-medium">
+          <label htmlFor={`${id}-body`} className="block text-sm font-medium">
             Description
           </label>
           <Textarea
@@ -205,7 +205,7 @@ export function CommentForm({
     >
       <fieldset disabled={save.isPending} className="min-w-0 space-y-4">
         <div className="space-y-2">
-          <label htmlFor={id} className="text-sm font-medium">
+          <label htmlFor={id} className="block text-sm font-medium">
             {initial === undefined ? "Add a comment" : "Edit comment"}
           </label>
           <Textarea

@@ -712,7 +712,7 @@ function ServerRow({
             if (name.trim() && !busy) change.mutate({ name: name.trim() });
           }}
         >
-          <label className="space-y-2 text-sm font-medium">
+          <label className="flex flex-col gap-2 text-sm font-medium">
             <span className="block">New server name</span>
             <Input
               value={name}

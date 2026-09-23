@@ -237,6 +237,8 @@
   --replay-control-size: var(--control-compact);
   --page-inset: 1rem;
   --app-bar-h: 3.25rem;
+  /* Native <select> chevron, tinted like --muted-foreground. */
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23585c63' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --canvas: #f5f3f0;
   --background: #fdfdfc;
   --foreground: #191c22;
@@ -328,6 +330,7 @@
    contrast, softer lines, and the oxide accent reads warmer against it. */
 .dark {
   --canvas: #121418;
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a2a6ad' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --background: #181a1e;
   --foreground: #ebedf0;
   --faint-foreground: #8c9097;
@@ -477,7 +480,9 @@
   [data-run-sequence-step] {
     min-height: 5rem;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 1.5rem auto auto;
+    /* The copy row absorbs extra height so status labels share a baseline
+       across steps even when a title wraps to two lines. */
+    grid-template-rows: 1.5rem 1fr auto;
     gap: 0.25rem;
     padding: 0.5rem;
   }
@@ -497,6 +502,7 @@
   }
 
   [data-run-sequence-copy] {
+    display: block;
     grid-column: 1;
     grid-row: 2;
   }
@@ -514,6 +520,8 @@
   [data-run-sequence-status] {
     grid-column: 1;
     grid-row: 3;
+    align-self: end;
+    line-height: 1rem;
   }
 }
 

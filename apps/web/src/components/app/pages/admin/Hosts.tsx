@@ -332,7 +332,7 @@ export function AdminHosts() {
           <div className="space-y-2">
             <label
               htmlFor="remove-host-confirm"
-              className="text-sm font-medium"
+              className="block text-sm font-medium"
             >
               Type <span className="font-semibold">{removeTarget?.name}</span>{" "}
               to confirm

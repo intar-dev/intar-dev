@@ -56,8 +56,8 @@ export function OrganizationSignIn() {
         <ThemeToggle />
       </header>
       <main className="mx-auto flex w-full max-w-7xl flex-1 items-center justify-center px-[var(--page-inset)] py-12">
-        <Card className="w-full max-w-lg overflow-hidden border-brand-border shadow-xl shadow-black/5">
-          <CardHeader className="border-b bg-brand-subtle">
+        <Card className="w-full max-w-lg overflow-hidden border-brand-border pt-0 shadow-xl shadow-black/5">
+          <CardHeader className="gap-4 border-b bg-brand-subtle pt-(--card-spacing)">
             <span className="flex size-11 items-center justify-center rounded-xl bg-primary text-primary-foreground">
               <Building2 className="size-5" />
             </span>
@@ -88,7 +88,7 @@ export function OrganizationSignIn() {
               <div className="space-y-2">
                 <label
                   htmlFor="organization-slug"
-                  className="text-label"
+                  className="block text-label"
                 >
                   Organization slug
                 </label>

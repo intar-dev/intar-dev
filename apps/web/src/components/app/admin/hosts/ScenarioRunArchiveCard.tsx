@@ -76,7 +76,7 @@ export function ScenarioRunArchiveCard(props: {
 
   return (
     <article
-      className="@container/archive-run py-3 first:pt-0 last:pb-0"
+      className="group/archive-run @container/archive-run py-3 first:pt-0 last:pb-0"
       data-archive-run={props.run.id}
     >
       <div className="grid gap-4 xl:grid-cols-[minmax(16rem,0.85fr)_minmax(30rem,1.35fr)_auto] xl:items-center">
@@ -142,7 +142,7 @@ export function ScenarioRunArchiveCard(props: {
             type="button"
             size="sm"
             variant="outline"
-            className="min-h-11 sm:min-h-9"
+            className="min-h-9"
             aria-expanded={props.isExpanded}
             aria-controls={detailsId}
             onClick={props.onToggle}
@@ -162,7 +162,7 @@ export function ScenarioRunArchiveCard(props: {
                   type="button"
                   size="icon-sm"
                   variant="ghost"
-                  className="min-h-11 min-w-11 sm:min-h-9 sm:min-w-9"
+                  className="min-h-9 min-w-9"
                   aria-label={`Actions for ${scenarioName}`}
                 />
               }
@@ -190,7 +190,10 @@ export function ScenarioRunArchiveCard(props: {
       {props.isExpanded ? (
         <div
           id={detailsId}
-          className="mt-4 border-t bg-muted/20 p-4"
+          // Bleed the tinted panel to the card edges: cancel the Section body
+          // inset and the row's bottom padding (the card's own padding when
+          // this is the last row), then restore the same inner inset.
+          className="-mx-(--card-spacing) mt-4 border-t bg-muted/20 px-(--card-spacing) py-4 group-not-last/archive-run:-mb-3 group-last/archive-run:-mb-(--card-spacing)"
         >
           {props.isDetailLoading ? (
             <p role="status" className="text-sm text-muted-foreground">
@@ -280,7 +283,7 @@ function ArchiveRunDetails(props: {
               itemLabel="milestones"
             >
               {(visibleEvents) => (
-                <ol className="mt-3 divide-y border-y">
+                <ol className="mt-3 divide-y border-t">
                   {visibleEvents.map((event) => (
                     <li key={event.id} className="relative py-3 pl-5 text-sm">
                       <span className="absolute top-[1.15rem] left-0 size-2 rounded-full bg-primary" />
@@ -297,7 +300,7 @@ function ArchiveRunDetails(props: {
               )}
             </PaginatedCollection>
           ) : (
-            <p className="mt-3 border-y py-4 text-metadata">
+            <p className="mt-3 border-t pt-4 text-metadata">
               No run events recorded.
             </p>
           )}

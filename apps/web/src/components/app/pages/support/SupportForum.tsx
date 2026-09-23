@@ -66,7 +66,7 @@ export function SupportForum() {
           }}
         >
           <div className="min-w-0 flex-1 space-y-2">
-            <label htmlFor="topic-search" className="text-sm font-medium">
+            <label htmlFor="topic-search" className="block text-sm font-medium">
               Search topics
             </label>
             <Input
@@ -83,7 +83,7 @@ export function SupportForum() {
           </Button>
         </form>
         <div className="flex flex-col gap-2">
-          <label htmlFor="topic-type" className="text-sm font-medium">
+          <label htmlFor="topic-type" className="block text-sm font-medium">
             Type
           </label>
           <NativeSelect
@@ -102,7 +102,7 @@ export function SupportForum() {
           </NativeSelect>
         </div>
         <div className="flex flex-col gap-2">
-          <label htmlFor="topic-status" className="text-sm font-medium">
+          <label htmlFor="topic-status" className="block text-sm font-medium">
             Status
           </label>
           <NativeSelect
@@ -119,7 +119,7 @@ export function SupportForum() {
             <option value="solved">Solved</option>
           </NativeSelect>
         </div>
-        <label className="flex min-h-10 items-center gap-2 text-sm font-medium">
+        <label className="flex h-(--control-standard) items-center gap-2 text-sm font-medium">
           <input
             type="checkbox"
             className="size-4 accent-primary"

@@ -101,7 +101,7 @@ export function RunListItem({
             to="/runs/$runId"
             params={{ runId: run.runId }}
             aria-label={runListItemLinkLabel(run)}
-            className="inline-flex min-h-11 items-center text-sm font-semibold text-balance underline-offset-4 hover:text-brand-text hover:underline"
+            className="inline-flex items-center text-sm font-semibold text-balance underline-offset-4 hover:text-brand-text hover:underline pointer-coarse:min-h-11"
           >
             {run.title}
           </Link>

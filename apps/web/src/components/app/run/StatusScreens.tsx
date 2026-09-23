@@ -132,13 +132,16 @@ export function ScenarioStepScreen(props: {
                     index + 1
                   )}
                 </span>
+                {/* The copy box dissolves into the step grid so the detail can
+                    run under the status column instead of wrapping early. The
+                    short-landscape rail restores it as a block. */}
                 <div
-                  className="min-w-0 space-y-1"
+                  className="contents space-y-1"
                   data-run-sequence-copy
                 >
                   <p
                     className={cn(
-                      "font-medium leading-6",
+                      "col-start-2 min-w-0 font-medium leading-6",
                       step.state === "done"
                         ? "text-success"
                         : "text-foreground",
@@ -148,7 +151,7 @@ export function ScenarioStepScreen(props: {
                   </p>
                   {isCurrent || step.state === "failed" ? (
                     <p
-                      className="leading-6 text-muted-foreground"
+                      className="col-span-2 col-start-2 min-w-0 leading-6 text-muted-foreground"
                       data-run-sequence-detail
                     >
                       {step.detail}
@@ -158,7 +161,7 @@ export function ScenarioStepScreen(props: {
                 <span
                   data-run-sequence-status
                   className={cn(
-                    "pt-0.5 text-xs font-medium whitespace-nowrap",
+                    "col-start-3 row-start-1 text-xs leading-6 font-medium whitespace-nowrap",
                     step.state === "done"
                       ? "text-success"
                       : step.state === "active"

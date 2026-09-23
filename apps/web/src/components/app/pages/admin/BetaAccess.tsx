@@ -255,25 +255,25 @@ export function BetaAccessPanel() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Link</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead>Expires</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
+                    <TableHead className="first:pl-0 last:pr-0">Link</TableHead>
+                    <TableHead className="first:pl-0 last:pr-0">Created</TableHead>
+                    <TableHead className="first:pl-0 last:pr-0">Expires</TableHead>
+                    <TableHead className="first:pl-0 last:pr-0 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {activeInvites.map((invite) => (
                     <TableRow key={invite.id}>
-                      <TableCell className="font-mono text-xs">
+                      <TableCell className="first:pl-0 last:pr-0 font-mono text-xs">
                         {invite.codePrefix}…
                       </TableCell>
-                      <TableCell className="text-sm">
+                      <TableCell className="first:pl-0 last:pr-0 text-sm">
                         {formatRelativeTime(invite.createdAt)}
                       </TableCell>
-                      <TableCell className="text-sm">
+                      <TableCell className="first:pl-0 last:pr-0 text-sm">
                         {formatRelativeTime(invite.expiresAt)}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="first:pl-0 last:pr-0">
                         <InviteActions
                           invite={invite}
                           copying={copyingId === invite.id}
@@ -333,7 +333,7 @@ export function BetaAccessPanel() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="min-h-11 self-start text-muted-foreground hover:text-destructive sm:min-h-9 sm:self-auto"
+                  className="min-h-9 self-start text-muted-foreground hover:text-destructive max-sm:-ml-3 sm:self-auto"
                   disabled={actionPending}
                   onClick={() => setRevokeUser(user)}
                 >
@@ -448,27 +448,27 @@ function InviteHistory({ invites }: { invites: AdminInvite[] }) {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Link</TableHead>
-            <TableHead>Result</TableHead>
-            <TableHead>Completed</TableHead>
-            <TableHead>GitHub account</TableHead>
+            <TableHead className="first:pl-0 last:pr-0">Link</TableHead>
+            <TableHead className="first:pl-0 last:pr-0">Result</TableHead>
+            <TableHead className="first:pl-0 last:pr-0">Completed</TableHead>
+            <TableHead className="first:pl-0 last:pr-0">GitHub account</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {invites.map((invite) => (
             <TableRow key={invite.id}>
-              <TableCell className="font-mono text-xs">
+              <TableCell className="first:pl-0 last:pr-0 font-mono text-xs">
                 {invite.codePrefix}…
               </TableCell>
-              <TableCell>
+              <TableCell className="first:pl-0 last:pr-0">
                 <InviteStateBadge state={invite.state} />
               </TableCell>
-              <TableCell className="text-sm">
+              <TableCell className="first:pl-0 last:pr-0 text-sm">
                 {invite.completedAt
                   ? formatRelativeTime(invite.completedAt)
                   : "—"}
               </TableCell>
-              <TableCell className="font-mono text-xs">
+              <TableCell className="first:pl-0 last:pr-0 font-mono text-xs">
                 {invite.redeemerGithubUsername
                   ? `@${invite.redeemerGithubUsername}`
                   : "—"}

@@ -35,12 +35,13 @@ export function MetaLine({ items, className }: MetaLineProps) {
           key={index}
           className="inline-flex min-w-0 items-start gap-1.5"
         >
-          {index > 0 ? (
+          <span className="min-w-0 [overflow-wrap:anywhere]">{item}</span>
+          {/* Trailing, so a wrapped line never starts with a separator. */}
+          {index < visible.length - 1 ? (
             <span aria-hidden="true" className="text-border-strong">
               ·
             </span>
           ) : null}
-          <span className="min-w-0 [overflow-wrap:anywhere]">{item}</span>
         </span>
       ))}
     </p>

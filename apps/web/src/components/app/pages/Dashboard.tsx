@@ -990,7 +990,7 @@ export function Dashboard() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <label htmlFor="delete-run-confirm" className="text-code">
+            <label htmlFor="delete-run-confirm" className="block text-code">
               {deleteTarget?.runId}
             </label>
             <Input
@@ -1144,7 +1144,7 @@ function LedgerRow({
         <p className="text-support font-medium">{label}</p>
         <p className="text-metadata">{detail}</p>
       </div>
-      <div className="flex min-w-20 flex-col items-end gap-0.5 text-right sm:contents">
+      <div className="flex min-w-20 flex-col items-end gap-0.5 self-start text-right sm:contents">
         <p className="text-support font-semibold tabular-nums sm:col-start-3 sm:justify-self-end">
           {value}
         </p>

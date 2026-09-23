@@ -256,11 +256,14 @@ export function Organizations() {
                           <h2 className="text-card-title transition-colors group-hover:text-brand-text">
                             {organization.name}
                           </h2>
-                          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-metadata">
-                            <Users className="size-3.5" />
-                            {organization.memberCount} member
-                            {organization.memberCount === 1 ? "" : "s"} ·
-                            created {formatRelativeTime(organization.createdAt)}
+                          <p className="mt-1 flex items-start gap-1.5 text-metadata">
+                            <Users className="mt-0.5 size-3.5 shrink-0" />
+                            <span className="min-w-0">
+                              {organization.memberCount} member
+                              {organization.memberCount === 1 ? "" : "s"} ·
+                              created{" "}
+                              {formatRelativeTime(organization.createdAt)}
+                            </span>
                           </p>
                         </div>
                         <Badge

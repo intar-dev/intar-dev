@@ -180,8 +180,10 @@ function CourseOutlineItem({
             />
           )}
           <span>{current ? `Current · ${state.word}` : state.word}</span>
-          <span aria-hidden="true">·</span>
-          <LectureScenarioLabel scenarioId={lecture.scenarioId} />
+          <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+            <span aria-hidden="true">·</span>
+            <LectureScenarioLabel scenarioId={lecture.scenarioId} />
+          </span>
         </span>
       </span>
     </>

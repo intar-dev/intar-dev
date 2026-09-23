@@ -492,7 +492,12 @@ function CourseDetail({
       </div>
       {course.bodyMarkdown.trim() ? (
         <section className="border-y py-6 text-body leading-7">
-          <Markdown pageContent>{course.bodyMarkdown}</Markdown>
+          <Markdown
+            pageContent
+            className="text-body [&>*:first-child]:pt-0"
+          >
+            {course.bodyMarkdown}
+          </Markdown>
         </section>
       ) : null}
       <section aria-labelledby="course-lectures-heading" className="space-y-4">
@@ -819,7 +824,7 @@ function CourseFilters({
       <details className="group relative max-sm:w-full">
         <summary
           className={cn(
-            buttonVariants({ variant: "outline", size: "sm" }),
+            buttonVariants({ variant: "outline" }),
             "cursor-pointer list-none [&::-webkit-details-marker]:hidden",
           )}
         >
@@ -972,8 +977,8 @@ function CourseCatalogLoading({ showCapacity }: { showCapacity: boolean }) {
         <Skeleton className="h-5 w-96 max-w-full" />
         {showCapacity ? (
           <div className="grid gap-3 sm:grid-cols-2" aria-hidden="true">
-            <Skeleton className="h-16 w-full" />
-            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-24 w-full rounded-xl" />
+            <Skeleton className="h-24 w-full rounded-xl" />
           </div>
         ) : null}
         <div className="divide-y overflow-hidden rounded-xl border bg-card">
