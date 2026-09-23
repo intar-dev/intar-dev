@@ -625,7 +625,8 @@
 }
 
 /* Field-manual graph paper: a faint dot grid that fades out from one focal
-   point. Texture, not glow; it never sits behind reading text. */
+   point (override --dot-grid-mask to move it). Texture, not glow; it never
+   sits behind reading text. */
 @utility dot-grid {
   background-image: radial-gradient(
     circle at 1px 1px,
@@ -633,10 +634,9 @@
     transparent 0
   );
   background-size: 24px 24px;
-  mask-image: radial-gradient(
-    ellipse 52% 72% at 74% 52%,
-    #000 18%,
-    transparent 72%
+  mask-image: var(
+    --dot-grid-mask,
+    radial-gradient(ellipse 52% 72% at 74% 52%, #000 18%, transparent 72%)
   );
 }
 
@@ -763,6 +763,29 @@
   [data-slot="select-trigger"],
   [data-slot="native-select"] {
     font-size: 1rem !important;
+  }
+}
+
+/* Landing: the run workspace leans back under the hero and settles flat as it
+   scrolls into view. Scroll-driven where supported; still everywhere else and
+   under reduced motion. */
+@keyframes intar-settle {
+  from {
+    transform: perspective(1800px) rotateX(12deg) scale(0.95);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .landing-settle {
+      transform-origin: 50% 0;
+      animation: intar-settle linear both;
+      animation-timeline: view();
+      animation-range: entry 10% cover 50%;
+    }
   }
 }
 
