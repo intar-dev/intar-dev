@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { accessAllowlist, agentHosts, member } from "@/db/schema";
+import { agentHosts, member, user } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
+import { activeAccountCondition } from "@/lib/account-access";
 import { auth } from "@/lib/auth";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
 const ONLINE_HEARTBEAT_TTL_MS = 90_000;
@@ -47,8 +47,6 @@ export interface UserContext {
   userId: string;
   /** The current Better Auth session for short-lived DO listeners. */
   sessionId: string;
-  /** Exact active admission observed while authenticating this request. */
-  betaAdmission: BetaAdmissionEpoch;
   role: string | null;
   isAdmin: boolean;
   organizationIds: string[];
@@ -140,26 +138,15 @@ export async function requireUserContext(
     };
   }
 
-  // Read the admission and its memberships in one database round trip. The
-  // active admission is the root: membership cannot authorize a blocked user.
-  // A left join also admits active users who have no organization membership.
+  // Read the account state and its memberships in one database round trip.
+  // An active account is the root: membership cannot authorize a revoked or
+  // deleted user. A left join also admits users without any membership.
   const memberships = await drizzle(env.DB)
-    .select({
-      sourceInviteId: accessAllowlist.sourceInviteId,
-      sourceLeaseId: accessAllowlist.sourceLeaseId,
-      grantedAt: accessAllowlist.grantedAt,
-      organizationId: member.organizationId,
-    })
-    .from(accessAllowlist)
-    .leftJoin(member, eq(member.userId, accessAllowlist.userId))
-    .where(
-      and(
-        eq(accessAllowlist.userId, sessionUser.id),
-        eq(accessAllowlist.state, "active"),
-      ),
-    );
-  const betaAccess = memberships[0];
-  if (!betaAccess) {
+    .select({ organizationId: member.organizationId })
+    .from(user)
+    .leftJoin(member, eq(member.userId, user.id))
+    .where(and(eq(user.id, sessionUser.id), activeAccountCondition()));
+  if (memberships.length === 0) {
     return {
       ok: false,
       response: jsonResponse({ error: "access revoked" }, { status: 403 }),
@@ -182,11 +169,6 @@ export async function requireUserContext(
     context: {
       userId: sessionUser.id,
       sessionId,
-      betaAdmission: {
-        sourceInviteId: betaAccess.sourceInviteId,
-        sourceLeaseId: betaAccess.sourceLeaseId,
-        grantedAt: betaAccess.grantedAt,
-      },
       role,
       isAdmin: isAdminRole(role),
       organizationIds,

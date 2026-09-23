@@ -1,5 +1,4 @@
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import type { AdmissionContentAccess } from "@/lib/scenario-runs/admission-guards";
 import type { RequiredScenarioImage } from "@/lib/scenario-host-readiness";
 import { user } from "./core";
@@ -13,7 +12,6 @@ export const personalImagePreparations = sqliteTable("personal_image_preparation
   credentialGeneration: integer("credential_generation").notNull(),
   requestKey: text("request_key").notNull(),
   accessJson: jsonText<AdmissionContentAccess>("access_json").notNull(),
-  betaJson: jsonText<BetaAdmissionEpoch>("beta_json").notNull(),
   imagesJson: jsonText<RequiredScenarioImage[]>("images_json").notNull(),
   expiresAt: integer("expires_at").notNull(),
 });

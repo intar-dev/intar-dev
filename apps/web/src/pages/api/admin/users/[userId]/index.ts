@@ -5,13 +5,9 @@ import {
   accessInviteJson,
   accessInviteNoStore,
 } from "@/lib/access-invite-http";
+import { ensureAccessRevoked } from "@/lib/access-revocation";
 import { requireAdminUserContext } from "@/lib/agent-bridge";
-import { appError, AppError } from "@/lib/app-error";
-import {
-  cleanupBetaRevocation,
-  getBetaRevocationStatus,
-} from "@/lib/beta-access-revocation";
-import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
+import { appError } from "@/lib/app-error";
 import {
   assertPlatformUserDeletionAllowed,
   finalizePlatformUserDeletion,
@@ -33,32 +29,13 @@ export const DELETE: APIRoute = async ({ request, params }) => {
       targetUserId,
       actorUserId,
     });
-
-    let revocation = await getBetaRevocationStatus(targetUserId);
-    if (!revocation) {
-      try {
-        const created = await revokeBetaUser({
-          d1: env.DB,
-          userId: targetUserId,
-          actorUserId,
-          reason: "admin_deleted",
-        });
-        revocation = { revocationId: created.revocationId, cleanup: "pending" };
-      } catch (error) {
-        if (!(error instanceof AppError) || error.code !== "beta_user_not_active") {
-          throw error;
-        }
-        revocation = await getBetaRevocationStatus(targetUserId);
-      }
-    }
-    if (revocation && revocation.cleanup !== "completed") {
-      await cleanupBetaRevocation({
-        userId: targetUserId,
-        revocationId: revocation.revocationId,
-        actorUserId,
-      });
-    }
-
+    // Deletion revokes first, so sessions, runs and hosts are cleaned up
+    // before the identity is anonymized.
+    await ensureAccessRevoked({
+      userId: targetUserId,
+      actorUserId,
+      reason: "admin_deleted",
+    });
     await finalizePlatformUserDeletion({
       d1: env.DB,
       targetUserId,

@@ -13,18 +13,11 @@ import {
   agentHosts,
   user,
 } from "@/db/schema";
-import {
-  acquireBetaRevocationCleanup,
-  completeBetaRevocationCleanup,
-  revokeBetaUser,
-} from "@/lib/beta-access-revocation-store";
-import { createBetaInvite, redeemBetaInvite } from "@/lib/beta-invites";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  FIXTURE_BETA_ADMIN_ID,
-  FIXTURE_INVITE_ENCRYPTION_KEY,
-  grantFixtureBetaAccess,
-} from "@/test/beta-access-fixtures";
+  ensureFixtureMember,
+  revokeFixtureAccount,
+} from "@/test/account-fixtures";
 
 const STRONG_SECRET = "test-agent-jwt-secret-0123456789abcdef";
 
@@ -100,9 +93,6 @@ describe("agent JWT secret validation", () => {
         hostId,
         userId: "user-valid-secret",
         role: "agent",
-        betaSourceInviteId: expect.any(String),
-        betaSourceLeaseId: expect.any(String),
-        betaAdmissionGrantedAt: expect.any(Number),
       },
     });
   });
@@ -112,7 +102,6 @@ describe("agent JWT secret validation", () => {
     await seedBootstrapToken(hostId, "organization-secret");
     await env.DB.prepare("INSERT INTO organization(id,name,slug,created_at) VALUES('org-1','Org','org-1',1)").run();
     await env.DB.prepare("UPDATE agent_hosts SET scope='organization', organization_id='org-1' WHERE id=?").bind(hostId).run();
-    await env.DB.prepare("DELETE FROM access_allowlist WHERE user_id='user-valid-secret'").run();
     await env.DB.prepare("UPDATE user SET banned=1, deleted_at=1 WHERE id='user-valid-secret'").run();
     const runtimeEnv = agentEnv(STRONG_SECRET);
     const response = await handleAgentBootstrap(bootstrapRequest(hostId, "organization-secret"), runtimeEnv);
@@ -123,7 +112,7 @@ describe("agent JWT secret validation", () => {
       headers: { authorization: `Bearer ${body.accessToken}` },
     }), runtimeEnv, hostId);
     expect(await verify()).toMatchObject({ ok: true, agent: { scope: "organization", organizationId: "org-1",
-      userId: "user-valid-secret", betaSourceInviteId: null, betaSourceLeaseId: null, betaAdmissionGrantedAt: null } });
+      userId: "user-valid-secret" } });
     await env.DB.prepare("INSERT INTO organization(id,name,slug,created_at) VALUES('org-2','Other','org-2',1)").run();
     await env.DB.prepare("UPDATE agent_hosts SET organization_id='org-2' WHERE id=?").bind(hostId).run();
     expect((await verify()).ok).toBe(false);
@@ -152,9 +141,9 @@ describe("agent JWT secret validation", () => {
     expect(verified.ok).toBe(false);
   });
 
-  it("rejects an earlier personal-host JWT after equal-timestamp readmission", async () => {
-    const hostId = "host-stale-beta-admission";
-    const bootstrapToken = "stale-admission-bootstrap-token";
+  it("refuses a personal host once its owner's account is revoked", async () => {
+    const hostId = "host-revoked-owner";
+    const bootstrapToken = "revoked-owner-bootstrap-token";
     await seedBootstrapToken(hostId, bootstrapToken);
     const runtimeEnv = agentEnv(STRONG_SECRET);
     const bootstrap = await handleAgentBootstrap(
@@ -162,84 +151,30 @@ describe("agent JWT secret validation", () => {
       runtimeEnv,
     );
     expect(bootstrap.status).toBe(200);
-    const oldJwt = ((await bootstrap.json()) as { accessToken: string })
-      .accessToken;
+    const { accessToken } = (await bootstrap.json()) as { accessToken: string };
 
-    const oldAdmission = await env.DB.prepare(
-      `SELECT source_invite_id, source_lease_id, granted_at
-       FROM access_allowlist WHERE user_id = 'user-valid-secret'`,
-    ).first<{
-      source_invite_id: string;
-      source_lease_id: string;
-      granted_at: number;
-    }>();
-    expect(oldAdmission).not.toBeNull();
-    const equalGrantedAt = oldAdmission!.granted_at;
-    const base = equalGrantedAt - 10;
-    const revoked = await revokeBetaUser({
-      d1: env.DB,
-      userId: "user-valid-secret",
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "stale_agent_jwt_test",
-      now: base,
-    });
-    const cleanup = await acquireBetaRevocationCleanup({
-      d1: env.DB,
-      userId: "user-valid-secret",
-      revocationId: revoked.revocationId,
-      now: base + 1,
-    });
-    expect(cleanup.status).toBe("acquired");
-    await completeBetaRevocationCleanup({
-      d1: env.DB,
-      userId: "user-valid-secret",
-      revocationId: revoked.revocationId,
-      cleanupAttemptId: cleanup.cleanupAttemptId,
-      now: base + 2,
-    });
-    const freshInvite = await createBetaInvite({
-      d1: env.DB,
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
-      now: base + 3,
-    });
-    const freshAttemptId = "fresh-agent-admission-attempt";
-    await redeemBetaInvite({
-      d1: env.DB,
-      inviteId: freshInvite.id,
-      attemptId: freshAttemptId,
-      userId: "user-valid-secret",
-      githubAccountId: "test-github-account-user-valid-secret",
-      githubUsername: "user-valid-secret",
-      now: equalGrantedAt,
-    });
-    const freshAdmission = await env.DB.prepare(
-      `SELECT source_invite_id, source_lease_id, granted_at
-       FROM access_allowlist WHERE user_id = 'user-valid-secret'`,
-    ).first<{
-      source_invite_id: string;
-      source_lease_id: string;
-      granted_at: number;
-    }>();
-    expect(freshAdmission).toEqual({
-      source_invite_id: freshInvite.id,
-      source_lease_id: freshAttemptId,
-      granted_at: equalGrantedAt,
-    });
-    expect(freshAdmission!.granted_at).toBe(oldAdmission!.granted_at);
+    await revokeFixtureAccount({ d1: env.DB, userId: "user-valid-secret" });
 
+    const refused = await handleAgentBootstrap(
+      bootstrapRequest(hostId, bootstrapToken),
+      runtimeEnv,
+    );
+    expect(refused.status).toBe(403);
+    await expect(refused.json()).resolves.toEqual({
+      error: "account access is revoked",
+    });
     const verified = await requireVerifiedAgentRequest(
       new Request("http://localhost/agent/connect", {
-        headers: { authorization: `Bearer ${oldJwt}` },
+        headers: { authorization: `Bearer ${accessToken}` },
       }),
       runtimeEnv,
       hostId,
     );
     expect(verified.ok).toBe(false);
     if (verified.ok) return;
-    expect(verified.response.status).toBe(401);
+    expect(verified.response.status).toBe(403);
     await expect(verified.response.json()).resolves.toEqual({
-      error: "Server credentials are no longer valid",
+      error: "account access is revoked",
     });
   });
 });
@@ -272,11 +207,10 @@ async function seedBootstrapToken(
     name: "Agent Owner",
     email: "agent-owner@example.com",
   });
-  await grantFixtureBetaAccess({
+  await ensureFixtureMember({
     d1: env.DB,
     userId: "user-valid-secret",
     githubAccountId: "test-github-account-user-valid-secret",
-    githubUsername: "user-valid-secret",
   });
   await db.insert(agentHosts).values({
     id: hostId,

@@ -6,7 +6,6 @@
   "main": "src/worker.ts",
   "secrets": {
     "required": [
-      "ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1",
       "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET",
       "STARGATE_EGRESS_IPV4_CIDRS",
     ],

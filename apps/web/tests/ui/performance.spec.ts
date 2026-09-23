@@ -95,9 +95,7 @@ test("courses share one bootstrap request and the sidebar uses its bounded summa
 
   expect(requestCount(ui.server.requests, "GET /api/app/bootstrap")).toBe(1);
   expect(ui.server.requests).not.toContain("GET /api/auth/get-session");
-  expect(ui.server.requests).not.toContain(
-    "GET /api/access-invites/current",
-  );
+  expect(ui.server.requests).not.toContain("GET /api/signups");
   await expect(
     page.getByRole("link", { name: /My runs.*1 ongoing run/i }),
   ).toBeVisible();

@@ -8,8 +8,9 @@ import { loadOrCreateHostDesiredState } from "./desired-state-store";
 import * as desiredStateStore from "./desired-state-store";
 import { updateRunState } from "./scenario-runs/storage";
 import { runtimeExecutions, runtimeVms, user } from "@/db/schema";
+import { ensureFixtureMember } from "@/test/account-fixtures";
 import {
-  desiredRunningVm, drizzle, env, eq, grantActiveBetaAccessForHostFixture, hostDesiredState, mutateStoredHostDesiredState,
+  desiredRunningVm, drizzle, env, eq, hostDesiredState, mutateStoredHostDesiredState,
   resetHostRuntimeTestDatabase, scenarioRuns, seedHost, seedRun, upsertDesiredVm,
 } from "@/control-plane/host-runtime-do/test-fixtures";
 
@@ -175,7 +176,7 @@ it("cleans one owner's run without changing another owner's run on the same plat
   const db = drizzle(env.DB);
   const now = Date.now();
   await db.insert(user).values({ id: "user-2", name: "Other owner", email: "other@example.test" });
-  await grantActiveBetaAccessForHostFixture("user-2", now);
+  await ensureFixtureMember({ d1: env.DB, userId: "user-2", githubAccountId: "host-runtime-github-user-2", now });
   const [execution] = await db.select().from(runtimeExecutions).where(eq(runtimeExecutions.id, "run-1"));
   const [vm] = await db.select().from(runtimeVms).where(eq(runtimeVms.executionId, "run-1"));
   if (!execution || !vm) throw new Error("runtime fixture is missing");
@@ -225,7 +226,6 @@ it("keeps shared organization work on its assigned host after placement and crea
   expect(await loadScenarioTerminalRouteGeneration({ runId: "run-1", vmId: "vm-1" })).toMatchObject({ hostId: "host-1", userId: "user-1" });
   const runVm = await resolveRunVm({ db: drizzle(env.DB), runId: "run-1", vmName: "runtime-1", agent: {
     scope: "organization", organizationId: "org", credentialGeneration: 1, hostId: "host-1", userId: "creator", role: "agent",
-    betaSourceInviteId: null, betaSourceLeaseId: null, betaAdmissionGrantedAt: null,
   } });
   expect(runVm).toMatchObject({ userId: "user-1", hostId: "host-1" });
   const now = Date.now();

@@ -5,11 +5,12 @@ export const APP_BOOTSTRAP_STALE_TIME_MS = 30_000;
 
 export const appBootstrapQueryKey = ["app", "bootstrap"] as const;
 
-export type AppBetaAccessState = "active" | "restricted";
+/** Whether the signed-in account still has access. */
+export type AppAccessState = "active" | "inactive";
 
 export interface AppBootstrapData {
   session: AppSessionData | null;
-  betaAccess: AppBetaAccessState;
+  access: AppAccessState;
 }
 
 export const appQueryClient = new QueryClient();
@@ -38,14 +39,13 @@ export async function getClientAppBootstrap(): Promise<AppBootstrapData> {
 
 export function parseAppBootstrapData(value: unknown): AppBootstrapData {
   if (!isRecord(value)) {
-    return { session: null, betaAccess: "restricted" };
+    return { session: null, access: "inactive" };
   }
 
   const session = isAppSessionData(value.session) ? value.session : null;
   return {
     session,
-    betaAccess:
-      session && value.betaAccess === "active" ? "active" : "restricted",
+    access: session && value.access === "active" ? "active" : "inactive",
   };
 }
 

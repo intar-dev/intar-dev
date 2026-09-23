@@ -6,7 +6,7 @@ export type OrganizationDetailTab =
   | "servers"
   | "settings";
 
-export type AdminPeopleTab = "beta" | "users" | "organizations";
+export type AdminPeopleTab = "users" | "signups" | "organizations";
 
 export interface OrganizationDetailSearch {
   tab?: OrganizationDetailTab;
@@ -27,8 +27,8 @@ export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
 ];
 
 export const ADMIN_PEOPLE_TABS: readonly AdminPeopleTab[] = [
-  "beta",
   "users",
+  "signups",
   "organizations",
 ];
 
@@ -57,7 +57,8 @@ export function validateOrganizationDetailSearch(
 export function validateAdminPeopleSearch(
   search: Record<string, unknown>,
 ): AdminPeopleSearch {
-  return isAdminPeopleTab(search.tab) && search.tab !== "beta"
+  // Users is the default and stays out of the URL. Removed tabs fall back to it.
+  return isAdminPeopleTab(search.tab) && search.tab !== "users"
     ? { tab: search.tab }
     : {};
 }

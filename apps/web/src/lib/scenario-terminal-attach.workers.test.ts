@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => {
     stageStargateTerminalTarget: vi.fn(),
     activateStargateTerminalTarget: vi.fn(),
     loadRuntimeVmAccessKey: vi.fn(),
-    getBetaAccess: vi.fn(),
+    isActiveAccount: vi.fn(),
   };
 });
 
@@ -38,10 +38,11 @@ vi.mock("@/lib/stargate", () => ({
 vi.mock("@/lib/runtime-vm-state", () => ({
   loadRuntimeVmAccessKey: mocks.loadRuntimeVmAccessKey,
 }));
-// The admission fence reads the epoch before and after the attach, so the
+// The account fence reads the account before and after the attach, so the
 // post-read is part of the fail-closed path under test.
-vi.mock("@/lib/allowlist", () => ({
-  getBetaAccess: mocks.getBetaAccess,
+vi.mock("@/lib/account-access", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/account-access")>()),
+  isActiveAccount: mocks.isActiveAccount,
 }));
 
 import {
@@ -72,16 +73,7 @@ describe("scenario terminal attach", () => {
       attachmentId: "attachment-1",
     });
     mocks.activateStargateTerminalTarget.mockResolvedValue(undefined);
-    mocks.getBetaAccess.mockResolvedValue({
-      userId: "user-1",
-      state: "active",
-      githubAccountId: "github-1",
-      githubUsername: "user-1",
-      revocationId: null,
-      sourceInviteId: "invite-1",
-      sourceLeaseId: "lease-1",
-      grantedAt: NOW,
-    });
+    mocks.isActiveAccount.mockResolvedValue(true);
     mocks.loadRuntimeVmAccessKey.mockResolvedValue({
       executionId: RUN_ID,
       runtimeVmId: "runtime-vm-1",
@@ -274,11 +266,11 @@ describe("scenario terminal attach", () => {
     expect(mocks.activateStargateTerminalTarget).not.toHaveBeenCalled();
   });
 
-  it("keeps the shell inert when the post-stage epoch read fails", async () => {
+  it("keeps the shell inert when the post-stage account read fails", async () => {
     // The stage landed, then the confirmation read itself throws. The fence
     // revokes, and activation must never run: no PTY, no woken socket.
-    mocks.getBetaAccess
-      .mockResolvedValueOnce(activeAdmission())
+    mocks.isActiveAccount
+      .mockResolvedValueOnce(true)
       .mockRejectedValueOnce(new Error("D1 read unavailable"));
 
     await expect(attachRequest()).rejects.toThrow(/D1 read unavailable/);
@@ -292,17 +284,17 @@ describe("scenario terminal attach", () => {
     expect(await attachedAt()).toBeNull();
   });
 
-  it("does not activate until the post-stage epoch read resolves", async () => {
+  it("does not activate until the post-stage account read resolves", async () => {
     // Hold the confirmation read open and prove activation can not start while
     // the fence is still deciding. This is the ordering the two phases exist
     // for: the shell is gated on the post-fence, exactly like the old flow,
     // where the route URL was returned only after it.
-    let releasePost!: (value: ReturnType<typeof activeAdmission>) => void;
-    const postGate = new Promise<ReturnType<typeof activeAdmission>>((resolve) => {
+    let releasePost!: (value: boolean) => void;
+    const postGate = new Promise<boolean>((resolve) => {
       releasePost = resolve;
     });
-    mocks.getBetaAccess
-      .mockResolvedValueOnce(activeAdmission())
+    mocks.isActiveAccount
+      .mockResolvedValueOnce(true)
       .mockReturnValueOnce(postGate);
 
     const pending = attachRequest();
@@ -312,16 +304,16 @@ describe("scenario terminal attach", () => {
     expect(mocks.activateStargateTerminalTarget).not.toHaveBeenCalled();
     expect(await attachedAt()).toBeNull();
 
-    releasePost(activeAdmission());
+    releasePost(true);
     await expect(pending).resolves.toBe("attached");
     expect(mocks.activateStargateTerminalTarget).toHaveBeenCalledTimes(1);
     expect(await attachedAt()).toBe(NOW);
   });
 
-  it("revokes the generation route and never activates when the epoch changes", async () => {
-    mocks.getBetaAccess
-      .mockResolvedValueOnce(activeAdmission())
-      .mockResolvedValueOnce({ ...activeAdmission(), state: "blocked" });
+  it("revokes the generation route and never activates when the account is revoked", async () => {
+    mocks.isActiveAccount
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
 
     await expect(attachRequest()).rejects.toMatchObject({ status: 403 });
 
@@ -366,19 +358,6 @@ describe("scenario terminal attach", () => {
     expect(mocks.activateStargateTerminalTarget).toHaveBeenCalledTimes(1);
   });
 });
-
-function activeAdmission() {
-  return {
-    userId: "user-1",
-    state: "active",
-    githubAccountId: "github-1",
-    githubUsername: "user-1",
-    revocationId: null,
-    sourceInviteId: "invite-1",
-    sourceLeaseId: "lease-1",
-    grantedAt: NOW,
-  };
-}
 
 function attachInput() {
   return {

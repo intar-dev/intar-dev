@@ -73,7 +73,7 @@ const organizationSignInRoute = createRoute({
   head: () =>
     routeHead(
       "Organization sign-in",
-      "Use an existing linked OIDC identity or connect it from an active GitHub beta session.",
+      "Use an existing linked OIDC identity or connect it from a signed-in GitHub account.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/OrganizationSignIn"),
@@ -87,7 +87,7 @@ const organizationDirectSignInRoute = createRoute({
   head: () =>
     routeHead(
       "Organization sign-in",
-      "Use an existing linked OIDC identity or connect it from an active GitHub beta session.",
+      "Use an existing linked OIDC identity or connect it from a signed-in GitHub account.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/OrganizationSignIn"),
@@ -402,7 +402,7 @@ const adminPeopleRoute = createRoute({
   head: () =>
     routeHead(
       "People and access",
-      "Manage beta invite links, beta users, roles, and platform organizations.",
+      "Manage users, access, the sign-up limit, and platform organizations.",
     ),
   beforeLoad: requireAdminRoute,
   component: lazyRouteComponent(
@@ -594,15 +594,12 @@ async function requireAdminRoute() {
 }
 
 async function requireSignedInRoute() {
-  const { betaAccess, session } = await loadAppBootstrap();
+  const { access, session } = await loadAppBootstrap();
   if (!session?.user) {
     throw redirect({ to: "/" });
   }
-  if (betaAccess !== "active") {
-    if (typeof window !== "undefined") {
-      window.location.replace("/join");
-    }
-    throw redirect({ to: "/" });
+  if (access !== "active") {
+    throw redirect({ to: "/", search: { error: "access_revoked" } });
   }
 }
 

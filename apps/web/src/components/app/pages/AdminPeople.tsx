@@ -1,7 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
+import {
+  Ban,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -34,18 +41,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { AdminPeopleTab } from "./tab-search";
-import { BetaAccessPanel } from "./admin/BetaAccess";
+import { SignupsPanel } from "./admin/SignupsPanel";
 
 export function AdminPeople() {
   const routeSearch = useSearch({ from: "/app/admin/people" });
   const navigate = useNavigate();
-  const activeTab = routeSearch.tab ?? "beta";
+  const activeTab = routeSearch.tab ?? "users";
 
   const setTab = (tab: AdminPeopleTab) => {
     void navigate({
       to: ".",
       replace: true,
-      search: tab === "beta" ? {} : { tab },
+      search: tab === "users" ? {} : { tab },
     });
   };
 
@@ -58,16 +65,16 @@ export function AdminPeople() {
       >
         <div className="overflow-x-auto border-b">
           <TabsList variant="line" className="min-w-max pb-1">
-            <TabsTrigger value="beta">Beta access</TabsTrigger>
             <TabsTrigger value="users">Users</TabsTrigger>
+            <TabsTrigger value="signups">Sign-ups</TabsTrigger>
             <TabsTrigger value="organizations">Organizations</TabsTrigger>
           </TabsList>
         </div>
-        <TabsContent value="beta">
-          <BetaAccessPanel />
-        </TabsContent>
         <TabsContent value="users">
           <UsersPanel />
+        </TabsContent>
+        <TabsContent value="signups">
+          <SignupsPanel />
         </TabsContent>
         <TabsContent value="organizations">
           <OrganizationsPanel />
@@ -84,18 +91,24 @@ interface AdminListedUser {
   image: string | null;
   username: string | null;
   role: string | null;
-  banned: boolean | null;
+  access: "active" | "revoked";
+  revokedAt: number | null;
+  cleanupCompletedAt: number | null;
   createdAt: string;
 }
+
+type UserConfirmation = {
+  entry: AdminListedUser;
+  kind: "role" | "revoke" | "delete";
+  nextRole?: "user" | "admin";
+};
 
 function UsersPanel() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [confirmation, setConfirmation] = useState<{
-    entry: AdminListedUser;
-    kind: "role" | "delete";
-    nextRole?: "user" | "admin";
-  } | null>(null);
+  const [confirmation, setConfirmation] = useState<UserConfirmation | null>(
+    null,
+  );
 
   const users = useQuery({
     queryKey: ["admin", "users"],
@@ -106,18 +119,33 @@ function UsersPanel() {
     staleTime: 5_000,
   });
 
+  // Revoking and deleting both free a sign-up spot. Refresh after failures
+  // too: access may be revoked even when its cleanup did not finish.
+  const refreshAccess = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["admin", "users"] }),
+      queryClient.invalidateQueries({ queryKey: ["admin", "signups"] }),
+    ]);
+
   const deleteUser = useMutation({
     mutationFn: (userId: string) =>
       adminJson<void>(`/api/admin/users/${encodeURIComponent(userId)}`, {
         method: "DELETE",
       }),
-    onSuccess: async () => {
-      setConfirmation(null);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["admin", "users"] }),
-        queryClient.invalidateQueries({ queryKey: ["admin", "beta-access"] }),
-      ]);
-    },
+    onSuccess: () => setConfirmation(null),
+    onSettled: refreshAccess,
+  });
+
+  const revokeAccess = useMutation({
+    mutationFn: (userId: string) => revokeUserAccess(userId),
+    onSuccess: () => setConfirmation(null),
+    onSettled: refreshAccess,
+  });
+
+  // The revoke endpoint also finishes a cleanup that did not complete.
+  const finishCleanup = useMutation({
+    mutationFn: (userId: string) => revokeUserAccess(userId),
+    onSettled: refreshAccess,
   });
 
   const setRole = useMutation({
@@ -161,14 +189,39 @@ function UsersPanel() {
         ].some((value) => value.toLowerCase().includes(needle)),
       )
     : entries;
-  const actionError = setRole.error;
+  const busy =
+    setRole.isPending ||
+    deleteUser.isPending ||
+    revokeAccess.isPending ||
+    finishCleanup.isPending;
+  const dialogPending =
+    setRole.isPending || deleteUser.isPending || revokeAccess.isPending;
+  const dialogError =
+    confirmation?.kind === "delete"
+      ? deleteUser.error
+      : confirmation?.kind === "revoke"
+        ? revokeAccess.error
+        : null;
+  const actionError = setRole.error ?? finishCleanup.error;
+  const openConfirmation = (next: UserConfirmation) => {
+    setRole.reset();
+    deleteUser.reset();
+    revokeAccess.reset();
+    finishCleanup.reset();
+    setConfirmation(next);
+  };
+  const closeConfirmation = () => {
+    setConfirmation(null);
+    deleteUser.reset();
+    revokeAccess.reset();
+  };
 
   return (
     <>
       <Section
         density="compact"
         title="Users"
-        description="Manage roles or permanently delete sign-in identities. Beta access is controlled separately. The last active administrator is protected."
+        description="Manage roles, revoke access, or permanently delete accounts. The last active administrator is protected."
         bodyClassName="space-y-4"
       >
         <FilterBar
@@ -190,6 +243,12 @@ function UsersPanel() {
               <div className="divide-y">
                 {visibleUsers.map((entry) => {
                   const isAdmin = entry.role === "admin";
+                  const revoked = entry.access === "revoked";
+                  const cleanupUnfinished =
+                    revoked && entry.cleanupCompletedAt === null;
+                  const finishing =
+                    finishCleanup.isPending &&
+                    finishCleanup.variables === entry.id;
                   return (
                     <div
                       key={entry.id}
@@ -221,17 +280,21 @@ function UsersPanel() {
                             ) : (
                               <Badge variant="outline">User</Badge>
                             )}
-                            {entry.banned ? (
-                              <Badge variant="destructive">Banned</Badge>
+                            {revoked ? (
+                              <Badge variant="destructive">Access revoked</Badge>
                             ) : (
                               <Badge variant="success">Active</Badge>
                             )}
                           </div>
-                          <p className="truncate text-caption">
+                          <p className="text-caption tabular-nums [overflow-wrap:anywhere]">
                             {entry.email} · added{" "}
                             {formatRelativeTime(
                               new Date(entry.createdAt).getTime(),
                             )}
+                            {revoked && entry.revokedAt !== null
+                              ? ` · revoked ${formatRelativeTime(entry.revokedAt)}`
+                              : null}
+                            {cleanupUnfinished ? " · cleanup unfinished" : null}
                           </p>
                           <p className="font-mono text-xs text-muted-foreground">
                             Flag targeting key: {entry.id}
@@ -239,35 +302,63 @@ function UsersPanel() {
                         </div>
                       </div>
 
-                      <div className="flex shrink-0 items-center gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="min-h-11 sm:min-h-9"
-                          disabled={setRole.isPending || deleteUser.isPending}
-                          onClick={() =>
-                            setConfirmation({
-                              entry,
-                              kind: "role",
-                              nextRole: isAdmin ? "user" : "admin",
-                            })
-                          }
-                        >
-                          <ShieldCheck className="size-3.5" />
-                          {isAdmin ? "Make user" : "Make admin"}
-                        </Button>
+                      <div className="flex shrink-0 flex-wrap items-center gap-2">
+                        {revoked ? (
+                          cleanupUnfinished ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="min-h-11 sm:min-h-9"
+                              disabled={busy}
+                              onClick={() => {
+                                setRole.reset();
+                                finishCleanup.mutate(entry.id);
+                              }}
+                            >
+                              <RefreshCw className="size-3.5" />
+                              {finishing ? "Finishing…" : "Finish cleanup"}
+                            </Button>
+                          ) : null
+                        ) : (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="min-h-11 sm:min-h-9"
+                              disabled={busy}
+                              onClick={() =>
+                                openConfirmation({
+                                  entry,
+                                  kind: "role",
+                                  nextRole: isAdmin ? "user" : "admin",
+                                })
+                              }
+                            >
+                              <ShieldCheck className="size-3.5" />
+                              {isAdmin ? "Make user" : "Make admin"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="min-h-11 text-muted-foreground hover:text-destructive sm:min-h-9"
+                              disabled={busy}
+                              onClick={() =>
+                                openConfirmation({ entry, kind: "revoke" })
+                              }
+                            >
+                              <Ban className="size-3.5" />
+                              Revoke access
+                            </Button>
+                          </>
+                        )}
                         <Button
                           size="sm"
                           variant="ghost"
                           className="min-h-11 text-muted-foreground hover:text-destructive sm:min-h-9"
-                          disabled={setRole.isPending || deleteUser.isPending}
-                          onClick={() => {
-                            deleteUser.reset();
-                            setConfirmation({
-                              entry,
-                              kind: "delete",
-                            });
-                          }}
+                          disabled={busy}
+                          onClick={() =>
+                            openConfirmation({ entry, kind: "delete" })
+                          }
                         >
                           <Trash2 className="size-3.5" />
                           Delete
@@ -297,16 +388,15 @@ function UsersPanel() {
               ? actionError.message
               : "Failed to update user"}
           </InlineFeedback>
+        ) : finishCleanup.isSuccess ? (
+          <InlineFeedback tone="success">Cleanup finished.</InlineFeedback>
         ) : null}
       </Section>
 
       <Dialog
         open={confirmation !== null}
         onOpenChange={(open) => {
-          if (!open && !deleteUser.isPending && !setRole.isPending) {
-            setConfirmation(null);
-            deleteUser.reset();
-          }
+          if (!open && !dialogPending) closeConfirmation();
         }}
       >
         <DialogContent>
@@ -314,51 +404,48 @@ function UsersPanel() {
             <DialogTitle>
               {confirmation?.kind === "delete"
                 ? "Delete this user?"
-                : confirmation?.nextRole === "admin"
-                  ? "Grant admin access?"
-                  : "Remove admin access?"}
+                : confirmation?.kind === "revoke"
+                  ? "Revoke access?"
+                  : confirmation?.nextRole === "admin"
+                    ? "Grant admin access?"
+                    : "Remove admin access?"}
             </DialogTitle>
             <DialogDescription>
-              {confirmation?.kind === "delete"
-                ? "This permanently removes sign-in, sessions, memberships, beta access, OAuth grants, and personal SSH keys. Retained operational and security history remains linked to an anonymous user record."
-                : confirmation?.kind === "role"
-                  ? "Role changes take effect immediately. The server will reject removal of the last active beta administrator."
-                  : "Choose a user action."}
+              {confirmation ? confirmationDescription(confirmation) : null}
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border bg-muted/40 p-3">
             <p className="text-sm font-medium">{confirmation?.entry.name}</p>
             <p className="text-metadata">{confirmation?.entry.email}</p>
           </div>
-          {confirmation?.kind === "delete" && deleteUser.error ? (
+          {dialogError ? (
             <InlineFeedback tone="error">
-              {deleteUser.error instanceof Error
-                ? deleteUser.error.message
-                : "The user could not be deleted"}
+              {dialogError instanceof Error
+                ? dialogError.message
+                : confirmation?.kind === "revoke"
+                  ? "Access could not be revoked"
+                  : "The user could not be deleted"}
             </InlineFeedback>
           ) : null}
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => {
-                setConfirmation(null);
-                deleteUser.reset();
-              }}
-              disabled={deleteUser.isPending || setRole.isPending}
+              onClick={closeConfirmation}
+              disabled={dialogPending}
             >
-              Cancel
+              {confirmation?.kind === "revoke" ? "Keep access" : "Cancel"}
             </Button>
             <Button
               variant={
-                confirmation?.kind === "delete"
-                  ? "destructive"
-                  : "default"
+                confirmation?.kind === "role" ? "default" : "danger"
               }
-              disabled={deleteUser.isPending || setRole.isPending}
+              disabled={dialogPending}
               onClick={() => {
                 if (!confirmation) return;
                 if (confirmation.kind === "delete") {
                   deleteUser.mutate(confirmation.entry.id);
+                } else if (confirmation.kind === "revoke") {
+                  revokeAccess.mutate(confirmation.entry.id);
                 } else if (confirmation.nextRole) {
                   setRole.mutate({
                     userId: confirmation.entry.id,
@@ -369,16 +456,51 @@ function UsersPanel() {
             >
               {deleteUser.isPending
                 ? "Deleting…"
-                : setRole.isPending
-                  ? "Updating…"
-                  : confirmation?.kind === "delete"
-                    ? "Delete user"
-                    : "Confirm change"}
+                : revokeAccess.isPending
+                  ? "Revoking…"
+                  : setRole.isPending
+                    ? "Updating…"
+                    : confirmation?.kind === "delete"
+                      ? "Delete user"
+                      : confirmation?.kind === "revoke"
+                        ? "Revoke access"
+                        : "Confirm change"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+function confirmationDescription({ entry, kind }: UserConfirmation): string {
+  if (kind === "revoke") {
+    return [
+      `${entry.name} is signed out everywhere, their runs stop, and their personal servers are disabled.`,
+      "Access can't be restored. Their spot opens for someone new.",
+      entry.role === "admin"
+        ? "The server keeps at least one active administrator."
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (kind === "delete") {
+    return [
+      "This permanently removes sign-in, sessions, memberships, OAuth grants, and personal SSH keys. Retained operational and security history remains linked to an anonymous user record.",
+      entry.access === "active" ? "Access is revoked first." : null,
+      "They can sign up again while spots are open.",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  return "Role changes take effect immediately. The server keeps at least one active administrator.";
+}
+
+function revokeUserAccess(userId: string) {
+  return adminJson<{ revocationId: string; cleanupCompleted: boolean }>(
+    `/api/admin/users/${encodeURIComponent(userId)}/revoke`,
+    { method: "POST" },
   );
 }
 

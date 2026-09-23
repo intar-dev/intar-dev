@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { scenarioRuns } from "@/db/schema";
+import { activeAccountSql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { getScenarioRunForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
 import {
@@ -147,15 +148,15 @@ function scenarioRunCliMutationGuard(input: ScenarioRunCliMutationFence) {
   return sql`EXISTS (
     SELECT 1
     FROM runtime_executions execution
-    INNER JOIN access_allowlist access
-      ON access.user_id = ${scenarioRuns.userId}
+    INNER JOIN user run_owner
+      ON run_owner.id = ${scenarioRuns.userId}
+     AND ${sql.raw(activeAccountSql("run_owner"))}
     INNER JOIN runtime_vms vm
       ON vm.execution_id = execution.id
     INNER JOIN runtime_vm_actual_state actual
       ON actual.runtime_vm_id = vm.id
      AND actual.execution_id = execution.id
     WHERE execution.id = ${input.executionId}
-      AND access.state = 'active'
       AND execution.host_id = ${input.hostId}
       AND execution.domain_kind = 'scenario'
       AND execution.domain_id = ${scenarioRuns.runId}

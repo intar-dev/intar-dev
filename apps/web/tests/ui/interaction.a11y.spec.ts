@@ -141,6 +141,10 @@ test("keyboard-only landing navigation keeps focus visible", async ({
       `Tab stop ${index + 1} (${focus?.label}) must render an outline or focus ring`,
     ).toBe(true);
     expect(focus?.visible, `Tab stop ${index + 1} must be visible`).toBe(true);
+    expect(
+      focus?.label,
+      `Tab stop ${index + 1} must not be the static sign-up spots line`,
+    ).not.toMatch(/spots? (left|are taken)|Sign-ups are closed/i);
   }
 });
 

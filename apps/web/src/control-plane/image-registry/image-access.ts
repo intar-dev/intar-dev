@@ -18,10 +18,8 @@ export function currentAgentHost(agent: VerifiedAgentHost) {
         AND current_host.organization_id = ${agent.organizationId ?? null} AND current_host.role = 'agent'
         AND EXISTS (SELECT 1 FROM organization org WHERE org.id = current_host.organization_id))
         OR (${agent.scope} = 'personal' AND EXISTS (
-        SELECT 1 FROM access_allowlist access WHERE access.user_id = current_host.user_id
-          AND access.state = 'active' AND access.source_invite_id = ${agent.betaSourceInviteId}
-          AND access.source_lease_id = ${agent.betaSourceLeaseId}
-          AND access.granted_at = ${agent.betaAdmissionGrantedAt}
+        SELECT 1 FROM user owner WHERE owner.id = current_host.user_id
+          AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
       ))))`;
 }
 
@@ -54,9 +52,8 @@ export function assignedPersonalScenarioImageAccess(hostId: string) {
           AND EXISTS (SELECT 1 FROM member membership WHERE membership.organization_id = host.organization_id
             AND membership.user_id = execution.user_id)))
       AND (json_extract(desired.doc_json, '$.scope'), json_extract(desired.doc_json, '$.owner_user_id')) = (host.scope, host.user_id)
-      AND EXISTS (SELECT 1 FROM user owner JOIN access_allowlist access ON access.user_id = owner.id
-        WHERE owner.id = execution.user_id AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
-          AND access.state = 'active')
+      AND EXISTS (SELECT 1 FROM user owner
+        WHERE owner.id = execution.user_id AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0)
       AND (execution.user_id, run.user_id, run.host_id, execution.domain_kind, execution.domain_id) =
         (run.user_id, execution.user_id, host.id, 'scenario', run.run_id)
       AND (execution.state IN ('provisioning', 'ready') AND execution.ended_at IS NULL

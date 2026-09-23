@@ -9,7 +9,7 @@ const requestSecurityMock = vi.hoisted(() => ({
 const agentBridgeMock = vi.hoisted(() => ({
   requireAdminUserContext: vi.fn(),
 }));
-const betaAdminGuardMock = vi.hoisted(() => ({
+const adminAuthorityMock = vi.hoisted(() => ({
   setPlatformUserRole: vi.fn(),
 }));
 const deletionStoreMock = vi.hoisted(() => ({
@@ -17,24 +17,20 @@ const deletionStoreMock = vi.hoisted(() => ({
   finalizePlatformUserDeletion: vi.fn(),
   listPlatformUsers: vi.fn(),
 }));
-const revocationStoreMock = vi.hoisted(() => ({
-  revokeBetaUser: vi.fn(),
-}));
 const revocationMock = vi.hoisted(() => ({
-  cleanupBetaRevocation: vi.fn(),
-  getBetaRevocationStatus: vi.fn(),
+  ensureAccessRevoked: vi.fn(),
 }));
 
 vi.mock("@/lib/request-security", () => requestSecurityMock);
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
-vi.mock("@/lib/beta-admin-guard", () => betaAdminGuardMock);
+vi.mock("@/lib/platform-admin-authority", () => adminAuthorityMock);
 vi.mock("@/lib/platform-user-deletion-store", () => deletionStoreMock);
-vi.mock("@/lib/beta-access-revocation-store", () => revocationStoreMock);
-vi.mock("@/lib/beta-access-revocation", () => revocationMock);
+vi.mock("@/lib/access-revocation", () => revocationMock);
 vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
 
 import { appError } from "@/lib/app-error";
 import { DELETE as deleteUser } from "@/pages/api/admin/users/[userId]/index";
+import { POST as revokeAccess } from "@/pages/api/admin/users/[userId]/revoke";
 import { POST as updateRole } from "@/pages/api/admin/users/[userId]/role";
 import { GET as listUsers } from "@/pages/api/admin/users/index";
 
@@ -45,7 +41,7 @@ describe("admin user mutation routes", () => {
       ok: true,
       context: { userId: "actor-admin" },
     });
-    betaAdminGuardMock.setPlatformUserRole.mockResolvedValue(undefined);
+    adminAuthorityMock.setPlatformUserRole.mockResolvedValue(undefined);
     deletionStoreMock.assertPlatformUserDeletionAllowed.mockResolvedValue(
       undefined,
     );
@@ -53,16 +49,15 @@ describe("admin user mutation routes", () => {
     deletionStoreMock.listPlatformUsers.mockResolvedValue([
       { id: "target-user", name: "Target User" },
     ]);
-    revocationStoreMock.revokeBetaUser.mockRejectedValue(
-      appError(409, "beta_user_not_active", "Beta access is not active"),
-    );
-    revocationMock.getBetaRevocationStatus.mockResolvedValue(null);
-    revocationMock.cleanupBetaRevocation.mockResolvedValue(undefined);
+    revocationMock.ensureAccessRevoked.mockResolvedValue({
+      revocationId: "revocation-1",
+    });
   });
 
   it.each([
     ["list", listUsers, listRequest()],
     ["delete", deleteUser, deleteRequest()],
+    ["revoke", revokeAccess, revokeRequest()],
   ] as const)(
     "returns an unauthenticated %s response with no-store headers",
     async (_name, route, request) => {
@@ -82,6 +77,7 @@ describe("admin user mutation routes", () => {
         code: "authentication_required",
       });
       expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+      expect(revocationMock.ensureAccessRevoked).not.toHaveBeenCalled();
       expect(
         deletionStoreMock.finalizePlatformUserDeletion,
       ).not.toHaveBeenCalled();
@@ -98,7 +94,7 @@ describe("admin user mutation routes", () => {
       error: "a JSON object is required",
       code: "invalid_json",
     });
-    expect(betaAdminGuardMock.setPlatformUserRole).not.toHaveBeenCalled();
+    expect(adminAuthorityMock.setPlatformUserRole).not.toHaveBeenCalled();
   });
 
   it("lists only users returned by the app-owned store", async () => {
@@ -130,7 +126,7 @@ describe("admin user mutation routes", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ updated: true });
-    expect(betaAdminGuardMock.setPlatformUserRole).toHaveBeenCalledWith({
+    expect(adminAuthorityMock.setPlatformUserRole).toHaveBeenCalledWith({
       d1: "test-db",
       targetUserId: "target-user",
       actorUserId: "actor-admin",
@@ -138,79 +134,42 @@ describe("admin user mutation routes", () => {
     });
   });
 
-  it("deletes a user who never had beta access", async () => {
+  it("revokes access and finishes the cleanup before deletion", async () => {
     const response = await deleteUser(
       routeContext(deleteRequest(), " target-user "),
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ deleted: true });
+    const target = {
+      d1: "test-db",
+      targetUserId: "target-user",
+      actorUserId: "actor-admin",
+    };
     expect(
       deletionStoreMock.assertPlatformUserDeletionAllowed,
-    ).toHaveBeenCalledWith({
-      d1: "test-db",
-      targetUserId: "target-user",
-      actorUserId: "actor-admin",
-    });
-    expect(revocationMock.cleanupBetaRevocation).not.toHaveBeenCalled();
-    expect(deletionStoreMock.finalizePlatformUserDeletion).toHaveBeenCalledWith({
-      d1: "test-db",
-      targetUserId: "target-user",
-      actorUserId: "actor-admin",
-    });
-  });
-
-  it("revokes and cleans active beta access before deletion", async () => {
-    revocationStoreMock.revokeBetaUser.mockResolvedValueOnce({
-      revocationId: "revocation-1",
-    });
-
-    const response = await deleteUser(
-      routeContext(deleteRequest(), "target-user"),
-    );
-
-    expect(response.status).toBe(200);
-    expect(revocationStoreMock.revokeBetaUser).toHaveBeenCalledWith({
-      d1: "test-db",
+    ).toHaveBeenCalledWith(target);
+    expect(revocationMock.ensureAccessRevoked).toHaveBeenCalledWith({
       userId: "target-user",
       actorUserId: "actor-admin",
       reason: "admin_deleted",
     });
-    expect(revocationMock.cleanupBetaRevocation).toHaveBeenCalledWith({
-      userId: "target-user",
-      revocationId: "revocation-1",
-      actorUserId: "actor-admin",
-    });
+    expect(deletionStoreMock.finalizePlatformUserDeletion).toHaveBeenCalledWith(
+      target,
+    );
     expect(
-      deletionStoreMock.finalizePlatformUserDeletion,
-    ).toHaveBeenCalledOnce();
+      revocationMock.ensureAccessRevoked.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      deletionStoreMock.assertPlatformUserDeletionAllowed.mock
+        .invocationCallOrder[0]!,
+    );
+    expect(
+      deletionStoreMock.finalizePlatformUserDeletion.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(revocationMock.ensureAccessRevoked.mock.invocationCallOrder[0]!);
   });
 
-  it("reuses completed revocation cleanup", async () => {
-    revocationMock.getBetaRevocationStatus.mockResolvedValueOnce({
-      revocationId: "revocation-complete",
-      cleanup: "completed",
-    });
-
-    const response = await deleteUser(
-      routeContext(deleteRequest(), "target-user"),
-    );
-
-    expect(response.status).toBe(200);
-    expect(revocationStoreMock.revokeBetaUser).not.toHaveBeenCalled();
-    expect(revocationMock.cleanupBetaRevocation).not.toHaveBeenCalled();
-    expect(
-      deletionStoreMock.finalizePlatformUserDeletion,
-    ).toHaveBeenCalledOnce();
-  });
-
-  it("does not anonymize the user when operational cleanup fails", async () => {
-    revocationStoreMock.revokeBetaUser.mockResolvedValueOnce({
-      revocationId: "revocation-failed",
-    });
-    revocationMock.cleanupBetaRevocation.mockRejectedValueOnce(
-      appError(503, "cleanup_failed", "User cleanup failed"),
-    );
+  it("does not anonymize the user when the cleanup is incomplete", async () => {
+    revocationMock.ensureAccessRevoked.mockRejectedValueOnce(cleanupIncomplete());
 
     const response = await deleteUser(
       routeContext(deleteRequest(), "target-user"),
@@ -218,8 +177,8 @@ describe("admin user mutation routes", () => {
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
-      error: "User cleanup failed",
-      code: "cleanup_failed",
+      error: "Access is revoked, but cleanup didn't finish. Try again.",
+      code: "access_cleanup_incomplete",
     });
     expect(
       deletionStoreMock.finalizePlatformUserDeletion,
@@ -231,7 +190,7 @@ describe("admin user mutation routes", () => {
       appError(
         409,
         "last_active_admin",
-        "The last active platform administrator cannot be deleted",
+        "The last active administrator can't be deleted",
       ),
     );
 
@@ -241,12 +200,93 @@ describe("admin user mutation routes", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
-      error: "The last active platform administrator cannot be deleted",
+      error: "The last active administrator can't be deleted",
       code: "last_active_admin",
     });
-    expect(revocationStoreMock.revokeBetaUser).not.toHaveBeenCalled();
+    expect(revocationMock.ensureAccessRevoked).not.toHaveBeenCalled();
+  });
+
+  it("revokes access and cleans up for the trimmed target", async () => {
+    const response = await revokeAccess(
+      routeContext(revokeRequest(), " target-user "),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+    await expect(response.json()).resolves.toEqual({
+      userId: "target-user",
+      access: "revoked",
+      revocationId: "revocation-1",
+      cleanupCompleted: true,
+    });
+    expect(revocationMock.ensureAccessRevoked).toHaveBeenCalledWith({
+      userId: "target-user",
+      actorUserId: "actor-admin",
+      reason: "admin_revoked",
+    });
+    expect(deletionStoreMock.finalizePlatformUserDeletion).not.toHaveBeenCalled();
+  });
+
+  it("answers a finished revocation with its existing id", async () => {
+    revocationMock.ensureAccessRevoked.mockResolvedValueOnce({
+      revocationId: "revocation-complete",
+    });
+
+    const response = await revokeAccess(
+      routeContext(revokeRequest({ ignored: true }), "target-user"),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      revocationId: "revocation-complete",
+      cleanupCompleted: true,
+    });
+    expect(revocationMock.ensureAccessRevoked).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the last active administrator", async () => {
+    revocationMock.ensureAccessRevoked.mockRejectedValueOnce(
+      appError(
+        409,
+        "last_active_admin",
+        "The last active administrator can't be revoked",
+      ),
+    );
+
+    const response = await revokeAccess(
+      routeContext(revokeRequest(), "target-user"),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "The last active administrator can't be revoked",
+      code: "last_active_admin",
+    });
+  });
+
+  it("reports an unfinished cleanup so it can be retried", async () => {
+    revocationMock.ensureAccessRevoked.mockRejectedValueOnce(cleanupIncomplete());
+
+    const response = await revokeAccess(
+      routeContext(revokeRequest(), "target-user"),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+    await expect(response.json()).resolves.toEqual({
+      error: "Access is revoked, but cleanup didn't finish. Try again.",
+      code: "access_cleanup_incomplete",
+    });
   });
 });
+
+function cleanupIncomplete() {
+  return appError(
+    503,
+    "access_cleanup_incomplete",
+    "Access is revoked, but cleanup didn't finish. Try again.",
+  );
+}
 
 function listRequest(): Request {
   return new Request("https://intar.test/api/admin/users");
@@ -255,6 +295,18 @@ function listRequest(): Request {
 function deleteRequest(): Request {
   return new Request("https://intar.test/api/admin/users/target-user", {
     method: "DELETE",
+  });
+}
+
+function revokeRequest(body?: Record<string, unknown>): Request {
+  return new Request("https://intar.test/api/admin/users/target-user/revoke", {
+    method: "POST",
+    ...(body
+      ? {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      : {}),
   });
 }
 

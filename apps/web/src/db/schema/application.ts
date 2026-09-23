@@ -31,259 +31,56 @@ export const scenarioAssignments = sqliteTable(
   ],
 );
 
-export type AccessInviteKind = "standard" | "bootstrap_admin";
-export type AccessInviteState = "pending" | "leased" | "redeemed" | "revoked";
-
-// Invite lookup always uses the hash. New active invites also retain an
-// AES-GCM envelope so an administrator can copy the same link later. The
-// envelope is erased when the invite becomes terminal. Legacy rows have no
-// envelope. The cutover migration revoked those rows and retained their audit
-// history; the application also treats any missed legacy row as revoked.
-export const accessInviteCodes = sqliteTable(
-  "access_invite_codes",
-  {
-    id: text("id").primaryKey(),
-    codeHash: text("code_hash").notNull(),
-    codePrefix: text("code_prefix").notNull(),
-    tokenCiphertext: text("token_ciphertext"),
-    kind: text("kind").$type<AccessInviteKind>().notNull(),
-    state: text("state")
-      .$type<AccessInviteState>()
-      .default("pending")
-      .notNull(),
-    label: text("label"),
-    createdBy: text("created_by"),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    claimExpiresAt: integer("claim_expires_at"),
-    leaseId: text("lease_id"),
-    leasedAt: integer("leased_at"),
-    leaseExpiresAt: integer("lease_expires_at"),
-    redeemerUserId: text("redeemer_user_id"),
-    redeemerGithubAccountId: text("redeemer_github_account_id"),
-    redeemerGithubUsername: text("redeemer_github_username"),
-    redeemedAt: integer("redeemed_at"),
-    revokedBy: text("revoked_by"),
-    revocationReason: text("revocation_reason"),
-    revokedAt: integer("revoked_at"),
-    replacesInviteId: text("replaces_invite_id"),
-    replacesInviteVersion: integer("replaces_invite_version"),
-    replacedByInviteId: text("replaced_by_invite_id"),
-    version: integer("version").default(1).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("access_invite_codes_hash_uidx").on(table.codeHash),
-    index("access_invite_codes_state_expiry_idx").on(
-      table.state,
-      table.expiresAt,
-    ),
-    index("access_invite_codes_creator_idx").on(
-      table.createdBy,
-      table.createdAt,
-    ),
-    index("access_invite_codes_lease_idx").on(
-      table.state,
-      table.leaseExpiresAt,
-    ),
-    check(
-      "access_invite_codes_hash_valid",
-      sql`length(${table.codeHash}) = 64 AND ${table.codeHash} NOT GLOB '*[^0-9a-f]*'`,
-    ),
-    check(
-      "access_invite_codes_kind_valid",
-      sql`${table.kind} in ('standard', 'bootstrap_admin')`,
-    ),
-    check(
-      "access_invite_codes_creator_valid",
-      sql`(${table.kind} = 'standard' AND ${table.createdBy} is not null) OR (${table.kind} = 'bootstrap_admin' AND ${table.createdBy} is null)`,
-    ),
-    check(
-      "access_invite_codes_expiry_valid",
-      sql`${table.expiresAt} in (${table.createdAt} + 172800000, ${table.createdAt} + 1209600000)`,
-    ),
-    check("access_invite_codes_version_valid", sql`${table.version} > 0`),
-    check(
-      "access_invite_codes_replacement_valid",
-      sql`(${table.replacesInviteId} is null AND ${table.replacesInviteVersion} is null) OR (${table.replacesInviteId} is not null AND ${table.replacesInviteVersion} > 0)`,
-    ),
-    check(
-      "access_invite_codes_state_valid",
-      sql`
-        (${table.state} = 'pending'
-          AND ${table.leaseId} is null
-          AND ${table.leasedAt} is null
-          AND ${table.leaseExpiresAt} is null
-          AND ${table.redeemerUserId} is null
-          AND ${table.redeemerGithubAccountId} is null
-          AND ${table.redeemerGithubUsername} is null
-          AND ${table.redeemedAt} is null
-          AND ${table.revokedBy} is null
-          AND ${table.revocationReason} is null
-          AND ${table.revokedAt} is null
-          AND ${table.replacedByInviteId} is null)
-        OR
-        (${table.state} = 'leased'
-          AND ${table.leaseId} is not null
-          AND ${table.leasedAt} is not null
-          AND ${table.leaseExpiresAt} = ${table.leasedAt} + 600000
-          AND ${table.redeemerUserId} is null
-          AND ${table.redeemerGithubAccountId} is null
-          AND ${table.redeemerGithubUsername} is null
-          AND ${table.redeemedAt} is null
-          AND ${table.revokedBy} is null
-          AND ${table.revocationReason} is null
-          AND ${table.revokedAt} is null
-          AND ${table.replacedByInviteId} is null)
-        OR
-        (${table.state} = 'redeemed'
-          AND ${table.leaseId} is not null
-          AND ${table.leasedAt} is not null
-          AND ${table.leaseExpiresAt} = ${table.leasedAt} + 600000
-          AND ${table.redeemerUserId} is not null
-          AND ${table.redeemerGithubAccountId} is not null
-          AND ${table.redeemerGithubUsername} is not null
-          AND ${table.redeemedAt} is not null
-          AND ${table.revokedBy} is null
-          AND ${table.revocationReason} is null
-          AND ${table.revokedAt} is null
-          AND ${table.replacedByInviteId} is null)
-        OR
-        (${table.state} = 'revoked'
-          AND ${table.leaseId} is null
-          AND ${table.leasedAt} is null
-          AND ${table.leaseExpiresAt} is null
-          AND ${table.redeemerUserId} is null
-          AND ${table.redeemerGithubAccountId} is null
-          AND ${table.redeemerGithubUsername} is null
-          AND ${table.redeemedAt} is null
-          AND ${table.revokedBy} is not null
-          AND ${table.revocationReason} is not null
-          AND ${table.revokedAt} is not null)`,
-    ),
-  ],
-);
-
-// Legacy presentation archives stay in the schema for audit compatibility.
-// The simplified invite UI and API no longer create removal rows.
-export const accessInviteRemovals = sqliteTable(
-  "access_invite_removals",
-  {
-    inviteId: text("invite_id")
-      .primaryKey()
-      .references(() => accessInviteCodes.id, { onDelete: "restrict" }),
-    inviteVersion: integer("invite_version").notNull(),
-    removedBy: text("removed_by").notNull(),
-    removedAt: integer("removed_at").notNull(),
-  },
-  (table) => [
-    index("access_invite_removals_removed_idx").on(table.removedAt),
-    check(
-      "access_invite_removals_version_valid",
-      sql`${table.inviteVersion} > 0`,
-    ),
-    check(
-      "access_invite_removals_actor_valid",
-      sql`length(${table.removedBy}) BETWEEN 1 AND 255`,
-    ),
-    check(
-      "access_invite_removals_timestamp_valid",
-      sql`${table.removedAt} >= 0`,
-    ),
-  ],
-);
-
-// This is the sole beta authorization registry. Authorization is by Better
-// Auth user id and state only; GitHub fields are immutable audit snapshots.
-export const accessAllowlist = sqliteTable(
-  "access_allowlist",
+// Revocation is terminal. The user row carries the access decision
+// (`banned`); this row is the audit record and the cleanup ledger that user
+// deletion requires to be complete.
+export const accessRevocations = sqliteTable(
+  "access_revocations",
   {
     userId: text("user_id")
       .primaryKey()
       .references(() => user.id, { onDelete: "restrict" }),
-    state: text("state")
-      .$type<"active" | "blocked">()
-      .default("active")
-      .notNull(),
-    githubAccountId: text("github_account_id").notNull(),
-    githubUsername: text("github_username").notNull(),
-    sourceInviteId: text("source_invite_id")
-      .notNull()
-      .references(() => accessInviteCodes.id, { onDelete: "restrict" }),
-    sourceLeaseId: text("source_lease_id").notNull(),
-    grantedBy: text("granted_by"),
-    grantReason: text("grant_reason").notNull(),
-    grantedAt: integer("granted_at").notNull(),
-    revocationId: text("revocation_id"),
-    revokedBy: text("revoked_by"),
-    revocationReason: text("revocation_reason"),
-    revokedAt: integer("revoked_at"),
-    revocationCleanupAttemptId: text("revocation_cleanup_attempt_id"),
-    revocationCleanupStartedAt: integer("revocation_cleanup_started_at"),
-    revocationCleanupCompletedAt: integer("revocation_cleanup_completed_at"),
+    revocationId: text("revocation_id").notNull(),
+    revokedBy: text("revoked_by").notNull(),
+    reason: text("reason").notNull(),
+    revokedAt: integer("revoked_at").notNull(),
+    cleanupAttemptId: text("cleanup_attempt_id"),
+    cleanupStartedAt: integer("cleanup_started_at"),
+    cleanupCompletedAt: integer("cleanup_completed_at"),
   },
   (table) => [
-    uniqueIndex("access_allowlist_github_account_uidx").on(
-      table.githubAccountId,
-    ),
-    uniqueIndex("access_allowlist_source_invite_uidx").on(table.sourceInviteId),
-    uniqueIndex("access_allowlist_revocation_uidx").on(table.revocationId),
-    index("access_allowlist_state_idx").on(table.state, table.grantedAt),
-    index("access_allowlist_granted_by_idx").on(table.grantedBy),
+    uniqueIndex("access_revocations_revocation_uidx").on(table.revocationId),
     check(
-      "access_allowlist_state_valid",
+      "access_revocations_audit_valid",
+      sql`length(${table.revokedBy}) BETWEEN 1 AND 255 AND length(${table.reason}) BETWEEN 1 AND 120 AND ${table.revokedAt} >= 0`,
+    ),
+    check(
+      "access_revocations_cleanup_valid",
       sql`
-        (${table.state} = 'active'
-          AND ${table.revocationId} is null
-          AND ${table.revokedBy} is null
-          AND ${table.revocationReason} is null
-          AND ${table.revokedAt} is null
-          AND ${table.revocationCleanupAttemptId} is null
-          AND ${table.revocationCleanupStartedAt} is null
-          AND ${table.revocationCleanupCompletedAt} is null)
+        (${table.cleanupAttemptId} is null
+          AND ${table.cleanupStartedAt} is null
+          AND ${table.cleanupCompletedAt} is null)
         OR
-        (${table.state} = 'blocked'
-          AND ${table.revocationId} is not null
-          AND ${table.revokedBy} is not null
-          AND ${table.revocationReason} is not null
-          AND ${table.revokedAt} is not null
-          AND (
-            (${table.revocationCleanupAttemptId} is null
-              AND ${table.revocationCleanupStartedAt} is null
-              AND ${table.revocationCleanupCompletedAt} is null)
-            OR
-            (${table.revocationCleanupAttemptId} is not null
-              AND ${table.revocationCleanupStartedAt} is not null
-              AND (${table.revocationCleanupCompletedAt} is null
-                OR ${table.revocationCleanupCompletedAt} >= ${table.revocationCleanupStartedAt}))
-          ))`,
+        (${table.cleanupAttemptId} is not null
+          AND ${table.cleanupStartedAt} is not null
+          AND (${table.cleanupCompletedAt} is null
+            OR ${table.cleanupCompletedAt} >= ${table.cleanupStartedAt}))`,
     ),
   ],
 );
 
 export type AccessEventType =
-  | "invite.created"
-  | "invite.copied"
-  | "invite.leased"
-  | "invite.lease_released"
-  | "invite.redeemed"
-  | "invite.revoked"
-  | "invite.replaced"
-  | "invite.removed"
-  | "invite.exchange_failed"
-  | "invite.lease_failed"
-  | "invite.claim_failed"
-  | "access.granted"
   | "access.blocked"
   | "access.revocation_cleanup_failed"
   | "access.revocation_cleanup_stalled"
   | "access.revocation_cleanup_completed"
-  | "access.reinvite_allowed"
   | "run.deleted_by_admin"
-  | "user.deleted";
+  | "user.deleted"
+  | "signups.limit_changed";
 
 // Event rows contain identifiers and normalized reason codes only. They must
-// never contain raw invite codes, links, cookies, provider tokens, or IPs.
+// never contain links, cookies, provider tokens, or IPs. Rows written before
+// the invite gate was removed keep their historical invite ids.
 export const accessEvents = sqliteTable(
   "access_events",
   {

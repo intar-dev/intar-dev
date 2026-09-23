@@ -53,9 +53,6 @@ export async function platformArtifactFixture(d1: D1Database, vmName: string) {
       hostId: "host-1",
       userId: "user-1",
       role: "agent",
-      betaSourceInviteId: null,
-      betaSourceLeaseId: null,
-      betaAdmissionGrantedAt: null,
     },
   });
   if (!runVm) throw new Error("missing artifact fixture");

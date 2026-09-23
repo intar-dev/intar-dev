@@ -1,8 +1,16 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { accessAllowlist, member, user } from "@/db/schema";
+import { accessRevocations, member, user } from "@/db/schema";
+import { activeAccountCondition } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
+import {
+  activeAdminSql,
+  adminRequiredError,
+  hasOtherActiveAdmin,
+  isActiveAdmin,
+  lastActiveAdminError,
+} from "@/lib/platform-admin-authority";
 
 const ID_MAX_LENGTH = 255;
 
@@ -13,6 +21,8 @@ interface PlatformUserDeletionInput {
   now?: number;
 }
 
+export type PlatformUserAccess = "active" | "revoked";
+
 export async function listPlatformUsers(d1: D1Database) {
   return drizzle(d1)
     .select({
@@ -22,10 +32,13 @@ export async function listPlatformUsers(d1: D1Database) {
       image: user.image,
       username: user.username,
       role: user.role,
-      banned: user.banned,
+      access: sql<PlatformUserAccess>`case when ${activeAccountCondition()} then 'active' else 'revoked' end`,
+      revokedAt: accessRevocations.revokedAt,
+      cleanupCompletedAt: accessRevocations.cleanupCompletedAt,
       createdAt: user.createdAt,
     })
     .from(user)
+    .leftJoin(accessRevocations, eq(accessRevocations.userId, user.id))
     .where(isNull(user.deletedAt))
     .orderBy(desc(user.createdAt))
     .limit(200);
@@ -49,70 +62,16 @@ export async function assertPlatformUserDeletionAllowed(
   }
 
   const db = drizzle(input.d1);
-  const [target, actor, targetIsAdmin, otherAdmin, soleOwnedOrganization] =
+  const [target, actorIsAdmin, targetIsAdmin, otherAdmin, soleOwnedOrganization] =
     await Promise.all([
       db
         .select({ id: user.id, deletedAt: user.deletedAt })
         .from(user)
         .where(eq(user.id, targetUserId))
         .limit(1),
-      db
-        .select({ id: user.id })
-        .from(user)
-        .innerJoin(
-          accessAllowlist,
-          and(
-            eq(accessAllowlist.userId, user.id),
-            eq(accessAllowlist.state, "active"),
-          ),
-        )
-        .where(
-          and(
-            eq(user.id, actorUserId),
-            sql`${user.deletedAt} is null`,
-            sql`coalesce(${user.banned}, 0) = 0`,
-            platformAdminRole(user.role),
-          ),
-        )
-        .limit(1),
-      db
-        .select({ id: user.id })
-        .from(user)
-        .innerJoin(
-          accessAllowlist,
-          and(
-            eq(accessAllowlist.userId, user.id),
-            eq(accessAllowlist.state, "active"),
-          ),
-        )
-        .where(
-          and(
-            eq(user.id, targetUserId),
-            sql`${user.deletedAt} is null`,
-            sql`coalesce(${user.banned}, 0) = 0`,
-            platformAdminRole(user.role),
-          ),
-        )
-        .limit(1),
-      db
-        .select({ id: user.id })
-        .from(user)
-        .innerJoin(
-          accessAllowlist,
-          and(
-            eq(accessAllowlist.userId, user.id),
-            eq(accessAllowlist.state, "active"),
-          ),
-        )
-        .where(
-          and(
-            sql`${user.id} <> ${targetUserId}`,
-            sql`${user.deletedAt} is null`,
-            sql`coalesce(${user.banned}, 0) = 0`,
-            platformAdminRole(user.role),
-          ),
-        )
-        .limit(1),
+      isActiveAdmin(actorUserId, input.d1),
+      isActiveAdmin(targetUserId, input.d1),
+      hasOtherActiveAdmin(targetUserId, input.d1),
       db
         .select({ organizationId: member.organizationId })
         .from(member)
@@ -138,20 +97,8 @@ export async function assertPlatformUserDeletionAllowed(
   if (!target[0] || target[0].deletedAt) {
     throw appError(404, "user_not_found", "User not found");
   }
-  if (!actor[0]) {
-    throw appError(
-      403,
-      "admin_required",
-      "Active beta administrator access is required",
-    );
-  }
-  if (targetIsAdmin[0] && !otherAdmin[0]) {
-    throw appError(
-      409,
-      "last_active_admin",
-      "The last active platform administrator cannot be deleted",
-    );
-  }
+  if (!actorIsAdmin) throw adminRequiredError();
+  if (targetIsAdmin && !otherAdmin) throw lastActiveAdminError("deleted");
   if (soleOwnedOrganization[0]) {
     throw appError(
       409,
@@ -186,62 +133,42 @@ export async function finalizePlatformUserDeletion(
     where id = ?2 and event_type = 'user.deleted'
   )`;
 
+  // Deletion requires a revocation whose cleanup finished. The revocation row
+  // is kept and stays attached to the anonymized tombstone.
   const statements = [
     input.d1
       .prepare(
         `INSERT INTO access_events (
            id, event_type, subject_user_id, github_account_id,
-           actor_user_id, reason, created_at
+           actor_user_id, revocation_id, reason, created_at
          )
-         SELECT ?1, 'user.deleted', target.id, access.github_account_id,
-                ?3, 'admin_deleted', ?4
+         SELECT ?1, 'user.deleted', target.id,
+                (SELECT github.account_id FROM account AS github
+                 WHERE github.user_id = target.id AND github.provider_id = 'github'
+                 LIMIT 1),
+                ?3, revocation.revocation_id, 'admin_deleted', ?4
          FROM user AS target
-         LEFT JOIN access_allowlist AS access ON access.user_id = target.id
+         INNER JOIN access_revocations AS revocation
+           ON revocation.user_id = target.id
+          AND revocation.cleanup_completed_at IS NOT NULL
          WHERE target.id = ?2
            AND target.deleted_at IS NULL
            AND ?2 <> ?3
            AND EXISTS (
-             SELECT 1
-             FROM access_allowlist AS actor_access
-             INNER JOIN user AS actor_identity
-               ON actor_identity.id = actor_access.user_id
-             WHERE actor_access.user_id = ?3
-               AND actor_access.state = 'active'
-               AND actor_identity.deleted_at IS NULL
-               AND coalesce(actor_identity.banned, 0) = 0
-               AND instr(
-                 ',' || replace(lower(coalesce(actor_identity.role, '')), ' ', '') || ',',
-                 ',admin,'
-               ) > 0
+             SELECT 1 FROM user AS actor_identity
+             WHERE actor_identity.id = ?3
+               AND ${activeAdminSql("actor_identity")}
            )
            AND (
              NOT EXISTS (
-               SELECT 1
-               FROM access_allowlist AS target_access
-               INNER JOIN user AS target_identity
-                 ON target_identity.id = target_access.user_id
-               WHERE target_access.user_id = ?2
-                 AND target_access.state = 'active'
-                 AND target_identity.deleted_at IS NULL
-                 AND coalesce(target_identity.banned, 0) = 0
-                 AND instr(
-                   ',' || replace(lower(coalesce(target_identity.role, '')), ' ', '') || ',',
-                   ',admin,'
-                 ) > 0
+               SELECT 1 FROM user AS target_identity
+               WHERE target_identity.id = ?2
+                 AND ${activeAdminSql("target_identity")}
              )
              OR EXISTS (
-               SELECT 1
-               FROM access_allowlist AS other_access
-               INNER JOIN user AS other_identity
-                 ON other_identity.id = other_access.user_id
-               WHERE other_access.state = 'active'
-                 AND other_access.user_id <> ?2
-                 AND other_identity.deleted_at IS NULL
-                 AND coalesce(other_identity.banned, 0) = 0
-                 AND instr(
-                   ',' || replace(lower(coalesce(other_identity.role, '')), ' ', '') || ',',
-                   ',admin,'
-                 ) > 0
+               SELECT 1 FROM user AS other_identity
+               WHERE other_identity.id <> ?2
+                 AND ${activeAdminSql("other_identity")}
              )
            )
            AND NOT EXISTS (
@@ -262,17 +189,10 @@ export async function finalizePlatformUserDeletion(
                      ',owner,'
                    ) > 0
                )
-           )
-           AND (
-             access.user_id IS NULL
-             OR (
-               access.state = 'blocked'
-               AND access.revocation_cleanup_completed_at IS NOT NULL
-             )
            )`,
       )
       .bind(eventId, targetUserId, actorUserId, now),
-    guardedDelete(input.d1, "access_allowlist", "user_id = ?1", eventGuard).bind(
+    guardedDelete(input.d1, "signup_reservations", "user_id = ?1", eventGuard).bind(
       targetUserId,
       eventId,
     ),
@@ -388,26 +308,23 @@ async function throwPlatformUserDeletionFailure(
   input: Omit<PlatformUserDeletionInput, "now">,
 ): Promise<never> {
   await assertPlatformUserDeletionAllowed(input);
-  const access = await drizzle(input.d1)
-    .select({
-      state: accessAllowlist.state,
-      cleanupCompletedAt: accessAllowlist.revocationCleanupCompletedAt,
-    })
-    .from(accessAllowlist)
-    .where(eq(accessAllowlist.userId, input.targetUserId))
+  const revocation = await drizzle(input.d1)
+    .select({ cleanupCompletedAt: accessRevocations.cleanupCompletedAt })
+    .from(accessRevocations)
+    .where(eq(accessRevocations.userId, input.targetUserId))
     .limit(1);
-  if (access[0]?.state === "active") {
+  if (!revocation[0]) {
     throw appError(
       409,
       "platform_user_access_active",
-      "Revoke beta access before deleting this user",
+      "Revoke access before deleting this user",
     );
   }
-  if (access[0] && access[0].cleanupCompletedAt == null) {
+  if (revocation[0].cleanupCompletedAt == null) {
     throw appError(
       409,
       "platform_user_cleanup_incomplete",
-      "User cleanup must finish before deletion",
+      "Access cleanup must finish before deleting this user",
     );
   }
   throw appError(
@@ -415,13 +332,6 @@ async function throwPlatformUserDeletionFailure(
     "platform_user_delete_conflict",
     "The user changed during deletion; refresh and try again",
   );
-}
-
-function platformAdminRole(column: typeof user.role) {
-  return sql`instr(
-    ',' || replace(lower(coalesce(${column}, '')), ' ', '') || ',',
-    ',admin,'
-  ) > 0`;
 }
 
 function organizationOwnerRole(column: typeof member.role) {

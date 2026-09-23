@@ -29,7 +29,9 @@ export async function notifyRunStatusListeners(
     let authorized: Set<number>;
     try {
       // Use one current authorization snapshot per batch. No TTL cache can
-      // keep a revoked browser session alive across status updates.
+      // keep a revoked browser session alive across status updates. The
+      // active-account predicate is spelled out so this module stays free of
+      // Worker imports.
       const result = await db.prepare(
         `SELECT CAST(subscriber.key AS INTEGER) AS position
          FROM json_each(?1) subscriber
@@ -38,11 +40,8 @@ export async function notifyRunStatusListeners(
          JOIN session auth_session
            ON auth_session.id = json_extract(subscriber.value, '$.sessionId')
            AND auth_session.user_id = run.user_id AND auth_session.expires_at > ?4
-         JOIN access_allowlist access ON access.user_id = run.user_id
-           AND access.state = 'active'
-           AND access.source_invite_id = json_extract(subscriber.value, '$.betaSourceInviteId')
-           AND access.source_lease_id = json_extract(subscriber.value, '$.betaSourceLeaseId')
-           AND access.granted_at = json_extract(subscriber.value, '$.betaAdmissionGrantedAt')`,
+         JOIN user run_owner ON run_owner.id = run.user_id
+           AND run_owner.deleted_at IS NULL AND coalesce(run_owner.banned, 0) = 0`,
       ).bind(
         JSON.stringify(batch.map(({ attachment }) => attachment)),
         input.runId, input.hostId, Date.now(),

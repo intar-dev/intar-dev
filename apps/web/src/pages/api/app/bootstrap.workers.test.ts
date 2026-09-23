@@ -5,15 +5,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const authMock = vi.hoisted(() => ({
   getSession: vi.fn(),
 }));
-const betaAccessMock = vi.hoisted(() => ({
-  getBetaAccessState: vi.fn(),
+const accountAccessMock = vi.hoisted(() => ({
+  isActiveAccount: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
   auth: { api: { getSession: authMock.getSession } },
 }));
-vi.mock("@/lib/allowlist", () => ({
-  getBetaAccessState: betaAccessMock.getBetaAccessState,
+vi.mock("@/lib/account-access", () => ({
+  isActiveAccount: accountAccessMock.isActiveAccount,
 }));
 
 import { GET } from "./bootstrap";
@@ -22,10 +22,10 @@ describe("app bootstrap API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     authMock.getSession.mockResolvedValue(null);
-    betaAccessMock.getBetaAccessState.mockResolvedValue(null);
+    accountAccessMock.isActiveAccount.mockResolvedValue(false);
   });
 
-  it("returns a private restricted bootstrap for an anonymous visitor", async () => {
+  it("returns a private inactive bootstrap for an anonymous visitor", async () => {
     const request = new Request("https://intar.test/api/app/bootstrap");
 
     const response = await GET({ request } as never);
@@ -35,13 +35,13 @@ describe("app bootstrap API", () => {
     expect(response.headers.get("pragma")).toBe("no-cache");
     await expect(response.json()).resolves.toEqual({
       session: null,
-      betaAccess: "restricted",
+      access: "inactive",
     });
     expect(authMock.getSession).toHaveBeenCalledTimes(1);
     expect(authMock.getSession).toHaveBeenCalledWith({
       headers: request.headers,
     });
-    expect(betaAccessMock.getBetaAccessState).not.toHaveBeenCalled();
+    expect(accountAccessMock.isActiveAccount).not.toHaveBeenCalled();
   });
 
   it("returns the session and active access after one session lookup", async () => {
@@ -50,7 +50,7 @@ describe("app bootstrap API", () => {
       user: { id: "user-1", email: "learner@example.test" },
     };
     authMock.getSession.mockResolvedValue(authSession);
-    betaAccessMock.getBetaAccessState.mockResolvedValue("active");
+    accountAccessMock.isActiveAccount.mockResolvedValue(true);
 
     const response = await GET({
       request: new Request("https://intar.test/api/app/bootstrap"),
@@ -59,18 +59,18 @@ describe("app bootstrap API", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       session: authSession,
-      betaAccess: "active",
+      access: "active",
     });
     expect(authMock.getSession).toHaveBeenCalledTimes(1);
-    expect(betaAccessMock.getBetaAccessState).toHaveBeenCalledWith("user-1");
+    expect(accountAccessMock.isActiveAccount).toHaveBeenCalledWith("user-1");
   });
 
-  it("fails closed when the beta admission is not active", async () => {
+  it("reports an inactive account for a revoked or deleted user", async () => {
     authMock.getSession.mockResolvedValue({
       session: { id: "session-1" },
       user: { id: "user-1" },
     });
-    betaAccessMock.getBetaAccessState.mockResolvedValue("blocked");
+    accountAccessMock.isActiveAccount.mockResolvedValue(false);
 
     const response = await GET({
       request: new Request("https://intar.test/api/app/bootstrap"),
@@ -78,7 +78,7 @@ describe("app bootstrap API", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      betaAccess: "restricted",
+      access: "inactive",
     });
   });
 
@@ -92,9 +92,9 @@ describe("app bootstrap API", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       session: null,
-      betaAccess: "restricted",
+      access: "inactive",
     });
-    expect(betaAccessMock.getBetaAccessState).not.toHaveBeenCalled();
+    expect(accountAccessMock.isActiveAccount).not.toHaveBeenCalled();
   });
 
   it("does not admit a user when bootstrap loading fails", async () => {
@@ -111,12 +111,12 @@ describe("app bootstrap API", () => {
     });
   });
 
-  it("does not admit a user when beta access loading fails", async () => {
+  it("does not admit a user when the account state cannot be loaded", async () => {
     authMock.getSession.mockResolvedValue({
       session: { id: "session-1" },
       user: { id: "user-1" },
     });
-    betaAccessMock.getBetaAccessState.mockRejectedValue(
+    accountAccessMock.isActiveAccount.mockRejectedValue(
       new Error("database unavailable"),
     );
 

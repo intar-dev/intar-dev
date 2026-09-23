@@ -70,7 +70,7 @@ export function OrganizationSignIn() {
               </h1>
               <p className="text-support text-muted-foreground">
                 Use an existing linked OIDC identity, or explicitly connect
-                your organization provider from an active GitHub beta session.
+                your organization provider from a signed-in GitHub account.
               </p>
             </div>
           </CardHeader>
@@ -127,12 +127,12 @@ export function OrganizationSignIn() {
               <ShieldCheck className="mt-0.5 size-4 shrink-0 text-brand-text" />
               <div className="space-y-2">
                 <p>
-                  New beta users must open an invite and redeem through GitHub
-                  first.
+                  New here? Sign up with GitHub first, then connect your
+                  organization.
                 </p>
                 <p>
-                  Signed in with an active GitHub beta account? Continuing here
-                  explicitly connects OIDC to that account.
+                  Signed in with GitHub? Continuing here explicitly connects
+                  OIDC to that account.
                 </p>
                 <p>
                   Already linked? Continuing signs in with the stable OIDC

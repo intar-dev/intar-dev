@@ -29,30 +29,26 @@ export async function createHostEnrollment(db: D1Database, context: UserContext,
   const token = randomHostSecret();
   const hostId = createAppId();
   const expiresAt = Date.now() + 15 * 60_000;
-  const epoch = context.betaAdmission;
   const row = await db.prepare(
-    "INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, source_invite_id, source_lease_id, granted_at, expires_at, organization_id) " +
-    "SELECT ?1, ?2, user_id, ?3, ?4, ?5, source_invite_id, source_lease_id, granted_at, ?6, ?11 FROM access_allowlist " +
-    "WHERE user_id = ?7 AND state = 'active' AND source_invite_id = ?8 AND source_lease_id = ?9 AND granted_at = ?10 " +
-    "AND EXISTS (SELECT 1 FROM user WHERE id = ?7 AND coalesce(banned, 0) = 0 AND deleted_at IS NULL) " +
-    "AND (?4 <> 'organization' OR EXISTS (SELECT 1 FROM member WHERE user_id = ?7 AND organization_id = ?11 AND role IN ('owner', 'admin'))) " +
+    "INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, expires_at, organization_id) " +
+    "SELECT ?1, ?2, owner.id, ?3, ?4, ?5, ?6, ?8 FROM user owner " +
+    "WHERE owner.id = ?7 AND coalesce(owner.banned, 0) = 0 AND owner.deleted_at IS NULL " +
+    "AND (?4 <> 'organization' OR EXISTS (SELECT 1 FROM member WHERE user_id = ?7 AND organization_id = ?8 AND role IN ('owner', 'admin'))) " +
     "AND (?4 <> 'platform' OR EXISTS (SELECT 1 FROM user WHERE id = ?7 AND instr(',' || replace(lower(coalesce(role, '')), ' ', '') || ',', ',admin,') > 0 AND coalesce(banned, 0) = 0 AND deleted_at IS NULL)) AND " + registrationOpen("?4") + " RETURNING host_id",
   ).bind(await sha256Hex(token), hostId, input.name, input.scope, input.role, expiresAt,
-    context.userId, epoch.sourceInviteId, epoch.sourceLeaseId, epoch.grantedAt, input.organizationId ?? null).first();
+    context.userId, input.organizationId ?? null).first();
   if (!row) throw appError(409, "host_enrollment_changed", "Registration changed. Reload My servers and try again.");
   return { hostId, enrollmentToken: token, expiresAt };
 }
 
-/** All claim steps use the same secret and admission epoch within one D1 transaction. */
+/** All claim steps use the same secret and recheck the owner's account within one D1 transaction. */
 export async function claimHostEnrollment(db: D1Database, token: string, credential: string) {
   if (!/^[a-f0-9]{64}$/.test(token) || !/^[a-f0-9]{64}$/.test(credential)) return null;
   const tokenHash = await sha256Hex(token);
   const credentialHash = await sha256Hex(credential);
   const now = Date.now();
-  const active = registrationOpen("enrollment.scope") + " AND EXISTS (SELECT 1 FROM access_allowlist access WHERE access.user_id = enrollment.user_id " +
-    "AND access.state = 'active' AND access.source_invite_id = enrollment.source_invite_id " +
-    "AND access.source_lease_id = enrollment.source_lease_id AND access.granted_at = enrollment.granted_at) " +
-    "AND EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id AND coalesce(banned, 0) = 0 AND deleted_at IS NULL) " +
+  const active = registrationOpen("enrollment.scope") +
+    " AND EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id AND coalesce(banned, 0) = 0 AND deleted_at IS NULL) " +
     "AND (enrollment.scope <> 'organization' OR (enrollment.role = 'agent' AND EXISTS (SELECT 1 FROM member " +
     "WHERE user_id = enrollment.user_id AND organization_id = enrollment.organization_id AND role IN ('owner', 'admin')))) " +
     "AND (enrollment.scope <> 'platform' OR EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id " +

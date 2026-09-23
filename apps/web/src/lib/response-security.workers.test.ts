@@ -64,7 +64,7 @@ describe("worker response security", () => {
 
   it("retains route-specific stricter content and permissions policies", () => {
     const response = hardenWorkerResponse(
-      new Request("https://intar.dev/join"),
+      new Request("https://intar.dev/api/runs/run-1/artifacts/vm-1:0/content"),
       new Response("ok", {
         headers: {
           "content-security-policy": "default-src 'none'; script-src 'none'",

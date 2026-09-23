@@ -23,7 +23,11 @@ import {
   scenarioRunSshKeys,
 } from "@/db/schema";
 import type { ScenarioStartRequestScope } from "@/db/schema/runs";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
+import {
+  activeAccountExistsSql,
+  activeAccountSql,
+  isActiveAccount,
+} from "@/lib/account-access";
 import { appError, AppError, errorChainMatches } from "@/lib/app-error";
 import {
   applyLectureBriefingPresentation,
@@ -124,7 +128,6 @@ import {
 export interface BeginScenarioRunInput {
   scenarioId: string;
   userId: string;
-  betaAdmission: BetaAdmissionEpoch;
   idempotencyKey: string;
   organizationId?: string | null;
   hostId?: string;
@@ -324,7 +327,7 @@ async function admitScenarioStart(
     scenarioId: scenario.scenarioId,
     ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
   });
-  await assertAdmissionActive(input.userId, input.betaAdmission);
+  await assertAccountActive(input.userId);
 
   const replayed = await loadRunByIdempotencyKey(
     db,
@@ -544,60 +547,34 @@ interface ScenarioStartSource {
   candidateProof: CandidateProof | null;
 }
 
-async function assertAdmissionActive(
-  userId: string,
-  admission: BetaAdmissionEpoch,
-): Promise<void> {
-  const current = await env.DB.prepare(
-    "SELECT 1 FROM access_allowlist WHERE user_id = ?1 AND state = 'active'" +
-      " AND source_invite_id = ?2 AND source_lease_id = ?3" +
-      " AND granted_at = ?4 LIMIT 1",
-  )
-    .bind(
-      userId,
-      admission.sourceInviteId,
-      admission.sourceLeaseId,
-      admission.grantedAt,
-    )
-    .first();
-  if (!current) throw scenarioStartAdmissionChanged();
+async function assertAccountActive(userId: string): Promise<void> {
+  if (!(await isActiveAccount(userId))) throw scenarioStartAccessRevoked();
 }
 
-async function assertAdmissionStillActive(input: {
+async function assertAccountStillActive(input: {
   userId: string;
   runId: string;
   hostId: string;
-  betaAdmission: BetaAdmissionEpoch;
 }): Promise<void> {
   const current = await env.DB.prepare(
-    "SELECT 1 FROM access_allowlist access" +
-      " INNER JOIN scenario_runs run ON run.user_id = access.user_id" +
+    "SELECT 1 FROM user owner" +
+      " INNER JOIN scenario_runs run ON run.user_id = owner.id" +
       " AND run.run_id = ?2" +
-      " WHERE access.user_id = ?1 AND run.host_id = ?3" +
-      " AND access.state = 'active'" +
-      " AND access.source_invite_id = ?4" +
-      " AND access.source_lease_id = ?5" +
-      " AND access.granted_at = ?6" +
+      " WHERE owner.id = ?1 AND run.host_id = ?3" +
+      " AND " + activeAccountSql("owner") +
       " AND run.state = 'provisioning'" +
       " AND run.delete_requested_at IS NULL LIMIT 1",
   )
-    .bind(
-      input.userId,
-      input.runId,
-      input.hostId,
-      input.betaAdmission.sourceInviteId,
-      input.betaAdmission.sourceLeaseId,
-      input.betaAdmission.grantedAt,
-    )
+    .bind(input.userId, input.runId, input.hostId)
     .first();
-  if (!current) throw scenarioStartAdmissionChanged();
+  if (!current) throw scenarioStartAccessRevoked();
 }
 
-function scenarioStartAdmissionChanged() {
+function scenarioStartAccessRevoked() {
   return appError(
     403,
-    "beta_access_revoked",
-    "beta access changed while the scenario was starting",
+    "access_revoked",
+    "account access was revoked while the scenario was starting",
   );
 }
 
@@ -621,7 +598,7 @@ function deliveryHint(hostId: string): Promise<void> {
 
 /**
  * Cancels a run that became durable inside the commit window but failed its
- * post-commit admission fence.
+ * post-commit account fence.
  *
  * Both writes travel in one D1 transaction. Marking the VMs absent without
  * moving the run out of provisioning would leave a run that no reconcile can
@@ -990,7 +967,6 @@ async function admitNewRun(context: {
         allowSequenceBypass: input.allowSequenceBypass === true,
         requiresAdmin: input.allowDrainedAdminProof === true || input.allowSequenceBypass === true,
       },
-      betaAdmission: input.betaAdmission,
       requestKey: context.idempotencyKey,
       ...(input.hostId ? { requestedHostId: input.hostId } : {}),
       requiredImages,
@@ -1044,7 +1020,6 @@ async function admitNewRun(context: {
       cpuMillis,
       reservationResources,
       leaseExpiresAt,
-      betaAdmission: input.betaAdmission,
       candidateProof: context.candidateProof,
       sourceAnchor,
       ...(input.allowDrainedAdminProof
@@ -1054,11 +1029,10 @@ async function admitNewRun(context: {
     });
     if (outcome.ok) {
       try {
-        await assertAdmissionStillActive({
+        await assertAccountStillActive({
           userId: input.userId,
           runId,
           hostId: allocated.hostId,
-          betaAdmission: input.betaAdmission,
         });
       } catch (error) {
         await cancelAdmittedRun({
@@ -1107,13 +1081,12 @@ async function admitNewRun(context: {
     }
     if (outcome.reason === "cas_lost") {
       // A lost compare-and-set is usually just contention, but a drain or a
-      // revoked admission that landed in the same window outranks it. Without
+      // revoked account that landed in the same window outranks it. Without
       // this check the final attempt reports a retryable 409 and hides a fence
       // that no retry can pass. It runs only after a failed attempt, so the
       // normal path pays nothing for it.
       await assertAdmissionRefusalPriority({
         userId: input.userId,
-        betaAdmission: input.betaAdmission,
         ...(input.allowDrainedAdminProof
           ? { allowDrainedAdminProof: true }
           : {}),
@@ -1407,7 +1380,6 @@ export interface AdmissionCommitInput {
   cpuMillis: number;
   reservationResources: RuntimeResourceDemand;
   leaseExpiresAt: number | null;
-  betaAdmission: BetaAdmissionEpoch;
   /** Administrative proof may admit a run while the cut-over gate is drained. */
   allowDrainedAdminProof?: boolean;
   /** The candidate proof this run was built from, or null for a live start. */
@@ -1459,7 +1431,7 @@ async function commitAdmissionBatch(
     return { ok: false, reason: "error", error };
   }
   if (rowCount(results[batch.runGateIndex]) === 0) {
-    // The run insert selects through the live admission epoch, the enabled
+    // The run insert selects through the owner's active account, the enabled
     // host, the idempotency guard, the cut-over gate, and the candidate anchor.
     // Zero rows means an anchor refused and D1 rolled the whole batch back, so
     // report the anchor that actually refused instead of a generic error.
@@ -1486,11 +1458,11 @@ async function runExistsForIdempotencyKey(
 
 /**
  * Names the anchor that refused the run insert. The candidate anchor is the
- * one refusal that is not about the admission epoch: the candidate row or the
- * build's artifacts left the read-to-commit window, so the run is refused with
- * the same error the candidate source read raises. A still-active admission
- * epoch is the remaining refusal, and it means the cut-over gate drained inside
- * the commit window.
+ * one refusal that is not about the account: the candidate row or the build's
+ * artifacts left the read-to-commit window, so the run is refused with the same
+ * error the candidate source read raises. A still-active account is the
+ * remaining refusal, and it means the cut-over gate drained inside the commit
+ * window.
  */
 async function admissionRefusal(input: AdmissionCommitInput) {
   const refusal = await sourceAnchorRefusal({
@@ -1502,13 +1474,12 @@ async function admissionRefusal(input: AdmissionCommitInput) {
   if (refusal) throw refusal;
   await assertAdmissionRefusalPriority({
     userId: input.run.userId,
-    betaAdmission: input.betaAdmission,
     ...(input.allowDrainedAdminProof
       ? { allowDrainedAdminProof: true }
       : {}),
   });
   await assertCurrentContentAccess(input.run, input.allowDrainedAdminProof);
-  return scenarioStartAdmissionChanged();
+  return scenarioStartAccessRevoked();
 }
 
 function admissionContentAccess(
@@ -1629,13 +1600,12 @@ async function candidateAnchorHolds(
 
 /**
  * Raises the refusal that outranks a lost compare-and-set or a refused insert,
- * from fresh reads. A drained cut-over gate is a 503 and a revoked admission
- * epoch is a 403; both are final, while the capacity conflict is retryable.
+ * from fresh reads. A drained cut-over gate is a 503 and a revoked account is
+ * a 403; both are final, while the capacity conflict is retryable.
  * Without this ordering a client would keep retrying a fence that cannot pass.
  */
 export async function assertAdmissionRefusalPriority(input: {
   userId: string;
-  betaAdmission: BetaAdmissionEpoch;
   allowDrainedAdminProof?: boolean;
 }): Promise<void> {
   await assertAgentKvmRunsOpen(env.DB, {
@@ -1643,7 +1613,7 @@ export async function assertAdmissionRefusalPriority(input: {
       ? { allowDrainedAdminProof: true }
       : {}),
   });
-  await assertAdmissionActive(input.userId, input.betaAdmission);
+  await assertAccountActive(input.userId);
 }
 
 function rowCount(result: D1Result<unknown> | undefined): number {
@@ -1666,12 +1636,13 @@ export function admissionStatements(input: AdmissionCommitInput): AdmissionBatch
   const run = input.run;
   const statements = [
     // The run references the execution, so insert the execution first. Both
-    // check the beta epoch. The run also checks content access and the host
-    // snapshot; the sentinel rolls the execution back if either check fails.
+    // require an active owner account through the placement guard. The run
+    // also checks content access and the host snapshot; the sentinel rolls
+    // the execution back if either check fails.
     runtimeExecutionStatement(run, input),
     insertRunStatement(run, input),
     runRefusedSentinelStatement(run, input),
-    ...sshKeyStatements(run, input.sshKeyRows, input.betaAdmission),
+    ...sshKeyStatements(run, input.sshKeyRows),
     desiredStateCasStatement(run, input),
     casSentinelStatement(run),
     cpuQuotaStatement(run, input),
@@ -1834,7 +1805,6 @@ function insertRunStatement(
   run: typeof scenarioRuns.$inferInsert & { hostId: string },
   input: AdmissionCommitInput,
 ): D1PreparedStatement {
-  const betaAdmission = input.betaAdmission;
   const values: Array<string | number | null> = [
     run.runId,
     run.userId,
@@ -1881,10 +1851,7 @@ function insertRunStatement(
   ];
   const hostParam = values.length + 1;
   const userParam = values.length + 2;
-  const inviteParam = values.length + 3;
-  const leaseParam = values.length + 4;
-  const grantedAtParam = values.length + 5;
-  const candidateParam = values.length + 6;
+  const candidateParam = values.length + 3;
   const candidateProof = input.candidateProof;
   const sourceAnchor = input.sourceAnchor ?? null;
   const anchorCondition = candidateProof
@@ -1936,25 +1903,11 @@ function insertRunStatement(
     " AND " + admissionContentAccessCondition(contentParam) +
     drainGateCondition(input.allowDrainedAdminProof) +
     (anchorCondition ? " AND " + anchorCondition : "") +
-    " AND EXISTS (SELECT 1 FROM access_allowlist access" +
-    " WHERE access.user_id = ?" +
-    String(userParam) +
-    " AND access.state = 'active'" +
-    " AND access.source_invite_id = ?" +
-    String(inviteParam) +
-    " AND access.source_lease_id = ?" +
-    String(leaseParam) +
-    " AND access.granted_at = ?" +
-    String(grantedAtParam) +
-    ")" +
     " RETURNING run_id";
   return env.DB.prepare(sqlText).bind(
     ...values,
     run.hostId,
     run.userId,
-    betaAdmission.sourceInviteId,
-    betaAdmission.sourceLeaseId,
-    betaAdmission.grantedAt,
     ...anchorParams,
     JSON.stringify(input.desired.readiness),
     JSON.stringify(admissionContentAccess(run, input.allowDrainedAdminProof)),
@@ -1964,7 +1917,6 @@ function insertRunStatement(
 function sshKeyStatements(
   run: typeof scenarioRuns.$inferInsert & { hostId: string },
   sshKeyRows: Array<typeof scenarioRunSshKeys.$inferInsert>,
-  betaAdmission: BetaAdmissionEpoch,
 ): D1PreparedStatement[] {
   return sshKeyRows.map((key) =>
     env.DB.prepare(
@@ -1974,12 +1926,7 @@ function sshKeyStatements(
         ") SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8" +
         " FROM scenario_runs run" +
         " WHERE run.run_id = ?2 AND run.user_id = ?9 AND run.host_id = ?10" +
-        " AND run.state = 'provisioning'" +
-        " AND EXISTS (SELECT 1 FROM access_allowlist access" +
-        " WHERE access.user_id = ?9 AND access.state = 'active'" +
-        " AND access.source_invite_id = ?11" +
-        " AND access.source_lease_id = ?12" +
-        " AND access.granted_at = ?13)",
+        " AND run.state = 'provisioning'",
     ).bind(
       key.id,
       key.runId,
@@ -1991,9 +1938,6 @@ function sshKeyStatements(
       key.createdAt,
       run.userId,
       run.hostId,
-      betaAdmission.sourceInviteId,
-      betaAdmission.sourceLeaseId,
-      betaAdmission.grantedAt,
     ),
   );
 }
@@ -2072,8 +2016,8 @@ function runtimeExecutionStatement(
   input: AdmissionCommitInput,
 ): D1PreparedStatement {
   // The execution is inserted before the run row because the run row
-  // references it. Both statements carry the same admission guard, so a
-  // revoked epoch refuses both.
+  // references it. Both statements carry the same placement guard, which
+  // requires an active owner account, so a revoked account refuses both.
   return env.DB.prepare(
     "INSERT INTO runtime_executions (" +
       "id, user_id, organization_id, host_id, provider_kind," +
@@ -2085,12 +2029,7 @@ function runtimeExecutionStatement(
       " NULL, NULL, ?7, ?7" +
       " FROM agent_hosts host" +
       " WHERE host.id = ?5 AND host.disabled = 0" +
-      " AND " + metalAdmissionSql("?3", "?4") +
-      " AND EXISTS (SELECT 1 FROM access_allowlist access" +
-      " WHERE access.user_id = ?3 AND access.state = 'active'" +
-      " AND access.source_invite_id = ?8" +
-      " AND access.source_lease_id = ?9" +
-      " AND access.granted_at = ?10)",
+      " AND " + metalAdmissionSql("?3", "?4"),
   ).bind(
     run.runtimeExecutionId ?? null,
     run.runId,
@@ -2099,17 +2038,16 @@ function runtimeExecutionStatement(
     run.hostId,
     input.leaseExpiresAt,
     input.now,
-    input.betaAdmission.sourceInviteId,
-    input.betaAdmission.sourceLeaseId,
-    input.betaAdmission.grantedAt,
   );
 }
 
 /**
- * Aborts the batch when the admission gate refused the run while the
- * admission epoch itself is still active. That combination means an anchor
- * other than the epoch refused the insert - a duplicate idempotency key or an
- * occupied active slot - and a partial admission must not survive.
+ * Aborts the batch when the admission gate refused the run while the owner's
+ * account is still active. That combination means an anchor other than the
+ * account refused the insert - a duplicate idempotency key or an occupied
+ * active slot - and a partial admission must not survive. An inactive owner
+ * leaves the sentinel silent: the placement guard refused both inserts, so
+ * the start reports the revoked account instead of a retryable conflict.
  */
 function runRefusedSentinelStatement(
   run: typeof scenarioRuns.$inferInsert & { hostId: string },
@@ -2126,20 +2064,13 @@ function runRefusedSentinelStatement(
       " NULL, NULL, NULL, ?5, ?5" +
       " WHERE NOT EXISTS (SELECT 1 FROM scenario_runs run" +
       " WHERE run.run_id = ?1)" +
-      " AND EXISTS (SELECT 1 FROM access_allowlist access" +
-      " WHERE access.user_id = ?2 AND access.state = 'active'" +
-      " AND access.source_invite_id = ?6" +
-      " AND access.source_lease_id = ?7" +
-      " AND access.granted_at = ?8)",
+      " AND " + activeAccountExistsSql("?2"),
   ).bind(
     run.runId,
     run.userId,
     run.organizationId ?? null,
     run.hostId,
     input.now,
-    input.betaAdmission.sourceInviteId,
-    input.betaAdmission.sourceLeaseId,
-    input.betaAdmission.grantedAt,
   );
 }
 function runtimeVmStatements(

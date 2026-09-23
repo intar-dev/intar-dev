@@ -54,8 +54,7 @@ export async function persistHostReport(input: {
       WHERE metal_placement = 'platform' AND deleted_at IS NULL AND coalesce(banned, 0) = 0 AND ?4 = 1
         AND EXISTS (SELECT 1 FROM agent_hosts host WHERE host.${currentHost}
           AND host.scope = 'personal' AND host.role = 'agent' AND host.scenario_enabled = 1 AND host.user_id = user.id)
-        AND EXISTS (SELECT 1 FROM host_actual_state WHERE host_id = ?1 AND report_json = ?5 AND updated_at = ?6)
-        AND EXISTS (SELECT 1 FROM access_allowlist access WHERE access.user_id = user.id AND access.state = 'active')`)
+        AND EXISTS (SELECT 1 FROM host_actual_state WHERE host_id = ?1 AND report_json = ?5 AND updated_at = ?6)`)
       .bind(hostId, sessionId, credentialGeneration, personalHostReportReady(report, input.requireRunCli) ? 1 : 0, JSON.stringify(report), now),
     d1.prepare(`UPDATE organization SET metal_placement = 'organization'
       WHERE metal_placement = 'platform' AND ?4 = 1

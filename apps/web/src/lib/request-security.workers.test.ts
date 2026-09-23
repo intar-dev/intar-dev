@@ -48,8 +48,6 @@ async function responseBody(
 }
 
 const BODYLESS_CUSTOM_MUTATIONS = [
-  ["POST", "/api/access-invites/cancel"],
-  ["POST", "/api/access-invites/confirm"],
   ["DELETE", "/api/admin/runs/run-1"],
   ["POST", "/api/admin/builds/build-1/retry"],
   ["POST", "/api/admin/scenarios/demo/enabled"],
@@ -480,6 +478,45 @@ describe("worker API request security", () => {
     expect(
       sensitiveRateLimitActionFor(customMutation("/api/auth/sign-in/social")),
     ).toBe("auth-start");
+    expect(
+      sensitiveRateLimitActionFor(
+        customMutation("/api/account-links/sso/start"),
+      ),
+    ).toBe("sso-link");
+    expect(
+      sensitiveRateLimitActionFor(
+        new Request("https://intar.dev/api/account-links/sso/start"),
+      ),
+    ).toBeNull();
+  });
+
+  it("charges the sso-link action before the SSO start route reads its body", async () => {
+    const keys: string[] = [];
+    const request = customMutation("/api/account-links/sso/start", {
+      headers: {
+        "cf-connecting-ip": "203.0.113.7",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ organizationSlug: "team" }),
+    });
+    if (!request.body) throw new Error("expected request body");
+    const getReader = vi.spyOn(request.body, "getReader");
+
+    const result = await secureApplicationApiRequest(
+      request,
+      securityEnv(async ({ key }) => {
+        keys.push(key);
+        return { success: false };
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.response.status).toBe(429);
+    expect(getReader).not.toHaveBeenCalled();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^web-edge:sso-link:[0-9a-f]{24}$/u);
+    expect(keys[0]).not.toContain("203.0.113.7");
   });
 
   it("fails closed when the shared rate limiter rejects or is unavailable", async () => {

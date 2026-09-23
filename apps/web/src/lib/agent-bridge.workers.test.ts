@@ -9,14 +9,13 @@ import {
   session,
   user,
 } from "@/db/schema";
-import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
-import { getBetaAccess, isActiveBetaUser } from "@/lib/allowlist";
+import { isActiveAccount } from "@/lib/account-access";
 import { auth } from "@/lib/auth";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  FIXTURE_BETA_ADMIN_ID,
-  grantFixtureBetaAccess,
-} from "@/test/beta-access-fixtures";
+  ensureFixtureMember,
+  revokeFixtureAccount,
+} from "@/test/account-fixtures";
 import { jsonResponse, requireUserContext } from "./agent-bridge";
 
 const db = drizzle(env.DB);
@@ -60,7 +59,7 @@ describe("requireUserContext", () => {
       organizationIds: [],
       activeOrganizationId: null,
       expectedActiveOrganizationId: null,
-      betaAccess: true,
+      account: "active",
       expired: false,
       status: 200,
     },
@@ -69,7 +68,7 @@ describe("requireUserContext", () => {
       organizationIds: ["first-organization", "second-organization"],
       activeOrganizationId: "second-organization",
       expectedActiveOrganizationId: "second-organization",
-      betaAccess: true,
+      account: "active",
       expired: false,
       status: 200,
     },
@@ -78,25 +77,34 @@ describe("requireUserContext", () => {
       organizationIds: ["first-organization", "second-organization"],
       activeOrganizationId: "unrelated-organization",
       expectedActiveOrganizationId: null,
-      betaAccess: true,
+      account: "active",
       expired: false,
       status: 200,
     },
     {
-      name: "membership without beta access",
+      name: "membership of a banned account",
       organizationIds: ["first-organization"],
       activeOrganizationId: "first-organization",
       expectedActiveOrganizationId: null,
-      betaAccess: false,
+      account: "banned",
       expired: false,
       status: 403,
     },
     {
-      name: "an expired session with active beta access",
+      name: "membership of a deleted account",
+      organizationIds: ["first-organization"],
+      activeOrganizationId: "first-organization",
+      expectedActiveOrganizationId: null,
+      account: "deleted",
+      expired: false,
+      status: 403,
+    },
+    {
+      name: "an expired session of an active account",
       organizationIds: [],
       activeOrganizationId: null,
       expectedActiveOrganizationId: null,
-      betaAccess: true,
+      account: "active",
       expired: true,
       status: 401,
     },
@@ -111,15 +119,12 @@ describe("requireUserContext", () => {
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    if (testCase.betaAccess) {
-      await grantFixtureBetaAccess({
-        d1: env.DB,
-        userId,
-        githubAccountId: "context-github-account",
-        githubUsername: "context-user",
-        now,
-      });
-    }
+    await ensureFixtureMember({
+      d1: env.DB,
+      userId,
+      githubAccountId: "context-github-account",
+      now,
+    });
     for (const organizationId of testCase.organizationIds) {
       await db.insert(organization).values({
         id: organizationId,
@@ -145,6 +150,14 @@ describe("requireUserContext", () => {
       updatedAt: new Date(now),
       activeOrganizationId: testCase.activeOrganizationId,
     });
+    if (testCase.account === "banned") {
+      await revokeFixtureAccount({ d1: env.DB, userId });
+    }
+    if (testCase.account === "deleted") {
+      await env.DB.prepare("UPDATE user SET deleted_at = ?1 WHERE id = ?2")
+        .bind(now, userId)
+        .run();
+    }
 
     const result = await requireUserContext(
       new Request("http://localhost/api/agent", {
@@ -155,6 +168,11 @@ describe("requireUserContext", () => {
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("unauthorized user was admitted");
       expect(result.response.status).toBe(testCase.status);
+      if (testCase.status === 403) {
+        await expect(result.response.json()).resolves.toEqual({
+          error: "access revoked",
+        });
+      }
       return;
     }
     expect(result.ok).toBe(true);
@@ -165,41 +183,42 @@ describe("requireUserContext", () => {
     expect(result.context.activeOrganizationId).toBe(
       testCase.expectedActiveOrganizationId,
     );
-    const admission = await getBetaAccess(userId);
-    expect(result.context.betaAdmission).toEqual({
-      sourceInviteId: admission!.sourceInviteId,
-      sourceLeaseId: admission!.sourceLeaseId,
-      grantedAt: admission!.grantedAt,
-    });
+    expect(Object.keys(result.context).toSorted()).toEqual([
+      "activeOrganizationId",
+      "isAdmin",
+      "organizationIds",
+      "role",
+      "sessionId",
+      "userId",
+    ]);
   });
 
   it("authorizes only the active Better Auth user id and never organization membership", async () => {
     const now = Date.now();
-    const userId = "beta-user-id";
+    const userId = "member-user-id";
     const githubUsername = "same-as-a-possible-username";
     const githubAccountId = "github-account-123";
 
     await db.insert(user).values({
       id: userId,
-      name: "Beta User",
-      email: "beta-user@example.test",
+      name: "Member User",
+      email: "member-user@example.test",
       emailVerified: true,
       username: githubUsername,
       displayUsername: githubUsername,
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    await grantFixtureBetaAccess({
+    await ensureFixtureMember({
       d1: env.DB,
       userId,
       githubAccountId,
-      githubUsername,
       now,
     });
     await db.insert(organization).values({
       id: "organization-id",
-      name: "Beta Organization",
-      slug: "beta-organization",
+      name: "Member Organization",
+      slug: "member-organization",
       createdAt: new Date(now),
     });
     await db.insert(member).values({
@@ -224,38 +243,25 @@ describe("requireUserContext", () => {
       headers: { cookie: await signedSessionCookie(sessionToken) },
     });
 
-    await expect(isActiveBetaUser(userId)).resolves.toBe(true);
+    await expect(isActiveAccount(userId)).resolves.toBe(true);
     // A username-shaped lookup is deliberately not an authorization alias.
-    await expect(isActiveBetaUser(githubUsername)).resolves.toBe(false);
-    const betaAccess = await getBetaAccess(userId);
-    expect(betaAccess?.state).toBe("active");
+    await expect(isActiveAccount(githubUsername)).resolves.toBe(false);
 
     const active = await requireUserContext(request);
     expect(active).toMatchObject({
       ok: true,
       context: {
         userId,
-        betaAdmission: {
-          sourceInviteId: betaAccess!.sourceInviteId,
-          sourceLeaseId: betaAccess!.sourceLeaseId,
-          grantedAt: betaAccess!.grantedAt,
-        },
         organizationIds: ["organization-id"],
         activeOrganizationId: "organization-id",
       },
     });
 
-    await revokeBetaUser({
-      d1: env.DB,
-      userId,
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "security_test",
-      now: now + 2,
-    });
+    await revokeFixtureAccount({ d1: env.DB, userId });
 
     const blocked = await requireUserContext(request);
     expect(blocked.ok).toBe(false);
-    if (blocked.ok) throw new Error("blocked beta user was authorized");
+    if (blocked.ok) throw new Error("revoked user was authorized");
     expect(blocked.response.status).toBe(403);
     await expect(blocked.response.json()).resolves.toEqual({
       error: "access revoked",

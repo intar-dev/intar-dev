@@ -9,8 +9,8 @@ import {
 import type { VmReportV2 } from "@/generated/bridge";
 import { runtimeVms, runtimeVmAccessKeys } from "@/db/schema";
 import { encryptRuntimeVmAccessKey, recordRuntimeVmActualState } from "@/lib/runtime-vm-state";
-import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
-import { FIXTURE_BETA_ADMIN_ID } from "@/test/beta-access-fixtures";
+import { revokeAccount } from "@/lib/access-revocation-store";
+import { FIXTURE_ADMIN_ID } from "@/test/account-fixtures";
 
 // Workerd eviction drains active requests for up to five seconds per eviction.
 vi.setConfig({ testTimeout: 20_000 });
@@ -91,12 +91,12 @@ describe("host credential generation", () => {
     ws.close();
   });
 
-  it("does not commit an admitted report after beta revocation, before cleanup", async () => {
-    await seedHost("host-beta-race");
-    const { ws, stub, messages } = await connectHost("host-beta-race");
+  it("does not commit an admitted report after access revocation, before cleanup", async () => {
+    await seedHost("host-revocation-race");
+    const { ws, stub, messages } = await connectHost("host-revocation-race");
     await waitForBridgeMessage(messages, frame => frame.type === "desired_state");
     const now = Date.now();
-    await seedRun({ db: drizzle(env.DB), hostId: "host-beta-race", runId: "run", now });
+    await seedRun({ db: drizzle(env.DB), hostId: "host-revocation-race", runId: "run", now });
     const before = await env.DB.prepare(
       "SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = 'run'",
     ).first();
@@ -120,18 +120,18 @@ describe("host credential generation", () => {
           return current;
         });
       const pending = runtime.webSocketMessage(
-        state.getWebSockets("host:host-beta-race")[0]!,
-        JSON.stringify(vmReport("host-beta-race", "run", "runtime-web", "ready", now + 1, 22001, "10.77.0.2")),
+        state.getWebSockets("host:host-revocation-race")[0]!,
+        JSON.stringify(vmReport("host-revocation-race", "run", "runtime-web", "ready", now + 1, 22001, "10.77.0.2")),
       );
       try {
         await reached;
         // Do not run deferred cleanup: the revocation transaction alone must fence this report.
-        await revokeBetaUser({
-          d1: env.DB, userId: "user-1", actorUserId: FIXTURE_BETA_ADMIN_ID,
+        await revokeAccount({
+          d1: env.DB, userId: "user-1", actorUserId: FIXTURE_ADMIN_ID,
           reason: "paused-report-regression",
         });
         expect(await env.DB.prepare(
-          "SELECT disabled, credential_generation, active_session_id FROM agent_hosts WHERE id = 'host-beta-race'",
+          "SELECT disabled, credential_generation, active_session_id FROM agent_hosts WHERE id = 'host-revocation-race'",
         ).first()).toEqual({ disabled: 1, credential_generation: 2, active_session_id: null });
       } finally {
         admission.mockRestore();

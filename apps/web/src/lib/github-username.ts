@@ -1,10 +1,10 @@
 // Pure GitHub-username helpers, safe for both the client bundle and the
-// worker. The D1 allowlist key is the normalized (lowercased) username.
+// worker. Stored usernames are normalized (lowercased).
 
 export const GITHUB_USERNAME_PATTERN =
   /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 
-export function toAllowlistKey(value?: string | null): string | null {
+export function normalizeGithubUsername(value?: string | null): string | null {
   const key = value?.trim().toLowerCase();
   return key ? key : null;
 }

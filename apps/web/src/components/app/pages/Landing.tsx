@@ -9,18 +9,23 @@ import { BrandMark } from "../patterns/BrandMark";
 import { InlineFeedback } from "../patterns/InlineFeedback";
 import { useMyRuns } from "../hooks/useMyRuns";
 import { useSession } from "../hooks/useSession";
+import { useSignupStatus } from "../hooks/useSignupStatus";
 import { ThemeToggle } from "../theme";
 import { RunLoop } from "./landing/RunLoop";
 import { RunPreview } from "./landing/RunPreview";
+import { signupSpotsLine } from "./landing/signup-spots";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { startGithubSignIn } from "@/lib/auth-client";
 
 const errorMessages: Record<string, string> = {
-  unable_to_create_session:
-    "We couldn't complete sign-in. Beta access requires an active invite claim.",
-  unable_to_create_user:
-    "We couldn't create your account. Open the beta invite link an administrator sent you.",
+  signups_full:
+    "No sign-up spots are open right now. Members can still sign in.",
+  access_revoked: "This account no longer has access.",
+  banned_user: "This account no longer has access.",
+  validation_failed: "We couldn't check this sign-in. Please try again.",
+  unable_to_create_session: "We couldn't complete sign-in. Please try again.",
+  unable_to_create_user: "We couldn't create your account. Please try again.",
   signup_disabled: "Sign-ups are disabled for this provider.",
   state_mismatch: "Your sign-in session expired. Please try again.",
   please_restart_the_process: "Your sign-in session expired. Please try again.",
@@ -43,6 +48,7 @@ export function Landing() {
   const session = useSession();
   const signedIn = Boolean(session.data?.user);
   const runs = useMyRuns({ enabled: signedIn });
+  const signups = useSignupStatus();
   const activeRun = runs.data?.runs.find((run) => run.active) ?? null;
 
   const signIn = useMutation({
@@ -77,7 +83,7 @@ export function Landing() {
                 aria-hidden="true"
                 className="size-1.5 rounded-full bg-primary"
               />
-              Private beta
+              Early access
             </p>
 
             <div className="space-y-5 sm:space-y-6">
@@ -98,53 +104,62 @@ export function Landing() {
               </p>
             </div>
 
-            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-center sm:gap-3">
-              {signedIn ? (
-                <Button
-                  size="lg"
-                  className="w-full sm:w-auto"
-                  disabled={runs.isLoading}
-                  render={
-                    runs.isLoading ? undefined : (
-                      <Link
-                        to={activeRun ? "/runs/$runId" : "/courses"}
-                        params={activeRun ? { runId: activeRun.runId } : {}}
-                      />
-                    )
-                  }
-                >
-                  {runs.isLoading
-                    ? "Finding your work…"
-                    : activeRun
-                      ? "Resume run"
-                      : "Browse courses"}
-                  {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
-                </Button>
-              ) : (
-                <>
+            {/* The spots line sits with the sign-in actions it describes. */}
+            <div className="flex w-full flex-col items-center gap-3 sm:w-auto">
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-center sm:gap-3">
+                {signedIn ? (
                   <Button
                     size="lg"
                     className="w-full sm:w-auto"
-                    onClick={() => signIn.mutate()}
-                    disabled={signIn.isPending}
+                    disabled={runs.isLoading}
+                    render={
+                      runs.isLoading ? undefined : (
+                        <Link
+                          to={activeRun ? "/runs/$runId" : "/courses"}
+                          params={activeRun ? { runId: activeRun.runId } : {}}
+                        />
+                      )
+                    }
                   >
-                    {signIn.isPending
-                      ? "Opening GitHub…"
-                      : "Sign in with GitHub"}
-                    {!signIn.isPending ? (
-                      <ArrowRight className="size-4" />
-                    ) : null}
+                    {runs.isLoading
+                      ? "Finding your work…"
+                      : activeRun
+                        ? "Resume run"
+                        : "Browse courses"}
+                    {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
                   </Button>
-                  <Button
-                    size="lg"
-                    variant="outline"
-                    className="w-full sm:w-auto"
-                    render={<Link to="/organization-sign-in" />}
-                  >
-                    Organization sign-in
-                  </Button>
-                </>
-              )}
+                ) : (
+                  <>
+                    <Button
+                      size="lg"
+                      className="w-full sm:w-auto"
+                      onClick={() => signIn.mutate()}
+                      disabled={signIn.isPending}
+                    >
+                      {signIn.isPending
+                        ? "Opening GitHub…"
+                        : "Sign in with GitHub"}
+                      {!signIn.isPending ? (
+                        <ArrowRight className="size-4" />
+                      ) : null}
+                    </Button>
+                    <Button
+                      size="lg"
+                      variant="outline"
+                      className="w-full sm:w-auto"
+                      render={<Link to="/organization-sign-in" />}
+                    >
+                      Organization sign-in
+                    </Button>
+                  </>
+                )}
+              </div>
+
+              {!signedIn && signups.isSuccess ? (
+                <p className="text-caption text-muted-foreground tabular-nums">
+                  {signupSpotsLine(signups.data)}
+                </p>
+              ) : null}
             </div>
 
             {signIn.error ? (

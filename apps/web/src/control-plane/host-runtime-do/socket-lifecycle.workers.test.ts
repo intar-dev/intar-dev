@@ -8,7 +8,7 @@ import {
   type RunStatusSocketAttachment,
 } from "./base";
 import {
-  betaAdmissionForHostFixture, clientHello, connectHost, drizzle, env,
+  clientHello, connectHost, drizzle, env,
   resetHostRuntimeTestDatabase, seedHost, seedRun, waitForBridgeMessage,
 } from "./test-fixtures";
 
@@ -30,14 +30,10 @@ function closed(ws: WebSocket): Promise<number> {
 }
 
 async function pendingHostRequest(hostId: string) {
-  const admission = await betaAdmissionForHostFixture("user-1");
   return () => env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId)).fetch(
     "http://host-runtime/connect", {
       headers: {
         upgrade: "websocket", "x-agent-host-id": hostId, "x-agent-credential-generation": "1",
-        "x-agent-beta-source-invite-id": admission.sourceInviteId,
-        "x-agent-beta-source-lease-id": admission.sourceLeaseId,
-        "x-agent-beta-admission-granted-at": String(admission.grantedAt),
       },
     },
   );
@@ -48,15 +44,11 @@ async function statusRequest(hostId: string, sessionId: string, expiresAt: numbe
   await env.DB.prepare(
     "INSERT INTO session (id, token, user_id, expires_at, created_at, updated_at) VALUES (?, ?, 'user-1', ?, ?, ?)",
   ).bind(sessionId, `${sessionId}-token`, expiresAt, now, now).run();
-  const admission = await betaAdmissionForHostFixture("user-1");
   return () => env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId)).fetch(
     "http://host-runtime/_internal/run-status", {
       headers: {
         upgrade: "websocket", "x-run-status-host-id": hostId, "x-run-status-run-id": "run",
         "x-run-status-user-id": "user-1", "x-run-status-session-id": sessionId,
-        "x-run-status-beta-source-invite-id": admission.sourceInviteId,
-        "x-run-status-beta-source-lease-id": admission.sourceLeaseId,
-        "x-run-status-beta-admission-granted-at": String(admission.grantedAt),
       },
     },
   );

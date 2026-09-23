@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { appError } from "@/lib/app-error";
 
-export async function resolveBetaOidcProvider(
+export async function resolveOrganizationOidcProvider(
   organizationSlug: string,
 ): Promise<{ providerId: string; organizationSlug: string }> {
   const slug = organizationSlug.trim();
@@ -28,7 +28,7 @@ export async function resolveBetaOidcProvider(
     throw appError(
       404,
       "organization_sso_unavailable",
-      "organization SSO recovery is unavailable",
+      "organization SSO is unavailable",
     );
   }
   return { ...provider, organizationSlug: slug };

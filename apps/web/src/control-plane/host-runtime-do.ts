@@ -25,7 +25,6 @@ import {
   serializeBridgeMessageV8,
 } from "@/control-plane/bridge-v8";
 import {
-  accessAllowlist,
   agentHosts,
   hostActualState,
   hostDesiredState,
@@ -65,7 +64,7 @@ import type {
   VmReportV2,
 } from "@/generated/bridge";
 import { reconcileHostScenarioImages } from "@/lib/scenario-image-cache";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
+import { activeAccountExistsSql, activeAccountSql } from "@/lib/account-access";
 import {
   controlPlaneMaintenanceEnabled,
   maintenanceJsonResponse,
@@ -227,11 +226,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
     if (!Number.isSafeInteger(credentialGeneration) || credentialGeneration < 1) {
       return jsonResponse({ error: "invalid credential generation" }, 401);
     }
-    const parsedBetaAdmission = parseBetaAdmissionHeaders(request.headers);
-    if (!parsedBetaAdmission.valid) {
-      return jsonResponse({ error: "invalid beta admission" }, 401);
-    }
-    const betaAdmission = parsedBetaAdmission.admission;
     const admission = await this.loadHostConnectionAdmission(hostId);
     if (!admission) {
       return jsonResponse({ error: "host not found" }, 404);
@@ -246,19 +240,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
       await this.retireRuntimeState(hostId, "host disabled");
       return jsonResponse({ error: "host is disabled" }, 403);
     }
-    if (admission.scope === "personal") {
-      if (admission.betaAdmission === null) {
-        await this.retireRuntimeState(hostId, "beta access revoked");
-        return jsonResponse({ error: "beta access is revoked" }, 403);
-      }
-      if (!sameBetaAdmission(betaAdmission, admission.betaAdmission)) {
-        return jsonResponse({ error: "stale beta admission" }, 401);
-      }
-    } else if (betaAdmission !== null) {
-      return jsonResponse(
-        { error: "invalid host admission" },
-        401,
-      );
+    if (admission.scope === "personal" && !admission.ownerActive) {
+      await this.retireRuntimeState(hostId, "account access revoked");
+      return jsonResponse({ error: "account access is revoked" }, 403);
     }
 
     await this.persistKnownHostId(hostId);
@@ -286,9 +270,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       scope: admission.scope,
       organizationId: admission.organizationId,
       sessionId: null,
-      betaSourceInviteId: betaAdmission?.sourceInviteId ?? null,
-      betaSourceLeaseId: betaAdmission?.sourceLeaseId ?? null,
-      betaAdmissionGrantedAt: betaAdmission?.grantedAt ?? null,
       connectedAt,
       helloReceived: false,
       bridgeProtocol: null,
@@ -434,23 +415,17 @@ export class HostRuntimeDO extends HostRuntimeBase {
          ON auth_session.id = ?1
         AND auth_session.user_id = run.user_id
         AND auth_session.expires_at > ?2
-       INNER JOIN access_allowlist access
-         ON access.user_id = run.user_id
-        AND access.state = 'active'
-        AND access.source_invite_id = ?3
-        AND access.source_lease_id = ?4
-        AND access.granted_at = ?5
-       WHERE run.run_id = ?6
-         AND run.user_id = ?7
-         AND run.host_id = ?8
+       INNER JOIN user run_owner
+         ON run_owner.id = run.user_id
+        AND ${activeAccountSql("run_owner")}
+       WHERE run.run_id = ?3
+         AND run.user_id = ?4
+         AND run.host_id = ?5
        LIMIT 1`,
     )
       .bind(
         attachment.sessionId,
         Date.now(),
-        attachment.betaSourceInviteId,
-        attachment.betaSourceLeaseId,
-        attachment.betaAdmissionGrantedAt,
         attachment.runId,
         attachment.userId,
         attachment.hostId,
@@ -580,7 +555,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       !(await this.isCurrentHostSessionAdmission(
         attachment.hostId,
         attachment.sessionId,
-        betaAdmissionFromAttachment(attachment),
+        attachment.scope,
         attachment.credentialGeneration,
         attachment.organizationId,
       ))
@@ -686,23 +661,18 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
     await this.persistKnownHostId(message.host_id);
     const db = drizzle(this.env.DB);
-    const socketBetaAdmission = betaAdmissionFromAttachment(attachment);
-    const admissionFence = host.scope === "personal" && socketBetaAdmission
-      ? exists(
-          db.select({ userId: accessAllowlist.userId }).from(accessAllowlist).where(and(
-            eq(accessAllowlist.userId, host.userId),
-            eq(accessAllowlist.state, "active"),
-            eq(accessAllowlist.sourceInviteId, socketBetaAdmission.sourceInviteId),
-            eq(accessAllowlist.sourceLeaseId, socketBetaAdmission.sourceLeaseId),
-            eq(accessAllowlist.grantedAt, socketBetaAdmission.grantedAt),
-          )),
-        )
-      : host.scope === "organization" && socketBetaAdmission === null && attachment.organizationId === host.organizationId
-        ? sql`${agentHosts.role} = 'agent' AND ${agentHosts.organizationId} = ${host.organizationId}
-            AND ${sql.raw(organizationHostAdmissionCondition("agent_hosts.organization_id"))}`
-        : host.scope === "platform" && socketBetaAdmission === null
-        ? sql`1 = 1`
-        : undefined;
+    // The socket was admitted for one scope at connect. A host whose scope
+    // changed since then must reconnect under its current credentials.
+    const admissionFence = attachment.scope !== host.scope
+      ? undefined
+      : host.scope === "personal"
+        ? sql.raw(activeAccountExistsSql("agent_hosts.user_id"))
+        : host.scope === "organization" && attachment.organizationId === host.organizationId
+          ? sql`${agentHosts.role} = 'agent' AND ${agentHosts.organizationId} = ${host.organizationId}
+              AND ${sql.raw(organizationHostAdmissionCondition("agent_hosts.organization_id"))}`
+          : host.scope === "platform"
+            ? sql`1 = 1`
+            : undefined;
     const activationFence = admissionFence && host.scope
       ? and(
           eq(agentHosts.id, message.host_id),
@@ -717,7 +687,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       await this.rejectClientHelloAdmission(
         ws,
         message.host_id,
-        "beta admission required",
+        "host admission required",
       );
       return;
     }
@@ -792,7 +762,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     const admissionStillCurrent = await this.isCurrentHostSessionAdmission(
       message.host_id,
       sessionId,
-      socketBetaAdmission,
+      attachment.scope,
       attachment.credentialGeneration,
       attachment.organizationId,
     );
@@ -1401,7 +1371,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       const admissionStillCurrent = await this.isCurrentHostSessionAdmission(
         hostId,
         attachment.sessionId,
-        betaAdmissionFromAttachment(attachment),
+        attachment.scope,
         attachment.credentialGeneration,
         attachment.organizationId,
       );
@@ -1509,18 +1479,15 @@ export class HostRuntimeDO extends HostRuntimeBase {
     organizationId: string | null;
     credentialGeneration: number;
     disabled: boolean;
-    betaAdmission: BetaAdmissionEpoch | null;
+    ownerActive: boolean;
   } | null> {
     const row = await this.env.DB.prepare(
       `SELECT host.scope, host.organization_id,
               host.credential_generation,
               (host.disabled OR (host.scope = 'organization' AND (host.role <> 'agent'
                 OR NOT (${organizationHostAdmissionCondition()})))) AS disabled,
-              CASE WHEN access.state = 'active' THEN access.source_invite_id END AS beta_source_invite_id,
-              CASE WHEN access.state = 'active' THEN access.source_lease_id END AS beta_source_lease_id,
-              CASE WHEN access.state = 'active' THEN access.granted_at END AS beta_granted_at
+              ${activeAccountExistsSql("host.user_id")} AS owner_active
        FROM agent_hosts host
-       LEFT JOIN access_allowlist access ON access.user_id = host.user_id
        WHERE host.id = ?1
        LIMIT 1`,
     )
@@ -1530,9 +1497,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         organization_id: string | null;
         credential_generation: number;
         disabled: number;
-        beta_source_invite_id: string | null;
-        beta_source_lease_id: string | null;
-        beta_granted_at: number | null;
+        owner_active: number;
       }>();
     return row
       ? {
@@ -1540,7 +1505,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
           organizationId: row.organization_id,
           credentialGeneration: row.credential_generation,
           disabled: row.disabled !== 0,
-          betaAdmission: admissionFromDatabaseRow(row),
+          ownerActive: row.owner_active !== 0,
         }
       : null;
   }
@@ -1556,7 +1521,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       !admission.scope ||
       admission.credentialGeneration < 1 ||
       admission.disabled ||
-      (admission.scope === "personal" && admission.betaAdmission === null)
+      (admission.scope === "personal" && !admission.ownerActive)
     ) {
       await this.retireRuntimeState(hostId, reason);
       return;
@@ -1571,43 +1536,32 @@ export class HostRuntimeDO extends HostRuntimeBase {
   private async isCurrentHostSessionAdmission(
     hostId: string,
     sessionId: string,
-    betaAdmission: BetaAdmissionEpoch | null,
+    scope: SocketAttachment["scope"],
     credentialGeneration: number,
     organizationId: string | null | undefined,
   ): Promise<boolean> {
     const row = await this.env.DB.prepare(
       `SELECT 1 AS admitted
        FROM agent_hosts host
-       LEFT JOIN access_allowlist access ON access.user_id = host.user_id
        WHERE host.id = ?1
          AND host.active_session_id = ?2
-         AND host.credential_generation = ?6
+         AND host.scope = ?3
+         AND host.credential_generation = ?4
          AND host.credential_generation > 0
          AND host.disabled = 0
          AND (
-           (
-             ((host.scope = 'platform' AND ?7 IS NULL) OR (host.scope = 'organization' AND host.role = 'agent' AND host.organization_id = ?7
-               AND (${organizationHostAdmissionCondition()})))
-             AND ?3 IS NULL
-             AND ?4 IS NULL
-             AND ?5 IS NULL
-           )
-           OR (
-             host.scope = 'personal' AND ?7 IS NULL
-             AND access.state = 'active'
-             AND access.source_invite_id = ?3
-             AND access.source_lease_id = ?4
-             AND access.granted_at = ?5
-           )
+           (host.scope = 'platform' AND ?5 IS NULL)
+           OR (host.scope = 'organization' AND host.role = 'agent' AND host.organization_id = ?5
+             AND (${organizationHostAdmissionCondition()}))
+           OR (host.scope = 'personal' AND ?5 IS NULL
+             AND ${activeAccountExistsSql("host.user_id")})
          )
        LIMIT 1`,
     )
       .bind(
         hostId,
         sessionId,
-        betaAdmission?.sourceInviteId ?? null,
-        betaAdmission?.sourceLeaseId ?? null,
-        betaAdmission?.grantedAt ?? null,
+        scope,
         credentialGeneration,
         organizationId ?? null,
       )
@@ -1769,24 +1723,7 @@ function parseRunStatusStreamAttachment(
     headers,
     "x-run-status-session-id",
   );
-  const betaSourceInviteId = headers.get(
-    "x-run-status-beta-source-invite-id",
-  );
-  const betaSourceLeaseId = headers.get(
-    "x-run-status-beta-source-lease-id",
-  );
-  const betaAdmissionGrantedAt = parseRunStatusTimestamp(
-    headers.get("x-run-status-beta-admission-granted-at"),
-  );
-  if (
-    !runId ||
-    !userId ||
-    !hostId ||
-    !sessionId ||
-    !validAdmissionId(betaSourceInviteId) ||
-    !validAdmissionId(betaSourceLeaseId) ||
-    betaAdmissionGrantedAt === null
-  ) {
+  if (!runId || !userId || !hostId || !sessionId) {
     return null;
   }
   return {
@@ -1795,9 +1732,6 @@ function parseRunStatusStreamAttachment(
     userId,
     hostId,
     sessionId,
-    betaSourceInviteId,
-    betaSourceLeaseId,
-    betaAdmissionGrantedAt,
   };
 }
 
@@ -1812,101 +1746,6 @@ function requiredRunStatusHeader(
     value.length <= maxLength &&
     value === value.trim()
     ? value
-    : null;
-}
-
-function parseRunStatusTimestamp(value: string | null): number | null {
-  if (!value || !/^\d{1,16}$/u.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function parseBetaAdmissionHeaders(headers: Headers):
-  | { valid: true; admission: BetaAdmissionEpoch | null }
-  | { valid: false } {
-  const sourceInviteId = headers.get("x-agent-beta-source-invite-id");
-  const sourceLeaseId = headers.get("x-agent-beta-source-lease-id");
-  const grantedAtValue = headers.get("x-agent-beta-admission-granted-at");
-  if (
-    sourceInviteId === null &&
-    sourceLeaseId === null &&
-    grantedAtValue === null
-  ) {
-    return { valid: true, admission: null };
-  }
-  if (
-    !validAdmissionId(sourceInviteId) ||
-    !validAdmissionId(sourceLeaseId) ||
-    !grantedAtValue ||
-    !/^\d{1,16}$/u.test(grantedAtValue)
-  ) {
-    return { valid: false };
-  }
-  const grantedAt = Number(grantedAtValue);
-  if (!Number.isSafeInteger(grantedAt) || grantedAt < 0) {
-    return { valid: false };
-  }
-  return {
-    valid: true,
-    admission: { sourceInviteId, sourceLeaseId, grantedAt },
-  };
-}
-
-function validAdmissionId(value: string | null): value is string {
-  return (
-    value !== null &&
-    value.length > 0 &&
-    value.length <= 256 &&
-    value === value.trim()
-  );
-}
-
-function sameBetaAdmission(
-  left: BetaAdmissionEpoch | null,
-  right: BetaAdmissionEpoch | null,
-): boolean {
-  return (
-    left !== null &&
-    right !== null &&
-    left.sourceInviteId === right.sourceInviteId &&
-    left.sourceLeaseId === right.sourceLeaseId &&
-    left.grantedAt === right.grantedAt
-  );
-}
-
-function betaAdmissionFromAttachment(
-  attachment: SocketAttachment,
-): BetaAdmissionEpoch | null {
-  return admissionFromValues(
-    attachment.betaSourceInviteId,
-    attachment.betaSourceLeaseId,
-    attachment.betaAdmissionGrantedAt,
-  );
-}
-
-function admissionFromDatabaseRow(row: {
-  beta_source_invite_id: string | null;
-  beta_source_lease_id: string | null;
-  beta_granted_at: number | null;
-}): BetaAdmissionEpoch | null {
-  return admissionFromValues(
-    row.beta_source_invite_id,
-    row.beta_source_lease_id,
-    row.beta_granted_at,
-  );
-}
-
-function admissionFromValues(
-  sourceInviteId: string | null,
-  sourceLeaseId: string | null,
-  grantedAt: number | null,
-): BetaAdmissionEpoch | null {
-  return validAdmissionId(sourceInviteId) &&
-    validAdmissionId(sourceLeaseId) &&
-    typeof grantedAt === "number" &&
-    Number.isSafeInteger(grantedAt) &&
-    grantedAt >= 0
-    ? { sourceInviteId, sourceLeaseId, grantedAt }
     : null;
 }
 

@@ -102,10 +102,10 @@ describe("exact generated D1 schema verifier", () => {
 
   test("rejects changed defaults or removed checks in a recreated table", async () => {
     for (const mutation of [
-      (sql: string) => sql.replace("DEFAULT 'pending'", "DEFAULT 'redeemed'"),
+      (sql: string) => sql.replace("DEFAULT 'pending'", "DEFAULT 'released'"),
       (sql: string) =>
         sql.replace(
-          /,\nCONSTRAINT "access_invite_codes_hash_valid" CHECK\([^\n]+\)/u,
+          /,\n\s*CONSTRAINT "host_resource_reservations_cpu_positive" CHECK\([^\n]+\)/u,
           "",
         ),
     ]) {
@@ -114,13 +114,15 @@ describe("exact generated D1 schema verifier", () => {
         const table = fixture.database
           .query(
             `SELECT name, sql FROM sqlite_schema
-             WHERE type = 'table' AND name = 'access_invite_codes'`,
+             WHERE type = 'table' AND name = 'host_resource_reservations'`,
           )
           .get() as { name: string; sql: string };
+        const mutated = mutation(table.sql);
+        expect(mutated).not.toBe(table.sql);
         const replacement = `${table.name}_replacement`;
-        const changed = mutation(table.sql.replaceAll(table.name, replacement))
+        const changed = mutated
+          .replaceAll(table.name, replacement)
           .replaceAll(`"${replacement}".`, "");
-        expect(changed).not.toBe(table.sql);
         fixture.database.exec("PRAGMA foreign_keys = OFF");
         fixture.database.exec(changed);
         fixture.database.exec(`DROP TABLE ${quote(table.name)}`);

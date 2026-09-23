@@ -11,7 +11,7 @@ import { appError } from "@/lib/app-error";
 import {
   setPlatformUserRole,
   type PlatformUserRole,
-} from "@/lib/beta-admin-guard";
+} from "@/lib/platform-admin-authority";
 
 export const prerender = false;
 

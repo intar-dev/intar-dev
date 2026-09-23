@@ -21,7 +21,6 @@ import { markRunVmsAbsentInDesiredState } from "@/lib/scenario-runs/start";
 import { loadCandidateScenarioRunSource } from "@/lib/scenario-runs/candidate";
 import { updateRunState } from "@/lib/scenario-runs/storage";
 import {
-  betaAdmissionForHostFixture,
   connectHost,
   resetHostRuntimeTestDatabase,
   seedEnabledScenario,
@@ -75,7 +74,6 @@ describe("candidate scenario proof runs", () => {
       idempotencyKey: "candidate-start-1",
       scenarioId: "broken-nginx",
       userId: "user-1",
-      betaAdmission: await betaAdmissionForHostFixture("user-1"),
       hostId,
       candidateRevision: CANDIDATE_REVISION,
       candidateBuildId: CANDIDATE_BUILD_ID,
@@ -195,7 +193,6 @@ describe("candidate scenario proof runs", () => {
       idempotencyKey: "candidate-start-2",
         scenarioId: "broken-nginx",
         userId: "user-1",
-        betaAdmission: await betaAdmissionForHostFixture("user-1"),
         hostId,
         candidateRevision: "missing-candidate",
         candidateBuildId: "missing-build",
@@ -251,7 +248,6 @@ describe("candidate scenario proof runs", () => {
       idempotencyKey: "candidate-start-3",
       scenarioId: "broken-nginx",
       userId: "user-1",
-      betaAdmission: await betaAdmissionForHostFixture("user-1"),
       hostId,
     });
     await expect(
@@ -259,7 +255,6 @@ describe("candidate scenario proof runs", () => {
       idempotencyKey: "candidate-start-4",
         scenarioId: "broken-nginx",
         userId: "user-1",
-        betaAdmission: await betaAdmissionForHostFixture("user-1"),
         hostId,
         candidateRevision: CANDIDATE_REVISION,
         candidateBuildId: CANDIDATE_BUILD_ID,
@@ -316,7 +311,6 @@ describe("candidate scenario proof runs", () => {
       idempotencyKey: "candidate-start-5",
       scenarioId: "broken-nginx",
       userId: "user-1",
-      betaAdmission: await betaAdmissionForHostFixture("user-1"),
       hostId,
       candidateRevision: CANDIDATE_REVISION,
       candidateBuildId: CANDIDATE_BUILD_ID,
@@ -335,7 +329,6 @@ describe("candidate scenario proof runs", () => {
       idempotencyKey: "candidate-start-6",
         scenarioId: "broken-nginx",
         userId: "user-1",
-        betaAdmission: await betaAdmissionForHostFixture("user-1"),
         hostId,
       }),
     ).rejects.toMatchObject({ code: "scenario_run_active_conflict" });

@@ -1,113 +1,86 @@
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 
-test("beta invite fragment is scrubbed before the claim is inspected", async ({
+test("landing shows the open sign-up spots and starts GitHub sign-in", async ({
   page,
   ui,
 }) => {
-  await ui.open({ ...routeCase("join-beta"), theme: "light" });
+  await ui.open({ ...routeCase("landing"), theme: "light" });
 
-  expect(new URL(page.url()).hash).toBe("");
-  await expect(
-    page.getByRole("heading", { name: "Join the intar.dev beta" }),
-  ).toBeVisible();
-  await expect(page.getByRole("status")).toContainText(
-    /This single-use link is ready/i,
+  await expect(page.getByText("12 of 50 spots left")).toBeVisible();
+  expect(ui.server.requests).toContain("GET /api/signups");
+  const signIn = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      request.url().endsWith("/api/auth/sign-in/social"),
   );
-  await expect(
-    page.getByRole("button", { name: "Continue with GitHub" }),
-  ).toBeVisible();
-  expect(ui.server.requests).toContain("POST /api/access-invites/exchange");
-  expect(ui.server.requests).toContain("GET /api/access-invites/current");
-  expect(ui.server.requests.join("\n")).not.toContain("intar_beta_");
+  await page.getByRole("button", { name: "Sign in with GitHub" }).click();
+  expect((await signIn).postDataJSON()).toMatchObject({ provider: "github" });
 });
 
-test("admin can copy a new beta link again from the list", async ({
-  page,
-  ui,
-}) => {
-  await page.addInitScript(() => {
-    const writes: string[] = [];
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: {
-        writeText: async (value: string) => {
-          writes.push(value);
-        },
-      },
-    });
-    Object.defineProperty(window, "__testClipboardWrites", {
-      configurable: true,
-      value: writes,
-    });
-  });
-  await ui.open({ ...routeCase("admin-people"), theme: "light" });
-  await page.getByRole("button", { name: "Create invite" }).click();
-
-  const rawLink = `http://127.0.0.1:4330/join#invite=intar_beta_${"C".repeat(43)}`;
-  const inviteRow = page
-    .getByRole("row")
-    .filter({ hasText: "intar_beta_CCCCCCCC" });
-  const listCopyButton = inviteRow.getByRole("button", { name: "Copy" });
-  await expect(listCopyButton).toBeVisible();
-  await listCopyButton.click();
-  await listCopyButton.click();
-  await expect(page.getByRole("status")).toHaveText(
-    "intar_beta_CCCCCCCC… copied.",
-  );
-  expect(
-    await page.evaluate(
-      () =>
-        (
-          window as unknown as {
-            __testClipboardWrites: string[];
-          }
-        ).__testClipboardWrites,
-    ),
-  ).toEqual([rawLink, rawLink]);
-  expect(ui.server.requests).toContain("POST /api/admin/access-invites");
-  expect(
-    ui.server.requests.filter(
-      (request) =>
-        request ===
-        "POST /api/admin/access-invites/invite-created-3/copy",
-    ),
-  ).toHaveLength(2);
-});
-
-test("admin can revoke an active invite into history", async ({
+test("admin saves the sign-up limit and reviews a stale one", async ({
   page,
   ui,
 }) => {
   await ui.open({ ...routeCase("admin-people"), theme: "light" });
-  const inviteRow = page
-    .getByRole("row")
-    .filter({ hasText: "intar_beta_AAAAAAAA" });
+  await page.getByRole("tab", { name: "Sign-ups" }).click();
+  await expect(page).toHaveURL(/tab=signups/);
 
-  await inviteRow.getByRole("button", { name: "Revoke" }).click();
-  const dialog = page.getByRole("dialog", {
-    name: "Revoke this invite?",
+  const limit = page.getByLabel("Sign-up limit");
+  await expect(limit).toHaveValue("50");
+  await limit.fill("60");
+  const saveRequest = page.waitForRequest(
+    (request) =>
+      request.method() === "PUT" &&
+      request.url().endsWith("/api/admin/signups"),
+  );
+  await page.getByRole("button", { name: "Save" }).click();
+  expect((await saveRequest).postDataJSON()).toEqual({
+    limit: 60,
+    expectedVersion: 3,
   });
-  await expect(dialog).toContainText("stops working immediately");
+  await expect(page.getByText("Sign-up limit saved.")).toBeVisible();
+  await expect(page.getByLabel("Sign-up limit")).toHaveValue("60");
+  await expect(page.getByText("22", { exact: true })).toBeVisible();
+
+  // Another session saves first; the form reports it and reloads the limit.
+  ui.server.state.signups = {
+    ...ui.server.state.signups,
+    limit: 70,
+    version: ui.server.state.signups.version + 1,
+  };
+  await page.getByLabel("Sign-up limit").fill("65");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(
+    page.getByText(
+      "The limit changed in another session. Review it and save again.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByLabel("Sign-up limit")).toHaveValue("70");
+});
+
+test("admin revokes access from the users list", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "light" });
+  const revokeButtons = page.getByRole("button", { name: "Revoke access" });
+  const revokedBadges = page.getByText("Access revoked", { exact: true });
+  const activeCount = await revokeButtons.count();
+  await expect(revokedBadges).toHaveCount(1);
+
+  await revokeButtons.first().click();
+  const dialog = page.getByRole("dialog", { name: "Revoke access?" });
+  await expect(dialog).toContainText("Mina Learner is signed out everywhere");
+  await expect(dialog).toContainText("Access can't be restored.");
   const revokeRequest = page.waitForRequest(
     (request) =>
       request.method() === "POST" &&
-      request.url().endsWith(
-        "/api/admin/access-invites/invite-pending/revoke",
-      ),
+      request.url().endsWith("/api/admin/users/user-learner/revoke"),
   );
-  await dialog.getByRole("button", { name: "Revoke invite" }).click();
-  expect((await revokeRequest).postDataJSON()).toEqual({ expectedVersion: 1 });
+  await dialog.getByRole("button", { name: "Revoke access" }).click();
+  await revokeRequest;
 
-  await expect(inviteRow).toHaveCount(0);
-  await expect(page.getByRole("status")).toHaveText("Invite revoked.");
-  await page.locator("details > summary").filter({ hasText: "History" }).click();
-  await expect(
-    page.getByRole("row").filter({ hasText: "intar_beta_AAAAAAAA" }),
-  ).toContainText("Revoked");
-  expect(ui.server.requests).toContain(
-    "POST /api/admin/access-invites/invite-pending/revoke",
-  );
+  await expect(revokedBadges).toHaveCount(2);
+  await expect(revokeButtons).toHaveCount(activeCount - 1);
+  expect(ui.server.state.signups.taken).toBe(37);
 });
 
 test("learner discovery filters the catalog", async ({ page, ui }) => {
@@ -199,11 +172,16 @@ test("admin operations expose URL-backed people views", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("admin-people"), theme: "dark" });
-  await page.getByRole("tab", { name: "Users" }).click();
-  await expect(page).toHaveURL(/tab=users/);
   await expect(
     page.getByRole("heading", { name: "Users", exact: true }),
   ).toBeVisible();
+  await page.getByRole("tab", { name: "Sign-ups" }).click();
+  await expect(page).toHaveURL(/tab=signups/);
+  await expect(
+    page.getByRole("heading", { name: "Sign-ups", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: "Users" }).click();
+  await expect(page).not.toHaveURL(/tab=/);
 });
 
 test("admin role changes use the app-owned user endpoint", async ({
@@ -211,7 +189,6 @@ test("admin role changes use the app-owned user endpoint", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("admin-people"), theme: "dark" });
-  await page.getByRole("tab", { name: "Users" }).click();
 
   await page.getByRole("button", { name: "Make admin" }).first().click();
   const dialog = page.getByRole("dialog", { name: "Grant admin access?" });
@@ -234,7 +211,6 @@ test("admin role changes use the app-owned user endpoint", async ({
 
 test("admin deletes a user instead of banning them", async ({ page, ui }) => {
   await ui.open({ ...routeCase("admin-people"), theme: "dark" });
-  await page.getByRole("tab", { name: "Users" }).click();
 
   await expect(page.getByRole("button", { name: "Ban" })).toHaveCount(0);
   await page.getByRole("button", { name: "Delete" }).first().click();

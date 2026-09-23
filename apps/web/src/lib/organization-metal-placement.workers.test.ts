@@ -24,6 +24,9 @@ beforeEach(async () => {
   ]);
   await env.DB.prepare("UPDATE agent_hosts SET active_session_id = 'session'").run();
   for (const hostId of ["organization-host", "platform-host", "personal-host", "other-host", "other-personal-host"]) await report(hostId);
+  // The learner's personal host just became Ready, which moves an active
+  // owner's new runs onto it. These cases start from platform placement.
+  await env.DB.prepare("UPDATE user SET metal_placement = 'platform' WHERE id = 'learner'").run();
 });
 
 async function report(hostId: string, change?: (report: import("@/generated/bridge").HostStateReportV2) => void) {

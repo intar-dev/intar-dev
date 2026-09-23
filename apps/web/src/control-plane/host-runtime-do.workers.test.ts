@@ -6,6 +6,7 @@ import {
   desiredRunningVm,
   seedHost,
   connectHost,
+  clientHello,
   sendBridge,
   waitForBridgeMessage,
   runNextScheduledAlarm,
@@ -31,16 +32,7 @@ import {
   resetHostRuntimeTestDatabase,
 } from "./host-runtime-do/test-fixtures";
 import { organization } from "@/db/schema";
-import {
-  acquireBetaRevocationCleanup,
-  completeBetaRevocationCleanup,
-  revokeBetaUser,
-} from "@/lib/beta-access-revocation-store";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
-import {
-  FIXTURE_BETA_ADMIN_ID,
-  grantFixtureBetaAccess,
-} from "@/test/beta-access-fixtures";
+import { revokeFixtureAccount } from "@/test/account-fixtures";
 
 describe("HostRuntimeDO bridge dispatch and sessions", () => {
   beforeEach(resetHostRuntimeTestDatabase);
@@ -50,7 +42,6 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     await seedHost(hostId);
     await env.DB.prepare("INSERT INTO organization(id,name,slug,created_at) VALUES('org-1','Org','org-1',1)").run();
     await env.DB.prepare("UPDATE agent_hosts SET scope='organization', organization_id='org-1' WHERE id=?").bind(hostId).run();
-    await env.DB.prepare("DELETE FROM access_allowlist WHERE user_id='user-1'").run();
     await env.DB.prepare("UPDATE user SET banned=1, deleted_at=1 WHERE id='user-1'").run();
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
     const rejected = await stub.fetch("http://host-runtime/connect", { headers: {
@@ -92,16 +83,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
   it("rejects a revoked personal host again inside the durable object", async () => {
     const hostId = "host-revoked-before-upgrade";
     await seedHost(hostId);
-    const admission = await env.DB.prepare(
-      `SELECT source_invite_id, source_lease_id, granted_at
-       FROM access_allowlist WHERE user_id = 'user-1'`,
-    ).first<{
-      source_invite_id: string;
-      source_lease_id: string;
-      granted_at: number;
-    }>();
-    expect(admission).not.toBeNull();
-    await blockFixtureBetaAccess("user-1");
+    await revokeFixtureAccount({ d1: env.DB, userId: "user-1" });
 
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
     const response = await stub.fetch("http://host-runtime/connect", {
@@ -109,70 +91,25 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
         upgrade: "websocket",
         "x-agent-host-id": hostId,
         "x-agent-credential-generation": "1",
-        "x-agent-beta-source-invite-id": admission!.source_invite_id,
-        "x-agent-beta-source-lease-id": admission!.source_lease_id,
-        "x-agent-beta-admission-granted-at": String(admission!.granted_at),
       },
     });
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(403);
+    expect(response.webSocket).toBeNull();
     await expect(response.json()).resolves.toEqual({
-      error: "server credentials changed",
+      error: "account access is revoked",
     });
   });
 
-  it("rejects a personal socket with different admission ids at the same timestamp", async () => {
-    const hostId = "host-stale-admission-at-do";
-    await seedHost(hostId);
-    const admission = await env.DB.prepare(
-      `SELECT source_invite_id, source_lease_id, granted_at
-       FROM access_allowlist WHERE user_id = 'user-1'`,
-    ).first<{
-      source_invite_id: string;
-      source_lease_id: string;
-      granted_at: number;
-    }>();
-    expect(admission).not.toBeNull();
-
-    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
-    const response = await stub.fetch("http://host-runtime/connect", {
-      headers: {
-        upgrade: "websocket",
-        "x-agent-host-id": hostId,
-        "x-agent-credential-generation": "1",
-        "x-agent-beta-source-invite-id": `${admission!.source_invite_id}-old`,
-        "x-agent-beta-source-lease-id": `${admission!.source_lease_id}-old`,
-        "x-agent-beta-admission-granted-at": String(admission!.granted_at),
-      },
-    });
-
-    expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual({
-      error: "stale beta admission",
-    });
-  });
-
-  it("does not activate an old socket after equal-timestamp readmission", async () => {
+  it("does not activate a socket whose owner was revoked before hello", async () => {
     const hostId = "host-revoked-during-hello";
     await seedHost(hostId);
-    const admission = await env.DB.prepare(
-      `SELECT source_invite_id, source_lease_id, granted_at
-       FROM access_allowlist WHERE user_id = 'user-1'`,
-    ).first<{
-      source_invite_id: string;
-      source_lease_id: string;
-      granted_at: number;
-    }>();
-    expect(admission).not.toBeNull();
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
     const response = await stub.fetch("http://host-runtime/connect", {
       headers: {
         upgrade: "websocket",
         "x-agent-host-id": hostId,
         "x-agent-credential-generation": "1",
-        "x-agent-beta-source-invite-id": admission!.source_invite_id,
-        "x-agent-beta-source-lease-id": admission!.source_lease_id,
-        "x-agent-beta-admission-granted-at": String(admission!.granted_at),
       },
     });
     expect(response.status).toBe(101);
@@ -183,40 +120,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     ws.accept();
     ws.addEventListener("message", (event) => messages.push(event.data));
 
-    const equalGrantedAt = admission!.granted_at;
-    const blocked = await blockFixtureBetaAccess(
-      "user-1",
-      equalGrantedAt - 6,
-    );
-    const cleanup = await acquireBetaRevocationCleanup({
-      d1: env.DB,
-      userId: "user-1",
-      revocationId: blocked.revocationId,
-      now: equalGrantedAt - 5,
-    });
-    expect(cleanup.status).toBe("acquired");
-    await completeBetaRevocationCleanup({
-      d1: env.DB,
-      userId: "user-1",
-      revocationId: blocked.revocationId,
-      cleanupAttemptId: cleanup.cleanupAttemptId,
-      now: equalGrantedAt - 4,
-    });
-    await grantFixtureBetaAccess({
-      d1: env.DB,
-      userId: "user-1",
-      githubAccountId: "host-runtime-github-user-1",
-      githubUsername: "user-1",
-      now: equalGrantedAt - 1,
-    });
-    const freshAdmission = await loadFixtureBetaAdmission("user-1");
-    expect(freshAdmission.grantedAt).toBe(equalGrantedAt);
-    expect(freshAdmission.sourceInviteId).not.toBe(
-      admission!.source_invite_id,
-    );
-    expect(freshAdmission.sourceLeaseId).not.toBe(
-      admission!.source_lease_id,
-    );
+    await revokeFixtureAccount({ d1: env.DB, userId: "user-1" });
 
     sendBridge(ws, {
       type: "client_hello",
@@ -262,7 +166,39 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     expect(messages).toEqual([]);
   });
 
-  it("keeps platform host connections independent of beta access", async () => {
+  it("rejects a hello after the host's scope changed since the upgrade", async () => {
+    const hostId = "host-scope-flipped-before-hello";
+    await seedHost(hostId);
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    const response = await stub.fetch("http://host-runtime/connect", {
+      headers: {
+        upgrade: "websocket",
+        "x-agent-host-id": hostId,
+        "x-agent-credential-generation": "1",
+      },
+    });
+    expect(response.status).toBe(101);
+    const ws = response.webSocket;
+    if (!ws) throw new Error("missing websocket");
+    const messages: unknown[] = [];
+    const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+      ws.addEventListener("close", (event) => resolve({ code: event.code, reason: event.reason }), { once: true }),
+    );
+    ws.accept();
+    ws.addEventListener("message", (event) => messages.push(event.data));
+
+    // The socket was admitted as personal; a platform host needs new credentials.
+    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?1").bind(hostId).run();
+    sendBridge(ws, clientHello(hostId));
+
+    await expect(closed).resolves.toEqual({ code: 1008, reason: "host admission required" });
+    expect(messages).toEqual([]);
+    expect(await env.DB.prepare(
+      "SELECT connected, active_session_id, last_client_hello_at FROM agent_hosts WHERE id = ?1",
+    ).bind(hostId).first()).toEqual({ connected: 0, active_session_id: null, last_client_hello_at: null });
+  });
+
+  it("keeps platform host connections independent of the owner's account", async () => {
     const hostId = "host-platform-owned";
     const now = Date.now();
     const db = drizzle(env.DB);
@@ -270,6 +206,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       id: "platform-host-owner",
       name: "Platform Host Owner",
       email: "platform-host-owner@example.com",
+      banned: true,
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
@@ -997,46 +934,3 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
   });
 
 });
-
-async function blockFixtureBetaAccess(
-  userId: string,
-  now = Date.now(),
-): Promise<{ revocationId: string; now: number }> {
-  const result = await revokeBetaUser({
-    d1: env.DB,
-    userId,
-    actorUserId: FIXTURE_BETA_ADMIN_ID,
-    reason: "adversarial_race_test",
-    now,
-  });
-  await expect(
-    env.DB.prepare(
-      "SELECT state FROM access_allowlist WHERE user_id = ?1",
-    )
-      .bind(userId)
-      .first<{ state: string }>(),
-  ).resolves.toEqual({ state: "blocked" });
-  return { revocationId: result.revocationId, now };
-}
-
-async function loadFixtureBetaAdmission(
-  userId: string,
-): Promise<BetaAdmissionEpoch> {
-  const row = await env.DB.prepare(
-    `SELECT source_invite_id, source_lease_id, granted_at
-     FROM access_allowlist
-     WHERE user_id = ?1 AND state = 'active'`,
-  )
-    .bind(userId)
-    .first<{
-      source_invite_id: string;
-      source_lease_id: string;
-      granted_at: number;
-    }>();
-  if (!row) throw new Error(`active beta fixture missing: ${userId}`);
-  return {
-    sourceInviteId: row.source_invite_id,
-    sourceLeaseId: row.source_lease_id,
-    grantedAt: row.granted_at,
-  };
-}

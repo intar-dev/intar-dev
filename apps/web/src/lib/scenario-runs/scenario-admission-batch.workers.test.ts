@@ -5,7 +5,6 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  accessAllowlist,
   agentHosts,
   hostCpuReservations,
   hostDesiredState,
@@ -29,12 +28,11 @@ import {
   assertAdmissionRefusalPriority,
   type AdmissionCommitInput,
 } from "@/lib/scenario-runs/begin";
-import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import {
-  FIXTURE_BETA_ADMIN_ID,
-  grantFixtureBetaAccess,
-} from "@/test/beta-access-fixtures";
+  ensureFixtureMember,
+  revokeFixtureAccount,
+} from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { seedAdmissionGuardFixture } from "./admission-test-fixtures";
 
@@ -286,7 +284,6 @@ describe("admission batch", () => {
 
   it("raises the drain refusal over the retryable capacity conflict", async () => {
     const db = await seedAdmissionFixture();
-    const parts = await admissionInput();
     // The gate can flip after a failed attempt: the run insert passed while
     // the gate was open and the compare-and-set was lost. The retry decision
     // must answer with the drain (final) instead of the contention
@@ -298,10 +295,7 @@ describe("admission batch", () => {
     });
 
     await expect(
-      assertAdmissionRefusalPriority({
-        userId: USER_ID,
-        betaAdmission: parts.betaAdmission,
-      }),
+      assertAdmissionRefusalPriority({ userId: USER_ID }),
     ).rejects.toMatchObject({
       status: 503,
       code: "runtime_cutover_drained",
@@ -312,7 +306,6 @@ describe("admission batch", () => {
 
   it("keeps the retryable conflict for an administrative proof start", async () => {
     const db = await seedAdmissionFixture();
-    const parts = await admissionInput();
     await db.insert(runtimeOperationGates).values({
       key: IMAGE_CUTOVER_GATE,
       state: "drained",
@@ -324,31 +317,20 @@ describe("admission batch", () => {
     await expect(
       assertAdmissionRefusalPriority({
         userId: USER_ID,
-        betaAdmission: parts.betaAdmission,
         allowDrainedAdminProof: true,
       }),
     ).resolves.toBeUndefined();
   });
 
-  it("raises a revoked admission over the retryable capacity conflict", async () => {
+  it("raises a revoked account over the retryable capacity conflict", async () => {
     const db = await seedAdmissionFixture();
-    const parts = await admissionInput();
-    await revokeBetaUser({
-      d1: env.DB,
-      userId: USER_ID,
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "admission_retry_priority",
-      now: NOW + 1,
-    });
+    await revokeFixtureAccount({ d1: env.DB, userId: USER_ID });
 
     await expect(
-      assertAdmissionRefusalPriority({
-        userId: USER_ID,
-        betaAdmission: parts.betaAdmission,
-      }),
+      assertAdmissionRefusalPriority({ userId: USER_ID }),
     ).rejects.toMatchObject({
       status: 403,
-      code: "beta_access_revoked",
+      code: "access_revoked",
     });
     await expect(count(db, scenarioRuns)).resolves.toBe(0);
   });
@@ -400,11 +382,10 @@ async function seedAdmissionFixture() {
     createdAt: new Date(NOW),
     updatedAt: new Date(NOW),
   });
-  await grantFixtureBetaAccess({
+  await ensureFixtureMember({
     d1: env.DB,
     userId: USER_ID,
     githubAccountId: "admission-github",
-    githubUsername: USER_ID,
     now: NOW,
   });
   await db.insert(organization).values({
@@ -431,16 +412,6 @@ async function seedAdmissionFixture() {
 
 async function admissionInput(): Promise<AdmissionCommitInput> {
   const db = drizzle(env.DB);
-  const [admission] = await db
-    .select({
-      sourceInviteId: accessAllowlist.sourceInviteId,
-      sourceLeaseId: accessAllowlist.sourceLeaseId,
-      grantedAt: accessAllowlist.grantedAt,
-    })
-    .from(accessAllowlist)
-      .where(eq(accessAllowlist.userId, USER_ID))
-      .limit(1);
-  if (!admission) throw new Error("fixture admission missing");
   const readiness = await seedAdmissionGuardFixture({
     userId: USER_ID, organizationId: ORG_ID, hostId: HOST_ID,
   });
@@ -542,7 +513,6 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       worstCaseDiskMib: 4_096,
     },
     leaseExpiresAt: NOW + 3_600_000,
-    betaAdmission: admission,
     now: NOW,
   } satisfies AdmissionCommitInput;
 }

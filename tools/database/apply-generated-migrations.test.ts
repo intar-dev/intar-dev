@@ -46,6 +46,8 @@ describe("generated migration apply", () => {
         "0028_married_rogue",
         "0029_powerful_zzzax",
         "0030_gifted_miek",
+        "0031_open_mariko_yashida",
+        "0032_cuddly_cloak",
       ]);
     } finally {
       fixture.database.close(false);
@@ -100,6 +102,8 @@ describe("generated migration apply", () => {
         "0028_married_rogue",
         "0029_powerful_zzzax",
         "0030_gifted_miek",
+        "0031_open_mariko_yashida",
+        "0032_cuddly_cloak",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);
@@ -189,12 +193,21 @@ describe("generated migration apply", () => {
           VALUES ('owner', 'host', 1, 'request', '{}', '{}', '[]', 9999999999999);
         INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, source_invite_id, source_lease_id, granted_at, expires_at)
           VALUES ('pending', 'pending-host', 'owner', 'Pending', 'personal', 'agent', 'invite', 'lease', 1, 9999999999999);`);
-      const tables = ["member", "personal_image_preparations", "agent_bootstrap_tokens"];
-      const before = tables.map(table => db.query(`SELECT * FROM ${table}`).all());
+      // Later migrations drop the retired admission columns; every other value survives.
+      const snapshots = [
+        "SELECT * FROM member",
+        "SELECT user_id, host_id, credential_generation, request_key, access_json, images_json, expires_at FROM personal_image_preparations",
+        "SELECT * FROM agent_bootstrap_tokens",
+      ];
+      const before = snapshots.map(query => db.query(query).all());
       await applyGeneratedMigrations(fixture.client);
-      expect(tables.map(table => db.query(`SELECT * FROM ${table}`).all())).toEqual(before);
+      expect(snapshots.map(query => db.query(query).all())).toEqual(before);
       expect(db.query("SELECT host_id, organization_id FROM host_enrollments").all())
         .toEqual([{ host_id: "pending-host", organization_id: null }]);
+      expect(db.query("SELECT name FROM pragma_table_info('personal_image_preparations') WHERE name = 'beta_json'").all())
+        .toEqual([]);
+      expect(db.query("SELECT name FROM pragma_table_info('host_enrollments') WHERE name IN ('source_invite_id', 'source_lease_id', 'granted_at')").all())
+        .toEqual([]);
       expect(db.query("SELECT metal_placement FROM organization").get()).toEqual({ metal_placement: "platform" });
       db.exec("UPDATE agent_hosts SET scope = 'organization', organization_id = 'org' WHERE id = 'host'");
       expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);

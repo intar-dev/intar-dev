@@ -8,10 +8,10 @@ test("1,000 listeners use bounded queries and still lose access when revoked", a
   sqlite.exec(`
     CREATE TABLE scenario_runs (run_id TEXT PRIMARY KEY, host_id TEXT, user_id TEXT);
     CREATE TABLE session (id TEXT PRIMARY KEY, user_id TEXT, expires_at INTEGER);
-    CREATE TABLE access_allowlist (user_id TEXT PRIMARY KEY, state TEXT, source_invite_id TEXT, source_lease_id TEXT, granted_at INTEGER);
+    CREATE TABLE user (id TEXT PRIMARY KEY, banned INTEGER, deleted_at INTEGER);
     INSERT INTO scenario_runs VALUES ('run', 'host', 'alice');
     INSERT INTO session VALUES ('session', 'alice', 9007199254740991);
-    INSERT INTO access_allowlist VALUES ('alice', 'active', 'invite', 'lease', 1);
+    INSERT INTO user VALUES ('alice', NULL, NULL);
   `);
   let queries = 0;
   let activeQueries = 0;
@@ -37,9 +37,7 @@ test("1,000 listeners use bounded queries and still lose access when revoked", a
     close(code: number) { this.code = code; this.readyState = WebSocket.CLOSED; },
     attachment: {
       kind: "run-status", hostId: "host", runId: "run", userId: "alice",
-      sessionId: "session", betaSourceInviteId: "invite",
-      betaSourceLeaseId: "lease", betaAdmissionGrantedAt: 1,
-      expiresAt: Number.MAX_SAFE_INTEGER,
+      sessionId: "session", expiresAt: Number.MAX_SAFE_INTEGER,
       ...overrides,
     } satisfies RunStatusSocketAttachment,
   });
@@ -47,7 +45,6 @@ test("1,000 listeners use bounded queries and still lose access when revoked", a
   const invalid = [
     makeSocket({ userId: "bob" }),
     makeSocket({ sessionId: "deleted-session" }),
-    makeSocket({ betaSourceLeaseId: "old-lease" }),
     makeSocket({ hostId: "another-host" }),
     makeSocket({ runId: "another-run" }),
     makeSocket({ expiresAt: 0 }),
@@ -69,6 +66,17 @@ test("1,000 listeners use bounded queries and still lose access when revoked", a
     expect(sockets.every(socket => socket.code === 1008 && socket.messages.length === 1)).toBe(true);
     await notify(sockets);
     expect(queries).toBe(16);
+
+    // A revoked account loses its listeners even while its session is valid.
+    sqlite.exec("INSERT INTO session VALUES ('session', 'alice', 9007199254740991)");
+    const listeners = Array.from({ length: 200 }, () => makeSocket());
+    await notify(listeners);
+    expect(queries).toBe(18);
+    expect(listeners.every(socket => socket.code === null && socket.messages.length === 1)).toBe(true);
+    sqlite.exec("UPDATE user SET banned = 1 WHERE id = 'alice'");
+    await notify(listeners);
+    expect(queries).toBe(20);
+    expect(listeners.every(socket => socket.code === 1008 && socket.messages.length === 1)).toBe(true);
   } finally {
     sqlite.close();
   }

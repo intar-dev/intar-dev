@@ -24,8 +24,7 @@ export async function listPersonalServers(context: UserContext) {
     env.DB.prepare("SELECT state FROM runtime_operation_gates WHERE key = 'personal_metal_registration'").first<{ state: string }>(),
     env.DB.prepare(`SELECT host_id AS id, name, expires_at AS expiresAt FROM host_enrollments
       WHERE user_id = ?1 AND scope = 'personal' AND claimed_at IS NULL AND revoked_at IS NULL AND expires_at > ?2
-        AND source_invite_id = ?3 AND source_lease_id = ?4 AND granted_at = ?5
-      ORDER BY expires_at DESC`).bind(context.userId, now, context.betaAdmission.sourceInviteId, context.betaAdmission.sourceLeaseId, context.betaAdmission.grantedAt).all<{ id: string; name: string; expiresAt: number }>(),
+      ORDER BY expires_at DESC`).bind(context.userId, now).all<{ id: string; name: string; expiresAt: number }>(),
     db.select({ hostId: scenarioRuns.hostId, count: sql<number>`count(*)` }).from(scenarioRuns)
       .innerJoin(agentHosts, eq(agentHosts.id, scenarioRuns.hostId))
       .where(and(eq(agentHosts.userId, context.userId), eq(agentHosts.scope, "personal"), eq(scenarioRuns.userId, context.userId), isNotNull(scenarioRuns.activeKey)))
@@ -80,19 +79,18 @@ export async function updatePersonalServer(d1: D1Database, context: UserContext,
   const rename = keys.length === 1 && keys[0] === "name" && typeof input.name === "string" && input.name.trim().length > 0 && input.name.trim().length <= 80;
   const pause = keys.length === 1 && keys[0] === "paused" && typeof input.paused === "boolean";
   if (!rename && !pause) throw appError(400, "invalid_server_update", "Enter a name of 1 to 80 characters, or choose pause or resume.");
-  const epoch = context.betaAdmission;
   const now = Date.now();
   const resume = pause && input.paused === false;
   const snapshot = resume ? await drizzle(d1).select({ report: hostActualState.reportJson, reportedAt: hostActualState.updatedAt,
     sessionId: agentHosts.activeSessionId, generation: agentHosts.credentialGeneration })
     .from(agentHosts).innerJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(eq(agentHosts.id, hostId)).get() : undefined;
-  const snapshotGuard = !resume ? "" : snapshot ? `AND active_session_id IS ?8 AND credential_generation = ?9
-    AND EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?5 AND actual.report_json = ?10 AND actual.updated_at = ?11)`
-    : "AND NOT EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?5)";
-  const statements = [d1.prepare(`UPDATE agent_hosts SET ${rename ? "name" : "scenario_enabled"} = ?6, updated_at = ?7
-    WHERE id = ?5 AND user_id = ?1 AND scope = 'personal' AND disabled = 0 AND ${currentPersonalOwnerSql} ${snapshotGuard} RETURNING id`)
-    .bind(context.userId, epoch.sourceInviteId, epoch.sourceLeaseId, epoch.grantedAt, hostId,
+  const snapshotGuard = !resume ? "" : snapshot ? `AND active_session_id IS ?5 AND credential_generation = ?6
+    AND EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?2 AND actual.report_json = ?7 AND actual.updated_at = ?8)`
+    : "AND NOT EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?2)";
+  const statements = [d1.prepare(`UPDATE agent_hosts SET ${rename ? "name" : "scenario_enabled"} = ?3, updated_at = ?4
+    WHERE id = ?2 AND user_id = ?1 AND scope = 'personal' AND disabled = 0 AND ${currentPersonalOwnerSql} ${snapshotGuard} RETURNING id`)
+    .bind(context.userId, hostId,
       rename ? (input.name as string).trim() : input.paused ? 0 : 1, now,
       ...(snapshot ? [snapshot.sessionId, snapshot.generation, JSON.stringify(snapshot.report), snapshot.reportedAt] : []))];
   if (resume) {
@@ -100,20 +98,20 @@ export async function updatePersonalServer(d1: D1Database, context: UserContext,
       statements.push(d1.prepare(`UPDATE user SET metal_placement = 'personal'
         WHERE id = ?1 AND metal_placement = 'platform' AND ${currentPersonalOwnerSql}
           AND EXISTS (SELECT 1 FROM agent_hosts host JOIN host_actual_state actual ON actual.host_id = host.id
-            WHERE host.id = ?5 AND host.user_id = ?1 AND host.scope = 'personal' AND host.disabled = 0
-              AND host.scenario_enabled = 1 AND host.connected = 1 AND host.active_session_id = ?6
-              AND host.credential_generation = ?7 AND actual.report_json = ?8 AND actual.updated_at = ?9
+            WHERE host.id = ?2 AND host.user_id = ?1 AND host.scope = 'personal' AND host.disabled = 0
+              AND host.scenario_enabled = 1 AND host.connected = 1 AND host.active_session_id = ?3
+              AND host.credential_generation = ?4 AND actual.report_json = ?5 AND actual.updated_at = ?6
               AND actual.updated_at >= CAST(unixepoch('subsecond') * 1000 AS INTEGER) - ${HOST_DEGRADED_AFTER_MS}
               AND host.last_heartbeat_at >= CAST(unixepoch('subsecond') * 1000 AS INTEGER) - 90000)`)
-        .bind(context.userId, epoch.sourceInviteId, epoch.sourceLeaseId, epoch.grantedAt, hostId,
+        .bind(context.userId, hostId,
           snapshot.sessionId, snapshot.generation, JSON.stringify(snapshot.report), snapshot.reportedAt));
     }
   }
   const [result] = await d1.batch(statements);
   if (!result?.results.length) {
-    if (resume && await d1.prepare(`SELECT id FROM agent_hosts WHERE id = ?5 AND user_id = ?1
+    if (resume && await d1.prepare(`SELECT id FROM agent_hosts WHERE id = ?2 AND user_id = ?1
       AND scope = 'personal' AND disabled = 0 AND ${currentPersonalOwnerSql}`)
-      .bind(context.userId, epoch.sourceInviteId, epoch.sourceLeaseId, epoch.grantedAt, hostId).first()) {
+      .bind(context.userId, hostId).first()) {
       throw appError(409, "server_status_changed", "Server status changed. Try resume again.");
     }
     throw appError(404, "server_not_found", "Server not found. Refresh My servers.");

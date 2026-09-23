@@ -13,12 +13,6 @@ const scenarioRunsMock = vi.hoisted(() => ({
 const organizationsMock = vi.hoisted(() => ({
   resolveOrganizationId: vi.fn(),
 }));
-const betaAdmission = {
-  sourceInviteId: "invite-1",
-  sourceLeaseId: "lease-1",
-  grantedAt: 1,
-};
-
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/scenario-runs", () => scenarioRunsMock);
 vi.mock("@/lib/organizations", () => organizationsMock);
@@ -34,7 +28,6 @@ describe("scenario start route", () => {
       context: {
         userId: "user-1",
         isAdmin: false,
-        betaAdmission,
         organizationIds: [],
       },
     });
@@ -63,7 +56,6 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "user-1",
-      betaAdmission,
       idempotencyKey: "route-test-key-0001",
     });
   });
@@ -75,7 +67,6 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "user-1",
-      betaAdmission,
       idempotencyKey: "route-test-key-0002",
     });
   });
@@ -105,7 +96,6 @@ describe("scenario start route", () => {
       context: {
         userId: "user-1",
         isAdmin: false,
-        betaAdmission,
         organizationIds: ["org-id"],
       },
     });
@@ -119,7 +109,6 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "user-1",
-      betaAdmission,
       organizationId: "org-id",
       idempotencyKey: "route-test-key-0001",
     });
@@ -131,7 +120,7 @@ describe("scenario start route", () => {
   it("marks an administrator start as an allowed drained cutover proof", async () => {
     agentBridgeMock.requireUserContext.mockResolvedValue({
       ok: true,
-      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+      context: { userId: "admin-1", isAdmin: true },
     });
 
     const response = await startRequest({ hostId: "agent-01" });
@@ -140,7 +129,6 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "admin-1",
-      betaAdmission,
       hostId: "agent-01",
       allowDrainedAdminProof: true,
       allowSequenceBypass: true,
@@ -151,7 +139,7 @@ describe("scenario start route", () => {
   it("allows an administrator to select an exact candidate revision", async () => {
     agentBridgeMock.requireUserContext.mockResolvedValue({
       ok: true,
-      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+      context: { userId: "admin-1", isAdmin: true },
     });
 
     const response = await startRequest({
@@ -164,7 +152,6 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "admin-1",
-      betaAdmission,
       hostId: "agent-01",
       candidateRevision: "image-build-v12-proof",
       candidateBuildId: "candidate-build-1",
@@ -196,7 +183,7 @@ describe("scenario start route", () => {
   it("rejects malformed candidate revisions", async () => {
     agentBridgeMock.requireUserContext.mockResolvedValue({
       ok: true,
-      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+      context: { userId: "admin-1", isAdmin: true },
     });
 
     const response = await startRequest({
@@ -214,7 +201,7 @@ describe("scenario start route", () => {
   it("requires both candidate proof identifiers", async () => {
     agentBridgeMock.requireUserContext.mockResolvedValue({
       ok: true,
-      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+      context: { userId: "admin-1", isAdmin: true },
     });
 
     const response = await startRequest({
@@ -231,7 +218,7 @@ describe("scenario start route", () => {
   it("rejects a candidate build id without its revision", async () => {
     agentBridgeMock.requireUserContext.mockResolvedValue({
       ok: true,
-      context: { userId: "admin-1", isAdmin: true, betaAdmission },
+      context: { userId: "admin-1", isAdmin: true },
     });
 
     const response = await startRequest({

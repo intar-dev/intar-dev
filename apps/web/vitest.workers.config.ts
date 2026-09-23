@@ -17,8 +17,6 @@ export default defineConfig({
           BETTER_AUTH_SECRET:
             "test-better-auth-secret-that-is-at-least-32-bytes",
           BETTER_AUTH_URL: "http://localhost",
-          ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1:
-            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",

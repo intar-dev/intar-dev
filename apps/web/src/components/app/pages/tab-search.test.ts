@@ -60,20 +60,25 @@ describe("organization detail tab search", () => {
 });
 
 describe("admin people tab search", () => {
-  it("uses beta access as the canonical default", () => {
+  it("uses users as the canonical default", () => {
     expect(validateAdminPeopleSearch({})).toEqual({});
-    expect(validateAdminPeopleSearch({ tab: "beta" })).toEqual({});
-    expect(ADMIN_PEOPLE_TABS[0]).toBe("beta");
+    expect(validateAdminPeopleSearch({ tab: "users" })).toEqual({});
+    expect(ADMIN_PEOPLE_TABS[0]).toBe("users");
   });
 
-  it("keeps supported operational tabs and drops the removed request tab", () => {
-    expect(validateAdminPeopleSearch({ tab: "users" })).toEqual({
-      tab: "users",
+  it("keeps the sign-up and organization tabs", () => {
+    expect(validateAdminPeopleSearch({ tab: "signups" })).toEqual({
+      tab: "signups",
     });
     expect(validateAdminPeopleSearch({ tab: "organizations" })).toEqual({
       tab: "organizations",
     });
+  });
+
+  it("falls removed tab links back to users", () => {
+    expect(validateAdminPeopleSearch({ tab: "beta" })).toEqual({});
     expect(validateAdminPeopleSearch({ tab: "requests" })).toEqual({});
+    expect(ADMIN_PEOPLE_TABS).not.toContain("beta");
     expect(ADMIN_PEOPLE_TABS).not.toContain("requests");
   });
 });

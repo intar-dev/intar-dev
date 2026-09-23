@@ -3,8 +3,7 @@ import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
-import { issueBetaAccessFencedRoute } from "@/lib/beta-route-issuance";
+import { issueAccountFencedRoute } from "@/lib/account-route-issuance";
 import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
@@ -59,7 +58,6 @@ import {
 export async function startScenarioRunForUser(params: {
   scenarioId: string;
   userId: string;
-  betaAdmission: BetaAdmissionEpoch;
   idempotencyKey: string;
   organizationId?: string | null;
   hostId?: string;
@@ -611,7 +609,7 @@ export async function createScenarioSshSessionForUser(params: {
   const session = await traceOperation(
     "scenario.terminal.route_issue",
     () =>
-      issueBetaAccessFencedRoute({
+      issueAccountFencedRoute({
         userId: params.userId,
         routeId: routeUsername,
         // Fenced by generation: a late cleanup after the same route name was

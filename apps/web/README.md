@@ -75,9 +75,29 @@ drains old requests before applying that migration. It does not roll back: a
 failed post-migration activation leaves maintenance enabled, and a failed live
 check leaves the deployed version active while the workflow reports failure.
 
+## Sign-ups
+
+Anyone can create an account with GitHub while sign-up spots are open.
+Administrators set the limit under **Admin → People → Sign-ups**. Every active
+account with a linked GitHub identity takes a spot, administrators included.
+Revoking or deleting someone frees their spot. Until a limit is saved, the limit
+is 0 and sign-ups are closed. Lowering the limit never removes anyone; it only
+stops new sign-ups. Members can always sign in, and the landing page shows how
+many spots are left.
+
+The spot is claimed atomically when the new member's GitHub account is linked,
+so concurrent sign-ups for the last spot admit exactly one person. GitHub is the
+only way to create an account; organization OIDC only links to an existing
+account.
+
+Revoking access is permanent: the person keeps their data but can no longer
+sign in, and their sessions, runs, routes, and personal servers are shut down.
+Deleting a user revokes access first, then anonymizes the account. A deleted
+person can sign up again while spots are open.
+
 ## Organizations
 
-Organizations are visible to every active beta user, but organization creation is
+Organizations are visible to every signed-in member, but organization creation is
 controlled by the generic Cloudflare Flagship binding named `FLAGS`. The
 `organization-creation` boolean flag defaults to `off`; targeting rules should
 serve `on` only when the `targetingKey` context field matches a selected Better
@@ -87,13 +107,12 @@ authorization boundary.
 An organization admin can configure one verified OIDC provider and domain.
 The callback URI shown in the organization settings must be registered at the
 identity provider. After the admin publishes the requested DNS TXT record,
-an active GitHub beta user connects that provider explicitly at
+a member signed in with GitHub connects that provider explicitly at
 `/organization-sign-in` or `/organizations/<slug>/sign-in`. Later sign-ins bind
-to the stable provider subject and dynamically require active beta access.
-Beta invitations can only be claimed with GitHub; an existing SSO-only identity
-cannot use an invite to recover or link a GitHub identity. Already-active users
-can still explicitly connect OIDC, and already-linked active OIDC identities
-can sign in normally. SAML routes are disabled; organization SSO is OIDC-only.
+to the stable provider subject and require an active account. OIDC never
+creates an account: new people sign up with GitHub first. Already-linked active
+OIDC identities can sign in normally. SAML routes are disabled; organization
+SSO is OIDC-only.
 
 Register Intar at the identity provider as a public client without a client
 secret. Use the callback URI shown in organization settings. Discovery must
@@ -111,8 +130,8 @@ in the pinned Better Auth release.
 
 Existing providers that use secrets cannot sign in. Remove their organization
 OIDC configuration and register a public client. Removal deletes linked OIDC
-accounts, so members must connect the new provider from their active GitHub
-beta accounts. The organization OIDC flow no longer needs an encryption key.
+accounts, so members must connect the new provider from their GitHub accounts.
+The organization OIDC flow no longer needs an encryption key.
 
 Private scenarios use the `<organization-slug>-<local-scenario-id>` namespace.
 They are built by platform builders and can run only on agent runners owned by

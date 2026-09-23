@@ -12,7 +12,7 @@ import {
   scenarioRuns,
   user,
 } from "@/db/schema";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember } from "@/test/account-fixtures";
 import {
   RUN_PHASE_ORDER,
   buildInitialRunState,
@@ -144,7 +144,7 @@ describe("agent run artifact sealing", () => {
   it.each([
     "UPDATE agent_hosts SET credential_generation = 2",
     "UPDATE agent_hosts SET scope = NULL",
-    "UPDATE access_allowlist SET granted_at = granted_at + 1",
+    "UPDATE user SET banned = 1 WHERE id = 'user-1'",
     "UPDATE runtime_vms SET runtime_vm_name = 'replacement'",
     "INSERT INTO runtime_executions (id,user_id,host_id,domain_kind,domain_id,generation,state) VALUES ('new','user-1','host-1','scenario','run-1',2,'archiving')",
   ])(
@@ -486,7 +486,7 @@ async function seedRun(runPhase: RunPhase, vmPhase: VmPhase): Promise<string> {
     name: "Agent Owner",
     email: "agent-owner@example.com",
   });
-  await grantActiveBetaAccess("user-1");
+  await ensureFixtureMember({ d1: env.DB, userId: "user-1" });
   await db.insert(agentHosts).values({
     id: "host-1",
     userId: "user-1",
@@ -566,14 +566,6 @@ async function seedRun(runPhase: RunPhase, vmPhase: VmPhase): Promise<string> {
   expect(response.status).toBe(200);
   const body = (await response.json()) as { accessToken: string };
   return body.accessToken;
-}
-
-async function grantActiveBetaAccess(userId: string): Promise<void> {
-  await grantFixtureBetaAccess({
-    d1: env.DB,
-    userId,
-    githubUsername: userId,
-  });
 }
 
 function artifactDescriptor() {

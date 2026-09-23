@@ -1,31 +1,24 @@
 import { and, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
-  accessAllowlist, agentBootstrapTokens, agentHosts,
+  agentBootstrapTokens, agentHosts,
   imageBuilds, runtimeExecutions, user,
 } from "@/db/schema";
-import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 
 /** Invalidate a platform host even if its creator or control socket is gone. */
 export async function revokePlatformHost(input: {
   d1: D1Database;
   hostId: string;
   actorUserId: string;
-  betaAdmission: BetaAdmissionEpoch;
 }): Promise<boolean> {
   const db = drizzle(input.d1);
   const now = Date.now();
   const currentAdmin = exists(db.select({ id: user.id }).from(user)
-    .innerJoin(accessAllowlist, eq(accessAllowlist.userId, user.id))
     .where(and(
       eq(user.id, input.actorUserId),
       isNull(user.deletedAt),
       sql`coalesce(${user.banned}, 0) = 0`,
       sql`instr(',' || replace(lower(coalesce(${user.role}, '')), ' ', '') || ',', ',admin,') > 0`,
-      eq(accessAllowlist.state, "active"),
-      eq(accessAllowlist.sourceInviteId, input.betaAdmission.sourceInviteId),
-      eq(accessAllowlist.sourceLeaseId, input.betaAdmission.sourceLeaseId),
-      eq(accessAllowlist.grantedAt, input.betaAdmission.grantedAt),
     )));
   const revokedHost = exists(db.select({ id: agentHosts.id }).from(agentHosts)
     .where(and(

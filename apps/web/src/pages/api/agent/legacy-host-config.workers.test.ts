@@ -7,7 +7,7 @@ import { user } from "@/db/schema";
 import { handleAgentBootstrap, requireVerifiedAgentRequest } from "@/control-plane/auth";
 import type { UserContext } from "@/lib/agent-bridge";
 import { claimHostEnrollment, createHostEnrollment, randomHostSecret } from "@/lib/host-enrollment";
-import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import { ensureFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
 const auth = vi.hoisted(() => ({
@@ -30,12 +30,9 @@ beforeEach(async () => {
   await drizzle(env.DB).insert(user).values({
     id: "owner", name: "Owner", email: "owner@example.test", role: "admin",
   });
-  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner" });
-  const admission = await env.DB.prepare(
-    "SELECT source_invite_id AS sourceInviteId, source_lease_id AS sourceLeaseId, granted_at AS grantedAt FROM access_allowlist WHERE user_id = 'owner'",
-  ).first<UserContext["betaAdmission"]>();
+  await ensureFixtureMember({ d1: env.DB, userId: "owner" });
   context = {
-    userId: "owner", sessionId: "browser", betaAdmission: admission!,
+    userId: "owner", sessionId: "browser",
     role: "admin", isAdmin: true, organizationIds: [], activeOrganizationId: null,
   };
   auth.requireAdminUserContext.mockResolvedValue({ ok: true, context });

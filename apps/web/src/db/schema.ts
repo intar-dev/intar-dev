@@ -63,18 +63,12 @@ export {
   oauthResource,
 } from "./schema/oauth";
 export {
-  accessAllowlist,
   accessEvents,
-  accessInviteCodes,
-  accessInviteRemovals,
+  accessRevocations,
   jwks,
   scenarioAssignments,
 } from "./schema/application";
-export type {
-  AccessEventType,
-  AccessInviteKind,
-  AccessInviteState,
-} from "./schema/application";
+export type { AccessEventType } from "./schema/application";
 export type {
   AgentHostRole,
   HostCpuReservationState,
@@ -102,3 +96,4 @@ export type {
 export { ACTIVE_RUNTIME_EXECUTION_STATES } from "./schema/runtime";
 export { personalImagePreparations } from "./schema/personal-image-preparations";
 export { supportTopics, supportComments } from "./schema/support";
+export { signupReservations, signupSettings } from "./schema/signups";

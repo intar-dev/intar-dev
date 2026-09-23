@@ -13,13 +13,12 @@ import { currentPersonalOwnerSql } from "@/lib/personal-host-retirement";
 import { loadActiveRuntimeResourceSnapshot } from "@/lib/runtime-capacity";
 import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 
-// Bindings 1–4 are the actor and admission epoch; binding 5 is the organization.
+// Binding 1 is the actor; binding 2 is the organization.
 const currentOrganizationAdminSql = `${currentPersonalOwnerSql} AND EXISTS (
-  SELECT 1 FROM member WHERE user_id = ?1 AND organization_id = ?5 AND role IN ('owner', 'admin'))`;
+  SELECT 1 FROM member WHERE user_id = ?1 AND organization_id = ?2 AND role IN ('owner', 'admin'))`;
 
 function actorArgs(context: UserContext, organizationId: string) {
-  const epoch = context.betaAdmission;
-  return [context.userId, epoch.sourceInviteId, epoch.sourceLeaseId, epoch.grantedAt, organizationId] as const;
+  return [context.userId, organizationId] as const;
 }
 
 export async function requireOrganizationServerAccess(context: UserContext, key: string, admin = false) {
@@ -43,13 +42,10 @@ export async function listOrganizationServers(context: UserContext, organization
     env.DB.prepare(`SELECT enrollment.host_id AS id, enrollment.name, enrollment.expires_at AS expiresAt
       FROM host_enrollments enrollment
       JOIN member creator ON creator.user_id = enrollment.user_id AND creator.organization_id = enrollment.organization_id
-      JOIN access_allowlist access ON access.user_id = enrollment.user_id
       JOIN user ON user.id = enrollment.user_id
       WHERE enrollment.organization_id = ?1 AND enrollment.scope = 'organization'
         AND enrollment.claimed_at IS NULL AND enrollment.revoked_at IS NULL AND enrollment.expires_at > ?2
-        AND creator.role IN ('owner', 'admin') AND access.state = 'active'
-        AND access.source_invite_id = enrollment.source_invite_id AND access.source_lease_id = enrollment.source_lease_id
-        AND access.granted_at = enrollment.granted_at AND user.deleted_at IS NULL AND coalesce(user.banned, 0) = 0
+        AND creator.role IN ('owner', 'admin') AND user.deleted_at IS NULL AND coalesce(user.banned, 0) = 0
       ORDER BY enrollment.expires_at DESC`).bind(organizationId, now).all<{ id: string; name: string; expiresAt: number }>(),
     db.select({ hostId: scenarioRuns.hostId, count: sql<number>`count(*)` }).from(scenarioRuns)
       .innerJoin(agentHosts, eq(agentHosts.id, scenarioRuns.hostId))
@@ -78,28 +74,28 @@ export async function updateOrganizationServer(d1: D1Database, context: UserCont
     sessionId: agentHosts.activeSessionId, generation: agentHosts.credentialGeneration })
     .from(agentHosts).innerJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(and(eq(agentHosts.id, hostId), eq(agentHosts.organizationId, organizationId), eq(agentHosts.scope, "organization"))).get() : undefined;
-  const snapshotGuard = !resume ? "" : snapshot ? `AND active_session_id IS ?9 AND credential_generation = ?10
-    AND EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?6 AND actual.report_json = ?11 AND actual.updated_at = ?12)`
-    : "AND NOT EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?6)";
-  const statements = [d1.prepare(`UPDATE agent_hosts SET ${rename ? "name" : "scenario_enabled"} = ?7, updated_at = ?8
-    WHERE id = ?6 AND organization_id = ?5 AND scope = 'organization' AND disabled = 0
+  const snapshotGuard = !resume ? "" : snapshot ? `AND active_session_id IS ?6 AND credential_generation = ?7
+    AND EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?3 AND actual.report_json = ?8 AND actual.updated_at = ?9)`
+    : "AND NOT EXISTS (SELECT 1 FROM host_actual_state actual WHERE actual.host_id = ?3)";
+  const statements = [d1.prepare(`UPDATE agent_hosts SET ${rename ? "name" : "scenario_enabled"} = ?4, updated_at = ?5
+    WHERE id = ?3 AND organization_id = ?2 AND scope = 'organization' AND disabled = 0
       AND ${currentOrganizationAdminSql} ${snapshotGuard} RETURNING id`)
     .bind(...args, rename ? (input.name as string).trim() : input.paused ? 0 : 1, Date.now(),
       ...(snapshot ? [snapshot.sessionId, snapshot.generation, JSON.stringify(snapshot.report), snapshot.reportedAt] : []))];
   if (snapshot && personalHostReportReady(snapshot.report, learnerRunCliV1EnforcementEnabled(env))) {
     statements.push(d1.prepare(`UPDATE organization SET metal_placement = 'organization'
-      WHERE id = ?5 AND metal_placement = 'platform' AND ${currentOrganizationAdminSql}
+      WHERE id = ?2 AND metal_placement = 'platform' AND ${currentOrganizationAdminSql}
         AND EXISTS (SELECT 1 FROM agent_hosts host JOIN host_actual_state actual ON actual.host_id = host.id
-          WHERE host.id = ?6 AND host.organization_id = ?5 AND host.scope = 'organization' AND host.disabled = 0
-            AND host.scenario_enabled = 1 AND host.connected = 1 AND host.active_session_id = ?7
-            AND host.credential_generation = ?8 AND actual.report_json = ?9 AND actual.updated_at = ?10
+          WHERE host.id = ?3 AND host.organization_id = ?2 AND host.scope = 'organization' AND host.disabled = 0
+            AND host.scenario_enabled = 1 AND host.connected = 1 AND host.active_session_id = ?4
+            AND host.credential_generation = ?5 AND actual.report_json = ?6 AND actual.updated_at = ?7
             AND actual.updated_at >= CAST(unixepoch('subsecond') * 1000 AS INTEGER) - ${HOST_DEGRADED_AFTER_MS}
             AND host.last_heartbeat_at >= CAST(unixepoch('subsecond') * 1000 AS INTEGER) - 90000)`)
       .bind(...args, snapshot.sessionId, snapshot.generation, JSON.stringify(snapshot.report), snapshot.reportedAt));
   }
   const [updated] = await d1.batch(statements);
   if (!updated?.results.length) {
-    if (resume && await d1.prepare(`SELECT id FROM agent_hosts WHERE id = ?6 AND organization_id = ?5
+    if (resume && await d1.prepare(`SELECT id FROM agent_hosts WHERE id = ?3 AND organization_id = ?2
       AND scope = 'organization' AND disabled = 0 AND ${currentOrganizationAdminSql}`).bind(...args).first()) {
       throw appError(409, "server_status_changed", "Server status changed. Try resume again.");
     }
@@ -108,8 +104,8 @@ export async function updateOrganizationServer(d1: D1Database, context: UserCont
 }
 
 export async function cancelOrganizationEnrollment(d1: D1Database, context: UserContext, organizationId: string, enrollmentId: string) {
-  const canceled = await d1.prepare(`UPDATE host_enrollments SET revoked_at = ?7
-    WHERE host_id = ?6 AND organization_id = ?5 AND scope = 'organization' AND claimed_at IS NULL
+  const canceled = await d1.prepare(`UPDATE host_enrollments SET revoked_at = ?4
+    WHERE host_id = ?3 AND organization_id = ?2 AND scope = 'organization' AND claimed_at IS NULL
       AND ${currentOrganizationAdminSql} RETURNING host_id`)
     .bind(...actorArgs(context, organizationId), enrollmentId, Date.now()).first();
   if (!canceled) throw appError(409, "enrollment_changed", "Setup already completed or access changed. Reload organization servers.");
@@ -120,30 +116,30 @@ export async function removeOrganizationServer(d1: D1Database, context: UserCont
   const args = [...actorArgs(context, organizationId), hostId] as const;
   const now = Date.now();
   const removalId = crypto.randomUUID();
-  const owned = `id = ?6 AND organization_id = ?5 AND scope = 'organization' AND ${currentOrganizationAdminSql}`;
+  const owned = `id = ?3 AND organization_id = ?2 AND scope = 'organization' AND ${currentOrganizationAdminSql}`;
   const retired = `EXISTS (SELECT 1 FROM agent_hosts WHERE ${owned} AND disabled = 1 AND owner_removal_id IS NOT NULL)`;
   const [removed] = await d1.batch([
     d1.prepare(`UPDATE agent_hosts SET disabled = 1, scenario_enabled = 0, connected = 0,
-      active_session_id = NULL, disconnected_at = ?7, updated_at = ?7,
-      credential_generation = credential_generation + CASE WHEN disabled = 0 THEN 1 ELSE 0 END, owner_removal_id = ?8
-      WHERE ${owned} AND (disabled = 0 OR owner_removal_id IS NULL) AND (?9 = 1
-        OR NOT EXISTS (SELECT 1 FROM organization WHERE id = ?5 AND metal_placement = 'organization')
-        OR EXISTS (SELECT 1 FROM agent_hosts other WHERE other.organization_id = ?5 AND other.scope = 'organization' AND other.disabled = 0 AND other.id <> ?6))
+      active_session_id = NULL, disconnected_at = ?4, updated_at = ?4,
+      credential_generation = credential_generation + CASE WHEN disabled = 0 THEN 1 ELSE 0 END, owner_removal_id = ?5
+      WHERE ${owned} AND (disabled = 0 OR owner_removal_id IS NULL) AND (?6 = 1
+        OR NOT EXISTS (SELECT 1 FROM organization WHERE id = ?2 AND metal_placement = 'organization')
+        OR EXISTS (SELECT 1 FROM agent_hosts other WHERE other.organization_id = ?2 AND other.scope = 'organization' AND other.disabled = 0 AND other.id <> ?3))
       RETURNING id`).bind(...args, now, removalId, confirmReturnToCloud ? 1 : 0),
-    d1.prepare(`UPDATE organization SET metal_placement = 'platform' WHERE id = ?5
-      AND EXISTS (SELECT 1 FROM agent_hosts WHERE ${owned} AND owner_removal_id = ?7)
-      AND NOT EXISTS (SELECT 1 FROM agent_hosts WHERE organization_id = ?5 AND scope = 'organization' AND disabled = 0)`)
+    d1.prepare(`UPDATE organization SET metal_placement = 'platform' WHERE id = ?2
+      AND EXISTS (SELECT 1 FROM agent_hosts WHERE ${owned} AND owner_removal_id = ?4)
+      AND NOT EXISTS (SELECT 1 FROM agent_hosts WHERE organization_id = ?2 AND scope = 'organization' AND disabled = 0)`)
       .bind(...args, removalId),
-    d1.prepare(`UPDATE agent_bootstrap_tokens SET revoked_at = ?7 WHERE host_id = ?6 AND revoked_at IS NULL AND ${retired}`).bind(...args, now),
-    d1.prepare(`UPDATE host_enrollments SET revoked_at = ?7 WHERE host_id = ?6 AND revoked_at IS NULL AND ${retired}`).bind(...args, now),
-    d1.prepare(`UPDATE runtime_executions SET lease_expires_at = ?7, updated_at = ?7
-      WHERE host_id = ?6 AND state <> 'archived' AND lease_expires_at IS NULL AND ${retired}`).bind(...args, now),
-    d1.prepare(`UPDATE scenario_runs SET delete_requested_at = coalesce(delete_requested_at, ?7), updated_at = ?7
-      WHERE host_id = ?6 AND state NOT IN ('completed', 'failed') AND ${retired}`).bind(...args, now),
+    d1.prepare(`UPDATE agent_bootstrap_tokens SET revoked_at = ?4 WHERE host_id = ?3 AND revoked_at IS NULL AND ${retired}`).bind(...args, now),
+    d1.prepare(`UPDATE host_enrollments SET revoked_at = ?4 WHERE host_id = ?3 AND revoked_at IS NULL AND ${retired}`).bind(...args, now),
+    d1.prepare(`UPDATE runtime_executions SET lease_expires_at = ?4, updated_at = ?4
+      WHERE host_id = ?3 AND state <> 'archived' AND lease_expires_at IS NULL AND ${retired}`).bind(...args, now),
+    d1.prepare(`UPDATE scenario_runs SET delete_requested_at = coalesce(delete_requested_at, ?4), updated_at = ?4
+      WHERE host_id = ?3 AND state NOT IN ('completed', 'failed') AND ${retired}`).bind(...args, now),
   ]);
   const result = await d1.prepare(`SELECT host.disabled, host.owner_removal_id, organization.metal_placement AS placement
     FROM agent_hosts host JOIN organization ON organization.id = host.organization_id
-    WHERE host.id = ?6 AND host.organization_id = ?5 AND host.scope = 'organization' AND ${currentOrganizationAdminSql}`)
+    WHERE host.id = ?3 AND host.organization_id = ?2 AND host.scope = 'organization' AND ${currentOrganizationAdminSql}`)
     .bind(...args).first<{ disabled: number; owner_removal_id: string | null; placement: "platform" | "organization" }>();
   if (!result) throw appError(404, "server_not_found", "Server not found or access changed. Reload organization servers.");
   if (!removed?.results.length && (!result.disabled || !result.owner_removal_id)) {
@@ -151,7 +147,7 @@ export async function removeOrganizationServer(d1: D1Database, context: UserCont
   }
   try { await cleanupRemovedHost(hostId); }
   catch { throw appError(503, "server_cleanup_pending", "Server access is revoked. Retry removal to finish closing sessions."); }
-  const completed = await d1.prepare(`UPDATE agent_hosts SET owner_removal_completed_at = coalesce(owner_removal_completed_at, ?7)
+  const completed = await d1.prepare(`UPDATE agent_hosts SET owner_removal_completed_at = coalesce(owner_removal_completed_at, ?4)
     WHERE ${owned} AND disabled = 1 AND owner_removal_id IS NOT NULL RETURNING id`)
     .bind(...args, Date.now()).first();
   if (!completed) throw appError(409, "server_access_changed", "Server access changed. Reload organization servers.");

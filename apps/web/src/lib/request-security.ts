@@ -19,18 +19,12 @@ type RequestSecurityEnv = Pick<
 
 type SensitiveRateLimitAction =
   | "auth-start"
+  | "sso-link"
   | "support-write"
   | "scenario-start"
   | "ssh-issuance"
   | "build-start"
   | "build-retry";
-
-type RateLimitAction =
-  | SensitiveRateLimitAction
-  | "access-invite:exchange"
-  | "access-invite:start"
-  | "access-invite:confirm"
-  | "access-invite:sso-link";
 
 export type ApiRequestSecurityResult =
   { ok: true; request: Request } | { ok: false; response: Response };
@@ -273,33 +267,10 @@ export function canonicalApplicationOrigin(
     throw appError(
       503,
       "canonical_origin_unavailable",
-      "access invitations are temporarily unavailable",
+      "the application origin is temporarily unavailable",
     );
   }
   return origin;
-}
-
-/** Retained for direct callers that need the invite-specific limiter key. */
-export async function rateLimitPublicAccessInvite(params: {
-  request: Request;
-  action: "exchange" | "start" | "confirm" | "sso-link";
-}): Promise<void> {
-  const result = await enforceRateLimit(
-    params.request,
-    env,
-    `access-invite:${params.action}`,
-  );
-  if (!result.ok) {
-    const body = (await result.response.json()) as {
-      error?: string;
-      code?: string;
-    };
-    throw appError(
-      result.response.status,
-      body.code ?? "rate_limit_unavailable",
-      body.error ?? "access invitations are temporarily unavailable",
-    );
-  }
 }
 
 export function sensitiveRateLimitActionFor(
@@ -310,6 +281,7 @@ export function sensitiveRateLimitActionFor(
 
   if (/^\/api\/support\/topics(?:\/|$)/u.test(pathname)) return "support-write";
   if (isBetterAuthStartPath(pathname)) return "auth-start";
+  if (pathname === "/api/account-links/sso/start") return "sso-link";
   if (/^\/api\/scenarios\/[^/]+\/start$/u.test(pathname)) {
     return "scenario-start";
   }
@@ -328,7 +300,7 @@ export function sensitiveRateLimitActionFor(
 async function enforceRateLimit(
   request: Request,
   workerEnv: Pick<Cloudflare.Env, "ACCESS_INVITE_RATE_LIMITER">,
-  action: RateLimitAction,
+  action: SensitiveRateLimitAction,
 ): Promise<ApiRequestSecurityResult> {
   const remoteAddress =
     request.headers.get("cf-connecting-ip")?.trim() || "unknown";
@@ -336,7 +308,7 @@ async function enforceRateLimit(
   let result: { success: boolean };
   try {
     result = await workerEnv.ACCESS_INVITE_RATE_LIMITER.limit({
-      key: rateLimitKey(action, remoteKey),
+      key: `web-edge:${action}:${remoteKey}`,
     });
   } catch (error) {
     console.error(
@@ -553,10 +525,4 @@ async function sha256Prefix(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest).slice(0, 12), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
-}
-
-function rateLimitKey(action: RateLimitAction, remoteKey: string): string {
-  return action.startsWith("access-invite:")
-    ? `${action}:${remoteKey}`
-    : `web-edge:${action}:${remoteKey}`;
 }

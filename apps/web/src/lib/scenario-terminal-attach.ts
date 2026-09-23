@@ -1,6 +1,6 @@
 import { loadStargateSshTransport } from "@/lib/stargate-relay";
 import { env } from "cloudflare:workers";
-import { issueBetaAccessFencedRoute } from "@/lib/beta-route-issuance";
+import { issueAccountFencedRoute } from "@/lib/account-route-issuance";
 import { parseRunState } from "@/lib/scenario-runs/storage";
 import { buildRunVmRouteUsername } from "@/lib/scenario-runs/start";
 import { runPhaseAcceptsTerminalSessions } from "@/lib/run-state";
@@ -59,15 +59,15 @@ interface PendingScenarioTerminalTargetRow {
  *
  * The attach has two phases, and only the second one can produce a shell:
  *
- * 1. STAGE the ready target under the admission fence. The fence confirms the
- *    admission epoch before the stage and re-reads it after, and the staged
+ * 1. STAGE the ready target under the account fence. The fence confirms the
+ *    account is active before the stage and re-reads it after, and the staged
  *    target is inert: the gateway opens no PTY and wakes no socket.
  * 2. ACTIVATE the staged attachment, but only after a fresh ownership read
  *    still matches this run, generation, host session, and observation. The
  *    gateway opens the PTY and wakes the socket only on activation.
  *
  * That ordering is the whole point: the browser can not receive a usable shell
- * until the admission fence has already confirmed the epoch, so a revoked
+ * until the account fence has already confirmed the account, so a revoked
  * learner never gets a live shell during the confirmation window.
  *
  * The durable `terminal_attached_at` marker is written only after activation
@@ -136,10 +136,10 @@ export async function attachReadyScenarioTerminalTargets(input: {
   };
 
   // Phase one. The fence returns an attachment id only after both the
-  // pre-check and the post-check confirm the same active admission epoch, so
+  // pre-check and the post-check confirm the account is still active, so
   // reaching the next line already proves the learner was authorized after the
   // stage. Nothing is usable yet.
-  const staged = await issueBetaAccessFencedRoute({
+  const staged = await issueAccountFencedRoute({
     userId: input.expectedUserId,
     routeId: routeUsername,
     revoke: (routeId) =>
@@ -150,7 +150,7 @@ export async function attachReadyScenarioTerminalTargets(input: {
 
   // Phase two. Activation wakes the socket, so it happens only while the
   // ownership facts that justified the stage are still true. This read is the
-  // last barrier before a shell exists; it is not a second admission fence,
+  // last barrier before a shell exists; it is not a second account fence,
   // because the fence above already ran on the far side of the stage.
   const confirmed = await loadPendingTarget(input);
   if (confirmed.kind === "not_ready") {

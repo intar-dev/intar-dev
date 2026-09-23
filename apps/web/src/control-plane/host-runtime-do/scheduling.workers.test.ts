@@ -24,7 +24,6 @@ import {
   mutateStoredHostDesiredState,
   startScenarioRunForUser,
   resetHostRuntimeTestDatabase,
-  betaAdmissionForHostFixture,
 } from "./test-fixtures";
 import {
   hostResourceReservations,
@@ -190,7 +189,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-1",
         scenarioId: "broken-nginx",
         userId: "user-1",
-        betaAdmission: await betaAdmissionForHostFixture("user-1"),
       }),
     ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
     ws.close();
@@ -239,7 +237,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-2",
         scenarioId: "broken-nginx",
         userId: "user-1",
-        betaAdmission: await betaAdmissionForHostFixture("user-1"),
         hostId,
       }),
     ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
@@ -278,7 +275,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-3",
       scenarioId: "broken-nginx",
       userId: "user-1",
-      betaAdmission: await betaAdmissionForHostFixture("user-1"),
       hostId,
     });
     const ending = await destroyScenarioRunForUserWithDependencies(
@@ -293,7 +289,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-4",
       scenarioId: "broken-nginx",
       userId: "user-1",
-      betaAdmission: await betaAdmissionForHostFixture("user-1"),
       hostId,
     });
 
@@ -379,7 +374,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-5",
       scenarioId: "broken-nginx",
       userId: "user-1",
-      betaAdmission: await betaAdmissionForHostFixture("user-1"),
     });
     expect(started.run).toMatchObject({
       id: started.runId,
@@ -410,7 +404,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-6",
         scenarioId: "broken-nginx",
         userId: "user-1",
-        betaAdmission: await betaAdmissionForHostFixture("user-1"),
       }),
     ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
 
@@ -481,7 +474,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-7",
         scenarioId: "broken-nginx",
         userId: "user-1",
-        betaAdmission: await betaAdmissionForHostFixture("user-1"),
         hostId: reservedHostId,
       }),
     ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
@@ -490,7 +482,6 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       idempotencyKey: "scheduling-start-8",
       scenarioId: "broken-nginx",
       userId: "user-1",
-      betaAdmission: await betaAdmissionForHostFixture("user-1"),
     });
     const [run] = await drizzle(env.DB)
       .select({ hostId: scenarioRuns.hostId })

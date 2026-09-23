@@ -116,8 +116,8 @@ export const account = sqliteTable(
       table.providerId,
       table.accountId,
     ),
-    // A Better Auth user can have at most one stable GitHub identity. Other
-    // providers are not capped per user by this beta-specific invariant.
+    // A Better Auth user can have at most one stable GitHub identity, so a
+    // sign-up spot counts one person. Other providers are not capped per user.
     uniqueIndex("account_user_github_uidx")
       .on(table.userId)
       .where(sql`${table.providerId} = 'github'`),

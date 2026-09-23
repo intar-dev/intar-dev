@@ -14,7 +14,6 @@ export function preparationAuthoritySql(): string {
   // depth limit when image, manifest, and artifact routes add their own fences.
   return `EXISTS (SELECT 1 FROM agent_hosts host
     JOIN user owner ON owner.id = prep.user_id
-    JOIN access_allowlist access ON access.user_id = owner.id
     JOIN vm_scenarios scenario ON scenario.scenario_id = ${field("scenarioId")}
     JOIN course_catalogs catalog ON catalog.scope_key = ${field("courseScopeKey")}
     JOIN json_each(catalog.catalog_json, '$.courses') course
@@ -26,9 +25,6 @@ export function preparationAuthoritySql(): string {
           AND owner.metal_placement = 'platform' AND EXISTS (SELECT 1 FROM organization org
             WHERE org.id = host.organization_id AND org.metal_placement = 'organization')))
       AND (owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0)
-      AND (access.state, access.source_invite_id, access.source_lease_id, access.granted_at) =
-        ('active', json_extract(prep.beta_json, '$.sourceInviteId'), json_extract(prep.beta_json, '$.sourceLeaseId'),
-          json_extract(prep.beta_json, '$.grantedAt'))
       AND (prep.user_id = ${field("userId")} AND prep.expires_at > CAST(unixepoch('subsecond') * 1000 AS INTEGER))
       AND NOT EXISTS (SELECT 1 FROM scenario_runs active
         WHERE active.active_key = prep.user_id OR (active.user_id = prep.user_id AND active.request_idempotency_key = prep.request_key))

@@ -426,20 +426,41 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("beta invite ready announcement", async ({ page, ui }, testInfo) => {
-    await ui.open({ ...routeCase("join-beta"), theme: "light" });
+  test("revoke access confirmation", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("admin-people"), theme: "light" });
+    await page.getByRole("button", { name: "Revoke access" }).first().click();
 
-    const status = page.getByRole("status");
+    const dialog = page.getByRole("dialog", { name: "Revoke access?" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Access can't be restored.");
     await expect(
-      page.getByRole("heading", { name: "Join the intar.dev beta" }),
+      dialog.getByRole("button", { name: "Keep access" }),
     ).toBeVisible();
-    await expect(status).toContainText(/This single-use link is ready/i);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("sign-up limit form", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("admin-people"), theme: "light" });
+    await page.getByRole("tab", { name: "Sign-ups" }).click();
+
+    const limit = page.getByRole("spinbutton", { name: "Sign-up limit" });
+    await expect(limit).toHaveAccessibleDescription(
+      /Set 0 to close sign-ups\./,
+    );
+    await limit.fill("1.5");
+    await expect(limit).toHaveAttribute("aria-invalid", "true");
     await expect(
-      page.getByRole("button", { name: "Continue with GitHub" }),
+      page.getByText("Enter a whole number from 0 to 1,000,000."),
     ).toBeVisible();
-    await expect(
-      page.getByText("Recover an existing OIDC account"),
-    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Save" })).toBeDisabled();
+    await expectNoAxeViolations(page, testInfo);
+
+    await limit.fill("60");
+    await expect(limit).not.toHaveAttribute("aria-invalid", "true");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByRole("status")).toContainText(
+      "Sign-up limit saved.",
+    );
     await expectNoAxeViolations(page, testInfo);
   });
 
@@ -2224,25 +2245,28 @@ test.describe("small-screen access management", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("keeps active invite actions on screen", async ({
+  test("keeps revoke, delete, and save controls on screen", async ({
     page,
     ui,
   }, testInfo) => {
     await ui.open({ ...routeCase("admin-people"), theme: "light" });
 
-    const copy = page.getByRole("button", {
-      name: /^Copy intar_beta_AAAAAAAA invite$/,
-    });
-    const revoke = page.getByRole("button", {
-      name: /^Revoke intar_beta_AAAAAAAA invite$/,
-    });
-    await expect(copy).toBeVisible();
-    await expect(revoke).toBeVisible();
-    for (const control of [copy, revoke]) {
-      const bounds = await control.boundingBox();
-      expect(bounds).not.toBeNull();
-      expect(bounds!.height).toBeGreaterThanOrEqual(44);
-    }
+    await expectCoarsePointerTarget(
+      page.getByRole("button", { name: "Revoke access" }).first(),
+      "320px revoke access",
+    );
+    await expectCoarsePointerTarget(
+      page.getByRole("button", { name: "Delete" }).first(),
+      "320px delete user",
+    );
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+
+    await page.getByRole("tab", { name: "Sign-ups" }).click();
+    await expectCoarsePointerTarget(
+      page.getByRole("button", { name: "Save" }),
+      "320px save sign-up limit",
+    );
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
@@ -2252,7 +2276,6 @@ test.describe("small-screen access management", () => {
     ui,
   }, testInfo) => {
     await ui.open({ ...routeCase("admin-people"), theme: "light" });
-    await page.getByRole("tab", { name: "Users" }).click();
 
     const remove = page.getByRole("button", { name: "Delete" }).first();
     await expect(remove).toBeVisible();
