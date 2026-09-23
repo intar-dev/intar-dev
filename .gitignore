@@ -15,3 +15,6 @@ config.vm.local.toml
 
 # impeccable review screenshots (ephemeral)
 .impeccable/review/
+
+# local Claude preview config
+.claude/launch.json
