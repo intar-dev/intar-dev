@@ -205,7 +205,7 @@ export function RunPreview({ className }: { className?: string }) {
   const remaining = LEASE_SECONDS - Math.floor(t / 1_000);
 
   return (
-    <figure className={cn("m-0", className)}>
+    <figure className={cn("m-0 flex-col", className)}>
       <figcaption className="sr-only">
         Example run: the learner starts nginx, restores the default site, and
         reloads the server while the three checks turn verified.
@@ -213,7 +213,7 @@ export function RunPreview({ className }: { className?: string }) {
       <div
         ref={frameRef}
         aria-hidden="true"
-        className="grid h-[30rem] min-w-0 grid-cols-1 overflow-hidden rounded-2xl border bg-canvas shadow-[var(--highlight),var(--shadow-overlay)] select-none lg:h-[31.5rem] lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
+        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden rounded-2xl border bg-canvas shadow-[var(--highlight),var(--shadow-overlay)] select-none lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
       >
         <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
           <header className="flex shrink-0 items-center gap-2 px-3 pt-2 pb-1">
