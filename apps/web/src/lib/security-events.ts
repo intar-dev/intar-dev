@@ -4,6 +4,8 @@ type SecurityEvent = {
   event:
     | "security.auth_request"
     | "security.session_created"
+    | "security.identity_linked"
+    | "security.identity_unlinked"
     | "security.request_rejected"
     | "security.agent_auth";
   outcome: "accepted" | "rejected" | "error";
@@ -20,7 +22,7 @@ export function securityRoute(path: string): string {
   if (/^\/(?:api\/)?agent\/connect$/u.test(path)) return "agent/connect";
   if (path.startsWith("/api/auth/")) {
     for (const operation of [
-      "sign-in/social", "sign-in/sso", "sign-out", "get-session",
+      "sign-in/social", "sign-in/sso", "link-social", "sign-out", "get-session",
       "callback/github", "sso/callback", "oauth2/token", "oauth2/authorize",
       "oauth2/introspect", "oauth2/userinfo",
     ]) {
@@ -30,6 +32,12 @@ export function securityRoute(path: string): string {
     }
     return "auth/other";
   }
+  // App routes that start sign-ins or change how an account signs in are
+  // audited like Better Auth's own.
+  if (path === "/api/organization-sign-in/start") return "auth/organization-sign-in";
+  if (path === "/api/account-links/sso/start") return "auth/organization-link";
+  // Disconnecting a sign-in method; listing them changes nothing.
+  if (path.startsWith("/api/account-links/")) return "auth/account-links";
   if (path.startsWith("/api/admin/")) return "admin";
   if (path.startsWith("/api/scenarios/")) return "scenarios";
   if (path.startsWith("/api/organizations/")) return "organizations";

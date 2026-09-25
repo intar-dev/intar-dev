@@ -34,6 +34,9 @@ export const user = sqliteTable("user", {
     .$type<"personal" | "platform">()
     .default("platform")
     .notNull(),
+  // The organization whose provider signed the account up, if one did. An
+  // address Intar didn't verify lets only that organization reclaim it.
+  signupOrganizationId: text("signup_organization_id"),
 });
 
 export const userSshKeys = sqliteTable(
@@ -80,7 +83,14 @@ export const session = sqliteTable(
     impersonatedBy: text("impersonated_by"),
     activeOrganizationId: text("active_organization_id"),
   },
-  (table) => [index("session_userId_idx").on(table.userId)],
+  (table) => [
+    index("session_userId_idx").on(table.userId),
+    // Signing someone out also ends the sessions they opened as an admin
+    // impersonating others, which are rare.
+    index("session_impersonated_by_idx")
+      .on(table.impersonatedBy)
+      .where(sql`${table.impersonatedBy} IS NOT NULL`),
+  ],
 );
 
 export const account = sqliteTable(

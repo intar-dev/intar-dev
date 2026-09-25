@@ -63,6 +63,13 @@ function actionableConsoleError(
     server.expectedSignupLimitConflicts -= 1;
     return false;
   }
+  if (
+    text === EXPECTED_MOCK_409_CONSOLE_ERROR &&
+    server.expectedConflicts > 0
+  ) {
+    server.expectedConflicts -= 1;
+    return false;
+  }
   return !text.includes("favicon.ico") && !text.includes("ResizeObserver loop");
 }
 
@@ -121,6 +128,7 @@ export const test = base.extend<UiFixtures>({
         server.nativeSshRequests.length = 0;
         server.expectedNativeSshNoProfileConflicts = 0;
         server.expectedSignupLimitConflicts = 0;
+        server.expectedConflicts = 0;
         server.nativeSshResponseDelayMs = 0;
         server.unhandled.length = 0;
       },

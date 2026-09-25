@@ -232,6 +232,13 @@
       "when": 1790175932994,
       "tag": "0032_cuddly_cloak",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1790369220074,
+      "tag": "0033_third_zeigeist",
+      "breakpoints": true
     }
   ]
 }

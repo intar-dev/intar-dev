@@ -1,3 +1,6 @@
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
+import type { OrganizationRemovedMemberRecord } from "@/lib/organizations";
+
 export type OrganizationRole = "owner" | "admin" | "member";
 
 export interface OrganizationDetailResponse {
@@ -16,6 +19,8 @@ export interface OrganizationDetailResponse {
       role: OrganizationRole;
       joinedAt: number;
     }>;
+    /** People an admin removed; only admins receive them. */
+    removedMembers: OrganizationRemovedMemberRecord[];
   };
 }
 
@@ -68,15 +73,17 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** Throws an HttpResponseError, with the app's code, for a refused mutation. */
 export async function mutationResponse(
   response: Response,
   fallback: string,
 ): Promise<void> {
   if (response.ok || response.status === 204) return;
-  const body = (await response.json().catch(() => null)) as {
-    error?: string;
-  } | null;
-  throw new Error(body?.error ?? `${fallback} (${response.status})`);
+  throw HttpResponseError.fromBody(
+    response.status,
+    await response.json().catch(() => null),
+    `${fallback} (${response.status})`,
+  );
 }
 
 export function initials(name: string): string {

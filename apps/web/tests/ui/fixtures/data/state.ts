@@ -478,6 +478,7 @@ export function createMockApiState(input?: {
         joinedAt: FIXED_NOW - 20 * day,
       },
     ],
+    removedMembers: [],
   };
   return {
     sessionRole,
@@ -636,6 +637,12 @@ export function createMockApiState(input?: {
             memberCount: organizationDetail.members.length,
             assignmentCount: 1,
             owner: { name: "Owen Owner", username: "owenowns" },
+            oidc: {
+              domain: "platform.example",
+              domainVerified: true,
+              allowExternalEmailSignups: false,
+            },
+            removedMemberCount: 0,
           },
         ],
     organizationRunners: empty
@@ -666,7 +673,8 @@ export function createMockApiState(input?: {
       callbackUrl: "https://intar.dev/api/auth/sso/callback/org-provider-1",
       clientIdLastFour: "****demo",
       pkce: true,
-      scopes: ["openid", "email", "profile", "offline_access"],
+      scopes: ["openid", "email", "profile"],
+      allowExternalEmailSignups: false,
       verification: null,
     },
     hosts: empty ? [] : [host],

@@ -478,6 +478,15 @@ describe("worker API request security", () => {
     expect(
       sensitiveRateLimitActionFor(customMutation("/api/auth/sign-in/social")),
     ).toBe("auth-start");
+    // Signed-out organization sign-in and connecting GitHub start OAuth too.
+    expect(
+      sensitiveRateLimitActionFor(
+        customMutation("/api/organization-sign-in/start"),
+      ),
+    ).toBe("auth-start");
+    expect(
+      sensitiveRateLimitActionFor(customMutation("/api/auth/link-social")),
+    ).toBe("auth-start");
     expect(
       sensitiveRateLimitActionFor(
         customMutation("/api/account-links/sso/start"),

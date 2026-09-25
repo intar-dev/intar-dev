@@ -10,10 +10,11 @@ import {
   user,
 } from "@/db/schema";
 import { isActiveAccount } from "@/lib/account-access";
-import { auth } from "@/lib/auth";
+import { signedSessionCookie } from "@/test/auth-requests";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   ensureFixtureMember,
+  FIXTURE_ADMIN_ID,
   revokeFixtureAccount,
 } from "@/test/account-fixtures";
 import { jsonResponse, requireUserContext } from "./agent-bridge";
@@ -100,6 +101,33 @@ describe("requireUserContext", () => {
       status: 403,
     },
     {
+      name: "a session of an account no identity can sign in to",
+      organizationIds: [],
+      activeOrganizationId: null,
+      expectedActiveOrganizationId: null,
+      account: "no-identity",
+      expired: false,
+      status: 403,
+    },
+    {
+      name: "an admin's impersonation of such an account",
+      organizationIds: [],
+      activeOrganizationId: null,
+      expectedActiveOrganizationId: null,
+      account: "impersonated-no-identity",
+      expired: false,
+      status: 200,
+    },
+    {
+      name: "an impersonation whose admin is no longer one",
+      organizationIds: [],
+      activeOrganizationId: null,
+      expectedActiveOrganizationId: null,
+      account: "impersonated-by-former-admin",
+      expired: false,
+      status: 403,
+    },
+    {
       name: "an expired session of an active account",
       organizationIds: [],
       activeOrganizationId: null,
@@ -149,7 +177,20 @@ describe("requireUserContext", () => {
       createdAt: new Date(now),
       updatedAt: new Date(now),
       activeOrganizationId: testCase.activeOrganizationId,
+      impersonatedBy: testCase.account.startsWith("impersonated")
+        ? FIXTURE_ADMIN_ID
+        : null,
     });
+    if (testCase.account.endsWith("no-identity")) {
+      await env.DB.prepare("DELETE FROM account WHERE user_id = ?1")
+        .bind(userId)
+        .run();
+    }
+    if (testCase.account === "impersonated-by-former-admin") {
+      await env.DB.prepare("UPDATE user SET role = 'user' WHERE id = ?1")
+        .bind(FIXTURE_ADMIN_ID)
+        .run();
+    }
     if (testCase.account === "banned") {
       await revokeFixtureAccount({ d1: env.DB, userId });
     }
@@ -171,6 +212,7 @@ describe("requireUserContext", () => {
       if (testCase.status === 403) {
         await expect(result.response.json()).resolves.toEqual({
           error: "access revoked",
+          code: "access_revoked",
         });
       }
       return;
@@ -265,27 +307,7 @@ describe("requireUserContext", () => {
     expect(blocked.response.status).toBe(403);
     await expect(blocked.response.json()).resolves.toEqual({
       error: "access revoked",
+      code: "access_revoked",
     });
   });
 });
-
-async function signedSessionCookie(token: string): Promise<string> {
-  const context = await auth.$context;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(context.secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(token),
-  );
-  const encodedSignature = btoa(
-    String.fromCharCode(...new Uint8Array(signature)),
-  );
-  const signedValue = encodeURIComponent(`${token}.${encodedSignature}`);
-  return `${context.authCookies.sessionToken.name}=${signedValue}`;
-}

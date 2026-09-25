@@ -1,25 +1,35 @@
 import { env } from "cloudflare:workers";
-import { and, count, desc, eq, inArray, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
+  account,
   agentHosts,
   hostEnrollments,
   imageBuildBundles,
   imageBuilds,
   member,
   organization,
+  organizationMemberRemovals,
+  organizationMemberRemovedLogins,
   personalImagePreparations,
   scenarioRuns,
   ssoProvider,
   user,
   vmScenarios,
 } from "@/db/schema";
+import { activeAdminSql } from "@/lib/account-access";
+import { signOutQueries } from "@/lib/account-sign-out";
 import { appError, errorChainMatches } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import {
   canCreateOrganization,
   hasReachedOwnedOrganizationLimit,
 } from "@/lib/organization-access";
+import {
+  activeAdministrator,
+  adminRequiredError,
+  isActiveAdmin,
+} from "@/lib/platform-admin-authority";
 import type { FeatureToggleService } from "@/lib/feature-toggles";
 
 export type OrganizationRole = "owner" | "admin" | "member";
@@ -43,10 +53,28 @@ export interface OrganizationMemberRecord {
   joinedAt: number;
 }
 
+/** Someone an admin removed; the organization's provider can't sign them in. */
+export interface OrganizationRemovedMemberRecord {
+  userId: string;
+  name: string;
+  email: string;
+  githubUsername: string | null;
+  removedAt: number;
+}
+
 const ORGANIZATION_NAME_MAX = 60;
 
 export function isOrganizationAdminRole(role: OrganizationRole): boolean {
   return role === "owner" || role === "admin";
+}
+
+/**
+ * Drizzle condition that holds while `userId` is an owner or admin of the
+ * organization, for writes that recheck their actor in the statement.
+ */
+function administersOrganization(organizationId: string, userId: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM member actor WHERE actor.organization_id = ${organizationId}
+    AND actor.user_id = ${userId} AND actor.role IN ('owner', 'admin'))`;
 }
 
 export async function requireOrganizationRole(params: {
@@ -217,6 +245,8 @@ export async function getOrganizationDetail(params: {
   createdAt: number;
   role: OrganizationRole;
   members: OrganizationMemberRecord[];
+  /** Only organization admins see who was removed. */
+  removedMembers: OrganizationRemovedMemberRecord[];
 }> {
   const organizationId = await resolveOrganizationId(params.organizationKey);
   if (!organizationId) {
@@ -227,7 +257,7 @@ export async function getOrganizationDetail(params: {
     userId: params.userId,
   });
   const db = drizzle(env.DB);
-  const [organizations, members] = await Promise.all([
+  const [organizations, members, removedMembers] = await Promise.all([
     db
       .select()
       .from(organization)
@@ -247,6 +277,9 @@ export async function getOrganizationDetail(params: {
       .innerJoin(user, eq(member.userId, user.id))
       .where(eq(member.organizationId, organizationId))
       .orderBy(member.createdAt),
+    isOrganizationAdminRole(role)
+      ? listOrganizationRemovedMembers(organizationId)
+      : Promise.resolve([]),
   ]);
   const record = organizations[0];
   if (!record) {
@@ -264,6 +297,7 @@ export async function getOrganizationDetail(params: {
       role: entry.role as OrganizationRole,
       joinedAt: entry.joinedAt.getTime(),
     })),
+    removedMembers,
   };
 }
 
@@ -473,8 +507,7 @@ export async function updateOrganizationMemberRole(params: {
         eq(member.id, params.memberId),
         eq(member.organizationId, params.organizationId),
         ne(member.role, "owner"),
-        sql`EXISTS (SELECT 1 FROM member actor WHERE actor.organization_id = ${params.organizationId}
-          AND actor.user_id = ${params.actorUserId} AND actor.role IN ('owner', 'admin'))`,
+        administersOrganization(params.organizationId, params.actorUserId),
       ),
     )
     .returning({ id: member.id }),
@@ -518,26 +551,184 @@ export async function removeOrganizationMember(params: {
       "the organization owner cannot be removed",
     );
   }
-  const [removed, runs] = await db.batch([
-    db.delete(member)
-    .where(
-      and(
-        eq(member.id, params.memberId),
-        eq(member.organizationId, params.organizationId),
-        ne(member.role, "owner"),
-        sql`EXISTS (SELECT 1 FROM member actor WHERE actor.organization_id = ${params.organizationId}
-          AND actor.user_id = ${params.actorUserId} AND actor.role IN ('owner', 'admin'))`,
-      ),
-    )
-    .returning({ id: member.id }),
-    requestRemovedMemberRunShutdown(db, { organizationId: params.organizationId, userId: rows[0].userId }),
-    revokeUnauthorizedOrganizationEnrollments(db, { organizationId: params.organizationId, userId: rows[0].userId }),
-    deleteRemovedMemberImagePreparation(db, { organizationId: params.organizationId, userId: rows[0].userId }),
+  const removedUserId = rows[0].userId;
+  // A removal sticks, so removing yourself would lock you out of an
+  // organization you can leave and rejoin instead.
+  if (removedUserId === params.actorUserId) {
+    throw appError(
+      400,
+      "cannot_remove_self",
+      "leave the organization instead of removing yourself",
+    );
+  }
+  const removable = and(
+    eq(member.id, params.memberId),
+    eq(member.organizationId, params.organizationId),
+    ne(member.role, "owner"),
+    ne(member.userId, params.actorUserId),
+    administersOrganization(params.organizationId, params.actorUserId),
+  );
+  const removedAt = Date.now();
+  // Holds once this batch has written its removal row, and only then.
+  const removalWritten = sql`EXISTS (SELECT 1 FROM organization_member_removals AS written
+    WHERE written.organization_id = ${params.organizationId}
+      AND written.user_id = ${removedUserId}
+      AND written.removed_by = ${params.actorUserId}
+      AND written.removed_at = ${removedAt})`;
+  const [, removed, runs] = await db.batch([
+    // Removal sticks: the organization's identity provider can neither sign
+    // the person in nor add them back until an admin restores them. The row
+    // uses the delete's own predicate, so both apply or neither does.
+    db
+      .insert(organizationMemberRemovals)
+      .select(
+        db
+          .select({
+            organizationId: member.organizationId,
+            userId: member.userId,
+            removedBy: sql<string>`${params.actorUserId}`.as("removed_by"),
+            removedAt: sql<number>`${removedAt}`.as("removed_at"),
+          })
+          .from(member)
+          .where(removable),
+      )
+      .onConflictDoUpdate({
+        target: [
+          organizationMemberRemovals.organizationId,
+          organizationMemberRemovals.userId,
+        ],
+        set: { removedBy: params.actorUserId, removedAt },
+      }),
+    db.delete(member).where(removable).returning({ id: member.id }),
+    requestRemovedMemberRunShutdown(db, { organizationId: params.organizationId, userId: removedUserId }),
+    revokeUnauthorizedOrganizationEnrollments(db, { organizationId: params.organizationId, userId: removedUserId }),
+    deleteRemovedMemberImagePreparation(db, { organizationId: params.organizationId, userId: removedUserId }),
+    // Their logins at the organization's providers stay removed even once
+    // this account no longer holds them.
+    db
+      .insert(organizationMemberRemovedLogins)
+      .select(
+        db
+          .select({
+            organizationId: sql<string>`${params.organizationId}`.as("organization_id"),
+            userId: account.userId,
+            issuer: ssoProvider.issuer,
+            subject: account.accountId,
+          })
+          .from(account)
+          .innerJoin(ssoProvider, eq(ssoProvider.providerId, account.providerId))
+          .where(
+            and(
+              eq(account.userId, removedUserId),
+              eq(ssoProvider.organizationId, params.organizationId),
+              removalWritten,
+            ),
+          ),
+      )
+      .onConflictDoNothing(),
+    // With the removal written, someone with an identity at its provider is
+    // signed out in the same transaction: a session doesn't record which
+    // identity opened it, so any of theirs may be one the provider opened.
+    // Platform admins sign in with GitHub only, so none of theirs is.
+    ...signOutQueries(
+      db,
+      (userColumn) => sql`${userColumn} = ${removedUserId}
+        AND ${removalWritten}
+        AND NOT EXISTS (SELECT 1 FROM ${user} AS removed_user
+          WHERE removed_user.id = ${removedUserId}
+            AND ${sql.raw(activeAdminSql("removed_user"))})
+        AND EXISTS (SELECT 1 FROM account AS organization_identity
+          JOIN sso_provider AS identity_provider
+            ON identity_provider.provider_id = organization_identity.provider_id
+          WHERE organization_identity.user_id = ${removedUserId}
+            AND identity_provider.organization_id = ${params.organizationId})`,
+    ),
   ]);
   if (removed.length !== 1) {
     throw appError(409, "organization_membership_changed", "organization membership changed while it was being removed");
   }
-  await finishRemovedMemberRunShutdown(rows[0].userId, runs);
+  await finishRemovedMemberRunShutdown(removedUserId, runs);
+}
+
+/** Lifts a removal while `guard` holds; whether it lifted one. */
+async function liftRemoval(
+  params: { organizationId: string; userId: string },
+  guard: SQL,
+): Promise<boolean> {
+  const restored = await drizzle(env.DB)
+    .delete(organizationMemberRemovals)
+    .where(
+      and(
+        eq(organizationMemberRemovals.organizationId, params.organizationId),
+        eq(organizationMemberRemovals.userId, params.userId),
+        guard,
+      ),
+    )
+    .returning({ userId: organizationMemberRemovals.userId });
+  return restored.length === 1;
+}
+
+function removedMemberNotFound() {
+  return appError(404, "removed_member_not_found", "removed member not found");
+}
+
+/** Lets a removed person sign in through the organization's provider again. */
+export async function restoreOrganizationMember(params: {
+  organizationId: string;
+  userId: string;
+  actorUserId: string;
+}): Promise<void> {
+  if (
+    await liftRemoval(
+      params,
+      administersOrganization(params.organizationId, params.actorUserId),
+    )
+  ) {
+    return;
+  }
+  // Refused: name whether the actor isn't an admin.
+  await requireOrganizationRole({
+    organizationId: params.organizationId,
+    userId: params.actorUserId,
+    admin: true,
+  });
+  throw removedMemberNotFound();
+}
+
+/**
+ * Lifts a removal for a platform admin, who needs no membership. Nobody else
+ * can restore someone an organization's admins removed.
+ */
+export async function restoreRemovedMemberAsPlatformAdmin(params: {
+  organizationId: string;
+  userId: string;
+  actorUserId: string;
+}): Promise<void> {
+  if (await liftRemoval(params, activeAdministrator(params.actorUserId))) {
+    return;
+  }
+  if (!(await isActiveAdmin(params.actorUserId, env.DB))) {
+    throw adminRequiredError();
+  }
+  throw removedMemberNotFound();
+}
+
+/** The people an organization's admins removed, most recent first. */
+export async function listOrganizationRemovedMembers(
+  organizationId: string,
+): Promise<OrganizationRemovedMemberRecord[]> {
+  return drizzle(env.DB)
+    .select({
+      userId: organizationMemberRemovals.userId,
+      name: user.name,
+      email: user.email,
+      githubUsername: user.username,
+      removedAt: organizationMemberRemovals.removedAt,
+    })
+    .from(organizationMemberRemovals)
+    .innerJoin(user, eq(organizationMemberRemovals.userId, user.id))
+    .where(eq(organizationMemberRemovals.organizationId, organizationId))
+    .orderBy(desc(organizationMemberRemovals.removedAt));
 }
 
 function revokeUnauthorizedOrganizationEnrollments(

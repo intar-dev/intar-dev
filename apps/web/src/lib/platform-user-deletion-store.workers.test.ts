@@ -92,6 +92,12 @@ describe("platform user deletion store", () => {
         createdAt: new Date(2_000),
       },
     ]);
+    await env.DB.prepare(
+      `INSERT INTO organization_member_removals (organization_id, user_id, removed_by, removed_at)
+       VALUES ('co-owned-organization', ?1, ?2, 4000)`,
+    )
+      .bind(TARGET_USER_ID, FIXTURE_ADMIN_ID)
+      .run();
 
     await finalizePlatformUserDeletion({
       d1: env.DB,
@@ -133,6 +139,14 @@ describe("platform user deletion store", () => {
           .first<{ count: number }>(),
       ).resolves.toEqual({ count: 0 });
     }
+    // The removal outlives the account, so it still holds for their logins.
+    await expect(
+      env.DB.prepare(
+        "SELECT organization_id AS organizationId FROM organization_member_removals WHERE user_id = ?",
+      )
+        .bind(TARGET_USER_ID)
+        .first(),
+    ).resolves.toEqual({ organizationId: "co-owned-organization" });
     await expect(
       env.DB.prepare(
         `SELECT event_type AS eventType, subject_user_id AS subjectUserId,
@@ -199,6 +213,45 @@ describe("platform user deletion store", () => {
         updatedAt: new Date(6_000),
       }),
     ).resolves.toBeDefined();
+  });
+
+  it("keeps the organization identity of someone without GitHub in the audit trail", async () => {
+    await drizzle(env.DB).insert(account).values({
+      id: "target-organization-identity",
+      providerId: "org-idp",
+      accountId: "target-subject",
+      userId: TARGET_USER_ID,
+      createdAt: new Date(2_500),
+      updatedAt: new Date(2_500),
+    });
+    await revokeAndFinishCleanup(TARGET_USER_ID, 4_000);
+
+    await finalizePlatformUserDeletion({
+      d1: env.DB,
+      targetUserId: TARGET_USER_ID,
+      actorUserId: FIXTURE_ADMIN_ID,
+      now: 5_000,
+    });
+
+    const events = await env.DB.prepare(
+      `SELECT event_type AS eventType, github_account_id AS githubAccountId,
+              sso_provider_id AS ssoProviderId, sso_account_id AS ssoAccountId
+       FROM access_events WHERE subject_user_id = ?1
+       ORDER BY created_at, event_type`,
+    )
+      .bind(TARGET_USER_ID)
+      .all();
+    expect(events.results.length).toBeGreaterThan(1);
+    for (const event of events.results) {
+      expect(event).toMatchObject({
+        githubAccountId: null,
+        ssoProviderId: "org-idp",
+        ssoAccountId: "target-subject",
+      });
+    }
+    expect(events.results.map((event) => event.eventType)).toContain(
+      "user.deleted",
+    );
   });
 
   it("refuses to delete a user whose access is active", async () => {

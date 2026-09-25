@@ -3,8 +3,8 @@ import { account, user } from "@/db/schema";
 import { createAppId } from "@/lib/id";
 
 // An account has access by existing, not deleted and not banned. These
-// fixtures add the GitHub identity a real member always has and, like the
-// production database, at least one active administrator.
+// fixtures give members a GitHub identity, the usual way in, and like the
+// production database keep at least one active administrator.
 
 export const FIXTURE_ADMIN_ID = "fixture-admin";
 
@@ -29,13 +29,14 @@ export async function createFixtureMember(params: {
   userId: string;
   role?: "user" | "admin";
   githubAccountId?: string | undefined;
+  email?: string | undefined;
   now?: number | undefined;
 }): Promise<void> {
   const now = params.now ?? Date.now();
   await drizzle(params.d1).insert(user).values({
     id: params.userId,
     name: params.userId,
-    email: `${params.userId}@example.test`,
+    email: params.email ?? `${params.userId}@example.test`,
     emailVerified: true,
     username: params.userId.toLowerCase(),
     role: params.role ?? "user",

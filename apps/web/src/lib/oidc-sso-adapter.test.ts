@@ -15,6 +15,40 @@ const identity = {
   organizationId: "organization-a",
 } as const;
 describe("OIDC SSO Better Auth adapter decorator", () => {
+  it("checks ID tokens against the issuer discovery advertised", async () => {
+    // Rows registered before the fix kept the typed issuer; the plugin compares
+    // the ID token's iss with the row's issuer exactly.
+    const row = providerRow();
+    row.oidcConfig = JSON.stringify({
+      ...JSON.parse(String(row.oidcConfig)),
+      issuer: "https://login.example.test/",
+    });
+    const base = fakeAdapter(row);
+    const adapter = decorateOidcSsoAdapter(base.adapter);
+
+    const found = await adapter.findOne({
+      model: "ssoProvider",
+      where: [{ field: "providerId", value: identity.providerId }],
+    });
+    const locked = await adapter.update({
+      model: "ssoProvider",
+      where: [{ field: "providerId", value: identity.providerId }],
+      update: { providerId: identity.providerId },
+    });
+    for (const result of [found, locked]) {
+      expect(result).toMatchObject({ issuer: "https://login.example.test/" });
+    }
+
+    // Without a discovered issuer the stored value stays.
+    const legacy = decorateOidcSsoAdapter(fakeAdapter(providerRow()).adapter);
+    await expect(
+      legacy.findOne({
+        model: "ssoProvider",
+        where: [{ field: "providerId", value: identity.providerId }],
+      }),
+    ).resolves.toMatchObject({ issuer: "https://login.example.test" });
+  });
+
   it.each([undefined, false, true])(
     "enforces PKCE on public providers across result paths: %s",
     async (pkce) => {

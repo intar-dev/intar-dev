@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { accessInviteError, accessInviteJson } from "@/lib/access-invite-http";
-import { isActiveAccount } from "@/lib/account-access";
+import { sessionMayAct } from "@/lib/account-access";
 import { auth } from "@/lib/auth";
 
 export const prerender = false;
@@ -12,8 +12,10 @@ export const GET: APIRoute = async ({ request }) => {
       authSession?.session && authSession.user
         ? { session: authSession.session, user: authSession.user }
         : null;
+    // The same rule every API request applies, so the app's route guard
+    // agrees with them.
     const access =
-      session && (await isActiveAccount(session.user.id))
+      session && (await sessionMayAct(session.session))
         ? "active"
         : "inactive";
 

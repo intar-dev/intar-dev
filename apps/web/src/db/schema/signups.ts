@@ -29,7 +29,7 @@ export const signupSettings = sqliteTable(
   ],
 );
 
-// A spot held while a new member's GitHub account is being linked. It stops
+// A spot held while a new member's first identity is being linked. It stops
 // counting once the account exists and expires if the link never completes.
 export const signupReservations = sqliteTable(
   "signup_reservations",

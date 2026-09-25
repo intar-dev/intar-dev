@@ -239,7 +239,9 @@ export function WebSshTerminal({
       cols: REPLAY_TERMINAL_COLS,
       rows: REPLAY_TERMINAL_ROWS,
       convertEol: true,
-      cursorBlink: true,
+      // xterm's blink is an animation the reduced-motion styles only shorten.
+      cursorBlink: !window.matchMedia("(prefers-reduced-motion: reduce)")
+        .matches,
       fontFamily: isReplayTerminalFontLoaded()
         ? REPLAY_TERMINAL_FONT_FAMILY
         : REPLAY_TERMINAL_FALLBACK_FONT_FAMILY,

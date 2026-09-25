@@ -19,6 +19,8 @@ export interface MockApiServer {
   expectedNativeSshNoProfileConflicts: number;
   /** Stale sign-up limit saves the mock answered with 409. */
   expectedSignupLimitConflicts: number;
+  /** Other requests a test answered with 409 on purpose. */
+  expectedConflicts: number;
   nativeSshResponseDelayMs: number;
   scenarioRunStatusRevision: number;
   handle(route: Route): Promise<void>;
@@ -511,6 +513,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     nativeSshRequests: [],
     expectedNativeSshNoProfileConflicts: 0,
     expectedSignupLimitConflicts: 0,
+    expectedConflicts: 0,
     nativeSshResponseDelayMs: 0,
     scenarioRunStatusRevision: 0,
     setRunState(runState) {
@@ -576,6 +579,26 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
       if (pathname === "/api/auth/sign-in/social" && method === "POST") {
         await json(route, { redirect: false, url: "/courses" });
+        return;
+      }
+      if (pathname === "/api/account-links" && method === "GET") {
+        // Fixture sessions signed up with GitHub; tests that need other sign-in
+        // methods route this themselves.
+        const session = sessionFor(server.state.sessionRole);
+        await json(route, {
+          identities: session
+            ? [
+                {
+                  providerId: "github",
+                  kind: "github",
+                  organization: null,
+                  linkedAt: FIXED_NOW - 30 * 24 * 60 * 60_000,
+                  usable: true,
+                  removed: false,
+                },
+              ]
+            : [],
+        });
         return;
       }
       if (pathname === "/api/auth/sign-out" && method === "POST") {
@@ -1179,6 +1202,31 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         /^\/api\/organizations\/[^/]+\/sso$/.test(pathname) &&
         method === "GET"
       ) {
+        await json(route, { provider: server.state.organizationOidc });
+        return;
+      }
+      if (
+        /^\/api\/admin\/organizations\/[^/]+\/sso-policy$/.test(pathname) &&
+        method === "PUT"
+      ) {
+        const body = await requestBody(route);
+        const allowExternalEmailSignups = body.allowExternalEmailSignups === true;
+        server.state.organizationOidc = {
+          ...server.state.organizationOidc,
+          allowExternalEmailSignups,
+        };
+        server.state.adminOrganizations = server.state.adminOrganizations.map(
+          (entry) =>
+            entry.oidc
+              ? {
+                  ...entry,
+                  oidc: {
+                    ...(entry.oidc as Record<string, unknown>),
+                    allowExternalEmailSignups,
+                  },
+                }
+              : entry,
+        );
         await json(route, { provider: server.state.organizationOidc });
         return;
       }

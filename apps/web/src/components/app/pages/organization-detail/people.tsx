@@ -1,7 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, BookOpen, Plus, UserMinus, Users } from "lucide-react";
+import {
+  ArrowRight,
+  BookOpen,
+  Plus,
+  UserMinus,
+  Users,
+} from "lucide-react";
 import { useState } from "react";
+import { useSession } from "../../hooks/useSession";
 import { formatDurationMs, formatRelativeTime } from "../../lib/format";
+import { ConfirmDialog } from "../../patterns/ConfirmDialog";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import {
   COLLECTION_PAGE_SIZE,
@@ -29,6 +37,8 @@ import {
   type CourseLectureSummary,
 } from "../learn/course-wire";
 import type { OrganizationDetailTab } from "../tab-search";
+import { invalidateOrganizationDetail } from "./queries";
+import { RemovedMemberList } from "./RemovedMemberList";
 import {
   type AssignmentsResponse,
   type OrganizationDetailResponse,
@@ -115,11 +125,10 @@ function OverviewMetric({
 
 export function MembersSection({ detail }: { detail: Detail }) {
   const queryClient = useQueryClient();
+  const { data: session } = useSession();
+  const viewerUserId = session?.user.id ?? null;
   const admin = detail.role !== "member";
-  const invalidate = () =>
-    queryClient.invalidateQueries({
-      queryKey: ["organizations", detail.id, "detail"],
-    });
+  const invalidate = () => invalidateOrganizationDetail(queryClient, detail);
   const changeRole = useMutation({
     mutationFn: async (input: {
       memberId: string;
@@ -136,8 +145,18 @@ export function MembersSection({ detail }: { detail: Detail }) {
       );
       await mutationResponse(response, "Failed to change member role");
     },
+    // Only the latest action's failure shows; one still running keeps its own.
+    onMutate: () => {
+      if (!restore.isPending) restore.reset();
+    },
     onSuccess: invalidate,
   });
+  // The target outlives the dialog's close animation, so its text holds.
+  const [removeTarget, setRemoveTarget] = useState<{
+    memberId: string;
+    name: string;
+  } | null>(null);
+  const [removeOpen, setRemoveOpen] = useState(false);
   const remove = useMutation({
     mutationFn: async (memberId: string) => {
       const response = await fetch(
@@ -146,15 +165,39 @@ export function MembersSection({ detail }: { detail: Detail }) {
       );
       await mutationResponse(response, "Failed to remove member");
     },
-    onSuccess: invalidate,
+    onSuccess: () => setRemoveOpen(false),
+    // A failure can follow a committed removal (run shutdown still pending),
+    // so the list refreshes either way.
+    onSettled: invalidate,
   });
-  const actionError = changeRole.error ?? remove.error;
+  const closeRemoveDialog = () => {
+    setRemoveOpen(false);
+    remove.reset();
+  };
+  const restore = useMutation({
+    mutationFn: async (userId: string) => {
+      const response = await fetch(
+        `/api/organizations/${encodeURIComponent(detail.id)}/removed-members/${encodeURIComponent(userId)}`,
+        { method: "DELETE", credentials: "include" },
+      );
+      await mutationResponse(response, "Failed to restore access");
+    },
+    // Only the latest action's failure shows; one still running keeps its own.
+    onMutate: () => {
+      if (!changeRole.isPending) changeRole.reset();
+    },
+    // A refused restore (someone else restored them first) refreshes the list
+    // too.
+    onSettled: invalidate,
+  });
+  // Removal errors show in the confirmation dialog, which covers the page.
+  const actionError = changeRole.error ?? restore.error;
 
   return (
     <Section
       density="compact"
       title="Members"
-      description="Successful sign-in through the verified OIDC provider creates membership automatically."
+      description="Signing in through the organization's verified OIDC provider makes people members. First-timers get an Intar account."
     >
       <PaginatedCollection
         items={detail.members}
@@ -222,13 +265,23 @@ export function MembersSection({ detail }: { detail: Detail }) {
                   </div>
                   {admin ? (
                     <div className="flex w-24 items-center justify-end">
-                      {entry.role !== "owner" ? (
+                      {/* A removal sticks, so admins leave from Settings
+                          instead of removing themselves. */}
+                      {entry.role !== "owner" &&
+                      entry.userId !== viewerUserId ? (
                         <Button
                           size="sm"
                           variant="ghost"
                           className="text-muted-foreground hover:text-destructive"
                           disabled={remove.isPending}
-                          onClick={() => remove.mutate(entry.memberId)}
+                          onClick={() => {
+                            remove.reset();
+                            setRemoveTarget({
+                              memberId: entry.memberId,
+                              name: entry.name,
+                            });
+                            setRemoveOpen(true);
+                          }}
                         >
                           <UserMinus className="size-3.5" />
                           Remove
@@ -242,11 +295,42 @@ export function MembersSection({ detail }: { detail: Detail }) {
           </ul>
         )}
       </PaginatedCollection>
+      {admin && detail.removedMembers.length > 0 ? (
+        <div className="mt-6 space-y-3">
+          <div>
+            <h3 className="text-sm font-medium">Removed</h3>
+            <p className="text-caption">
+              They can't sign in through this organization's identity provider
+              until you restore them. Restored people rejoin on their next
+              organization sign-in.
+            </p>
+          </div>
+          <RemovedMemberList
+            entries={detail.removedMembers}
+            restoring={restore.isPending}
+            onRestore={(userId) => restore.mutate(userId)}
+          />
+        </div>
+      ) : null}
       {actionError ? (
         <InlineFeedback tone="error" className="mt-4">
           {actionError instanceof Error ? actionError.message : "Action failed"}
         </InlineFeedback>
       ) : null}
+      <ConfirmDialog
+        open={removeOpen}
+        onClose={closeRemoveDialog}
+        title={`Remove ${removeTarget?.name}?`}
+        description="They lose access to this organization and can't sign in through its identity provider until an admin restores them. If they connected it, they're signed out everywhere now."
+        error={remove.error ? remove.error.message : null}
+        pending={remove.isPending}
+        confirmLabel="Remove member"
+        pendingLabel="Removing…"
+        confirmDisabled={!removeTarget}
+        onConfirm={() => {
+          if (removeTarget) remove.mutate(removeTarget.memberId);
+        }}
+      />
     </Section>
   );
 }

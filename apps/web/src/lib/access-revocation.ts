@@ -12,8 +12,8 @@ import {
   recordAccessRevocationCleanupStall,
   revokeAccount,
 } from "@/lib/access-revocation-store";
+import { signOutStatements } from "@/lib/account-sign-out";
 import { appError, AppError } from "@/lib/app-error";
-import { auth } from "@/lib/auth";
 import { retireHostRuntime, wakeHostRuntime } from "@/lib/host-runtime-wake";
 import {
   destroyScenarioRunForUser,
@@ -109,12 +109,6 @@ export async function cleanupAccessRevocation(params: {
   let externalCleanupDispatched = false;
 
   try {
-    // The internal adapter is Better Auth's lifecycle-aware deletion seam:
-    // deleteUserSessions runs session delete hooks, OAuth revocation, and
-    // back-channel logout without depending on the target's now-revoked
-    // browser session (which also makes multi-admin self-revocation safe).
-    const authContext = await auth.$context;
-    await authContext.internalAdapter.deleteUserSessions(params.userId);
     await assertRevocationFence(
       params.userId,
       params.revocationId,
@@ -153,12 +147,13 @@ export async function cleanupAccessRevocation(params: {
         AND revocation.cleanup_completed_at IS NULL
     )`;
     await env.DB.batch([
-      env.DB
-        .prepare(`DELETE FROM oauth_access_token WHERE user_id = ?1 AND ${fence}`)
-        .bind(params.userId, params.revocationId, cleanupAttemptId),
-      env.DB
-        .prepare(`DELETE FROM oauth_refresh_token WHERE user_id = ?1 AND ${fence}`)
-        .bind(params.userId, params.revocationId, cleanupAttemptId),
+      // Every session and OAuth token, including any the revocation raced
+      // with.
+      ...signOutStatements(
+        env.DB,
+        (userColumn) => `${userColumn} = ?1 AND ${fence}`,
+        [params.userId, params.revocationId, cleanupAttemptId],
+      ),
       env.DB
         .prepare(`DELETE FROM oauth_consent WHERE user_id = ?1 AND ${fence}`)
         .bind(params.userId, params.revocationId, cleanupAttemptId),

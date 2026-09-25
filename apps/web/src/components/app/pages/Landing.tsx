@@ -7,8 +7,10 @@ import hosttechLogoLight from "@/assets/hosttech-logo-light.svg?url";
 import namespaceLogo from "@/assets/namespace-logo.png";
 import { BrandMark } from "../patterns/BrandMark";
 import { InlineFeedback } from "../patterns/InlineFeedback";
+import { useCallbackErrorCode } from "../hooks/useCallbackErrorCode";
 import { useMyRuns } from "../hooks/useMyRuns";
-import { useSession } from "../hooks/useSession";
+import { useSessionAccess } from "../hooks/useSession";
+import { useSignOut } from "../hooks/useSignOut";
 import { useSignupStatus } from "../hooks/useSignupStatus";
 import { ThemeToggle } from "../theme";
 import { RunLoop } from "./landing/RunLoop";
@@ -17,37 +19,19 @@ import { signupSpotsLine } from "./landing/signup-spots";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { startGithubSignIn } from "@/lib/auth-client";
-
-const errorMessages: Record<string, string> = {
-  signups_full:
-    "No sign-up spots are open right now. Members can still sign in.",
-  access_revoked: "This account no longer has access.",
-  banned_user: "This account no longer has access.",
-  validation_failed: "We couldn't check this sign-in. Please try again.",
-  unable_to_create_session: "We couldn't complete sign-in. Please try again.",
-  unable_to_create_user: "We couldn't create your account. Please try again.",
-  signup_disabled: "Sign-ups are disabled for this provider.",
-  state_mismatch: "Your sign-in session expired. Please try again.",
-  please_restart_the_process: "Your sign-in session expired. Please try again.",
-  invalid_callback_request: "Sign-in failed. Please try again.",
-  invalid_code: "GitHub sign-in was canceled or expired. Please try again.",
-  no_callback_url: "Sign-in failed to return to the app. Please try again.",
-  oauth_provider_not_found:
-    "GitHub sign-in isn't configured. Please try again later.",
-  unable_to_get_user_info: "GitHub didn't return user info. Please try again.",
-  email_not_found:
-    "GitHub didn't return an email. Please check your GitHub email settings.",
-};
+import { githubCallbackMessage } from "./sign-in-helpers";
 
 export function Landing() {
-  const errorFromQuery =
-    typeof window === "undefined"
-      ? null
-      : new URLSearchParams(window.location.search).get("error");
-  const errorMessage = friendlyMessageFor(errorFromQuery) ?? null;
-  const session = useSession();
-  const signedIn = Boolean(session.data?.user);
-  const runs = useMyRuns({ enabled: signedIn });
+  // Sign-in and app-authorization failures land here with a code.
+  const [errorCode, clearErrorCode] = useCallbackErrorCode();
+  const errorMessage = errorCode
+    ? (githubCallbackMessage(errorCode) ??
+      "Sign-in couldn't be completed. Please try again.")
+    : null;
+  const { access } = useSessionAccess();
+  const runs = useMyRuns({ enabled: access === "active" });
+  // Signing out a stranded session answers the refusal that brought it here.
+  const signOut = useSignOut({ onSignedOut: clearErrorCode });
   const signups = useSignupStatus();
   const activeRun = runs.data?.runs.find((run) => run.active) ?? null;
 
@@ -57,6 +41,7 @@ export function Landing() {
         callbackURL: `${window.location.origin}/courses`,
         errorCallbackURL: `${window.location.origin}/`,
       }),
+    onMutate: clearErrorCode,
   });
 
   return (
@@ -107,7 +92,16 @@ export function Landing() {
             {/* The spots line sits with the sign-in actions it describes. */}
             <div className="flex w-full flex-col items-center gap-3 sm:w-auto">
               <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-center sm:gap-3">
-                {signedIn ? (
+                {access === "stranded" ? (
+                  <Button
+                    size="lg"
+                    className="w-full sm:w-auto"
+                    onClick={() => signOut.mutate()}
+                    disabled={signOut.isPending}
+                  >
+                    {signOut.isPending ? "Signing out…" : "Sign out"}
+                  </Button>
+                ) : access === "active" ? (
                   <Button
                     size="lg"
                     className="w-full sm:w-auto"
@@ -155,7 +149,12 @@ export function Landing() {
                 )}
               </div>
 
-              {!signedIn && signups.isSuccess ? (
+              {access === "stranded" ? (
+                <p className="text-caption text-muted-foreground">
+                  This session can no longer be used. Sign out, then sign in
+                  again.
+                </p>
+              ) : access === "signed-out" && signups.isSuccess ? (
                 <p className="text-caption text-muted-foreground tabular-nums">
                   {signupSpotsLine(signups.data)}
                 </p>
@@ -168,6 +167,8 @@ export function Landing() {
                   ? signIn.error.message
                   : "GitHub sign-in could not be started."}
               </InlineFeedback>
+            ) : signOut.error ? (
+              <InlineFeedback tone="error">{signOut.error.message}</InlineFeedback>
             ) : null}
           </div>
         </section>
@@ -275,13 +276,3 @@ const footerLinkClassName =
 const sponsorLinkClassName =
   "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-1 opacity-80 transition-opacity duration-200 hover:opacity-100 focus-visible:opacity-100";
 
-function normalizeErrorCode(value?: string | null) {
-  if (!value) return null;
-  return value.trim().toLowerCase().replace(/\s+/g, "_");
-}
-
-function friendlyMessageFor(value?: string | null) {
-  const key = normalizeErrorCode(value);
-  if (!key) return null;
-  return errorMessages[key] ?? null;
-}

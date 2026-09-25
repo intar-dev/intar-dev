@@ -1,6 +1,10 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
+import {
+  runWithEndpointContext,
+  type AuthEndpointContext,
+} from "@better-auth/core/context";
 import type { Session, User } from "better-auth";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,7 +20,17 @@ import {
   oauthClient,
   oauthRefreshToken,
 } from "@/db/schema/oauth";
-import { getSignupStatus, setSignupLimit } from "@/lib/signups";
+import { getSignupStatus } from "@/lib/signups";
+import {
+  authRequest,
+  type GithubProfile,
+  mockGithubProfiles,
+  requestUrl,
+  seedSessionCookie,
+  setTestSignupLimit,
+  signedCookie,
+} from "@/test/auth-requests";
+import { interleaveBefore } from "@/test/d1-interleave";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   ensureFixtureAdmin,
@@ -27,13 +41,13 @@ import {
   auth,
   authCookiePolicy,
   assertNoAdditionalBetterAuthTrustedOrigins,
-  createSsoLinkOAuthHandoff,
   enforceActiveOAuthIssuance,
   enforceCreatedSessionStillActive,
   getOAuthAccessTokenClaims,
-  SSO_LINK_HANDOFF_HEADER,
   trustedBrowserOrigin,
 } from "./auth";
+import { encodeBase64Url } from "./base64url";
+import { createSsoIntent, SSO_INTENT_HEADER } from "./organization-sso";
 
 describe("auth policy", () => {
   beforeEach(async () => {
@@ -114,24 +128,44 @@ describe("auth policy", () => {
         domainVerified: true,
       });
 
-    const crossOriginCallback = await auth.handler(
-      authRequest("/api/auth/sign-in/sso", {
+    const signInBody = {
+      providerId,
+      providerType: "oidc",
+      callbackURL: "http://localhost/organizations/public-oidc-organization",
+      errorCallbackURL:
+        "http://localhost/organizations/public-oidc-organization/sign-in",
+    };
+    // Organization sign-in starts only from Intar's routes.
+    const withoutIntent = await auth.handler(
+      authRequest("/api/auth/sign-in/sso", signInBody),
+    );
+    expect(withoutIntent.status).toBe(403);
+    await expect(withoutIntent.json()).resolves.toMatchObject({
+      code: "sso_intent_required",
+    });
+
+    const intentHeaders = {
+      [SSO_INTENT_HEADER]: await createSsoIntent({
+        kind: "sign-in",
         providerId,
-        providerType: "oidc",
-        callbackURL: "https://login.example.test/steal",
-        errorCallbackURL: "https://login.example.test/steal-error",
+        expiresAt: Date.now() + 600_000,
       }),
+    };
+    const crossOriginCallback = await auth.handler(
+      authRequest(
+        "/api/auth/sign-in/sso",
+        {
+          ...signInBody,
+          callbackURL: "https://login.example.test/steal",
+          errorCallbackURL: "https://login.example.test/steal-error",
+        },
+        intentHeaders,
+      ),
     );
     expect(crossOriginCallback.status).toBe(403);
 
     const response = await auth.handler(
-      authRequest("/api/auth/sign-in/sso", {
-        providerId,
-        providerType: "oidc",
-        callbackURL: "http://localhost/organizations/public-oidc-organization",
-        errorCallbackURL:
-          "http://localhost/organizations/public-oidc-organization/sign-in",
-      }),
+      authRequest("/api/auth/sign-in/sso", signInBody, intentHeaders),
     );
 
     expect(response.status).toBe(200);
@@ -195,7 +229,8 @@ describe("auth policy", () => {
           organizationId,
           domainVerified: true,
         });
-      const handoff = await createSsoLinkOAuthHandoff({
+      const intent = await createSsoIntent({
+        kind: "link",
         userId,
         providerId,
         expiresAt: now + 600_000,
@@ -218,7 +253,7 @@ describe("auth policy", () => {
           },
           {
             cookie: sessionCookie,
-            [SSO_LINK_HANDOFF_HEADER]: handoff,
+            [SSO_INTENT_HEADER]: intent,
           },
         ),
       );
@@ -242,7 +277,7 @@ describe("auth policy", () => {
         ["sign", "verify"],
       );
       const encode = (value: unknown) =>
-        bytesToBase64Url(new TextEncoder().encode(JSON.stringify(value)));
+        encodeBase64Url(new TextEncoder().encode(JSON.stringify(value)));
       const tokenPayload = `${encode({ alg: "RS256", kid: "test-key" })}.${encode(
         {
           iss: "https://login.example.test",
@@ -266,7 +301,7 @@ describe("auth policy", () => {
       const idToken =
         tokenCase === "missing"
           ? undefined
-          : `${tokenPayload}.${bytesToBase64Url(new Uint8Array(signature))}`;
+          : `${tokenPayload}.${encodeBase64Url(new Uint8Array(signature))}`;
       const jwk = {
         ...(await crypto.subtle.exportKey("jwk", signingKey.publicKey)),
         kid: "test-key",
@@ -321,7 +356,7 @@ describe("auth policy", () => {
         "SHA-256",
         new TextEncoder().encode(verifier!),
       );
-      const challenge = bytesToBase64Url(new Uint8Array(digest));
+      const challenge = encodeBase64Url(new Uint8Array(digest));
       expect(challenge).toBe(
         new URL(startedBody.url!).searchParams.get("code_challenge"),
       );
@@ -368,6 +403,9 @@ describe("auth policy", () => {
       createOrganization,
       registerSso,
       directLink,
+      idTokenLink,
+      idTokenSignIn,
+      unauthenticatedGithubLink,
       genericJwt,
       adminCreateUser,
       adminListUsers,
@@ -415,8 +453,28 @@ describe("auth policy", () => {
         ),
         auth.handler(
           authRequest("/api/auth/link-social", {
+            provider: "google",
+            callbackURL: "http://localhost/profile",
+          }),
+        ),
+        auth.handler(
+          authRequest("/api/auth/link-social", {
+            provider: "github",
+            callbackURL: "http://localhost/profile",
+            idToken: { token: "client-obtained-id-token" },
+          }),
+        ),
+        auth.handler(
+          authRequest("/api/auth/sign-in/social", {
             provider: "github",
             callbackURL: "http://localhost/courses",
+            idToken: { token: "client-obtained-id-token" },
+          }),
+        ),
+        auth.handler(
+          authRequest("/api/auth/link-social", {
+            provider: "github",
+            callbackURL: "http://localhost/profile",
           }),
         ),
         auth.handler(new Request("http://localhost/api/auth/token")),
@@ -465,7 +523,7 @@ describe("auth policy", () => {
           enabled: true,
           disableImplicitLinking: false,
           allowDifferentEmails: true,
-          updateUserInfoOnLink: true,
+          updateUserInfoOnLink: false,
         },
       },
     });
@@ -485,10 +543,19 @@ describe("auth policy", () => {
       expect(response.status).toBe(404);
       await expect(response.text()).resolves.toBe("Not Found");
     }
+    // Only GitHub connects through Better Auth's link flow, and only through
+    // the state-bound redirect from a signed-in account.
     expect(directLink.status).toBe(403);
     await expect(directLink.json()).resolves.toMatchObject({
-      code: "explicit_github_link_required",
+      code: "link_provider_unsupported",
     });
+    for (const response of [idTokenLink, idTokenSignIn]) {
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        code: "id_token_sign_in_disabled",
+      });
+    }
+    expect(unauthenticatedGithubLink.status).toBe(401);
   });
 
   it("maps GitHub profiles and gates identities before mutation", async () => {
@@ -503,6 +570,8 @@ describe("auth policy", () => {
 
     const validate = auth.options.user?.validateUserInfo;
     expect(validate).toBeTypeOf("function");
+    // Called outside a callback, the gate has no endpoint context to note on.
+    const noContext = undefined as never;
 
     // No saved limit means sign-ups are closed.
     await expect(
@@ -513,7 +582,7 @@ describe("auth policy", () => {
           method: "oauth",
           oauth: { providerId: "github", profile: {} },
         },
-      }),
+      }, noContext),
     ).resolves.toMatchObject({ error: "signups_full" });
 
     await setTestSignupLimit(2);
@@ -525,7 +594,7 @@ describe("auth policy", () => {
           method: "oauth",
           oauth: { providerId: "github", profile: {} },
         },
-      }),
+      }, noContext),
     ).resolves.toBeUndefined();
 
     await expect(
@@ -536,7 +605,7 @@ describe("auth policy", () => {
           method: "oauth",
           oauth: { providerId: "gitlab", profile: {} },
         },
-      }),
+      }, noContext),
     ).resolves.toMatchObject({ error: "unsupported_oauth_provider" });
 
     await expect(
@@ -547,7 +616,7 @@ describe("auth policy", () => {
           method: "oauth",
           oauth: { providerId: "github", profile: {} },
         },
-      }),
+      }, noContext),
     ).resolves.toMatchObject({ error: "access_revoked" });
 
     await expect(
@@ -558,8 +627,8 @@ describe("auth policy", () => {
           method: "sso-oidc",
           sso: { providerId: "example-sso", profile: {} },
         },
-      }),
-    ).resolves.toMatchObject({ error: "github_identity_required" });
+      }, noContext),
+    ).resolves.toMatchObject({ error: "sso_flow_invalid" });
 
     await expect(
       validate?.({
@@ -569,8 +638,8 @@ describe("auth policy", () => {
           method: "sso-oidc",
           sso: { providerId: "example-sso", profile: {} },
         },
-      }),
-    ).resolves.toMatchObject({ error: "explicit_sso_link_required" });
+      }, noContext),
+    ).resolves.toMatchObject({ error: "sso_flow_invalid" });
   });
 
   it("signs up a new member with GitHub while a spot is open", async () => {
@@ -721,6 +790,166 @@ describe("auth policy", () => {
     ).resolves.toEqual({ count: 2 });
   });
 
+  it("never lets GitHub take over a platform admin whom only their role keeps out", async () => {
+    // Promoted while their only identity is at an organization, whose
+    // provider can't sign a platform admin in.
+    const target = await seedOidcOnlyUser({
+      id: "admin-kept-out",
+      email: "admin.kept.out@example.test",
+      now: Date.now(),
+    });
+    await env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = ?1")
+      .bind(target.id)
+      .run();
+    await setTestSignupLimit(10);
+
+    const callback = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: target.email,
+      githubAccountId: "4242199",
+      githubLogin: "admin-kept-out",
+    });
+
+    expectOauthCallbackError(callback, "explicit_github_link_required");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242199");
+  });
+
+  it("never lets GitHub take over a platform admin left without any identity", async () => {
+    await drizzle(env.DB).insert(user).values({
+      id: "admin-without-identity",
+      name: "Admin without identity",
+      email: "admin.without.identity@example.test",
+      emailVerified: true,
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await setTestSignupLimit(10);
+
+    const callback = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: "admin.without.identity@example.test",
+      githubAccountId: "4242198",
+      githubLogin: "admin-without-identity",
+    });
+
+    expectOauthCallbackError(callback, "explicit_github_link_required");
+    await expectGithubLinkAndSessionAbsent("admin-without-identity", "4242198");
+  });
+
+  it("refuses to authorize apps while an admin impersonates someone", async () => {
+    const now = Date.now();
+    await seedMember({ id: "impersonated-app-user", githubAccountId: "4242200", now });
+    const cookie = await seedSessionCookie({
+      id: "impersonated-app-session",
+      token: "impersonated-app-token",
+      userId: "impersonated-app-user",
+      now,
+      impersonatedBy: FIXTURE_ADMIN_ID,
+    });
+
+    const response = await auth.handler(
+      new Request(
+        "http://localhost/api/auth/oauth2/authorize?client_id=app&response_type=code",
+        { headers: { cookie } },
+      ),
+    );
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "impersonation_oauth_forbidden",
+    });
+  });
+
+  it("refuses to widen an app's consent while an admin impersonates someone", async () => {
+    const now = Date.now();
+    await seedMember({ id: "impersonated-consent-user", githubAccountId: "4242201", now });
+    const cookie = await seedSessionCookie({
+      id: "impersonated-consent-session",
+      token: "impersonated-consent-token",
+      userId: "impersonated-consent-user",
+      now,
+      impersonatedBy: FIXTURE_ADMIN_ID,
+    });
+
+    const response = await auth.handler(
+      authRequest(
+        "/api/auth/oauth2/update-consent",
+        { id: "consent", update: { scopes: ["openid", "offline_access"] } },
+        { cookie },
+      ),
+    );
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "impersonation_oauth_forbidden",
+    });
+  });
+
+  it("ends an impersonation once its admin is no longer one", async () => {
+    const now = Date.now();
+    await seedMember({ id: "impersonated-user", githubAccountId: "4242202", now });
+    const cookie = await seedSessionCookie({
+      id: "impersonation-session",
+      token: "impersonation-token",
+      userId: "impersonated-user",
+      now,
+      impersonatedBy: FIXTURE_ADMIN_ID,
+    });
+    const listSessions = () =>
+      auth.handler(
+        new Request("http://localhost/api/auth/list-sessions", {
+          headers: { cookie },
+        }),
+      );
+
+    expect((await listSessions()).status).toBe(200);
+    await env.DB.prepare("UPDATE user SET role = 'user' WHERE id = ?1")
+      .bind(FIXTURE_ADMIN_ID)
+      .run();
+    const refused = await listSessions();
+    expect(refused.status).toBe(403);
+    await expect(refused.json()).resolves.toMatchObject({
+      code: "access_revoked",
+    });
+  });
+
+  it("lets an impersonation end even once its admin is no longer one", async () => {
+    const now = Date.now();
+    await seedMember({ id: "impersonated-ending", githubAccountId: "4242203", now });
+    await seedSessionCookie({
+      id: "admin-own-session",
+      token: "admin-own-token",
+      userId: FIXTURE_ADMIN_ID,
+      now,
+    });
+    const impersonation = await seedSessionCookie({
+      id: "ending-impersonation",
+      token: "ending-impersonation-token",
+      userId: "impersonated-ending",
+      now,
+      impersonatedBy: FIXTURE_ADMIN_ID,
+    });
+    // The admin plugin keeps the admin's own session in this cookie.
+    const adminSession = await signedCookie(
+      (await auth.$context).createAuthCookie("admin_session").name,
+      "admin-own-token:",
+    );
+    await env.DB.prepare("UPDATE user SET role = 'user' WHERE id = ?1")
+      .bind(FIXTURE_ADMIN_ID)
+      .run();
+
+    const stopped = await auth.handler(
+      authRequest(
+        "/api/auth/admin/stop-impersonating",
+        {},
+        { cookie: `${impersonation}; ${adminSession}` },
+      ),
+    );
+    expect(stopped.status).toBe(200);
+    await expect(
+      env.DB.prepare("SELECT id FROM session ORDER BY id").all(),
+    ).resolves.toMatchObject({ results: [{ id: "admin-own-session" }] });
+  });
+
   it("rejects a same-email implicit GitHub link to a user with other accounts", async () => {
     const target = await seedOidcOnlyUser({
       id: "same-email-oidc-target",
@@ -738,6 +967,59 @@ describe("auth policy", () => {
 
     expectOauthCallbackError(callback, "explicit_github_link_required");
     await expectGithubLinkAndSessionAbsent(target.id, "4242131");
+  });
+
+  it("lets GitHub reclaim an account whose organization identity is gone", async () => {
+    // Its provider was removed: nothing can sign in to this account anymore.
+    const target = await seedOidcOnlyUser({
+      id: "stranded-oidc-target",
+      email: "stranded-oidc@example.test",
+      now: Date.now(),
+      provider: false,
+    });
+    // The account already holds a spot, so a full limit doesn't matter.
+    await setTestSignupLimit(1);
+
+    const callback = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: target.email,
+      githubAccountId: "4242133",
+      githubLogin: "stranded-oidc",
+    });
+
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("http://localhost/courses");
+    await expect(
+      env.DB.prepare(
+        `SELECT user_id AS userId FROM account
+         WHERE provider_id = 'github' AND account_id = ?`,
+      )
+        .bind("4242133")
+        .first(),
+    ).resolves.toEqual({ userId: target.id });
+  });
+
+  it("never lets GitHub reclaim an account whose email Intar didn't verify", async () => {
+    // An approved organization provider signed it up off its domain.
+    const target = await seedOidcOnlyUser({
+      id: "unverified-oidc-target",
+      email: "unverified-oidc@personal.test",
+      now: Date.now(),
+      provider: false,
+    });
+    await env.DB.prepare("UPDATE user SET email_verified = 0 WHERE id = ?1")
+      .bind(target.id)
+      .run();
+
+    const callback = await completeGithubCallback({
+      ...(await beginGithubFlow()),
+      email: target.email,
+      githubAccountId: "4242134",
+      githubLogin: "unverified-oidc",
+    });
+
+    expectOauthCallbackError(callback, "explicit_github_link_required");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242134");
   });
 
   it("rejects a same-email target that already has another GitHub account", async () => {
@@ -764,7 +1046,7 @@ describe("auth policy", () => {
       githubLogin: "same-email-second-github",
     });
 
-    expectOauthCallbackError(callback, "explicit_github_link_required");
+    expectOauthCallbackError(callback, "github_account_mismatch");
     await expectGithubLinkAndSessionAbsent(target.id, "4242132");
     await expect(
       env.DB.prepare(
@@ -887,14 +1169,14 @@ describe("auth policy", () => {
       env.DB.prepare("SELECT user_id AS userId FROM signup_reservations").all(),
     ).resolves.toMatchObject({ results: [{ userId: "hook-user" }] });
     await drizzle(env.DB).insert(account).values(githubAccount);
-    await expect(after(githubAccount)).resolves.toBeUndefined();
+    await expect(after(githubAccount, hookContext)).resolves.toBeUndefined();
     await expect(
       env.DB.prepare("SELECT count(*) AS count FROM signup_reservations").first(),
     ).resolves.toEqual({ count: 0 });
 
     await expect(
       before({ ...githubAccount, accountId: "hook-second-github" }, hookContext),
-    ).rejects.toMatchObject({ body: { code: "explicit_github_link_required" } });
+    ).rejects.toMatchObject({ body: { code: "github_already_connected" } });
     await expect(
       before(
         { ...githubAccount, providerId: "tenant-oidc", accountId: "subject" },
@@ -937,6 +1219,107 @@ describe("auth policy", () => {
 
     await expect(enforceCreatedSessionStillActive(created)).resolves.toBeUndefined();
     await banMember(userId);
+    await expect(enforceCreatedSessionStillActive(created)).rejects.toMatchObject({
+      body: { code: "access_revoked" },
+    });
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE id = ?")
+        .bind(created.id)
+        .first(),
+    ).resolves.toBeNull();
+  });
+
+  it("refuses a session for an account no identity can sign in to", async () => {
+    const now = new Date();
+    await drizzle(env.DB).insert(user).values({
+      id: "no-way-in",
+      name: "No way in",
+      email: "no.way.in@example.test",
+      emailVerified: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const context = await auth.$context;
+
+    await expect(
+      context.internalAdapter.createSession("no-way-in"),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    // An admin's impersonation needs only an active account.
+    await expect(
+      context.internalAdapter.createSession("no-way-in", false, {
+        impersonatedBy: FIXTURE_ADMIN_ID,
+      }),
+    ).resolves.toMatchObject({ userId: "no-way-in" });
+  });
+
+  it("keeps a callback's session only for the identity it signed in with", async () => {
+    const now = Date.now();
+    const userId = "provider-bound-session-user";
+    await seedMember({ id: userId, githubAccountId: "4242173", now });
+    // The account also signs in through an organization.
+    await seedOidcProvider("har-oidc");
+    await drizzle(env.DB).insert(account).values({
+      id: `${userId}-oidc-row`,
+      providerId: "har-oidc",
+      accountId: `${userId}-oidc-subject`,
+      userId,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    const context = await auth.$context;
+    const callback = { context } as unknown as AuthEndpointContext;
+    await expect(
+      auth.options.user?.validateUserInfo?.(
+        {
+          user: { id: userId },
+          source: {
+            action: "sign-in",
+            method: "oauth",
+            oauth: { providerId: "github", profile: {} },
+          },
+        },
+        callback as never,
+      ),
+    ).resolves.toBeUndefined();
+
+    // GitHub is disconnected before this GitHub callback creates its session.
+    await env.DB.prepare(
+      "DELETE FROM account WHERE user_id = ? AND provider_id = 'github'",
+    )
+      .bind(userId)
+      .run();
+    await expect(
+      runWithEndpointContext(callback, () =>
+        context.internalAdapter.createSession(userId),
+      ),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    // A session no callback vouched for needs only some way to sign in.
+    await expect(
+      context.internalAdapter.createSession(userId),
+    ).resolves.toMatchObject({ userId });
+  });
+
+  it("deletes a session inserted after its last way to sign in went", async () => {
+    const now = Date.now();
+    const userId = "session-identity-race-user";
+    await seedMember({ id: userId, githubAccountId: "4242172", now });
+    const created: Session = {
+      id: "session-identity-race-row",
+      token: "session-identity-race-token",
+      userId,
+      expiresAt: new Date(now + 3_600_000),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+      ipAddress: null,
+      userAgent: null,
+    };
+    await drizzle(env.DB).insert(session).values(created);
+
+    await expect(enforceCreatedSessionStillActive(created)).resolves.toBeUndefined();
+    // A removal or disconnect committed while the session was being created.
+    await env.DB.prepare("DELETE FROM account WHERE user_id = ?")
+      .bind(userId)
+      .run();
     await expect(enforceCreatedSessionStillActive(created)).rejects.toMatchObject({
       body: { code: "access_revoked" },
     });
@@ -994,6 +1377,20 @@ describe("auth policy", () => {
       });
     }
 
+    // Someone else signing in with GitHub in this browser finishes the
+    // callback; the identity gate checks the callback's own account.
+    await setTestSignupLimit(10);
+    const flow = await beginGithubFlow();
+    const callback = await completeGithubCallback({
+      ...flow,
+      cookie: `${flow.cookie}; ${cookie}`,
+      email: "next-person@example.test",
+      githubAccountId: "4242182",
+      githubLogin: "next-person",
+    });
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("http://localhost/courses");
+
     const signOut = await auth.handler(
       authRequest("/api/auth/sign-out", {}, { cookie }),
     );
@@ -1018,7 +1415,8 @@ describe("auth policy", () => {
       now,
     });
     await banMember("inspection-revoked");
-    const handoff = await createSsoLinkOAuthHandoff({
+    const intent = await createSsoIntent({
+      kind: "link",
       userId: "inspection-member",
       providerId: "inspection-provider",
       expiresAt: now + 600_000,
@@ -1026,7 +1424,7 @@ describe("auth policy", () => {
 
     for (const [cookie, header] of [
       [memberCookie, undefined],
-      [memberCookie, handoff],
+      [memberCookie, intent],
       [revokedCookie, undefined],
       [null, "not-a-handoff"],
     ] as const) {
@@ -1046,32 +1444,33 @@ describe("auth policy", () => {
     }
   });
 
-  it("accepts an SSO-link handoff only for its signed-in member and OIDC provider", async () => {
+  it("accepts a link intent only for its signed-in account and OIDC provider", async () => {
     const now = Date.now();
-    const userId = "handoff-member";
+    const userId = "intent-member";
     await seedMember({ id: userId, githubAccountId: "4242201", now });
-    await seedMember({ id: "handoff-other", githubAccountId: "4242202", now });
-    await seedOidcProvider("handoff-provider");
+    await seedMember({ id: "intent-other", githubAccountId: "4242202", now });
+    await seedOidcProvider("intent-provider");
     const cookie = await seedSessionCookie({
-      id: "handoff-member-session",
-      token: "handoff-member-token",
+      id: "intent-member-session",
+      token: "intent-member-token",
       userId,
       now,
     });
     const otherCookie = await seedSessionCookie({
-      id: "handoff-other-session",
-      token: "handoff-other-token",
-      userId: "handoff-other",
+      id: "intent-other-session",
+      token: "intent-other-token",
+      userId: "intent-other",
       now,
     });
-    const handoff = await createSsoLinkOAuthHandoff({
+    const intent = await createSsoIntent({
+      kind: "link",
       userId,
-      providerId: "handoff-provider",
+      providerId: "intent-provider",
       expiresAt: now + 600_000,
     });
-    const forged = `${handoff.slice(0, -1)}${handoff.endsWith("a") ? "b" : "a"}`;
+    const forged = `${intent.slice(0, -1)}${intent.endsWith("a") ? "b" : "a"}`;
     const ssoBody = {
-      providerId: "handoff-provider",
+      providerId: "intent-provider",
       providerType: "oidc",
       callbackURL: "http://localhost/organizations/example",
     };
@@ -1079,114 +1478,122 @@ describe("auth policy", () => {
     const accepted = await auth.handler(
       authRequest("/api/auth/sign-in/sso", ssoBody, {
         cookie,
-        [SSO_LINK_HANDOFF_HEADER]: handoff,
+        [SSO_INTENT_HEADER]: intent,
       }),
     );
     expect(accepted.status).toBe(200);
 
-    const rejected = await Promise.all([
-      auth.handler(
-        authRequest("/api/auth/sign-in/sso", ssoBody, {
-          cookie,
-          [SSO_LINK_HANDOFF_HEADER]: forged,
-        }),
-      ),
+    const forgedResponse = await auth.handler(
+      authRequest("/api/auth/sign-in/sso", ssoBody, {
+        cookie,
+        [SSO_INTENT_HEADER]: forged,
+      }),
+    );
+    expect(forgedResponse.status).toBe(403);
+    await expect(forgedResponse.json()).resolves.toMatchObject({
+      code: "sso_intent_required",
+    });
+
+    const mismatched = await Promise.all([
       auth.handler(
         authRequest("/api/auth/sign-in/sso", ssoBody, {
           cookie: otherCookie,
-          [SSO_LINK_HANDOFF_HEADER]: handoff,
+          [SSO_INTENT_HEADER]: intent,
         }),
       ),
       auth.handler(
         authRequest(
           "/api/auth/sign-in/sso",
           { ...ssoBody, providerId: "another-provider" },
-          { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
+          { cookie, [SSO_INTENT_HEADER]: intent },
         ),
       ),
       auth.handler(
         authRequest("/api/auth/sign-in/sso", ssoBody, {
-          [SSO_LINK_HANDOFF_HEADER]: handoff,
+          [SSO_INTENT_HEADER]: intent,
         }),
+      ),
+      auth.handler(
+        authRequest(
+          "/api/auth/sign-in/sso",
+          { ...ssoBody, providerType: "saml" },
+          { cookie, [SSO_INTENT_HEADER]: intent },
+        ),
       ),
       auth.handler(
         authRequest(
           "/api/auth/sign-in/social",
           { provider: "github", callbackURL: "http://localhost/courses" },
-          { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
+          { cookie, [SSO_INTENT_HEADER]: intent },
         ),
       ),
     ]);
-    for (const response of rejected) {
+    for (const response of mismatched) {
       expect(response.status).toBe(403);
       await expect(response.json()).resolves.toMatchObject({
-        code: "invalid_sso_link_handoff",
+        code: "sso_intent_mismatch",
       });
     }
   });
 
-  it("rejects handoffs signed for another audience or flow", async () => {
+  it("rejects intents signed for another audience or flow", async () => {
     const now = Date.now();
-    const userId = "legacy-handoff-member";
+    const userId = "legacy-intent-member";
     await seedMember({ id: userId, githubAccountId: "4242211", now });
-    await seedOidcProvider("legacy-handoff-provider");
+    await seedOidcProvider("legacy-intent-provider");
     const cookie = await seedSessionCookie({
-      id: "legacy-handoff-session",
-      token: "legacy-handoff-token",
+      id: "legacy-intent-session",
+      token: "legacy-intent-token",
       userId,
       now,
     });
     const expiresAt = now + 300_000;
-    const handoffs = [
-      // The retired beta handoff carried the same flow under another audience.
-      await signHandoff("intar.beta-auth-handoff.v1", {
+    const intents = [
+      // The retired link handoff carried a link under another audience.
+      await signHandoff("intar.sso-link-handoff.v1", {
         kind: "sso-link",
         userId,
-        providerId: "legacy-handoff-provider",
-        sourceInviteId: "legacy-invite",
-        sourceLeaseId: "legacy-lease",
-        grantedAt: now - 1_000,
-        aud: "intar.beta-auth-handoff.v1",
+        providerId: "legacy-intent-provider",
+        aud: "intar.sso-link-handoff.v1",
         expiresAt,
         version: 1,
       }),
-      await signHandoff("intar.sso-link-handoff.v1", {
+      await signHandoff("intar.sso-intent.v1", {
         kind: "github-invite",
-        inviteId: "legacy-invite",
-        attemptId: "legacy-attempt",
         userId,
-        providerId: "legacy-handoff-provider",
-        aud: "intar.sso-link-handoff.v1",
+        providerId: "legacy-intent-provider",
+        aud: "intar.sso-intent.v1",
         expiresAt,
         version: 1,
       }),
     ];
 
-    for (const handoff of handoffs) {
+    for (const intent of intents) {
       const response = await auth.handler(
         authRequest(
           "/api/auth/sign-in/sso",
           {
-            providerId: "legacy-handoff-provider",
+            providerId: "legacy-intent-provider",
             providerType: "oidc",
             callbackURL: "http://localhost/organizations/example",
           },
-          { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
+          { cookie, [SSO_INTENT_HEADER]: intent },
         ),
       );
       expect(response.status).toBe(403);
       await expect(response.json()).resolves.toMatchObject({
-        code: "invalid_sso_link_handoff",
+        code: "sso_intent_required",
       });
     }
   });
 
-  it("rejects an SSO-link handoff once the account is revoked", async () => {
+  it("rejects a link intent once the account is revoked", async () => {
     const now = Date.now();
     const userId = "revoked-sso-link-user";
     await seedMember({ id: userId, githubAccountId: "4242221", now });
     await seedOidcProvider("revoked-sso-provider");
-    const handoff = await createSsoLinkOAuthHandoff({
+    const intent = await createSsoIntent({
+      kind: "link",
       userId,
       providerId: "revoked-sso-provider",
       expiresAt: now + 600_000,
@@ -1207,23 +1614,23 @@ describe("auth policy", () => {
           providerType: "oidc",
           callbackURL: "http://localhost/organizations/example",
         },
-        { cookie, [SSO_LINK_HANDOFF_HEADER]: handoff },
+        { cookie, [SSO_INTENT_HEADER]: intent },
       ),
     );
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({
-      code: "invalid_sso_link_handoff",
+      code: "sso_intent_mismatch",
     });
   });
 
-  it("refuses to mint an already-expired OAuth handoff", async () => {
+  it("refuses to mint an already-expired intent", async () => {
     await expect(
-      createSsoLinkOAuthHandoff({
-        userId: "handoff-user",
-        providerId: "handoff-provider",
+      createSsoIntent({
+        kind: "sign-in",
+        providerId: "intent-provider",
         expiresAt: Date.now() - 1,
       }),
-    ).rejects.toThrow("handoff expiry is outside the allowed window");
+    ).rejects.toThrow("intent expiry is outside the allowed window");
   });
 
   it("dynamically rejects a revoked user's OAuth credentials after authenticating the request", async () => {
@@ -1304,6 +1711,125 @@ describe("auth policy", () => {
       .bind("revoked-refresh-row")
       .first<{ revoked: number | null; rotated_at: number | null }>();
     expect(storedRefresh).toEqual({ revoked: null, rotated_at: null });
+  });
+
+  it("removes OAuth tokens issued while the account lost its last way to sign in", async () => {
+    const now = Date.now();
+    const userId = "oauth-sign-out-race-user";
+    await seedMember({ id: userId, githubAccountId: "4242242", now });
+    const clientId = "oauth-sign-out-race-client";
+    await seedOAuthClient(clientId, now);
+    const issued = "sign-out-race-access-token";
+    await drizzle(env.DB).insert(oauthAccessToken).values({
+      id: "sign-out-race-access-row",
+      token: await hashOAuthToken(issued),
+      clientId,
+      userId,
+      scopes: ["openid"],
+      createdAt: new Date(now),
+      expiresAt: new Date(now + 3_600_000),
+    });
+    // A removal signed the account out while the token was being issued.
+    await env.DB.prepare("DELETE FROM account WHERE user_id = ?")
+      .bind(userId)
+      .run();
+
+    await expect(
+      enforceActiveOAuthIssuance({ userId, returned: { access_token: issued } }),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    await expect(countOAuthTokens(userId)).resolves.toBe(0);
+  });
+
+  it("removes the tokens a refresh issued while a sign-out took the rotated one", async () => {
+    const now = Date.now();
+    const userId = "oauth-refresh-race-user";
+    await seedMember({ id: userId, githubAccountId: "4242243", now });
+    const clientId = "oauth-refresh-race-client";
+    await seedOAuthClient(clientId, now);
+    const presented = "presented-refresh-token";
+    const returned = {
+      access_token: "rotated-access-token",
+      refresh_token: "rotated-refresh-token",
+    };
+    const refreshRow = async (id: string, token: string) =>
+      drizzle(env.DB).insert(oauthRefreshToken).values({
+        id,
+        token: await hashOAuthToken(token),
+        clientId,
+        userId,
+        scopes: ["openid", "offline_access"],
+        createdAt: new Date(now),
+        expiresAt: new Date(now + 3_600_000),
+      });
+    // Rotation keeps the presented token's row and adds the new tokens.
+    await refreshRow("presented-refresh-row", presented);
+    await refreshRow("rotated-refresh-row", returned.refresh_token);
+    await drizzle(env.DB).insert(oauthAccessToken).values({
+      id: "rotated-access-row",
+      token: await hashOAuthToken(returned.access_token),
+      clientId,
+      userId,
+      scopes: ["openid"],
+      createdAt: new Date(now),
+      expiresAt: new Date(now + 3_600_000),
+    });
+
+    await expect(
+      enforceActiveOAuthIssuance({ userId, returned, presentedRefreshToken: presented }),
+    ).resolves.toBeUndefined();
+    await expect(countOAuthTokens(userId)).resolves.toBe(3);
+
+    // A disconnect signed the account out between the rotation and the new
+    // tokens' insert. The account can still sign in, but not this app.
+    await env.DB.prepare("DELETE FROM oauth_refresh_token WHERE id = 'presented-refresh-row'").run();
+    await expect(
+      enforceActiveOAuthIssuance({ userId, returned, presentedRefreshToken: presented }),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    await expect(countOAuthTokens(userId)).resolves.toBe(0);
+  });
+
+  it("rechecks a refresh however the client spells its grant type", async () => {
+    const now = Date.now();
+    const userId = "oauth-padded-refresh-user";
+    await seedMember({ id: userId, githubAccountId: "4242244", now });
+    const clientId = "oauth-padded-refresh-client";
+    await seedOAuthClient(clientId, now);
+    const presented = "padded-grant-refresh-token";
+    await drizzle(env.DB).insert(oauthRefreshToken).values({
+      id: "padded-grant-refresh-row",
+      token: await hashOAuthToken(presented),
+      clientId,
+      userId,
+      scopes: ["openid", "offline_access"],
+      createdAt: new Date(now),
+      expiresAt: new Date(now + 3_600_000),
+    });
+    // A disconnect's sign-out lands after the rotation, just before the new
+    // refresh token is stored. The provider trims the grant type.
+    const race = interleaveBefore(/^insert into "oauth_refresh_token"/iu, () =>
+      env.DB.prepare("DELETE FROM oauth_refresh_token WHERE user_id = ?1")
+        .bind(userId)
+        .run(),
+    );
+    let response: Response;
+    try {
+      response = await auth.handler(
+        formRequest(
+          "/api/auth/oauth2/token",
+          new URLSearchParams({
+            grant_type: "refresh_token ",
+            refresh_token: presented,
+          }),
+          { authorization: basicAuthorization(clientId, `${clientId}-secret`) },
+        ),
+      );
+      expect(race.fired()).toBe(true);
+    } finally {
+      race.restore();
+    }
+
+    expect(response.status).toBe(403);
+    await expect(countOAuthTokens(userId)).resolves.toBe(0);
   });
 
   it("removes exactly the OAuth tokens issued while the account was revoked", async () => {
@@ -1497,12 +2023,6 @@ type StartedGithubFlow = {
   state: string;
 };
 
-type GithubProfile = {
-  email: string;
-  githubAccountId: string;
-  githubLogin: string;
-};
-
 async function seedMember(input: {
   id: string;
   githubAccountId: string;
@@ -1534,21 +2054,14 @@ async function banMember(userId: string): Promise<void> {
   await revokeFixtureAccount({ d1: env.DB, userId });
 }
 
-async function setTestSignupLimit(limit: number): Promise<void> {
-  const { version } = await getSignupStatus(env.DB);
-  await setSignupLimit({
-    d1: env.DB,
-    actorUserId: FIXTURE_ADMIN_ID,
-    limit,
-    expectedVersion: version,
-  });
-}
-
 async function seedOidcOnlyUser(input: {
   id: string;
   email: string;
   now: number;
+  /** False leaves the identity without its provider, so it can't sign in. */
+  provider?: boolean;
 }): Promise<{ id: string; email: string }> {
+  if (input.provider !== false) await seedOidcProvider("har-oidc");
   await drizzle(env.DB).insert(user).values({
     id: input.id,
     name: input.id,
@@ -1589,23 +2102,6 @@ async function seedOidcProvider(providerId: string): Promise<void> {
   });
 }
 
-async function seedSessionCookie(input: {
-  id: string;
-  token: string;
-  userId: string;
-  now: number;
-}): Promise<string> {
-  await drizzle(env.DB).insert(session).values({
-    id: input.id,
-    token: input.token,
-    userId: input.userId,
-    expiresAt: new Date(input.now + 7 * 24 * 60 * 60_000),
-    createdAt: new Date(input.now),
-    updatedAt: new Date(input.now),
-  });
-  return signedSessionCookie(input.token);
-}
-
 async function beginGithubFlow(): Promise<StartedGithubFlow> {
   const response = await auth.handler(
     authRequest("/api/auth/sign-in/social", {
@@ -1630,55 +2126,6 @@ function githubCallbackRequest(flow: StartedGithubFlow, code: string): Request {
   return new Request(
     `http://localhost/api/auth/callback/github?code=${encodeURIComponent(code)}&state=${encodeURIComponent(flow.state)}`,
     { headers: { cookie: flow.cookie } },
-  );
-}
-
-/**
- * Serves GitHub's token and profile endpoints for each authorization code, so
- * concurrent callbacks each receive their own identity.
- */
-function mockGithubProfiles(profiles: Record<string, GithubProfile>) {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(
-    async (input, init): Promise<Response> => {
-      const request = new Request(input, init);
-      if (request.url === "https://github.com/login/oauth/access_token") {
-        const code = new URLSearchParams(
-          new TextDecoder().decode(await request.arrayBuffer()),
-        ).get("code");
-        if (!code || !profiles[code]) {
-          throw new Error(`unexpected GitHub authorization code: ${code}`);
-        }
-        return Response.json({
-          access_token: `token-${code}`,
-          scope: "read:user,user:email",
-          token_type: "bearer",
-        });
-      }
-      const code = request.headers
-        .get("authorization")
-        ?.replace(/^Bearer token-/u, "");
-      const profile = code ? profiles[code] : undefined;
-      if (profile && request.url === "https://api.github.com/user") {
-        return Response.json({
-          id: Number(profile.githubAccountId),
-          login: profile.githubLogin,
-          name: profile.githubLogin,
-          email: profile.email,
-          avatar_url: null,
-        });
-      }
-      if (profile && request.url === "https://api.github.com/user/emails") {
-        return Response.json([
-          {
-            email: profile.email,
-            primary: true,
-            verified: true,
-            visibility: null,
-          },
-        ]);
-      }
-      throw new Error(`unexpected fetch in GitHub callback test: ${request.url}`);
-    },
   );
 }
 
@@ -1724,29 +2171,6 @@ async function expectGithubLinkAndSessionAbsent(
   ).resolves.toBeNull();
 }
 
-function requestUrl(request: RequestInfo | URL): string {
-  return typeof request === "string"
-    ? request
-    : request instanceof URL
-      ? request.href
-      : request.url;
-}
-
-function authRequest(
-  path: string,
-  body: object,
-  extraHeaders?: HeadersInit,
-): Request {
-  const headers = new Headers(extraHeaders);
-  headers.set("content-type", "application/json");
-  headers.set("origin", "http://localhost");
-  return new Request(`http://localhost${path}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-}
-
 function authGetRequest(path: string, cookie: string): Request {
   return new Request(`http://localhost${path}`, {
     headers: { cookie, origin: "http://localhost" },
@@ -1755,12 +2179,12 @@ function authGetRequest(path: string, cookie: string): Request {
 
 function inspectionRequest(
   cookie: string | null,
-  handoffHeader?: string,
+  intentHeader?: string,
 ): Request {
   const headers = new Headers({ origin: "http://localhost" });
   if (cookie) headers.set("cookie", cookie);
-  if (handoffHeader !== undefined) {
-    headers.set(SSO_LINK_HANDOFF_HEADER, handoffHeader);
+  if (intentHeader !== undefined) {
+    headers.set(SSO_INTENT_HEADER, intentHeader);
   }
   return new Request("http://localhost/api/auth/get-session", { headers });
 }
@@ -1786,32 +2210,10 @@ async function capturePreparedSql(run: () => Promise<void>): Promise<string[]> {
   return statements;
 }
 
-async function signedSessionCookie(token: string): Promise<string> {
-  const context = await auth.$context;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(context.secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(token),
-  );
-  const encodedSignature = btoa(
-    String.fromCharCode(...new Uint8Array(signature)),
-  );
-  return `${context.authCookies.sessionToken.name}=${encodeURIComponent(
-    `${token}.${encodedSignature}`,
-  )}`;
-}
-
 /** Signs `payload` the way the app signs its handoffs, for any audience. */
 async function signHandoff(audience: string, payload: object): Promise<string> {
   const context = await auth.$context;
-  const encoded = bytesToBase64Url(
+  const encoded = encodeBase64Url(
     new TextEncoder().encode(JSON.stringify(payload)),
   );
   const key = await crypto.subtle.importKey(
@@ -1826,14 +2228,7 @@ async function signHandoff(audience: string, payload: object): Promise<string> {
     key,
     new TextEncoder().encode(`${audience}.${encoded}`),
   );
-  return `${encoded}.${bytesToBase64Url(new Uint8Array(signature))}`;
-}
-
-function bytesToBase64Url(value: Uint8Array): string {
-  return btoa(String.fromCharCode(...value))
-    .replace(/\+/gu, "-")
-    .replace(/\//gu, "_")
-    .replace(/=+$/gu, "");
+  return `${encoded}.${encodeBase64Url(new Uint8Array(signature))}`;
 }
 
 function formRequest(
@@ -1859,7 +2254,7 @@ async function hashOAuthToken(value: string): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(value),
   );
-  return bytesToBase64Url(new Uint8Array(digest));
+  return encodeBase64Url(new Uint8Array(digest));
 }
 
 async function countOAuthTokens(userId: string): Promise<number> {

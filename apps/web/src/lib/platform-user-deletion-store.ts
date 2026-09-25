@@ -1,14 +1,17 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { accessRevocations, member, user } from "@/db/schema";
-import { activeAccountCondition } from "@/lib/account-access";
+import {
+  activeAccountCondition,
+  activeAdminSql,
+  firstOrganizationIdentitySql,
+} from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import {
-  activeAdminSql,
   adminRequiredError,
-  hasOtherActiveAdmin,
   isActiveAdmin,
+  isLastActiveAdmin,
   lastActiveAdminError,
 } from "@/lib/platform-admin-authority";
 
@@ -62,7 +65,7 @@ export async function assertPlatformUserDeletionAllowed(
   }
 
   const db = drizzle(input.d1);
-  const [target, actorIsAdmin, targetIsAdmin, otherAdmin, soleOwnedOrganization] =
+  const [target, actorIsAdmin, lastAdmin, soleOwnedOrganization] =
     await Promise.all([
       db
         .select({ id: user.id, deletedAt: user.deletedAt })
@@ -70,8 +73,7 @@ export async function assertPlatformUserDeletionAllowed(
         .where(eq(user.id, targetUserId))
         .limit(1),
       isActiveAdmin(actorUserId, input.d1),
-      isActiveAdmin(targetUserId, input.d1),
-      hasOtherActiveAdmin(targetUserId, input.d1),
+      isLastActiveAdmin(targetUserId, input.d1),
       db
         .select({ organizationId: member.organizationId })
         .from(member)
@@ -98,7 +100,7 @@ export async function assertPlatformUserDeletionAllowed(
     throw appError(404, "user_not_found", "User not found");
   }
   if (!actorIsAdmin) throw adminRequiredError();
-  if (targetIsAdmin && !otherAdmin) throw lastActiveAdminError("deleted");
+  if (lastAdmin) throw lastActiveAdminError("deleted");
   if (soleOwnedOrganization[0]) {
     throw appError(
       409,
@@ -140,12 +142,15 @@ export async function finalizePlatformUserDeletion(
       .prepare(
         `INSERT INTO access_events (
            id, event_type, subject_user_id, github_account_id,
+           sso_provider_id, sso_account_id,
            actor_user_id, revocation_id, reason, created_at
          )
          SELECT ?1, 'user.deleted', target.id,
                 (SELECT github.account_id FROM account AS github
                  WHERE github.user_id = target.id AND github.provider_id = 'github'
                  LIMIT 1),
+                ${firstOrganizationIdentitySql("target.id", "provider_id")},
+                ${firstOrganizationIdentitySql("target.id", "account_id")},
                 ?3, revocation.revocation_id, 'admin_deleted', ?4
          FROM user AS target
          INNER JOIN access_revocations AS revocation
@@ -232,6 +237,8 @@ export async function finalizePlatformUserDeletion(
       targetUserId,
       eventId,
     ),
+    // Removals stay, holding for the person's organization logins
+    // (organization_member_removed_logins) until an admin restores them.
     input.d1
       .prepare(
         `DELETE FROM invitation

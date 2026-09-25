@@ -14,7 +14,7 @@ const leafBudgets = [
   { prefix: "ScenarioRun", maximumKiB: 22, required: true },
   { prefix: "RunArtifactViewer", maximumKiB: 8, required: false },
   { prefix: "NativeSshDialogButton", maximumKiB: 24, required: true },
-  { prefix: "terminal", maximumKiB: 95, required: true },
+  { prefix: "xterm", maximumKiB: 95, required: true },
 ] as const;
 
 const routeClosureBudgets = [
@@ -23,7 +23,7 @@ const routeClosureBudgets = [
 ] as const;
 
 const onDemandPrefixes = [
-  "terminal",
+  "xterm",
   "NativeSshDialogButton",
   "RunArtifactViewer",
 ] as const;

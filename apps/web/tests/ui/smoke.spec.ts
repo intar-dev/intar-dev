@@ -1,3 +1,4 @@
+import { sessionFor } from "./fixtures/sessions";
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 
@@ -16,6 +17,74 @@ test("landing shows the open sign-up spots and starts GitHub sign-in", async ({
   );
   await page.getByRole("button", { name: "Sign in with GitHub" }).click();
   expect((await signIn).postDataJSON()).toMatchObject({ provider: "github" });
+});
+
+test("a session that lost access can sign out from the landing page", async ({
+  page,
+  ui,
+}) => {
+  let session = sessionFor("learner");
+  await page.route("**/api/app/bootstrap", (route) =>
+    route.fulfill({ json: { session, access: "inactive" } }),
+  );
+  await page.route("**/api/auth/sign-out", (route) => {
+    session = null;
+    return route.fulfill({ json: { success: true } });
+  });
+  await ui.open({
+    ...routeCase("landing"),
+    path: "/?error=access_revoked",
+    theme: "light",
+  });
+
+  await expect(page.getByText("This session can no longer be used.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Browse courses" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(
+    page.getByRole("button", { name: "Sign in with GitHub" }),
+  ).toBeVisible();
+  // Signing out answered the refusal that brought the session here.
+  await expect(page.getByText("This account no longer has access.")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/error=/u);
+});
+
+test("the consent page doesn't offer a stranded session a choice", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("oauth-consent"), theme: "light" });
+  await page.route("**/api/app/bootstrap", (route) =>
+    route.fulfill({
+      json: { session: sessionFor("learner"), access: "inactive" },
+    }),
+  );
+  await page.reload();
+
+  await expect(page.getByText("Session required")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Allow access" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Deny access" })).toBeDisabled();
+  await expect(page.getByText("Signed in as")).toHaveCount(0);
+});
+
+test("a Connect GitHub that outlived its session explains itself", async ({
+  page,
+  ui,
+}) => {
+  // GitHub returns to Profile after the session ended; the signed-in guard
+  // passes the code on to the landing page.
+  await ui.open({
+    ...routeCase("landing"),
+    path: "/profile?error=link_session_ended",
+    theme: "light",
+  });
+
+  await expect(
+    page.getByText("You were signed out before the connection finished.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  // The landing page keeps the message and drops the code from its URL.
+  await expect(page).toHaveURL(/\/$/u);
 });
 
 test("admin saves the sign-up limit and reviews a stale one", async ({
@@ -207,6 +276,34 @@ test("admin role changes use the app-owned user endpoint", async ({
   await expect(
     page.getByRole("button", { name: "Make user" }).first(),
   ).toBeVisible();
+});
+
+test("a refused role change explains itself in its dialog", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "dark" });
+  await page.route("**/api/admin/users/user-learner/role", async (route) => {
+    ui.server.expectedConflicts += 1;
+    await route.fulfill({
+      status: 409,
+      json: {
+        error:
+          "Platform admins sign in with GitHub. Ask them to connect GitHub from their profile first.",
+        code: "admin_sign_in_required",
+      },
+    });
+  });
+
+  await page.getByRole("button", { name: "Make admin" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Grant admin access?" });
+  await expect(dialog).toContainText("They're signed out now");
+  await dialog.getByRole("button", { name: "Confirm change" }).click();
+  await expect(dialog).toContainText(
+    "Ask them to connect GitHub from their profile first.",
+  );
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByText("Ask them to connect GitHub")).toHaveCount(0);
 });
 
 test("admin deletes a user instead of banning them", async ({ page, ui }) => {

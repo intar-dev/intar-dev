@@ -2,9 +2,9 @@ import type { APIRoute } from "astro";
 import {
   jsonResponse,
   requireUserContext,
-  resolveRequestOrigin,
 } from "@/lib/agent-bridge";
 import { appError, toErrorResponse } from "@/lib/app-error";
+import { canonicalApplicationOrigin } from "@/lib/request-security";
 import {
   deleteOrganizationOidc,
   getOrganizationOidc,
@@ -44,7 +44,9 @@ export const GET: APIRoute = async ({ request, params }) => {
     if (!access.ok) return access.response;
     const provider = await getOrganizationOidc({
       organizationId: access.organizationId,
-      baseUrl: resolveRequestOrigin(request),
+      // The callback shown to admins must match the redirect_uri Better Auth
+      // sends, which it builds from BETTER_AUTH_URL, not the request host.
+      baseUrl: canonicalApplicationOrigin(),
     });
     return jsonResponse({ provider });
   } catch (error) {
@@ -79,7 +81,7 @@ export const POST: APIRoute = async ({ request, params }) => {
       issuer: typeof body?.issuer === "string" ? body.issuer : "",
       domain: typeof body?.domain === "string" ? body.domain : "",
       clientId: typeof body?.clientId === "string" ? body.clientId : "",
-      baseUrl: resolveRequestOrigin(request),
+      baseUrl: canonicalApplicationOrigin(),
     });
     return jsonResponse({ provider }, { status: 201 });
   } catch (error) {
@@ -95,7 +97,11 @@ export const DELETE: APIRoute = async ({ request, params }) => {
   try {
     const access = await authorize(request, params.orgId ?? "");
     if (!access.ok) return access.response;
-    await deleteOrganizationOidc({ organizationId: access.organizationId });
+    await deleteOrganizationOidc({
+      organizationId: access.organizationId,
+      actorUserId: access.context.userId,
+      currentSessionId: access.context.sessionId,
+    });
     return new Response(null, { status: 204 });
   } catch (error) {
     const { status, body } = toErrorResponse(

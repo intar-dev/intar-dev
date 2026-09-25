@@ -76,7 +76,8 @@ export type AccessEventType =
   | "access.revocation_cleanup_completed"
   | "run.deleted_by_admin"
   | "user.deleted"
-  | "signups.limit_changed";
+  | "signups.limit_changed"
+  | "sso.external_email_signups_changed";
 
 // Event rows contain identifiers and normalized reason codes only. They must
 // never contain links, cookies, provider tokens, or IPs. Rows written before
@@ -89,6 +90,10 @@ export const accessEvents = sqliteTable(
     inviteId: text("invite_id"),
     subjectUserId: text("subject_user_id"),
     githubAccountId: text("github_account_id"),
+    // The person's first organization identity: its provider and subject.
+    // Like the GitHub id, it outlives the account rows user deletion removes.
+    ssoProviderId: text("sso_provider_id"),
+    ssoAccountId: text("sso_account_id"),
     actorUserId: text("actor_user_id"),
     revocationId: text("revocation_id"),
     cleanupAttemptId: text("cleanup_attempt_id"),

@@ -9,13 +9,28 @@ import {
 } from "@better-auth/sso";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { account, ssoProvider, verification } from "@/db/schema";
+import { ssoProvider, ssoProviderPolicies, verification } from "@/db/schema";
+import {
+  activeAccountExistsSql,
+  activeAdminSql,
+  organizationSignInAllowedSql,
+  usableIdentityExistsSql,
+  usableIdentitySql,
+} from "@/lib/account-access";
+import { signOutStatements } from "@/lib/account-sign-out";
 import { appError, errorChainMatches } from "@/lib/app-error";
+import { encodeBase64Url } from "@/lib/base64url";
 import { createAppId } from "@/lib/id";
+import { providerIssuer } from "@/lib/oidc-sso-adapter";
+import { ORGANIZATION_SSO_SCOPES } from "@/lib/organization-sso";
+import { requireOrganizationRole } from "@/lib/organizations";
+import {
+  adminRequiredError,
+  isActiveAdmin,
+} from "@/lib/platform-admin-authority";
 
 const VERIFICATION_PREFIX = "intar-oidc";
 const VERIFICATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const OIDC_SCOPES = ["openid", "email", "profile", "offline_access"];
 const DOMAIN_PATTERN =
   /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
@@ -37,6 +52,8 @@ export interface OrganizationOidcView {
   clientIdLastFour: string;
   pkce: true;
   scopes: string[];
+  /** Set by a platform admin: sign-ups may use emails off the domain. */
+  allowExternalEmailSignups: boolean;
   verification: {
     host: string;
     value: string;
@@ -142,14 +159,16 @@ export async function registerOrganizationOidc(
     jwksEndpoint: discovered.jwks_uri,
     pkce: true,
     discoveryEndpoint,
-    scopes: OIDC_SCOPES,
+    scopes: ORGANIZATION_SSO_SCOPES,
   });
 
   try {
     await db.batch([
       db.insert(ssoProvider).values({
         id: providerRowId,
-        issuer,
+        // ID tokens are checked against this exact value, so store what the
+        // provider advertises (for example with its trailing slash).
+        issuer: discovered.issuer,
         domain,
         oidcConfig,
         oidcClientSecretCiphertext: null,
@@ -183,13 +202,14 @@ export async function registerOrganizationOidc(
 
   return {
     providerId,
-    issuer,
+    issuer: discovered.issuer,
     domain,
     domainVerified: false,
     callbackUrl: callbackUrl(input.baseUrl, providerId),
     clientIdLastFour: maskClientId(clientId),
     pkce: true,
-    scopes: [...OIDC_SCOPES],
+    scopes: [...ORGANIZATION_SSO_SCOPES],
+    allowExternalEmailSignups: false,
     verification: {
       host: `${verificationIdentifier}.${domain}`,
       value: verificationToken,
@@ -212,22 +232,28 @@ export async function getOrganizationOidc(params: {
   if (!provider) return null;
   const config = parseRecord(provider.oidcConfig);
   const clientId = typeof config?.clientId === "string" ? config.clientId : "";
-  const pending = provider.domainVerified
-    ? null
-    : await loadVerification(provider.providerId);
+  const [pending, policies] = await Promise.all([
+    provider.domainVerified ? null : loadVerification(provider.providerId),
+    db
+      .select({
+        allowExternalEmailSignups: ssoProviderPolicies.allowExternalEmailSignups,
+      })
+      .from(ssoProviderPolicies)
+      .where(eq(ssoProviderPolicies.providerId, provider.providerId))
+      .limit(1),
+  ]);
   return {
     providerId: provider.providerId,
-    issuer: provider.issuer,
+    issuer: providerIssuer(config, provider.issuer),
     domain: provider.domain,
     domainVerified: provider.domainVerified,
     callbackUrl: callbackUrl(params.baseUrl, provider.providerId),
     clientIdLastFour: maskClientId(clientId),
     pkce: true,
-    scopes: Array.isArray(config?.scopes)
-      ? config.scopes.filter(
-          (value): value is string => typeof value === "string",
-        )
-      : [...OIDC_SCOPES],
+    // Intar requests these scopes whatever an older row stored.
+    scopes: [...ORGANIZATION_SSO_SCOPES],
+    allowExternalEmailSignups:
+      policies[0]?.allowExternalEmailSignups === true,
     verification: pending
       ? {
           host: `${verificationIdentifierFor(provider.providerId)}.${provider.domain}`,
@@ -347,8 +373,93 @@ export async function verifyOrganizationOidcDomain(params: {
   return view;
 }
 
+/**
+ * Platform admins decide whether the provider may create accounts for emails
+ * outside its verified domain. The provider must mark those emails verified.
+ */
+export async function setOrganizationOidcPolicy(params: {
+  organizationId: string;
+  actorUserId: string;
+  allowExternalEmailSignups: unknown;
+  baseUrl: string;
+}): Promise<OrganizationOidcView> {
+  if (typeof params.allowExternalEmailSignups !== "boolean") {
+    throw appError(
+      400,
+      "invalid_sso_policy",
+      "allowExternalEmailSignups must be true or false",
+    );
+  }
+  const allow = params.allowExternalEmailSignups;
+  const rows = await drizzle(env.DB)
+    .select({ providerId: ssoProvider.providerId })
+    .from(ssoProvider)
+    .where(eq(ssoProvider.organizationId, params.organizationId))
+    .limit(1);
+  const provider = rows[0];
+  if (!provider) {
+    throw appError(
+      404,
+      "organization_oidc_not_found",
+      "OIDC provider not found",
+    );
+  }
+  const now = Date.now();
+  // Only a change is written and audited; saving the current value again
+  // leaves both alone. The write rechecks that its actor is still a platform
+  // admin.
+  const [written] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO sso_provider_policies
+         (provider_id, allow_external_email_signups, updated_by, updated_at)
+       SELECT ?1, ?2, ?3, ?4
+       WHERE EXISTS (SELECT 1 FROM sso_provider WHERE provider_id = ?1)
+         AND EXISTS (SELECT 1 FROM user AS policy_admin
+           WHERE policy_admin.id = ?3 AND ${activeAdminSql("policy_admin")})
+         AND ?2 <> coalesce((SELECT current.allow_external_email_signups
+           FROM sso_provider_policies AS current WHERE current.provider_id = ?1), 0)
+       ON CONFLICT (provider_id) DO UPDATE SET
+         allow_external_email_signups = excluded.allow_external_email_signups,
+         updated_by = excluded.updated_by,
+         updated_at = excluded.updated_at`,
+    ).bind(provider.providerId, allow ? 1 : 0, params.actorUserId, now),
+    env.DB.prepare(
+      `INSERT INTO access_events (id, event_type, actor_user_id, reason, created_at)
+       SELECT ?1, 'sso.external_email_signups_changed', ?2, ?3, ?4
+       WHERE changes() = 1`,
+    ).bind(
+      createAppId(),
+      params.actorUserId,
+      `${provider.providerId}:${allow ? "on" : "off"}`,
+      now,
+    ),
+  ]);
+  if (
+    written?.meta.changes !== 1 &&
+    !(await isActiveAdmin(params.actorUserId, env.DB))
+  ) {
+    throw adminRequiredError();
+  }
+  const view = await getOrganizationOidc({
+    organizationId: params.organizationId,
+    baseUrl: params.baseUrl,
+  });
+  if (!view) {
+    throw appError(
+      404,
+      "organization_oidc_not_found",
+      "OIDC provider not found",
+    );
+  }
+  return view;
+}
+
 export async function deleteOrganizationOidc(params: {
   organizationId: string;
+  /** An owner or admin of the organization. */
+  actorUserId: string;
+  /** The remover's own session, which stays signed in. */
+  currentSessionId?: string;
 }): Promise<void> {
   const db = drizzle(env.DB);
   const rows = await db
@@ -365,20 +476,103 @@ export async function deleteOrganizationOidc(params: {
     );
   }
 
-  await db.batch([
-    db
-      .delete(verification)
-      .where(
-        eq(
-          verification.identifier,
-          verificationIdentifierFor(provider.providerId),
-        ),
-      ),
-    db.delete(account).where(eq(account.providerId, provider.providerId)),
-    db
-      .delete(ssoProvider)
-      .where(eq(ssoProvider.organizationId, params.organizationId)),
+  // Removing the provider must not lock current members out: refuse while an
+  // active member has no other usable way to sign in. Platform admins sign in
+  // with GitHub, so they never depend on it.
+  await assertProviderRemovable(provider.providerId, params.organizationId);
+
+  // Everyone with an identity at it is signed out in the same batch: a
+  // session doesn't record which identity opened it, so any of theirs may be
+  // one the provider opened. Platform admins sign in with GitHub only, so
+  // they stay signed in. Every statement rechecks the guards, the members and
+  // the remover's role, so a sign-in or demotion that lands in the meantime
+  // turns the whole batch into a no-op instead of stranding someone.
+  const removable = `${REMOVABLE_SQL} AND ${REMOVER_SQL}`;
+  const bindings = [provider.providerId, params.organizationId, params.actorUserId];
+  const results = await env.DB.batch([
+    ...signOutStatements(
+      env.DB,
+      (userColumn) =>
+        `${userColumn} IN (SELECT identity.user_id FROM account AS identity
+           WHERE identity.provider_id = ?1)
+         AND ${organizationSignInAllowedSql(userColumn)} AND ${removable}`,
+      bindings,
+      params.currentSessionId,
+    ),
+    env.DB.prepare(
+      `DELETE FROM verification WHERE identifier = ?4 AND ${removable}`,
+    ).bind(...bindings, verificationIdentifierFor(provider.providerId)),
+    env.DB.prepare(
+      `DELETE FROM account WHERE provider_id = ?1 AND ${removable}`,
+    ).bind(...bindings),
+    env.DB.prepare(
+      `DELETE FROM sso_provider
+       WHERE provider_id = ?1 AND organization_id = ?2 AND ${removable}
+       RETURNING provider_id AS providerId`,
+    ).bind(...bindings),
   ]);
+  if (results.at(-1)?.results?.length) return;
+  await requireOrganizationRole({
+    organizationId: params.organizationId,
+    userId: params.actorUserId,
+    admin: true,
+  });
+  await assertProviderRemovable(provider.providerId, params.organizationId);
+  throw appError(
+    409,
+    "organization_oidc_changed",
+    "the identity provider changed while it was being removed",
+  );
+}
+
+// Members that can sign in only through the provider `?1` of organization
+// `?2`.
+const DEPENDENT_MEMBERS_WHERE = `membership.organization_id = ?2
+  AND ${activeAccountExistsSql("membership.user_id")}
+  AND EXISTS (SELECT 1 FROM account AS identity
+    WHERE identity.user_id = membership.user_id AND identity.provider_id = ?1
+      AND ${usableIdentitySql("identity")})
+  AND NOT ${usableIdentityExistsSql("membership.user_id", { exceptProvider: "?1" })}`;
+
+const REMOVABLE_SQL = `NOT EXISTS (SELECT 1 FROM member AS membership
+  WHERE ${DEPENDENT_MEMBERS_WHERE})`;
+
+// The remover `?3` is still an owner or admin of organization `?2`.
+const REMOVER_SQL = `EXISTS (SELECT 1 FROM member AS remover
+  WHERE remover.organization_id = ?2 AND remover.user_id = ?3
+    AND remover.role IN ('owner', 'admin'))`;
+
+async function assertProviderRemovable(
+  providerId: string,
+  organizationId: string,
+): Promise<void> {
+  const state = await env.DB.prepare(
+    `SELECT count(*) AS members,
+       coalesce(sum(membership.role = 'owner'), 0) AS owners
+     FROM member AS membership
+     WHERE ${DEPENDENT_MEMBERS_WHERE}`,
+  )
+    .bind(providerId, organizationId)
+    .first<{ members: number; owners: number }>();
+  const members = state?.members ?? 0;
+  if (members > 0) {
+    throw appError(
+      409,
+      "organization_oidc_in_use",
+      dependentMembersMessage(members, state?.owners ?? 0),
+    );
+  }
+}
+
+// Removing them would stick, so each needs another way to sign in first.
+function dependentMembersMessage(members: number, owners: number): string {
+  const who =
+    members === 1
+      ? owners === 1
+        ? "The owner signs"
+        : "1 member signs"
+      : `${members} members${owners > 0 ? ", including the owner," : ""} sign`;
+  return `${who} in only through this identity provider. They need to connect GitHub from Profile before you can remove it.`;
 }
 
 function normalizeIssuer(value: string): string {
@@ -502,14 +696,7 @@ function maskClientId(clientId: string): string {
 }
 
 function randomToken(): string {
-  const bytes = new Uint8Array(24);
-  crypto.getRandomValues(bytes);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+  return encodeBase64Url(crypto.getRandomValues(new Uint8Array(24)));
 }
 
 function parseRecord(value: string | null): Record<string, unknown> | null {

@@ -8,19 +8,20 @@ import {
   type AdminSignupStatus,
 } from "@/lib/signup-status";
 
-/** How long a spot is held while a new member's GitHub account is linked. */
+
+/** How long a spot is held while a new member's first identity is linked. */
 export const SIGNUP_RESERVATION_TTL_MS = 10 * 60 * 1000;
 
-// Members are active accounts with a linked GitHub identity: GitHub is the only
-// way to create an account, and the account table allows one GitHub identity
-// per user, so this counts people.
+// Members are active people with at least one sign-in identity, GitHub or an
+// organization's identity provider. A person counts once however many
+// identities they connect.
 const LIMIT_SQL = `coalesce((SELECT settings.signup_limit FROM signup_settings AS settings WHERE settings.id = 1), 0)`;
-const MEMBERS_SQL = `(SELECT count(*) FROM account AS github
-  JOIN user AS identity ON identity.id = github.user_id
-  WHERE github.provider_id = 'github' AND ${activeAccountSql("identity")})`;
+const MEMBERS_SQL = `(SELECT count(*) FROM user AS identity
+  WHERE ${activeAccountSql("identity")}
+    AND EXISTS (SELECT 1 FROM account AS linked WHERE linked.user_id = identity.id))`;
 
 /**
- * Live reservations of other people whose GitHub link has not completed yet.
+ * Live reservations of other people whose first identity is not linked yet.
  * `?1` is the reserving user id (or NULL) and `?2` is the current time.
  */
 const PENDING_SQL = `(SELECT count(*) FROM signup_reservations AS reservation
@@ -29,7 +30,7 @@ const PENDING_SQL = `(SELECT count(*) FROM signup_reservations AS reservation
     AND reservation.user_id IS NOT ?1
     AND ${activeAccountSql("reserved")}
     AND NOT EXISTS (SELECT 1 FROM account AS linked
-      WHERE linked.user_id = reservation.user_id AND linked.provider_id = 'github'))`;
+      WHERE linked.user_id = reservation.user_id))`;
 
 interface SignupStatusRow {
   signup_limit: number;
@@ -79,7 +80,7 @@ export async function hasOpenSignupSpot(params: {
 }
 
 /**
- * Holds one spot for `userId` while its GitHub account is linked. The guarded
+ * Holds one spot for `userId` while its first identity is linked. The guarded
  * insert is a single statement, so concurrent sign-ups for the last spot admit
  * exactly one. A retry by the same user refreshes its own reservation.
  */

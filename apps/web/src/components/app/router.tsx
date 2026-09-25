@@ -8,6 +8,7 @@ import {
   Outlet,
   redirect,
   type ErrorComponentProps,
+  type ParsedLocation,
 } from "@tanstack/react-router";
 import { CircleAlert, LoaderCircle, SearchX } from "lucide-react";
 import { BrandMark } from "./patterns/BrandMark";
@@ -73,7 +74,7 @@ const organizationSignInRoute = createRoute({
   head: () =>
     routeHead(
       "Organization sign-in",
-      "Use an existing linked OIDC identity or connect it from a signed-in GitHub account.",
+      "Sign in or create your account through your organization's identity provider.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/OrganizationSignIn"),
@@ -87,7 +88,7 @@ const organizationDirectSignInRoute = createRoute({
   head: () =>
     routeHead(
       "Organization sign-in",
-      "Use an existing linked OIDC identity or connect it from a signed-in GitHub account.",
+      "Sign in or create your account through your organization's identity provider.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/OrganizationSignIn"),
@@ -593,10 +594,17 @@ async function requireAdminRoute() {
   }
 }
 
-async function requireSignedInRoute() {
+async function requireSignedInRoute({
+  location,
+}: {
+  location: ParsedLocation;
+}) {
   const { access, session } = await loadAppBootstrap();
   if (!session?.user) {
-    throw redirect({ to: "/" });
+    // Connect GitHub may return to Profile with a code after the session
+    // ended; the landing page explains it.
+    const error = new URLSearchParams(location.searchStr).get("error");
+    throw redirect({ to: "/", search: error ? { error } : {} });
   }
   if (access !== "active") {
     throw redirect({ to: "/", search: { error: "access_revoked" } });

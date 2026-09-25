@@ -9,7 +9,19 @@ import {
 describe("organization detail tab search", () => {
   it("keeps only known OIDC test results in Settings", () => {
     expect(validateOrganizationDetailSearch({ error: "oidc_sign_in_failed" }))
-      .toEqual({ tab: "settings", oidcTest: "failed" });
+      .toEqual({
+        tab: "settings",
+        oidcTest: "failed",
+        oidcError: "oidc_sign_in_failed",
+      });
+    expect(
+      validateOrganizationDetailSearch({ error: "sso_identity_linked_elsewhere" }),
+    ).toEqual({
+      tab: "settings",
+      oidcTest: "failed",
+      oidcError: "sso_identity_linked_elsewhere",
+    });
+    expect(validateOrganizationDetailSearch({ error: "<script>" })).toEqual({});
     expect(
       validateOrganizationDetailSearch({
         tab: "settings",
