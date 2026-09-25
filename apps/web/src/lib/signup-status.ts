@@ -3,6 +3,8 @@
 
 export const SIGNUP_LIMIT_MAX = 1_000_000;
 
+export const SIGNUPS_FULL_MESSAGE = "No sign-up spots are open right now";
+
 export interface SignupStatus {
   limit: number;
   taken: number;

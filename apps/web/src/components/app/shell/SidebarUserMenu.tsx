@@ -1,4 +1,3 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ChevronsUpDown,
@@ -25,33 +24,20 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { authClient } from "@/lib/auth-client";
-import { clearAllTemporaryNativeSshKeys } from "@/lib/temporary-native-ssh-storage";
 import { useSession } from "../hooks/useSession";
+import { useSignOut } from "../hooks/useSignOut";
 import { useTheme, type AppTheme } from "../theme";
 
 export function SidebarUserMenu() {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const { isMobile } = useSidebar();
   const { theme, setTheme } = useTheme();
   const { data } = useSession();
   const user = data?.user ?? null;
   const username = user?.username ?? user?.email ?? "Account";
 
-  const signOut = useMutation({
-    mutationFn: async () => {
-      const result = await authClient.signOut();
-      if ("error" in result && result.error) {
-        throw new Error(result.error.message ?? "Failed to sign out");
-      }
-      return result;
-    },
-    onSuccess: () => {
-      clearAllTemporaryNativeSshKeys();
-      queryClient.clear();
-      void navigate({ to: "/" });
-    },
+  const signOut = useSignOut({
+    onSignedOut: () => void navigate({ to: "/" }),
   });
 
   if (!user) return null;

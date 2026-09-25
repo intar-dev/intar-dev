@@ -97,3 +97,8 @@ export { ACTIVE_RUNTIME_EXECUTION_STATES } from "./schema/runtime";
 export { personalImagePreparations } from "./schema/personal-image-preparations";
 export { supportTopics, supportComments } from "./schema/support";
 export { signupReservations, signupSettings } from "./schema/signups";
+export {
+  organizationMemberRemovals,
+  organizationMemberRemovedLogins,
+  ssoProviderPolicies,
+} from "./schema/organization-sso";

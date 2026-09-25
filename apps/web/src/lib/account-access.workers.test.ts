@@ -10,9 +10,11 @@ import {
   activeAccountCondition,
   activeAccountExistsSql,
   activeAccountSql,
-  hasAnyLinkedAccount,
-  hasLinkedProviderAccount,
+  canSignIn,
+  identityState,
   isActiveAccount,
+  sessionMayAct,
+  usableIdentityExistsSql,
 } from "./account-access";
 
 const NOW = 1_800_000_000_000;
@@ -97,32 +99,123 @@ describe("account access", () => {
     expect(rows.map(({ id }) => id)).toEqual(["active", "never-flagged"]);
   });
 
-  it("finds linked provider accounts by user", async () => {
+  it("reads how an account can sign in in one query", async () => {
     await insertAccount("active", "github", "active-github");
+    // No provider row: the identity can't sign anyone in.
     await insertAccount("never-flagged", "tenant-oidc", "subject");
 
-    await expect(
-      hasLinkedProviderAccount("active", "github", env.DB),
-    ).resolves.toBe(true);
-    await expect(
-      hasLinkedProviderAccount("never-flagged", "github", env.DB),
-    ).resolves.toBe(false);
-    await expect(
-      hasLinkedProviderAccount("never-flagged", "tenant-oidc", env.DB),
-    ).resolves.toBe(true);
-    await expect(hasLinkedProviderAccount("", "github", env.DB)).resolves.toBe(
-      false,
-    );
-    await expect(hasLinkedProviderAccount("active", "", env.DB)).resolves.toBe(
-      false,
-    );
+    await expect(identityState("active", env.DB)).resolves.toEqual({
+      linked: true,
+      github: true,
+      reclaimable: false,
+    });
+    await expect(identityState("never-flagged", env.DB)).resolves.toEqual({
+      linked: true,
+      github: false,
+      reclaimable: true,
+    });
+    await expect(identityState("banned", env.DB)).resolves.toEqual({
+      linked: false,
+      github: false,
+      reclaimable: true,
+    });
+  });
 
-    await expect(hasAnyLinkedAccount("active", env.DB)).resolves.toBe(true);
-    await expect(hasAnyLinkedAccount("never-flagged", env.DB)).resolves.toBe(
-      true,
-    );
-    await expect(hasAnyLinkedAccount("banned", env.DB)).resolves.toBe(false);
-    await expect(hasAnyLinkedAccount("", env.DB)).resolves.toBe(false);
+  it("counts an organization identity while its provider exists and keeps the person", async () => {
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO organization (id, name, slug, created_at) VALUES ('org', 'Org', 'org', 1)",
+      ),
+      env.DB.prepare(
+        `INSERT INTO sso_provider (id, issuer, domain, oidc_config, user_id, provider_id, organization_id, domain_verified)
+         VALUES ('tenant-row', 'https://idp.test', 'idp.test', '{}', 'active', 'tenant-oidc', 'org', 1)`,
+      ),
+    ]);
+    await insertAccount("never-flagged", "tenant-oidc", "subject");
+    const usable = async (
+      options?: { exceptProvider?: string },
+      ...bindings: string[]
+    ) =>
+      (
+        await env.DB.prepare(
+          `SELECT ${usableIdentityExistsSql("?1", options)} AS usable`,
+        )
+          .bind("never-flagged", ...bindings)
+          .first<{ usable: number }>()
+      )?.usable;
+
+    expect(await usable()).toBe(1);
+    expect(await usable({ exceptProvider: "?2" }, "tenant-oidc")).toBe(0);
+    await env.DB.prepare(
+      "INSERT INTO organization_member_removals (organization_id, user_id, removed_by, removed_at) VALUES ('org', 'never-flagged', 'active', 1)",
+    ).run();
+    expect(await usable()).toBe(0);
+    expect(() => usableIdentityExistsSql("id; DROP TABLE user")).toThrow();
+  });
+
+  it("never signs a platform admin in through an organization", async () => {
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO organization (id, name, slug, created_at) VALUES ('org', 'Org', 'org', 1)",
+      ),
+      env.DB.prepare(
+        `INSERT INTO sso_provider (id, issuer, domain, oidc_config, user_id, provider_id, organization_id, domain_verified)
+         VALUES ('tenant-row', 'https://idp.test', 'idp.test', '{}', 'active', 'tenant-oidc', 'org', 1)`,
+      ),
+      env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = 'never-flagged'"),
+      env.DB.prepare(
+        "INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('membership', 'org', 'never-flagged', 'member', 1)",
+      ),
+    ]);
+    await insertAccount("never-flagged", "tenant-oidc", "subject");
+
+    // The organization controls its provider and who administers it, so it
+    // can't sign in a platform admin, not even one it made an admin.
+    await expect(canSignIn("never-flagged", null, env.DB)).resolves.toBe(false);
+    await env.DB.prepare("UPDATE member SET role = 'admin' WHERE id = 'membership'").run();
+    await expect(canSignIn("never-flagged", null, env.DB)).resolves.toBe(false);
+    // Only their role keeps them out, so nobody may take the account over.
+    await expect(identityState("never-flagged", env.DB)).resolves.toMatchObject({
+      reclaimable: false,
+    });
+    await env.DB.prepare("UPDATE user SET role = 'user' WHERE id = 'never-flagged'").run();
+    await expect(canSignIn("never-flagged", null, env.DB)).resolves.toBe(true);
+  });
+
+  it("never lets anyone take over a platform admin's account", async () => {
+    // Without any identity, like a leftover user, but an admin.
+    await env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = 'never-flagged'").run();
+    await expect(identityState("never-flagged", env.DB)).resolves.toEqual({
+      linked: false,
+      github: false,
+      reclaimable: false,
+    });
+  });
+
+  it("lets an impersonation act only while its admin can still sign in", async () => {
+    await insertAccount("active", "github", "active-github");
+    await insertUser("admin");
+    await insertAccount("admin", "github", "admin-github");
+    await env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = 'admin'").run();
+    const impersonation = { userId: "never-flagged", impersonatedBy: "admin" };
+
+    await expect(sessionMayAct({ userId: "active" }, null, env.DB)).resolves.toBe(true);
+    await expect(sessionMayAct({ userId: "never-flagged" }, null, env.DB)).resolves.toBe(false);
+    // The impersonated account needs no way in of its own, only access.
+    await expect(sessionMayAct(impersonation, null, env.DB)).resolves.toBe(true);
+    await expect(
+      sessionMayAct({ userId: "banned", impersonatedBy: "admin" }, null, env.DB),
+    ).resolves.toBe(false);
+    await env.DB.prepare("UPDATE user SET role = 'user' WHERE id = 'admin'").run();
+    await expect(sessionMayAct(impersonation, null, env.DB)).resolves.toBe(false);
+  });
+
+  it("signs in through a provider only while that identity can sign the account in", async () => {
+    await insertAccount("active", "github", "active-github");
+    await expect(canSignIn("active", null, env.DB)).resolves.toBe(true);
+    await expect(canSignIn("active", "github", env.DB)).resolves.toBe(true);
+    await expect(canSignIn("active", "tenant-oidc", env.DB)).resolves.toBe(false);
+    await expect(canSignIn("banned", null, env.DB)).resolves.toBe(false);
   });
 });
 

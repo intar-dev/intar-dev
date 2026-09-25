@@ -1,10 +1,30 @@
 export class HttpResponseError extends Error {
   readonly status: number;
+  /** The app's error code, when the response named one. */
+  readonly code: string | null;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.name = "HttpResponseError";
     this.status = status;
+    this.code = code;
+  }
+
+  /** The error for a refused response whose body is the app's `{ error, code }`. */
+  static fromBody(
+    status: number,
+    body: unknown,
+    fallback: string,
+  ): HttpResponseError {
+    const fields =
+      typeof body === "object" && body !== null
+        ? (body as { error?: unknown; code?: unknown })
+        : {};
+    return new HttpResponseError(
+      status,
+      typeof fields.error === "string" ? fields.error : fallback,
+      typeof fields.code === "string" ? fields.code : null,
+    );
   }
 }
 

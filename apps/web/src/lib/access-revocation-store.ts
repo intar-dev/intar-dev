@@ -7,13 +7,14 @@ import {
 } from "@/db/schema/application";
 import { account, user } from "@/db/schema/core";
 import { agentBootstrapTokens, agentHosts } from "@/db/schema/platform";
+import { firstOrganizationIdentitySql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import {
   activeAdministrator,
   adminRequiredError,
-  hasOtherActiveAdmin,
   isActiveAdmin,
+  isLastActiveAdmin,
   lastActiveAdminError,
   lastAdministratorSafe,
 } from "@/lib/platform-admin-authority";
@@ -127,6 +128,8 @@ export async function revokeAccount(params: {
           inviteId: sql<string | null>`null`.as("invite_id"),
           subjectUserId: accessRevocations.userId,
           githubAccountId: revokedGithubAccountId(),
+          ssoProviderId: revokedSsoIdentity("provider_id"),
+          ssoAccountId: revokedSsoIdentity("account_id"),
           actorUserId: accessRevocations.revokedBy,
           revocationId: accessRevocations.revocationId,
           cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
@@ -252,6 +255,8 @@ export async function completeAccessRevocationCleanup(params: {
           inviteId: sql<string | null>`null`.as("invite_id"),
           subjectUserId: accessRevocations.userId,
           githubAccountId: revokedGithubAccountId(),
+          ssoProviderId: revokedSsoIdentity("provider_id"),
+          ssoAccountId: revokedSsoIdentity("account_id"),
           actorUserId: sql<string | null>`null`.as("actor_user_id"),
           revocationId: accessRevocations.revocationId,
           cleanupAttemptId: accessRevocations.cleanupAttemptId,
@@ -421,6 +426,8 @@ function cleanupEventSelect(params: {
       inviteId: sql<string | null>`null`.as("invite_id"),
       subjectUserId: accessRevocations.userId,
       githubAccountId: revokedGithubAccountId(),
+      ssoProviderId: revokedSsoIdentity("provider_id"),
+      ssoAccountId: revokedSsoIdentity("account_id"),
       actorUserId: sql<string | null>`${params.actorUserId}`.as("actor_user_id"),
       revocationId: accessRevocations.revocationId,
       cleanupAttemptId: sql<string>`${params.cleanupAttemptId}`.as(
@@ -455,6 +462,12 @@ function revokedGithubAccountId() {
   )`.as("github_account_id");
 }
 
+function revokedSsoIdentity(column: "provider_id" | "account_id") {
+  return sql<string | null>`${sql.raw(
+    firstOrganizationIdentitySql("access_revocations.user_id", column),
+  )}`.as(column === "provider_id" ? "sso_provider_id" : "sso_account_id");
+}
+
 // Classifies a revocation that inserted nothing, most specific cause first.
 async function revocationFailure(
   d1: D1Database,
@@ -477,10 +490,7 @@ async function revocationFailure(
   if (target.revokedUserId) {
     return appError(409, "access_already_revoked", "Access is already revoked");
   }
-  if (
-    (await isActiveAdmin(userId, d1)) &&
-    !(await hasOtherActiveAdmin(userId, d1))
-  ) {
+  if (await isLastActiveAdmin(userId, d1)) {
     return lastActiveAdminError("revoked");
   }
   return appError(

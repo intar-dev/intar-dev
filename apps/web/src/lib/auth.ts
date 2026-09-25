@@ -1,5 +1,6 @@
 import { recordSecurityEvent } from "@/lib/security-events";
 import { env } from "cloudflare:workers";
+import type { GenericEndpointContext } from "@better-auth/core";
 import { defineRequestState } from "@better-auth/core/context";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { sso } from "@better-auth/sso";
@@ -15,16 +16,21 @@ import {
 } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { admin, jwt, organization, username } from "better-auth/plugins";
-import { eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import { isRecord } from "@/control-plane/image-registry/shared";
 import * as schema from "../db/schema";
 import { db } from "../db/client";
 import {
-  hasAnyLinkedAccount,
-  hasLinkedProviderAccount,
+  canSignIn,
+  identityState,
   isActiveAccount,
+  isImpersonatedSession,
+  RECENT_SIGN_IN_SECONDS,
+  sessionMayAct,
+  usableIdentityExistsSql,
 } from "./account-access";
+import { authSetting } from "./auth-runtime";
 import { getUserRole, isAdminRole } from "./authz";
+import { encodeBase64Url } from "./base64url";
 import {
   isValidGithubUsername,
   normalizeGithubUsername,
@@ -36,19 +42,34 @@ import {
   hasReachedOwnedOrganizationLimit,
 } from "./organization-access";
 import {
+  checkLinkSession,
+  checkSsoReclaim,
+  checkSsoSignUp,
+  completeSsoLink,
+  deleteUnclaimedSsoUser,
+  organizationSignUpFields,
+  provisionOrganizationMember,
+  removedLoginRedirect,
+  SSO_INTENT_CONTEXT_KEY,
+  SSO_INTENT_HEADER,
+  ssoIntentFromState,
+  ssoSignInState,
+  verifySsoIntent,
+} from "./organization-sso";
+import {
+  linkErrorURL,
+  SSO_ERROR_MESSAGES,
+  ssoRejection,
+  withErrorCode,
+} from "./organization-sso-errors";
+import {
   clearSignupReservation,
   hasOpenSignupSpot,
   reserveSignupSpot,
 } from "./signups";
+import { SIGNUPS_FULL_MESSAGE } from "./signup-status";
 
-const runtimeEnv =
-  "process" in globalThis
-    ? (globalThis as { process?: { env?: Record<string, string | undefined> } })
-        .process?.env
-    : undefined;
-
-const baseURL =
-  runtimeEnv?.BETTER_AUTH_URL ?? env.BETTER_AUTH_URL ?? "http://localhost:4321";
+const baseURL = authSetting("BETTER_AUTH_URL") ?? "http://localhost:4321";
 
 const oauthScopes = [
   "openid",
@@ -77,28 +98,13 @@ const oauthAdvertisedClaims = [
   "roles",
 ] as const;
 
-export const SSO_LINK_HANDOFF_HEADER = "x-intar-sso-link-handoff";
-
-const HANDOFF_AUDIENCE = "intar.sso-link-handoff.v1";
-const MAX_HANDOFF_TTL_MS = 10 * 60 * 1000;
-const SSO_LINK_CONTEXT_KEY = "intarSsoLink";
-const SIGNUPS_FULL_MESSAGE = "No sign-up spots are open right now";
-
-// The user an OAuth token response is issued for. The after hook rechecks
-// that account once the provider has stored the tokens.
-const oauthIssuanceUserState = defineRequestState<string | null>(() => null);
-
-type SsoLinkFlow = {
-  kind: "sso-link";
+// The user an OAuth token response is issued for, and whether the provider
+// ran a refresh grant. The after hook rechecks both once the provider has
+// stored the tokens.
+const oauthIssuanceState = defineRequestState<{
   userId: string;
-  providerId: string;
-  expiresAt: number;
-};
-
-type HandoffPayload = SsoLinkFlow & {
-  aud: typeof HANDOFF_AUDIENCE;
-  version: 1;
-};
+  refreshGrant: boolean;
+} | null>(() => null);
 
 const rejectIdentity = (
   error: string,
@@ -150,159 +156,32 @@ export async function getOAuthAccessTokenClaims(input: {
   return getOAuthRoleClaims(input.user, input.scopes);
 }
 
-export async function createSsoLinkOAuthHandoff(input: {
-  userId: string;
-  providerId: string;
-  expiresAt: number;
-}): Promise<string> {
-  const payload: HandoffPayload = {
-    kind: "sso-link",
-    userId: requireSafeIdentifier(input.userId, "userId"),
-    providerId: requireSafeIdentifier(input.providerId, "providerId"),
-    expiresAt: requireHandoffExpiry(input.expiresAt),
-    aud: HANDOFF_AUDIENCE,
-    version: 1,
-  };
-  const encoded = encodeBase64Url(
-    new TextEncoder().encode(JSON.stringify(payload)),
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    await handoffKey(),
-    new TextEncoder().encode(`${HANDOFF_AUDIENCE}.${encoded}`),
-  );
-  return `${encoded}.${encodeBase64Url(new Uint8Array(signature))}`;
-}
-
-async function verifyHandoff(value: string): Promise<SsoLinkFlow | null> {
-  const [encoded, encodedSignature, extra] = value.split(".");
-  if (!encoded || !encodedSignature || extra) return null;
-
-  let payload: unknown;
-  let signature: Uint8Array;
-  try {
-    payload = JSON.parse(
-      new TextDecoder().decode(decodeBase64Url(encoded)),
-    ) as unknown;
-    signature = decodeBase64Url(encodedSignature);
-  } catch {
-    return null;
-  }
-
-  const validSignature = await crypto.subtle.verify(
-    "HMAC",
-    await handoffKey(),
-    copyToArrayBuffer(signature),
-    new TextEncoder().encode(`${HANDOFF_AUDIENCE}.${encoded}`),
-  );
-  if (!validSignature || !isHandoffPayload(payload)) return null;
-
-  const now = Date.now();
-  if (payload.expiresAt <= now || payload.expiresAt > now + MAX_HANDOFF_TTL_MS) {
-    return null;
-  }
-  return {
-    kind: payload.kind,
-    userId: payload.userId,
-    providerId: payload.providerId,
-    expiresAt: payload.expiresAt,
-  };
-}
-
-function copyToArrayBuffer(value: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(value.byteLength);
-  copy.set(value);
-  return copy.buffer;
-}
-
-async function handoffKey(): Promise<CryptoKey> {
-  const secret =
-    runtimeEnv?.BETTER_AUTH_SECRET ?? env.BETTER_AUTH_SECRET ?? "";
-  if (!secret) throw new Error("BETTER_AUTH_SECRET is required");
-  return crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"],
-  );
-}
-
-function isHandoffPayload(value: unknown): value is HandoffPayload {
-  return (
-    isRecord(value) &&
-    value.aud === HANDOFF_AUDIENCE &&
-    value.version === 1 &&
-    value.kind === "sso-link" &&
-    Number.isSafeInteger(value.expiresAt) &&
-    isSafeIdentifier(value.userId) &&
-    isSafeIdentifier(value.providerId)
-  );
-}
-
-function requireSafeIdentifier(value: string, field: string): string {
-  if (!isSafeIdentifier(value)) throw new Error(`${field} is invalid`);
-  return value;
-}
-
-function isSafeIdentifier(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 256 &&
-    /^[A-Za-z0-9._:-]+$/.test(value)
-  );
-}
-
-function requireHandoffExpiry(value: number): number {
-  const now = Date.now();
-  if (
-    !Number.isSafeInteger(value) ||
-    value <= now ||
-    value > now + MAX_HANDOFF_TTL_MS
-  ) {
-    throw new Error("handoff expiry is outside the allowed window");
-  }
-  return value;
-}
-
-function encodeBase64Url(value: Uint8Array): string {
-  let binary = "";
-  for (const byte of value) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function decodeBase64Url(value: string): Uint8Array {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid base64url");
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(padded.padEnd(Math.ceil(padded.length / 4) * 4, "="));
-  const decoded = Uint8Array.from(binary, (character) =>
-    character.charCodeAt(0),
-  );
-  if (encodeBase64Url(decoded) !== value) {
-    throw new Error("non-canonical base64url");
-  }
-  return decoded;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function emailLocalPart(email: unknown): string {
+  const local = typeof email === "string" ? email.split("@", 1)[0]?.trim() : "";
+  return local || "Member";
 }
 
 /**
- * Runs after the provider stored an OAuth token response. Access only moves
- * from active to revoked, so an account that is still active held access for
- * the whole issuance; otherwise the issued tokens are removed and the
- * response is suppressed.
+ * Runs after the provider stored an OAuth token response. An account that can
+ * still sign in keeps them. Otherwise a revocation or sign-out committed
+ * during issuance without seeing them, so the issued tokens are removed and
+ * the response is suppressed. A refresh grant also needs the token it
+ * rotated: rotation keeps its row, so a missing one means a sign-out deleted
+ * it while the new tokens were being issued.
  */
 export async function enforceActiveOAuthIssuance(input: {
   userId: string;
   returned: unknown;
+  /** The refresh token a refresh grant presented. */
+  presentedRefreshToken?: string | null | undefined;
 }): Promise<void> {
-  if (await isActiveAccount(input.userId)) return;
+  const [allowed, rotatedTokenKept] = await Promise.all([
+    canSignIn(input.userId),
+    input.presentedRefreshToken
+      ? storedRefreshTokenExists(input.userId, input.presentedRefreshToken)
+      : true,
+  ]);
+  if (allowed && rotatedTokenKept) return;
 
   const returned = isRecord(input.returned) ? input.returned : {};
   const accessToken =
@@ -350,6 +229,18 @@ async function deleteExactIssuedOAuthTokens(input: {
   if (statements.length) await env.DB.batch(statements);
 }
 
+async function storedRefreshTokenExists(
+  userId: string,
+  refreshToken: string,
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT 1 AS stored FROM oauth_refresh_token WHERE token = ? AND user_id = ?",
+  )
+    .bind(await hashStoredOAuthToken(refreshToken), userId)
+    .first<{ stored: number }>();
+  return row !== null;
+}
+
 async function hashStoredOAuthToken(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -359,89 +250,139 @@ async function hashStoredOAuthToken(value: string): Promise<string> {
 }
 
 async function deleteExactSession(session: Session): Promise<void> {
-  let lifecycleError: unknown;
-  try {
-    const context = await getAuthInstance().$context;
-    await context.internalAdapter.deleteSession(session.token);
-    return;
-  } catch (error) {
-    lifecycleError = error;
-  }
+  await env.DB.prepare("DELETE FROM session WHERE token = ? AND user_id = ?")
+    .bind(session.token, session.userId)
+    .run();
+}
 
+// What one callback's checks decided, for the database hooks that follow.
+// Better Auth hands validateUserInfo and every database hook of a request the
+// same endpoint context, while request state is gone by the time after hooks
+// run.
+interface CallbackNote {
+  /** The provider the callback signs in through; its session needs it. */
+  signInProvider?: string | undefined;
+  /** The existing account an identity is connected to, which is audited. */
+  linkedUserId?: string | undefined;
+  /** The connected GitHub account's login, for an account without a username. */
+  githubLogin?: string | undefined;
+  /** The user an organization sign-up created in this callback. */
+  createdUserId?: string | undefined;
+  /** The sign-up spot the account insert reserved, cleared after it. */
+  reservedFor?: string | undefined;
+  /** The session an explicit GitHub link started from, rechecked after it. */
+  linkSessionId?: string | undefined;
+}
+const callbackNotes = new WeakMap<object, CallbackNote>();
+
+function noteCallback(context: unknown, note: CallbackNote): void {
+  if (!isRecord(context)) return;
+  callbackNotes.set(context, { ...callbackNotes.get(context), ...note });
+}
+
+function callbackNote(context: unknown): CallbackNote {
+  return (isRecord(context) ? callbackNotes.get(context) : undefined) ?? {};
+}
+
+function githubLoginOf(profile: unknown): string | undefined {
+  const login =
+    isRecord(profile) && typeof profile.login === "string"
+      ? profile.login.trim()
+      : "";
+  return login && isValidGithubUsername(login) ? login : undefined;
+}
+
+/**
+ * An account holds a session only while it is active and some identity can
+ * still sign it in (see sessionMayAct). A callback's session needs the
+ * identity it signed in with, which a disconnect or removal in the meantime
+ * may have taken away.
+ */
+async function sessionAccountAllowed(
+  session: Session,
+  context: unknown,
+): Promise<boolean> {
+  return sessionMayAct(session, callbackNote(context).signInProvider ?? null);
+}
+
+/**
+ * Runs after a session row exists. A revocation, removal, or disconnect that
+ * committed between the create hook's check and the insert has already signed
+ * the account out, so the late row is removed here.
+ */
+export async function enforceCreatedSessionStillActive(
+  session: Session,
+  context?: unknown,
+): Promise<void> {
+  if (await sessionAccountAllowed(session, context)) return;
+  await deleteExactSession(session);
+  throwAccessError(
+    "access_revoked",
+    "Account access changed while the session was being created",
+  );
+}
+
+/**
+ * A person's first identity takes a sign-up spot; connecting another one
+ * never does. One guarded insert, so concurrent sign-ups for the last spot
+ * admit exactly one.
+ */
+async function reserveFirstIdentitySpot(
+  context: GenericEndpointContext,
+  state: unknown,
+  userId: string,
+  linked: boolean,
+): Promise<void> {
+  if (linked) return;
+  if (!(await reserveSignupSpot({ userId }))) {
+    refuseAccountInsert(context, state, "signups_full", SIGNUPS_FULL_MESSAGE);
+  }
+  noteCallback(context, { reservedFor: userId });
+}
+
+/**
+ * Gives an account that has no username, such as one an organization sign-up
+ * created, the login of the GitHub account it just connected. A login another
+ * account already uses is left alone.
+ */
+async function adoptGithubUsername(userId: string, login: string): Promise<void> {
+  const username = normalizeGithubUsername(login);
+  if (!username) return;
   try {
-    await env.DB.prepare("DELETE FROM session WHERE token = ? AND user_id = ?")
-      .bind(session.token, session.userId)
+    await env.DB.prepare(
+      `UPDATE user SET username = ?2, display_username = ?3, updated_at = ?4
+       WHERE id = ?1 AND username IS NULL
+         AND NOT EXISTS (SELECT 1 FROM user AS taken WHERE taken.username = ?2)`,
+    )
+      .bind(userId, username, login, Date.now())
       .run();
-  } catch (fallbackError) {
-    throw new AggregateError(
-      [lifecycleError, fallbackError],
-      "a session of a revoked account could not be removed",
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "github_username_adopt_failed",
+        error: error instanceof Error ? error.message : String(error),
+      }),
     );
   }
 }
 
 /**
- * Runs after a session row exists. A revocation that committed between the
- * create hook's check and the insert has already swept the sessions, so the
- * late row is removed here.
+ * Refuses an account insert. Better Auth's explicit link callback runs the
+ * insert without its error-to-redirect handling, so a thrown refusal would end
+ * on a JSON page: that flow returns to its error URL with the code instead.
  */
-export async function enforceCreatedSessionStillActive(
-  session: Session,
-): Promise<void> {
-  if (await isActiveAccount(session.userId)) return;
-  await deleteExactSession(session);
-  throwAccessError(
-    "access_revoked",
-    "Account access was revoked while the session was being created",
-  );
-}
-
-async function isOidcSsoProvider(providerId: string): Promise<boolean> {
-  // Better Auth SSO 1.7.0-beta.10 preserves OAuth serverContext in OIDC
-  // state, but its separate SAML RelayState omits it. Explicit account linking
-  // therefore fails closed for SAML until that server-context seam exists.
-  const providers = await drizzle(env.DB)
-    .select({ oidcConfig: schema.ssoProvider.oidcConfig })
-    .from(schema.ssoProvider)
-    .where(eq(schema.ssoProvider.providerId, providerId))
-    .limit(1);
-  return Boolean(providers[0]?.oidcConfig);
-}
-
-function getTrustedSsoLinkFromState(
-  state: Awaited<ReturnType<typeof getOAuthState>>,
-): SsoLinkFlow | null {
-  const context = state?.serverContext;
-  if (!isRecord(context)) return null;
-  const value = context[SSO_LINK_CONTEXT_KEY];
-  if (
-    !isRecord(value) ||
-    value.kind !== "sso-link" ||
-    !isSafeIdentifier(value.userId) ||
-    !isSafeIdentifier(value.providerId) ||
-    !Number.isSafeInteger(value.expiresAt)
-  ) {
-    return null;
+function refuseAccountInsert(
+  context: GenericEndpointContext,
+  state: unknown,
+  code: string,
+  message: string,
+): never {
+  if (isRecord(state) && isRecord(state.link)) {
+    throw context.redirect(
+      withErrorCode(linkErrorURL(state) ?? "/", code, baseURL),
+    );
   }
-  return {
-    kind: "sso-link",
-    userId: value.userId,
-    providerId: value.providerId,
-    expiresAt: value.expiresAt as number,
-  };
-}
-
-function isLiveSsoLink(
-  flow: SsoLinkFlow | null,
-  userId: string | null,
-  providerId: string,
-): boolean {
-  return (
-    flow !== null &&
-    flow.userId === userId &&
-    flow.providerId === providerId &&
-    flow.expiresAt > Date.now()
-  );
+  throw new APIError("FORBIDDEN", { code, message });
 }
 
 async function readOAuthState(): Promise<
@@ -456,19 +397,55 @@ async function readOAuthState(): Promise<
   }
 }
 
+// Routes that only end a session or finish a sign-in.
+const SESSION_EXEMPT_PATHS: ReadonlySet<string> = new Set([
+  "/sign-out",
+  "/oauth2/end-session",
+  "/admin/stop-impersonating",
+  "/callback/:id",
+  "/sso/callback",
+  "/sso/callback/:providerId",
+]);
+
+// Routes that grant or widen an app's access to the account.
+const IMPERSONATION_OAUTH_PATHS: ReadonlySet<string> = new Set([
+  "/oauth2/authorize",
+  "/oauth2/consent",
+  "/oauth2/update-consent",
+]);
+
 const accountAccessBeforeRequest = createAuthMiddleware(async (context) => {
   // disabledPaths protects HTTP. This guard also protects direct auth.api
   // calls, including leaveOrganization, which has no member-removal hook.
   if (context.path === "/organization/leave" || context.path === "/organization/remove-member") {
     throw new APIError("FORBIDDEN", { message: "Use the application organization membership routes" });
   }
-  // Better Auth's id-token link shortcut does not invoke validateUserInfo in
-  // 1.7.0-beta.10. Reject direct social links: GitHub is linked only by
-  // signing up with GitHub, and SSO only through the explicit SSO-link flow.
-  if (context.path === "/link-social") {
+  // Usernames come from GitHub. The username plugin only freezes one once it
+  // is set, so an account without one could otherwise claim any login.
+  if (context.path === "/update-user") {
+    throw new APIError("FORBIDDEN", { message: "Profile details come from your sign-in provider" });
+  }
+  // Better Auth's id-token shortcut signs in or links without the state-bound
+  // redirect, and its link path skips validateUserInfo in 1.7.0-beta.10.
+  if (
+    (context.path === "/sign-in/social" || context.path === "/link-social") &&
+    isRecord(context.body) &&
+    context.body.idToken !== undefined
+  ) {
     throwAccessError(
-      "explicit_github_link_required",
-      "GitHub can only be connected by signing up with GitHub",
+      "id_token_sign_in_disabled",
+      "Continue through the provider's sign-in page",
+    );
+  }
+  // A signed-in account can connect GitHub through Better Auth's link flow.
+  // Organizations connect through the organization sign-in link intent.
+  if (
+    context.path === "/link-social" &&
+    (!isRecord(context.body) || context.body.provider !== "github")
+  ) {
+    throwAccessError(
+      "link_provider_unsupported",
+      "Only GitHub can be connected here",
     );
   }
   // Session inspection carries no credential material beyond the cookie, and
@@ -476,72 +453,108 @@ const accountAccessBeforeRequest = createAuthMiddleware(async (context) => {
   if (context.path === "/get-session") return undefined;
 
   const requestHeaders = context.request?.headers ?? context.headers;
-  const encodedHandoff = requestHeaders?.get(SSO_LINK_HANDOFF_HEADER);
+  const encodedIntent = requestHeaders?.get(SSO_INTENT_HEADER);
+  if (encodedIntent && context.path !== "/sign-in/sso") {
+    throwAccessError(
+      "sso_intent_mismatch",
+      "The organization sign-in request does not match its intent",
+    );
+  }
+  // Any session may sign out, end an impersonation, or finish a sign-in
+  // callback, even one whose account lost access: the identity gate checks
+  // the callback's own account. Hooks see route templates, not request paths.
+  if (SESSION_EXEMPT_PATHS.has(context.path)) return undefined;
+
   const session = await getSessionFromCtx(context, {
     disableCookieCache: true,
     disableRefresh: true,
   });
   const sessionUserId = session?.user.id ?? null;
-  const sessionActive = sessionUserId
-    ? await isActiveAccount(sessionUserId)
-    : false;
+  // A session lasts only while its account can sign in, as when it was made.
+  const sessionActive = session ? await sessionMayAct(session.session) : false;
+  // An admin impersonating someone must not leave a sign-in method or app
+  // grant of their own on that account: it would outlive the impersonation.
+  const impersonating = isImpersonatedSession(session?.session);
+  if (context.path === "/link-social" && impersonating) {
+    throwAccessError(
+      "impersonation_link_forbidden",
+      SSO_ERROR_MESSAGES.impersonation_link_forbidden,
+    );
+  }
+  if (impersonating && IMPERSONATION_OAUTH_PATHS.has(context.path)) {
+    throwAccessError(
+      "impersonation_oauth_forbidden",
+      "Stop impersonating before authorizing apps",
+    );
+  }
+  // A connected sign-in method stays a way in, so connecting one needs a
+  // recent sign-in, like Better Auth's fresh-session routes: an older session
+  // someone took over can't add their own.
+  const recentSignIn =
+    !session ||
+    Date.now() - new Date(session.session.createdAt).getTime() <
+      RECENT_SIGN_IN_SECONDS * 1000;
+  if (context.path === "/link-social" && !recentSignIn) {
+    throwAccessError("session_not_fresh", "Sign in again to connect GitHub");
+  }
 
-  if (encodedHandoff) {
-    const handoff = await verifyHandoff(encodedHandoff);
-    if (!handoff) {
+  if (context.path === "/sign-in/sso") {
+    // Organization sign-in starts only from Intar's routes. Their signed
+    // intent travels in the OAuth state, and the callback enforces it.
+    const intent = encodedIntent ? await verifySsoIntent(encodedIntent) : null;
+    if (!intent) {
       throwAccessError(
-        "invalid_sso_link_handoff",
-        "The SSO link handoff is invalid",
+        "sso_intent_required",
+        "Start organization sign-in from Intar",
       );
     }
-    const { expiresAt, providerId, userId } = handoff;
+    if (intent.kind === "link" && impersonating) {
+      throwAccessError(
+        "impersonation_link_forbidden",
+        SSO_ERROR_MESSAGES.impersonation_link_forbidden,
+      );
+    }
+    if (intent.kind === "link" && !recentSignIn) {
+      throwAccessError(
+        "session_not_fresh",
+        "Sign in again to connect your organization",
+      );
+    }
     if (
-      context.path !== "/sign-in/sso" ||
-      context.body?.providerId !== providerId ||
-      context.body?.providerType === "saml" ||
-      !(await isOidcSsoProvider(providerId)) ||
-      sessionUserId !== userId ||
-      !sessionActive ||
-      !(await hasLinkedProviderAccount(userId, "github"))
+      !isRecord(context.body) ||
+      context.body.providerId !== intent.providerId ||
+      // Intents are signed only for OIDC providers; SAML RelayState would
+      // drop the intent the callback needs.
+      context.body.providerType === "saml" ||
+      (intent.kind === "link" &&
+        (sessionUserId !== intent.userId || !sessionActive))
     ) {
       throwAccessError(
-        "invalid_sso_link_handoff",
-        "The SSO link handoff does not match this request",
+        "sso_intent_mismatch",
+        "The organization sign-in request does not match its intent",
       );
     }
-    await addOAuthServerContext({
-      [SSO_LINK_CONTEXT_KEY]: {
-        kind: "sso-link",
-        userId,
-        providerId,
-        expiresAt,
-      },
-    });
+    await addOAuthServerContext({ [SSO_INTENT_CONTEXT_KEY]: intent });
   }
 
   if (!sessionUserId || sessionActive) return undefined;
-
-  // A session whose account lost access may only sign out or finish a sign-in
-  // callback. The identity gate checks the callback's own account.
-  if (
-    context.path === "/sign-out" ||
-    context.path === "/callback/github" ||
-    context.path === "/sso/callback" ||
-    context.path.startsWith("/sso/callback/")
-  ) {
-    return undefined;
-  }
-
   return throwAccessError("access_revoked");
 });
 
 const accountAccessAfterRequest = createAuthMiddleware(async (context) => {
   if (context.path === "/oauth2/token") {
-    const userId = await oauthIssuanceUserState.get();
-    if (userId) {
+    const issuance = await oauthIssuanceState.get();
+    if (issuance) {
+      // The grant type comes from the provider, which normalizes it; the
+      // refresh token is the raw value it looked up.
+      const presented =
+        issuance.refreshGrant && isRecord(context.body)
+          ? context.body.refresh_token
+          : null;
       await enforceActiveOAuthIssuance({
-        userId,
+        userId: issuance.userId,
         returned: context.context.returned,
+        presentedRefreshToken: typeof presented === "string" ? presented : null,
       });
     }
     return undefined;
@@ -556,10 +569,11 @@ const accountAccessAfterRequest = createAuthMiddleware(async (context) => {
 
   // The provider has authenticated the introspection client / bearer token by
   // this point. Public subject identifiers are Better Auth user ids because
-  // this provider does not enable pairwise subjects.
+  // this provider does not enable pairwise subjects. A token lasts only while
+  // its account can sign in, like a session.
   const returned = context.context.returned;
   const subject = isRecord(returned) ? returned.sub : null;
-  if (typeof subject !== "string" || (await isActiveAccount(subject))) {
+  if (typeof subject !== "string" || (await canSignIn(subject))) {
     return undefined;
   }
 
@@ -571,6 +585,15 @@ const accountAccessAfterRequest = createAuthMiddleware(async (context) => {
     message: "OAuth credential is no longer active",
   });
 });
+
+async function emailVerifiedFor(userId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT email_verified AS verified FROM user WHERE id = ?1",
+  )
+    .bind(userId)
+    .first<{ verified: number }>();
+  return row?.verified === 1;
+}
 
 async function validateProviderIdentity(
   data: {
@@ -586,17 +609,20 @@ async function validateProviderIdentity(
         | undefined;
     };
   },
+  context: unknown,
 ) {
   const state = await readOAuthState();
-  const ssoLink = getTrustedSsoLinkFromState(state);
-  const stateTargetUserId =
+  const ssoIntent = ssoIntentFromState(state);
+  // Better Auth's explicit link flow (linkSocial) stores the signed-in user in
+  // the state; its callback passes the provider's account id as `user.id`.
+  const explicitLinkUserId =
     typeof state?.link?.userId === "string" ? state.link.userId : null;
   const incomingUserId =
     typeof data.user.id === "string" ? data.user.id : null;
   const targetUserId =
     data.source.action === "create-user"
       ? null
-      : (stateTargetUserId ?? incomingUserId);
+      : (explicitLinkUserId ?? incomingUserId);
 
   if (data.source.method === "oauth") {
     if (data.source.oauth?.providerId !== "github") {
@@ -605,45 +631,105 @@ async function validateProviderIdentity(
         "Sign in with GitHub",
       );
     }
-    // GitHub never completes an SSO-link flow or a stock account link.
-    if (ssoLink || state?.link) {
-      return rejectIdentity(
-        "explicit_github_link_required",
-        "GitHub can only be connected by signing up with GitHub",
-      );
+    // A GitHub callback never finishes an organization sign-in.
+    if (ssoIntent) {
+      return rejectIdentity("github_flow_invalid", "Start GitHub sign-in again");
     }
 
     switch (data.source.action) {
       case "sign-in":
-        return (await isActiveAccount(targetUserId))
-          ? undefined
-          : rejectIdentity("access_revoked", "This account no longer has access");
+        if (!(await isActiveAccount(targetUserId))) {
+          return rejectIdentity("access_revoked", "This account no longer has access");
+        }
+        noteCallback(context, { signInProvider: "github" });
+        return undefined;
       case "create-user":
         // A cheap pre-check that keeps a full cap from creating account-less
         // user rows. The account hook's reservation is authoritative.
-        return (await hasOpenSignupSpot({ userId: null }))
-          ? undefined
-          : rejectIdentity("signups_full", SIGNUPS_FULL_MESSAGE);
-      case "link-account":
-        // Better Auth classifies a GitHub callback as `link-account` when its
-        // verified email matches an existing user without this GitHub
-        // identity. Only an account-less user row, left by a sign-up that
-        // lost the race for the last spot, may complete its sign-up this way.
-        if (!targetUserId || !(await isActiveAccount(targetUserId))) {
+        if (!(await hasOpenSignupSpot({ userId: null }))) {
+          return rejectIdentity("signups_full", SIGNUPS_FULL_MESSAGE);
+        }
+        noteCallback(context, { signInProvider: "github" });
+        return undefined;
+      case "link-account": {
+        // Connect GitHub from Profile: the signed-in account that started the
+        // link receives the GitHub identity, whatever its email.
+        if (explicitLinkUserId) {
+          const [link, identity] = await Promise.all([
+            checkLinkSession(
+              context as GenericEndpointContext,
+              explicitLinkUserId,
+            ),
+            identityState(explicitLinkUserId),
+          ]);
+          if (link.refusal) {
+            return rejectIdentity(
+              link.refusal,
+              link.refusal === "access_revoked"
+                ? "This account no longer has access"
+                : SSO_ERROR_MESSAGES[link.refusal],
+            );
+          }
+          if (identity.github) {
+            return rejectIdentity(
+              "github_already_connected",
+              "This account already has a GitHub account",
+            );
+          }
+          noteCallback(context, {
+            linkedUserId: explicitLinkUserId,
+            githubLogin: githubLoginOf(data.source.oauth?.profile),
+            linkSessionId: link.sessionId,
+          });
+          return undefined;
+        }
+        const [active, identity] = targetUserId
+          ? await Promise.all([
+              isActiveAccount(targetUserId),
+              identityState(targetUserId),
+            ])
+          : [false, null];
+        if (!targetUserId || !active || !identity) {
           return rejectIdentity(
             "access_revoked",
             "This account no longer has access",
           );
         }
-        if (await hasAnyLinkedAccount(targetUserId)) {
+        // Better Auth classifies a GitHub callback as `link-account` when its
+        // verified email matches an existing user without this GitHub
+        // identity. Only an account nobody can sign in to may be taken over
+        // this way: a sign-up that stopped between its inserts, or an account
+        // whose organization identity is gone or removed.
+        if (!identity.reclaimable) {
+          return identity.github
+            ? rejectIdentity(
+                "github_account_mismatch",
+                "This email's Intar account signs in with a different GitHub account",
+              )
+            : rejectIdentity(
+                "explicit_github_link_required",
+                "An Intar account already uses this email. Sign in to it, then connect GitHub from your profile.",
+              );
+        }
+        // Only an address Intar verified: an approved organization provider's
+        // other addresses never let a GitHub sign-in take the account over.
+        if (!(await emailVerifiedFor(targetUserId))) {
           return rejectIdentity(
             "explicit_github_link_required",
-            "This GitHub account can't be linked to an existing account",
+            "An Intar account already uses this email. Sign in to it, then connect GitHub from your profile.",
           );
         }
-        return (await hasOpenSignupSpot({ userId: targetUserId }))
-          ? undefined
-          : rejectIdentity("signups_full", SIGNUPS_FULL_MESSAGE);
+        // An account that still has identity rows already holds a spot.
+        if (!identity.linked && !(await hasOpenSignupSpot({ userId: targetUserId }))) {
+          return rejectIdentity("signups_full", SIGNUPS_FULL_MESSAGE);
+        }
+        noteCallback(context, {
+          signInProvider: "github",
+          linkedUserId: targetUserId,
+          githubLogin: githubLoginOf(data.source.oauth?.profile),
+        });
+        return undefined;
+      }
     }
   }
 
@@ -658,29 +744,73 @@ async function validateProviderIdentity(
         "The organization identity provider is missing",
       );
     }
-    if (data.source.action === "create-user") {
-      return rejectIdentity(
-        "github_identity_required",
-        "Sign up with GitHub first, then connect your organization",
-      );
+    // Explicit links finish in the SSO callback hook before user resolution,
+    // so only a sign-in that Intar started for this provider reaches here.
+    if (ssoIntent?.kind !== "sign-in" || ssoIntent.providerId !== providerId) {
+      return ssoRejection("sso_flow_invalid");
     }
-    if (
-      !targetUserId ||
-      !(await isActiveAccount(targetUserId)) ||
-      !(await hasLinkedProviderAccount(targetUserId, "github"))
-    ) {
-      return rejectIdentity(
-        "access_revoked",
-        "This account no longer has access",
-      );
-    }
-    if (data.source.action === "sign-in" && !ssoLink) return;
-    if (isLiveSsoLink(ssoLink, targetUserId, providerId)) return;
 
-    return rejectIdentity(
-      "explicit_sso_link_required",
-      "Connect your organization from a signed-in GitHub account",
-    );
+    switch (data.source.action) {
+      case "sign-in": {
+        const account = targetUserId
+          ? await ssoSignInState(targetUserId, providerId)
+          : null;
+        if (!account?.active) {
+          return rejectIdentity(
+            "access_revoked",
+            "This account no longer has access",
+          );
+        }
+        if (account.removed) {
+          return ssoRejection("sso_removed_from_organization");
+        }
+        if (!account.allowed) {
+          return ssoRejection("sso_admin_sign_in_forbidden");
+        }
+        noteCallback(context, { signInProvider: providerId });
+        return undefined;
+      }
+      case "create-user": {
+        const refused = await checkSsoSignUp({
+          providerId,
+          email: typeof data.user.email === "string" ? data.user.email : undefined,
+          profile: data.source.sso?.profile,
+        });
+        if (!refused) noteCallback(context, { signInProvider: providerId });
+        return refused;
+      }
+      case "link-account": {
+        // The provider's email belongs to an account this identity is not
+        // connected to. An address match never links an account someone can
+        // sign in to; an account with no usable identity may be reclaimed.
+        const [account, identity] = targetUserId
+          ? await Promise.all([
+              ssoSignInState(targetUserId, providerId),
+              identityState(targetUserId),
+            ])
+          : [null, null];
+        if (!targetUserId || !account?.active || !identity) {
+          return ssoRejection("sso_email_in_use");
+        }
+        if (account.removed) {
+          return ssoRejection("sso_removed_from_organization");
+        }
+        const refused = await checkSsoReclaim({
+          providerId,
+          userId: targetUserId,
+          identity,
+          email: typeof data.user.email === "string" ? data.user.email : undefined,
+          profile: data.source.sso?.profile,
+        });
+        if (!refused) {
+          noteCallback(context, {
+            signInProvider: providerId,
+            linkedUserId: targetUserId,
+          });
+        }
+        return refused;
+      }
+    }
   }
 
   return rejectIdentity("provider_authentication_required");
@@ -725,20 +855,23 @@ function buildAuthInstance() {
     // authorization-code and refresh grants, including opaque-token flows.
     // Refresh tokens use the provider defaults: the stored hash covers the
     // complete presented token.
-    customTokenResponseFields: async ({ user }) => {
+    customTokenResponseFields: async ({ user, grantType }) => {
       if (!user) return {};
-      if (!(await isActiveAccount(user.id))) {
+      // Tokens need an account that can still sign in, like sessions.
+      if (!(await canSignIn(user.id))) {
         throwAccessError("access_revoked");
       }
-      await oauthIssuanceUserState.set(user.id);
+      await oauthIssuanceState.set({
+        userId: user.id,
+        refreshGrant: grantType === "refresh_token",
+      });
       return {};
     },
   }) as unknown as BetterAuthPlugin;
 
   return betterAuth({
     appName:
-      runtimeEnv?.BETTER_AUTH_APP_NAME ??
-      env.BETTER_AUTH_APP_NAME ??
+      authSetting("BETTER_AUTH_APP_NAME") ??
       "Astro App",
     baseURL,
     database: createOidcSsoAdapterFactory(
@@ -753,7 +886,11 @@ function buildAuthInstance() {
     logger: { disabled: true },
     // Bubble non-redirect failures to the app-owned callback boundary before
     // BetterCall can log an upstream object or synthesize a detailed response.
-    onAPIError: { throw: true },
+    // Failures before a flow's own error URL is known (a missing or expired
+    // state) land on the landing page, which explains their codes, instead of
+    // Better Auth's built-in page. Organization flows reroute in
+    // oidc-callback-error.ts.
+    onAPIError: { throw: true, errorURL: `${trustedBrowserOrigin(baseURL)}/` },
     advanced: authCookiePolicy(baseURL),
     hooks: {
       before: accountAccessBeforeRequest,
@@ -767,6 +904,7 @@ function buildAuthInstance() {
       "/change-password",
       "/delete-user",
       "/delete-user/callback",
+      "/update-user",
       "/unlink-account",
       "/admin/create-user",
       "/admin/list-users",
@@ -799,35 +937,93 @@ function buildAuthInstance() {
       enabled: false,
       disableSignUp: true,
     },
+    session: { freshAge: RECENT_SIGN_IN_SECONDS },
     account: {
       accountLinking: {
         enabled: true,
+        // Implicit links still reach validateUserInfo, which admits them
+        // only into an account nobody can sign in to.
         disableImplicitLinking: false,
-        // Provider identifiers and the signed step-up intent bind explicit
-        // account links; an address match is not an authorization boundary.
+        // Provider identifiers and signed link intents bind explicit account
+        // links; an address match is not an authorization boundary.
         allowDifferentEmails: true,
-        // Explicit account linking may refresh mapped profile fields while
-        // Better Auth preserves the existing primary email.
-        updateUserInfoOnLink: true,
+        // validateProviderIdentity decides which accounts a sign-in may
+        // reclaim: GitHub only one whose address Intar verified, an
+        // organization one its sign-up rules would have admitted.
+        requireLocalEmailVerified: false,
+        // Connecting another sign-in method keeps the name and avatar.
+        updateUserInfoOnLink: false,
       },
     },
     user: {
-      validateUserInfo: (data) => validateProviderIdentity(data),
+      validateUserInfo: (data, context) =>
+        validateProviderIdentity(data, context),
+      additionalFields: {
+        // Set only by an organization sign-up's create hook.
+        signupOrganizationId: {
+          type: "string",
+          required: false,
+          returned: false,
+          input: false,
+        },
+      },
     },
     socialProviders: {
       github: {
-        clientId: runtimeEnv?.GITHUB_CLIENT_ID ?? env.GITHUB_CLIENT_ID,
-        clientSecret:
-          runtimeEnv?.GITHUB_CLIENT_SECRET ?? env.GITHUB_CLIENT_SECRET,
+        clientId: authSetting("GITHUB_CLIENT_ID") ?? "",
+        clientSecret: authSetting("GITHUB_CLIENT_SECRET") ?? "",
         mapProfileToUser: (profile) => ({
           username: profile.login,
           displayUsername: profile.login,
         }),
       },
     },
-    // These hooks always throw an APIError to refuse. Returning false would
-    // let Better Auth continue with a generic, unexplained failure.
+    // The create hooks throw an APIError to refuse: returning false would let
+    // Better Auth continue with a generic, unexplained failure. The update
+    // hook returns false on purpose, to skip one write.
     databaseHooks: {
+      user: {
+        create: {
+          // An organization sign-up names its new user here, so the account
+          // hook admits the SSO account only for the user this request made.
+          // After-create hooks run too late for that: Better Auth queues them
+          // until the account exists.
+          before: async (user, context) => {
+            const intent = ssoIntentFromState(await readOAuthState());
+            if (intent?.kind !== "sign-in") return;
+            const id = createAppId();
+            noteCallback(context, { createdUserId: id });
+            const name =
+              typeof user.name === "string" && user.name.trim()
+                ? user.name
+                : emailLocalPart(user.email);
+            // checkSsoSignUp admitted the address: it is on the provider's
+            // DNS-verified domain, or an approved provider verified it. Only
+            // the first is recorded as verified, which lets a later GitHub
+            // sign-in with it reclaim the account if its organization identity
+            // goes away. An approved provider's other addresses stay
+            // unverified, so it can't set up an account for someone else's
+            // address that their own sign-in would then land in: only its
+            // organization may reclaim those.
+            const signUp = await organizationSignUpFields(
+              intent.providerId,
+              user.email,
+            );
+            return { data: { id, name, ...signUp } };
+          },
+        },
+        update: {
+          // trustEmailVerified would also let every organization sign-in mark
+          // an existing account's address verified, past the rules that admit
+          // the provider's addresses. Only an organization sign-up records it.
+          before: async (user, context) => {
+            const provider = callbackNote(context).signInProvider;
+            return user.emailVerified === true && provider && provider !== "github"
+              ? false
+              : undefined;
+          },
+        },
+      },
       account: {
         create: {
           before: async (account, context) => {
@@ -837,48 +1033,150 @@ function buildAuthInstance() {
                 "Account links require an endpoint context",
               );
             }
+            const state = await readOAuthState();
+            const identity = await identityState(account.userId);
             if (account.providerId === "github") {
-              if (await hasLinkedProviderAccount(account.userId, "github")) {
-                throwAccessError(
-                  "explicit_github_link_required",
+              if (identity.github) {
+                refuseAccountInsert(
+                  context,
+                  state,
+                  "github_already_connected",
                   "This account already has a GitHub account",
                 );
               }
-              // The authoritative cap: one guarded insert, so concurrent
-              // sign-ups for the last spot admit exactly one.
-              if (!(await reserveSignupSpot({ userId: account.userId }))) {
-                throw new APIError("FORBIDDEN", {
-                  code: "signups_full",
-                  message: SIGNUPS_FULL_MESSAGE,
-                });
+              // Outside Profile's explicit link, only a sign-up or a reclaim
+              // of an account nobody can sign in to adds GitHub here.
+              if (!isRecord(state) || !isRecord(state.link)) {
+                if (!identity.reclaimable) {
+                  refuseAccountInsert(
+                    context,
+                    state,
+                    "explicit_github_link_required",
+                    "An Intar account already uses this email. Sign in to it, then connect GitHub from your profile.",
+                  );
+                }
               }
+              await reserveFirstIdentitySpot(
+                context,
+                state,
+                account.userId,
+                identity.linked,
+              );
               return;
             }
-            const flow = getTrustedSsoLinkFromState(await readOAuthState());
-            if (
-              !isLiveSsoLink(flow, account.userId, account.providerId) ||
-              !(await isActiveAccount(account.userId)) ||
-              !(await hasLinkedProviderAccount(account.userId, "github"))
-            ) {
-              throwAccessError(
-                "explicit_sso_link_required",
-                "Connect your organization from a signed-in GitHub account",
+            // Explicit organization links insert their account in the SSO
+            // callback hook. Here a sign-in Intar started for this provider
+            // may give an account its first usable identity: the user its
+            // sign-up just created, or an account nobody can sign in to that
+            // validateUserInfo let it reclaim.
+            const intent = ssoIntentFromState(state);
+            const createdHere =
+              callbackNote(context).createdUserId === account.userId;
+            try {
+              if (
+                intent?.kind !== "sign-in" ||
+                intent.providerId !== account.providerId ||
+                (!createdHere && !identity.reclaimable)
+              ) {
+                throwAccessError(
+                  "explicit_sso_link_required",
+                  "Connect your organization from a signed-in account",
+                );
+              }
+              await reserveFirstIdentitySpot(
+                context,
+                state,
+                account.userId,
+                identity.linked,
               );
+            } catch (error) {
+              // D1 has no transactions: a refused sign-up removes the user row
+              // it just created, so its address stays free.
+              if (createdHere) await deleteUnclaimedSsoUser(account.userId);
+              throw error;
             }
           },
-          after: async (account) => {
-            if (account.providerId !== "github") return;
-            // The linked GitHub account now holds the spot; the reservation
-            // stops counting either way, so a failed clear is only logged.
-            try {
-              await clearSignupReservation({ userId: account.userId });
-            } catch (error) {
-              console.warn(
-                JSON.stringify({
-                  event: "signup_reservation_clear_failed",
-                  error: error instanceof Error ? error.message : String(error),
-                }),
+          after: async (account, context) => {
+            // The before hook refuses an insert without an endpoint context.
+            const note = callbackNote(context);
+            // The linked account now holds the spot; the reservation stops
+            // counting either way, so a failed clear is only logged.
+            if (note.reservedFor === account.userId) {
+              try {
+                await clearSignupReservation({ userId: account.userId });
+              } catch (error) {
+                console.warn(
+                  JSON.stringify({
+                    event: "signup_reservation_clear_failed",
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+                );
+              }
+            }
+            // An organization sign-in's identity lands after its checks. If
+            // the provider was removed in between, its removal already
+            // deleted the provider's identities, so this one goes too, with
+            // the user a sign-up just made: otherwise it would hold a sign-up
+            // spot for a provider that no longer exists. Better Auth runs this
+            // hook even when the callback then failed.
+            if (
+              account.providerId !== "github" &&
+              !(await env.DB.prepare(
+                "SELECT 1 AS present FROM sso_provider WHERE provider_id = ?1",
+              )
+                .bind(account.providerId)
+                .first())
+            ) {
+              await env.DB.batch([
+                env.DB.prepare(
+                  "DELETE FROM account WHERE id = ?1 AND provider_id = ?2",
+                ).bind(account.id, account.providerId),
+                // This callback may already have opened a session, which
+                // can't act without an identity; the throw below skips the
+                // session hooks that would remove it.
+                env.DB.prepare(
+                  `DELETE FROM session WHERE user_id = ?1
+                     AND impersonated_by IS NULL
+                     AND NOT ${usableIdentityExistsSql("?1")}`,
+                ).bind(account.userId),
+              ]);
+              if (note.createdUserId === account.userId) {
+                await deleteUnclaimedSsoUser(account.userId);
+              }
+              throwAccessError(
+                "sso_flow_invalid",
+                SSO_ERROR_MESSAGES.sso_flow_invalid,
               );
+            }
+            // Better Auth links the GitHub account after the callback's
+            // session check, without a guard of its own: a sign-out that
+            // landed in between wins, and the new identity goes.
+            if (
+              account.providerId === "github" &&
+              note.linkSessionId &&
+              !(await env.DB.prepare("SELECT 1 AS live FROM session WHERE id = ?1")
+                .bind(note.linkSessionId)
+                .first())
+            ) {
+              await env.DB.prepare(
+                "DELETE FROM account WHERE id = ?1 AND provider_id = 'github'",
+              )
+                .bind(account.id)
+                .run();
+              throwAccessError(
+                "link_session_ended",
+                SSO_ERROR_MESSAGES.link_session_ended,
+              );
+            }
+            if (note.linkedUserId === account.userId) {
+              if (account.providerId === "github" && note.githubLogin) {
+                await adoptGithubUsername(account.userId, note.githubLogin);
+              }
+              recordSecurityEvent(context?.request, {
+                event: "security.identity_linked",
+                outcome: "accepted",
+                userId: account.userId,
+              });
             }
           },
         },
@@ -886,13 +1184,13 @@ function buildAuthInstance() {
       session: {
         create: {
           // The admin plugin's banned-user check runs before this hook.
-          before: async (session: Session) => {
-            if (!(await isActiveAccount(session.userId))) {
+          before: async (session: Session, context) => {
+            if (!(await sessionAccountAllowed(session, context))) {
               throwAccessError("access_revoked");
             }
           },
           after: async (session: Session, context) => {
-            await enforceCreatedSessionStillActive(session);
+            await enforceCreatedSessionStillActive(session, context);
             recordSecurityEvent(context?.request, {
               event: "security.session_created", outcome: "accepted",
               userId: session.userId,
@@ -939,27 +1237,38 @@ function buildAuthInstance() {
           enabled: true,
           tokenPrefix: "intar-oidc",
         },
+        // Off the verified domain Better Auth refuses an email match before
+        // validateUserInfo runs unless the provider verified the address.
+        // validateUserInfo admits such a match only into an account nobody can
+        // sign in to, under the sign-up rules, so reclaims can reach it.
+        trustEmailVerified: true,
         // The verified provider, not the user's email suffix, owns access.
         // Custom provisioning also prevents an ordinary GitHub callback from
         // joining an organization through the SSO plugin's domain hook.
         organizationProvisioning: { disabled: true },
+        // Signing in through an organization's provider makes the person a
+        // member, unless an admin removed them. Inactive accounts never gain
+        // organization tenancy.
         provisionUserOnEveryLogin: true,
         provisionUser: async ({ user, provider }) => {
-          // An account that lost access must not gain organization tenancy.
-          if (!(await isActiveAccount(user.id))) return;
           if (!provider.organizationId) return;
-          await db
-            .insert(schema.member)
-            .values({
-              id: createAppId(),
-              organizationId: provider.organizationId,
-              userId: user.id,
-              role: "member",
-              createdAt: new Date(),
-            })
-            .onConflictDoNothing({
-              target: [schema.member.organizationId, schema.member.userId],
-            });
+          await provisionOrganizationMember({
+            userId: user.id,
+            organizationId: provider.organizationId,
+          });
+        },
+        // Added by patches/@better-auth%2Fsso@1.7.0-beta.10.patch. A login its
+        // organization removed goes no further. An explicit link binds the
+        // verified identity to the signed-in account before the plugin
+        // resolves a user by subject or email.
+        beforeOIDCUserResolution: async ({
+          context,
+          provider,
+          stateData,
+          userInfo,
+        }) => {
+          const login = { context, provider, stateData, subject: String(userInfo.id) };
+          return (await removedLoginRedirect(login)) ?? completeSsoLink(login);
         },
       }),
       jwt({
@@ -1001,7 +1310,7 @@ function buildAuthInstance() {
       }),
       oauthProviderPlugin,
     ],
-    secret: runtimeEnv?.BETTER_AUTH_SECRET ?? env.BETTER_AUTH_SECRET,
+    secret: authSetting("BETTER_AUTH_SECRET"),
   });
 }
 

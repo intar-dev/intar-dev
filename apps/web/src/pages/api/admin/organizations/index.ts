@@ -1,8 +1,16 @@
 import { env } from "cloudflare:workers";
 import type { APIRoute } from "astro";
-import { count, desc, eq } from "drizzle-orm";
+import { count, desc, eq, isNotNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { member, organization, scenarioAssignments, user } from "@/db/schema";
+import {
+  member,
+  organization,
+  organizationMemberRemovals,
+  scenarioAssignments,
+  ssoProvider,
+  ssoProviderPolicies,
+  user,
+} from "@/db/schema";
 import { jsonResponse, requireAdminUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
 
@@ -13,8 +21,14 @@ export const GET: APIRoute = async ({ request }) => {
   if (!authz.ok) return authz.response;
   try {
     const db = drizzle(env.DB);
-    const [organizations, memberCounts, assignmentCounts, owners] =
-      await Promise.all([
+    const [
+      organizations,
+      memberCounts,
+      assignmentCounts,
+      owners,
+      providers,
+      removalCounts,
+    ] = await Promise.all([
         db
           .select({
             id: organization.id,
@@ -44,6 +58,29 @@ export const GET: APIRoute = async ({ request }) => {
           .from(member)
           .innerJoin(user, eq(member.userId, user.id))
           .where(eq(member.role, "owner")),
+        // Platform admins approve off-domain sign-ups here, without being
+        // members of the organization.
+        db
+          .select({
+            organizationId: ssoProvider.organizationId,
+            domain: ssoProvider.domain,
+            domainVerified: ssoProvider.domainVerified,
+            allowExternalEmailSignups:
+              ssoProviderPolicies.allowExternalEmailSignups,
+          })
+          .from(ssoProvider)
+          .leftJoin(
+            ssoProviderPolicies,
+            eq(ssoProviderPolicies.providerId, ssoProvider.providerId),
+          )
+          .where(isNotNull(ssoProvider.organizationId)),
+        db
+          .select({
+            organizationId: organizationMemberRemovals.organizationId,
+            removed: count(),
+          })
+          .from(organizationMemberRemovals)
+          .groupBy(organizationMemberRemovals.organizationId),
       ]);
 
     const membersByOrganization = new Map(
@@ -58,6 +95,19 @@ export const GET: APIRoute = async ({ request }) => {
         { name: row.ownerName, username: row.ownerUsername },
       ]),
     );
+    const providerByOrganization = new Map(
+      providers.map((row) => [
+        row.organizationId,
+        {
+          domain: row.domain,
+          domainVerified: row.domainVerified,
+          allowExternalEmailSignups: row.allowExternalEmailSignups === true,
+        },
+      ]),
+    );
+    const removalsByOrganization = new Map(
+      removalCounts.map((row) => [row.organizationId, row.removed]),
+    );
     return jsonResponse({
       organizations: organizations.map((entry) => ({
         id: entry.id,
@@ -67,6 +117,8 @@ export const GET: APIRoute = async ({ request }) => {
         memberCount: membersByOrganization.get(entry.id) ?? 0,
         assignmentCount: assignmentsByOrganization.get(entry.id) ?? 0,
         owner: ownerByOrganization.get(entry.id) ?? null,
+        oidc: providerByOrganization.get(entry.id) ?? null,
+        removedMemberCount: removalsByOrganization.get(entry.id) ?? 0,
       })),
     });
   } catch (error) {

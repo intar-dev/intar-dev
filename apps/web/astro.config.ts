@@ -56,7 +56,8 @@ export default defineConfig({
           codeSplitting: {
             groups: [
               {
-                name: "terminal",
+                // Not "terminal": lucide's Terminal icon gets that chunk name.
+                name: "xterm",
                 test: /node_modules[\\/]@xterm[\\/]/,
                 priority: 30,
               },

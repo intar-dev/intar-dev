@@ -40,6 +40,20 @@ describe("security events", () => {
     expect(info).toHaveBeenCalledTimes(1);
   });
 
+  it("audits organization sign-in starts and sign-in method changes as auth requests", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(securityRoute("/api/organization-sign-in/start")).toBe("auth/organization-sign-in");
+    expect(securityRoute("/api/account-links/sso/start")).toBe("auth/organization-link");
+    expect(securityRoute("/api/account-links/secret-provider")).toBe("auth/account-links");
+    // Listing sign-in methods changes nothing.
+    expect(securityRoute("/api/account-links")).toBe("api");
+    recordSecurityResponse(new Request("https://intar.dev/api/organization-sign-in/start"), new Response(null, { status: 200 }));
+    recordSecurityResponse(new Request("https://intar.dev/api/account-links/sso/start"), new Response(null, { status: 502 }));
+    expect(JSON.parse(String(info.mock.calls[0]?.[0]))).toMatchObject({ event: "security.auth_request", outcome: "accepted" });
+    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ event: "security.auth_request", outcome: "error" });
+  });
+
   it("records an OAuth error redirect as rejected without copying its details", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     recordSecurityResponse(new Request("https://intar.dev/api/auth/callback/github"),

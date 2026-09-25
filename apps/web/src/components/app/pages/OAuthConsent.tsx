@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ArrowUpRight, CheckCircle2, ShieldCheck } from "lucide-react";
-import { useSession } from "../hooks/useSession";
+import { useSessionAccess } from "../hooks/useSession";
 import { AuthShell } from "../patterns/AuthShell";
 import { InlineFeedback } from "../patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -134,7 +134,8 @@ export function OAuthConsent() {
   const searchParams = new URLSearchParams(oauthQuery);
   const clientId = searchParams.get("client_id");
   const scopes = parseScopes(searchParams.get("scope"));
-  const { data: session, isLoading: sessionLoading } = useSession();
+  // A session the server no longer lets act can't answer either.
+  const { session, access, isLoading: sessionLoading } = useSessionAccess();
 
   const clientQuery = useQuery({
     queryKey: ["oauth-client-prelogin", clientId, oauthQuery],
@@ -163,7 +164,7 @@ export function OAuthConsent() {
       : null;
   const clientError =
     clientQuery.error instanceof Error ? clientQuery.error.message : null;
-  const hasSignedInUser = Boolean(session?.user);
+  const hasSignedInUser = access === "active";
   const oauthQueryMissing = !oauthQuery || !clientId;
   const canRespond =
     hasSignedInUser && !oauthQueryMissing && !consentMutation.isPending;
@@ -225,7 +226,7 @@ export function OAuthConsent() {
               <ConsentDetail label="Client ID">
                 <code className="break-all">{clientId}</code>
               </ConsentDetail>
-              {session?.user ? (
+              {hasSignedInUser && session?.user ? (
                 <ConsentDetail label="Signed in as">
                   <span className="break-all">{session.user.email}</span>
                 </ConsentDetail>

@@ -1,5 +1,44 @@
+diff --git a/dist/index-A_DJ_AqL.d.mts b/dist/index-A_DJ_AqL.d.mts
+index 4b12a6f922364928b743ef09336d1d9b54a0a24e..ff3ee14b94eedfe8a47ebd1079b808a3c37a4f8e 100644
+--- a/dist/index-A_DJ_AqL.d.mts
++++ b/dist/index-A_DJ_AqL.d.mts
+@@ -2,6 +2,7 @@ import { APIError } from "better-auth/api";
+ import * as z from "zod";
+ import { DBFieldAttribute, FieldAttributeToObject, InferAdditionalFieldsFromPluginOptions, RemoveFieldsWithReturnedFalse } from "better-auth/db";
+ import { Awaitable, OAuth2Tokens, User } from "better-auth";
++import { GenericEndpointContext } from "@better-auth/core";
+ import * as better_call0 from "better-call";
+ 
+ //#region src/saml/algorithms.d.ts
+@@ -226,6 +227,26 @@ interface SSOOptions {
+      */
+     provider: SSOProvider<SSOOptions>;
+   }) => Awaitable<void>) | undefined;
++  /**
++   * Runs after the OIDC tokens and ID token are verified, before the plugin
++   * resolves a user. Return a URL to finish the callback with a redirect to
++   * it, for example after the application linked the identity to the
++   * signed-in user. Return nothing to continue with the default resolution.
++   *
++   * Added by a local patch; not part of the upstream plugin.
++   */
++  beforeOIDCUserResolution?: ((data: {
++    context: GenericEndpointContext;
++    provider: SSOProvider<SSOOptions>;
++    stateData: Record<string, any>;
++    userInfo: {
++      id: string;
++      email: string;
++      name?: string | undefined;
++      image?: string | undefined;
++    };
++    profile: Record<string, any> | undefined;
++  }) => Awaitable<string | undefined | void>) | undefined;
+   /**
+    * If true, the `provisionUser` callback will be called on every login,
+    * not just when a new user is registered. This is useful when you need
 diff --git a/dist/index.mjs b/dist/index.mjs
-index b62dd8f6706f8efe36df35f9609bf406896dafda..fdd091e25cb059f046e9a0ced609d6d8899d5ac8 100644
+index b62dd8f6706f8efe36df35f9609bf406896dafda..ecb84d91a558e738fe800e583ea8a70d6aed2a83 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -3236,7 +3236,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData) {
@@ -11,3 +50,23 @@ index b62dd8f6706f8efe36df35f9609bf406896dafda..fdd091e25cb059f046e9a0ced609d6d8
  	if (config.tokenEndpointAuthentication === "private_key_jwt") {
  		let resolved;
  		const matchingDefault = options?.defaultSSO?.find((p) => p.providerId === provider.providerId && "privateKey" in p && p.privateKey);
+@@ -3330,6 +3330,19 @@ async function handleOIDCCallback(ctx, options, providerId, stateData) {
+ 	const userInfoEmail = userInfo.email;
+ 	const userInfoId = userInfo.id;
+ 	const isTrustedProvider = "domainVerified" in provider && provider.domainVerified === true && validateEmailDomain(userInfoEmail, provider.domain);
++	const applicationRedirect = await options?.beforeOIDCUserResolution?.({
++		context: ctx,
++		provider,
++		stateData,
++		userInfo: {
++			id: userInfoId,
++			email: userInfoEmail,
++			name: userInfo.name,
++			image: userInfo.image
++		},
++		profile: rawProfile
++	});
++	if (applicationRedirect) throw ctx.redirect(applicationRedirect);
+ 	let linked;
+ 	try {
+ 		linked = await runWithTransaction(ctx.context.adapter, async () => {

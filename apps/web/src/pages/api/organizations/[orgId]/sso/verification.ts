@@ -2,9 +2,9 @@ import type { APIRoute } from "astro";
 import {
   jsonResponse,
   requireUserContext,
-  resolveRequestOrigin,
 } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
+import { canonicalApplicationOrigin } from "@/lib/request-security";
 import { refreshOrganizationOidcVerification } from "@/lib/organization-oidc";
 import {
   requireOrganizationRole,
@@ -29,7 +29,7 @@ export const POST: APIRoute = async ({ request, params }) => {
     });
     const provider = await refreshOrganizationOidcVerification({
       organizationId,
-      baseUrl: resolveRequestOrigin(request),
+      baseUrl: canonicalApplicationOrigin(),
     });
     return jsonResponse({ provider });
   } catch (error) {

@@ -5,9 +5,13 @@ const register = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/agent-bridge", () => ({
   requireUserContext: async () => ({ ok: true, context: { userId: "admin" } }),
-  resolveRequestOrigin: () => "https://intar.dev",
   jsonResponse: (body: unknown, init?: ResponseInit) =>
     Response.json(body, init),
+}));
+// The callback URL shown to admins comes from BETTER_AUTH_URL, which is the
+// base Better Auth uses for the redirect_uri, not from the request host.
+vi.mock("@/lib/request-security", () => ({
+  canonicalApplicationOrigin: () => "https://intar.dev",
 }));
 vi.mock("@/lib/organizations", () => ({
   resolveOrganizationId: async () => "organization",

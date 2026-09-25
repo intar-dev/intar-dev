@@ -281,6 +281,7 @@ export function sensitiveRateLimitActionFor(
 
   if (/^\/api\/support\/topics(?:\/|$)/u.test(pathname)) return "support-write";
   if (isBetterAuthStartPath(pathname)) return "auth-start";
+  if (pathname === "/api/organization-sign-in/start") return "auth-start";
   if (pathname === "/api/account-links/sso/start") return "sso-link";
   if (/^\/api\/scenarios\/[^/]+\/start$/u.test(pathname)) {
     return "scenario-start";
@@ -376,6 +377,7 @@ function isBetterAuthStartPath(pathname: string): boolean {
   return (
     pathname.startsWith("/api/auth/sign-in/") ||
     pathname.startsWith("/api/auth/sign-up/") ||
+    pathname === "/api/auth/link-social" ||
     pathname === "/api/auth/forget-password" ||
     pathname === "/api/auth/request-password-reset" ||
     pathname === "/api/auth/send-verification-email" ||

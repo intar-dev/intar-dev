@@ -29,7 +29,7 @@ describe("sign-up limit", () => {
     await ensureFixtureAdmin(env.DB, NOW);
   });
 
-  it("counts active accounts with GitHub, admins included", async () => {
+  it("counts active people with any identity once, admins included", async () => {
     await createFixtureMember({ d1: env.DB, userId: "member", now: NOW });
     await createFixtureMember({
       d1: env.DB,
@@ -50,9 +50,18 @@ describe("sign-up limit", () => {
     )
       .bind(NOW)
       .run();
+    // A second identity does not take a second spot.
+    await env.DB.prepare(
+      `INSERT INTO account (id, account_id, provider_id, user_id, created_at, updated_at)
+       VALUES ('member-oidc-row', 'member-subject', 'tenant-oidc', 'member', ?1, ?1)`,
+    )
+      .bind(NOW)
+      .run();
+    await insertAccountlessUser("no-identity");
 
-    // The fixture admin, the member, and the second admin.
-    await expect(getSignupStatus(env.DB)).resolves.toMatchObject({ taken: 3 });
+    // The fixture admin, the member, the second admin, and the account that
+    // signs in only through an organization.
+    await expect(getSignupStatus(env.DB)).resolves.toMatchObject({ taken: 4 });
   });
 
   it("keeps sign-ups closed until an administrator saves a limit", async () => {
@@ -278,7 +287,7 @@ describe("sign-up limit", () => {
     ).resolves.toMatchObject({ results: [{ userId: "fresh" }] });
   });
 
-  it("ignores reservations of users who already have GitHub or lost access", async () => {
+  it("ignores reservations of users who already have an identity or lost access", async () => {
     await saveLimit(3);
     await insertAccountlessUser("linked");
     await insertAccountlessUser("revoked");
@@ -292,8 +301,8 @@ describe("sign-up limit", () => {
     ).resolves.toBe(true);
     await expect(getSignupStatus(env.DB)).resolves.toMatchObject({ taken: 1 });
 
-    // A linked GitHub account holds the spot now, so its reservation does not
-    // count twice. A revoked account's reservation frees its spot.
+    // A linked identity holds the spot now, so its reservation does not count
+    // twice. A revoked account's reservation frees its spot.
     await ensureFixtureGithubAccount({ d1: env.DB, userId: "linked", now: NOW });
     await revokeFixtureAccount({ d1: env.DB, userId: "revoked" });
     await expect(getSignupStatus(env.DB)).resolves.toMatchObject({

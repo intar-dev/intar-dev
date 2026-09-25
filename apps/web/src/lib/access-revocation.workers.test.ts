@@ -4,7 +4,8 @@ import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { agentBootstrapTokens, agentHosts } from "@/db/schema";
-import { activeAdminSql } from "@/lib/platform-admin-authority";
+import { signOutStatements } from "@/lib/account-sign-out";
+import { activeAdminSql } from "@/lib/account-access";
 import { getSignupStatus } from "@/lib/signups";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
@@ -27,13 +28,13 @@ import {
 const effects = vi.hoisted(() => ({
   retire: vi.fn().mockResolvedValue(undefined),
   wake: vi.fn().mockResolvedValue(undefined),
-  sessions: vi.fn().mockResolvedValue(undefined),
   destroy: vi.fn().mockResolvedValue(undefined),
   routes: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/lib/auth", () => ({
-  auth: { $context: Promise.resolve({ internalAdapter: { deleteUserSessions: effects.sessions } }) },
-}));
+vi.mock("@/lib/account-sign-out", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/account-sign-out")>();
+  return { ...actual, signOutStatements: vi.fn(actual.signOutStatements) };
+});
 vi.mock("@/lib/host-runtime-wake", () => ({ retireHostRuntime: effects.retire, wakeHostRuntime: effects.wake }));
 vi.mock("@/lib/scenario-runs", () => ({
   destroyScenarioRunForUser: effects.destroy,
@@ -238,11 +239,14 @@ describe("access revocation cleanup", () => {
 
 describe("ensureAccessRevoked", () => {
   it("revokes, cleans up, and leaves a finished revocation as it is", async () => {
+    await seedConnectedSession();
     const first = await ensureAccessRevoked({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
     const second = await ensureAccessRevoked({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
 
     expect(second).toEqual(first);
-    expect(effects.sessions.mock.calls).toEqual([["owner"]]);
+    expect(await env.DB.prepare(
+      "SELECT (SELECT count(*) FROM session) + (SELECT count(*) FROM oauth_access_token) AS count",
+    ).first()).toEqual({ count: 0 });
     await expect(getAccessRevocationStatus("owner")).resolves.toEqual({
       revocationId: first.revocationId, cleanup: "completed",
     });
@@ -254,8 +258,26 @@ describe("ensureAccessRevoked", () => {
     ]);
   });
 
+  it("ends the sessions a revoked admin opened as someone else", async () => {
+    await createFixtureMember({
+      d1: env.DB, userId: "second-admin", role: "admin", githubAccountId: "second-admin-github",
+    });
+    await env.DB.prepare(
+      `INSERT INTO session (id, token, user_id, impersonated_by, expires_at, created_at, updated_at)
+       VALUES ('impersonation', 'impersonation-token', 'owner', 'second-admin', 9999999999999, 1, 1),
+              ('owner-own', 'owner-own-token', 'owner', NULL, 9999999999999, 1, 1)`,
+    ).run();
+
+    await ensureAccessRevoked({ userId: "second-admin", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
+    expect(await env.DB.prepare("SELECT id FROM session").all().then(({ results }) => results))
+      .toEqual([{ id: "owner-own" }]);
+  });
+
   it("reports an unfinished cleanup and finishes it on retry", async () => {
-    effects.sessions.mockRejectedValueOnce(new Error("session store unavailable"));
+    await seedConnectedSession();
+    vi.mocked(signOutStatements).mockImplementationOnce(() => {
+      throw new Error("session store unavailable");
+    });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       await expect(ensureAccessRevoked({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" }))
@@ -276,9 +298,28 @@ describe("ensureAccessRevoked", () => {
     await expect(ensureAccessRevoked({ userId: FIXTURE_ADMIN_ID, actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" }))
       .rejects.toMatchObject({ status: 409, code: "last_active_admin" });
     await expect(getAccessRevocationStatus(FIXTURE_ADMIN_ID)).resolves.toBeNull();
-    expect(effects.sessions).not.toHaveBeenCalled();
+    expect(signOutStatements).not.toHaveBeenCalled();
   });
 });
+
+/** Two sessions of the owner, one with an app connected through it. */
+async function seedConnectedSession(): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO session (id, token, user_id, expires_at, created_at, updated_at)
+       VALUES ('owner-app-session', 'owner-app-session-token', 'owner', 9999999999999, 1, 1),
+              ('owner-session', 'owner-session-token', 'owner', 9999999999999, 1, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO oauth_client (id, client_id, redirect_uris)
+       VALUES ('app-row', 'app', '["http://localhost/callback"]')`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO oauth_access_token (id, token, client_id, session_id, user_id, expires_at, scopes)
+       VALUES ('app-access', 'app-access-token', 'app', 'owner-app-session', 'owner', 9999999999999, '["openid"]')`,
+    ),
+  ]);
+}
 
 async function expectNothingWritten(userId: string): Promise<void> {
   expect(await env.DB.prepare("SELECT coalesce(banned, 0) AS banned FROM user WHERE id = ?").bind(userId).first())

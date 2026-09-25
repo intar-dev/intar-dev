@@ -1,4 +1,9 @@
 import { useState } from "react";
+import type { OrganizationRemovedMemberRecord } from "@/lib/organizations";
+import {
+  signupPolicyText,
+  useSignupPolicy,
+} from "../hooks/useSignupPolicy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -42,6 +47,7 @@ import {
 } from "@/components/ui/table";
 import type { AdminPeopleTab } from "./tab-search";
 import { SignupsPanel } from "./admin/SignupsPanel";
+import { RemovedMemberList } from "./organization-detail/RemovedMemberList";
 
 export function AdminPeople() {
   const routeSearch = useSearch({ from: "/app/admin/people" });
@@ -201,8 +207,10 @@ function UsersPanel() {
       ? deleteUser.error
       : confirmation?.kind === "revoke"
         ? revokeAccess.error
-        : null;
-  const actionError = setRole.error ?? finishCleanup.error;
+        : confirmation?.kind === "role"
+          ? setRole.error
+          : null;
+  const actionError = finishCleanup.error;
   const openConfirmation = (next: UserConfirmation) => {
     setRole.reset();
     deleteUser.reset();
@@ -212,6 +220,7 @@ function UsersPanel() {
   };
   const closeConfirmation = () => {
     setConfirmation(null);
+    setRole.reset();
     deleteUser.reset();
     revokeAccess.reset();
   };
@@ -424,7 +433,9 @@ function UsersPanel() {
                 ? dialogError.message
                 : confirmation?.kind === "revoke"
                   ? "Access could not be revoked"
-                  : "The user could not be deleted"}
+                  : confirmation?.kind === "role"
+                    ? "The role could not be changed"
+                    : "The user could not be deleted"}
             </InlineFeedback>
           ) : null}
           <DialogFooter>
@@ -473,7 +484,11 @@ function UsersPanel() {
   );
 }
 
-function confirmationDescription({ entry, kind }: UserConfirmation): string {
+function confirmationDescription({
+  entry,
+  kind,
+  nextRole,
+}: UserConfirmation): string {
   if (kind === "revoke") {
     return [
       `${entry.name} is signed out everywhere, their runs stop, and their personal servers are disabled.`,
@@ -494,7 +509,9 @@ function confirmationDescription({ entry, kind }: UserConfirmation): string {
       .filter(Boolean)
       .join(" ");
   }
-  return "Role changes take effect immediately. The server keeps at least one active administrator.";
+  return nextRole === "admin"
+    ? "Admins sign in with GitHub, so they need it connected. They're signed out now and sign in again as an admin."
+    : "Role changes take effect immediately. The server keeps at least one active administrator.";
 }
 
 function revokeUserAccess(userId: string) {
@@ -532,9 +549,16 @@ interface AdminOrganizationRow {
   memberCount: number;
   assignmentCount: number;
   owner: { name: string; username: string | null } | null;
+  oidc: {
+    domain: string;
+    domainVerified: boolean;
+    allowExternalEmailSignups: boolean;
+  } | null;
+  removedMemberCount: number;
 }
 
 function OrganizationsPanel() {
+  const [managedId, setManagedId] = useState<string | null>(null);
   const organizations = useQuery({
     queryKey: ["admin", "organizations"],
     queryFn: async () => {
@@ -575,12 +599,13 @@ function OrganizationsPanel() {
   }
 
   const entries = organizations.data?.organizations ?? [];
+  const managed = entries.find((entry) => entry.id === managedId) ?? null;
 
   return (
     <Section
       density="compact"
       title="Organizations"
-      description="Organization ownership, roster size, and assignment counts. Owners manage lifecycle from their workspace because deletion is blocked while owned resources exist."
+      description="Organization ownership, roster size, and assignment counts. Owners manage lifecycle from their workspace because deletion is blocked while owned resources exist. Sign-in approvals and removed people are managed here without membership."
     >
       {entries.length ? (
         <PaginatedCollection
@@ -596,6 +621,7 @@ function OrganizationsPanel() {
                   <TableHead>Owner</TableHead>
                   <TableHead>Members</TableHead>
                   <TableHead>Assignments</TableHead>
+                  <TableHead>Sign-in</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
               </TableHeader>
@@ -632,6 +658,29 @@ function OrganizationsPanel() {
                     <TableCell className="text-sm">
                       {organization.assignmentCount}
                     </TableCell>
+                    <TableCell className="text-sm">
+                      {organization.oidc || organization.removedMemberCount ? (
+                        <div className="flex items-center gap-2">
+                          <div className="min-w-0 space-y-0.5">
+                            <p className="font-mono text-xs">
+                              {organization.oidc?.domain ?? "No provider"}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {organizationSignInSummary(organization)}
+                            </p>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setManagedId(organization.id)}
+                          >
+                            Manage
+                          </Button>
+                        </div>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatRelativeTime(organization.createdAt)}
                     </TableCell>
@@ -648,6 +697,146 @@ function OrganizationsPanel() {
           description="Selected users can create the first organization from the Organizations workspace."
         />
       )}
+      {managed ? (
+        <OrganizationAccessDialog
+          organization={managed}
+          onClose={() => setManagedId(null)}
+        />
+      ) : null}
     </Section>
+  );
+}
+
+function organizationSignInSummary(organization: AdminOrganizationRow): string {
+  const parts: string[] = [];
+  if (organization.oidc) {
+    parts.push(
+      !organization.oidc.domainVerified
+        ? "Domain unverified"
+        : organization.oidc.allowExternalEmailSignups
+          ? "Any verified email"
+          : "Domain emails only",
+    );
+  }
+  if (organization.removedMemberCount) {
+    parts.push(`${organization.removedMemberCount} removed`);
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * A platform admin's controls for an organization's sign-in: approving
+ * sign-ups with emails off its verified domain, and restoring people its
+ * admins removed. Neither needs membership in the organization.
+ */
+function OrganizationAccessDialog({
+  organization,
+  onClose,
+}: {
+  organization: AdminOrganizationRow;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const removedPath = `/api/admin/organizations/${encodeURIComponent(organization.id)}/removed-members`;
+  const removed = useQuery({
+    queryKey: ["admin", "organizations", organization.id, "removed-members"],
+    queryFn: () =>
+      adminJson<{ removedMembers: OrganizationRemovedMemberRecord[] }>(removedPath, {
+        method: "GET",
+      }),
+  });
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: ["admin", "organizations"] });
+  const setPolicy = useSignupPolicy(organization.id);
+  const restore = useMutation({
+    mutationFn: (userId: string) =>
+      adminJson(`${removedPath}/${encodeURIComponent(userId)}`, {
+        method: "DELETE",
+      }),
+    // Only the latest action's failure shows; one still running keeps its own.
+    onMutate: () => {
+      if (!setPolicy.isPending) setPolicy.reset();
+    },
+    onSettled: refresh,
+  });
+  const actionError = setPolicy.error ?? restore.error;
+  const oidc = organization.oidc;
+  const removedMembers = removed.data?.removedMembers ?? [];
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{organization.name} sign-in</DialogTitle>
+          <DialogDescription>
+            Changes apply to the organization's next sign-ins.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-5">
+          {oidc ? (
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium">New accounts</h3>
+              <p className="text-caption">
+                {
+                  signupPolicyText(oidc.domain, oidc.allowExternalEmailSignups)
+                    .status
+                }
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={setPolicy.isPending}
+                onClick={() => {
+                  if (!restore.isPending) restore.reset();
+                  setPolicy.mutate(!oidc.allowExternalEmailSignups);
+                }}
+              >
+                {
+                  signupPolicyText(oidc.domain, oidc.allowExternalEmailSignups)
+                    .action
+                }
+              </Button>
+            </div>
+          ) : null}
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium">Removed people</h3>
+            {removed.error ? (
+              <InlineFeedback tone="error">
+                {removed.error instanceof Error
+                  ? removed.error.message
+                  : "Failed to load removed people"}
+              </InlineFeedback>
+            ) : removed.isPending ? (
+              <p className="text-caption">Loading…</p>
+            ) : removedMembers.length ? (
+              <RemovedMemberList
+                entries={removedMembers}
+                restoring={restore.isPending}
+                onRestore={(userId) => restore.mutate(userId)}
+              />
+            ) : (
+              <p className="text-caption">Nobody is removed.</p>
+            )}
+          </div>
+          {actionError ? (
+            <InlineFeedback tone="error">
+              {actionError instanceof Error
+                ? actionError.message
+                : "Action failed"}
+            </InlineFeedback>
+          ) : null}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Done
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

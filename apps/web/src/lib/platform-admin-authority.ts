@@ -1,7 +1,8 @@
 import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { user } from "@/db/schema";
-import { activeAccountSql } from "@/lib/account-access";
+import { session, user } from "@/db/schema";
+import { activeAdminSql, signingAdminSql } from "@/lib/account-access";
+import { signOutQueries } from "@/lib/account-sign-out";
 import { appError, type AppError } from "@/lib/app-error";
 
 // A platform administrator is an active account whose role list contains
@@ -17,13 +18,6 @@ interface PlatformUserMutationInput {
   now?: number;
 }
 
-/** Raw SQL that holds when the `user` row aliased as `alias` is an active administrator. */
-export function activeAdminSql(alias: string): string {
-  return `(${activeAccountSql(alias)} AND instr(
-    ',' || replace(lower(coalesce(${alias}.role, '')), ' ', '') || ',',
-    ',admin,'
-  ) > 0)`;
-}
 
 /** Drizzle condition that holds while `userId` is an active administrator. */
 export function activeAdministrator(userId: string): SQL {
@@ -36,21 +30,41 @@ export function activeAdministrator(userId: string): SQL {
 
 /**
  * Drizzle condition that holds unless `targetUserId` is the last active
- * administrator. Guard every write that removes a role or access with it.
+ * administrator who can still sign in. An administrator with no usable
+ * identity can't act, so they don't count. Guard every write that removes an
+ * administrator's role or access with it.
  */
 export function lastAdministratorSafe(targetUserId: string): SQL {
   return sql`(
     not exists (
       select 1 from ${user} as target_identity
       where target_identity.id = ${targetUserId}
-        and ${sql.raw(activeAdminSql("target_identity"))}
+        and ${sql.raw(signingAdminSql("target_identity"))}
     )
     or exists (
       select 1 from ${user} as other_identity
       where other_identity.id <> ${targetUserId}
-        and ${sql.raw(activeAdminSql("other_identity"))}
+        and ${sql.raw(signingAdminSql("other_identity"))}
     )
   )`;
+}
+
+/** Whether this is the only active administrator who can still sign in. */
+export async function isLastActiveAdmin(
+  userId: string,
+  d1: D1Database,
+): Promise<boolean> {
+  const row = await d1
+    .prepare(
+      `SELECT EXISTS (SELECT 1 FROM user AS identity
+           WHERE identity.id = ?1 AND ${signingAdminSql("identity")})
+         AND NOT EXISTS (SELECT 1 FROM user AS other_identity
+           WHERE other_identity.id <> ?1
+             AND ${signingAdminSql("other_identity")}) AS last`,
+    )
+    .bind(userId)
+    .first<{ last: number }>();
+  return row?.last === 1;
 }
 
 export async function isActiveAdmin(
@@ -61,21 +75,6 @@ export async function isActiveAdmin(
     .prepare(
       `SELECT 1 AS admin FROM user AS identity
        WHERE identity.id = ?1 AND ${activeAdminSql("identity")}
-       LIMIT 1`,
-    )
-    .bind(userId)
-    .first<{ admin: number }>();
-  return row !== null;
-}
-
-export async function hasOtherActiveAdmin(
-  userId: string,
-  d1: D1Database,
-): Promise<boolean> {
-  const row = await d1
-    .prepare(
-      `SELECT 1 AS admin FROM user AS identity
-       WHERE identity.id <> ?1 AND ${activeAdminSql("identity")}
        LIMIT 1`,
     )
     .bind(userId)
@@ -108,7 +107,12 @@ export async function setPlatformUserRole(
   const actorUserId = requiredId(input.actorUserId, "actor user");
   const now = validNow(input.now);
   const db = drizzle(input.d1);
-  const updated = await db
+  const promoting = input.role === "admin";
+  // Platform admins sign in with GitHub only.
+  const hasGithub = sql`EXISTS (SELECT 1 FROM account AS admin_identity
+    WHERE admin_identity.user_id = ${targetUserId}
+      AND admin_identity.provider_id = 'github')`;
+  const update = db
     .update(user)
     .set({ role: input.role, updatedAt: new Date(now) })
     .where(
@@ -116,17 +120,41 @@ export async function setPlatformUserRole(
         eq(user.id, targetUserId),
         isNull(user.deletedAt),
         activeAdministrator(actorUserId),
-        input.role === "admin"
-          ? undefined
-          : lastAdministratorSafe(targetUserId),
+        promoting ? hasGithub : lastAdministratorSafe(targetUserId),
       ),
     )
     .returning({ id: user.id });
+  // The sign-outs run before the update with its guard, so they apply exactly
+  // when it changes the role. A promotion ends the person's sessions, which an
+  // organization's provider may have opened. A demotion ends the sessions the
+  // admin opened by impersonating someone.
+  const signOuts = promoting
+    ? signOutQueries(
+        db,
+        (userColumn) => sql`${userColumn} = ${targetUserId}
+          AND ${activeAdministrator(actorUserId)}
+          AND ${hasGithub}
+          AND EXISTS (SELECT 1 FROM ${user} AS promoted
+            WHERE promoted.id = ${targetUserId}
+              AND promoted.deleted_at IS NULL
+              AND NOT ${sql.raw(activeAdminSql("promoted"))})`,
+      )
+    : ([
+        db.delete(session).where(sql`${session.impersonatedBy} = ${targetUserId}
+          AND ${activeAdministrator(actorUserId)}
+          AND ${lastAdministratorSafe(targetUserId)}
+          AND EXISTS (SELECT 1 FROM ${user} AS demoted
+            WHERE demoted.id = ${targetUserId}
+              AND demoted.deleted_at IS NULL)`),
+      ] as const);
+  const results = await db.batch([...signOuts, update]);
+  const updated = results.at(-1) as { id: string }[];
   if (updated.length === 1) return;
   await throwPlatformUserMutationFailure({
     d1: input.d1,
     targetUserId,
     actorUserId,
+    promoting,
   });
 }
 
@@ -134,6 +162,7 @@ async function throwPlatformUserMutationFailure(input: {
   d1: D1Database;
   targetUserId: string;
   actorUserId: string;
+  promoting: boolean;
 }): Promise<never> {
   const [target, actorIsAdmin] = await Promise.all([
     drizzle(input.d1)
@@ -147,6 +176,13 @@ async function throwPlatformUserMutationFailure(input: {
     throw appError(404, "user_not_found", "User not found");
   }
   if (!actorIsAdmin) throw adminRequiredError();
+  if (input.promoting) {
+    throw appError(
+      409,
+      "admin_sign_in_required",
+      "Platform admins sign in with GitHub. Ask them to connect GitHub from their profile first.",
+    );
+  }
   throw lastActiveAdminError("demoted");
 }
 

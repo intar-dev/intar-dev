@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, member, user } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
-import { activeAccountCondition } from "@/lib/account-access";
+import { sessionMayActCondition } from "@/lib/account-access";
 import { auth } from "@/lib/auth";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
@@ -69,41 +69,6 @@ export const jsonResponse = (body: unknown, init?: ResponseInit) => {
   });
 };
 
-export function resolveRequestOrigin(request: Request): string {
-  const directUrl = safeOriginFromUrl(request.url);
-  if (directUrl) return directUrl;
-
-  const originHeader = request.headers.get("origin");
-  const origin = safeOriginFromUrl(originHeader);
-  if (origin) return origin;
-
-  const refererHeader = request.headers.get("referer");
-  const referer = safeOriginFromUrl(refererHeader);
-  if (referer) return referer;
-
-  const forwarded = parseForwardedOrigin(request.headers.get("forwarded"));
-  if (forwarded) return forwarded;
-
-  const forwardedHost = extractForwardedHost(
-    request.headers.get("x-forwarded-host") ?? request.headers.get("host"),
-  );
-  if (!forwardedHost) {
-    throw new Error("unable to resolve request origin");
-  }
-
-  const forwardedProto =
-    request.headers.get("x-forwarded-proto") ??
-    parseCfVisitorScheme(request.headers.get("cf-visitor")) ??
-    "https";
-
-  const fallbackOrigin = safeOriginFromUrl(
-    `${forwardedProto}://${forwardedHost}`,
-  );
-  if (fallbackOrigin) return fallbackOrigin;
-
-  throw new Error("unable to resolve request origin");
-}
-
 export async function requireUserContext(
   request: Request,
 ): Promise<AuthzResult> {
@@ -134,22 +99,33 @@ export async function requireUserContext(
   ) {
     return {
       ok: false,
-      response: jsonResponse({ error: "unauthorized" }, { status: 401 }),
+      response: jsonResponse(
+        { error: "unauthorized", code: "signed_out" },
+        { status: 401 },
+      ),
     };
   }
 
   // Read the account state and its memberships in one database round trip.
-  // An active account is the root: membership cannot authorize a revoked or
-  // deleted user. A left join also admits users without any membership.
+  // A session that may still act for its account is the root: membership
+  // cannot authorize a revoked or deleted user, one whose last way in is gone,
+  // or an impersonation whose admin no longer is one (see
+  // sessionMayActCondition). A left join also admits users without any
+  // membership.
   const memberships = await drizzle(env.DB)
     .select({ organizationId: member.organizationId })
     .from(user)
     .leftJoin(member, eq(member.userId, user.id))
-    .where(and(eq(user.id, sessionUser.id), activeAccountCondition()));
+    .where(
+      and(eq(user.id, sessionUser.id), sessionMayActCondition(session.session)),
+    );
   if (memberships.length === 0) {
     return {
       ok: false,
-      response: jsonResponse({ error: "access revoked" }, { status: 403 }),
+      response: jsonResponse(
+        { error: "access revoked", code: "access_revoked" },
+        { status: 403 },
+      ),
     };
   }
 
@@ -300,64 +276,4 @@ function parseJsonObject(value: string | null): Record<string, unknown> | null {
   } catch {
     return null;
   }
-}
-
-function safeOriginFromUrl(value: string | null): string | null {
-  if (!value) return null;
-  try {
-    return new URL(value).origin;
-  } catch {
-    return null;
-  }
-}
-
-function parseCfVisitorScheme(value: string | null): string | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as { scheme?: unknown };
-    return typeof parsed.scheme === "string" && parsed.scheme
-      ? parsed.scheme
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function extractForwardedHost(value: string | null): string | null {
-  if (!value) return null;
-
-  const first = value
-    .split(",")
-    .map((part) => part.trim())
-    .find(Boolean);
-
-  return first || null;
-}
-
-function parseForwardedOrigin(value: string | null): string | null {
-  if (!value) return null;
-
-  const first = value
-    .split(",")
-    .map((part) => part.trim())
-    .find(Boolean);
-  if (!first) return null;
-
-  let proto: string | null = null;
-  let host: string | null = null;
-
-  for (const segment of first.split(";")) {
-    const [rawKey, rawValue] = segment.split("=", 2);
-    if (!rawKey || !rawValue) continue;
-
-    const key = rawKey.trim().toLowerCase();
-    const value = rawValue.trim().replace(/^"|"$/g, "");
-    if (!value) continue;
-
-    if (key === "proto") proto = value;
-    if (key === "host") host = value;
-  }
-
-  if (!host) return null;
-  return safeOriginFromUrl(`${proto ?? "https"}://${host}`);
 }

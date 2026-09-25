@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
+import { ConfirmDialog } from "../../patterns/ConfirmDialog";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import { Section } from "../../patterns/Section";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -27,6 +28,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { startOrganizationSignIn } from "@/lib/auth-client";
+import { isAdminUser } from "@/lib/authz";
+import { useSession } from "../../hooks/useSession";
+import { invalidateOrganizationDetail } from "./queries";
+import {
+  signupPolicyText,
+  useSignupPolicy,
+} from "../../hooks/useSignupPolicy";
+import {
+  organizationSignInErrorMessage,
+  organizationSignInStartErrorMessage,
+} from "../sign-in-helpers";
 import {
   type OrganizationDetailResponse,
   fetchJson,
@@ -44,6 +56,7 @@ interface OrganizationOidcProvider {
   clientIdLastFour: string;
   pkce: true;
   scopes: string[];
+  allowExternalEmailSignups: boolean;
   verification: {
     host: string;
     value: string;
@@ -54,7 +67,11 @@ interface OrganizationOidcProvider {
 export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { oidcTest } = useSearch({ from: "/app/organizations/$orgId" });
+  const { oidcTest, oidcError } = useSearch({
+    from: "/app/organizations/$orgId",
+  });
+  const { data: session } = useSession();
+  const platformAdmin = isAdminUser(session?.user);
   const admin = detail.role !== "member";
   const owner = detail.role === "owner";
   const [name, setName] = useState(detail.name);
@@ -65,6 +82,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   const [transferTarget, setTransferTarget] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [removeProviderOpen, setRemoveProviderOpen] = useState(false);
 
   const oidcEndpoint = `/api/organizations/${encodeURIComponent(detail.id)}/sso`;
   const oidc = useQuery({
@@ -74,9 +92,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
     enabled: admin,
   });
   const invalidateDetail = () =>
-    queryClient.invalidateQueries({
-      queryKey: ["organizations", detail.id, "detail"],
-    });
+    invalidateOrganizationDetail(queryClient, detail);
   const invalidateOidc = () =>
     queryClient.invalidateQueries({
       queryKey: ["organizations", detail.id, "oidc"],
@@ -121,7 +137,8 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
     },
   });
   const testSignIn = useMutation({
-    mutationFn: () => startOrganizationSignIn(detail.slug, { test: true }),
+    mutationFn: () =>
+      startOrganizationSignIn(detail.slug, { connect: true, test: true }),
     onMutate: () =>
       navigate({ to: ".", replace: true, search: { tab: "settings" } }),
   });
@@ -145,6 +162,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
     },
     onSuccess: invalidateOidc,
   });
+  const setSignupPolicy = useSignupPolicy(detail.id);
   const removeProvider = useMutation({
     mutationFn: async () => {
       const response = await fetch(oidcEndpoint, {
@@ -153,8 +171,27 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       });
       await mutationResponse(response, "Failed to remove OIDC provider");
     },
-    onSuccess: invalidateOidc,
+    onSuccess: async () => {
+      setRemoveProviderOpen(false);
+      await Promise.all([
+        invalidateOidc(),
+        // Removing the provider also removes your own identity at it.
+        queryClient.invalidateQueries({ queryKey: ["profile", "identities"] }),
+      ]);
+    },
   });
+  const closeRemoveProviderDialog = () => {
+    setRemoveProviderOpen(false);
+    removeProvider.reset();
+  };
+  const providerError = verify.error ?? refresh.error ?? setSignupPolicy.error;
+  // Only the latest provider action's failure shows; one still running keeps
+  // its own.
+  const startProviderAction = () => {
+    for (const action of [verify, refresh, setSignupPolicy]) {
+      if (!action.isPending) action.reset();
+    }
+  };
   const transfer = useMutation({
     mutationFn: async () => {
       const response = await fetch(
@@ -261,7 +298,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         <Section
           density="compact"
           title="Organization OIDC"
-          description="One verified provider owns sign-in for this organization. New IdP users are provisioned as members after a successful callback."
+          description="One verified provider owns sign-in for this organization. Everyone who signs in through it joins as a member, and first-timers get an Intar account."
         >
           {oidc.isPending ? (
             <p className="text-sm text-muted-foreground">
@@ -284,7 +321,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-label">Email domain</dt>
+                    <dt className="text-label">Domain</dt>
                     <dd className="mt-1 font-medium">{provider.domain}</dd>
                   </div>
                   <div>
@@ -307,13 +344,53 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                       </Badge>
                     </dd>
                   </div>
+                  <div className="sm:col-span-2">
+                    <dt className="text-label">New accounts</dt>
+                    <dd className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-2">
+                      <span>
+                        {
+                          signupPolicyText(
+                            provider.domain,
+                            provider.allowExternalEmailSignups,
+                          ).status
+                        }
+                      </span>
+                      {platformAdmin ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={setSignupPolicy.isPending}
+                          onClick={() => {
+                            startProviderAction();
+                            setSignupPolicy.mutate(
+                              !provider.allowExternalEmailSignups,
+                            );
+                          }}
+                        >
+                          {
+                            signupPolicyText(
+                              provider.domain,
+                              provider.allowExternalEmailSignups,
+                            ).action
+                          }
+                        </Button>
+                      ) : provider.allowExternalEmailSignups ? null : (
+                        <span className="text-caption">
+                          An Intar admin can allow other email domains from
+                          Admin → People → Organizations.
+                        </span>
+                      )}
+                    </dd>
+                  </div>
                 </dl>
                 <Button
                   variant="ghost"
                   size="sm"
                   className="text-muted-foreground hover:text-destructive"
-                  disabled={removeProvider.isPending}
-                  onClick={() => removeProvider.mutate()}
+                  onClick={() => {
+                    removeProvider.reset();
+                    setRemoveProviderOpen(true);
+                  }}
                 >
                   <Trash2 className="size-3.5" />
                   Remove provider
@@ -366,7 +443,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                       <Button
                         size="sm"
                         disabled={verify.isPending}
-                        onClick={() => verify.mutate()}
+                        onClick={() => {
+                          startProviderAction();
+                          verify.mutate();
+                        }}
                       >
                         <CheckCircle2 className="size-3.5" />
                         {verify.isPending ? "Checking…" : "Verify DNS"}
@@ -375,7 +455,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                         size="sm"
                         variant="outline"
                         disabled={refresh.isPending}
-                        onClick={() => refresh.mutate()}
+                        onClick={() => {
+                          startProviderAction();
+                          refresh.mutate();
+                        }}
                       >
                         <RefreshCw className="size-3.5" />
                         New token
@@ -389,7 +472,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   <AlertTitle>OIDC sign-in is active</AlertTitle>
                   <AlertDescription>
                     Share the member sign-in URL. Intar requests{" "}
-                    <code>openid email profile offline_access</code> with PKCE S256.
+                    <code>{provider.scopes.join(" ")}</code> with PKCE S256.
                   </AlertDescription>
                 </Alert>
               )}
@@ -411,7 +494,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {provider.domainVerified
-                      ? "Sign in at your provider to test access and connect your account."
+                      ? "Sign in at your provider to test access. The test connects that identity to your account."
                       : "Verify DNS before testing sign-in."}
                   </p>
                   {testSignIn.isPending ? (
@@ -420,7 +503,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     </InlineFeedback>
                   ) : testSignIn.error ? (
                     <InlineFeedback tone="error">
-                      {testSignIn.error.message}
+                      {organizationSignInStartErrorMessage(testSignIn.error)}
                     </InlineFeedback>
                   ) : oidcTest ? (
                     <InlineFeedback
@@ -428,7 +511,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     >
                       {oidcTest === "passed"
                         ? "PKCE S256 sign-in passed."
-                        : "Sign-in test failed. Check the provider settings and try again."}
+                        : organizationSignInErrorMessage(
+                            oidcError ?? null,
+                            "Sign-in test failed. Check the provider settings and try again.",
+                          )}
                     </InlineFeedback>
                   ) : null}
                 </div>
@@ -440,14 +526,9 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   {copyFeedback}
                 </InlineFeedback>
               ) : null}
-              {(verify.error ?? refresh.error ?? removeProvider.error) ? (
+              {providerError ? (
                 <InlineFeedback tone="error">
-                  {(verify.error ??
-                    refresh.error ??
-                    removeProvider.error) instanceof Error
-                    ? (verify.error ?? refresh.error ?? removeProvider.error)
-                        ?.message
-                    : "Identity provider action failed"}
+                  {providerError.message}
                 </InlineFeedback>
               ) : null}
             </div>
@@ -468,7 +549,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   required
                 />
               </Field>
-              <Field label="Verified email domain">
+              <Field label="Organization domain">
                 <Input
                   value={domain}
                   onChange={(event) => setDomain(event.target.value)}
@@ -486,7 +567,9 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
               <p className="text-sm text-muted-foreground sm:col-span-2">
                 Use a public client without a client secret. The provider must
                 support authorization code flow with PKCE S256 and token
-                authentication method none.
+                authentication method none. You'll prove the domain with a DNS
+                record. People with emails on it can create accounts through
+                the provider; other emails need a platform admin's approval.
               </p>
               <div className="sm:col-span-2">
                 <Button
@@ -566,6 +649,18 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
           ) : null}
         </div>
       </Section>
+
+      <ConfirmDialog
+        open={removeProviderOpen}
+        onClose={closeRemoveProviderDialog}
+        title="Remove the identity provider?"
+        description="Everyone who connected it is signed out everywhere, except you here, and loses it as a way to sign in. Members keep their memberships and their other sign-in methods."
+        error={removeProvider.error ? removeProvider.error.message : null}
+        pending={removeProvider.isPending}
+        confirmLabel="Remove provider"
+        pendingLabel="Removing…"
+        onConfirm={() => removeProvider.mutate()}
+      />
 
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>

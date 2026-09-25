@@ -1,3 +1,5 @@
+import { ORGANIZATION_SIGN_IN_CODES } from "@/lib/organization-sso-errors";
+
 export type OrganizationDetailTab =
   | "overview"
   | "people"
@@ -11,6 +13,8 @@ export type AdminPeopleTab = "users" | "signups" | "organizations";
 export interface OrganizationDetailSearch {
   tab?: OrganizationDetailTab;
   oidcTest?: "passed" | "failed";
+  /** The app code a failed Test sign-in returned with. */
+  oidcError?: string;
 }
 
 export interface AdminPeopleSearch {
@@ -26,6 +30,7 @@ export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
   "settings",
 ];
 
+
 export const ADMIN_PEOPLE_TABS: readonly AdminPeopleTab[] = [
   "users",
   "signups",
@@ -36,11 +41,12 @@ export function validateOrganizationDetailSearch(
   search: Record<string, unknown>,
 ): OrganizationDetailSearch {
   // SSO appends error parameters; its failure URL must not have a query string.
+  // Only a code travels in the URL; the page looks up its message.
   if (
-    search.error === "oidc_sign_in_failed" ||
-    search.error === "oidc_discovery_failed"
+    typeof search.error === "string" &&
+    ORGANIZATION_SIGN_IN_CODES.has(search.error)
   ) {
-    return { tab: "settings", oidcTest: "failed" };
+    return { tab: "settings", oidcTest: "failed", oidcError: search.error };
   }
   if (!isOrganizationDetailTab(search.tab) || search.tab === "overview") {
     return {};

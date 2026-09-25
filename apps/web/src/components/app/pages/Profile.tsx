@@ -7,7 +7,10 @@ import {
   PaginatedCollection,
 } from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
+import { ConfirmDialog } from "@/components/app/patterns/ConfirmDialog";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
+import { useCallbackErrorCode } from "@/components/app/hooks/useCallbackErrorCode";
 import { useSession } from "@/components/app/hooks/useSession";
 import { formatTimestamp } from "@/components/app/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -16,7 +19,63 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import type { LinkedIdentity } from "@/lib/account-links";
+import { appBootstrapQueryKey } from "@/lib/app-bootstrap";
+import { AuthFlowError, connectGithub } from "@/lib/auth-client";
+import { isAdminUser } from "@/lib/authz";
+import { SSO_ERROR_MESSAGES } from "@/lib/organization-sso-errors";
 import { MyServers } from "./MyServers";
+import { fetchJson, mutationResponse } from "./organization-detail/types";
+import { githubCallbackMessage } from "./sign-in-helpers";
+
+// Link results return to Profile with an error code only; the message comes
+// from here.
+const CONNECT_ERROR_MESSAGES: Record<string, string> = {
+  account_already_linked_to_different_user:
+    "This GitHub account is already connected to another Intar account.",
+  github_already_connected: "This account already has GitHub connected.",
+  unable_to_link_account:
+    "GitHub couldn't be connected. Make sure your GitHub email is verified.",
+  impersonation_link_forbidden: SSO_ERROR_MESSAGES.impersonation_link_forbidden,
+  session_not_fresh:
+    "Connecting GitHub needs a recent sign-in. Sign out, sign in again, and connect it then.",
+};
+
+const DISCONNECT_ERROR_MESSAGES: Record<string, string> = {
+  session_not_fresh:
+    "Disconnecting needs a sign-in from the last day. Sign out, sign in again, and disconnect it then.",
+  last_sign_in_method:
+    "This is your last way to sign in. Connect another one before disconnecting it.",
+  identity_removed:
+    "An organization admin removed you, so this sign-in stays connected until they restore you.",
+  identity_not_found: "This sign-in method is already disconnected.",
+  impersonation_unlink_forbidden:
+    "Stop impersonating before disconnecting sign-in methods.",
+};
+
+function disconnectErrorMessage(error: unknown): string {
+  if (error instanceof HttpResponseError) {
+    if (error.code && Object.hasOwn(DISCONNECT_ERROR_MESSAGES, error.code)) {
+      return DISCONNECT_ERROR_MESSAGES[error.code]!;
+    }
+    // Signed out elsewhere, or the account lost access: trying again won't
+    // help.
+    if (error.status === 401) {
+      return "You were signed out. Sign in again to change sign-in methods.";
+    }
+    if (error.status === 403) return "This account no longer has access.";
+  }
+  return "The sign-in method couldn't be disconnected. Try again.";
+}
+
+function connectErrorMessage(code: string | null): string {
+  if (code && Object.hasOwn(CONNECT_ERROR_MESSAGES, code)) {
+    return CONNECT_ERROR_MESSAGES[code]!;
+  }
+  return (
+    githubCallbackMessage(code) ?? "GitHub couldn't be connected. Try again."
+  );
+}
 
 interface UserSshKeyRecord {
   id: string;
@@ -149,6 +208,64 @@ export function Profile() {
   });
 
   const user = session?.user ?? null;
+  // Organization providers never sign in a platform admin.
+  const platformAdmin = isAdminUser(user);
+  const identities = useQuery({
+    queryKey: ["profile", "identities"],
+    queryFn: async () =>
+      (await fetchJson<{ identities: LinkedIdentity[] }>("/api/account-links"))
+        .identities,
+    enabled: Boolean(user),
+    // Sign-in methods change only through redirects, the dialog below, and
+    // removing an organization's provider, which invalidates this query.
+    staleTime: 60_000,
+  });
+  const github = identities.data?.find((entry) => entry.kind === "github");
+  const organizationIdentities =
+    identities.data?.filter((entry) => entry.kind === "organization") ?? [];
+  const usableCount =
+    identities.data?.filter((entry) => entry.usable).length ?? 0;
+  const [callbackCode, clearCallbackCode] = useCallbackErrorCode();
+  const connect = useMutation({
+    mutationFn: connectGithub,
+    onMutate: clearCallbackCode,
+  });
+  const connectError = connect.error
+    ? connectErrorMessage(
+        connect.error instanceof AuthFlowError ? connect.error.code : null,
+      )
+    : callbackCode
+      ? connectErrorMessage(callbackCode)
+      : null;
+  // The target outlives the dialog's close animation, so its text holds.
+  const [disconnectTarget, setDisconnectTarget] =
+    useState<LinkedIdentity | null>(null);
+  const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const disconnect = useMutation({
+    mutationFn: async (identity: LinkedIdentity) => {
+      const response = await fetch(
+        `/api/account-links/${encodeURIComponent(identity.providerId)}`,
+        { method: "DELETE", credentials: "include" },
+      );
+      await mutationResponse(response, "Failed to disconnect");
+    },
+    onSuccess: () => setDisconnectOpen(false),
+    // Disconnecting GitHub also clears the username the session shows.
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["profile", "identities"] }),
+        queryClient.invalidateQueries({ queryKey: appBootstrapQueryKey }),
+      ]),
+  });
+  const closeDisconnectDialog = () => {
+    setDisconnectOpen(false);
+    disconnect.reset();
+  };
+  const openDisconnectDialog = (identity: LinkedIdentity) => {
+    disconnect.reset();
+    setDisconnectTarget(identity);
+    setDisconnectOpen(true);
+  };
 
   return (
     <PageShell>
@@ -165,7 +282,7 @@ export function Profile() {
             <div>
               <dt className="text-label">Username</dt>
               <dd className="mt-1 text-sm font-medium">
-                {user?.username ?? "Anonymous"}
+                {user?.username ?? user?.name ?? "—"}
               </dd>
             </div>
             <div>
@@ -175,22 +292,111 @@ export function Profile() {
               </dd>
             </div>
             <div className="sm:col-span-2">
-              <dt className="text-label">GitHub</dt>
-              <dd className="mt-1 flex flex-wrap items-center gap-2 text-sm font-medium">
-                {user?.username ? (
-                  <span className="font-mono text-xs">@{user.username}</span>
-                ) : (
-                  "—"
-                )}
-                <Badge variant="secondary">Signed in with GitHub</Badge>
+              <dt className="text-label">Sign-in methods</dt>
+              <dd className="mt-1 space-y-2 text-sm">
+                <div className="flex flex-wrap items-center gap-2 font-medium">
+                  {github ? (
+                    <>
+                      <Badge variant="secondary">
+                        GitHub
+                        {user?.username ? (
+                          <span className="font-mono">@{user.username}</span>
+                        ) : null}
+                      </Badge>
+                      {/* Keep at least one way to sign in. */}
+                      {usableCount > 1 ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-muted-foreground hover:text-destructive"
+                          disabled={disconnect.isPending}
+                          onClick={() => openDisconnectDialog(github)}
+                        >
+                          Disconnect GitHub
+                        </Button>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {identities.data && !github ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={connect.isPending}
+                      onClick={() => connect.mutate()}
+                    >
+                      {connect.isPending ? "Opening GitHub…" : "Connect GitHub"}
+                    </Button>
+                  ) : null}
+                </div>
+                {organizationIdentities.length ? (
+                  <ul className="divide-y overflow-hidden rounded-lg border">
+                    {organizationIdentities.map((entry) => {
+                      // Keep at least one way to sign in.
+                      const lastSignIn =
+                        usableCount - (entry.usable ? 1 : 0) < 1;
+                      // An organization's removal holds through its identity
+                      // until an admin restores the person.
+                      const removed = entry.removed;
+                      return (
+                        <li
+                          key={entry.providerId}
+                          className="flex flex-wrap items-center gap-3 px-3 py-2"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="font-medium">
+                              {entry.organization?.name ??
+                                "Removed identity provider"}
+                            </p>
+                            <p className="text-caption">
+                              {entry.usable
+                                ? "Organization sign-in"
+                                : platformAdmin
+                                  ? "Organization sign-in · platform admins sign in with GitHub only"
+                                  : "Organization sign-in · can't sign you in"}
+                              {removed
+                                ? " · an admin removed you; it stays until they restore you"
+                                : lastSignIn
+                                  ? " · connect GitHub before disconnecting"
+                                  : ""}
+                            </p>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground hover:text-destructive"
+                            disabled={
+                              lastSignIn || removed || disconnect.isPending
+                            }
+                            onClick={() => openDisconnectDialog(entry)}
+                          >
+                            Disconnect
+                          </Button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+                {identities.error ? (
+                  <InlineFeedback tone="error">
+                    Your sign-in methods couldn't be loaded. Reload the page to
+                    try again.
+                  </InlineFeedback>
+                ) : null}
               </dd>
+              {connectError ? (
+                <InlineFeedback tone="error" className="mt-2">
+                  {connectError}
+                </InlineFeedback>
+              ) : null}
             </div>
           </dl>
         </div>
         <dl className="mt-5 grid gap-4 border-t pt-5 sm:grid-cols-3">
           <div>
             <dt className="text-label">1. Identity</dt>
-            <dd className="mt-1 text-sm">Sign in with GitHub.</dd>
+            <dd className="mt-1 text-sm">
+              Sign in with GitHub or your organization.
+            </dd>
           </div>
           <div>
             <dt className="text-label">2. Public key</dt>
@@ -205,6 +411,30 @@ export function Profile() {
             </dd>
           </div>
         </dl>
+        <ConfirmDialog
+          open={disconnectOpen}
+          onClose={closeDisconnectDialog}
+          title={`Disconnect ${
+            disconnectTarget?.kind === "github"
+              ? "GitHub"
+              : (disconnectTarget?.organization?.name ?? "this organization")
+          }?`}
+          description={`${
+            disconnectTarget?.kind === "github"
+              ? "Your GitHub account"
+              : "Its identity provider"
+          } can no longer sign in as you. Your other sessions and connected apps are signed out.`}
+          error={
+            disconnect.error ? disconnectErrorMessage(disconnect.error) : null
+          }
+          pending={disconnect.isPending}
+          confirmLabel="Disconnect"
+          pendingLabel="Disconnecting…"
+          confirmDisabled={!disconnectTarget}
+          onConfirm={() => {
+            if (disconnectTarget) disconnect.mutate(disconnectTarget);
+          }}
+        />
       </Section>
 
       {user ? <MyServers key={user.id} userId={user.id} /> : null}

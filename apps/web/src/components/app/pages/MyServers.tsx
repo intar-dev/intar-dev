@@ -78,14 +78,10 @@ async function serverRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const body = (await response.json().catch(() => null)) as
     (T & { error?: unknown; code?: unknown }) | null;
   if (!response.ok || !body) {
-    throw Object.assign(
-      new HttpResponseError(
-        response.status,
-        typeof body?.error === "string"
-          ? body.error
-          : "The server request failed. Try again.",
-      ),
-      { code: body?.code },
+    throw HttpResponseError.fromBody(
+      response.status,
+      body,
+      "The server request failed. Try again.",
     );
   }
   return body as T;
@@ -613,7 +609,6 @@ function ServerRow({
     onError: (error) => {
       if (
         error instanceof HttpResponseError &&
-        "code" in error &&
         error.code === "last_server_confirmation_required"
       ) {
         setLastServerConflict(true);

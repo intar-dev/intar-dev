@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "f4bf3138-740c-498e-8806-c20e171254a6",
-  "prevId": "aa7fc6b2-cfbd-463d-be79-e0c47d3aa902",
+  "id": "fbf23851-85d4-41e2-91e1-885121125401",
+  "prevId": "f4bf3138-740c-498e-8806-c20e171254a6",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -37,6 +37,20 @@
         },
         "github_account_id": {
           "name": "github_account_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "sso_provider_id": {
+          "name": "sso_provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "sso_account_id": {
+          "name": "sso_account_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -3779,6 +3793,164 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "organization_member_removals": {
+      "name": "organization_member_removals",
+      "columns": {
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "removed_by": {
+          "name": "removed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "removed_at": {
+          "name": "removed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "organization_member_removals_user_idx": {
+          "name": "organization_member_removals_user_idx",
+          "columns": [
+            "user_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "organization_member_removals_organization_id_organization_id_fk": {
+          "name": "organization_member_removals_organization_id_organization_id_fk",
+          "tableFrom": "organization_member_removals",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "organization_member_removals_user_id_user_id_fk": {
+          "name": "organization_member_removals_user_id_user_id_fk",
+          "tableFrom": "organization_member_removals",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "organization_member_removals_organization_id_user_id_pk": {
+          "columns": [
+            "organization_id",
+            "user_id"
+          ],
+          "name": "organization_member_removals_organization_id_user_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "organization_member_removals_audit_valid": {
+          "name": "organization_member_removals_audit_valid",
+          "value": "length(\"organization_member_removals\".\"removed_by\") BETWEEN 1 AND 255 AND \"organization_member_removals\".\"removed_at\" >= 0"
+        }
+      }
+    },
+    "organization_member_removed_logins": {
+      "name": "organization_member_removed_logins",
+      "columns": {
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "organization_member_removed_logins_removal_idx": {
+          "name": "organization_member_removed_logins_removal_idx",
+          "columns": [
+            "organization_id",
+            "user_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "organization_member_removed_logins_organization_id_user_id_organization_member_removals_organization_id_user_id_fk": {
+          "name": "organization_member_removed_logins_organization_id_user_id_organization_member_removals_organization_id_user_id_fk",
+          "tableFrom": "organization_member_removed_logins",
+          "tableTo": "organization_member_removals",
+          "columnsFrom": [
+            "organization_id",
+            "user_id"
+          ],
+          "columnsTo": [
+            "organization_id",
+            "user_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "organization_member_removed_logins_organization_id_issuer_subject_pk": {
+          "columns": [
+            "organization_id",
+            "issuer",
+            "subject"
+          ],
+          "name": "organization_member_removed_logins_organization_id_issuer_subject_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "personal_image_preparations": {
       "name": "personal_image_preparations",
       "columns": {
@@ -6299,6 +6471,14 @@
             "user_id"
           ],
           "isUnique": false
+        },
+        "session_impersonated_by_idx": {
+          "name": "session_impersonated_by_idx",
+          "columns": [
+            "impersonated_by"
+          ],
+          "isUnique": false,
+          "where": "\"session\".\"impersonated_by\" IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -6580,6 +6760,64 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "sso_provider_policies": {
+      "name": "sso_provider_policies",
+      "columns": {
+        "provider_id": {
+          "name": "provider_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "allow_external_email_signups": {
+          "name": "allow_external_email_signups",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "updated_by": {
+          "name": "updated_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "sso_provider_policies_provider_id_sso_provider_provider_id_fk": {
+          "name": "sso_provider_policies_provider_id_sso_provider_provider_id_fk",
+          "tableFrom": "sso_provider_policies",
+          "tableTo": "sso_provider",
+          "columnsFrom": [
+            "provider_id"
+          ],
+          "columnsTo": [
+            "provider_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "sso_provider_policies_audit_valid": {
+          "name": "sso_provider_policies_audit_valid",
+          "value": "length(\"sso_provider_policies\".\"updated_by\") BETWEEN 1 AND 255 AND \"sso_provider_policies\".\"updated_at\" >= 0"
+        }
+      }
     },
     "support_comments": {
       "name": "support_comments",
@@ -6947,6 +7185,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'platform'"
+        },
+        "signup_organization_id": {
+          "name": "signup_organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {

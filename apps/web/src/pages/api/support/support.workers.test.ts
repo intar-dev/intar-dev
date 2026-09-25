@@ -11,7 +11,6 @@ import {
   supportTopics,
   user,
 } from "@/db/schema";
-import { auth } from "@/lib/auth";
 import { revokeAccount } from "@/lib/access-revocation-store";
 import {
   createSupportComment,
@@ -27,6 +26,7 @@ import {
 } from "@/lib/support-types";
 import { resetDatabase } from "@/test/database-migrations";
 import { ensureFixtureMember } from "@/test/account-fixtures";
+import { signedSessionCookie } from "@/test/auth-requests";
 import * as topics from "./topics/index";
 import * as topic from "./topics/[topicId]/index";
 import * as comments from "./topics/[topicId]/comments/index";
@@ -488,20 +488,3 @@ describe("support forum API", () => {
     }
   });
 });
-
-async function signedSessionCookie(token: string): Promise<string> {
-  const context = await auth.$context;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(context.secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(token),
-  );
-  return `${context.authCookies.sessionToken.name}=${encodeURIComponent(`${token}.${btoa(String.fromCharCode(...new Uint8Array(signature)))}`)}`;
-}

@@ -3,7 +3,11 @@ import { appError } from "@/lib/app-error";
 
 export async function resolveOrganizationOidcProvider(
   organizationSlug: string,
-): Promise<{ providerId: string; organizationSlug: string }> {
+): Promise<{
+  providerId: string;
+  organizationId: string;
+  organizationSlug: string;
+}> {
   const slug = organizationSlug.trim();
   if (!slug || slug.length > 128 || !/^[a-z0-9][a-z0-9-]*$/u.test(slug)) {
     throw appError(
@@ -13,7 +17,8 @@ export async function resolveOrganizationOidcProvider(
     );
   }
   const provider = await env.DB.prepare(
-    `SELECT provider.provider_id AS providerId
+    `SELECT provider.provider_id AS providerId,
+            provider.organization_id AS organizationId
      FROM sso_provider AS provider
      INNER JOIN organization AS tenant
        ON tenant.id = provider.organization_id
@@ -23,7 +28,7 @@ export async function resolveOrganizationOidcProvider(
      LIMIT 1`,
   )
     .bind(slug)
-    .first<{ providerId: string }>();
+    .first<{ providerId: string; organizationId: string }>();
   if (!provider) {
     throw appError(
       404,

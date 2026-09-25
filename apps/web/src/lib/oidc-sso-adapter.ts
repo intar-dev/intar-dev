@@ -113,11 +113,30 @@ function hydrateSsoProvider(provider: unknown): unknown {
   }
   // Require a signed ID token; the SSO library otherwise prefers UserInfo.
   delete config.userInfoEndpoint;
+  // Find and lock results both pass through here, which keeps the plugin's
+  // issuer comparison consistent.
+  const issuer = providerIssuer(config, sanitized.issuer);
   // Enforce PKCE for every provider, including older stored configurations.
   return {
     ...sanitized,
+    issuer,
     oidcConfig: JSON.stringify({ ...config, pkce: true }),
   };
+}
+
+/**
+ * The issuer a provider's ID tokens are checked against, exactly. Older rows
+ * stored it as typed (for example without a trailing slash) and keep the value
+ * discovery advertised in their OIDC configuration. Generated migrations can't
+ * carry data fixes, so this stays at read time.
+ */
+export function providerIssuer<RowIssuer>(
+  config: Record<string, unknown> | null | undefined,
+  rowIssuer: RowIssuer,
+): string | RowIssuer {
+  return typeof config?.issuer === "string" && config.issuer
+    ? config.issuer
+    : rowIssuer;
 }
 
 function parseOidcConfig(value: string): Record<string, unknown> {
