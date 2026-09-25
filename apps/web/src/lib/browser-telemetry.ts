@@ -1,13 +1,14 @@
 import { ErrorsInstrumentation, SessionInstrumentation, WebVitalsInstrumentation, initializeFaro } from "@grafana/faro-web-sdk";
 import { TracingInstrumentation } from "@grafana/faro-web-tracing";
 import { sanitizeBrowserTelemetry } from "./browser-telemetry-privacy";
+import { BlockableFetchTransport } from "./browser-telemetry-transport";
 
 /** The collector ID is public and restricted to this origin in Grafana. */
 export function initializeBrowserTelemetry() {
   if (location.origin !== "https://intar.dev") return;
   try {
     const faro = initializeFaro({
-      url: "https://faro-collector-prod-eu-west-2.grafana.net/collect/267676b3afb447820d9a46f07140de07",
+      transports: [new BlockableFetchTransport({ url: "https://faro-collector-prod-eu-west-2.grafana.net/collect/267676b3afb447820d9a46f07140de07" })],
       app: { name: "intar-web", version: import.meta.env.PUBLIC_RELEASE_VERSION || "development", environment: "production" },
       sessionTracking: { enabled: true, persistent: false, samplingRate: 1 },
       beforeSend: sanitizeBrowserTelemetry,
