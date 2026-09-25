@@ -70,12 +70,12 @@ jobs:
           rustup show active-toolchain
 
       - name: Set up Namespace caches
-        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
 
       - name: Install just and cargo-zigbuild
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2
         with:
           tool: just@1.58.0,cargo-zigbuild@0.23.0
 
