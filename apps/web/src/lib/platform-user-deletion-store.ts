@@ -1,6 +1,6 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { accessRevocations, member, user } from "@/db/schema";
+import { accessRevocations, member, organization, user } from "@/db/schema";
 import {
   activeAccountCondition,
   activeAdminSql,
@@ -8,6 +8,10 @@ import {
 } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
+import {
+  platformUserOrigin,
+  type PlatformUserAccess,
+} from "@/lib/platform-user-details";
 import {
   adminRequiredError,
   isActiveAdmin,
@@ -24,10 +28,8 @@ interface PlatformUserDeletionInput {
   now?: number;
 }
 
-export type PlatformUserAccess = "active" | "revoked";
-
 export async function listPlatformUsers(d1: D1Database) {
-  return drizzle(d1)
+  const rows = await drizzle(d1)
     .select({
       id: user.id,
       name: user.name,
@@ -36,15 +38,23 @@ export async function listPlatformUsers(d1: D1Database) {
       username: user.username,
       role: user.role,
       access: sql<PlatformUserAccess>`case when ${activeAccountCondition()} then 'active' else 'revoked' end`,
+      revocationId: accessRevocations.revocationId,
       revokedAt: accessRevocations.revokedAt,
       cleanupCompletedAt: accessRevocations.cleanupCompletedAt,
       createdAt: user.createdAt,
+      signupOrganizationId: user.signupOrganizationId,
+      signupOrganizationName: organization.name,
     })
     .from(user)
     .leftJoin(accessRevocations, eq(accessRevocations.userId, user.id))
+    .leftJoin(organization, eq(organization.id, user.signupOrganizationId))
     .where(isNull(user.deletedAt))
     .orderBy(desc(user.createdAt))
     .limit(200);
+  return rows.map(({ signupOrganizationId, signupOrganizationName, ...row }) => ({
+    ...row,
+    origin: platformUserOrigin(signupOrganizationId, signupOrganizationName),
+  }));
 }
 
 /**

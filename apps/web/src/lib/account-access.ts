@@ -58,6 +58,24 @@ export function activeAdminSql(alias: string): string {
   return `(${activeAccountSql(alias)} AND ${adminRoleSql(alias)})`;
 }
 
+/**
+ * Raw SQL that holds when the `member` row aliased as `membership` makes its
+ * user the organization's only owner, whom a restore keeps as owner rather
+ * than leave the organization without one.
+ */
+export function soleOwnerMembershipSql(membership: string): string {
+  if (!SQL_ALIAS.test(membership)) {
+    throw new Error("Expected a plain SQL alias");
+  }
+  const owner = (column: string) =>
+    `instr(',' || replace(lower(coalesce(${column}, '')), ' ', '') || ',', ',owner,') > 0`;
+  return `(${owner(`${membership}.role`)}
+    AND NOT EXISTS (SELECT 1 FROM member AS other_owner
+      WHERE other_owner.organization_id = ${membership}.organization_id
+        AND other_owner.user_id <> ${membership}.user_id
+        AND ${owner("other_owner.role")}))`;
+}
+
 /** Raw SQL that holds when the organization removed the user. */
 export function removedFromOrganizationSql(
   userExpression: string,

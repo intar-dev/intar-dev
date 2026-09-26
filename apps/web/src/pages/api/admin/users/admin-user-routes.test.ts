@@ -17,6 +17,9 @@ const deletionStoreMock = vi.hoisted(() => ({
   finalizePlatformUserDeletion: vi.fn(),
   listPlatformUsers: vi.fn(),
 }));
+const detailsStoreMock = vi.hoisted(() => ({
+  getPlatformUserDetails: vi.fn(),
+}));
 const revocationMock = vi.hoisted(() => ({
   ensureAccessRevoked: vi.fn(),
   finishAccessRevocationCleanup: vi.fn(),
@@ -29,10 +32,14 @@ vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/platform-admin-authority", () => adminAuthorityMock);
 vi.mock("@/lib/platform-user-deletion-store", () => deletionStoreMock);
 vi.mock("@/lib/access-revocation", () => revocationMock);
+vi.mock("@/lib/platform-user-details-store", () => detailsStoreMock);
 vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
 
 import { appError } from "@/lib/app-error";
-import { DELETE as deleteUser } from "@/pages/api/admin/users/[userId]/index";
+import {
+  DELETE as deleteUser,
+  GET as getUser,
+} from "@/pages/api/admin/users/[userId]/index";
 import { POST as restoreRoute } from "@/pages/api/admin/users/[userId]/restore";
 import { POST as finishCleanupRoute } from "@/pages/api/admin/users/[userId]/revocation-cleanup";
 import { POST as revokeRoute } from "@/pages/api/admin/users/[userId]/revoke";
@@ -62,10 +69,15 @@ describe("admin user mutation routes", () => {
     });
     revocationMock.finishAccessRevocationCleanup.mockResolvedValue(undefined);
     revocationMock.restoreAccess.mockResolvedValue({ serversPendingCleanup: 0 });
+    detailsStoreMock.getPlatformUserDetails.mockResolvedValue({
+      id: "target-user",
+      name: "Target User",
+    });
   });
 
   it.each([
     ["list", listUsers, listRequest()],
+    ["details", getUser, detailsRequest()],
     ["delete", deleteUser, deleteRequest()],
     ["revoke", revokeRoute, revokeRequest()],
     ["restore", restoreRoute, restoreRequest({ revocationId: "revocation-1" })],
@@ -102,8 +114,65 @@ describe("admin user mutation routes", () => {
       expect(
         deletionStoreMock.finalizePlatformUserDeletion,
       ).not.toHaveBeenCalled();
+      expect(detailsStoreMock.getPlatformUserDetails).not.toHaveBeenCalled();
     },
   );
+
+  it("passes a refused administrator through with no-store headers", async () => {
+    agentBridgeMock.requireAdminUserContext.mockResolvedValueOnce({
+      ok: false,
+      response: Response.json({ error: "admin required" }, { status: 403 }),
+    });
+
+    const response = await getUser(routeContext(detailsRequest(), "target-user"));
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+    expect(detailsStoreMock.getPlatformUserDetails).not.toHaveBeenCalled();
+  });
+
+  it("returns a person's details for the trimmed id", async () => {
+    const response = await getUser(
+      routeContext(detailsRequest(), " target-user "),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+    await expect(response.json()).resolves.toEqual({
+      user: { id: "target-user", name: "Target User" },
+    });
+    expect(detailsStoreMock.getPlatformUserDetails).toHaveBeenCalledWith(
+      "test-db",
+      "target-user",
+    );
+  });
+
+  it("answers a missing or deleted person with 404", async () => {
+    detailsStoreMock.getPlatformUserDetails.mockResolvedValueOnce(null);
+
+    const response = await getUser(routeContext(detailsRequest(), "gone"));
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({
+      error: "User not found",
+      code: "user_not_found",
+    });
+  });
+
+  it("requires a user id and hides unexpected errors", async () => {
+    const blank = await getUser(routeContext(detailsRequest(), " "));
+    expect(blank.status).toBe(400);
+    await expect(blank.json()).resolves.toMatchObject({ code: "user_id_required" });
+
+    detailsStoreMock.getPlatformUserDetails.mockRejectedValueOnce(
+      new Error("D1 exploded with secret detail"),
+    );
+    const failed = await getUser(routeContext(detailsRequest(), "target-user"));
+    expect(failed.status).toBe(500);
+    const body = await failed.text();
+    expect(body).toContain("The user could not be loaded");
+    expect(body).not.toContain("secret detail");
+  });
 
   it("rejects malformed JSON for the role endpoint", async () => {
     const request = roleRequest("{");
@@ -408,6 +477,10 @@ function cleanupIncomplete() {
 
 function listRequest(): Request {
   return new Request("https://intar.test/api/admin/users");
+}
+
+function detailsRequest(): Request {
+  return new Request("https://intar.test/api/admin/users/target-user");
 }
 
 function deleteRequest(): Request {
