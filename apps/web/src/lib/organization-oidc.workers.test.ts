@@ -11,6 +11,7 @@ import {
   session,
   ssoProvider,
   user,
+  verification,
 } from "@/db/schema/core";
 import {
   ensureFixtureAdmin,
@@ -24,6 +25,7 @@ import {
   getOrganizationOidc,
   registerOrganizationOidc,
   setOrganizationOidcPolicy,
+  verifyOrganizationOidcDomain,
 } from "./organization-oidc";
 
 const ACTOR_ID = "oidc-organization-admin";
@@ -448,7 +450,175 @@ describe("organization OIDC public client registration", () => {
       JSON.stringify({ event: "oidc_discovery_failed" }),
     );
   });
+
+  describe("DNS verification", () => {
+    it.each([
+      ["the bare token", (_identifier: string, token: string) => txt(token)],
+      [
+        "identifier=token",
+        (identifier: string, token: string) => txt(`${identifier}=${token}`),
+      ],
+      [
+        "the token split into strings",
+        (_identifier: string, token: string) =>
+          `${txt(token.slice(0, 8))} ${txt(token.slice(8))}`,
+      ],
+    ])("verifies the domain from a TXT record with %s", async (_label, record) => {
+      const pending = await registerPendingProvider();
+      const lookups = answerDnsWith(() =>
+        dnsAnswer([record(pending.identifier, pending.token)]),
+      );
+
+      const view = await verifyOrganizationOidcDomain(verifyParams());
+
+      expect(view).toMatchObject({ domainVerified: true, verification: null });
+      expect(lookups).toHaveLength(1);
+      const lookup = lookups.at(0);
+      const url = new URL(lookup?.url ?? "");
+      expect(`${url.origin}${url.pathname}`).toBe(
+        "https://cloudflare-dns.com/dns-query",
+      );
+      expect(url.searchParams.get("name")).toBe(pending.host);
+      expect(url.searchParams.get("type")).toBe("TXT");
+      expect(lookup?.headers.get("accept")).toBe("application/dns-json");
+      // Workers support only "follow" and "manual"; "error" throws.
+      expect(lookup?.redirect).toBe("manual");
+      const db = drizzle(env.DB);
+      const [row] = await db.select().from(ssoProvider);
+      expect(row?.domainVerified).toBe(true);
+      await expect(
+        db
+          .select()
+          .from(verification)
+          .where(eq(verification.identifier, pending.identifier)),
+      ).resolves.toEqual([]);
+    });
+
+    it.each([
+      ["another record", () => dnsAnswer([txt("someone-elses-token")])],
+      ["no record", () => Response.json({ Status: 3 })],
+    ])("keeps the domain unverified when the lookup finds %s", async (_label, answer) => {
+      await registerPendingProvider();
+      answerDnsWith(answer);
+
+      await expect(
+        verifyOrganizationOidcDomain(verifyParams()),
+      ).rejects.toMatchObject({
+        status: 502,
+        code: "oidc_domain_verification_pending",
+      });
+      const [row] = await drizzle(env.DB).select().from(ssoProvider);
+      expect(row?.domainVerified).toBe(false);
+    });
+
+    it.each([
+      ["an error status", () => new Response("unavailable", { status: 503 })],
+      [
+        "a redirect",
+        () =>
+          new Response(null, {
+            status: 302,
+            headers: { location: "https://dns.example.test/dns-query" },
+          }),
+      ],
+      ["a body that isn't JSON", () => new Response("<html>", { status: 200 })],
+      [
+        "a network failure",
+        () => {
+          throw new TypeError("Network connection lost.");
+        },
+      ],
+    ])("reports a failed lookup on %s as a DNS lookup failure", async (_label, answer) => {
+      await registerPendingProvider();
+      answerDnsWith(answer);
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await expect(
+        verifyOrganizationOidcDomain(verifyParams()),
+      ).rejects.toMatchObject({ status: 502, code: "dns_lookup_failed" });
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"oidc_dns_lookup_failed"'),
+      );
+      const [row] = await drizzle(env.DB).select().from(ssoProvider);
+      expect(row?.domainVerified).toBe(false);
+    });
+
+    it("asks for a new token once the pending one expired, without a lookup", async () => {
+      const pending = await registerPendingProvider();
+      await drizzle(env.DB)
+        .update(verification)
+        .set({ expiresAt: new Date(Date.now() - 1) })
+        .where(eq(verification.identifier, pending.identifier));
+      const lookups = answerDnsWith(() => dnsAnswer([txt(pending.token)]));
+
+      await expect(
+        verifyOrganizationOidcDomain(verifyParams()),
+      ).rejects.toMatchObject({ status: 409, code: "oidc_verification_expired" });
+      expect(lookups).toEqual([]);
+    });
+
+    it("returns an already verified provider without another lookup", async () => {
+      const pending = await registerPendingProvider();
+      const lookups = answerDnsWith(() => dnsAnswer([txt(pending.token)]));
+      await verifyOrganizationOidcDomain(verifyParams());
+
+      await expect(
+        verifyOrganizationOidcDomain(verifyParams()),
+      ).resolves.toMatchObject({ domainVerified: true, verification: null });
+      expect(lookups).toHaveLength(1);
+    });
+  });
 });
+
+/** Registers the test provider and returns its pending DNS record. */
+async function registerPendingProvider(): Promise<{
+  host: string;
+  identifier: string;
+  token: string;
+}> {
+  const view = await registerOrganizationOidc(registration());
+  if (!view.verification) {
+    throw new Error("a new provider should have a pending DNS record");
+  }
+  const { host, value } = view.verification;
+  return { host, identifier: host.slice(0, host.indexOf(".")), token: value };
+}
+
+function verifyParams() {
+  return { organizationId: ORGANIZATION_ID, baseUrl: "https://intar.dev" };
+}
+
+/**
+ * Answers DNS-over-HTTPS lookups. Each request is rebuilt from its options
+ * first, so the Workers runtime rejects what production would reject, such
+ * as `redirect: "error"`.
+ */
+function answerDnsWith(answer: () => Response): Request[] {
+  const lookups: Request[] = [];
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const request = new Request(input, init);
+    lookups.push(request);
+    return answer();
+  });
+  return lookups;
+}
+
+/** A TXT character-string the way DNS-over-HTTPS JSON renders it: quoted. */
+function txt(value: string): string {
+  return JSON.stringify(value);
+}
+
+function dnsAnswer(records: string[]): Response {
+  return Response.json({
+    Status: 0,
+    Answer: records.map((data) => ({
+      name: "_intar-oidc.example.test",
+      type: 16,
+      TTL: 300,
+      data,
+    })),
+  });
+}
 
 /** A user whose only identity is at `providerId`, with a live session. */
 async function seedIdentityUser(input: {

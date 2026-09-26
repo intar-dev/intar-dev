@@ -31,6 +31,7 @@ import {
 
 const VERIFICATION_PREFIX = "intar-oidc";
 const VERIFICATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DNS_LOOKUP_TIMEOUT_MS = 10_000;
 const DOMAIN_PATTERN =
   /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
@@ -645,18 +646,32 @@ async function resolveTxtRecords(name: string): Promise<string[]> {
   const url = new URL("https://cloudflare-dns.com/dns-query");
   url.searchParams.set("name", name);
   url.searchParams.set("type", "TXT");
-  const response = await fetch(url, {
-    headers: { accept: "application/dns-json" },
-    redirect: "error",
-  });
-  if (!response.ok) {
+  let body: unknown;
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/dns-json" },
+      // Workers reject redirect: "error". A redirect isn't ok, so it fails
+      // like any other unusable answer.
+      redirect: "manual",
+      signal: AbortSignal.timeout(DNS_LOOKUP_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error("DNS lookup was not answered");
+    body = await response.json();
+  } catch (error) {
+    // The error name tells runtime, timeout, status and parse failures apart
+    // without logging upstream text.
+    console.warn(
+      JSON.stringify({
+        event: "oidc_dns_lookup_failed",
+        error: error instanceof Error ? error.name : "unknown",
+      }),
+    );
     throw appError(
       502,
       "dns_lookup_failed",
       "DNS verification could not be completed; try again shortly",
     );
   }
-  const body = (await response.json()) as unknown;
   if (typeof body !== "object" || body === null || !("Answer" in body)) {
     return [];
   }
