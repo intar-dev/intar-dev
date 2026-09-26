@@ -35,7 +35,10 @@ import {
   adminUserKey,
   fetchPlatformUserDetails,
   finishRevocationCleanup,
+  isUnfinishedCleanup,
   restoreErrorMessage,
+  restoreSuccessMessage,
+  restoreUnavailableMessage,
   restoreUserAccess,
   revokeAccessDescription,
   revokeUserAccess,
@@ -64,6 +67,10 @@ export function AdminUserDetails() {
   const revoke = useMutation({
     mutationFn: () => revokeUserAccess(userId),
     onSuccess: () => setDialog(null),
+    // Committed, but its cleanup didn't finish: Finish cleanup takes over.
+    onError: (error) => {
+      if (isUnfinishedCleanup(error)) setDialog(null);
+    },
     onSettled: refresh,
   });
   const finishCleanup = useMutation({
@@ -78,7 +85,9 @@ export function AdminUserDetails() {
     onSettled: refresh,
   });
 
-  const person = details.data ?? null;
+  // After a failed refetch the cached person is stale: show the error, not
+  // their name and actions.
+  const person = details.isError ? null : (details.data ?? null);
   const preview = useMemo(
     () => (person ? restorePreview(person) : null),
     [person],
@@ -128,7 +137,22 @@ export function AdminUserDetails() {
           </Button>
         );
       }
-      if (!revocation) return undefined;
+      if (!revocation) {
+        return (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => {
+              resetFeedback();
+              setDialog("revoke");
+            }}
+          >
+            <Ban className="size-3.5" />
+            Record revocation
+          </Button>
+        );
+      }
       if (revocation.cleanup !== "completed") {
         return (
           <Button
@@ -186,7 +210,7 @@ export function AdminUserDetails() {
                 to="/admin/people"
                 className={buttonVariants({
                   variant: "outline",
-                  className: "min-h-11 sm:min-h-9",
+                  className: "min-h-11 sm:min-h-9 pointer-coarse:min-h-11",
                 })}
               >
                 Back to people
@@ -227,8 +251,10 @@ export function AdminUserDetails() {
     );
   }
 
-  const mutationError = revoke.error ?? finishCleanup.error ?? null;
-  const restoredServersPending = restore.data?.serversPendingCleanup ?? 0;
+  // Revoke errors show in its dialog, unless the dialog closed for Finish
+  // cleanup to take over.
+  const mutationError =
+    (dialog === null ? revoke.error : null) ?? finishCleanup.error ?? null;
 
   return (
     <PageShell variant="workspace" density="compact">
@@ -263,9 +289,7 @@ export function AdminUserDetails() {
         </InlineFeedback>
       ) : restore.isSuccess ? (
         <InlineFeedback tone="success">
-          {restoredServersPending > 0
-            ? `Access restored. Removing ${restoredServersPending === 1 ? "one of their servers" : `${restoredServersPending} of their servers`} didn't finish; they can remove it again from My servers.`
-            : "Access restored."}
+          {restoreSuccessMessage(restore.data.serversPendingCleanup)}
         </InlineFeedback>
       ) : finishCleanup.isSuccess ? (
         <InlineFeedback tone="success">Cleanup finished.</InlineFeedback>
@@ -336,7 +360,8 @@ export function AdminUserDetails() {
             <div className="sm:col-span-2">
               <dt className="text-label">Revocation</dt>
               <dd className="mt-1 text-sm">
-                There's no revocation record, so access can't be restored here.
+                There's no revocation record. Record the revocation to clean up
+                and to be able to restore their access.
               </dd>
             </div>
           ) : null}
@@ -365,8 +390,13 @@ export function AdminUserDetails() {
 
       <ConfirmDialog
         open={dialog === "revoke"}
-        onClose={() => setDialog(null)}
-        title="Revoke access?"
+        onClose={() => {
+          setDialog(null);
+          revoke.reset();
+        }}
+        title={revocation === null && person.access === "revoked"
+          ? "Record the revocation?"
+          : "Revoke access?"}
         description={revokeAccessDescription(person)}
         error={
           revoke.error
@@ -376,9 +406,13 @@ export function AdminUserDetails() {
             : null
         }
         pending={revoke.isPending}
-        confirmLabel="Revoke access"
+        confirmLabel={revocation === null && person.access === "revoked"
+          ? "Record revocation"
+          : "Revoke access"}
         pendingLabel="Revoking…"
         cancelLabel="Keep access"
+        // Someone revoked them meanwhile; the page now offers what's next.
+        confirmDisabled={revocation !== null}
         onConfirm={() => revoke.mutate()}
       />
 
@@ -389,7 +423,7 @@ export function AdminUserDetails() {
         description={
           preview.working.length
             ? `${person.name} can sign in again with the methods below and starts fresh.`
-            : `${person.name} gets access back and starts fresh, but none of their sign-in methods works, so they still can't sign in.`
+            : `${person.name} gets access back and starts fresh, but none of their sign-in methods works.`
         }
         error={restore.error ? restoreErrorMessage(restore.error) : null}
         pending={restore.isPending}
@@ -404,6 +438,11 @@ export function AdminUserDetails() {
           if (revocation) restore.mutate(revocation.revocationId);
         }}
       >
+        {preview.unavailable !== null && !details.isFetching ? (
+          <InlineFeedback tone="error">
+            {restoreUnavailableMessage(preview.unavailable)}
+          </InlineFeedback>
+        ) : null}
         <RestoreAccessSummary person={person} preview={preview} />
       </ConfirmDialog>
     </PageShell>
@@ -680,6 +719,16 @@ export function RestoreAccessSummary({
 
   return (
     <div className="space-y-3 text-sm">
+      {preview.working.length ? null : (
+        <p className="flex items-start gap-1.5 text-warning">
+          <TriangleAlert aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            No sign-in method works, so after the restore the next GitHub or
+            organization sign-in with this account's email address can claim
+            it, with the organizations it keeps.
+          </span>
+        </p>
+      )}
       {preview.working.length ? (
         <div className="space-y-1.5">
           <h3 className="text-label">Will work again</h3>

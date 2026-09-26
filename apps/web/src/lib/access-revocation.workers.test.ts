@@ -345,8 +345,13 @@ describe("finishAccessRevocationCleanup", () => {
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
+      // A repeated revoke would be refused, so the message points at finishing.
       await expect(revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" }))
-        .rejects.toMatchObject({ status: 503, code: "access_cleanup_incomplete" });
+        .rejects.toMatchObject({
+          status: 503,
+          code: "access_cleanup_incomplete",
+          message: "Access is revoked, but cleanup didn't finish. Finish the cleanup to retry it.",
+        });
     } finally {
       warn.mockRestore();
     }
@@ -357,6 +362,16 @@ describe("finishAccessRevocationCleanup", () => {
       userId: "owner", revocationId: pending!.revocationId, actorUserId: FIXTURE_ADMIN_ID,
     });
     await expect(getAccessRevocationStatus("owner")).resolves.toMatchObject({ cleanup: "completed" });
+  });
+
+  it("reports a cleanup another attempt holds instead of an unfinished one", async () => {
+    const { revocationId } = await revokeAccount({
+      d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    await acquireAccessRevocationCleanup({ d1: env.DB, userId: "owner", revocationId });
+    await expect(finishAccessRevocationCleanup({
+      userId: "owner", revocationId, actorUserId: FIXTURE_ADMIN_ID,
+    })).rejects.toMatchObject({ status: 409, code: "access_revocation_cleanup_in_progress" });
   });
 
   it("refuses a revocation that is no longer current and never revokes", async () => {

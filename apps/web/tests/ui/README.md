@@ -20,9 +20,9 @@ bundle.
   remote-access, validation, and mobile-sheet states; and keyboard, focus,
   reduced-motion, coarse-pointer, overflow, 200%-text, and terminal-cell
   behavior.
-- `bun run test:ui:smoke` runs 15 workflow archetypes in Chromium, Firefox,
-  and WebKit, for 45 checks.
-- `bun run test:ui` runs the complete 455-test release gate, including 29 VM
+- `bun run test:ui:smoke` runs 16 workflow archetypes in Chromium, Firefox,
+  and WebKit, for 48 checks.
+- `bun run test:ui` runs the complete 458-test release gate, including 29 VM
   lifecycle checks, 9 VM startup checks, and 10 performance checks, with one
   worker in CI.
 

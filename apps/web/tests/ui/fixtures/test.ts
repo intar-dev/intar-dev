@@ -42,6 +42,8 @@ const EXPECTED_MOCK_409_CONSOLE_ERROR =
   "Failed to load resource: the server responded with a status of 409 (Conflict)";
 const EXPECTED_MOCK_404_CONSOLE_ERROR =
   "Failed to load resource: the server responded with a status of 404 (Not Found)";
+const EXPECTED_MOCK_503_CONSOLE_ERROR =
+  "Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
 
 function actionableConsoleError(
   text: string,
@@ -77,6 +79,13 @@ function actionableConsoleError(
     server.expectedNotFound > 0
   ) {
     server.expectedNotFound -= 1;
+    return false;
+  }
+  if (
+    text === EXPECTED_MOCK_503_CONSOLE_ERROR &&
+    server.expectedUnavailable > 0
+  ) {
+    server.expectedUnavailable -= 1;
     return false;
   }
   return !text.includes("favicon.ico") && !text.includes("ResizeObserver loop");
@@ -139,6 +148,7 @@ export const test = base.extend<UiFixtures>({
         server.expectedSignupLimitConflicts = 0;
         server.expectedConflicts = 0;
         server.expectedNotFound = 0;
+        server.expectedUnavailable = 0;
         server.nativeSshResponseDelayMs = 0;
         server.unhandled.length = 0;
       },

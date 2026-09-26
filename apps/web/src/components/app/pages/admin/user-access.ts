@@ -84,18 +84,56 @@ export function revokeAccessDescription(person: {
     .join(" ");
 }
 
-const RESTORE_MESSAGES: Readonly<Record<string, string>> = {
+const RESTORE_MESSAGES = {
   access_not_revoked: "Their access is already active.",
   access_cleanup_incomplete:
     "Finish the revocation cleanup before restoring access.",
   stale_access_revocation:
     "Their access changed since you opened this. Review it, then try again.",
   user_not_found: "This user no longer exists.",
-};
+} as const;
+
+function knownRestoreMessage(code: string | null): string | undefined {
+  return code !== null && Object.hasOwn(RESTORE_MESSAGES, code)
+    ? RESTORE_MESSAGES[code as keyof typeof RESTORE_MESSAGES]
+    : undefined;
+}
+
+/**
+ * A revocation that committed but whose cleanup didn't finish. Repeating the
+ * revoke would be refused, so the dialog closes and Finish cleanup takes over.
+ */
+export function isUnfinishedCleanup(error: unknown): boolean {
+  return (
+    error instanceof HttpResponseError &&
+    error.code === "access_cleanup_incomplete"
+  );
+}
+
+/** Why a restore isn't available right now, for the open dialog. */
+export function restoreUnavailableMessage(
+  reason: "not_revoked" | "no_revocation" | "cleanup_unfinished",
+): string {
+  switch (reason) {
+    case "not_revoked":
+      return RESTORE_MESSAGES.access_not_revoked;
+    case "cleanup_unfinished":
+      return RESTORE_MESSAGES.access_cleanup_incomplete;
+    case "no_revocation":
+      return "There's no revocation record. Revoke access again to record it, then restore it.";
+  }
+}
+
+export function restoreSuccessMessage(serversPendingCleanup: number): string {
+  if (serversPendingCleanup <= 0) return "Access restored.";
+  return serversPendingCleanup === 1
+    ? "Access restored. Removing one of their servers didn't finish; they can remove it again from My servers."
+    : `Access restored. Removing ${serversPendingCleanup} of their servers didn't finish; they can remove them again from My servers.`;
+}
 
 export function restoreErrorMessage(error: unknown): string {
   if (error instanceof HttpResponseError) {
-    const known = error.code ? RESTORE_MESSAGES[error.code] : undefined;
+    const known = knownRestoreMessage(error.code);
     if (known) return known;
     if (error.status === 403) {
       return "Only an active administrator can restore access.";

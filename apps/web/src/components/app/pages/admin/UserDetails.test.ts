@@ -13,7 +13,15 @@ import {
   SignInMethodList,
   signInSummary,
 } from "./UserDetails";
-import { revokeAccessDescription, signupOriginText } from "./user-access";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
+import {
+  isUnfinishedCleanup,
+  restoreErrorMessage,
+  restoreSuccessMessage,
+  restoreUnavailableMessage,
+  revokeAccessDescription,
+  signupOriginText,
+} from "./user-access";
 
 const REVOKED_AT = Date.now() - 3 * 86_400_000;
 
@@ -150,6 +158,27 @@ describe("restore summary", () => {
     expect(markup).not.toContain("admin role");
   });
 
+  it("warns that an account no method signs in to can be claimed after a restore", () => {
+    const stranded = person({
+      signInMethods: [
+        method("contoso-idp", "Contoso Labs", REVOKED_AT - 1, "removed_from_organization"),
+      ],
+    });
+    const markup = renderToStaticMarkup(
+      createElement(RestoreAccessSummary, { person: stranded, preview: restorePreview(stranded) }),
+    );
+    expect(markup).toContain("No sign-in method works");
+    expect(markup).toContain("can claim it, with the organizations it keeps.");
+    expect(markup).not.toContain("Will work again");
+
+    const reachable = person();
+    expect(
+      renderToStaticMarkup(
+        createElement(RestoreAccessSummary, { person: reachable, preview: restorePreview(reachable) }),
+      ),
+    ).not.toContain("No sign-in method works");
+  });
+
   it("warns that a restored admin comes back as a user", () => {
     const admin = person({ role: "admin", sshKeyCount: 0, appCount: 0, memberships: [] });
     const markup = renderToStaticMarkup(
@@ -197,6 +226,50 @@ describe("access history", () => {
         createElement(AccessHistoryList, { history: { events: [], truncated: false } }),
       ),
     ).toContain("No access changes are recorded.");
+  });
+});
+
+describe("restore messages", () => {
+  it("explains refusals by their code", () => {
+    const refusal = (status: number, code: string | null) =>
+      new HttpResponseError(status, "server text", code);
+    expect(restoreErrorMessage(refusal(409, "stale_access_revocation"))).toBe(
+      "Their access changed since you opened this. Review it, then try again.",
+    );
+    expect(restoreErrorMessage(refusal(409, "access_cleanup_incomplete"))).toBe(
+      "Finish the revocation cleanup before restoring access.",
+    );
+    expect(restoreErrorMessage(refusal(409, "access_not_revoked"))).toBe(
+      "Their access is already active.",
+    );
+    expect(restoreErrorMessage(refusal(404, "user_not_found"))).toBe(
+      "This user no longer exists.",
+    );
+    expect(restoreErrorMessage(refusal(403, null))).toBe(
+      "Only an active administrator can restore access.",
+    );
+    // Unknown codes, and inherited object keys, fall back to the server text.
+    expect(restoreErrorMessage(refusal(500, "toString"))).toBe("server text");
+    expect(restoreErrorMessage(new Error("offline"))).toBe("offline");
+  });
+
+  it("says why a restore isn't available and what a finished one left", () => {
+    expect(restoreUnavailableMessage("not_revoked")).toBe("Their access is already active.");
+    expect(restoreUnavailableMessage("cleanup_unfinished")).toBe(
+      "Finish the revocation cleanup before restoring access.",
+    );
+    expect(restoreUnavailableMessage("no_revocation")).toContain("no revocation record");
+    expect(restoreSuccessMessage(0)).toBe("Access restored.");
+    expect(restoreSuccessMessage(1)).toContain("Removing one of their servers didn't finish");
+    expect(restoreSuccessMessage(2)).toContain("Removing 2 of their servers didn't finish");
+  });
+
+  it("hands an unfinished revocation cleanup to Finish cleanup", () => {
+    expect(
+      isUnfinishedCleanup(new HttpResponseError(503, "x", "access_cleanup_incomplete")),
+    ).toBe(true);
+    expect(isUnfinishedCleanup(new HttpResponseError(409, "x", "access_already_revoked"))).toBe(false);
+    expect(isUnfinishedCleanup(new Error("access_cleanup_incomplete"))).toBe(false);
   });
 });
 

@@ -50,7 +50,12 @@ export async function revokeAccess(params: {
     actorUserId: params.actorUserId,
     reason: params.reason,
   });
-  await runRevocationCleanup({ ...params, revocationId });
+  // A retry of this request would be refused as already revoked, so the
+  // failure points at finishing the cleanup instead.
+  await runRevocationCleanup(
+    { ...params, revocationId },
+    "Access is revoked, but cleanup didn't finish. Finish the cleanup to retry it.",
+  );
   return { revocationId };
 }
 
@@ -110,14 +115,21 @@ export async function ensureAccessRevoked(params: {
   return { revocationId: revocation.revocationId };
 }
 
-async function runRevocationCleanup(params: {
-  userId: string;
-  revocationId: string;
-  actorUserId: string;
-}): Promise<void> {
+async function runRevocationCleanup(
+  params: {
+    userId: string;
+    revocationId: string;
+    actorUserId: string;
+  },
+  incompleteMessage = "Access is revoked, but cleanup didn't finish. Try again.",
+): Promise<void> {
   try {
     await cleanupAccessRevocation(params);
   } catch (error) {
+    // Another attempt holds the cleanup, or the revocation is no longer the
+    // current one (finished, or restored). Say so rather than claim access is
+    // revoked with an unfinished cleanup.
+    if (error instanceof AppError && error.status === 409) throw error;
     // The revocation itself is committed; only the cleanup needs a retry.
     console.warn(
       JSON.stringify({
@@ -127,11 +139,7 @@ async function runRevocationCleanup(params: {
         error: error instanceof Error ? error.message : String(error),
       }),
     );
-    throw appError(
-      503,
-      "access_cleanup_incomplete",
-      "Access is revoked, but cleanup didn't finish. Try again.",
-    );
+    throw appError(503, "access_cleanup_incomplete", incompleteMessage);
   }
 }
 

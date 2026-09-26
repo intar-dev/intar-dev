@@ -56,6 +56,7 @@ import {
   ADMIN_USERS_KEY,
   adminJson,
   finishRevocationCleanup,
+  isUnfinishedCleanup,
   revokeAccessDescription,
   revokeUserAccess,
   signupOriginText,
@@ -160,6 +161,11 @@ function UsersPanel() {
   const revokeAccess = useMutation({
     mutationFn: (userId: string) => revokeUserAccess(userId),
     onSuccess: () => setConfirmation(null),
+    // Committed, but its cleanup didn't finish: the row's Finish cleanup
+    // takes over, since repeating the revoke would be refused.
+    onError: (error) => {
+      if (isUnfinishedCleanup(error)) setConfirmation(null);
+    },
     onSettled: refreshAccess,
   });
 
@@ -226,7 +232,9 @@ function UsersPanel() {
         : confirmation?.kind === "role"
           ? setRole.error
           : null;
-  const actionError = finishCleanup.error;
+  const actionError =
+    finishCleanup.error ??
+    (confirmation === null ? revokeAccess.error : null);
   const openConfirmation = (next: UserConfirmation) => {
     setRole.reset();
     deleteUser.reset();
@@ -269,8 +277,9 @@ function UsersPanel() {
                 {visibleUsers.map((entry) => {
                   const isAdmin = entry.role === "admin";
                   const revoked = entry.access === "revoked";
+                  const unrecorded = revoked && entry.revocationId === null;
                   const cleanupUnfinished =
-                    revoked && entry.cleanupCompletedAt === null;
+                    revoked && !unrecorded && entry.cleanupCompletedAt === null;
                   const finishing =
                     finishCleanup.isPending &&
                     finishCleanup.variables?.userId === entry.id;
@@ -324,6 +333,7 @@ function UsersPanel() {
                               ? ` · revoked ${formatRelativeTime(entry.revokedAt)}`
                               : null}
                             {cleanupUnfinished ? " · cleanup unfinished" : null}
+                            {unrecorded ? " · no revocation record" : null}
                           </p>
                           <p className="font-mono text-xs text-muted-foreground">
                             Flag targeting key: {entry.id}
@@ -333,15 +343,16 @@ function UsersPanel() {
 
                       <div className="flex shrink-0 flex-wrap items-center gap-2">
                         {revoked ? (
-                          cleanupUnfinished && entry.revocationId ? (
+                          cleanupUnfinished && entry.revocationId !== null ? (
                             <Button
                               size="sm"
                               variant="outline"
                               className="min-h-11 sm:min-h-9"
                               disabled={busy}
                               onClick={() => {
-                                if (!entry.revocationId) return;
+                                if (entry.revocationId === null) return;
                                 setRole.reset();
+                                revokeAccess.reset();
                                 finishCleanup.mutate({
                                   userId: entry.id,
                                   revocationId: entry.revocationId,
