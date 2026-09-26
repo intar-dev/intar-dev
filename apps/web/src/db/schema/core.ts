@@ -37,6 +37,10 @@ export const user = sqliteTable("user", {
   // The organization whose provider signed the account up, if one did. An
   // address Intar didn't verify lets only that organization reclaim it.
   signupOrganizationId: text("signup_organization_id"),
+  // Advanced by every revocation and never lowered. A check that brackets an
+  // operation compares it, so a revocation in between fails the check even
+  // after an administrator restored access.
+  accessGeneration: integer("access_generation").default(0).notNull(),
 });
 
 export const userSshKeys = sqliteTable(

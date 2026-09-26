@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "fbf23851-85d4-41e2-91e1-885121125401",
-  "prevId": "f4bf3138-740c-498e-8806-c20e171254a6",
+  "id": "2f21f6a4-c859-474a-b78b-5a26adf7411a",
+  "prevId": "fbf23851-85d4-41e2-91e1-885121125401",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -7192,6 +7192,14 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "access_generation": {
+          "name": "access_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
         }
       },
       "indexes": {

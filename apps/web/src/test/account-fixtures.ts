@@ -96,8 +96,9 @@ export async function ensureFixtureAdmin(
 }
 
 /**
- * Makes the account inactive the way a revocation does, without the host and
- * session cleanup. Use `revokeAccount` when a test needs those side effects.
+ * Makes the account inactive the way a revocation does, advancing its access
+ * generation, without the host and session cleanup. Use `revokeAccount` when a
+ * test needs those side effects.
  */
 export async function revokeFixtureAccount(params: {
   d1: D1Database;
@@ -105,7 +106,25 @@ export async function revokeFixtureAccount(params: {
 }): Promise<void> {
   await params.d1
     .prepare(
-      `UPDATE user SET banned = 1, ban_reason = 'access_revoked', ban_expires = NULL
+      `UPDATE user SET banned = 1, ban_reason = 'access_revoked', ban_expires = NULL,
+         access_generation = access_generation + 1
+       WHERE id = ?1`,
+    )
+    .bind(params.userId)
+    .run();
+}
+
+/**
+ * Lifts a fixture revocation the way a restore does, keeping the access
+ * generation. Use `restoreAccount` when a test needs the restore's sweep.
+ */
+export async function restoreFixtureAccount(params: {
+  d1: D1Database;
+  userId: string;
+}): Promise<void> {
+  await params.d1
+    .prepare(
+      `UPDATE user SET banned = 0, ban_reason = NULL, ban_expires = NULL
        WHERE id = ?1`,
     )
     .bind(params.userId)

@@ -1,4 +1,4 @@
-import { isActiveAccount } from "@/lib/account-access";
+import { activeAccessGeneration } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { revokeAllRoutes } from "@/lib/route-revocation";
 
@@ -9,9 +9,10 @@ import { revokeAllRoutes } from "@/lib/route-revocation";
  * outcome that is not a confirmed success with the account still active
  * revokes the route: a rejected mutation, a lost response, a timeout, a 5xx,
  * a revoked account, and a failure of the post-read itself. An ambiguous
- * failure therefore can not leave a ready route behind. Revocation is
- * terminal, so an account active before and after the mutation was active
- * throughout it.
+ * failure therefore can not leave a ready route behind. The account must be
+ * active at the same access generation before and after the mutation, so it
+ * was active throughout it, even if an administrator restored access
+ * meanwhile.
  *
  * A caller passes a generation-fenced `revoke` when the route has one
  * generation, so a late cleanup can not delete a route that the same name was
@@ -27,7 +28,8 @@ export async function issueAccountFencedRoute<Result>(params: {
   // The pre-check runs before the cleanup fence. A refused pre-check made no
   // remote mutation, so it must not revoke anything; only an outcome after
   // the write is ambiguous.
-  if (!(await isActiveAccount(params.userId))) throw accountAccessRevoked();
+  const generation = await activeAccessGeneration(params.userId);
+  if (generation === null) throw accountAccessRevoked();
 
   // Keep the deterministic requested id inside the cleanup fence even when
   // the mutation reached Stargate but its response was lost or malformed.
@@ -38,7 +40,9 @@ export async function issueAccountFencedRoute<Result>(params: {
       issuedRouteIds.add(routeId);
     }
     // A throw here is a failure to confirm, so it revokes like any other.
-    if (!(await isActiveAccount(params.userId))) throw accountAccessRevoked();
+    if ((await activeAccessGeneration(params.userId)) !== generation) {
+      throw accountAccessRevoked();
+    }
     return result;
   } catch (error) {
     try {

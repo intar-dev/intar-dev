@@ -9,7 +9,7 @@ import {
   organizationSignInAllowedSql,
   removedFromOrganizationSql,
   removedThroughProviderSql,
-  sessionMayAct,
+  sessionAccessStamp,
 } from "./account-access";
 import { isRecord } from "@/control-plane/image-registry/shared";
 import { authSetting } from "./auth-runtime";
@@ -410,7 +410,8 @@ export async function checkLinkSession(
   context: GenericEndpointContext,
   userId: string,
 ): Promise<
-  { refusal: LinkSessionRefusal } | { refusal: null; sessionId: string }
+  | { refusal: LinkSessionRefusal }
+  | { refusal: null; sessionId: string; accessGeneration: number }
 > {
   const session = await getSessionFromCtx(context, {
     disableCookieCache: true,
@@ -432,10 +433,13 @@ export async function checkLinkSession(
   }
   // A session that may still act has an identity already, so a link never
   // takes a sign-up spot.
-  if (!(await sessionMayAct(session.session))) {
-    return { refusal: "access_revoked" };
-  }
-  return { refusal: null, sessionId: session.session.id };
+  const stamp = await sessionAccessStamp(session.session);
+  if (!stamp) return { refusal: "access_revoked" };
+  return {
+    refusal: null,
+    sessionId: session.session.id,
+    accessGeneration: stamp.user,
+  };
 }
 
 /**

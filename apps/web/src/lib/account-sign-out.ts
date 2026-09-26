@@ -60,3 +60,58 @@ export function signOutQueries(
   // Typed as non-empty, so a batch may start with them.
   return [first!, ...rest] as const;
 }
+
+/**
+ * Statements that end every credential an account could still hold or redeem
+ * once it loses access: its sessions and OAuth tokens (signOutStatements), app
+ * consents and authorization codes, unclaimed server registrations, and a
+ * pending image preparation. Revocation cleanup runs them, and a restore runs
+ * them again for anything that raced in. `?1` is the user id; `guard` uses the
+ * numbered placeholders bound to `bindings` and must name the last of them.
+ */
+export function accountCredentialSweepStatements(
+  d1: D1Database,
+  guard: string,
+  bindings: readonly unknown[],
+  now: number,
+): D1PreparedStatement[] {
+  const nowParameter = `?${bindings.length + 1}`;
+  return [
+    ...signOutStatements(
+      d1,
+      (userColumn) => `${userColumn} = ?1 AND ${guard}`,
+      bindings,
+    ),
+    d1
+      .prepare(`DELETE FROM oauth_consent WHERE user_id = ?1 AND ${guard}`)
+      .bind(...bindings),
+    d1
+      .prepare(
+        `DELETE FROM verification
+         WHERE CASE
+                 WHEN json_valid(value)
+                 THEN json_extract(value, '$.type')
+               END = 'authorization_code'
+           AND CASE
+                 WHEN json_valid(value)
+                 THEN json_extract(value, '$.userId')
+               END = ?1
+           AND ${guard}`,
+      )
+      .bind(...bindings),
+    // Registration tokens are bearer credentials that only recheck the
+    // owner's status when claimed, so they must not outlive the access.
+    d1
+      .prepare(
+        `UPDATE host_enrollments SET revoked_at = ${nowParameter}
+         WHERE user_id = ?1 AND claimed_at IS NULL AND revoked_at IS NULL
+           AND ${guard}`,
+      )
+      .bind(...bindings, now),
+    d1
+      .prepare(
+        `DELETE FROM personal_image_preparations WHERE user_id = ?1 AND ${guard}`,
+      )
+      .bind(...bindings),
+  ];
+}

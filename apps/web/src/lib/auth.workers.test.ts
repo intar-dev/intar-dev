@@ -33,8 +33,10 @@ import {
 import { interleaveBefore } from "@/test/d1-interleave";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
+  createFixtureMember,
   ensureFixtureAdmin,
   FIXTURE_ADMIN_ID,
+  restoreFixtureAccount,
   revokeFixtureAccount,
 } from "@/test/account-fixtures";
 import {
@@ -44,11 +46,29 @@ import {
   enforceActiveOAuthIssuance,
   enforceCreatedSessionStillActive,
   getOAuthAccessTokenClaims,
+  stampSessionBeforeCreate,
   trustedBrowserOrigin,
 } from "./auth";
 import { encodeBase64Url } from "./base64url";
 import { createSsoIntent, SSO_INTENT_HEADER } from "./organization-sso";
 
+
+/** A fresh endpoint context, as Better Auth gives every session it creates. */
+async function sessionEndpoint(): Promise<AuthEndpointContext> {
+  return { context: await auth.$context } as unknown as AuthEndpointContext;
+}
+
+/** Creates a session the way an endpoint does, inside its context. */
+async function createEndpointSession(
+  userId: string,
+  override?: Record<string, unknown>,
+) {
+  const endpoint = await sessionEndpoint();
+  const context = await auth.$context;
+  return runWithEndpointContext(endpoint, () =>
+    context.internalAdapter.createSession(userId, false, override),
+  );
+}
 describe("auth policy", () => {
   beforeEach(async () => {
     await resetD1Database();
@@ -1189,11 +1209,12 @@ describe("auth policy", () => {
     const now = Date.now();
     await seedMember({ id: "banned-session-user", githubAccountId: "4242161", now });
     await banMember("banned-session-user");
-    const context = await auth.$context;
 
+    // Inside an endpoint, as in production, the admin plugin's ban check runs
+    // before the create hook.
     await expect(
-      context.internalAdapter.createSession("banned-session-user"),
-    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+      createEndpointSession("banned-session-user"),
+    ).rejects.toMatchObject({ body: { code: "BANNED_USER" } });
     await expect(
       env.DB.prepare("SELECT id FROM session WHERE user_id = ?")
         .bind("banned-session-user")
@@ -1215,16 +1236,102 @@ describe("auth policy", () => {
       ipAddress: null,
       userAgent: null,
     };
+    const endpoint = await sessionEndpoint();
+    await stampSessionBeforeCreate(created, endpoint);
     await drizzle(env.DB).insert(session).values(created);
 
-    await expect(enforceCreatedSessionStillActive(created)).resolves.toBeUndefined();
+    await expect(
+      enforceCreatedSessionStillActive(created, endpoint),
+    ).resolves.toBeUndefined();
     await banMember(userId);
-    await expect(enforceCreatedSessionStillActive(created)).rejects.toMatchObject({
+    await expect(
+      enforceCreatedSessionStillActive(created, endpoint),
+    ).rejects.toMatchObject({
       body: { code: "access_revoked" },
     });
     await expect(
       env.DB.prepare("SELECT id FROM session WHERE id = ?")
         .bind(created.id)
+        .first(),
+    ).resolves.toBeNull();
+  });
+
+  it("deletes a session when access was revoked and restored during its creation", async () => {
+    const now = Date.now();
+    const userId = "session-restore-race-user";
+    await seedMember({ id: userId, githubAccountId: "4242174", now });
+    const created: Session = {
+      id: "session-restore-race-row",
+      token: "session-restore-race-token",
+      userId,
+      expiresAt: new Date(now + 3_600_000),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+      ipAddress: null,
+      userAgent: null,
+    };
+    const endpoint = await sessionEndpoint();
+    await stampSessionBeforeCreate(created, endpoint);
+    await drizzle(env.DB).insert(session).values(created);
+    // Revoked and restored between the create hooks: active both times, but
+    // at a newer access generation.
+    await revokeFixtureAccount({ d1: env.DB, userId });
+    await restoreFixtureAccount({ d1: env.DB, userId });
+
+    await expect(
+      enforceCreatedSessionStillActive(created, endpoint),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE id = ?")
+        .bind(created.id)
+        .first(),
+    ).resolves.toBeNull();
+  });
+
+  it("deletes an impersonation when its admin was revoked and restored during its creation", async () => {
+    const now = Date.now();
+    const userId = "impersonated-restore-race-user";
+    const adminId = "impersonating-restore-race-admin";
+    await seedMember({ id: userId, githubAccountId: "4242175", now });
+    await createFixtureMember({ d1: env.DB, userId: adminId, role: "admin", now });
+    const created: Session = {
+      id: "impersonation-restore-race-row",
+      token: "impersonation-restore-race-token",
+      userId,
+      expiresAt: new Date(now + 3_600_000),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+      ipAddress: null,
+      userAgent: null,
+      impersonatedBy: adminId,
+    } as Session;
+    const endpoint = await sessionEndpoint();
+    await stampSessionBeforeCreate(created, endpoint);
+    await drizzle(env.DB).insert(session).values(created);
+    await revokeFixtureAccount({ d1: env.DB, userId: adminId });
+    await restoreFixtureAccount({ d1: env.DB, userId: adminId });
+
+    await expect(
+      enforceCreatedSessionStillActive(created, endpoint),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE id = ?")
+        .bind(created.id)
+        .first(),
+    ).resolves.toBeNull();
+  });
+
+  it("refuses a session without an endpoint context", async () => {
+    const now = Date.now();
+    await seedMember({ id: "contextless-session-user", githubAccountId: "4242176", now });
+    const context = await auth.$context;
+
+    await expect(
+      context.internalAdapter.createSession("contextless-session-user"),
+    ).rejects.toMatchObject({ body: { code: "session_context_missing" } });
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE user_id = ?")
+        .bind("contextless-session-user")
         .first(),
     ).resolves.toBeNull();
   });
@@ -1239,16 +1346,13 @@ describe("auth policy", () => {
       createdAt: now,
       updatedAt: now,
     });
-    const context = await auth.$context;
 
-    await expect(
-      context.internalAdapter.createSession("no-way-in"),
-    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    await expect(createEndpointSession("no-way-in")).rejects.toMatchObject({
+      body: { code: "access_revoked" },
+    });
     // An admin's impersonation needs only an active account.
     await expect(
-      context.internalAdapter.createSession("no-way-in", false, {
-        impersonatedBy: FIXTURE_ADMIN_ID,
-      }),
+      createEndpointSession("no-way-in", { impersonatedBy: FIXTURE_ADMIN_ID }),
     ).resolves.toMatchObject({ userId: "no-way-in" });
   });
 
@@ -1294,9 +1398,9 @@ describe("auth policy", () => {
       ),
     ).rejects.toMatchObject({ body: { code: "access_revoked" } });
     // A session no callback vouched for needs only some way to sign in.
-    await expect(
-      context.internalAdapter.createSession(userId),
-    ).resolves.toMatchObject({ userId });
+    await expect(createEndpointSession(userId)).resolves.toMatchObject({
+      userId,
+    });
   });
 
   it("deletes a session inserted after its last way to sign in went", async () => {
@@ -1313,14 +1417,20 @@ describe("auth policy", () => {
       ipAddress: null,
       userAgent: null,
     };
+    const endpoint = await sessionEndpoint();
+    await stampSessionBeforeCreate(created, endpoint);
     await drizzle(env.DB).insert(session).values(created);
 
-    await expect(enforceCreatedSessionStillActive(created)).resolves.toBeUndefined();
+    await expect(
+      enforceCreatedSessionStillActive(created, endpoint),
+    ).resolves.toBeUndefined();
     // A removal or disconnect committed while the session was being created.
     await env.DB.prepare("DELETE FROM account WHERE user_id = ?")
       .bind(userId)
       .run();
-    await expect(enforceCreatedSessionStillActive(created)).rejects.toMatchObject({
+    await expect(
+      enforceCreatedSessionStillActive(created, endpoint),
+    ).rejects.toMatchObject({
       body: { code: "access_revoked" },
     });
     await expect(
@@ -1713,6 +1823,32 @@ describe("auth policy", () => {
     expect(storedRefresh).toEqual({ revoked: null, rotated_at: null });
   });
 
+  it("removes OAuth tokens issued while access was revoked and restored", async () => {
+    const now = Date.now();
+    const userId = "oauth-restore-race-user";
+    await seedMember({ id: userId, githubAccountId: "4242245", now });
+    const clientId = "oauth-restore-race-client";
+    await seedOAuthClient(clientId, now);
+    const issued = "restore-race-access-token";
+    await drizzle(env.DB).insert(oauthAccessToken).values({
+      id: "restore-race-access-row",
+      token: await hashOAuthToken(issued),
+      clientId,
+      userId,
+      scopes: ["openid"],
+      createdAt: new Date(now),
+      expiresAt: new Date(now + 3_600_000),
+    });
+    // Revoked and restored while the token was being issued at generation 0.
+    await revokeFixtureAccount({ d1: env.DB, userId });
+    await restoreFixtureAccount({ d1: env.DB, userId });
+
+    await expect(
+      enforceActiveOAuthIssuance({ userId, accessGeneration: 0, returned: { access_token: issued } }),
+    ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+    await expect(countOAuthTokens(userId)).resolves.toBe(0);
+  });
+
   it("removes OAuth tokens issued while the account lost its last way to sign in", async () => {
     const now = Date.now();
     const userId = "oauth-sign-out-race-user";
@@ -1735,7 +1871,7 @@ describe("auth policy", () => {
       .run();
 
     await expect(
-      enforceActiveOAuthIssuance({ userId, returned: { access_token: issued } }),
+      enforceActiveOAuthIssuance({ userId, accessGeneration: 0, returned: { access_token: issued } }),
     ).rejects.toMatchObject({ body: { code: "access_revoked" } });
     await expect(countOAuthTokens(userId)).resolves.toBe(0);
   });
@@ -1775,7 +1911,7 @@ describe("auth policy", () => {
     });
 
     await expect(
-      enforceActiveOAuthIssuance({ userId, returned, presentedRefreshToken: presented }),
+      enforceActiveOAuthIssuance({ userId, accessGeneration: 0, returned, presentedRefreshToken: presented }),
     ).resolves.toBeUndefined();
     await expect(countOAuthTokens(userId)).resolves.toBe(3);
 
@@ -1783,7 +1919,7 @@ describe("auth policy", () => {
     // tokens' insert. The account can still sign in, but not this app.
     await env.DB.prepare("DELETE FROM oauth_refresh_token WHERE id = 'presented-refresh-row'").run();
     await expect(
-      enforceActiveOAuthIssuance({ userId, returned, presentedRefreshToken: presented }),
+      enforceActiveOAuthIssuance({ userId, accessGeneration: 0, returned, presentedRefreshToken: presented }),
     ).rejects.toMatchObject({ body: { code: "access_revoked" } });
     await expect(countOAuthTokens(userId)).resolves.toBe(0);
   });
@@ -1887,13 +2023,13 @@ describe("auth policy", () => {
 
     // An account that is still active held access for the whole issuance.
     await expect(
-      enforceActiveOAuthIssuance({ userId, returned }),
+      enforceActiveOAuthIssuance({ userId, accessGeneration: 0, returned }),
     ).resolves.toBeUndefined();
     await expect(countOAuthTokens(userId)).resolves.toBe(4);
 
     await banMember(userId);
     await expect(
-      enforceActiveOAuthIssuance({ userId, returned }),
+      enforceActiveOAuthIssuance({ userId, accessGeneration: 0, returned }),
     ).rejects.toMatchObject({ body: { code: "access_revoked" } });
     const remaining = await env.DB.prepare(
       `SELECT id FROM oauth_access_token WHERE user_id = ?
@@ -1914,6 +2050,7 @@ describe("auth policy", () => {
     await expect(
       enforceActiveOAuthIssuance({
         userId,
+        accessGeneration: 0,
         returned: { access_token: "header.payload.signature" },
       }),
     ).rejects.toMatchObject({ body: { code: "access_revoked" } });

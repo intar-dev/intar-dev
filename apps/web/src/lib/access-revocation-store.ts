@@ -1,4 +1,4 @@
-import { and, eq, exists, inArray, isNull, notExists, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   accessEvents,
@@ -7,9 +7,15 @@ import {
 } from "@/db/schema/application";
 import { account, user } from "@/db/schema/core";
 import { agentBootstrapTokens, agentHosts } from "@/db/schema/platform";
-import { firstOrganizationIdentitySql } from "@/lib/account-access";
+import {
+  activeAccountSql,
+  activeAdminSql,
+  firstOrganizationIdentitySql,
+} from "@/lib/account-access";
+import { accountCredentialSweepStatements } from "@/lib/account-sign-out";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
+import { retiredHostCredentialStatements } from "@/lib/personal-host-retirement";
 import {
   activeAdministrator,
   adminRequiredError,
@@ -19,8 +25,21 @@ import {
   lastAdministratorSafe,
 } from "@/lib/platform-admin-authority";
 
-// Revocation is terminal: nothing sets `banned` back to 0. The revocation row
-// is the audit record and the ledger for the cleanup that follows it.
+// A revocation bans the account and advances its access generation in one
+// write; its row is the audit record and the ledger for the cleanup that
+// follows. An administrator can restore access once that cleanup finished: the
+// restore sweeps whatever credentials raced in, lifts the ban, and deletes the
+// row, so a row exists exactly while the account is revoked. The history stays
+// in `access_events`.
+
+/**
+ * A cleanup attempt that neither finished nor recorded a failure within this
+ * long is abandoned (a lost isolate, or a stall after external cleanup was
+ * dispatched), so a new attempt may take it over. Every write of the old
+ * attempt is fenced by its attempt id, and its late external effects only
+ * target the runs, routes, and host credential generations it read.
+ */
+export const CLEANUP_LEASE_MS = 10 * 60 * 1000;
 
 export type AccessRevocationCleanupClaim =
   | {
@@ -94,6 +113,9 @@ export async function revokeAccount(params: {
       banned: true,
       banReason: "access_revoked",
       banExpires: null,
+      // Fails every bracketing check that started before this write, even
+      // once access is restored (see account-access.ts).
+      accessGeneration: sql`${user.accessGeneration} + 1`,
       updatedAt: new Date(now),
     }).where(and(eq(user.id, userId), currentRevocation)),
     // A report admitted before this transaction must fail its session/generation
@@ -168,9 +190,14 @@ export async function acquireAccessRevocationCleanup(params: {
       and(
         eq(accessRevocations.userId, userId),
         eq(accessRevocations.revocationId, revocationId),
-        isNull(accessRevocations.cleanupAttemptId),
-        isNull(accessRevocations.cleanupStartedAt),
         isNull(accessRevocations.cleanupCompletedAt),
+        or(
+          and(
+            isNull(accessRevocations.cleanupAttemptId),
+            isNull(accessRevocations.cleanupStartedAt),
+          ),
+          lte(accessRevocations.cleanupStartedAt, now - CLEANUP_LEASE_MS),
+        ),
       ),
     )
     .returning({
@@ -404,6 +431,176 @@ export async function recordAccessRevocationCleanupStall(params: {
     .returning({ id: accessEvents.id });
   if (recorded[0]?.id === eventId) return;
   throw staleRevocation();
+}
+
+export type AccessRestoreOutcome = "restored" | "already_restored";
+
+/**
+ * Restores the access of an account whose revocation cleanup finished, as a
+ * fresh start: it keeps its identities, history, and the organization it alone
+ * owns, and loses everything else it held. One batch; the restore event guards
+ * every later statement, so a refused restore writes nothing.
+ */
+export async function restoreAccount(params: {
+  d1: D1Database;
+  userId: string;
+  actorUserId: string;
+  revocationId: string;
+  now?: number;
+}): Promise<AccessRestoreOutcome> {
+  const now = validTimestamp(params.now ?? Date.now());
+  const userId = validId(params.userId, "user");
+  const actorUserId = validId(params.actorUserId, "actor");
+  const revocationId = validId(params.revocationId, "revocation");
+  const eventId = createAppId();
+  const d1 = params.d1;
+  const bindings = [userId, eventId] as const;
+  const restored = `EXISTS (SELECT 1 FROM access_events AS restore_event
+    WHERE restore_event.id = ?2 AND restore_event.event_type = 'access.restored')`;
+  const ownerRole = (column: string) =>
+    `instr(',' || replace(lower(coalesce(${column}, '')), ' ', '') || ',', ',owner,') > 0`;
+
+  const [recorded] = await d1.batch<{ id: string }>([
+    d1
+      .prepare(
+        `INSERT INTO access_events (
+           id, event_type, subject_user_id, github_account_id,
+           sso_provider_id, sso_account_id,
+           actor_user_id, revocation_id, reason, created_at
+         )
+         SELECT ?2, 'access.restored', revocation.user_id,
+                (SELECT github.account_id FROM account AS github
+                 WHERE github.user_id = revocation.user_id
+                   AND github.provider_id = 'github'
+                 LIMIT 1),
+                ${firstOrganizationIdentitySql("revocation.user_id", "provider_id")},
+                ${firstOrganizationIdentitySql("revocation.user_id", "account_id")},
+                ?3, revocation.revocation_id, 'admin_restored', ?5
+         FROM access_revocations AS revocation
+         WHERE revocation.user_id = ?1
+           AND revocation.revocation_id = ?4
+           AND revocation.cleanup_completed_at IS NOT NULL
+           AND EXISTS (SELECT 1 FROM user AS revoked_account
+             WHERE revoked_account.id = ?1
+               AND revoked_account.deleted_at IS NULL
+               AND revoked_account.banned = 1
+               AND revoked_account.ban_reason = 'access_revoked')
+           AND EXISTS (SELECT 1 FROM user AS actor_identity
+             WHERE actor_identity.id = ?3
+               AND ${activeAdminSql("actor_identity")})
+         RETURNING id`,
+      )
+      .bind(userId, eventId, actorUserId, revocationId, now),
+    // Anything that raced in after the revocation cleanup.
+    ...accountCredentialSweepStatements(d1, restored, bindings, now),
+    d1
+      .prepare(`DELETE FROM user_ssh_keys WHERE user_id = ?1 AND ${restored}`)
+      .bind(...bindings),
+    // Their apps, with every grant other people gave them (cascade).
+    d1
+      .prepare(`DELETE FROM oauth_client WHERE user_id = ?1 AND ${restored}`)
+      .bind(...bindings),
+    // Every membership except an organization they alone own, which would be
+    // left without an owner. An organization's identity provider adds its
+    // people back when they sign in through it.
+    d1
+      .prepare(
+        `DELETE FROM member
+         WHERE member.user_id = ?1 AND ${restored}
+           AND NOT (${ownerRole("member.role")}
+             AND NOT EXISTS (SELECT 1 FROM member AS other_owner
+               WHERE other_owner.organization_id = member.organization_id
+                 AND other_owner.user_id <> ?1
+                 AND ${ownerRole("other_owner.role")}))`,
+      )
+      .bind(...bindings),
+    // Revocation already disabled their servers and rotated the credentials;
+    // retire them as a server removal does, so the owner starts on cloud.
+    d1
+      .prepare(
+        `UPDATE agent_hosts SET disabled = 1, scenario_enabled = 0, connected = 0,
+           active_session_id = NULL, disconnected_at = ?3, updated_at = ?3,
+           credential_generation = credential_generation + CASE WHEN disabled = 0 THEN 1 ELSE 0 END,
+           owner_removal_id = coalesce(owner_removal_id, ?2)
+         WHERE user_id = ?1 AND scope = 'personal'
+           AND owner_removal_completed_at IS NULL AND ${restored}`,
+      )
+      .bind(...bindings, now),
+    ...retiredHostCredentialStatements(
+      d1,
+      `host_id IN (SELECT retired_host.id FROM agent_hosts AS retired_host
+        WHERE retired_host.user_id = ?1 AND retired_host.scope = 'personal')
+        AND ${restored}`,
+      bindings,
+      now,
+    ),
+    // The access generation stays where the revocation left it.
+    d1
+      .prepare(
+        `UPDATE user SET banned = 0, ban_reason = NULL, ban_expires = NULL,
+           role = 'user', metal_placement = 'platform', updated_at = ?3
+         WHERE id = ?1 AND ${restored}`,
+      )
+      .bind(...bindings, now),
+    d1
+      .prepare(
+        `DELETE FROM access_revocations
+         WHERE user_id = ?1 AND revocation_id = ?3 AND ${restored}`,
+      )
+      .bind(...bindings, revocationId),
+  ]);
+  if (recorded?.results[0]?.id === eventId) return "restored";
+  return restoreFailure(d1, { userId, actorUserId, revocationId });
+}
+
+// Classifies a restore that recorded nothing, most specific cause first. A
+// retry of a restore whose response was lost reports the earlier success.
+async function restoreFailure(
+  d1: D1Database,
+  params: { userId: string; actorUserId: string; revocationId: string },
+): Promise<AccessRestoreOutcome> {
+  if (!(await isActiveAdmin(params.actorUserId, d1))) throw adminRequiredError();
+  const target = await d1
+    .prepare(
+      `SELECT target.deleted_at AS deletedAt,
+              ${activeAccountSql("target")} AS active,
+              revocation.revocation_id AS revocationId,
+              revocation.cleanup_completed_at AS cleanupCompletedAt,
+              EXISTS (SELECT 1 FROM access_events
+                WHERE subject_user_id = ?1 AND revocation_id = ?2
+                  AND event_type = 'access.restored') AS restored
+       FROM user AS target
+       LEFT JOIN access_revocations AS revocation ON revocation.user_id = target.id
+       WHERE target.id = ?1`,
+    )
+    .bind(params.userId, params.revocationId)
+    .first<{
+      deletedAt: number | null;
+      active: number;
+      revocationId: string | null;
+      cleanupCompletedAt: number | null;
+      restored: number;
+    }>();
+  if (!target || target.deletedAt !== null) {
+    throw appError(404, "user_not_found", "User not found");
+  }
+  if (target.revocationId === null) {
+    if (target.restored === 1 && target.active === 1) return "already_restored";
+    throw appError(409, "access_not_revoked", "Their access isn't revoked");
+  }
+  if (target.revocationId !== params.revocationId) throw staleRevocation();
+  if (target.cleanupCompletedAt === null) {
+    throw appError(
+      409,
+      "access_cleanup_incomplete",
+      "Finish revoking access before restoring it",
+    );
+  }
+  throw appError(
+    409,
+    "access_restore_conflict",
+    "The user changed during the restore. Refresh and try again.",
+  );
 }
 
 function cleanupEventSelect(params: {
