@@ -138,7 +138,9 @@ test("admin revokes access from the users list", async ({ page, ui }) => {
   await revokeButtons.first().click();
   const dialog = page.getByRole("dialog", { name: "Revoke access?" });
   await expect(dialog).toContainText("Mina Learner is signed out everywhere");
-  await expect(dialog).toContainText("Access can't be restored.");
+  await expect(dialog).toContainText(
+    "You can restore access later from their page.",
+  );
   const revokeRequest = page.waitForRequest(
     (request) =>
       request.method() === "POST" &&
@@ -150,6 +152,50 @@ test("admin revokes access from the users list", async ({ page, ui }) => {
   await expect(revokedBadges).toHaveCount(2);
   await expect(revokeButtons).toHaveCount(activeCount - 1);
   expect(ui.server.state.signups.taken).toBe(37);
+});
+
+test("admin restores a revoked user's access from their details", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "light" });
+  await expect(
+    page.getByText("signed up through Platform Repair Crew", { exact: false }),
+  ).toBeVisible();
+
+  await page.getByRole("link", { name: "Blake Blocked" }).click();
+  await expect(page).toHaveURL(/\/admin\/people\/user-blocked$/);
+  await expect(page.locator("h1").first()).toHaveText("Blake Blocked");
+  await expect(page.getByRole("link", { name: "People" }).first()).toHaveAttribute(
+    "href",
+    "/admin/people",
+  );
+  await expect(page.getByText("Platform Repair Crew's identity provider")).toBeVisible();
+  await expect(page.getByText("The organization removed them.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Connected after access was revoked.").first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Restore access" }).click();
+  const dialog = page.getByRole("dialog", { name: "Restore access?" });
+  await expect(dialog).toContainText("Will work again");
+  await expect(dialog).toContainText("Still won't work");
+  await expect(dialog).toContainText("Check that it's theirs.");
+  await expect(dialog).toContainText("Their SSH key is removed.");
+  await expect(dialog).toContainText("They leave Platform Repair Crew.");
+  const restoreRequest = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      request.url().endsWith("/api/admin/users/user-blocked/restore"),
+  );
+  await dialog.getByRole("button", { name: "Restore access" }).click();
+  expect((await restoreRequest).postDataJSON()).toEqual({
+    revocationId: "revocation-user-blocked",
+  });
+
+  await expect(page.getByText("Access restored.", { exact: true })).toBeVisible();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("button", { name: "Revoke access" })).toBeVisible();
+  await expect(page.getByText("Access restored", { exact: true }).first()).toBeVisible();
+  expect(ui.server.state.signups.taken).toBe(39);
 });
 
 test("learner discovery filters the catalog", async ({ page, ui }) => {

@@ -412,6 +412,21 @@ const adminPeopleRoute = createRoute({
   ),
 });
 
+const adminUserDetailsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin/people/$userId",
+  head: () =>
+    routeHead(
+      "User details",
+      "See how a person signs in, their organizations, access, and access history.",
+    ),
+  beforeLoad: requireAdminRoute,
+  component: lazyRouteComponent(
+    () => import("./pages/admin/UserDetails"),
+    "AdminUserDetails",
+  ),
+});
+
 const routeTree = rootRoute.addChildren([
   marketingLayoutRoute.addChildren([
     indexRoute,
@@ -443,6 +458,7 @@ const routeTree = rootRoute.addChildren([
     adminScenariosRoute,
     adminScenarioDetailsRoute,
     adminPeopleRoute,
+    adminUserDetailsRoute,
   ]),
 ]);
 

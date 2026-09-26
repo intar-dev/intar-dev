@@ -649,6 +649,17 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "people-revoke-access-light-desktop");
   });
 
+  test("people restore access", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("admin-user-detail"), theme: "light" });
+    await page.getByRole("button", { name: "Restore access" }).click();
+    const dialog = page.getByRole("dialog", { name: "Restore access?" });
+    await expect(dialog).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Restore access" }),
+    ).toBeEnabled();
+    await expectRouteScreenshot(page, "people-restore-access-light-desktop");
+  });
+
 });
 
 test.describe("focused mobile workspace", () => {

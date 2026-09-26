@@ -5,7 +5,7 @@ import {
   useSignupPolicy,
 } from "../hooks/useSignupPolicy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   Ban,
   RefreshCw,
@@ -46,7 +46,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { AdminPeopleTab } from "./tab-search";
+import type {
+  PlatformUserAccess,
+  PlatformUserOrigin,
+} from "@/lib/platform-user-details";
 import { SignupsPanel } from "./admin/SignupsPanel";
+import {
+  ADMIN_SIGNUPS_KEY,
+  ADMIN_USERS_KEY,
+  adminJson,
+  finishRevocationCleanup,
+  revokeAccessDescription,
+  revokeUserAccess,
+  signupOriginText,
+} from "./admin/user-access";
 import { RemovedMemberList } from "./organization-detail/RemovedMemberList";
 
 export function AdminPeople() {
@@ -97,7 +110,9 @@ interface AdminListedUser {
   image: string | null;
   username: string | null;
   role: string | null;
-  access: "active" | "revoked";
+  access: PlatformUserAccess;
+  origin: PlatformUserOrigin;
+  revocationId: string | null;
   revokedAt: number | null;
   cleanupCompletedAt: number | null;
   createdAt: string;
@@ -117,7 +132,7 @@ function UsersPanel() {
   );
 
   const users = useQuery({
-    queryKey: ["admin", "users"],
+    queryKey: ADMIN_USERS_KEY,
     queryFn: () =>
       adminJson<{ users: AdminListedUser[] }>("/api/admin/users", {
         method: "GET",
@@ -129,8 +144,8 @@ function UsersPanel() {
   // too: access may be revoked even when its cleanup did not finish.
   const refreshAccess = () =>
     Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["admin", "users"] }),
-      queryClient.invalidateQueries({ queryKey: ["admin", "signups"] }),
+      queryClient.invalidateQueries({ queryKey: ADMIN_USERS_KEY }),
+      queryClient.invalidateQueries({ queryKey: ADMIN_SIGNUPS_KEY }),
     ]);
 
   const deleteUser = useMutation({
@@ -148,9 +163,10 @@ function UsersPanel() {
     onSettled: refreshAccess,
   });
 
-  // The revoke endpoint also finishes a cleanup that did not complete.
+  // Finishes the cleanup of the revocation this list shows, never another.
   const finishCleanup = useMutation({
-    mutationFn: (userId: string) => revokeUserAccess(userId),
+    mutationFn: (entry: { userId: string; revocationId: string }) =>
+      finishRevocationCleanup(entry.userId, entry.revocationId),
     onSettled: refreshAccess,
   });
 
@@ -162,7 +178,7 @@ function UsersPanel() {
       ),
     onSuccess: async () => {
       setConfirmation(null);
-      await queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+      await queryClient.invalidateQueries({ queryKey: ADMIN_USERS_KEY });
     },
   });
 
@@ -230,7 +246,7 @@ function UsersPanel() {
       <Section
         density="compact"
         title="Users"
-        description="Manage roles, revoke access, or permanently delete accounts. The last active administrator is protected."
+        description="Manage roles and access, or permanently delete accounts. Open a person to see how they sign in and to restore their access. The last active administrator is protected."
         bodyClassName="space-y-4"
       >
         <FilterBar
@@ -257,7 +273,7 @@ function UsersPanel() {
                     revoked && entry.cleanupCompletedAt === null;
                   const finishing =
                     finishCleanup.isPending &&
-                    finishCleanup.variables === entry.id;
+                    finishCleanup.variables?.userId === entry.id;
                   return (
                     <div
                       key={entry.id}
@@ -276,9 +292,13 @@ function UsersPanel() {
                         </Avatar>
                         <div className="min-w-0 space-y-0.5">
                           <div className="flex flex-wrap items-center gap-2">
-                            <p className="truncate text-sm font-medium">
-                              {entry.name}
-                            </p>
+                            <Link
+                              to="/admin/people/$userId"
+                              params={{ userId: entry.id }}
+                              className="inline-flex min-w-0 items-center text-sm font-medium hover:underline pointer-coarse:min-h-11"
+                            >
+                              <span className="truncate">{entry.name}</span>
+                            </Link>
                             {entry.username ? (
                               <p className="font-mono text-xs text-muted-foreground">
                                 @{entry.username}
@@ -296,7 +316,7 @@ function UsersPanel() {
                             )}
                           </div>
                           <p className="text-caption tabular-nums [overflow-wrap:anywhere]">
-                            {entry.email} · added{" "}
+                            {entry.email} · {signupOriginText(entry.origin)}{" "}
                             {formatRelativeTime(
                               new Date(entry.createdAt).getTime(),
                             )}
@@ -313,15 +333,19 @@ function UsersPanel() {
 
                       <div className="flex shrink-0 flex-wrap items-center gap-2">
                         {revoked ? (
-                          cleanupUnfinished ? (
+                          cleanupUnfinished && entry.revocationId ? (
                             <Button
                               size="sm"
                               variant="outline"
                               className="min-h-11 sm:min-h-9"
                               disabled={busy}
                               onClick={() => {
+                                if (!entry.revocationId) return;
                                 setRole.reset();
-                                finishCleanup.mutate(entry.id);
+                                finishCleanup.mutate({
+                                  userId: entry.id,
+                                  revocationId: entry.revocationId,
+                                });
                               }}
                             >
                               <RefreshCw className="size-3.5" />
@@ -489,17 +513,7 @@ function confirmationDescription({
   kind,
   nextRole,
 }: UserConfirmation): string {
-  if (kind === "revoke") {
-    return [
-      `${entry.name} is signed out everywhere, their runs stop, and their personal servers are disabled.`,
-      "Access can't be restored. Their spot opens for someone new.",
-      entry.role === "admin"
-        ? "The server keeps at least one active administrator."
-        : null,
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
+  if (kind === "revoke") return revokeAccessDescription(entry);
   if (kind === "delete") {
     return [
       "This permanently removes sign-in, sessions, memberships, OAuth grants, and personal SSH keys. Retained operational and security history remains linked to an anonymous user record.",
@@ -512,33 +526,6 @@ function confirmationDescription({
   return nextRole === "admin"
     ? "Admins sign in with GitHub, so they need it connected. They're signed out now and sign in again as an admin."
     : "Role changes take effect immediately. The server keeps at least one active administrator.";
-}
-
-function revokeUserAccess(userId: string) {
-  return adminJson<{ revocationId: string; cleanupCompleted: boolean }>(
-    `/api/admin/users/${encodeURIComponent(userId)}/revoke`,
-    { method: "POST" },
-  );
-}
-
-async function adminJson<T>(path: string, init: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: { "content-type": "application/json", ...init.headers },
-  });
-  const result = (await response.json().catch(() => null)) as {
-    error?: unknown;
-  } | null;
-  if (!response.ok) {
-    throw new Error(
-      typeof result?.error === "string"
-        ? result.error
-        : "User action failed",
-    );
-  }
-  return result as T;
 }
 
 interface AdminOrganizationRow {

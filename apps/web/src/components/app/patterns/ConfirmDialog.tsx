@@ -11,8 +11,10 @@ import {
 } from "@/components/ui/dialog";
 
 /**
- * Asks before a destructive action and shows its failure in place. A pending
+ * Asks before a consequential action and shows its failure in place. A pending
  * action keeps the dialog open until it settles, so its result always shows.
+ * The confirm button is a danger button unless the action gives something
+ * back rather than taking it away.
  */
 export function ConfirmDialog(props: {
   open: boolean;
@@ -24,7 +26,12 @@ export function ConfirmDialog(props: {
   pending: boolean;
   confirmLabel: string;
   pendingLabel: string;
-  confirmDisabled?: boolean;
+  confirmDisabled?: boolean | undefined;
+  confirmVariant?: "danger" | "default" | undefined;
+  cancelLabel?: string | undefined;
+  /** Details shown between the description and any error. */
+  children?: ReactNode;
+  contentClassName?: string | undefined;
   onConfirm: () => void;
 }) {
   const close = () => {
@@ -37,20 +44,21 @@ export function ConfirmDialog(props: {
         if (!open) close();
       }}
     >
-      <DialogContent>
+      <DialogContent className={props.contentClassName}>
         <DialogHeader>
           <DialogTitle>{props.title}</DialogTitle>
           <DialogDescription>{props.description}</DialogDescription>
         </DialogHeader>
+        {props.children}
         {props.error ? (
           <InlineFeedback tone="error">{props.error}</InlineFeedback>
         ) : null}
         <DialogFooter>
           <Button variant="outline" disabled={props.pending} onClick={close}>
-            Cancel
+            {props.cancelLabel ?? "Cancel"}
           </Button>
           <Button
-            variant="danger"
+            variant={props.confirmVariant ?? "danger"}
             disabled={props.pending || props.confirmDisabled}
             onClick={props.onConfirm}
           >

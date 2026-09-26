@@ -432,10 +432,46 @@ test.describe("focused state accessibility", () => {
 
     const dialog = page.getByRole("dialog", { name: "Revoke access?" });
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText("Access can't be restored.");
+    await expect(dialog).toContainText(
+      "You can restore access later from their page.",
+    );
     await expect(
       dialog.getByRole("button", { name: "Keep access" }),
     ).toBeVisible();
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("restore access confirmation", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("admin-user-detail"), theme: "light" });
+    await page.getByRole("button", { name: "Restore access" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Restore access?" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Will work again");
+    await expect(
+      dialog.getByRole("heading", { name: "After you restore" }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Restore access" }),
+    ).toBeEnabled();
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("user details for someone who no longer exists", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({ ...routeCase("admin-people"), theme: "light" });
+    ui.server.expectedNotFound = 1;
+    await page.goto("/admin/people/user-missing");
+    await expect(
+      page.getByRole("heading", { name: "User not found" }),
+    ).toBeVisible();
+    await expect(page.getByRole("link", { name: "Back to people" })).toHaveAttribute(
+      "href",
+      "/admin/people",
+    );
+    await expect(page.locator("h1").first()).toHaveText("User");
     await expectNoAxeViolations(page, testInfo);
   });
 
