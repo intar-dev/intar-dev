@@ -23,6 +23,8 @@ export interface MockApiServer {
   expectedConflicts: number;
   /** Requests a test answered with 404 on purpose. */
   expectedNotFound: number;
+  /** Requests a test answered with 503 on purpose. */
+  expectedUnavailable: number;
   nativeSshResponseDelayMs: number;
   scenarioRunStatusRevision: number;
   handle(route: Route): Promise<void>;
@@ -523,7 +525,11 @@ function platformUserDetails(state: MockApiState, userId: string) {
     createdAt: Date.parse(String(listed.createdAt)),
     origin: listed.origin ?? { kind: "github" },
     access,
-    canSignIn: access === "active",
+    canSignIn:
+      access === "active" &&
+      (signInMethods as Array<{ blocker?: unknown }>).some(
+        (method) => method.blocker === null,
+      ),
     signInMethods,
     memberships: extra.memberships ?? [],
     removals: extra.removals ?? [],
@@ -581,6 +587,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     expectedSignupLimitConflicts: 0,
     expectedConflicts: 0,
     expectedNotFound: 0,
+    expectedUnavailable: 0,
     nativeSshResponseDelayMs: 0,
     scenarioRunStatusRevision: 0,
     setRunState(runState) {
@@ -781,8 +788,13 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         const target = server.state.users.find(
           (entry) => entry.id === restoredUserId,
         );
+        if (!target) {
+          server.expectedNotFound += 1;
+          await json(route, { error: "User not found", code: "user_not_found" }, 404);
+          return;
+        }
         const refusal =
-          !target || target.access !== "revoked"
+          target.access !== "revoked"
             ? { error: "Their access isn't revoked", code: "access_not_revoked" }
             : target.revocationId !== body.revocationId
               ? {
@@ -795,7 +807,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
                     code: "access_cleanup_incomplete",
                   }
                 : null;
-        if (!target || refusal) {
+        if (refusal) {
           server.expectedConflicts += 1;
           await json(route, refusal, 409);
           return;
@@ -810,7 +822,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         if (details) {
           details.sshKeyCount = 0;
           details.appCount = 0;
-          details.memberships = [];
+          // An organization they alone own keeps them as its owner.
+          details.memberships = (
+            (details.memberships as Array<{ soleOwner?: boolean }> | undefined) ?? []
+          ).filter((membership) => membership.soleOwner === true);
         }
         historyOf(server.state, restoredUserId).unshift({
           id: `event-restored-${restoredUserId}`,

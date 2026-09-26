@@ -154,6 +154,53 @@ test("admin revokes access from the users list", async ({ page, ui }) => {
   expect(ui.server.state.signups.taken).toBe(37);
 });
 
+test("a revoke whose cleanup didn't finish hands over to Finish cleanup", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "light" });
+  // The revocation commits, then its cleanup fails.
+  await page.route("**/api/admin/users/user-learner/revoke", async (route) => {
+    const learner = ui.server.state.users.find((entry) => entry.id === "user-learner");
+    if (learner) {
+      Object.assign(learner, {
+        access: "revoked",
+        revokedAt: Date.parse("2026-07-10T09:00:00Z"),
+        cleanupCompletedAt: null,
+        revocationId: "revocation-user-learner",
+      });
+    }
+    ui.server.expectedUnavailable += 1;
+    await route.fulfill({
+      status: 503,
+      json: {
+        error: "Access is revoked, but cleanup didn't finish. Finish the cleanup to retry it.",
+        code: "access_cleanup_incomplete",
+      },
+    });
+  });
+
+  await page.getByRole("button", { name: "Revoke access" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Revoke access?" });
+  await dialog.getByRole("button", { name: "Revoke access" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("Finish the cleanup to retry it.", { exact: false })).toBeVisible();
+
+  const finish = page.getByRole("button", { name: "Finish cleanup" });
+  await expect(finish).toBeVisible();
+  const cleanupRequest = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      request.url().endsWith("/api/admin/users/user-learner/revocation-cleanup"),
+  );
+  await finish.click();
+  expect((await cleanupRequest).postDataJSON()).toEqual({
+    revocationId: "revocation-user-learner",
+  });
+  await expect(page.getByText("Cleanup finished.")).toBeVisible();
+  await expect(finish).toBeHidden();
+});
+
 test("admin restores a revoked user's access from their details", async ({
   page,
   ui,
