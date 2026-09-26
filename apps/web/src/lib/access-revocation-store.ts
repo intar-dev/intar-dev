@@ -11,6 +11,7 @@ import {
   activeAccountSql,
   activeAdminSql,
   firstOrganizationIdentitySql,
+  soleOwnerMembershipSql,
 } from "@/lib/account-access";
 import { accountCredentialSweepStatements } from "@/lib/account-sign-out";
 import { appError } from "@/lib/app-error";
@@ -457,8 +458,6 @@ export async function restoreAccount(params: {
   const bindings = [userId, eventId] as const;
   const restored = `EXISTS (SELECT 1 FROM access_events AS restore_event
     WHERE restore_event.id = ?2 AND restore_event.event_type = 'access.restored')`;
-  const ownerRole = (column: string) =>
-    `instr(',' || replace(lower(coalesce(${column}, '')), ' ', '') || ',', ',owner,') > 0`;
 
   const [recorded] = await d1.batch<{ id: string }>([
     d1
@@ -507,11 +506,7 @@ export async function restoreAccount(params: {
       .prepare(
         `DELETE FROM member
          WHERE member.user_id = ?1 AND ${restored}
-           AND NOT (${ownerRole("member.role")}
-             AND NOT EXISTS (SELECT 1 FROM member AS other_owner
-               WHERE other_owner.organization_id = member.organization_id
-                 AND other_owner.user_id <> ?1
-                 AND ${ownerRole("other_owner.role")}))`,
+           AND NOT ${soleOwnerMembershipSql("member")}`,
       )
       .bind(...bindings),
     // Revocation already disabled their servers and rotated the credentials;
