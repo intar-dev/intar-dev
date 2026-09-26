@@ -21,6 +21,8 @@ export interface MockApiServer {
   expectedSignupLimitConflicts: number;
   /** Other requests a test answered with 409 on purpose. */
   expectedConflicts: number;
+  /** Requests a test answered with 404 on purpose. */
+  expectedNotFound: number;
   nativeSshResponseDelayMs: number;
   scenarioRunStatusRevision: number;
   handle(route: Route): Promise<void>;
@@ -479,6 +481,70 @@ function probeSnapshots(variant: MockApiState["variant"]) {
   ];
 }
 
+/** The access history of a fixture user, created on first use. */
+function historyOf(
+  state: MockApiState,
+  userId: string,
+): Array<Record<string, unknown>> {
+  const details = (state.userDetails[userId] ??= {});
+  const history = (details.history ??= { events: [], truncated: false }) as {
+    events: Array<Record<string, unknown>>;
+  };
+  return history.events;
+}
+
+/** What GET /api/admin/users/:id answers, built from the listed user. */
+function platformUserDetails(state: MockApiState, userId: string) {
+  const listed = state.users.find((entry) => entry.id === userId);
+  if (!listed) return null;
+  const extra = state.userDetails[userId] ?? {};
+  const access = listed.access === "revoked" ? "revoked" : "active";
+  const revocationId =
+    typeof listed.revocationId === "string" ? listed.revocationId : null;
+  const revokedAt = typeof listed.revokedAt === "number" ? listed.revokedAt : null;
+  const cleanupCompletedAt =
+    typeof listed.cleanupCompletedAt === "number" ? listed.cleanupCompletedAt : null;
+  const signInMethods = (extra.signInMethods as unknown[] | undefined) ?? [
+    {
+      providerId: "github",
+      kind: "github",
+      organization: null,
+      linkedAt: Date.parse(String(listed.createdAt)),
+      blocker: null,
+    },
+  ];
+  return {
+    id: listed.id,
+    name: listed.name,
+    email: listed.email,
+    image: listed.image ?? null,
+    username: listed.username ?? null,
+    role: listed.role === "admin" ? "admin" : "user",
+    createdAt: Date.parse(String(listed.createdAt)),
+    origin: listed.origin ?? { kind: "github" },
+    access,
+    canSignIn: access === "active",
+    signInMethods,
+    memberships: extra.memberships ?? [],
+    removals: extra.removals ?? [],
+    revocation:
+      access === "revoked" && revocationId !== null && revokedAt !== null
+        ? {
+            revocationId,
+            revokedAt,
+            revokedBy: { id: "user-admin", name: "Ada Administrator" },
+            reason: "admin_revoked",
+            cleanup: cleanupCompletedAt === null ? "pending" : "completed",
+            cleanupStartedAt: cleanupCompletedAt === null ? null : revokedAt,
+            cleanupCompletedAt,
+          }
+        : null,
+    sshKeyCount: extra.sshKeyCount ?? 0,
+    appCount: extra.appCount ?? 0,
+    history: extra.history ?? { events: [], truncated: false },
+  };
+}
+
 function segment(pathname: string, pattern: RegExp): string | null {
   const match = pathname.match(pattern);
   return match?.[1] ? decodeURIComponent(match[1]) : null;
@@ -514,6 +580,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     expectedNativeSshNoProfileConflicts: 0,
     expectedSignupLimitConflicts: 0,
     expectedConflicts: 0,
+    expectedNotFound: 0,
     nativeSshResponseDelayMs: 0,
     scenarioRunStatusRevision: 0,
     setRunState(runState) {
@@ -644,17 +711,118 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         const target = server.state.users.find(
           (entry) => entry.id === revokedUserId,
         );
-        if (target && target.access === "active") {
+        if (target?.access === "revoked") {
+          server.expectedConflicts += 1;
+          await json(
+            route,
+            { error: "Access is already revoked", code: "access_already_revoked" },
+            409,
+          );
+          return;
+        }
+        if (target) {
           target.access = "revoked";
           target.revokedAt = FIXED_NOW;
+          target.cleanupCompletedAt = FIXED_NOW;
+          target.revocationId = `revocation-${revokedUserId}`;
           server.state.signups.taken = Math.max(0, server.state.signups.taken - 1);
+          historyOf(server.state, revokedUserId).unshift({
+            id: `event-revoked-${revokedUserId}`,
+            type: "access.blocked",
+            at: FIXED_NOW,
+            actor: { id: "user-admin", name: "Ada Administrator" },
+            reason: "admin_revoked",
+          });
         }
-        if (target) target.cleanupCompletedAt = FIXED_NOW;
         await json(route, {
           userId: revokedUserId,
           access: "revoked",
           revocationId: `revocation-${revokedUserId}`,
           cleanupCompleted: true,
+        });
+        return;
+      }
+      const cleanupUserId = segment(
+        pathname,
+        /^\/api\/admin\/users\/([^/]+)\/revocation-cleanup$/,
+      );
+      if (cleanupUserId && method === "POST") {
+        const body = await requestBody(route);
+        const target = server.state.users.find(
+          (entry) => entry.id === cleanupUserId,
+        );
+        if (!target || target.revocationId !== body.revocationId) {
+          server.expectedConflicts += 1;
+          await json(
+            route,
+            {
+              error: "The access revocation is no longer current",
+              code: "stale_access_revocation",
+            },
+            409,
+          );
+          return;
+        }
+        target.cleanupCompletedAt = FIXED_NOW;
+        await json(route, {
+          userId: cleanupUserId,
+          access: "revoked",
+          revocationId: target.revocationId,
+          cleanupCompleted: true,
+        });
+        return;
+      }
+      const restoredUserId = segment(
+        pathname,
+        /^\/api\/admin\/users\/([^/]+)\/restore$/,
+      );
+      if (restoredUserId && method === "POST") {
+        const body = await requestBody(route);
+        const target = server.state.users.find(
+          (entry) => entry.id === restoredUserId,
+        );
+        const refusal =
+          !target || target.access !== "revoked"
+            ? { error: "Their access isn't revoked", code: "access_not_revoked" }
+            : target.revocationId !== body.revocationId
+              ? {
+                  error: "The access revocation is no longer current",
+                  code: "stale_access_revocation",
+                }
+              : target.cleanupCompletedAt === null
+                ? {
+                    error: "Finish revoking access before restoring it",
+                    code: "access_cleanup_incomplete",
+                  }
+                : null;
+        if (!target || refusal) {
+          server.expectedConflicts += 1;
+          await json(route, refusal, 409);
+          return;
+        }
+        target.access = "active";
+        target.role = "user";
+        target.revocationId = null;
+        target.revokedAt = null;
+        target.cleanupCompletedAt = null;
+        server.state.signups.taken += 1;
+        const details = server.state.userDetails[restoredUserId];
+        if (details) {
+          details.sshKeyCount = 0;
+          details.appCount = 0;
+          details.memberships = [];
+        }
+        historyOf(server.state, restoredUserId).unshift({
+          id: `event-restored-${restoredUserId}`,
+          type: "access.restored",
+          at: FIXED_NOW,
+          actor: { id: "user-admin", name: "Ada Administrator" },
+          reason: "admin_restored",
+        });
+        await json(route, {
+          userId: restoredUserId,
+          access: "active",
+          serversPendingCleanup: 0,
         });
         return;
       }
@@ -698,6 +866,17 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
 
       if (server.state.variant === "error" && method === "GET") {
         await json(route, { error: "Deterministic fixture failure" }, 503);
+        return;
+      }
+
+      const detailUserId = segment(pathname, /^\/api\/admin\/users\/([^/]+)$/);
+      if (detailUserId && method === "GET") {
+        const details = platformUserDetails(server.state, detailUserId);
+        if (!details) {
+          await json(route, { error: "User not found", code: "user_not_found" }, 404);
+          return;
+        }
+        await json(route, { user: details });
         return;
       }
 

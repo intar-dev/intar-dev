@@ -81,6 +81,8 @@ export interface MockApiState {
     updatedAt: number | null;
   };
   users: Array<Record<string, unknown>>;
+  /** Sign-in methods, organizations, and history by user id. */
+  userDetails: Record<string, Record<string, unknown>>;
   adminOrganizations: Array<Record<string, unknown>>;
   organizationRunners: Array<Record<string, unknown>>;
   organizationOidc: Record<string, unknown> | null;

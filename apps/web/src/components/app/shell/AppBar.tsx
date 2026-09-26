@@ -67,6 +67,9 @@ export function safeDynamicPageLabel(pathname: string): string | null {
   if (/^\/runs\/start\/[^/]+$/.test(pathname)) {
     return "Starting run";
   }
+  if (/^\/admin\/people\/[^/]+$/.test(pathname)) {
+    return "User";
+  }
   if (isLecturePage(pathname)) {
     return "Lecture";
   }

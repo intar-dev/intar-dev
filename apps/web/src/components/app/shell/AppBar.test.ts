@@ -32,6 +32,24 @@ describe("safe dynamic app-bar labels", () => {
     expect(safeDynamicPageLabel("/runs")).toBeNull();
     expect(safeDynamicPageLabel("/courses/linux-operations")).toBeNull();
     expect(safeDynamicPageLabel("/admin/hosts")).toBeNull();
+    expect(safeDynamicPageLabel("/admin/people")).toBeNull();
+  });
+
+  it("never exposes a user id while the person loads", () => {
+    expect(safeDynamicPageLabel("/admin/people/user_technical_id")).toBe("User");
+    expect(buildCrumbs("/admin/people/user_technical_id", new Map())).toEqual([
+      { label: "People", to: "/admin/people" },
+      { label: "User" },
+    ]);
+    expect(
+      buildCrumbs(
+        "/admin/people/user_technical_id",
+        new Map([["/admin/people/user_technical_id", "Blake Blocked"]]),
+      ),
+    ).toEqual([
+      { label: "People", to: "/admin/people" },
+      { label: "Blake Blocked" },
+    ]);
   });
 });
 

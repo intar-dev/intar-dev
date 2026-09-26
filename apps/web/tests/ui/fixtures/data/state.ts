@@ -592,6 +592,8 @@ export function createMockApiState(input?: {
             username: "minalearns",
             role: "user",
             access: "active",
+            origin: { kind: "github" },
+            revocationId: null,
             revokedAt: null,
             cleanupCompletedAt: null,
             createdAt: new Date(FIXED_NOW - 80 * day).toISOString(),
@@ -606,6 +608,8 @@ export function createMockApiState(input?: {
             username: "inezinfra",
             role: "user",
             access: "active",
+            origin: { kind: "github" },
+            revocationId: null,
             revokedAt: null,
             cleanupCompletedAt: null,
             createdAt: new Date(FIXED_NOW - 70 * day).toISOString(),
@@ -620,12 +624,82 @@ export function createMockApiState(input?: {
             username: "blakeblocked",
             role: "user",
             access: "revoked",
+            origin: {
+              kind: "organization",
+              organization: { id: "org-platform", name: "Platform Repair Crew" },
+            },
+            revocationId: "revocation-user-blocked",
             revokedAt: FIXED_NOW - 3 * day,
             cleanupCompletedAt: FIXED_NOW - 3 * day,
             createdAt: new Date(FIXED_NOW - 60 * day).toISOString(),
             updatedAt: new Date(FIXED_NOW - 3 * day).toISOString(),
           },
         ],
+    userDetails: empty
+      ? {}
+      : {
+          "user-blocked": {
+            signInMethods: [
+              {
+                providerId: "platform-idp",
+                kind: "organization",
+                organization: { id: "org-platform", name: "Platform Repair Crew" },
+                linkedAt: FIXED_NOW - 60 * day,
+                blocker: null,
+              },
+              {
+                providerId: "contoso-idp",
+                kind: "organization",
+                organization: { id: "org-contoso", name: "Contoso Labs" },
+                linkedAt: FIXED_NOW - 20 * day,
+                blocker: "removed_from_organization",
+              },
+              {
+                providerId: "github",
+                kind: "github",
+                organization: null,
+                linkedAt: FIXED_NOW - day,
+                blocker: null,
+              },
+            ],
+            memberships: [
+              {
+                organization: { id: "org-platform", name: "Platform Repair Crew" },
+                role: "member",
+                soleOwner: false,
+                joinedAt: FIXED_NOW - 60 * day,
+              },
+            ],
+            removals: [
+              {
+                organization: { id: "org-contoso", name: "Contoso Labs" },
+                removedAt: FIXED_NOW - 10 * day,
+                removedBy: { id: "user-contoso-owner", name: "Cora Contoso" },
+              },
+            ],
+            sshKeyCount: 1,
+            appCount: 0,
+            history: {
+              events: [
+                {
+                  id: "event-blocked-cleanup",
+                  type: "access.revocation_cleanup_completed",
+                  at: FIXED_NOW - 3 * day,
+                  actor: null,
+                  reason: "cleanup_completed",
+                },
+                {
+                  id: "event-blocked",
+                  type: "access.blocked",
+                  at: FIXED_NOW - 3 * day,
+                  actor: { id: "user-admin", name: "Ada Administrator" },
+                  reason: "admin_revoked",
+                },
+              ],
+              truncated: false,
+            },
+          },
+        },
     adminOrganizations: empty
       ? []
       : [

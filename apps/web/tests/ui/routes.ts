@@ -71,6 +71,11 @@ export const ROUTE_CASES = [
     path: "/admin/people",
     sessionRole: "global-admin",
   },
+  {
+    id: "admin-user-detail",
+    path: "/admin/people/user-blocked",
+    sessionRole: "global-admin",
+  },
 ] as const satisfies readonly RouteCase[];
 
 const byId = new Map<string, RouteCase>(
