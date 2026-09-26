@@ -31,9 +31,10 @@ export const scenarioAssignments = sqliteTable(
   ],
 );
 
-// Revocation is terminal. The user row carries the access decision
-// (`banned`); this row is the audit record and the cleanup ledger that user
-// deletion requires to be complete.
+// A row exists exactly while the account is revoked. The user row carries the
+// access decision (`banned`); this row is the audit record and the cleanup
+// ledger that user deletion and an administrator's restore require to be
+// complete. A restore deletes it; `access_events` keep the history.
 export const accessRevocations = sqliteTable(
   "access_revocations",
   {
@@ -74,6 +75,7 @@ export type AccessEventType =
   | "access.revocation_cleanup_failed"
   | "access.revocation_cleanup_stalled"
   | "access.revocation_cleanup_completed"
+  | "access.restored"
   | "run.deleted_by_admin"
   | "user.deleted"
   | "signups.limit_changed"

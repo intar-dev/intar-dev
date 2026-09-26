@@ -4,10 +4,11 @@ import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { agentBootstrapTokens, agentHosts } from "@/db/schema";
-import { signOutStatements } from "@/lib/account-sign-out";
+import { accountCredentialSweepStatements } from "@/lib/account-sign-out";
 import { activeAdminSql } from "@/lib/account-access";
 import { getSignupStatus } from "@/lib/signups";
 import { resetD1Database } from "@/test/d1-migrations";
+import { finalizePlatformUserDeletion } from "@/lib/platform-user-deletion-store";
 import {
   createFixtureMember,
   ensureFixtureAdmin,
@@ -15,14 +16,20 @@ import {
 } from "@/test/account-fixtures";
 import {
   acquireAccessRevocationCleanup,
+  CLEANUP_LEASE_MS,
   completeAccessRevocationCleanup,
   recordAccessRevocationCleanupFailure,
+  recordAccessRevocationCleanupStall,
+  restoreAccount,
   revokeAccount,
 } from "./access-revocation-store";
 import {
   cleanupAccessRevocation,
   ensureAccessRevoked,
+  finishAccessRevocationCleanup,
   getAccessRevocationStatus,
+  restoreAccess,
+  revokeAccess,
 } from "./access-revocation";
 
 const effects = vi.hoisted(() => ({
@@ -30,11 +37,16 @@ const effects = vi.hoisted(() => ({
   wake: vi.fn().mockResolvedValue(undefined),
   destroy: vi.fn().mockResolvedValue(undefined),
   routes: vi.fn().mockResolvedValue(undefined),
+  removeHost: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/account-sign-out", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/account-sign-out")>();
-  return { ...actual, signOutStatements: vi.fn(actual.signOutStatements) };
+  return {
+    ...actual,
+    accountCredentialSweepStatements: vi.fn(actual.accountCredentialSweepStatements),
+  };
 });
+vi.mock("@/lib/host-workload-retirement", () => ({ cleanupRemovedHost: effects.removeHost }));
 vi.mock("@/lib/host-runtime-wake", () => ({ retireHostRuntime: effects.retire, wakeHostRuntime: effects.wake }));
 vi.mock("@/lib/scenario-runs", () => ({
   destroyScenarioRunForUser: effects.destroy,
@@ -275,7 +287,7 @@ describe("ensureAccessRevoked", () => {
 
   it("reports an unfinished cleanup and finishes it on retry", async () => {
     await seedConnectedSession();
-    vi.mocked(signOutStatements).mockImplementationOnce(() => {
+    vi.mocked(accountCredentialSweepStatements).mockImplementationOnce(() => {
       throw new Error("session store unavailable");
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -298,9 +310,362 @@ describe("ensureAccessRevoked", () => {
     await expect(ensureAccessRevoked({ userId: FIXTURE_ADMIN_ID, actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" }))
       .rejects.toMatchObject({ status: 409, code: "last_active_admin" });
     await expect(getAccessRevocationStatus(FIXTURE_ADMIN_ID)).resolves.toBeNull();
-    expect(signOutStatements).not.toHaveBeenCalled();
+    expect(accountCredentialSweepStatements).not.toHaveBeenCalled();
   });
 });
+
+describe("revokeAccess", () => {
+  it("refuses an account that is already revoked instead of reusing it", async () => {
+    await revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
+    await expect(revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" }))
+      .rejects.toMatchObject({ status: 409, code: "access_already_revoked" });
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM access_events WHERE subject_user_id = 'owner' AND event_type = 'access.blocked'",
+    ).first()).toEqual({ count: 1 });
+  });
+
+  it("advances the access generation only when it revokes", async () => {
+    await revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
+    await expect(revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" }))
+      .rejects.toMatchObject({ code: "access_already_revoked" });
+    expect(await accessGeneration("owner")).toBe(1);
+  });
+
+  it("revokes pending server registrations and image preparations in its cleanup", async () => {
+    await seedPendingCredentials("owner", "before");
+    await revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
+    await expectPendingCredentialsEnded("owner", "before");
+  });
+});
+
+describe("finishAccessRevocationCleanup", () => {
+  it("finishes the cleanup of the named revocation", async () => {
+    vi.mocked(accountCredentialSweepStatements).mockImplementationOnce(() => {
+      throw new Error("session store unavailable");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" }))
+        .rejects.toMatchObject({ status: 503, code: "access_cleanup_incomplete" });
+    } finally {
+      warn.mockRestore();
+    }
+    const pending = await getAccessRevocationStatus("owner");
+    expect(pending?.cleanup).toBe("pending");
+
+    await finishAccessRevocationCleanup({
+      userId: "owner", revocationId: pending!.revocationId, actorUserId: FIXTURE_ADMIN_ID,
+    });
+    await expect(getAccessRevocationStatus("owner")).resolves.toMatchObject({ cleanup: "completed" });
+  });
+
+  it("refuses a revocation that is no longer current and never revokes", async () => {
+    await expect(finishAccessRevocationCleanup({
+      userId: "owner", revocationId: "not-current", actorUserId: FIXTURE_ADMIN_ID,
+    })).rejects.toMatchObject({ status: 409, code: "stale_access_revocation" });
+    expect(await env.DB.prepare("SELECT banned FROM user WHERE id = 'owner'").first()).toEqual({ banned: 0 });
+    await expect(getAccessRevocationStatus("owner")).resolves.toBeNull();
+  });
+});
+
+describe("cleanup lease", () => {
+  it("lets a new attempt take over a stalled one once its lease ran out", async () => {
+    const { revocationId } = await revokeAccount({
+      d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "test", now: 3_000,
+    });
+    const stalled = await acquireAccessRevocationCleanup({ d1: env.DB, userId: "owner", revocationId, now: 3_100 });
+    if (stalled.status !== "acquired") throw new Error("expected a new cleanup attempt");
+    // A stall keeps its attempt: external cleanup may still be landing.
+    await recordAccessRevocationCleanupStall({
+      d1: env.DB, userId: "owner", revocationId, cleanupAttemptId: stalled.cleanupAttemptId,
+      reason: "ambiguous_cleanup_test", now: 3_200,
+    });
+    await expect(acquireAccessRevocationCleanup({
+      d1: env.DB, userId: "owner", revocationId, now: 3_100 + CLEANUP_LEASE_MS - 1,
+    })).rejects.toMatchObject({ status: 409, code: "access_revocation_cleanup_in_progress" });
+
+    const takeover = await acquireAccessRevocationCleanup({
+      d1: env.DB, userId: "owner", revocationId, now: 3_100 + CLEANUP_LEASE_MS,
+    });
+    if (takeover.status !== "acquired") throw new Error("expected a takeover");
+    expect(takeover.cleanupAttemptId).not.toBe(stalled.cleanupAttemptId);
+
+    // The abandoned attempt can no longer write anything.
+    await expect(completeAccessRevocationCleanup({
+      d1: env.DB, userId: "owner", revocationId, cleanupAttemptId: stalled.cleanupAttemptId,
+    })).rejects.toMatchObject({ code: "stale_access_revocation" });
+    await expect(recordAccessRevocationCleanupFailure({
+      d1: env.DB, userId: "owner", revocationId, cleanupAttemptId: stalled.cleanupAttemptId,
+      reason: "cleanup_late",
+    })).rejects.toMatchObject({ code: "stale_access_revocation" });
+    await completeAccessRevocationCleanup({
+      d1: env.DB, userId: "owner", revocationId, cleanupAttemptId: takeover.cleanupAttemptId,
+      now: 3_100 + CLEANUP_LEASE_MS + 1,
+    });
+    await expect(getAccessRevocationStatus("owner")).resolves.toMatchObject({ cleanup: "completed" });
+  });
+});
+
+describe("restoring access", () => {
+  it("restores a revoked account as a fresh start", async () => {
+    await seedFreshStartState();
+    const { revocationId } = await revokeAccess({
+      userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    // Credentials that raced in after the cleanup, and an app another person
+    // connected to one of the owner's apps.
+    await seedPendingCredentials("owner", "late");
+
+    await expect(restoreAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }))
+      .resolves.toEqual({ serversPendingCleanup: 0 });
+
+    expect(await env.DB.prepare(
+      `SELECT banned, ban_reason, ban_expires, role, metal_placement, access_generation
+       FROM user WHERE id = 'owner'`,
+    ).first()).toEqual({
+      banned: 0, ban_reason: null, ban_expires: null, role: "user",
+      metal_placement: "platform", access_generation: 1,
+    });
+    await expect(getAccessRevocationStatus("owner")).resolves.toBeNull();
+    expect(await env.DB.prepare(
+      `SELECT event_type, actor_user_id, revocation_id, reason, github_account_id
+       FROM access_events WHERE subject_user_id = 'owner' AND event_type = 'access.restored'`,
+    ).all().then(({ results }) => results)).toEqual([{
+      event_type: "access.restored", actor_user_id: FIXTURE_ADMIN_ID, revocation_id: revocationId,
+      reason: "admin_restored", github_account_id: "owner-github",
+    }]);
+    await expectPendingCredentialsEnded("owner", "late");
+    expect(await count("SELECT count(*) AS count FROM user_ssh_keys WHERE user_id = 'owner'")).toBe(0);
+    expect(await count("SELECT count(*) AS count FROM oauth_client WHERE client_id = 'owner-app'")).toBe(0);
+    // Their app's grants to other people go with it.
+    expect(await count("SELECT count(*) AS count FROM oauth_consent WHERE user_id = 'bystander'")).toBe(0);
+    // The organization they alone own keeps them; other memberships go.
+    expect(await env.DB.prepare(
+      "SELECT organization_id FROM member WHERE user_id = 'owner' ORDER BY organization_id",
+    ).all().then(({ results }) => results)).toEqual([{ organization_id: "owned-org" }]);
+    expect(await count("SELECT count(*) AS count FROM member WHERE user_id = 'bystander'")).toBe(2);
+    expect(await env.DB.prepare(
+      `SELECT disabled, owner_removal_id IS NOT NULL AS removing,
+              owner_removal_completed_at IS NOT NULL AS removed
+       FROM agent_hosts WHERE id = 'owner-personal'`,
+    ).first()).toEqual({ disabled: 1, removing: 1, removed: 1 });
+    expect(effects.removeHost.mock.calls).toEqual([["owner-personal"]]);
+    // The identities stay, and nobody else's access changed.
+    expect(await count("SELECT count(*) AS count FROM account WHERE user_id = 'owner'")).toBe(1);
+    expect(await count("SELECT count(*) AS count FROM session WHERE user_id = 'bystander'")).toBe(1);
+  });
+
+  it("makes a restored administrator a user", async () => {
+    await createFixtureMember({ d1: env.DB, userId: "second-admin", role: "admin", githubAccountId: "second-admin-github" });
+    const { revocationId } = await revokeAccess({
+      userId: "second-admin", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    await restoreAccess({ userId: "second-admin", actorUserId: FIXTURE_ADMIN_ID, revocationId });
+    expect(await env.DB.prepare("SELECT banned, role FROM user WHERE id = 'second-admin'").first())
+      .toEqual({ banned: 0, role: "user" });
+  });
+
+  it("reports servers whose removal cleanup didn't finish", async () => {
+    await seedFreshStartState();
+    const { revocationId } = await revokeAccess({
+      userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    effects.removeHost.mockRejectedValueOnce(new Error("host unreachable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(restoreAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }))
+        .resolves.toEqual({ serversPendingCleanup: 1 });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await env.DB.prepare(
+      `SELECT owner_removal_id IS NOT NULL AS removing, owner_removal_completed_at AS completed
+       FROM agent_hosts WHERE id = 'owner-personal'`,
+    ).first()).toEqual({ removing: 1, completed: null });
+    expect(await env.DB.prepare("SELECT banned FROM user WHERE id = 'owner'").first()).toEqual({ banned: 0 });
+  });
+
+  it("refuses until the revocation cleanup finished, and writes nothing", async () => {
+    const { revocationId } = await revokeAccount({
+      d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    await expect(restoreAccount({ d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }))
+      .rejects.toMatchObject({ status: 409, code: "access_cleanup_incomplete" });
+    await acquireAccessRevocationCleanup({ d1: env.DB, userId: "owner", revocationId });
+    await expect(restoreAccount({ d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }))
+      .rejects.toMatchObject({ status: 409, code: "access_cleanup_incomplete" });
+    expect(await env.DB.prepare("SELECT banned FROM user WHERE id = 'owner'").first()).toEqual({ banned: 1 });
+    expect(await count("SELECT count(*) AS count FROM access_events WHERE event_type = 'access.restored'")).toBe(0);
+  });
+
+  it("refuses a revocation id that isn't the current one", async () => {
+    const first = await revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
+    await restoreAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId: first.revocationId });
+    const second = await revokeAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
+    expect(second.revocationId).not.toBe(first.revocationId);
+    expect(await accessGeneration("owner")).toBe(2);
+
+    // A delayed restore of the first revocation can't undo the second.
+    await expect(restoreAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId: first.revocationId }))
+      .rejects.toMatchObject({ status: 409, code: "stale_access_revocation" });
+    expect(await env.DB.prepare("SELECT banned FROM user WHERE id = 'owner'").first()).toEqual({ banned: 1 });
+  });
+
+  it("reports a repeated restore as done, and one of two concurrent restores wins", async () => {
+    const { revocationId } = await revokeAccess({
+      userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    const outcomes = await Promise.all([
+      restoreAccount({ d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }),
+      restoreAccount({ d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }),
+    ]);
+    expect(outcomes.sort()).toEqual(["already_restored", "restored"]);
+    await expect(restoreAccount({ d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }))
+      .resolves.toBe("already_restored");
+    expect(await count("SELECT count(*) AS count FROM access_events WHERE event_type = 'access.restored'")).toBe(1);
+  });
+
+  it("refuses accounts that aren't revoked, missing or deleted users, and non-admin actors", async () => {
+    await expect(restoreAccount({ d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId: "none" }))
+      .rejects.toMatchObject({ status: 409, code: "access_not_revoked" });
+    await expect(restoreAccount({ d1: env.DB, userId: "missing", actorUserId: FIXTURE_ADMIN_ID, revocationId: "none" }))
+      .rejects.toMatchObject({ status: 404, code: "user_not_found" });
+
+    const { revocationId } = await revokeAccess({
+      userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    await createFixtureMember({ d1: env.DB, userId: "member", githubAccountId: "member-github" });
+    await expect(restoreAccount({ d1: env.DB, userId: "owner", actorUserId: "member", revocationId }))
+      .rejects.toMatchObject({ status: 403 });
+    await createFixtureMember({ d1: env.DB, userId: "revoked-admin", role: "admin", githubAccountId: "revoked-admin-github" });
+    await revokeAccess({ userId: "revoked-admin", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked" });
+    await expect(restoreAccount({ d1: env.DB, userId: "owner", actorUserId: "revoked-admin", revocationId }))
+      .rejects.toMatchObject({ status: 403 });
+
+    await env.DB.prepare("UPDATE user SET deleted_at = 1 WHERE id = 'owner'").run();
+    await expect(restoreAccount({ d1: env.DB, userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId }))
+      .rejects.toMatchObject({ status: 404, code: "user_not_found" });
+    expect(await count("SELECT count(*) AS count FROM access_events WHERE event_type = 'access.restored'")).toBe(0);
+  });
+
+  it("needs a new revocation before a restored account can be deleted", async () => {
+    const { revocationId } = await revokeAccess({
+      userId: "owner", actorUserId: FIXTURE_ADMIN_ID, reason: "admin_revoked",
+    });
+    await restoreAccess({ userId: "owner", actorUserId: FIXTURE_ADMIN_ID, revocationId });
+    await expect(finalizePlatformUserDeletion({
+      d1: env.DB, targetUserId: "owner", actorUserId: FIXTURE_ADMIN_ID,
+    })).rejects.toMatchObject({ status: 409, code: "platform_user_access_active" });
+    expect(await env.DB.prepare("SELECT deleted_at FROM user WHERE id = 'owner'").first()).toEqual({ deleted_at: null });
+  });
+});
+
+async function count(query: string): Promise<number> {
+  const row = await env.DB.prepare(query).first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
+async function accessGeneration(userId: string): Promise<number | undefined> {
+  const row = await env.DB.prepare("SELECT access_generation FROM user WHERE id = ?1")
+    .bind(userId)
+    .first<{ access_generation: number }>();
+  return row?.access_generation;
+}
+
+/** Credentials the owner holds or can redeem, named by `tag`. */
+async function seedPendingCredentials(userId: string, tag: string): Promise<void> {
+  const far = 9_999_999_999_999;
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO agent_hosts (id, user_id, name, scope, credential_generation)
+       VALUES (?1 || '-prep-host', ?1, 'Prep host', 'platform', 1)`,
+    ).bind(userId),
+    env.DB.prepare(
+      `INSERT INTO session (id, token, user_id, expires_at, created_at, updated_at)
+       VALUES (?1 || '-' || ?2 || '-session', ?1 || '-' || ?2 || '-token', ?1, ?3, 1, 1)`,
+    ).bind(userId, tag, far),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO oauth_client (id, client_id, redirect_uris)
+       VALUES ('sweep-app-row', 'sweep-app', '["http://localhost/callback"]')`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO oauth_consent (id, client_id, user_id, scopes)
+       VALUES (?1 || '-' || ?2 || '-consent', 'sweep-app', ?1, '["openid"]')`,
+    ).bind(userId, tag),
+    env.DB.prepare(
+      `INSERT INTO verification (id, identifier, value, expires_at)
+       VALUES (?1 || '-' || ?2 || '-code', ?1 || '-' || ?2 || '-code',
+               json_object('type', 'authorization_code', 'userId', ?1), ?3)`,
+    ).bind(userId, tag, far),
+    env.DB.prepare(
+      `INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, expires_at)
+       VALUES (?1 || '-' || ?2 || '-enrollment', ?1 || '-' || ?2 || '-enrolled-host', ?1,
+               'Pending', 'personal', 'agent', ?3)`,
+    ).bind(userId, tag, far),
+    env.DB.prepare(
+      `INSERT OR REPLACE INTO personal_image_preparations
+         (user_id, host_id, credential_generation, request_key, access_json, images_json, expires_at)
+       VALUES (?1, ?1 || '-prep-host', 1, ?2, '{}', '[]', ?3)`,
+    ).bind(userId, tag, far),
+  ]);
+}
+
+async function expectPendingCredentialsEnded(userId: string, tag: string): Promise<void> {
+  expect(await env.DB.prepare(
+    `SELECT
+       (SELECT count(*) FROM session WHERE user_id = ?1) AS sessions,
+       (SELECT count(*) FROM oauth_consent WHERE user_id = ?1) AS consents,
+       (SELECT count(*) FROM verification WHERE id = ?1 || '-' || ?2 || '-code') AS codes,
+       (SELECT count(*) FROM host_enrollments
+         WHERE token_hash = ?1 || '-' || ?2 || '-enrollment' AND revoked_at IS NULL) AS enrollments,
+       (SELECT count(*) FROM personal_image_preparations WHERE user_id = ?1) AS preparations`,
+  ).bind(userId, tag).first()).toEqual({
+    sessions: 0, consents: 0, codes: 0, enrollments: 0, preparations: 0,
+  });
+}
+
+/**
+ * The owner with a personal server on personal placement, an SSH key, an app
+ * a bystander connected to, their own organization and a membership in the
+ * bystander's.
+ */
+async function seedFreshStartState(): Promise<void> {
+  await createFixtureMember({ d1: env.DB, userId: "bystander", githubAccountId: "bystander-github" });
+  await env.DB.batch([
+    env.DB.prepare("UPDATE user SET metal_placement = 'personal' WHERE id = 'owner'"),
+    env.DB.prepare(
+      `INSERT INTO agent_hosts (id, user_id, name, scope, credential_generation)
+       VALUES ('owner-personal', 'owner', 'Owner personal', 'personal', 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO user_ssh_keys (id, user_id, key_type, public_key_openssh, fingerprint_sha256)
+       VALUES ('owner-key', 'owner', 'ssh-ed25519', 'ssh-ed25519 AAAA owner', 'SHA256:owner')`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO oauth_client (id, client_id, user_id, redirect_uris)
+       VALUES ('owner-app-row', 'owner-app', 'owner', '["http://localhost/callback"]')`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO oauth_consent (id, client_id, user_id, scopes)
+       VALUES ('bystander-consent', 'owner-app', 'bystander', '["openid"]')`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO organization (id, name, slug, created_at)
+       VALUES ('owned-org', 'Owned', 'owned', 1), ('bystander-org', 'Bystander', 'bystander', 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO member (id, organization_id, user_id, role, created_at)
+       VALUES ('owner-owns', 'owned-org', 'owner', 'owner', 1),
+              ('owner-joins', 'bystander-org', 'owner', 'member', 1),
+              ('bystander-owns', 'bystander-org', 'bystander', 'owner', 1),
+              ('bystander-joins', 'owned-org', 'bystander', 'member', 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO session (id, token, user_id, expires_at, created_at, updated_at)
+       VALUES ('bystander-session', 'bystander-token', 'bystander', 9999999999999, 1, 1)`,
+    ),
+  ]);
+}
 
 /** Two sessions of the owner, one with an app connected through it. */
 async function seedConnectedSession(): Promise<void> {

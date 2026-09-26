@@ -19,6 +19,9 @@ const deletionStoreMock = vi.hoisted(() => ({
 }));
 const revocationMock = vi.hoisted(() => ({
   ensureAccessRevoked: vi.fn(),
+  finishAccessRevocationCleanup: vi.fn(),
+  restoreAccess: vi.fn(),
+  revokeAccess: vi.fn(),
 }));
 
 vi.mock("@/lib/request-security", () => requestSecurityMock);
@@ -30,7 +33,9 @@ vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
 
 import { appError } from "@/lib/app-error";
 import { DELETE as deleteUser } from "@/pages/api/admin/users/[userId]/index";
-import { POST as revokeAccess } from "@/pages/api/admin/users/[userId]/revoke";
+import { POST as restoreRoute } from "@/pages/api/admin/users/[userId]/restore";
+import { POST as finishCleanupRoute } from "@/pages/api/admin/users/[userId]/revocation-cleanup";
+import { POST as revokeRoute } from "@/pages/api/admin/users/[userId]/revoke";
 import { POST as updateRole } from "@/pages/api/admin/users/[userId]/role";
 import { GET as listUsers } from "@/pages/api/admin/users/index";
 
@@ -52,12 +57,23 @@ describe("admin user mutation routes", () => {
     revocationMock.ensureAccessRevoked.mockResolvedValue({
       revocationId: "revocation-1",
     });
+    revocationMock.revokeAccess.mockResolvedValue({
+      revocationId: "revocation-1",
+    });
+    revocationMock.finishAccessRevocationCleanup.mockResolvedValue(undefined);
+    revocationMock.restoreAccess.mockResolvedValue({ serversPendingCleanup: 0 });
   });
 
   it.each([
     ["list", listUsers, listRequest()],
     ["delete", deleteUser, deleteRequest()],
-    ["revoke", revokeAccess, revokeRequest()],
+    ["revoke", revokeRoute, revokeRequest()],
+    ["restore", restoreRoute, restoreRequest({ revocationId: "revocation-1" })],
+    [
+      "revocation cleanup",
+      finishCleanupRoute,
+      cleanupRequest({ revocationId: "revocation-1" }),
+    ],
   ] as const)(
     "returns an unauthenticated %s response with no-store headers",
     async (_name, route, request) => {
@@ -78,6 +94,11 @@ describe("admin user mutation routes", () => {
       });
       expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
       expect(revocationMock.ensureAccessRevoked).not.toHaveBeenCalled();
+      expect(revocationMock.revokeAccess).not.toHaveBeenCalled();
+      expect(revocationMock.restoreAccess).not.toHaveBeenCalled();
+      expect(
+        revocationMock.finishAccessRevocationCleanup,
+      ).not.toHaveBeenCalled();
       expect(
         deletionStoreMock.finalizePlatformUserDeletion,
       ).not.toHaveBeenCalled();
@@ -207,7 +228,7 @@ describe("admin user mutation routes", () => {
   });
 
   it("revokes access and cleans up for the trimmed target", async () => {
-    const response = await revokeAccess(
+    const response = await revokeRoute(
       routeContext(revokeRequest(), " target-user "),
     );
 
@@ -219,33 +240,33 @@ describe("admin user mutation routes", () => {
       revocationId: "revocation-1",
       cleanupCompleted: true,
     });
-    expect(revocationMock.ensureAccessRevoked).toHaveBeenCalledWith({
+    expect(revocationMock.revokeAccess).toHaveBeenCalledWith({
       userId: "target-user",
       actorUserId: "actor-admin",
       reason: "admin_revoked",
     });
+    expect(revocationMock.ensureAccessRevoked).not.toHaveBeenCalled();
     expect(deletionStoreMock.finalizePlatformUserDeletion).not.toHaveBeenCalled();
   });
 
-  it("answers a finished revocation with its existing id", async () => {
-    revocationMock.ensureAccessRevoked.mockResolvedValueOnce({
-      revocationId: "revocation-complete",
-    });
+  it("refuses an account that is already revoked instead of reusing it", async () => {
+    revocationMock.revokeAccess.mockRejectedValueOnce(
+      appError(409, "access_already_revoked", "Access is already revoked"),
+    );
 
-    const response = await revokeAccess(
+    const response = await revokeRoute(
       routeContext(revokeRequest({ ignored: true }), "target-user"),
     );
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      revocationId: "revocation-complete",
-      cleanupCompleted: true,
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Access is already revoked",
+      code: "access_already_revoked",
     });
-    expect(revocationMock.ensureAccessRevoked).toHaveBeenCalledOnce();
   });
 
   it("keeps the last active administrator", async () => {
-    revocationMock.ensureAccessRevoked.mockRejectedValueOnce(
+    revocationMock.revokeAccess.mockRejectedValueOnce(
       appError(
         409,
         "last_active_admin",
@@ -253,7 +274,7 @@ describe("admin user mutation routes", () => {
       ),
     );
 
-    const response = await revokeAccess(
+    const response = await revokeRoute(
       routeContext(revokeRequest(), "target-user"),
     );
 
@@ -265,9 +286,9 @@ describe("admin user mutation routes", () => {
   });
 
   it("reports an unfinished cleanup so it can be retried", async () => {
-    revocationMock.ensureAccessRevoked.mockRejectedValueOnce(cleanupIncomplete());
+    revocationMock.revokeAccess.mockRejectedValueOnce(cleanupIncomplete());
 
-    const response = await revokeAccess(
+    const response = await revokeRoute(
       routeContext(revokeRequest(), "target-user"),
     );
 
@@ -278,6 +299,103 @@ describe("admin user mutation routes", () => {
       code: "access_cleanup_incomplete",
     });
   });
+
+  it("finishes the cleanup of the named revocation for the trimmed target", async () => {
+    const response = await finishCleanupRoute(
+      routeContext(
+        cleanupRequest({ revocationId: " revocation-1 " }),
+        " target-user ",
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+    await expect(response.json()).resolves.toEqual({
+      userId: "target-user",
+      access: "revoked",
+      revocationId: "revocation-1",
+      cleanupCompleted: true,
+    });
+    expect(revocationMock.finishAccessRevocationCleanup).toHaveBeenCalledWith({
+      userId: "target-user",
+      revocationId: "revocation-1",
+      actorUserId: "actor-admin",
+    });
+    expect(revocationMock.revokeAccess).not.toHaveBeenCalled();
+  });
+
+  it("restores access for the trimmed target and revocation", async () => {
+    revocationMock.restoreAccess.mockResolvedValueOnce({
+      serversPendingCleanup: 1,
+    });
+
+    const response = await restoreRoute(
+      routeContext(
+        restoreRequest({ revocationId: " revocation-1 " }),
+        " target-user ",
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+    await expect(response.json()).resolves.toEqual({
+      userId: "target-user",
+      access: "active",
+      serversPendingCleanup: 1,
+    });
+    expect(revocationMock.restoreAccess).toHaveBeenCalledWith({
+      userId: "target-user",
+      revocationId: "revocation-1",
+      actorUserId: "actor-admin",
+    });
+  });
+
+  it.each([
+    ["restore", restoreRoute, restoreRequest],
+    ["revocation cleanup", finishCleanupRoute, cleanupRequest],
+  ] as const)(
+    "requires the %s request to name a revocation",
+    async (_name, route, request) => {
+      for (const body of ["{", { revocationId: "" }, { revocationId: 7 }, {}]) {
+        const response = await route(
+          routeContext(request(body), "target-user"),
+        );
+        expect(response.status).toBe(400);
+        expect(response.headers.get("cache-control")).toBe(
+          "no-store, max-age=0",
+        );
+        await expect(response.json()).resolves.toMatchObject({
+          code: body === "{" ? "invalid_json" : "revocation_id_required",
+        });
+      }
+      expect(revocationMock.restoreAccess).not.toHaveBeenCalled();
+      expect(
+        revocationMock.finishAccessRevocationCleanup,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [403, "admin_required", "An active administrator is required"],
+    [404, "user_not_found", "User not found"],
+    [409, "access_not_revoked", "Their access isn't revoked"],
+    [409, "stale_access_revocation", "The access revocation is no longer current"],
+    [409, "access_cleanup_incomplete", "Finish revoking access before restoring it"],
+  ] as const)(
+    "passes a %s %s restore refusal through",
+    async (status, code, message) => {
+      revocationMock.restoreAccess.mockRejectedValueOnce(
+        appError(status, code, message),
+      );
+
+      const response = await restoreRoute(
+        routeContext(restoreRequest({ revocationId: "revocation-1" }), "target-user"),
+      );
+
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toEqual({ error: message, code });
+    },
+  );
 });
 
 function cleanupIncomplete() {
@@ -307,6 +425,22 @@ function revokeRequest(body?: Record<string, unknown>): Request {
           body: JSON.stringify(body),
         }
       : {}),
+  });
+}
+
+function restoreRequest(body: Record<string, unknown> | string): Request {
+  return jsonPost("restore", body);
+}
+
+function cleanupRequest(body: Record<string, unknown> | string): Request {
+  return jsonPost("revocation-cleanup", body);
+}
+
+function jsonPost(path: string, body: Record<string, unknown> | string): Request {
+  return new Request(`https://intar.test/api/admin/users/target-user/${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
 

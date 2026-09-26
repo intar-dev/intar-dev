@@ -10,11 +10,13 @@ import {
   completeAccessRevocationCleanup,
   recordAccessRevocationCleanupFailure,
   recordAccessRevocationCleanupStall,
+  restoreAccount,
   revokeAccount,
 } from "@/lib/access-revocation-store";
-import { signOutStatements } from "@/lib/account-sign-out";
+import { accountCredentialSweepStatements } from "@/lib/account-sign-out";
 import { appError, AppError } from "@/lib/app-error";
 import { retireHostRuntime, wakeHostRuntime } from "@/lib/host-runtime-wake";
+import { cleanupRemovedHost } from "@/lib/host-workload-retirement";
 import {
   destroyScenarioRunForUser,
   revokeScenarioRoutesForUser,
@@ -33,8 +35,44 @@ export interface AccessRevocationStatus {
 }
 
 /**
+ * Revokes access, then runs the revocation cleanup. An account that is already
+ * revoked is refused rather than reused: a request made against an older view
+ * must not report, or finish, a revocation an administrator restored since.
+ */
+export async function revokeAccess(params: {
+  userId: string;
+  actorUserId: string;
+  reason: string;
+}): Promise<{ revocationId: string }> {
+  const { revocationId } = await revokeAccount({
+    d1: env.DB,
+    userId: params.userId,
+    actorUserId: params.actorUserId,
+    reason: params.reason,
+  });
+  await runRevocationCleanup({ ...params, revocationId });
+  return { revocationId };
+}
+
+/**
+ * Finishes the cleanup of the named revocation, which must still be the
+ * account's current one. Repeating it after it finished changes nothing.
+ */
+export async function finishAccessRevocationCleanup(params: {
+  userId: string;
+  revocationId: string;
+  actorUserId: string;
+}): Promise<void> {
+  const revocation = await getAccessRevocationStatus(params.userId);
+  if (revocation?.revocationId !== params.revocationId) throw staleRevocation();
+  if (revocation.cleanup === "completed") return;
+  await runRevocationCleanup(params);
+}
+
+/**
  * Revokes access unless it already is, then finishes the revocation cleanup.
  * Repeating it retries an unfinished cleanup and leaves a finished one as is.
+ * User deletion uses it, and its final batch rechecks the revocation.
  */
 export async function ensureAccessRevoked(params: {
   userId: string;
@@ -63,30 +101,83 @@ export async function ensureAccessRevoked(params: {
   }
 
   if (revocation.cleanup !== "completed") {
-    try {
-      await cleanupAccessRevocation({
+    await runRevocationCleanup({
+      userId: params.userId,
+      revocationId: revocation.revocationId,
+      actorUserId: params.actorUserId,
+    });
+  }
+  return { revocationId: revocation.revocationId };
+}
+
+async function runRevocationCleanup(params: {
+  userId: string;
+  revocationId: string;
+  actorUserId: string;
+}): Promise<void> {
+  try {
+    await cleanupAccessRevocation(params);
+  } catch (error) {
+    // The revocation itself is committed; only the cleanup needs a retry.
+    console.warn(
+      JSON.stringify({
+        event: "access_revocation_cleanup_incomplete",
         userId: params.userId,
-        revocationId: revocation.revocationId,
-        actorUserId: params.actorUserId,
-      });
+        revocationId: params.revocationId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    throw appError(
+      503,
+      "access_cleanup_incomplete",
+      "Access is revoked, but cleanup didn't finish. Try again.",
+    );
+  }
+}
+
+/**
+ * Restores a revoked account's access as a fresh start (see restoreAccount),
+ * then finishes removing its personal servers as a server removal does. A
+ * server whose cleanup fails stays "removing" in My servers, where removing it
+ * again finishes; the restore itself is committed either way.
+ */
+export async function restoreAccess(params: {
+  userId: string;
+  actorUserId: string;
+  revocationId: string;
+}): Promise<{ serversPendingCleanup: number }> {
+  await restoreAccount({ d1: env.DB, ...params });
+  const retired = await env.DB.prepare(
+    `SELECT id FROM agent_hosts
+     WHERE user_id = ?1 AND scope = 'personal' AND disabled = 1
+       AND owner_removal_id IS NOT NULL AND owner_removal_completed_at IS NULL`,
+  )
+    .bind(params.userId)
+    .all<{ id: string }>();
+  let serversPendingCleanup = 0;
+  for (const host of retired.results) {
+    try {
+      await cleanupRemovedHost(host.id);
+      await env.DB.prepare(
+        `UPDATE agent_hosts SET owner_removal_completed_at = ?3
+         WHERE id = ?1 AND user_id = ?2 AND scope = 'personal' AND disabled = 1
+           AND owner_removal_id IS NOT NULL AND owner_removal_completed_at IS NULL`,
+      )
+        .bind(host.id, params.userId, Date.now())
+        .run();
     } catch (error) {
-      // The revocation itself is committed; only the cleanup needs a retry.
+      serversPendingCleanup += 1;
       console.warn(
         JSON.stringify({
-          event: "access_revocation_cleanup_incomplete",
+          event: "access_restore_server_cleanup_incomplete",
           userId: params.userId,
-          revocationId: revocation.revocationId,
+          hostId: host.id,
           error: error instanceof Error ? error.message : String(error),
         }),
       );
-      throw appError(
-        503,
-        "access_cleanup_incomplete",
-        "Access is revoked, but cleanup didn't finish. Try again.",
-      );
     }
   }
-  return { revocationId: revocation.revocationId };
+  return { serversPendingCleanup };
 }
 
 /**
@@ -146,32 +237,16 @@ export async function cleanupAccessRevocation(params: {
         AND revocation.cleanup_attempt_id = ?3
         AND revocation.cleanup_completed_at IS NULL
     )`;
-    await env.DB.batch([
-      // Every session and OAuth token, including any the revocation raced
-      // with.
-      ...signOutStatements(
+    // Every session, OAuth grant, and registration token, including any the
+    // revocation raced with.
+    await env.DB.batch(
+      accountCredentialSweepStatements(
         env.DB,
-        (userColumn) => `${userColumn} = ?1 AND ${fence}`,
+        fence,
         [params.userId, params.revocationId, cleanupAttemptId],
+        Date.now(),
       ),
-      env.DB
-        .prepare(`DELETE FROM oauth_consent WHERE user_id = ?1 AND ${fence}`)
-        .bind(params.userId, params.revocationId, cleanupAttemptId),
-      env.DB
-        .prepare(
-          `DELETE FROM verification
-           WHERE CASE
-                   WHEN json_valid(value)
-                   THEN json_extract(value, '$.type')
-                 END = 'authorization_code'
-             AND CASE
-                   WHEN json_valid(value)
-                   THEN json_extract(value, '$.userId')
-                 END = ?1
-             AND ${fence}`,
-        )
-        .bind(params.userId, params.revocationId, cleanupAttemptId),
-    ]);
+    );
     await assertRevocationFence(
       params.userId,
       params.revocationId,

@@ -82,7 +82,8 @@ identity provider, while sign-up spots are open. Administrators set the limit
 under **Admin → People → Sign-ups**. Every active account with at least one
 sign-in identity takes a spot, administrators included; connecting a second
 sign-in method never takes another. Revoking or deleting someone frees their
-spot. Until a limit is saved, the limit is 0 and sign-ups are closed. Lowering
+spot, and restoring their access takes one again, even past the limit. Until a
+limit is saved, the limit is 0 and sign-ups are closed. Lowering
 the limit never removes anyone; it only stops new sign-ups. Members can always
 sign in, and the landing page shows how many spots are left.
 
@@ -125,12 +126,23 @@ since an organization's provider may have opened those sessions. Guards that
 keep the last platform admin, on demotion, revocation, and deletion, count
 only admins who can still sign in.
 
-Revoking access is permanent: the person keeps their data but can no longer
-sign in, and their sessions, runs, routes, and personal servers are shut down.
+Revoking access signs the person out: they keep their data but can no longer
+sign in, and their sessions, connected apps, runs, routes, pending server
+registrations, and personal servers are shut down. Once that cleanup finished,
+an administrator can restore their access from the person's page under
+**Admin → People**, as a fresh start on the same account. They keep their
+sign-in methods, history, and an organization they alone own; their SSH keys,
+the apps they registered, their other organization memberships, and the admin
+role are removed, their personal servers are retired, and new runs use the
+cloud. Nothing the revocation ended comes back: every check that brackets an
+operation compares the account's access generation, which each revocation
+advances, so an operation that started before a revocation fails even when it
+finishes after a restore. Restoring also signs out anything that raced in.
+
 Deleting a user revokes access first, then anonymizes the account. A deleted
-person can sign up again while spots are open. Revocation and deletion events
-keep the person's GitHub account id and first organization identity (provider
-and subject), so the audit trail outlives the account rows.
+person can sign up again while spots are open. Revocation, restore, and
+deletion events keep the person's GitHub account id and first organization
+identity (provider and subject), so the audit trail outlives the account rows.
 
 ## Organizations
 

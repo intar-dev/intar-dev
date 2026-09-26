@@ -3,19 +3,19 @@
 import { describe, expect, it, vi } from "vitest";
 
 const accessMocks = vi.hoisted(() => ({
-  isActiveAccount: vi.fn(),
+  activeAccessGeneration: vi.fn(),
 }));
 
 vi.mock("@/lib/account-access", () => ({
-  isActiveAccount: accessMocks.isActiveAccount,
+  activeAccessGeneration: accessMocks.activeAccessGeneration,
 }));
 
 import { issueAccountFencedRoute } from "./account-route-issuance";
 
 describe("account-fenced route issuance", () => {
   it("rejects an inactive account before calling Stargate", async () => {
-    accessMocks.isActiveAccount.mockReset();
-    accessMocks.isActiveAccount.mockResolvedValue(false);
+    accessMocks.activeAccessGeneration.mockReset();
+    accessMocks.activeAccessGeneration.mockResolvedValue(null);
     const issue = vi.fn();
     const revoke = vi.fn();
 
@@ -33,10 +33,10 @@ describe("account-fenced route issuance", () => {
   });
 
   it("deletes a route created while the account was revoked", async () => {
-    accessMocks.isActiveAccount.mockReset();
-    accessMocks.isActiveAccount
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+    accessMocks.activeAccessGeneration.mockReset();
+    accessMocks.activeAccessGeneration
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(null);
     const issue = vi
       .fn()
       .mockResolvedValue({ routeUsername: "alternate-run-vm-web" });
@@ -59,9 +59,32 @@ describe("account-fenced route issuance", () => {
     expect(revoke).toHaveBeenCalledWith("alternate-run-vm-web");
   });
 
+  it("deletes a route when access was revoked and restored during issuance", async () => {
+    accessMocks.activeAccessGeneration.mockReset();
+    accessMocks.activeAccessGeneration
+      .mockResolvedValueOnce(3)
+      .mockResolvedValueOnce(4);
+    const issue = vi.fn().mockResolvedValue({ routeUsername: "run-vm-web" });
+    const revoke = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      issueAccountFencedRoute({
+        userId: "user-a",
+        routeId: "run-vm-web",
+        issue,
+        issuedRouteIds: (result: { routeUsername: string }) => [
+          result.routeUsername,
+        ],
+        revoke,
+      }),
+    ).rejects.toMatchObject({ code: "access_revoked", status: 403 });
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(revoke).toHaveBeenCalledWith("run-vm-web");
+  });
+
   it("deletes the deterministic route when Stargate creation is ambiguous", async () => {
-    accessMocks.isActiveAccount.mockReset();
-    accessMocks.isActiveAccount.mockResolvedValue(true);
+    accessMocks.activeAccessGeneration.mockReset();
+    accessMocks.activeAccessGeneration.mockResolvedValue(0);
     const issueError = new Error("Stargate response was lost");
     const issue = vi.fn().mockRejectedValue(issueError);
     const revoke = vi.fn().mockResolvedValue(undefined);
@@ -80,10 +103,10 @@ describe("account-fenced route issuance", () => {
   });
 
   it("deletes the issued route when the account post-read fails", async () => {
-    accessMocks.isActiveAccount.mockReset();
+    accessMocks.activeAccessGeneration.mockReset();
     const readError = new Error("account read failed");
-    accessMocks.isActiveAccount
-      .mockResolvedValueOnce(true)
+    accessMocks.activeAccessGeneration
+      .mockResolvedValueOnce(0)
       .mockRejectedValueOnce(readError);
     const issue = vi.fn().mockResolvedValue({ routeUsername: "run-vm-web" });
     const revoke = vi.fn().mockResolvedValue(undefined);
@@ -104,8 +127,8 @@ describe("account-fenced route issuance", () => {
   });
 
   it("returns the issued route only while the account stays active", async () => {
-    accessMocks.isActiveAccount.mockReset();
-    accessMocks.isActiveAccount.mockResolvedValue(true);
+    accessMocks.activeAccessGeneration.mockReset();
+    accessMocks.activeAccessGeneration.mockResolvedValue(0);
     const issue = vi.fn().mockResolvedValue({ route: "issued" });
     const revoke = vi.fn();
 
@@ -118,8 +141,8 @@ describe("account-fenced route issuance", () => {
         revoke,
       }),
     ).resolves.toEqual({ route: "issued" });
-    expect(accessMocks.isActiveAccount).toHaveBeenCalledTimes(2);
-    expect(accessMocks.isActiveAccount).toHaveBeenCalledWith("user-a");
+    expect(accessMocks.activeAccessGeneration).toHaveBeenCalledTimes(2);
+    expect(accessMocks.activeAccessGeneration).toHaveBeenCalledWith("user-a");
     expect(revoke).not.toHaveBeenCalled();
   });
 });

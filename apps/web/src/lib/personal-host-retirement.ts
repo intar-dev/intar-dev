@@ -27,11 +27,7 @@ export async function retirePersonalHost(input: {
       AND EXISTS (SELECT 1 FROM agent_hosts WHERE ${owned} AND owner_removal_id = ?3)
       AND NOT EXISTS (SELECT 1 FROM agent_hosts WHERE user_id = ?1 AND scope = 'personal' AND disabled = 0)`)
       .bind(...args, removalId),
-    d1.prepare(`UPDATE agent_bootstrap_tokens SET revoked_at = ?3 WHERE host_id = ?2 AND revoked_at IS NULL AND ${retired}`).bind(...args, now),
-    d1.prepare(`UPDATE host_enrollments SET revoked_at = ?3 WHERE host_id = ?2 AND revoked_at IS NULL AND ${retired}`).bind(...args, now),
-    // Preserve issued leases for offline hardware. Unissued work can expire now.
-    d1.prepare(`UPDATE runtime_executions SET lease_expires_at = ?3, updated_at = ?3
-      WHERE host_id = ?2 AND state <> 'archived' AND lease_expires_at IS NULL AND ${retired}`).bind(...args, now),
+    ...retiredHostCredentialStatements(d1, `host_id = ?2 AND ${retired}`, args, now),
   ]);
   const result = await d1.prepare(`SELECT host.disabled, host.owner_removal_id, user.metal_placement AS placement
     FROM agent_hosts host JOIN user ON user.id = host.user_id
@@ -42,4 +38,24 @@ export async function retirePersonalHost(input: {
     throw appError(409, "last_server_confirmation_required", "This is your last server. Confirm removal to use cloud for new runs.");
   }
   return { placement: result.placement };
+}
+
+/**
+ * Revokes the credentials and expires the unissued work of retired hosts. The
+ * `retiredHost` condition selects them by `host_id` and uses the numbered
+ * placeholders bound to `bindings`, naming the last of them.
+ */
+export function retiredHostCredentialStatements(
+  d1: D1Database, retiredHost: string, bindings: readonly unknown[], now: number,
+): D1PreparedStatement[] {
+  const nowParameter = `?${bindings.length + 1}`;
+  return [
+    d1.prepare(`UPDATE agent_bootstrap_tokens SET revoked_at = ${nowParameter}
+      WHERE revoked_at IS NULL AND ${retiredHost}`).bind(...bindings, now),
+    d1.prepare(`UPDATE host_enrollments SET revoked_at = ${nowParameter}
+      WHERE revoked_at IS NULL AND ${retiredHost}`).bind(...bindings, now),
+    // Preserve issued leases for offline hardware. Unissued work can expire now.
+    d1.prepare(`UPDATE runtime_executions SET lease_expires_at = ${nowParameter}, updated_at = ${nowParameter}
+      WHERE state <> 'archived' AND lease_expires_at IS NULL AND ${retiredHost}`).bind(...bindings, now),
+  ];
 }

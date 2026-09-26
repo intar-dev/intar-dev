@@ -50,3 +50,17 @@ export async function readJsonObject(
   }
   return body as Record<string, unknown>;
 }
+
+/** The revocation id an administrator's request names in its JSON body. */
+export function requiredRevocationId(body: Record<string, unknown>): string {
+  const revocationId =
+    typeof body.revocationId === "string" ? body.revocationId.trim() : "";
+  if (!revocationId || revocationId.length > 255) {
+    throw new AppError({
+      status: 400,
+      code: "revocation_id_required",
+      message: "Revocation id is required",
+    });
+  }
+  return revocationId;
+}

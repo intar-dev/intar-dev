@@ -20,13 +20,18 @@ import { isRecord } from "@/control-plane/image-registry/shared";
 import * as schema from "../db/schema";
 import { db } from "../db/client";
 import {
+  activeAccountSql,
   canSignIn,
   identityState,
   isActiveAccount,
   isImpersonatedSession,
   RECENT_SIGN_IN_SECONDS,
+  sameAccessStamp,
+  sessionAccessStamp,
   sessionMayAct,
+  signInAccessGeneration,
   usableIdentityExistsSql,
+  type AccessStamp,
 } from "./account-access";
 import { authSetting } from "./auth-runtime";
 import { getUserRole, isAdminRole } from "./authz";
@@ -98,11 +103,12 @@ const oauthAdvertisedClaims = [
   "roles",
 ] as const;
 
-// The user an OAuth token response is issued for, and whether the provider
-// ran a refresh grant. The after hook rechecks both once the provider has
-// stored the tokens.
+// The user an OAuth token response is issued for, the access generation it
+// was issued at, and whether the provider ran a refresh grant. The after hook
+// rechecks them once the provider has stored the tokens.
 const oauthIssuanceState = defineRequestState<{
   userId: string;
+  accessGeneration: number;
   refreshGrant: boolean;
 } | null>(() => null);
 
@@ -163,25 +169,34 @@ function emailLocalPart(email: unknown): string {
 
 /**
  * Runs after the provider stored an OAuth token response. An account that can
- * still sign in keeps them. Otherwise a revocation or sign-out committed
- * during issuance without seeing them, so the issued tokens are removed and
- * the response is suppressed. A refresh grant also needs the token it
- * rotated: rotation keeps its row, so a missing one means a sign-out deleted
- * it while the new tokens were being issued.
+ * still sign in at the access generation the tokens were issued at keeps
+ * them. Otherwise a revocation or sign-out committed during issuance without
+ * seeing them, even if access was restored since, so the issued tokens are
+ * removed and the response is suppressed. A refresh grant also needs the token
+ * it rotated: rotation keeps its row, so a missing one means a sign-out
+ * deleted it while the new tokens were being issued. A check that fails to
+ * run removes them too.
  */
 export async function enforceActiveOAuthIssuance(input: {
   userId: string;
   returned: unknown;
+  /** The access generation customTokenResponseFields issued at. */
+  accessGeneration: number;
   /** The refresh token a refresh grant presented. */
   presentedRefreshToken?: string | null | undefined;
 }): Promise<void> {
-  const [allowed, rotatedTokenKept] = await Promise.all([
-    canSignIn(input.userId),
-    input.presentedRefreshToken
-      ? storedRefreshTokenExists(input.userId, input.presentedRefreshToken)
-      : true,
-  ]);
-  if (allowed && rotatedTokenKept) return;
+  let checkError: unknown = null;
+  try {
+    const [generation, rotatedTokenKept] = await Promise.all([
+      signInAccessGeneration(input.userId),
+      input.presentedRefreshToken
+        ? storedRefreshTokenExists(input.userId, input.presentedRefreshToken)
+        : true,
+    ]);
+    if (generation === input.accessGeneration && rotatedTokenKept) return;
+  } catch (error) {
+    checkError = error;
+  }
 
   const returned = isRecord(input.returned) ? input.returned : {};
   const accessToken =
@@ -196,10 +211,11 @@ export async function enforceActiveOAuthIssuance(input: {
     });
   } catch (cleanupError) {
     throw new AggregateError(
-      [cleanupError],
+      checkError === null ? [cleanupError] : [checkError, cleanupError],
       "account access was revoked during OAuth issuance and issued tokens could not be removed",
     );
   }
+  if (checkError !== null) throw checkError;
   throwAccessError(
     "access_revoked",
     "Account access was revoked while the OAuth credential was being issued",
@@ -272,6 +288,10 @@ interface CallbackNote {
   reservedFor?: string | undefined;
   /** The session an explicit GitHub link started from, rechecked after it. */
   linkSessionId?: string | undefined;
+  /** The access generation that link session acted at. */
+  linkAccessGeneration?: number | undefined;
+  /** Each session's access stamp at its create hook, by session token. */
+  sessionStamps?: Readonly<Record<string, AccessStamp>> | undefined;
 }
 const callbackNotes = new WeakMap<object, CallbackNote>();
 
@@ -294,27 +314,65 @@ function githubLoginOf(profile: unknown): string | undefined {
 
 /**
  * An account holds a session only while it is active and some identity can
- * still sign it in (see sessionMayAct). A callback's session needs the
+ * still sign it in (see sessionAccessStamp). A callback's session needs the
  * identity it signed in with, which a disconnect or removal in the meantime
  * may have taken away.
  */
-async function sessionAccountAllowed(
+async function sessionAccountStamp(
   session: Session,
   context: unknown,
-): Promise<boolean> {
-  return sessionMayAct(session, callbackNote(context).signInProvider ?? null);
+): Promise<AccessStamp | null> {
+  return sessionAccessStamp(
+    session,
+    callbackNote(context).signInProvider ?? null,
+  );
+}
+
+/**
+ * Runs before a session row exists and records the access stamp it may act
+ * at, which the after hook compares. Every session Intar creates comes from an
+ * endpoint, whose context carries the stamp; a session without one is refused.
+ */
+export async function stampSessionBeforeCreate(
+  session: Session,
+  context: unknown,
+): Promise<void> {
+  if (!isRecord(context)) {
+    throwAccessError(
+      "session_context_missing",
+      "Sessions require an endpoint context",
+    );
+  }
+  const stamp = await sessionAccountStamp(session, context);
+  if (!stamp) throwAccessError("access_revoked");
+  noteCallback(context, {
+    sessionStamps: {
+      ...callbackNote(context).sessionStamps,
+      [session.token]: stamp,
+    },
+  });
 }
 
 /**
  * Runs after a session row exists. A revocation, removal, or disconnect that
  * committed between the create hook's check and the insert has already signed
- * the account out, so the late row is removed here.
+ * the account out, so the late row is removed here. The account must still
+ * act at the stamp the create hook recorded: a revocation in between fails
+ * that even once access is restored.
  */
 export async function enforceCreatedSessionStillActive(
   session: Session,
   context?: unknown,
 ): Promise<void> {
-  if (await sessionAccountAllowed(session, context)) return;
+  const expected = callbackNote(context).sessionStamps?.[session.token];
+  let current: AccessStamp | null;
+  try {
+    current = await sessionAccountStamp(session, context);
+  } catch (error) {
+    await deleteExactSession(session);
+    throw error;
+  }
+  if (sameAccessStamp(expected, current)) return;
   await deleteExactSession(session);
   throwAccessError(
     "access_revoked",
@@ -553,6 +611,7 @@ const accountAccessAfterRequest = createAuthMiddleware(async (context) => {
           : null;
       await enforceActiveOAuthIssuance({
         userId: issuance.userId,
+        accessGeneration: issuance.accessGeneration,
         returned: context.context.returned,
         presentedRefreshToken: typeof presented === "string" ? presented : null,
       });
@@ -680,6 +739,7 @@ async function validateProviderIdentity(
             linkedUserId: explicitLinkUserId,
             githubLogin: githubLoginOf(data.source.oauth?.profile),
             linkSessionId: link.sessionId,
+            linkAccessGeneration: link.accessGeneration,
           });
           return undefined;
         }
@@ -857,12 +917,15 @@ function buildAuthInstance() {
     // complete presented token.
     customTokenResponseFields: async ({ user, grantType }) => {
       if (!user) return {};
-      // Tokens need an account that can still sign in, like sessions.
-      if (!(await canSignIn(user.id))) {
+      // Tokens need an account that can still sign in, like sessions. The
+      // after hook requires the same access generation.
+      const accessGeneration = await signInAccessGeneration(user.id);
+      if (accessGeneration === null) {
         throwAccessError("access_revoked");
       }
       await oauthIssuanceState.set({
         userId: user.id,
+        accessGeneration,
         refreshGrant: grantType === "refresh_token",
       });
       return {};
@@ -1149,24 +1212,39 @@ function buildAuthInstance() {
               );
             }
             // Better Auth links the GitHub account after the callback's
-            // session check, without a guard of its own: a sign-out that
-            // landed in between wins, and the new identity goes.
-            if (
-              account.providerId === "github" &&
-              note.linkSessionId &&
-              !(await env.DB.prepare("SELECT 1 AS live FROM session WHERE id = ?1")
-                .bind(note.linkSessionId)
-                .first())
-            ) {
-              await env.DB.prepare(
-                "DELETE FROM account WHERE id = ?1 AND provider_id = 'github'",
+            // session check, without a guard of its own: a sign-out or a
+            // revocation that landed in between wins, and the new identity
+            // goes. The account must still be active at the generation the
+            // link session acted at, since the revocation's cleanup signs the
+            // session out only later.
+            if (account.providerId === "github" && note.linkSessionId) {
+              const link = await env.DB.prepare(
+                `SELECT EXISTS (SELECT 1 FROM session WHERE id = ?1) AS live,
+                   EXISTS (SELECT 1 FROM user AS linking_account
+                     WHERE linking_account.id = ?2
+                       AND ${activeAccountSql("linking_account")}
+                       AND linking_account.access_generation = ?3) AS active`,
               )
-                .bind(account.id)
-                .run();
-              throwAccessError(
-                "link_session_ended",
-                SSO_ERROR_MESSAGES.link_session_ended,
-              );
+                .bind(
+                  note.linkSessionId,
+                  account.userId,
+                  note.linkAccessGeneration ?? -1,
+                )
+                .first<{ live: number; active: number }>()
+                .catch(() => null);
+              if (link?.live !== 1 || link.active !== 1) {
+                await env.DB.prepare(
+                  "DELETE FROM account WHERE id = ?1 AND provider_id = 'github'",
+                )
+                  .bind(account.id)
+                  .run();
+                throwAccessError(
+                  link?.live === 1 ? "access_revoked" : "link_session_ended",
+                  link?.live === 1
+                    ? "This account no longer has access"
+                    : SSO_ERROR_MESSAGES.link_session_ended,
+                );
+              }
             }
             if (note.linkedUserId === account.userId) {
               if (account.providerId === "github" && note.githubLogin) {
@@ -1185,9 +1263,7 @@ function buildAuthInstance() {
         create: {
           // The admin plugin's banned-user check runs before this hook.
           before: async (session: Session, context) => {
-            if (!(await sessionAccountAllowed(session, context))) {
-              throwAccessError("access_revoked");
-            }
+            await stampSessionBeforeCreate(session, context);
           },
           after: async (session: Session, context) => {
             await enforceCreatedSessionStillActive(session, context);

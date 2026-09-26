@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => {
     stageStargateTerminalTarget: vi.fn(),
     activateStargateTerminalTarget: vi.fn(),
     loadRuntimeVmAccessKey: vi.fn(),
-    isActiveAccount: vi.fn(),
+    activeAccessGeneration: vi.fn(),
   };
 });
 
@@ -42,7 +42,7 @@ vi.mock("@/lib/runtime-vm-state", () => ({
 // post-read is part of the fail-closed path under test.
 vi.mock("@/lib/account-access", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/account-access")>()),
-  isActiveAccount: mocks.isActiveAccount,
+  activeAccessGeneration: mocks.activeAccessGeneration,
 }));
 
 import {
@@ -73,7 +73,7 @@ describe("scenario terminal attach", () => {
       attachmentId: "attachment-1",
     });
     mocks.activateStargateTerminalTarget.mockResolvedValue(undefined);
-    mocks.isActiveAccount.mockResolvedValue(true);
+    mocks.activeAccessGeneration.mockResolvedValue(0);
     mocks.loadRuntimeVmAccessKey.mockResolvedValue({
       executionId: RUN_ID,
       runtimeVmId: "runtime-vm-1",
@@ -269,8 +269,8 @@ describe("scenario terminal attach", () => {
   it("keeps the shell inert when the post-stage account read fails", async () => {
     // The stage landed, then the confirmation read itself throws. The fence
     // revokes, and activation must never run: no PTY, no woken socket.
-    mocks.isActiveAccount
-      .mockResolvedValueOnce(true)
+    mocks.activeAccessGeneration
+      .mockResolvedValueOnce(0)
       .mockRejectedValueOnce(new Error("D1 read unavailable"));
 
     await expect(attachRequest()).rejects.toThrow(/D1 read unavailable/);
@@ -289,12 +289,12 @@ describe("scenario terminal attach", () => {
     // the fence is still deciding. This is the ordering the two phases exist
     // for: the shell is gated on the post-fence, exactly like the old flow,
     // where the route URL was returned only after it.
-    let releasePost!: (value: boolean) => void;
-    const postGate = new Promise<boolean>((resolve) => {
+    let releasePost!: (value: number | null) => void;
+    const postGate = new Promise<number | null>((resolve) => {
       releasePost = resolve;
     });
-    mocks.isActiveAccount
-      .mockResolvedValueOnce(true)
+    mocks.activeAccessGeneration
+      .mockResolvedValueOnce(0)
       .mockReturnValueOnce(postGate);
 
     const pending = attachRequest();
@@ -304,16 +304,16 @@ describe("scenario terminal attach", () => {
     expect(mocks.activateStargateTerminalTarget).not.toHaveBeenCalled();
     expect(await attachedAt()).toBeNull();
 
-    releasePost(true);
+    releasePost(0);
     await expect(pending).resolves.toBe("attached");
     expect(mocks.activateStargateTerminalTarget).toHaveBeenCalledTimes(1);
     expect(await attachedAt()).toBe(NOW);
   });
 
   it("revokes the generation route and never activates when the account is revoked", async () => {
-    mocks.isActiveAccount
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+    mocks.activeAccessGeneration
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(null);
 
     await expect(attachRequest()).rejects.toMatchObject({ status: 403 });
 

@@ -9,6 +9,8 @@ import {
   createFixtureMember,
   ensureFixtureAdmin,
   FIXTURE_ADMIN_ID,
+  restoreFixtureAccount,
+  revokeFixtureAccount,
 } from "@/test/account-fixtures";
 import {
   authRequest,
@@ -933,6 +935,45 @@ describe("connecting GitHub", () => {
       ).first(),
     ).resolves.toEqual({ count: 0 });
   });
+
+  it.each([
+    ["a revocation", false, "5151008"],
+    ["a revocation and a restore", true, "5151009"],
+  ])(
+    "doesn't connect GitHub when %s lands just before the link",
+    async (_label, restore, githubAccountId) => {
+      const sub = `revoked-linker-${githubAccountId}`;
+      await signIn({ sub, email: `${sub}@example.test` });
+      const userId = (await accountOwner(sub))!;
+      const cookie = await sessionCookieFor(userId);
+      // The revocation commits after the callback's session check. Its
+      // cleanup signs the session out only later, so the session still
+      // exists when Better Auth stores the GitHub identity.
+      const race = interleaveBefore(/^insert into "account"/iu, async () => {
+        await revokeFixtureAccount({ d1: env.DB, userId });
+        if (restore) await restoreFixtureAccount({ d1: env.DB, userId });
+      });
+      try {
+        await expect(
+          connectGithub(cookie, {
+            githubAccountId,
+            login: sub,
+            email: `${sub}@personal.test`,
+          }),
+        ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+        expect(race.fired()).toBe(true);
+      } finally {
+        race.restore();
+      }
+      await expect(
+        env.DB.prepare(
+          "SELECT count(*) AS count FROM account WHERE provider_id = 'github' AND account_id = ?1",
+        )
+          .bind(githubAccountId)
+          .first(),
+      ).resolves.toEqual({ count: 0 });
+    },
+  );
 
   it("tells an account revoked during Connect GitHub that it lost access", async () => {
     await signIn({ sub: "revoked-linker", email: "revoked.linker@example.test" });

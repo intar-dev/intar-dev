@@ -4,9 +4,13 @@ import { drizzle } from "drizzle-orm/d1";
 import { user } from "@/db/schema";
 
 // An account has access while its user row exists, is not deleted, and is not
-// banned. Revocation and deletion only ever move an account out of that state
-// (nothing sets `banned` back to 0), so a check that holds before and after an
-// operation held for the whole operation.
+// banned. Revocation bans it and advances `access_generation` in the same
+// write; an administrator's restore lifts the ban but never lowers the
+// generation, and deletion is final. So a check that reads the same generation,
+// active both times, before and after an operation held for the whole
+// operation. Status alone doesn't: the account may have been revoked and
+// restored in between. Point-in-time gates and writes guarded in the same
+// statement need only the status.
 
 const SQL_ALIAS = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const SQL_USER_ID_EXPRESSION =
@@ -38,12 +42,20 @@ export function activeAccountExistsSql(userIdExpression: string): string {
       AND ${activeAccountSql("active_account")})`;
 }
 
-/** Raw SQL that holds when the `user` row aliased as `alias` is an active administrator. */
-export function activeAdminSql(alias: string): string {
-  return `(${activeAccountSql(alias)} AND instr(
+/** Raw SQL that holds when the `user` row aliased as `alias` has the admin role, active or not. */
+export function adminRoleSql(alias: string): string {
+  if (!SQL_ALIAS.test(alias)) {
+    throw new Error("Expected a plain SQL alias");
+  }
+  return `(instr(
     ',' || replace(lower(coalesce(${alias}.role, '')), ' ', '') || ',',
     ',admin,'
   ) > 0)`;
+}
+
+/** Raw SQL that holds when the `user` row aliased as `alias` is an active administrator. */
+export function activeAdminSql(alias: string): string {
+  return `(${activeAccountSql(alias)} AND ${adminRoleSql(alias)})`;
 }
 
 /** Raw SQL that holds when the organization removed the user. */
@@ -118,6 +130,36 @@ export function usableIdentityExistsSql(
       AND ${usableIdentitySql("usable_identity")})`;
 }
 
+/** Why an identity can't sign its user in (see identitySignInBlockerSql). */
+export type IdentitySignInBlocker =
+  | "provider_removed"
+  | "removed_from_organization"
+  | "admin_requires_github";
+
+/**
+ * Raw SQL for why the `account` row aliased as `identity` can't sign its user
+ * in once they have access, or NULL when it can. Built from the predicates of
+ * usableIdentitySql, so for an active account it is NULL exactly when that
+ * holds; while an account is revoked its admin role still counts.
+ */
+export function identitySignInBlockerSql(identity: string): string {
+  if (!SQL_ALIAS.test(identity)) {
+    throw new Error("Expected a plain SQL alias");
+  }
+  return `CASE
+    WHEN ${identity}.provider_id = 'github' THEN NULL
+    WHEN NOT EXISTS (SELECT 1 FROM sso_provider AS present_provider
+      WHERE present_provider.provider_id = ${identity}.provider_id)
+      THEN 'provider_removed'
+    WHEN ${removedThroughProviderSql(`${identity}.user_id`, `${identity}.provider_id`)}
+      THEN 'removed_from_organization'
+    WHEN EXISTS (SELECT 1 FROM user AS role_holder
+      WHERE role_holder.id = ${identity}.user_id AND ${adminRoleSql("role_holder")})
+      THEN 'admin_requires_github'
+    ELSE NULL
+  END`;
+}
+
 /**
  * Raw SQL that holds when the `user` row aliased as `alias` is an active
  * administrator who can still sign in.
@@ -176,6 +218,35 @@ export async function identityState(
 }
 
 /**
+ * The access generation of an active account that some identity can still sign
+ * in, or null. With `throughProvider`, the identity at that provider must be
+ * the one.
+ */
+export async function signInAccessGeneration(
+  userId: string,
+  throughProvider: string | null = null,
+  d1: D1Database = env.DB,
+): Promise<number | null> {
+  const row = await d1
+    .prepare(
+      `SELECT signing_account.access_generation AS generation
+       FROM user AS signing_account
+       WHERE signing_account.id = ?1
+         AND ${activeAccountSql("signing_account")}
+         AND CASE WHEN ?2 IS NULL
+           THEN ${usableIdentityExistsSql("?1")}
+           ELSE EXISTS (SELECT 1 FROM account AS signing_identity
+             WHERE signing_identity.user_id = ?1
+               AND signing_identity.provider_id = ?2
+               AND ${usableIdentitySql("signing_identity")})
+         END`,
+    )
+    .bind(userId, throughProvider)
+    .first<{ generation: number }>();
+  return row ? row.generation : null;
+}
+
+/**
  * An active account that some identity can still sign in. With
  * `throughProvider`, the identity at that provider must be the one.
  */
@@ -184,19 +255,7 @@ export async function canSignIn(
   throughProvider: string | null = null,
   d1: D1Database = env.DB,
 ): Promise<boolean> {
-  const row = await d1
-    .prepare(
-      `SELECT ${activeAccountExistsSql("?1")} AND CASE WHEN ?2 IS NULL
-         THEN ${usableIdentityExistsSql("?1")}
-         ELSE EXISTS (SELECT 1 FROM account AS signing_identity
-           WHERE signing_identity.user_id = ?1
-             AND signing_identity.provider_id = ?2
-             AND ${usableIdentitySql("signing_identity")})
-       END AS allowed`,
-    )
-    .bind(userId, throughProvider)
-    .first<{ allowed: number }>();
-  return row?.allowed === 1;
+  return (await signInAccessGeneration(userId, throughProvider, d1)) !== null;
 }
 
 /** A session row's fields that decide whether it may act. */
@@ -239,6 +298,65 @@ export function sessionMayActCondition(session: ActingSession): SQL {
 }
 
 /**
+ * The access generations a session's permission to act rests on: its
+ * account's, and for an impersonation also the impersonating admin's.
+ */
+export interface AccessStamp {
+  user: number;
+  admin: number | null;
+}
+
+export function sameAccessStamp(
+  left: AccessStamp | null | undefined,
+  right: AccessStamp | null | undefined,
+): boolean {
+  return (
+    left != null &&
+    right != null &&
+    left.user === right.user &&
+    left.admin === right.admin
+  );
+}
+
+/**
+ * The access stamp of a session that may act for its account (see
+ * sessionMayActCondition), or null. `throughProvider` is the provider opening
+ * the session, whose identity must be the one that can still sign the account
+ * in.
+ */
+export async function sessionAccessStamp(
+  session: ActingSession,
+  throughProvider: string | null = null,
+  d1: D1Database = env.DB,
+): Promise<AccessStamp | null> {
+  const admin = impersonatingAdmin(session);
+  if (throughProvider && !admin) {
+    const generation = await signInAccessGeneration(
+      session.userId,
+      throughProvider,
+      d1,
+    );
+    return generation === null ? null : { user: generation, admin: null };
+  }
+  const rows = await drizzle(d1)
+    .select({
+      user: user.accessGeneration,
+      admin: admin
+        ? sql<number | null>`(SELECT impersonating_admin.access_generation
+            FROM user AS impersonating_admin
+            WHERE impersonating_admin.id = ${admin})`
+        : sql<null>`NULL`,
+    })
+    .from(user)
+    .where(and(eq(user.id, session.userId), sessionMayActCondition(session)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (admin && typeof row.admin !== "number") return null;
+  return { user: row.user, admin: admin ? row.admin : null };
+}
+
+/**
  * Whether a session may act for its account (see sessionMayActCondition).
  * `throughProvider` is the provider opening the session, whose identity must
  * be the one that can still sign the account in.
@@ -248,15 +366,7 @@ export async function sessionMayAct(
   throughProvider: string | null = null,
   d1: D1Database = env.DB,
 ): Promise<boolean> {
-  if (throughProvider && !impersonatingAdmin(session)) {
-    return canSignIn(session.userId, throughProvider, d1);
-  }
-  const rows = await drizzle(d1)
-    .select({ id: user.id })
-    .from(user)
-    .where(and(eq(user.id, session.userId), sessionMayActCondition(session)))
-    .limit(1);
-  return rows.length > 0;
+  return (await sessionAccessStamp(session, throughProvider, d1)) !== null;
 }
 
 /**
@@ -271,19 +381,27 @@ export function activeAccountCondition(): SQL {
   return and(isNull(user.deletedAt), sql`coalesce(${user.banned}, 0) = 0`)!;
 }
 
-export async function isActiveAccount(
+/** The access generation of an active account, or null. */
+export async function activeAccessGeneration(
   userId?: string | null,
   d1: D1Database = env.DB,
-): Promise<boolean> {
-  if (!userId) return false;
+): Promise<number | null> {
+  if (!userId) return null;
 
   const row = await d1
     .prepare(
-      `SELECT 1 AS active FROM user AS identity
+      `SELECT identity.access_generation AS generation FROM user AS identity
        WHERE identity.id = ?1 AND ${activeAccountSql("identity")}
        LIMIT 1`,
     )
     .bind(userId)
-    .first<{ active: number }>();
-  return row !== null;
+    .first<{ generation: number }>();
+  return row ? row.generation : null;
+}
+
+export async function isActiveAccount(
+  userId?: string | null,
+  d1: D1Database = env.DB,
+): Promise<boolean> {
+  return (await activeAccessGeneration(userId, d1)) !== null;
 }
