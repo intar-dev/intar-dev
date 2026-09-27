@@ -10,7 +10,12 @@ import { revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
 import { requestScenarioRunRouteCleanup } from "@/lib/scenario-runs/route-cleanup";
 
 /** Also runs after hibernation/reconnect. A saved desired document is not an access grant. */
-export async function enforceHostWorkloadAccess(state: HostDesiredStateV2): Promise<HostDesiredStateV2> {
+export async function enforceHostWorkloadAccess(
+  state: HostDesiredStateV2,
+  // Called for each run this pass wrote to, whether or not its destroy
+  // finished, so a watching browser hears about it.
+  onRunChanged?: (runId: string) => void,
+): Promise<HostDesiredStateV2> {
   const { results } = await env.DB.prepare(`WITH permitted_runs AS MATERIALIZED (
     SELECT run.run_id, run.user_id, run.runtime_execution_id, run.organization_id,
       run.scenario_id, run.course_scope_key, run.course_id, run.lecture_id, run.request_scope_json
@@ -69,6 +74,7 @@ export async function enforceHostWorkloadAccess(state: HostDesiredStateV2): Prom
     } catch {
       console.warn(JSON.stringify({ event: "workload_access_route_cleanup_pending", hostId: state.host_id, runId }));
     }
+    onRunChanged?.(runId);
   }
   // Destroy clears its cleanup ID only after success. Completed cleanup is
   // no longer selected, so later reports do no per-run reads, writes, or deletes.

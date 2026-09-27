@@ -353,6 +353,16 @@ export class HostRuntimeDO extends HostRuntimeBase {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  /**
+   * Pushes runs whose committed revision the caller does not know. The fanout
+   * reads it while it authorizes the subscribers, so no extra query runs.
+   */
+  private scheduleRunStatusRefresh(hostId: string, runIds: Iterable<string>): void {
+    for (const runId of runIds) {
+      this.scheduleRunStatusInvalidation({ runId, hostId, revision: 0 });
+    }
+  }
+
   private scheduleRunStatusInvalidation(input: {
     runId: string;
     hostId: string;
@@ -946,9 +956,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
         });
       }
     }
-    await this.withCpuReservationLock(async () => {
-      await reconcileHostCpuReservations(db, hostId, now);
-    });
+    const reservations = await this.withCpuReservationLock(() =>
+      reconcileHostCpuReservations(db, hostId, now),
+    );
+    this.scheduleRunStatusRefresh(hostId, reservations.expiredRunIds);
 
     try {
       await this.reconcileScenarioImageCacheIfDue({
@@ -1286,11 +1297,19 @@ export class HostRuntimeDO extends HostRuntimeBase {
         revision: expired.revision,
       });
     }
-    await expireOverdueRuntimeExecutions(hostId, now);
-    if (options?.reconcileCpuReservations !== false) {
-      await this.withCpuReservationLock(async () => {
-        await reconcileHostCpuReservations(db, hostId, now);
+    const expiredExecutions = await expireOverdueRuntimeExecutions(hostId, now);
+    for (const expired of expiredExecutions.updatedRunRevisions) {
+      this.scheduleRunStatusInvalidation({
+        runId: expired.runId,
+        hostId,
+        revision: expired.revision,
       });
+    }
+    if (options?.reconcileCpuReservations !== false) {
+      const reservations = await this.withCpuReservationLock(() =>
+        reconcileHostCpuReservations(db, hostId, now),
+      );
+      this.scheduleRunStatusRefresh(hostId, reservations.expiredRunIds);
     }
     // Terminal attach retries ride the reconcile path because the runtime
     // mirror row is the durable work marker: a target that is recorded but
@@ -1342,11 +1361,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
         return;
       }
 
-      const desiredState = await enforceHostWorkloadAccess(await loadOrCreateHostDesiredState(
-        drizzle(this.env.DB),
-        hostId,
-        Date.now(),
-      ));
+      const desiredState = await enforceHostWorkloadAccess(
+        await loadOrCreateHostDesiredState(
+          drizzle(this.env.DB),
+          hostId,
+          Date.now(),
+        ),
+        (runId) => this.scheduleRunStatusRefresh(hostId, [runId]),
+      );
       const lastSent = attachment.lastDesiredVersionSent;
       if (lastSent !== null && desiredState.version < lastSent) return;
       const relayRefreshDue = desiredState.scope !== "platform" &&

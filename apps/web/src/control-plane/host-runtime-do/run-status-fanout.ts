@@ -9,11 +9,6 @@ export async function notifyRunStatusListeners(
   readAttachment: (socket: WebSocket) => RunStatusSocketAttachment | null,
   input: { runId: string; hostId: string; revision: number },
 ): Promise<void> {
-  const message = JSON.stringify({
-    type: "invalidate",
-    runId: input.runId,
-    revision: input.revision,
-  });
   for (let offset = 0; offset < listeners.length; offset += STATUS_BATCH_SIZE) {
     const batch: { socket: WebSocket; attachment: RunStatusSocketAttachment }[] = [];
     for (const socket of listeners.slice(offset, offset + STATUS_BATCH_SIZE)) {
@@ -27,13 +22,17 @@ export async function notifyRunStatusListeners(
     }
     if (!batch.length) continue;
     let authorized: Set<number>;
+    let revision = input.revision;
     try {
       // Use one current authorization snapshot per batch. No TTL cache can
       // keep a revoked browser session alive across status updates. The
       // active-account predicate is spelled out so this module stays free of
       // Worker imports.
+      // The same read supplies the committed revision, so a caller that
+      // cannot know it (revision 0) still pushes the current one.
       const result = await db.prepare(
-        `SELECT CAST(subscriber.key AS INTEGER) AS position
+        `SELECT CAST(subscriber.key AS INTEGER) AS position,
+           run.updated_at AS revision
          FROM json_each(?1) subscriber
          JOIN scenario_runs run ON run.run_id = ?2 AND run.host_id = ?3
            AND run.user_id = json_extract(subscriber.value, '$.userId')
@@ -45,12 +44,18 @@ export async function notifyRunStatusListeners(
       ).bind(
         JSON.stringify(batch.map(({ attachment }) => attachment)),
         input.runId, input.hostId, Date.now(),
-      ).all<{ position: number }>();
+      ).all<{ position: number; revision: number }>();
       authorized = new Set(result.results.map(row => row.position));
+      for (const row of result.results) revision = Math.max(revision, row.revision);
     } catch {
       for (const { socket } of batch) close(socket, 1011, "run status authorization failed");
       continue;
     }
+    const message = JSON.stringify({
+      type: "invalidate",
+      runId: input.runId,
+      revision,
+    });
     for (const [position, { socket, attachment }] of batch.entries()) {
       if (!authorized.has(position) || attachment.expiresAt <= Date.now()) {
         close(socket, 1008, "run status access is no longer active");

@@ -45,8 +45,11 @@ it.each(["absent", "empty"])("retries durable cleanup with an %s desired VM list
     else for (const vm of draft.vms) vm.desired_phase = "absent";
   });
   gateway.deleteRoute.mockRejectedValue(new Error("gateway unavailable"));
-  const failed = await enforceHostWorkloadAccess(state);
+  const changed = vi.fn();
+  const failed = await enforceHostWorkloadAccess(state, changed);
   expect(failed).toEqual(state);
+  // The failed destroy still wrote to the run, so a watching browser is told.
+  expect(changed.mock.calls).toEqual([["run-1"]]);
   expect((await runRow()).activeKey).toBe("user-1");
   expect(gateway.deleteRoute).toHaveBeenCalledTimes(3);
 
@@ -56,7 +59,9 @@ it.each(["absent", "empty"])("retries durable cleanup with an %s desired VM list
   }) });
   expect((await runRow()).activeKey).toBe("user-1");
   gateway.deleteRoute.mockResolvedValue(undefined);
-  const retried = await enforceHostWorkloadAccess(failed);
+  changed.mockClear();
+  const retried = await enforceHostWorkloadAccess(failed, changed);
+  expect(changed.mock.calls).toEqual([["run-1"]]);
   const completed = await runRow();
   expect(completed.activeKey).toBeNull();
   expect(completed.routeCleanupId).toBeNull();
@@ -66,7 +71,9 @@ it.each(["absent", "empty"])("retries durable cleanup with an %s desired VM list
   expect(gateway.wake).not.toHaveBeenCalled();
 
   const prepare = vi.spyOn(env.DB, "prepare");
-  expect(await enforceHostWorkloadAccess(retried)).toBe(retried);
+  changed.mockClear();
+  expect(await enforceHostWorkloadAccess(retried, changed)).toBe(retried);
+  expect(changed).not.toHaveBeenCalled();
   // One host-level discovery query; no per-run reads or lifecycle writes.
   expect(prepare).toHaveBeenCalledTimes(1);
   prepare.mockRestore();

@@ -1,6 +1,6 @@
 import { loadStargateSshTransport } from "@/lib/stargate-relay";
 import { env } from "cloudflare:workers";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import { issueAccountFencedRoute } from "@/lib/account-route-issuance";
@@ -165,7 +165,9 @@ export async function destroyScenarioRunForUserWithDependencies(
       .update(scenarioRuns)
       .set({
         deleteRequestedAt,
-        updatedAt: acceptedAt,
+        // Revisions only move forward: route cleanup above already bumped
+        // this row, and a concurrent destroy may have bumped it further.
+        updatedAt: sql`max(${scenarioRuns.updatedAt} + 1, ${acceptedAt})`,
       })
       .where(
         and(

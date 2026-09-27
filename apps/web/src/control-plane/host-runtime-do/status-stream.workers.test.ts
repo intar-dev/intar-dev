@@ -2,7 +2,8 @@
 
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { session } from "@/db/schema";
+import { hostCpuReservations, runtimeExecutions, session } from "@/db/schema";
+import { RUN_STATUS_PING, RUN_STATUS_PONG } from "@/lib/run-status-heartbeat";
 import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 import {
   agentHosts,
@@ -28,6 +29,15 @@ import {
 type StatusMessage =
   | { type: "subscribed"; runId: string }
   | { type: "invalidate"; runId: string; revision: number };
+
+const isSubscribed = (
+  message: StatusMessage,
+): message is Extract<StatusMessage, { type: "subscribed" }> =>
+  message.type === "subscribed";
+const isInvalidate = (
+  message: StatusMessage,
+): message is Extract<StatusMessage, { type: "invalidate" }> =>
+  message.type === "invalidate";
 
 describe("HostRuntimeDO run status stream", () => {
   beforeEach(resetHostRuntimeTestDatabase);
@@ -286,6 +296,141 @@ describe("HostRuntimeDO run status stream", () => {
     listener.ws.close();
   });
 
+  it("notifies when an expired runtime execution fails the run", async () => {
+    const hostId = "host-status-execution-expiry";
+    const runId = "run-status-execution-expiry";
+    const now = Date.now();
+    await seedHost(hostId);
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const listener = await openStatusStream({ hostId, runId, now });
+    await waitForStatusMessage(listener.messages, isSubscribed);
+    await db
+      .update(runtimeExecutions)
+      .set({ leaseExpiresAt: now - 1 })
+      .where(eq(runtimeExecutions.id, runId));
+
+    const wake = await listener.stub.fetch(
+      "http://host-runtime/_internal/wake",
+      { method: "POST" },
+    );
+    expect(wake.status).toBe(202);
+    await runNextScheduledAlarm(listener.stub);
+
+    const invalidation = await waitForStatusMessage(listener.messages, isInvalidate);
+    const row = await env.DB.prepare(
+      "SELECT state, updated_at FROM scenario_runs WHERE run_id = ?1",
+    )
+      .bind(runId)
+      .first<{ state: string; updated_at: number }>();
+    expect(row?.state).toBe("failed");
+    expect(invalidation.revision).toBe(row?.updated_at);
+
+    listener.ws.close();
+  });
+
+  it("notifies with the committed revision when an undispatched reservation expires", async () => {
+    const hostId = "host-status-reservation-expiry";
+    const runId = "run-status-reservation-expiry";
+    const now = Date.now();
+    await seedHost(hostId);
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const listener = await openStatusStream({ hostId, runId, now });
+    await waitForStatusMessage(listener.messages, isSubscribed);
+    // A start that never reached the host: its reservation outlived its TTL.
+    await db.insert(hostCpuReservations).values({
+      runId,
+      hostId,
+      cpuMillis: 500,
+      state: "pending",
+      expiresAt: now - 1,
+      createdAt: now - 61_000,
+      updatedAt: now - 61_000,
+    });
+
+    const wake = await listener.stub.fetch(
+      "http://host-runtime/_internal/wake",
+      { method: "POST" },
+    );
+    expect(wake.status).toBe(202);
+    await runNextScheduledAlarm(listener.stub);
+
+    // The caller cannot know the revision, so the fanout reads it.
+    const invalidation = await waitForStatusMessage(listener.messages, isInvalidate);
+    const row = await env.DB.prepare(
+      "SELECT state, updated_at FROM scenario_runs WHERE run_id = ?1",
+    )
+      .bind(runId)
+      .first<{ state: string; updated_at: number }>();
+    expect(row?.state).toBe("failed");
+    expect(invalidation.revision).toBe(row?.updated_at);
+
+    listener.ws.close();
+  });
+
+  it("notifies after a wake finishes a destroy that the Worker started", async () => {
+    const hostId = "host-status-access-cleanup";
+    const runId = "run-status-access-cleanup";
+    const now = Date.now();
+    await seedHost(hostId);
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const { messages: agentMessages, ws: agentSocket } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      agentMessages,
+      (message) => message.type === "desired_state",
+    );
+    const listener = await openStatusStream({ hostId, runId, now });
+    await waitForStatusMessage(listener.messages, isSubscribed);
+    // A Worker-side destroy recorded its intent but has not released the slot.
+    await env.DB.prepare(
+      "UPDATE scenario_runs SET delete_requested_at = ?2 WHERE run_id = ?1",
+    )
+      .bind(runId, now)
+      .run();
+
+    const wake = await listener.stub.fetch(
+      "http://host-runtime/_internal/wake",
+      { method: "POST" },
+    );
+    expect(wake.status).toBe(202);
+
+    const invalidation = await waitForStatusMessage(listener.messages, isInvalidate);
+    const row = await env.DB.prepare(
+      "SELECT active_key, updated_at FROM scenario_runs WHERE run_id = ?1",
+    )
+      .bind(runId)
+      .first<{ active_key: string | null; updated_at: number }>();
+    // The push carries the state after the slot release, not a mid-destroy one.
+    expect(row?.active_key).toBeNull();
+    expect(invalidation.revision).toBe(row?.updated_at);
+
+    listener.ws.close();
+    agentSocket.close();
+  });
+
+  it("answers the keep-alive ping without closing the status socket", async () => {
+    const hostId = "host-status-heartbeat";
+    const runId = "run-status-heartbeat";
+    const now = Date.now();
+    await seedHost(hostId);
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const listener = await openStatusStream({ hostId, runId, now });
+    await waitForStatusMessage(listener.messages, isSubscribed);
+
+    listener.ws.send(RUN_STATUS_PING);
+    const deadline = Date.now() + 1_000;
+    while (!listener.frames.includes(RUN_STATUS_PONG) && Date.now() <= deadline) {
+      await sleep(10);
+    }
+    expect(listener.frames).toContain(RUN_STATUS_PONG);
+    expect(listener.close).toBeNull();
+
+    listener.ws.close();
+  });
+
   it("closes a revoked subscriber before sending another invalidation", async () => {
     const hostId = "host-status-revoked";
     const runId = "run-status-revoked";
@@ -405,6 +550,7 @@ async function openStatusStream(input: {
   stub: DurableObjectStub;
   ws: WebSocket;
   messages: StatusMessage[];
+  frames: string[];
   close: CloseEvent | null;
 }> {
   const response = await createStatusStreamResponse(input);
@@ -414,10 +560,14 @@ async function openStatusStream(input: {
   if (!ws) throw new Error("missing run status websocket");
 
   const messages: StatusMessage[] = [];
+  const frames: string[] = [];
   let close: CloseEvent | null = null;
   ws.accept();
   ws.addEventListener("message", (event) => {
     if (typeof event.data !== "string") return;
+    frames.push(event.data);
+    // The keep-alive pong is a bare string, not a status message.
+    if (event.data === RUN_STATUS_PONG) return;
     messages.push(JSON.parse(event.data) as StatusMessage);
   });
   ws.addEventListener("close", (event) => {
@@ -427,6 +577,7 @@ async function openStatusStream(input: {
     stub: env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(input.hostId)),
     ws,
     messages,
+    frames,
     get close() {
       return close;
     },

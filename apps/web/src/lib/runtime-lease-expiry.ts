@@ -13,6 +13,8 @@ type ExpiredRuntimeExecutionRow = {
 export interface RuntimeLeaseExpiryResult {
   expiredExecutionIds: string[];
   failedExecutionIds: string[];
+  /** Runs this expiry ended, with the revision their status now reports. */
+  updatedRunRevisions: Array<{ runId: string; revision: number }>;
 }
 
 /**
@@ -49,13 +51,14 @@ export async function expireOverdueRuntimeExecutions(
 
   const expiredExecutionIds: string[] = [];
   const failedExecutionIds: string[] = [];
+  const updatedRunRevisions: Array<{ runId: string; revision: number }> = [];
   for (const execution of rows.results) {
     try {
       const run = await loadRunRow(execution.domain_id);
       if (run) await revokeScenarioRunRoutes(run);
       if (run && !["completed", "failed"].includes(run.state.phase)) {
         // End the logical run without inventing a host absence observation.
-        await updateRunState(run.runId, {
+        const revision = await updateRunState(run.runId, {
           mutate: (current) => ["completed", "failed"].includes(current.phase)
             ? current
             : {
@@ -64,6 +67,9 @@ export async function expireOverdueRuntimeExecutions(
               },
           releaseActiveSlot: true,
         });
+        if (revision !== null) {
+          updatedRunRevisions.push({ runId: run.runId, revision });
+        }
       }
       await archiveRuntimeExecution({
         executionId: execution.execution_id,
@@ -86,5 +92,5 @@ export async function expireOverdueRuntimeExecutions(
     }
   }
 
-  return { expiredExecutionIds, failedExecutionIds };
+  return { expiredExecutionIds, failedExecutionIds, updatedRunRevisions };
 }
