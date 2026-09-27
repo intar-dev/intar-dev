@@ -379,6 +379,33 @@ for (const { action, sessionRole, status } of [
   });
 }
 
+test("a refused organization read shows its error without retrying", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ path: "/organizations", sessionRole: "owner", theme: "light" });
+  // The organization was deleted after the list loaded.
+  let reads = 0;
+  ui.server.expectedNotFound = 1;
+  await page.route("**/api/organizations/org-platform", async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    reads += 1;
+    await route.fulfill({
+      status: 404,
+      json: { error: "This organization no longer exists." },
+    });
+  });
+  await page.getByText("Platform Repair Crew", { exact: true }).click();
+
+  // Retrying with backoff held the skeleton for about seven seconds.
+  await expect(
+    page.getByText("This organization no longer exists."),
+  ).toBeVisible({ timeout: 3_000 });
+  // Past the first retry delay: still the one read.
+  await page.waitForTimeout(1_500);
+  expect(reads).toBe(1);
+});
+
 test("the app bar offers a reload once a new version is deployed", async ({
   page,
   ui,
