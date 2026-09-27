@@ -7,8 +7,6 @@ export const NO_STORE_HEADERS = {
 } as const;
 
 export const MAX_API_JSON_BODY_BYTES = 1024 * 1024;
-export const MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES =
-  65 * 1024 * 1024;
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -23,7 +21,6 @@ type SensitiveRateLimitAction =
   | "support-write"
   | "scenario-start"
   | "ssh-issuance"
-  | "build-start"
   | "build-retry";
 
 export type ApiRequestSecurityResult =
@@ -156,15 +153,6 @@ export async function guardCustomApiMutation(
   const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
   if (!originResult.ok) return originResult;
 
-  if (isOrganizationScenarioBundleUpload(pathname)) {
-    try {
-      requireOrganizationScenarioBundleMultipart(request);
-    } catch (error) {
-      return errorResponse(error, "invalid scenario bundle upload");
-    }
-    return { ok: true, request };
-  }
-
   const maxBodyBytes = MAX_API_JSON_BODY_BYTES;
   const declaredLengthHeader = request.headers.get("content-length");
   let declaredLength: number | null = null;
@@ -223,42 +211,6 @@ export async function guardCustomApiMutation(
   }
 }
 
-/** Require the one custom multipart upload to be declared and bounded. */
-export function requireOrganizationScenarioBundleMultipart(
-  request: Request,
-): void {
-  if (!isMultipartFormData(request.headers.get("content-type"))) {
-    throw appError(
-      415,
-      "multipart_required",
-      "content-type must be multipart/form-data with a boundary",
-    );
-  }
-  const declaredLength = request.headers.get("content-length");
-  if (declaredLength === null) {
-    throw appError(
-      411,
-      "content_length_required",
-      "bundle uploads require a content-length",
-    );
-  }
-  const parsedLength = canonicalContentLength(declaredLength);
-  if (parsedLength === null) {
-    throw appError(
-      400,
-      "invalid_content_length",
-      "content-length must be a canonical decimal value",
-    );
-  }
-  if (parsedLength > MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES) {
-    throw appError(
-      413,
-      "bundle_request_too_large",
-      "scenario bundle upload is too large",
-    );
-  }
-}
-
 export function canonicalApplicationOrigin(
   workerEnv: Pick<Cloudflare.Env, "BETTER_AUTH_URL"> = env,
 ): string {
@@ -288,9 +240,6 @@ export function sensitiveRateLimitActionFor(
   }
   if (/^\/api\/scenarios\/runs\/[^/]+\/ssh$/u.test(pathname)) {
     return "ssh-issuance";
-  }
-  if (isOrganizationScenarioBundleUpload(pathname)) {
-    return "build-start";
   }
   if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {
     return "build-retry";
@@ -389,20 +338,9 @@ function isPrehandledBearerApiPath(pathname: string): boolean {
   return pathname === "/api/agent/bootstrap" || pathname === "/api/agent/connect";
 }
 
-function isOrganizationScenarioBundleUpload(pathname: string): boolean {
-  return /^\/api\/organizations\/[^/]+\/scenarios\/bundles$/u.test(pathname);
-}
-
 function isJsonContentType(value: string | null): boolean {
   if (!value) return false;
   return /^application\/json(?:\s*;|$)/iu.test(value.trim());
-}
-
-function isMultipartFormData(value: string | null): boolean {
-  if (!value) return false;
-  return /^multipart\/form-data\s*;\s*boundary=(?:"[^"]+"|[^;\s]+)(?:\s*;.*)?$/iu.test(
-    value,
-  );
 }
 
 function canonicalContentLength(value: string): number | null {
