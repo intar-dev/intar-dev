@@ -280,6 +280,9 @@ export const POLL_INTERVALS: Record<
   failed: false,
 };
 
+/** While the push stream is live, polling is only a safety net. */
+export const STREAM_FALLBACK_POLL_INTERVAL = 15_000;
+
 /**
  * A failed status request must not freeze a live run. Only access and
  * not-found errors stop polling; transient network and server failures keep
@@ -288,9 +291,13 @@ export const POLL_INTERVALS: Record<
 export function scenarioRunStatusRefetchInterval(
   run: Pick<ScenarioRunRecord, "activity" | "phase"> | null | undefined,
   error: unknown,
+  streamLive = false,
 ): number | false {
   if (!run || run.activity === "settled") return false;
-  const interval =
+  let interval =
     run.activity === "background" ? 1_000 : POLL_INTERVALS[run.phase];
+  if (streamLive && interval !== false) {
+    interval = STREAM_FALLBACK_POLL_INTERVAL;
+  }
   return pollingIntervalUnlessAccessError(error, interval);
 }

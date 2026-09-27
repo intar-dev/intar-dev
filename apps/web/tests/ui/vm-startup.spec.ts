@@ -110,7 +110,7 @@ test("a lecture start click records terminal-start evidence", async ({ page, ui 
   expect(startRequests).toBe(1);
 });
 
-test("startup notifications survive phase changes and close when the terminal is ready", async ({ page, ui }) => {
+test("startup notifications survive phase changes and stay open once the terminal is ready", async ({ page, ui }) => {
   const sockets: WebSocketRoute[] = [];
   let closed = 0;
   await page.routeWebSocket(/\/api\/scenarios\/runs\/[^/]+\/status\/stream$/, (ws) => {
@@ -147,7 +147,9 @@ test("startup notifications survive phase changes and close when the terminal is
   }));
   await readyResponse;
   await expect(page.locator(".xterm")).toBeVisible();
-  await expect.poll(() => closed).toBe(1);
+  // The stream keeps carrying updates for the running scenario.
+  expect(sockets).toHaveLength(1);
+  expect(closed).toBe(0);
 });
 
 test("the status socket closes in the background and reconnects once when visible", async ({
@@ -340,7 +342,7 @@ test("a late font callback does not resize a closed terminal", async ({ page, ui
   expect(terminal.controls).toHaveLength(controlsAfterClose);
 });
 
-test("a failed status socket keeps the 750 ms startup poll active", async ({
+test("a failed status socket keeps the 750 ms startup poll active while it retries", async ({
   page,
   ui,
 }) => {
@@ -364,7 +366,6 @@ test("a failed status socket keeps the 750 ms startup poll active", async ({
   await page.clock.resume();
 
   await expect(page.locator('[data-terminal-status="connected"]')).toBeVisible();
-  expect(socketAttempts).toBe(1);
 });
 
 interface TerminalBinaryFrame {

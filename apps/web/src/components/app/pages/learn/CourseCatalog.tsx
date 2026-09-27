@@ -155,12 +155,13 @@ function CourseCatalogPage({
     },
     staleTime: 10_000,
     refetchInterval: (query) =>
-      pollingIntervalUnlessAccessError(query.state.error, courseId ? false : 15_000),
+      pollingIntervalUnlessAccessError(query.state.error, courseId ? false : 60_000),
     retry: retryHttpResponseError,
   });
   const assignments = useQuery({
     queryKey: ["organizations", "my-assignments"],
-    enabled: organizationId === null,
+    // Only the public course index shows assignments.
+    enabled: organizationId === null && !courseId,
     queryFn: async () => {
       const response = await fetch("/api/organizations/my-assignments", {
         credentials: "include",

@@ -551,6 +551,9 @@ export function ProgressSection({ detail }: { detail: Detail }) {
       fetchJson<ProgressResponse>(
         `/api/organizations/${encodeURIComponent(detail.id)}/progress`,
       ),
+    // Assignment and roster changes elsewhere on this page do not invalidate
+    // it, so read it fresh each time the tab opens.
+    staleTime: 0,
   });
   if (progress.error) {
     return (

@@ -49,6 +49,16 @@ export interface MyServersResponse {
 }
 
 type Server = MyServersResponse["servers"][number];
+
+function serversPending(data: MyServersResponse | undefined): boolean {
+  return Boolean(
+    data &&
+      (data.enrollments.length > 0 ||
+        data.servers.some(
+          (server) => server.status !== "ready" && server.status !== "revoked",
+        )),
+  );
+}
 type Enrollment = {
   hostId: string;
   enrollmentToken: string;
@@ -112,8 +122,13 @@ export function MyServers(
     queryFn: ({ signal }) =>
       serverRequest<MyServersResponse>(apiBase, { signal }),
     enabled: !removing,
+    // Setup, removal, and servers waiting on a fix outside this page (offline,
+    // needs attention, paused) change on their own; ready servers do not.
     refetchInterval: (query) =>
-      pollingIntervalUnlessAccessError(query.state.error, 15_000),
+      pollingIntervalUnlessAccessError(
+        query.state.error,
+        adding || serversPending(query.state.data) ? 15_000 : false,
+      ),
     refetchIntervalInBackground: false,
     retry: false,
   });

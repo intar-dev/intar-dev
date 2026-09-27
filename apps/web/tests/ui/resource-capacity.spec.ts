@@ -4,7 +4,7 @@ import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
 import { expectNoHorizontalOverflow } from "./support/layout";
 
-test("capacity updates after 15 seconds and distinguishes zero from unavailable", async ({ page, ui }) => {
+test("capacity updates after 60 seconds and distinguishes zero from unavailable", async ({ page, ui }) => {
   await page.clock.install({ time: FIXED_NOW });
   await ui.open(routeCase("course-catalog"));
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
@@ -16,13 +16,13 @@ test("capacity updates after 15 seconds and distinguishes zero from unavailable"
     cpu: { availableMillis: 0, totalMillis: 8000 },
     memory: { availableMib: 0, totalMib: 16384 },
   };
-  await page.clock.fastForward(15_001);
+  await page.clock.fastForward(60_001);
   await expect(cpu).toHaveAttribute("aria-valuenow", "0");
   await expect(page.getByRole("meter", { name: "Memory", exact: true })).toHaveAttribute("aria-valuenow", "0");
   await expect(page.getByText("Capacity unavailable", { exact: true })).toHaveCount(0);
 
   ui.server.state.resourceCapacity = null;
-  await page.clock.fastForward(15_001);
+  await page.clock.fastForward(60_001);
   await expect(page.getByText("Capacity unavailable", { exact: true })).toBeVisible();
   await expect(page.getByRole("meter")).toHaveCount(0);
   await expect(courseList).toBeVisible();
@@ -34,7 +34,7 @@ test("capacity refresh failure keeps courses and last values, then recovers", as
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
   await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
   ui.server.state.variant = "error";
-  await page.clock.fastForward(15_001);
+  await page.clock.fastForward(60_001);
   // Advance retries between completed network responses.
   await expect.poll(async () => {
     await page.clock.fastForward(5_000);
@@ -46,7 +46,7 @@ test("capacity refresh failure keeps courses and last values, then recovers", as
 
   ui.server.state.variant = "populated";
   ui.server.state.resourceCapacity!.cpu.availableMillis = 8000;
-  await page.clock.fastForward(15_001);
+  await page.clock.fastForward(60_001);
   await expect(cpu).toHaveAttribute("aria-valuenow", "100");
   await expect(page.getByText(/Update failed/)).toHaveCount(0);
 });
@@ -87,7 +87,7 @@ test("organization catalog reads its own capacity and course detail has no meter
   await expect(page.getByRole("meter")).toHaveCount(0);
   const catalogRequests = () => ui.server.requests.filter((request) => /^GET \/api\/organizations\/[^/]+\/courses$/.test(request)).length;
   const count = catalogRequests();
-  await page.clock.fastForward(45_001);
+  await page.clock.fastForward(120_001);
   expect(catalogRequests()).toBe(count);
 });
 
@@ -112,10 +112,10 @@ test("access denial discards cached courses even when the next retry fails", asy
     await route.fulfill({ status: 403, json: { error: "Course access denied" } });
   });
   ui.server.state.variant = "error";
-  await page.clock.fastForward(15_001);
+  await page.clock.fastForward(60_001);
   await expect(page.getByText("Course access denied", { exact: true })).toBeVisible();
   await expect(page.getByRole("meter")).toHaveCount(0);
-  await page.clock.fastForward(45_001);
+  await page.clock.fastForward(120_001);
   expect(deniedReads).toBe(1);
 
   denied = false;

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { groupMyRunsByActivity, type MyRunEntry } from "./useMyRuns";
+import {
+  groupMyRunsByActivity,
+  myRunsSummaryPollInterval,
+  type MyRunEntry,
+} from "./useMyRuns";
 
 describe("groupMyRunsByActivity", () => {
   it("keeps foreground, background, and settled runs distinct", () => {
@@ -14,6 +18,21 @@ describe("groupMyRunsByActivity", () => {
     expect(grouped.foreground.map((entry) => entry.runId)).toEqual(["run-a"]);
     expect(grouped.background.map((entry) => entry.runId)).toEqual(["run-b"]);
     expect(grouped.settled.map((entry) => entry.runId)).toEqual(["run-c"]);
+  });
+});
+
+describe("myRunsSummaryPollInterval", () => {
+  it("polls only while a run is active, faster during background cleanup", () => {
+    expect(myRunsSummaryPollInterval(undefined)).toBe(false);
+    expect(
+      myRunsSummaryPollInterval({ activeCount: 0, activeRunId: null }),
+    ).toBe(false);
+    expect(
+      myRunsSummaryPollInterval({ activeCount: 1, activeRunId: "run-a" }),
+    ).toBe(30_000);
+    expect(
+      myRunsSummaryPollInterval({ activeCount: 1, activeRunId: null }),
+    ).toBe(3_000);
   });
 });
 

@@ -1,5 +1,5 @@
 import type { Page, WebSocketRoute } from "@playwright/test";
-import type { MockApiServer } from "./mock-api";
+import { type MockApiServer, scenarioRunStatusRevision } from "./mock-api";
 
 const terminalTranscript = Buffer.from(
   "\r\nintar scenario shell\r\nroot@web:~# systemctl status nginx\r\n" +
@@ -59,8 +59,21 @@ export async function installTerminalWebSocketMock(
   page: Page,
   server: MockApiServer,
 ) {
+  // Like the host runtime, push an invalidation after every status write.
+  const statusStreams = new Set<{ ws: WebSocketRoute; runId: string }>();
+  const setRunState = server.setRunState.bind(server);
+  server.setRunState = (runState) => {
+    setRunState(runState);
+    const revision = scenarioRunStatusRevision(server);
+    for (const { ws, runId } of statusStreams) {
+      ws.send(JSON.stringify({ type: "invalidate", runId, revision }));
+    }
+  };
   await page.routeWebSocket(/\/api\/scenarios\/runs\/[^/]+\/status\/stream$/, (ws) => {
     const runId = decodeURIComponent(new URL(ws.url()).pathname.split("/")[4]!);
+    const stream = { ws, runId };
+    statusStreams.add(stream);
+    ws.onClose(() => statusStreams.delete(stream));
     ws.send(JSON.stringify({ type: "subscribed", runId }));
   });
   let connectionCount = 0;

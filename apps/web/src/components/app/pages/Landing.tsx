@@ -8,7 +8,7 @@ import namespaceLogo from "@/assets/namespace-logo.png";
 import { BrandMark } from "../patterns/BrandMark";
 import { InlineFeedback } from "../patterns/InlineFeedback";
 import { useCallbackErrorCode } from "../hooks/useCallbackErrorCode";
-import { useMyRuns } from "../hooks/useMyRuns";
+import { useMyRunsSummary } from "../hooks/useMyRuns";
 import { useSessionAccess } from "../hooks/useSession";
 import { useSignOut } from "../hooks/useSignOut";
 import { useSignupStatus } from "../hooks/useSignupStatus";
@@ -29,11 +29,11 @@ export function Landing() {
       "Sign-in couldn't be completed. Please try again.")
     : null;
   const { access } = useSessionAccess();
-  const runs = useMyRuns({ enabled: access === "active" });
+  const runs = useMyRunsSummary({ enabled: access === "active" });
   // Signing out a stranded session answers the refusal that brought it here.
   const signOut = useSignOut({ onSignedOut: clearErrorCode });
   const signups = useSignupStatus();
-  const activeRun = runs.data?.runs.find((run) => run.active) ?? null;
+  const activeRunId = runs.data?.activeRunId ?? null;
 
   const signIn = useMutation({
     mutationFn: () =>
@@ -109,15 +109,15 @@ export function Landing() {
                     render={
                       runs.isLoading ? undefined : (
                         <Link
-                          to={activeRun ? "/runs/$runId" : "/courses"}
-                          params={activeRun ? { runId: activeRun.runId } : {}}
+                          to={activeRunId ? "/runs/$runId" : "/courses"}
+                          params={activeRunId ? { runId: activeRunId } : {}}
                         />
                       )
                     }
                   >
                     {runs.isLoading
                       ? "Finding your work…"
-                      : activeRun
+                      : activeRunId
                         ? "Resume run"
                         : "Browse courses"}
                     {!runs.isLoading ? <ArrowRight className="size-4" /> : null}

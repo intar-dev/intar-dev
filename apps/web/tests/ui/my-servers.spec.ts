@@ -500,11 +500,26 @@ test("load errors allow retry and failed cleanup keeps the removal panel without
   await expect(dialog).toHaveCount(0);
 });
 
-test("polls at 15 seconds only while the profile page is visible and mounted", async ({
+test("does not poll while every server is settled", async ({ page, ui }) => {
+  const requests = await mockServers(page, serverData());
+  await ui.open(routeCase("profile"));
+  await page.clock.install({ time: FIXED_NOW });
+  const reads = () =>
+    requests.filter((request) => request.method === "GET").length;
+  await expect.poll(reads).toBeGreaterThan(0);
+  const initial = reads();
+  await page.clock.fastForward(60_000);
+  expect(reads()).toBe(initial);
+});
+
+test("polls at 15 seconds during setup only while the profile page is visible and mounted", async ({
   page,
   ui,
 }) => {
-  const requests = await mockServers(page, serverData());
+  const requests = await mockServers(
+    page,
+    serverData({ servers: [makeServer({ status: "setting_up", connected: false })] }),
+  );
   await ui.open(routeCase("profile"));
   await page.clock.install({ time: FIXED_NOW });
   const reads = () =>
