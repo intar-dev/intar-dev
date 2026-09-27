@@ -210,6 +210,17 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       await invalidateDetail();
     },
   });
+  // Leaving or deleting ends access to this organization, so refetching this
+  // still-mounted page's queries could only fail, and retrying them held the
+  // navigation for seconds. Mark them stale without refetching; the list page
+  // reloads what it shows.
+  const exitOrganization = async () => {
+    await queryClient.invalidateQueries({
+      queryKey: ["organizations"],
+      refetchType: "none",
+    });
+    await navigate({ to: "/organizations" });
+  };
   const leave = useMutation({
     mutationFn: async () => {
       const response = await fetch(
@@ -218,10 +229,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       );
       await mutationResponse(response, "Failed to leave organization");
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["organizations"] });
-      void navigate({ to: "/organizations" });
-    },
+    onSuccess: exitOrganization,
   });
   const deleteOrganization = useMutation({
     mutationFn: async () => {
@@ -234,10 +242,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       );
       await mutationResponse(response, "Failed to delete organization");
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["organizations"] });
-      void navigate({ to: "/organizations" });
-    },
+    onSuccess: exitOrganization,
   });
 
   const provider = oidc.data?.provider ?? null;
