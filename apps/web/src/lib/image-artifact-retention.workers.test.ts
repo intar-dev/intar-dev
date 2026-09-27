@@ -277,6 +277,82 @@ describe("registry retention fail-closed rules", () => {
     ]);
   });
 
+  it("keeps a rebuild staged under the live revision, and its objects, through a deleting sweep", async () => {
+    // 2026-09-27: a publish re-run rebuilt the images of the live revision and
+    // staged them as candidates of that same revision. The sweep read the
+    // matching revision as "already promoted" and deleted what was warming.
+    const live = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "live",
+    });
+    const rebuild = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "rebuild",
+    });
+    const orphan = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "orphan",
+    });
+    await seedScenario(
+      { scenario: SCENARIO_ID, vm: "web", arch: "x86_64" },
+      {
+        chunkManifestSha256: live.chunkManifestSha256,
+        imageId: live.imageId,
+        kernel: live.kernelSha256,
+        initrd: live.initrdSha256,
+        sourceRevision: "revision-2",
+      },
+    );
+    const db = drizzle(env.DB);
+    await db.insert(scenarioCatalogCandidates).values({
+      id: "public:revision-2:" + SCENARIO_ID,
+      revision: "revision-2",
+      scenarioId: SCENARIO_ID,
+      buildId: "build-rebuild",
+      manifestJson: manifestFor(rebuild),
+    });
+    // The rebuilt build, and a host warming its image for the promotion.
+    await seedBuildManifest({ manifest: manifestFor(rebuild), id: "build-rebuild" });
+    const now = Date.now();
+    await seedHostRow(db, { hostId: "host-warming", now });
+    await seedHostDesiredRow(db, {
+      hostId: "host-warming",
+      now,
+      cachedImages: [
+        {
+          image_key: { scenario: SCENARIO_ID, vm: "web", arch: "x86_64" },
+          image_id: rebuild.imageId,
+        },
+      ],
+    });
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    expect(projection.candidates.keepIds).toEqual([
+      "public:revision-2:" + SCENARIO_ID,
+    ]);
+    expect(projection.candidates.retireIds).toEqual([]);
+    expect(projection.builds.retireBuildIds).not.toContain("build-rebuild");
+    expect(projection.hostCacheTrims).toEqual([]);
+
+    const core = createImageRegistryCleanupCore({});
+    const cleanupEnv = {
+      DB: env.DB,
+      VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
+    };
+    const plan = await core.plan(cleanupEnv, { mode: "delete", nowMs: Date.now() });
+    expect(plan.details.faults).toEqual([]);
+    const result = await core.run(cleanupEnv, { mode: "delete", nowMs: Date.now() });
+    expect(result.error).toBeNull();
+
+    for (const image of [live, rebuild]) {
+      expect(await objectExists(image.objectKey)).toBe(true);
+      expect(await objectExists("image-chunks/v1/zstd6/" + image.chunkRawSha256)).toBe(true);
+      expect(await objectExists("artifacts/" + image.kernelSha256)).toBe(true);
+      expect(await objectExists("artifacts/" + image.initrdSha256)).toBe(true);
+    }
+    // The sweep still deletes: nothing references the orphan.
+    expect(await objectExists(orphan.objectKey)).toBe(false);
+  });
+
   it("faults the projection when a chunked live pointer has no chunk manifest", async () => {
     const image = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
       label: "live",
@@ -420,13 +496,21 @@ async function seedScalePolicyRows(now: number): Promise<{
 
   const candidates = Array.from({ length: SCALE_CANDIDATES }, (_, index) => ({
     id: scaleCandidateId(index),
-    // The newest row carries the live revision, so its intent is fulfilled.
-    // Every other row is history for the same scenario.
+    // The newest row carries the live revision and the live images, so its
+    // intent is fulfilled. Every other row is history for the same scenario.
     revision:
       index === SCALE_CANDIDATES - 1 ? SCALE_REVISION : "revision-" + index,
     scenarioId: SCENARIO_ID,
     buildId: "candidate-build-" + index,
-    manifestJson: { scenario_id: SCENARIO_ID, vms: [] } as never,
+    manifestJson:
+      index === SCALE_CANDIDATES - 1
+        ? manifestFor({
+            imageId: SCALE_LIVE_IMAGE_ID,
+            chunkManifestSha256: SCALE_CHUNK_MANIFEST_SHA256,
+            kernelSha256: SCALE_KERNEL_SHA256,
+            initrdSha256: SCALE_INITRD_SHA256,
+          })
+        : ({ scenario_id: SCENARIO_ID, vms: [] } as never),
     updatedAt: now + index,
   }));
   // Eight columns per candidate row, so 12 rows stay inside the limit.
@@ -2180,7 +2264,7 @@ function cleanupEnvForSweep(): {
 /** A host with desired state but no desired VM: the actual report is all it has. */
 async function seedHostDesiredRow(
   db: ReturnType<typeof drizzle>,
-  input: { hostId: string; now: number },
+  input: { hostId: string; now: number; cachedImages?: unknown[] },
 ): Promise<void> {
   await db.insert(hostDesiredState).values({
     hostId: input.hostId,
@@ -2190,7 +2274,7 @@ async function seedHostDesiredRow(
       host_id: input.hostId,
       version: 1,
       generated_at_unix_ms: input.now,
-      cached_images: [],
+      cached_images: input.cachedImages ?? [],
       cached_guest_tools: [],
       builds: [],
       vms: [],

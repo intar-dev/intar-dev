@@ -164,6 +164,9 @@ describe("candidate scenario catalog promotion", () => {
       title: "Broken Nginx",
       sourceRevision: "revision-1",
     });
+    // The promotion's sweep retires the fulfilled candidate: the rows it wrote
+    // carry the candidate's exact image closure, so no intent lingers.
+    expect(await db.select().from(scenarioCatalogCandidates)).toEqual([]);
     expect(vms).toHaveLength(1);
     expect(vms[0]).toMatchObject({
       // The promoted row carries the fixture's derived identity, the same one the
