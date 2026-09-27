@@ -1,4 +1,6 @@
-export const FLEET_SNAPSHOT_POLL_INTERVAL_MS = 3_000;
+// Operators watch hosts and runs change over minutes; each read costs an auth
+// check and several D1 queries, so a slower cadence keeps the Worker cheap.
+export const FLEET_SNAPSHOT_POLL_INTERVAL_MS = 10_000;
 
 export interface FleetSnapshotPollerOptions {
   poll: (signal: AbortSignal) => Promise<void>;

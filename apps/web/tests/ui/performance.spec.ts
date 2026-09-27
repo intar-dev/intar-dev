@@ -1,4 +1,5 @@
 import type { Page, Request } from "@playwright/test";
+import { FIXED_NOW } from "./fixtures/data";
 import { expect, test } from "./fixtures/test";
 
 test.setTimeout(120_000);
@@ -151,6 +152,16 @@ test("admin uses a separate bounded archive API and keeps collapsed details out 
   await expect
     .poll(() => requestCount(ui.server.requests, "GET /api/admin/runs"))
     .toBe(2);
+  // A quick tab refocus does not re-read the archive that just loaded...
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await ui.settle();
+  expect(requestCount(ui.server.requests, "GET /api/admin/runs")).toBe(2);
+  // ...but a refocus once it has gone stale does.
+  await page.clock.setFixedTime(FIXED_NOW + 31_000);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect
+    .poll(() => requestCount(ui.server.requests, "GET /api/admin/runs"))
+    .toBe(3);
   expect(
     ui.server.requests.filter((request) =>
       request.startsWith("GET /api/agent/hosts"),

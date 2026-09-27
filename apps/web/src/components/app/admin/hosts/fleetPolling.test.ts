@@ -28,12 +28,12 @@ describe("fleet snapshot polling", () => {
 
     poller.start();
     expect(poll).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(35_000);
     expect(poll).toHaveBeenCalledTimes(1);
 
     first.resolve();
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(poll).toHaveBeenCalledTimes(2);
 
     visible = false;
@@ -78,7 +78,7 @@ describe("fleet snapshot polling", () => {
     poller.stop();
   });
 
-  it("uses 20 recurring requests per minute for one or 100 returned hosts", async () => {
+  it("uses 6 recurring requests per minute for one or 100 returned hosts", async () => {
     vi.useFakeTimers();
     const oneHostResponse = [{ id: "host-1" }];
     const hundredHostResponse = Array.from(
@@ -108,15 +108,15 @@ describe("fleet snapshot polling", () => {
     expect(oneHostPoll).toHaveBeenCalledTimes(1);
     expect(hundredHostPoll).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(60_000);
-    // One immediate read plus exactly 20 three-second cadence reads.
-    expect(oneHostPoll).toHaveBeenCalledTimes(21);
-    expect(hundredHostPoll).toHaveBeenCalledTimes(21);
+    // One immediate read plus exactly 6 ten-second cadence reads.
+    expect(oneHostPoll).toHaveBeenCalledTimes(7);
+    expect(hundredHostPoll).toHaveBeenCalledTimes(7);
 
     oneHostPoller.stop();
     hundredHostPoller.stop();
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(oneHostPoll).toHaveBeenCalledTimes(21);
-    expect(hundredHostPoll).toHaveBeenCalledTimes(21);
+    expect(oneHostPoll).toHaveBeenCalledTimes(7);
+    expect(hundredHostPoll).toHaveBeenCalledTimes(7);
   });
 });
 

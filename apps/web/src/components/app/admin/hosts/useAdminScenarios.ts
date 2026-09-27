@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import type { AdminScenarioListResponse } from "./types";
 
-// The launchable-scenario list, shared by the admin Overview (stats) and the
-// Hosts page (launch dialog). One cache entry, one queryFn.
+// The scenario list, shared by the admin Overview (stats) and the Scenario
+// registry. One cache entry, one queryFn, so moving between them reuses it.
 export function useAdminScenarios() {
   return useQuery({
-    queryKey: ["admin-scenarios", "launcher"],
+    queryKey: ["admin-scenarios", "list"],
     queryFn: async () => {
       const response = await fetch("/api/admin/scenarios", {
         method: "GET",

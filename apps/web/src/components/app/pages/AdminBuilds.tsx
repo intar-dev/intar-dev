@@ -92,11 +92,12 @@ export function AdminBuilds() {
   const builds = useQuery({
     queryKey: ["admin-builds"],
     queryFn: fetchBuilds,
+    // Builds run for minutes and each read returns up to 200 rows.
     refetchInterval: (query) =>
       query.state.data?.builds.some((build) =>
         isActiveImageBuild(build.status),
       )
-        ? 2_500
+        ? 5_000
         : false,
     staleTime: 2_000,
   });
