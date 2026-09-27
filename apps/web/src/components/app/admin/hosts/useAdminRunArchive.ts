@@ -6,7 +6,11 @@ import type {
 } from "./types";
 
 const ADMIN_RUN_ARCHIVE_PATH = "/api/admin/runs";
-const ADMIN_RUN_ARCHIVE_REFRESH_INTERVAL_MS = 10_000;
+// Each read is a 100-row page with artifact aggregates, and finished runs are
+// not urgent. The Refresh button reads on demand.
+const ADMIN_RUN_ARCHIVE_REFRESH_INTERVAL_MS = 60_000;
+// Timer ticks and tab refocus skip a read when the list is this fresh.
+const ADMIN_RUN_ARCHIVE_FRESH_MS = 30_000;
 
 interface PageRequest {
   controller: AbortController;
@@ -25,6 +29,7 @@ export function useAdminRunArchive() {
   const pageRequestRef = useRef<PageRequest | null>(null);
   const hasLoadedOlderPagesRef = useRef(false);
   const archiveGenerationRef = useRef(0);
+  const latestPageLoadedAtRef = useRef(0);
 
   const loadPage = useCallback(
     (cursor: string | null, append: boolean): Promise<void> => {
@@ -60,6 +65,7 @@ export function useAdminRunArchive() {
             else if (!append) setTotalCount(null);
             setNextCursor(page.nextCursor);
             if (append) hasLoadedOlderPagesRef.current = true;
+            else latestPageLoadedAtRef.current = Date.now();
             setError(null);
             setLoadMoreError(null);
           }
@@ -100,7 +106,8 @@ export function useAdminRunArchive() {
       if (
         hasLoadedOlderPagesRef.current ||
         pageRequestRef.current ||
-        document.visibilityState === "hidden"
+        document.visibilityState === "hidden" ||
+        Date.now() - latestPageLoadedAtRef.current < ADMIN_RUN_ARCHIVE_FRESH_MS
       ) {
         return;
       }

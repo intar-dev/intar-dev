@@ -25,10 +25,8 @@ import { TableSkeleton } from "@/components/app/patterns/Skeletons";
 import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
 import { formatRelativeTime } from "@/components/app/lib/format";
 import { Button } from "@/components/ui/button";
-import type {
-  AdminScenarioListResponse,
-  AdminScenarioSummary,
-} from "@/components/app/admin/hosts/types";
+import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
+import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenarios";
 import { cn } from "@/lib/utils";
 
 type StateFilter = "enabled" | "disabled" | null;
@@ -54,27 +52,7 @@ export function ScenarioRegistry() {
   const [difficulty, setDifficulty] = useState<ScenarioDifficulty | null>(null);
   const [category, setCategory] = useState<string | null>(null);
 
-  const scenarios = useQuery({
-    queryKey: ["admin-scenarios"],
-    queryFn: async () => {
-      const response = await fetch("/api/admin/scenarios", {
-        method: "GET",
-        credentials: "include",
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(
-          body?.error ?? `Failed to load scenarios (${response.status})`,
-        );
-      }
-
-      return (await response.json()) as AdminScenarioListResponse;
-    },
-    staleTime: 10_000,
-  });
+  const scenarios = useAdminScenarios();
   const builds = useQuery({
     queryKey: ["admin-builds"],
     queryFn: fetchScenarioBuilds,
