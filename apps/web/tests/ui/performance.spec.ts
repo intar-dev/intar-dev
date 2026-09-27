@@ -119,6 +119,19 @@ test("the sidebar does not fetch the full run archive just to draw its badge", a
   expect(ui.server.requests).not.toContain("GET /api/scenarios/runs");
 });
 
+test("the landing page resumes the active run from the bounded summary", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ path: "/", sessionRole: "learner", theme: "light" });
+
+  await expect(page.getByText("Resume run")).toBeVisible();
+  expect(
+    requestCount(ui.server.requests, "GET /api/scenarios/runs/summary"),
+  ).toBeGreaterThan(0);
+  expect(ui.server.requests).not.toContain("GET /api/scenarios/runs");
+});
+
 test("admin uses a separate bounded archive API and keeps collapsed details out of the DOM", async ({
   page,
   ui,

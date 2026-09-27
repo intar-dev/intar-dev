@@ -212,8 +212,15 @@ export function ScenarioRunStart() {
           ["scenarios", "run", runId],
           { run: presentScenarioRun(run) },
         );
+        // Mark stale without refetching: this page is about to leave, and the
+        // next page that shows them reloads them on mount.
         void queryClient.invalidateQueries({
           queryKey: courseCatalogQueryKey(organizationId),
+          refetchType: "none",
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["scenario-runs"],
+          refetchType: "none",
         });
         await navigate({
           to: "/runs/$runId",
@@ -467,6 +474,9 @@ export function ScenarioRun() {
     [statusTransport],
   );
 
+  // Set while the push stream is subscribed, so polling can fall back to a
+  // slow safety-net cadence instead of hammering the status route.
+  const statusStreamLiveRef = useRef(false);
   const runStatus = useQuery({
     queryKey: runStatusQueryKey,
     enabled:
@@ -476,7 +486,11 @@ export function ScenarioRun() {
     queryFn: () => requestRunStatus(),
     refetchInterval: (query) => {
       const record = queryClient.getQueryData<ScenarioRunResponse>(runQueryKey)?.run;
-      return scenarioRunStatusRefetchInterval(record, query.state.error);
+      return scenarioRunStatusRefetchInterval(
+        record,
+        query.state.error,
+        statusStreamLiveRef.current,
+      );
     },
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: (query) =>
@@ -524,37 +538,27 @@ export function ScenarioRun() {
     [statusRefreshQueue],
   );
 
-  const [pageVisibility, setPageVisibility] = useState(() => ({
-    visible:
+  const [pageVisible, setPageVisible] = useState(
+    () =>
       typeof document === "undefined" || document.visibilityState !== "hidden",
-    epoch: 0,
-  }));
+  );
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const updateVisibility = () => {
-      const visible = document.visibilityState !== "hidden";
-      setPageVisibility((current) =>
-        current.visible === visible
-          ? current
-          : {
-              visible,
-              epoch: visible ? current.epoch + 1 : current.epoch,
-            },
-      );
-    };
+    const updateVisibility = () =>
+      setPageVisible(document.visibilityState !== "hidden");
     document.addEventListener("visibilitychange", updateVisibility);
     return () => document.removeEventListener("visibilitychange", updateVisibility);
   }, []);
 
   const shouldSubscribeToStatusStream = Boolean(
-    pageVisibility.visible &&
+    pageVisible &&
+      // Lost access refuses every upgrade; don't keep retrying it.
+      !isAccessResponseError(runStatus.error, true) &&
       attempt.data?.run &&
       attempt.data.run.activity === "foreground" &&
-      attempt.data.run.terminalPhase === "pending" &&
       attempt.data.run.phase !== "failed" &&
       attempt.data.run.phase !== "completed",
   );
-  const statusStreamAttemptedRef = useRef<string | null>(null);
   useEffect(() => {
     if (
       !shouldSubscribeToStatusStream ||
@@ -563,48 +567,71 @@ export function ScenarioRun() {
     ) {
       return;
     }
-    const attemptKey = `${runId}:${pageVisibility.epoch}`;
-    if (statusStreamAttemptedRef.current === attemptKey) return;
-    statusStreamAttemptedRef.current = attemptKey;
 
     let disposed = false;
-    let websocket: WebSocket;
-    try {
-      const target = new URL(
-        `/api/scenarios/runs/${encodeURIComponent(runId)}/status/stream`,
-        window.location.origin,
-      );
-      target.protocol =
-        window.location.protocol === "https:" ? "wss:" : "ws:";
-      websocket = new WebSocket(target);
-    } catch {
-      return;
-    }
+    let websocket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectDelay = 1_000;
+
     const handleMessage = (event: MessageEvent) => {
       if (disposed || typeof event.data !== "string") return;
       const message = parseScenarioRunStatusStreamMessage(event.data, runId);
       if (!message) return;
+      if (message.type === "subscribed") {
+        reconnectDelay = 1_000;
+        statusStreamLiveRef.current = true;
+      }
+      // A fresh read after subscribing closes any gap since the last poll and
+      // re-arms the poll timer at the stream fallback cadence.
       requestStatusRefresh(
         message.type === "invalidate" ? message.revision : undefined,
       );
     };
-    websocket.addEventListener("message", handleMessage);
+    const handleClose = () => {
+      if (disposed) return;
+      websocket = null;
+      const wasLive = statusStreamLiveRef.current;
+      statusStreamLiveRef.current = false;
+      // Resume the fast cadence right away rather than after the fallback
+      // timer, then try the stream again with backoff. This also renews the
+      // socket after its server-side lifetime ends.
+      if (wasLive) requestStatusRefresh();
+      reconnectTimer = setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+    };
+    const connect = () => {
+      reconnectTimer = null;
+      if (disposed) return;
+      try {
+        const target = new URL(
+          `/api/scenarios/runs/${encodeURIComponent(runId)}/status/stream`,
+          window.location.origin,
+        );
+        target.protocol =
+          window.location.protocol === "https:" ? "wss:" : "ws:";
+        websocket = new WebSocket(target);
+      } catch {
+        return;
+      }
+      websocket.addEventListener("message", handleMessage);
+      websocket.addEventListener("close", handleClose);
+    };
+    connect();
 
     return () => {
       disposed = true;
+      statusStreamLiveRef.current = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (!websocket) return;
       websocket.removeEventListener("message", handleMessage);
+      websocket.removeEventListener("close", handleClose);
       try {
         websocket.close();
       } catch {
         // Polling remains available if the browser socket is already closed.
       }
     };
-  }, [
-    pageVisibility.epoch,
-    requestStatusRefresh,
-    runId,
-    shouldSubscribeToStatusStream,
-  ]);
+  }, [requestStatusRefresh, runId, shouldSubscribeToStatusStream]);
 
   useEffect(() => {
     const status = runStatus.data?.status;
@@ -625,18 +652,14 @@ export function ScenarioRun() {
     [completedCourseLocation],
   );
   const shouldLoadNextCourseLecture = Boolean(completedCourseRoute);
+  // Shares the catalog cache so the course page reuses this fresh copy. It is
+  // read once on mount because the finished run just changed lecture state.
   const currentCourse = useQuery({
-    queryKey: [
-      "scenario-run",
-      runId,
-      "current-course",
-      completedCourseRoute?.scope ?? null,
-      completedCourseRoute?.organizationId ?? null,
-      completedCourseRoute?.courseId ?? null,
-    ],
+    queryKey: courseCatalogQueryKey(completedCourseRoute?.organizationId ?? null),
     queryFn: () => fetchCurrentCourseCatalog(completedCourseRoute),
     enabled: shouldLoadNextCourseLecture,
     staleTime: 0,
+    refetchOnWindowFocus: false,
     retry: false,
   });
 
@@ -689,7 +712,6 @@ export function ScenarioRun() {
       });
       setCancelDialogOpen(false);
       setTerminalVisible(false);
-      void queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] });
       void queryClient.invalidateQueries({
         queryKey: ["scenario-runs", "list"],
       });
@@ -721,7 +743,6 @@ export function ScenarioRun() {
     },
     onSuccess: async () => {
       setDeleteRunDialogOpen(false);
-      void queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] });
       void queryClient.invalidateQueries({
         queryKey: ["scenario-runs", "list"],
       });

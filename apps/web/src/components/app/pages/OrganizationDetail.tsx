@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { Link } from "@tanstack/react-router";
 import { Building2 } from "lucide-react";
@@ -14,6 +14,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { authClient } from "@/lib/auth-client";
+import {
+  appBootstrapQueryKey,
+  type AppBootstrapData,
+} from "@/lib/app-bootstrap";
+import { useSession } from "../hooks/useSession";
 import {
   AssignmentsSection,
   MembersSection,
@@ -48,10 +53,31 @@ export function OrganizationDetail() {
   const detail = organization.data?.organization;
   usePageChrome({ title: detail?.name });
 
+  const queryClient = useQueryClient();
+  const activeOrganizationId = useSession().data?.session.activeOrganizationId;
   useEffect(() => {
-    if (!detail?.id) return;
-    void authClient.organization.setActive({ organizationId: detail.id });
-  }, [detail?.id]);
+    if (!detail?.id || detail.id === activeOrganizationId) return;
+    const organizationId = detail.id;
+    void authClient.organization
+      .setActive({ organizationId })
+      .then(({ error }) => {
+        if (error) return;
+        // Record it locally so revisits skip the write until the next bootstrap.
+        queryClient.setQueryData<AppBootstrapData>(
+          appBootstrapQueryKey,
+          (current) =>
+            current?.session
+              ? {
+                  ...current,
+                  session: {
+                    ...current.session,
+                    session: { ...current.session.session, activeOrganizationId: organizationId },
+                  },
+                }
+              : current,
+        );
+      });
+  }, [activeOrganizationId, detail?.id, queryClient]);
 
   // Search params may still contain a stale value in the address bar.
   // Normalize defensively here as well as in validateSearch so no invalid tab

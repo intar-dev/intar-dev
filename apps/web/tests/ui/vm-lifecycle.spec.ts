@@ -1315,6 +1315,8 @@ test("foreground-to-settled polling updates persistent history without a toast",
     (request) => request === "GET /api/scenarios/runs",
   ).length;
   ui.server.setRunState("archived");
+  // A foreground run that ends on its own shows up on the next summary poll.
+  await page.clock.runFor(30_000);
 
   await expect
     .poll(

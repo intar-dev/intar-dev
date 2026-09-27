@@ -3,6 +3,7 @@ import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import {
   mergeScenarioRunStatus,
   POLL_INTERVALS,
+  STREAM_FALLBACK_POLL_INTERVAL,
   scenarioRunStatusRefetchInterval,
   type ScenarioRunRecord,
   type ScenarioRunStatus,
@@ -41,6 +42,24 @@ describe("scenario run polling", () => {
       scenarioRunStatusRefetchInterval(
         liveRun,
         new HttpResponseError(404, "not found"),
+      ),
+    ).toBe(false);
+  });
+
+  it("slows to a fallback poll while the push stream is live", () => {
+    const liveRun = runRecord();
+
+    expect(scenarioRunStatusRefetchInterval(liveRun, null, true)).toBe(
+      STREAM_FALLBACK_POLL_INTERVAL,
+    );
+    expect(
+      scenarioRunStatusRefetchInterval({ ...liveRun, phase: "completed" }, null, true),
+    ).toBe(false);
+    expect(
+      scenarioRunStatusRefetchInterval(
+        liveRun,
+        new HttpResponseError(403, "forbidden"),
+        true,
       ),
     ).toBe(false);
   });

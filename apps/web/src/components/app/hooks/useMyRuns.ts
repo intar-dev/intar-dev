@@ -111,6 +111,21 @@ export function useMyRuns(options?: { enabled?: boolean }) {
 }
 
 /**
+ * Only an active run can end on its own (lease expiry, failure). New runs
+ * start from this tab's own mutations, which invalidate the summary, or from
+ * another tab, which a focus refetch or the next page mount picks up. A run
+ * still cleaning up in the background finishes within moments, so that short
+ * window keeps a fast cadence.
+ */
+export function myRunsSummaryPollInterval(
+  summary: MyRunsSummary | undefined,
+): number | false {
+  if (!summary?.activeCount) return false;
+  const backgroundCount = summary.activeCount - (summary.activeRunId ? 1 : 0);
+  return backgroundCount > 0 ? 3_000 : 30_000;
+}
+
+/**
  * A bounded sidebar-only status query. It never loads a user's historical
  * runs, and React Query pauses it while the tab is hidden and cancels it when
  * its observer unmounts.
@@ -136,11 +151,14 @@ export function useMyRunsSummary(options?: { enabled?: boolean }) {
       return (await response.json()) as MyRunsSummary;
     },
     refetchInterval: (query) =>
-      pollingIntervalUnlessAccessError(query.state.error, 3_000),
+      pollingIntervalUnlessAccessError(
+        query.state.error,
+        myRunsSummaryPollInterval(query.state.data),
+      ),
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: (query) =>
       !isAccessResponseError(query.state.error, true),
-    staleTime: 1_000,
+    staleTime: 10_000,
     retry: retryHttpResponseError,
     enabled: options?.enabled ?? true,
   });

@@ -145,6 +145,9 @@ export function OAuthConsent() {
         clientId: clientId!,
         oauthQuery,
       }),
+    // A POST that answers for this one consent URL; read it once.
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
 
   const consentMutation = useMutation({

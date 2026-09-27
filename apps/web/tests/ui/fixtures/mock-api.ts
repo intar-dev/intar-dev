@@ -341,6 +341,12 @@ function adminRunArchive(state: MockApiState) {
   return { runs, totalCount: runs.length, nextCursor: null };
 }
 
+/** The revision the status route reports now, as the stream pushes it. */
+export function scenarioRunStatusRevision(server: MockApiServer): number {
+  return scenarioRunStatus(server.state.run, server.scenarioRunStatusRevision)
+    .updatedAt;
+}
+
 /** Build the small run projection used after the first full run response. */
 function scenarioRunStatus(run: FixtureRecord, revision: number) {
   const baseUpdatedAt =

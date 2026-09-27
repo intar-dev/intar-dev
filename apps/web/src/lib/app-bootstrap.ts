@@ -1,4 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
+import { retryHttpResponseError } from "@/components/app/lib/http-response-error";
 import type { AppSessionData } from "./auth-client";
 
 export const APP_BOOTSTRAP_STALE_TIME_MS = 30_000;
@@ -13,7 +14,14 @@ export interface AppBootstrapData {
   access: AppAccessState;
 }
 
-export const appQueryClient = new QueryClient();
+// Mutations invalidate what they change, so a short stale window only skips
+// repeat reads on remount and tab focus. Queries that must stay live set their
+// own staleTime or refetchInterval.
+export const appQueryClient = new QueryClient({
+  defaultOptions: {
+    queries: { staleTime: 30_000, retry: retryHttpResponseError },
+  },
+});
 
 export function appBootstrapQueryOptions() {
   return {
