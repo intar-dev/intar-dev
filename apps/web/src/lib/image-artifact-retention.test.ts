@@ -14,6 +14,8 @@ import {
   manifestImageIds,
   planBuildRetention,
   planCandidateIntentRetention,
+  imageClosureSignature,
+  manifestImageClosureSignature,
   planSnapshotRetention,
   pruneSupersededCachedImages,
   snapshotArtifactRoots,
@@ -182,6 +184,7 @@ describe("candidate intent retention", () => {
       organizationId,
       revision,
       members: imageIds.map((imageId) => root("web", imageId, { scenarioId })),
+      closure: "closure-" + id,
       stagedAt,
     };
   }
@@ -200,6 +203,7 @@ describe("candidate intent retention", () => {
         candidate("c1", "nginx", [ANCIENT], 100, "revision-1"),
       ],
       liveRevisionByScenario: liveRevisions({ nginx: "revision-0" }),
+      liveClosureByScenario: new Map(),
     });
 
     expect(plan.keepIds).toEqual(["c3"]);
@@ -212,26 +216,54 @@ describe("candidate intent retention", () => {
     const plan = planCandidateIntentRetention({
       rows: [candidate("c1", "nginx", [LIVE], 100, "revision-2")],
       liveRevisionByScenario: liveRevisions({ nginx: "revision-1" }),
+      liveClosureByScenario: new Map(),
     });
 
     expect(plan.keepIds).toEqual(["c1"]);
     expect(plan.retireIds).toEqual([]);
   });
 
-  it("retires an intent only once the catalog carries that exact revision", () => {
+  it("retires an intent only once the catalog carries that exact revision and closure", () => {
     const plan = planCandidateIntentRetention({
       rows: [candidate("c1", "nginx", [LIVE], 100, "revision-2")],
       liveRevisionByScenario: liveRevisions({ nginx: "revision-2" }),
+      liveClosureByScenario: new Map([["nginx", "closure-c1"]]),
     });
 
     expect(plan.keepIds).toEqual([]);
     expect(plan.retireIds).toEqual(["c1"]);
   });
 
+  it("keeps a rebuild staged under the live revision until the catalog carries its images", () => {
+    // A publish that rebuilds the live revision stages new images under the
+    // same revision name. The catalog does not carry them yet, so retiring the
+    // row would delete what the publish is warming.
+    const plan = planCandidateIntentRetention({
+      rows: [candidate("rebuild", "nginx", [CANDIDATE_ONLY], 100, "revision-2")],
+      liveRevisionByScenario: liveRevisions({ nginx: "revision-2" }),
+      liveClosureByScenario: new Map([["nginx", "closure-live"]]),
+    });
+
+    expect(plan.keepIds).toEqual(["rebuild"]);
+    expect(plan.retireIds).toEqual([]);
+  });
+
+  it("keeps an intent under the live revision when no live closure is known", () => {
+    const plan = planCandidateIntentRetention({
+      rows: [candidate("c1", "nginx", [LIVE], 100, "revision-2")],
+      liveRevisionByScenario: liveRevisions({ nginx: "revision-2" }),
+      liveClosureByScenario: new Map(),
+    });
+
+    expect(plan.keepIds).toEqual(["c1"]);
+    expect(plan.retireIds).toEqual([]);
+  });
+
   it("keeps an intent when the live catalog has no revision recorded", () => {
     const plan = planCandidateIntentRetention({
       rows: [candidate("c1", "nginx", [LIVE], 100, "revision-2")],
       liveRevisionByScenario: liveRevisions({ nginx: null }),
+      liveClosureByScenario: new Map(),
     });
 
     expect(plan.keepIds).toEqual(["c1"]);
@@ -245,6 +277,7 @@ describe("candidate intent retention", () => {
         candidate("dns-c", "dns", [CANDIDATE_ONLY], 100, "revision-2"),
       ],
       liveRevisionByScenario: liveRevisions({ nginx: "revision-2" }),
+      liveClosureByScenario: new Map([["nginx", "closure-nginx-c"]]),
     });
 
     expect(plan.keepIds).toEqual(["dns-c"]);
@@ -261,6 +294,7 @@ describe("candidate intent retention", () => {
         candidate("history", "nginx", [CANDIDATE_ONLY], 5, "revision-ancient"),
       ],
       liveRevisionByScenario: liveRevisions({ nginx: "revision-older" }),
+      liveClosureByScenario: new Map(),
       activeRunCandidates: [
         { scenarioId: "nginx", organizationId: null, revision: "revision-older" },
       ],
@@ -279,6 +313,7 @@ describe("candidate intent retention", () => {
         candidate("org-row", "nginx", [LIVE], 20, "revision-old", "org-1"),
       ],
       liveRevisionByScenario: liveRevisions({}),
+      liveClosureByScenario: new Map(),
       activeRunCandidates: [
         { scenarioId: "nginx", organizationId: "org-1", revision: "revision-old" },
       ],
@@ -298,6 +333,7 @@ describe("candidate intent retention", () => {
         candidate("oldest", "nginx", [ANCIENT], 10, "revision-1"),
       ],
       liveRevisionByScenario: liveRevisions({ nginx: "revision-1" }),
+      liveClosureByScenario: new Map(),
       activeRunCandidates: [],
     });
 
@@ -313,6 +349,7 @@ describe("candidate intent retention", () => {
         candidate("dns-new", "dns", [ANCIENT], 300, "revision-1"),
       ],
       liveRevisionByScenario: liveRevisions({ nginx: "revision-1" }),
+      liveClosureByScenario: new Map(),
     });
 
     expect(plan.keepIds).toEqual(["dns-new", "nginx-new"]);
@@ -624,6 +661,52 @@ describe("manifest image members", () => {
       },
     ]);
     expect(manifestImageIds(manifest)).toEqual([LIVE, PREVIOUS].sort());
+  });
+
+  it("renders the same closure for a manifest and the live rows promoted from it", () => {
+    const manifest = {
+      scenario_id: "nginx",
+      vms: [
+        {
+          name: "web",
+          image_id: LIVE,
+          chunk_manifest_sha256: "manifest-web",
+          boot: { kernel_sha256: "kernel", initrd_sha256: "initrd" },
+        },
+        {
+          name: "db",
+          image_id: PREVIOUS,
+          chunk_manifest_sha256: "manifest-db",
+          boot: { kernel_sha256: "kernel", initrd_sha256: "initrd" },
+        },
+      ],
+    } as unknown as ScenarioManifestV5;
+    const liveRows = [
+      {
+        vmName: "db",
+        imageId: PREVIOUS,
+        chunkManifestSha256: "manifest-db",
+        kernelSha256: "kernel",
+        initrdSha256: "initrd",
+      },
+      {
+        vmName: "web",
+        imageId: LIVE,
+        chunkManifestSha256: "manifest-web",
+        kernelSha256: "kernel",
+        initrdSha256: "initrd",
+      },
+    ];
+
+    expect(manifestImageClosureSignature(manifest)).toBe(
+      imageClosureSignature(liveRows),
+    );
+    expect(
+      imageClosureSignature([
+        liveRows[0]!,
+        { ...liveRows[1]!, kernelSha256: "rebuilt-kernel" },
+      ]),
+    ).not.toBe(manifestImageClosureSignature(manifest));
   });
 });
 

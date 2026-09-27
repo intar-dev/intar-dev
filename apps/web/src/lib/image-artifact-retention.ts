@@ -136,6 +136,50 @@ export function manifestImageMembers(
   }));
 }
 
+/**
+ * What a catalog entry boots, per VM: its image and the objects that image
+ * needs. Live rows written by a promotion carry the same closure as the
+ * candidate manifest they were promoted from.
+ */
+export interface CatalogVmClosure {
+  vmName: string;
+  imageId: string;
+  chunkManifestSha256?: string | null;
+  kernelSha256?: string | null;
+  initrdSha256?: string | null;
+}
+
+export function imageClosureSignature(
+  vms: ReadonlyArray<CatalogVmClosure>,
+): string {
+  return vms
+    .map((vm) =>
+      [
+        vm.vmName.trim(),
+        vm.imageId,
+        vm.chunkManifestSha256 ?? "",
+        vm.kernelSha256 ?? "",
+        vm.initrdSha256 ?? "",
+      ].join(" "),
+    )
+    .sort()
+    .join("\n");
+}
+
+export function manifestImageClosureSignature(
+  manifest: ScenarioManifestV5,
+): string {
+  return imageClosureSignature(
+    manifest.vms.map((vm) => ({
+      vmName: vm.name,
+      imageId: vm.image_id,
+      chunkManifestSha256: vm.chunk_manifest_sha256,
+      kernelSha256: vm.boot?.kernel_sha256,
+      initrdSha256: vm.boot?.initrd_sha256,
+    })),
+  );
+}
+
 export function manifestImageIds(manifest: ScenarioManifestV5): string[] {
   return [...new Set(manifest.vms.map((vm) => vm.image_id))].sort();
 }
@@ -331,6 +375,8 @@ export interface CandidateIntentRow {
   /** The revision the candidate was staged for. */
   revision: string;
   members: ImageRoot[];
+  /** The candidate's image closure, as manifestImageClosureSignature renders it. */
+  closure: string;
   stagedAt: number;
 }
 
@@ -371,9 +417,13 @@ function candidateRefKey(input: {
  *   - only the newest row per scenario can be that intent, so older rows are
  *     history;
  *   - an intent is fulfilled only when the catalog carries that exact
- *     revision. A candidate can change the kernel, the initrd, the probes, or
- *     the metadata while its disk image is byte-identical, so image equality
- *     never proves that the intent was promoted.
+ *     revision and that exact image closure. A candidate can change the
+ *     kernel, the initrd, the probes, or the metadata while its disk image is
+ *     byte-identical, so image equality never proves that the intent was
+ *     promoted. A rebuild republished under the live revision stages new
+ *     images under the same name, so revision equality alone does not prove it
+ *     either: retiring that row while it warms deletes the images it is about
+ *     to promote. Without a live closure to compare, the row is kept.
  *   - a row an active run was admitted from is kept whatever its intent has
  *     become: the agent index resolves that run's manifest through it, so
  *     retiring it would leave a queued run with no way to find its image.
@@ -384,6 +434,7 @@ function candidateRefKey(input: {
 export function planCandidateIntentRetention(input: {
   rows: readonly CandidateIntentRow[];
   liveRevisionByScenario: ReadonlyMap<string, string | null>;
+  liveClosureByScenario: ReadonlyMap<string, string>;
   activeRunCandidates?: readonly ActiveRunCandidateRef[];
 }): CandidateIntentPlan {
   const active = new Set(
@@ -411,7 +462,10 @@ export function planCandidateIntentRetention(input: {
       retireIds.push(row.id);
       continue;
     }
-    if (input.liveRevisionByScenario.get(row.scenarioId) === row.revision) {
+    if (
+      input.liveRevisionByScenario.get(row.scenarioId) === row.revision &&
+      input.liveClosureByScenario.get(row.scenarioId) === row.closure
+    ) {
       retireIds.push(row.id);
       continue;
     }
@@ -1075,6 +1129,7 @@ export async function projectRegistryRetention(
   const chunkManifestSha256s = new Set<string>();
   const bootArtifactSha256s = new Set<string>();
   const liveRevisionByScenario = new Map<string, string | null>();
+  const liveVmsByScenario = new Map<string, CatalogVmClosure[]>();
   for (const row of liveRows) {
     // A published live pointer must be readable in full. Skipping a malformed
     // row would drop its manifest, kernel, and initrd from the root set and
@@ -1103,6 +1158,15 @@ export async function projectRegistryRetention(
     // The catalog row carries the revision it was published from, which is
     // what proves whether a staged candidate has become the live catalog.
     liveRevisionByScenario.set(row.scenarioId, row.sourceRevision ?? null);
+    const liveVms = liveVmsByScenario.get(row.scenarioId) ?? [];
+    liveVms.push({
+      vmName: row.vmName,
+      imageId: row.imageId,
+      chunkManifestSha256: row.chunkManifestSha256,
+      kernelSha256: row.kernelSha256,
+      initrdSha256: row.initrdSha256,
+    });
+    liveVmsByScenario.set(row.scenarioId, liveVms);
     if (row.chunkManifestSha256) chunkManifestSha256s.add(row.chunkManifestSha256);
     if (row.kernelSha256) bootArtifactSha256s.add(row.kernelSha256);
     if (row.initrdSha256) bootArtifactSha256s.add(row.initrdSha256);
@@ -1137,9 +1201,16 @@ export async function projectRegistryRetention(
       organizationId: row.organizationId,
       revision: row.revision,
       members: manifestImageMembers(row.manifest, "candidate_intent"),
+      closure: manifestImageClosureSignature(row.manifest),
       stagedAt: row.updatedAt,
     })),
     liveRevisionByScenario,
+    liveClosureByScenario: new Map(
+      [...liveVmsByScenario].map(([scenarioId, vms]) => [
+        scenarioId,
+        imageClosureSignature(vms),
+      ]),
+    ),
     // A run in flight keeps the candidate row it was admitted from, whether or
     // not that row is still the current intent.
     activeRunCandidates: runRows.flatMap((row) =>
