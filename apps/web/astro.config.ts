@@ -41,6 +41,12 @@ export default defineConfig({
     define: {
       "import.meta.env.PUBLIC_RELEASE_VERSION": JSON.stringify(process.env.GITHUB_SHA ?? "development"),
     },
+    optimizeDeps: {
+      // The telemetry page script is outside Astro's client scan entries,
+      // which skip .astro files. Found on the first page load instead, it
+      // re-bundles every client dependency and in-flight chunk requests 404.
+      include: ["@grafana/faro-web-sdk", "@grafana/faro-web-tracing"],
+    },
     server: {
       watch: {
         ignored: [
@@ -68,7 +74,20 @@ export default defineConfig({
     },
     ssr: {
       optimizeDeps: {
-        include: ["picomatch"],
+        // Pre-bundle what the first server render needs. A dependency found
+        // on that request re-optimizes the bundle and reloads every open page,
+        // which fails the first UI test of each worker.
+        include: [
+          "picomatch",
+          "@better-auth/core/context",
+          "@better-auth/oauth-provider",
+          "@better-auth/sso",
+          "astro/app/manifest",
+          "better-auth",
+          "better-auth/adapters/drizzle",
+          "better-auth/api",
+          "better-auth/plugins",
+        ],
       },
       external: [
         "node:async_hooks",
