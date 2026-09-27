@@ -66,8 +66,8 @@ a single CPU quota so concurrent starts cannot overcommit a host.
 
 ## Image Registry
 
-Course bundle uploads replace the complete public or organization-scoped
-`CourseCatalogSnapshotV2`; they do not merge earlier catalog data. The bundle
+Course bundle uploads replace the complete public `CourseCatalogSnapshotV2`;
+they do not merge earlier catalog data. The bundle
 endpoint stores deterministic source in R2 and records technical Scenario hashes
 in D1. It accepts Markdown-only Course bundles with no technical Scenarios and
 updates their presentation data without queueing a VM build. When technical HCL

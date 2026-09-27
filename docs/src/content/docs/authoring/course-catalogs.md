@@ -113,9 +113,10 @@ scope. The server replaces that scope's catalog; it does not merge Courses from
 an earlier publish. A content-only Course bundle with zero technical Scenarios
 is valid.
 
-Public and organization Course source is published with the CLI bundle upload.
-There is no browser HCL authoring, private browser authoring, or standalone
-learner Scenario catalog. Link every learner Scenario to a Lecture.
+Public Course source is published with the CLI bundle upload. Organizations
+cannot publish Course source through the website; existing organization
+Courses stay available. There is no browser HCL authoring, private browser
+authoring, or standalone learner Scenario catalog. Link every learner Scenario to a Lecture.
 
 The learner reads the Lecture before starting its linked Scenario. A theory-only
 Lecture has an explicit completion action. A linked Lecture completes only after

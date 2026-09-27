@@ -3,7 +3,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   MAX_API_JSON_BODY_BYTES,
-  MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES,
   guardBetterAuthRequest,
   guardCanonicalRequestPath,
   guardCustomApiMutation,
@@ -301,66 +300,22 @@ describe("worker API request security", () => {
     }
   });
 
-  it("accepts multipart only for declared, bounded organization bundle uploads", async () => {
-    const valid = await guardCustomApiMutation(
+  it("rejects multipart on the removed organization bundle upload path", async () => {
+    const result = await guardCustomApiMutation(
       customMutation("/api/organizations/example/scenarios/bundles", {
         headers: {
           "content-type": "multipart/form-data; boundary=intar-boundary",
-          "content-length": String(
-            MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES,
-          ),
         },
         body: "bundle",
       }),
       securityEnv(),
     );
-    expect(valid.ok).toBe(true);
-
-    for (const [headers, status, code] of [
-      [
-        { "content-type": "multipart/form-data; boundary=intar-boundary" },
-        411,
-        "content_length_required",
-      ],
-      [
-        {
-          "content-type": "multipart/form-data; boundary=intar-boundary",
-          "content-length": "065",
-        },
-        400,
-        "invalid_content_length",
-      ],
-      [
-        {
-          "content-type": "application/json",
-          "content-length": "10",
-        },
-        415,
-        "multipart_required",
-      ],
-      [
-        {
-          "content-type": "multipart/form-data; boundary=intar-boundary",
-          "content-length": String(
-            MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES + 1,
-          ),
-        },
-        413,
-        "bundle_request_too_large",
-      ],
-    ] as const) {
-      const result = await guardCustomApiMutation(
-        customMutation("/api/organizations/example/scenarios/bundles", {
-          headers,
-          body: "bundle",
-        }),
-        securityEnv(),
-      );
-      expect(result.ok).toBe(false);
-      if (result.ok) throw new Error("expected request rejection");
-      expect(result.response.status).toBe(status);
-      await expect(result.response.json()).resolves.toMatchObject({ code });
-    }
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected request rejection");
+    expect(result.response.status).toBe(415);
+    await expect(result.response.json()).resolves.toMatchObject({
+      code: "json_required",
+    });
   });
 
   it("keeps Better Auth OIDC callbacks reachable but blocks tenant IdP and SAML paths", async () => {
@@ -470,11 +425,6 @@ describe("worker API request security", () => {
         customMutation("/api/admin/builds/build-1/retry"),
       ),
     ).toBe("build-retry");
-    for (const path of ["/api/organizations/org/scenarios/bundles"]) {
-      expect(sensitiveRateLimitActionFor(customMutation(path))).toBe(
-        "build-start",
-      );
-    }
     expect(
       sensitiveRateLimitActionFor(customMutation("/api/auth/sign-in/social")),
     ).toBe("auth-start");
