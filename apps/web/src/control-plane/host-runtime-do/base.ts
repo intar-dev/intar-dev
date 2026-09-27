@@ -12,6 +12,7 @@ import {
   type RunStateDocument,
 } from "@/lib/run-state";
 import { recordProbeTransitions } from "@/lib/run-probe-history";
+import { RUN_STATUS_PING, RUN_STATUS_PONG } from "@/lib/run-status-heartbeat";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
 import {
   drizzleQueryToD1Statement,
@@ -91,6 +92,12 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     override readonly env: Cloudflare.Env,
   ) {
     super(ctx, env);
+    // Browsers keep their run status socket alive with this ping. Agents only
+    // send bridge JSON, so the one auto-response pair a Durable Object holds
+    // never answers them.
+    ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(RUN_STATUS_PING, RUN_STATUS_PONG),
+    );
   }
 
   protected async withRunProjectionLock<T>(

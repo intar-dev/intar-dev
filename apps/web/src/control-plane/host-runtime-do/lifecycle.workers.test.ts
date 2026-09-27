@@ -226,9 +226,12 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         // The inventory INSERT succeeded; expiry now wins before the run CAS.
         expect(await env.DB.prepare("SELECT observed_at FROM host_actual_state WHERE host_id = ?").bind(hostId).first())
           .toEqual({ observed_at: now + 1 });
-        expect(await expireOverdueRuntimeExecutions(hostId, leaseExpiry + 1))
-          .toEqual({ expiredExecutionIds: [runId], failedExecutionIds: [] });
+        const expiry = await expireOverdueRuntimeExecutions(hostId, leaseExpiry + 1);
         expiredState = await env.DB.prepare("SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = ?").bind(runId).first();
+        expect(expiry).toEqual({
+          expiredExecutionIds: [runId], failedExecutionIds: [],
+          updatedRunRevisions: [{ runId, revision: (expiredState as { updated_at: number }).updated_at }],
+        });
         return persist(...args);
       });
       try {

@@ -6,10 +6,10 @@ import type { RunStatusSocketAttachment } from "../../apps/web/src/control-plane
 test("1,000 listeners use bounded queries and still lose access when revoked", async () => {
   const sqlite = new Database(":memory:");
   sqlite.exec(`
-    CREATE TABLE scenario_runs (run_id TEXT PRIMARY KEY, host_id TEXT, user_id TEXT);
+    CREATE TABLE scenario_runs (run_id TEXT PRIMARY KEY, host_id TEXT, user_id TEXT, updated_at INTEGER);
     CREATE TABLE session (id TEXT PRIMARY KEY, user_id TEXT, expires_at INTEGER);
     CREATE TABLE user (id TEXT PRIMARY KEY, banned INTEGER, deleted_at INTEGER);
-    INSERT INTO scenario_runs VALUES ('run', 'host', 'alice');
+    INSERT INTO scenario_runs VALUES ('run', 'host', 'alice', 5);
     INSERT INTO session VALUES ('session', 'alice', 9007199254740991);
     INSERT INTO user VALUES ('alice', NULL, NULL);
   `);
@@ -59,6 +59,8 @@ test("1,000 listeners use bounded queries and still lose access when revoked", a
     expect(queries).toBe(8);
     expect(maxConcurrentQueries).toBe(1);
     expect(sockets.every(socket => socket.messages.length === 1)).toBe(true);
+    // The pushed revision is the committed one, not the smaller one requested.
+    expect(JSON.parse(sockets[0]!.messages[0]!)).toEqual({ type: "invalidate", runId: "run", revision: 5 });
     expect(invalid.every(socket => socket.code === 1008 && socket.messages.length === 0)).toBe(true);
     sqlite.exec("DELETE FROM session");
     await notify(sockets);

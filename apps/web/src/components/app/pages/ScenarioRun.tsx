@@ -24,6 +24,11 @@ import {
   scenarioStatusRevision,
 } from "@/components/app/lib/scenario-status-stream";
 import {
+  RUN_STATUS_HEARTBEAT_INTERVAL_MS,
+  RUN_STATUS_PING,
+  RUN_STATUS_PONG,
+} from "@/lib/run-status-heartbeat";
+import {
   HttpResponseError,
   isAccessResponseError,
   retryHttpResponseError,
@@ -572,14 +577,51 @@ export function ScenarioRun() {
     let websocket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectDelay = 1_000;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let awaitingPong = false;
 
+    const stopHeartbeat = () => {
+      if (heartbeat) clearInterval(heartbeat);
+      heartbeat = null;
+      awaitingPong = false;
+    };
+    // A connection that stops answering may never deliver its close event, so
+    // treat it as closed now: poll at the fast cadence and reconnect.
+    const abandon = (socket: WebSocket) => {
+      socket.removeEventListener("message", handleMessage);
+      socket.removeEventListener("close", handleClose);
+      try {
+        socket.close();
+      } catch {
+        // The socket is already gone.
+      }
+      handleClose();
+    };
     const handleMessage = (event: MessageEvent) => {
       if (disposed || typeof event.data !== "string") return;
+      if (event.data === RUN_STATUS_PONG) {
+        awaitingPong = false;
+        return;
+      }
       const message = parseScenarioRunStatusStreamMessage(event.data, runId);
       if (!message) return;
       if (message.type === "subscribed") {
         reconnectDelay = 1_000;
         statusStreamLiveRef.current = true;
+        heartbeat ??= setInterval(() => {
+          const socket = websocket;
+          if (!socket) return;
+          if (awaitingPong) {
+            abandon(socket);
+            return;
+          }
+          awaitingPong = true;
+          try {
+            socket.send(RUN_STATUS_PING);
+          } catch {
+            abandon(socket);
+          }
+        }, RUN_STATUS_HEARTBEAT_INTERVAL_MS);
       }
       // A fresh read after subscribing closes any gap since the last poll and
       // re-arms the poll timer at the stream fallback cadence.
@@ -589,6 +631,7 @@ export function ScenarioRun() {
     };
     const handleClose = () => {
       if (disposed) return;
+      stopHeartbeat();
       websocket = null;
       const wasLive = statusStreamLiveRef.current;
       statusStreamLiveRef.current = false;
@@ -621,6 +664,7 @@ export function ScenarioRun() {
     return () => {
       disposed = true;
       statusStreamLiveRef.current = false;
+      stopHeartbeat();
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (!websocket) return;
       websocket.removeEventListener("message", handleMessage);

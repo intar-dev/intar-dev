@@ -2,6 +2,11 @@ import type { Page, WebSocketRoute } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
 import { FIXED_NOW } from "./fixtures/data";
 import { routeCase } from "./routes";
+import {
+  RUN_STATUS_HEARTBEAT_INTERVAL_MS,
+  RUN_STATUS_PING,
+  RUN_STATUS_PONG,
+} from "@/lib/run-status-heartbeat";
 
 type TerminalControl = {
   type: "open" | "resize" | "close";
@@ -366,6 +371,66 @@ test("a failed status socket keeps the 750 ms startup poll active while it retri
   await page.clock.resume();
 
   await expect(page.locator('[data-terminal-status="connected"]')).toBeVisible();
+});
+
+test("a status socket that stops answering pings falls back to fast polling and reconnects", async ({
+  page,
+  ui,
+}) => {
+  const sockets: WebSocketRoute[] = [];
+  const pings: number[] = [];
+  await page.routeWebSocket(/\/api\/scenarios\/runs\/[^/]+\/status\/stream$/, (ws) => {
+    const index = sockets.push(ws) - 1;
+    pings[index] = 0;
+    // A half-open connection: frames go out, nothing comes back.
+    ws.onMessage((message) => {
+      if (message === RUN_STATUS_PING) pings[index]! += 1;
+    });
+    ws.send(JSON.stringify({ type: "subscribed", runId: "run-active" }));
+  });
+  await ui.open({ ...routeCase("run-workspace"), runState: "running" });
+  await expect.poll(() => sockets.length).toBe(1);
+
+  await page.clock.pauseAt(FIXED_NOW + 1_000);
+  const statusReads = () =>
+    ui.server.requests.filter((request) =>
+      /^GET \/api\/scenarios\/runs\/run-active\/status/.test(request),
+    ).length;
+  // One unanswered ping, then the next tick gives up on the socket.
+  await page.clock.runFor(RUN_STATUS_HEARTBEAT_INTERVAL_MS);
+  expect(pings[0]).toBe(1);
+  const readsBeforeAbandon = statusReads();
+  await page.clock.runFor(RUN_STATUS_HEARTBEAT_INTERVAL_MS + 2_000);
+  await page.clock.resume();
+
+  await expect.poll(() => sockets.length).toBe(2);
+  await expect.poll(statusReads).toBeGreaterThan(readsBeforeAbandon);
+});
+
+test("a status socket that answers pings stays open", async ({ page, ui }) => {
+  const sockets: WebSocketRoute[] = [];
+  let pongs = 0;
+  await page.routeWebSocket(/\/api\/scenarios\/runs\/[^/]+\/status\/stream$/, (ws) => {
+    sockets.push(ws);
+    ws.onMessage((message) => {
+      if (message !== RUN_STATUS_PING) return;
+      pongs += 1;
+      ws.send(RUN_STATUS_PONG);
+    });
+    ws.send(JSON.stringify({ type: "subscribed", runId: "run-active" }));
+  });
+  await ui.open({ ...routeCase("run-workspace"), runState: "running" });
+  await expect.poll(() => sockets.length).toBe(1);
+
+  await page.clock.pauseAt(FIXED_NOW + 1_000);
+  for (let tick = 0; tick < 4; tick += 1) {
+    await page.clock.runFor(RUN_STATUS_HEARTBEAT_INTERVAL_MS);
+    // Let the pong reach the page before the next tick checks for it.
+    await expect.poll(() => pongs).toBe(tick + 1);
+  }
+  await page.clock.resume();
+
+  expect(sockets).toHaveLength(1);
 });
 
 interface TerminalBinaryFrame {

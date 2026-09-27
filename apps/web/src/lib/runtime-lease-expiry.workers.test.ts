@@ -54,10 +54,13 @@ it("finalizes an expired desired-absent run without inventing VM absence", async
   expect(selectOverdueRunLeases(desired!.docJson, now + 1)).toEqual([]);
   const before = await loadRunRow(runId);
 
-  expect(await expireOverdueRuntimeExecutions(hostId, now)).toEqual({
-    expiredExecutionIds: [runId], failedExecutionIds: [],
-  });
+  const result = await expireOverdueRuntimeExecutions(hostId, now);
   const after = await loadRunRow(runId);
+  // The revision it reports is the one a watching browser is pushed.
+  expect(result).toEqual({
+    expiredExecutionIds: [runId], failedExecutionIds: [],
+    updatedRunRevisions: [{ runId, revision: after?.updatedAt }],
+  });
   expect(after).toMatchObject({ activeKey: null, failedAt: expect.any(Number), state: { phase: "failed" } });
   expect(after?.state.vms).toEqual(before?.state.vms);
   expect(await env.DB.prepare("SELECT state FROM runtime_executions WHERE id = ?").bind(runId).first())
@@ -76,7 +79,7 @@ it("leaves an already archived execution and its run unchanged on retry", async 
   effects.revokeRoute.mockClear();
 
   expect(await expireOverdueRuntimeExecutions(hostId, now + 1)).toEqual({
-    expiredExecutionIds: [], failedExecutionIds: [],
+    expiredExecutionIds: [], failedExecutionIds: [], updatedRunRevisions: [],
   });
   expect(await loadRunRow(runId)).toEqual(before);
   expect(await env.DB.prepare("SELECT * FROM runtime_executions WHERE id = ?").bind(runId).first()).toEqual(execution);
@@ -86,13 +89,14 @@ it("leaves an already archived execution and its run unchanged on retry", async 
 it("retries route failure before finalizing the run or releasing reservations", async () => {
   effects.revokeRoute.mockRejectedValueOnce(new Error("gateway unavailable"));
   expect(await expireOverdueRuntimeExecutions(hostId, now)).toEqual({
-    expiredExecutionIds: [], failedExecutionIds: [runId],
+    expiredExecutionIds: [], failedExecutionIds: [runId], updatedRunRevisions: [],
   });
   expect((await loadRunRow(runId))?.state.phase).toBe("teardown_requested");
   expect(await env.DB.prepare("SELECT state FROM host_resource_reservations WHERE execution_id = ?").bind(runId).first())
     .toEqual({ state: "committed" });
-  expect(await expireOverdueRuntimeExecutions(hostId, now + 1)).toEqual({
+  expect(await expireOverdueRuntimeExecutions(hostId, now + 1)).toMatchObject({
     expiredExecutionIds: [runId], failedExecutionIds: [],
+    updatedRunRevisions: [{ runId, revision: expect.any(Number) }],
   });
 });
 

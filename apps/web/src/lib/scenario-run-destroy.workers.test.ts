@@ -62,6 +62,37 @@ describe("scenario run destroy acceptance", () => {
     ).toBe("absent");
   });
 
+  it("never moves a terminal run's revision backwards when teardown is requested", async () => {
+    const now = Date.now();
+    await seedDestroyableRun("run-a", now);
+    await updateRunState("run-a", {
+      mutate: (current) => ({
+        ...current,
+        phase: "completed",
+        vms: current.vms.map((vm) => ({ ...vm, phase: "completed" })),
+      }),
+    });
+    // Another writer, or a clock ahead of this Worker, already moved the
+    // revision past now. A watching browser drops any push at or below it.
+    const ahead = now + 60_000;
+    const db = drizzle(env.DB);
+    await db
+      .update(scenarioRuns)
+      .set({ updatedAt: ahead })
+      .where(eq(scenarioRuns.runId, "run-a"));
+
+    await destroyScenarioRunForUserWithDependencies(
+      { runId: "run-a", userId: "user-1" },
+      successfulDependencies(),
+    );
+
+    const [row] = await db
+      .select({ updatedAt: scenarioRuns.updatedAt })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, "run-a"));
+    expect(row?.updatedAt).toBeGreaterThan(ahead);
+  });
+
   it("retains the foreground slot when route revocation fails and succeeds on retry", async () => {
     const now = Date.now();
     await seedDestroyableRun("run-a", now);

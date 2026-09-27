@@ -1,4 +1,5 @@
 import type { Page, WebSocketRoute } from "@playwright/test";
+import { RUN_STATUS_PING, RUN_STATUS_PONG } from "@/lib/run-status-heartbeat";
 import { type MockApiServer, scenarioRunStatusRevision } from "./mock-api";
 
 const terminalTranscript = Buffer.from(
@@ -74,6 +75,10 @@ export async function installTerminalWebSocketMock(
     const stream = { ws, runId };
     statusStreams.add(stream);
     ws.onClose(() => statusStreams.delete(stream));
+    // Production answers the keep-alive with a Durable Object auto-response.
+    ws.onMessage((message) => {
+      if (message === RUN_STATUS_PING) ws.send(RUN_STATUS_PONG);
+    });
     ws.send(JSON.stringify({ type: "subscribed", runId }));
   });
   let connectionCount = 0;
