@@ -329,6 +329,56 @@ test("organization workspace keeps the active tab in the URL", async ({
   ).toBeVisible();
 });
 
+for (const { action, sessionRole, status } of [
+  { action: "delete", sessionRole: "owner", status: 404 },
+  { action: "leave", sessionRole: "organization-member", status: 403 },
+] as const) {
+  test(`after an organization ${action}, the list opens without re-reading the organization`, async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({ path: "/organizations", sessionRole, theme: "light" });
+    const listReads = () =>
+      ui.server.requests.filter((request) => request === "GET /api/organizations")
+        .length;
+    await expect.poll(listReads).toBe(1);
+    await page.getByText("Platform Repair Crew", { exact: true }).click();
+    await expect(page).toHaveURL(/\/organizations\/org-platform/);
+    // Once the request lands, every read of this organization is refused, as
+    // it is in production.
+    let done = false;
+    const refusedReads: string[] = [];
+    await page.route("**/api/organizations/org-platform**", async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET") {
+        done = true;
+      } else if (done) {
+        refusedReads.push(new URL(request.url()).pathname);
+        await route.fulfill({ status, json: { error: "Organization unavailable" } });
+        return;
+      }
+      await route.fallback();
+    });
+    await page.getByRole("tab", { name: "Settings" }).click();
+    if (action === "delete") {
+      await page.getByRole("button", { name: "Delete organization" }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog
+        .getByRole("textbox", { name: "Organization name confirmation" })
+        .fill("Platform Repair Crew");
+      await dialog.getByRole("button", { name: "Delete organization" }).click();
+    } else {
+      await page.getByRole("button", { name: "Leave organization" }).click();
+    }
+
+    // The old hang retried refused reads for about 7s.
+    await expect(page).toHaveURL(/\/organizations$/, { timeout: 4_000 });
+    // The cached list is read again rather than showing the old membership.
+    await expect.poll(listReads).toBe(2);
+    expect(refusedReads).toEqual([]);
+  });
+}
+
 test("admin operations expose URL-backed people views", async ({
   page,
   ui,
