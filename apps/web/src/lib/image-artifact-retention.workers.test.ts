@@ -9,6 +9,7 @@ import {
   hostDesiredState,
   imageBuildBundles,
   imageBuilds,
+  organization,
   runtimeExecutions,
   runtimeVms,
   scenarioCatalogCandidates,
@@ -348,6 +349,88 @@ describe("registry retention fail-closed rules", () => {
       expect(await objectExists("image-chunks/v1/zstd6/" + image.chunkRawSha256)).toBe(true);
       expect(await objectExists("artifacts/" + image.kernelSha256)).toBe(true);
       expect(await objectExists("artifacts/" + image.initrdSha256)).toBe(true);
+    }
+    // The sweep still deletes: nothing references the orphan.
+    expect(await objectExists(orphan.objectKey)).toBe(false);
+  });
+
+  it("keeps a candidate when another tenant stages a newer one for the same scenario id", async () => {
+    // An organization with slug "broken" may upload "broken-nginx", which is
+    // also a public scenario. Its newer candidate must not turn the public
+    // candidate into history, or a deleting sweep takes its images.
+    const live = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "live",
+    });
+    const publicCandidate = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "public-candidate",
+    });
+    const orgCandidate = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "org-candidate",
+    });
+    const orphan = await seedChunkedImage(env.VM_IMAGE_REGISTRY_BUCKET, {
+      label: "orphan",
+    });
+    await seedScenario(
+      { scenario: SCENARIO_ID, vm: "web", arch: "x86_64" },
+      {
+        chunkManifestSha256: live.chunkManifestSha256,
+        imageId: live.imageId,
+        kernel: live.kernelSha256,
+        initrd: live.initrdSha256,
+        sourceRevision: "scenarios-live",
+      },
+    );
+    const db = drizzle(env.DB);
+    await db.insert(organization).values({
+      id: "org-broken",
+      name: "Broken",
+      slug: "broken",
+      createdAt: new Date(0),
+    });
+    const now = Date.now();
+    const publicId = "public:scenarios-next:" + SCENARIO_ID;
+    const orgId = "org-broken:org-broken-1:" + SCENARIO_ID;
+    await db.insert(scenarioCatalogCandidates).values([
+      {
+        id: publicId,
+        revision: "scenarios-next",
+        scenarioId: SCENARIO_ID,
+        organizationId: null,
+        buildId: "build-public",
+        manifestJson: manifestFor(publicCandidate),
+        updatedAt: now,
+      },
+      {
+        id: orgId,
+        revision: "org-broken-1",
+        scenarioId: SCENARIO_ID,
+        organizationId: "org-broken",
+        buildId: "build-org",
+        manifestJson: manifestFor(orgCandidate),
+        updatedAt: now + 1,
+      },
+    ]);
+
+    const projection = await projectRegistryRetention(env, {
+      nowUnixMs: Date.now(),
+    });
+    expect(projection.candidates.keepIds).toEqual([orgId, publicId]);
+    expect(projection.candidates.retireIds).toEqual([]);
+
+    const core = createImageRegistryCleanupCore({});
+    const cleanupEnv = {
+      DB: env.DB,
+      VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
+    };
+    const plan = await core.plan(cleanupEnv, { mode: "delete", nowMs: Date.now() });
+    expect(plan.details.faults).toEqual([]);
+    const result = await core.run(cleanupEnv, { mode: "delete", nowMs: Date.now() });
+    expect(result.error).toBeNull();
+
+    for (const image of [live, publicCandidate, orgCandidate]) {
+      expect(await objectExists(image.objectKey)).toBe(true);
+      expect(await objectExists("image-chunks/v1/zstd6/" + image.chunkRawSha256)).toBe(true);
+      expect(await objectExists("artifacts/" + image.kernelSha256)).toBe(true);
     }
     // The sweep still deletes: nothing references the orphan.
     expect(await objectExists(orphan.objectKey)).toBe(false);
