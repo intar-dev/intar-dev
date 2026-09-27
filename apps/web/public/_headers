@@ -5,3 +5,7 @@
   Referrer-Policy: no-referrer
   Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()
   Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'
+
+# The app compares its release with this file; revalidate on every check.
+/version.json
+  Cache-Control: no-cache

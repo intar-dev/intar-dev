@@ -379,6 +379,47 @@ for (const { action, sessionRole, status } of [
   });
 }
 
+test("the app bar offers a reload once a new version is deployed", async ({
+  page,
+  ui,
+}) => {
+  await page.route("**/version.json", (route) =>
+    route.fulfill({ json: { version: "next-release" } }),
+  );
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+  const update = page.getByRole("button", {
+    name: "New version available, reload to update",
+  });
+  await expect(update).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as Window & { beforeUpdate?: boolean }).beforeUpdate = true;
+  });
+  await update.click();
+  // The reload drops everything this document held.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as Window & { beforeUpdate?: boolean }).beforeUpdate,
+      ),
+    )
+    .toBeUndefined();
+});
+
+test("the app bar stays quiet while the tab runs the deployed version", async ({
+  page,
+  ui,
+}) => {
+  let checks = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/version.json") checks += 1;
+  });
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+
+  await expect.poll(() => checks).toBeGreaterThan(0);
+  await expect(page.getByRole("button", { name: /New version/ })).toHaveCount(0);
+});
+
 test("admin operations expose URL-backed people views", async ({
   page,
   ui,

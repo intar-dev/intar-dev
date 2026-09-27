@@ -524,6 +524,28 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "sidebar-support-discord-light-desktop");
   });
 
+  for (const { theme, viewport } of [
+    { theme: "light", viewport: "desktop" },
+    { theme: "dark", viewport: "mobile" },
+  ] as const) {
+    test(`app bar · new version · ${theme} ${viewport}`, async ({ page, ui }) => {
+      if (viewport === "mobile") {
+        await page.setViewportSize({ width: 390, height: 844 });
+      }
+      await page.route("**/version.json", (route) =>
+        route.fulfill({ json: { version: "next-release" } }),
+      );
+      await ui.open({ ...routeCase("course-catalog"), theme });
+      await expect(
+        page.getByRole("button", { name: /^New version/ }),
+      ).toBeVisible();
+      await expectRouteScreenshot(
+        page,
+        `app-bar-new-version-${theme}-${viewport}`,
+      );
+    });
+  }
+
   test("catalog · authored course", async ({ page, ui }) => {
     await ui.open({ ...routeCase("course-catalog"), theme: "light" });
     await page.getByRole("link", { name: /Linux operations/ }).click();

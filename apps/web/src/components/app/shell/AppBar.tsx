@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { NewVersionButton } from "./NewVersionButton";
 import { NAV_ITEMS } from "./nav-config";
 import { useBreadcrumbOverrides, usePageChromeValue } from "./page-chrome";
 
@@ -227,6 +228,7 @@ export function AppBar() {
         </ol>
       </nav>
       <div className="flex min-w-0 shrink-0 items-center gap-2" data-app-bar-trailing>
+        <NewVersionButton />
         {chrome?.utility}
         {chrome?.status ? (
           <span className="inline-flex min-w-0">{chrome.status}</span>
