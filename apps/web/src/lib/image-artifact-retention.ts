@@ -411,11 +411,23 @@ function candidateRefKey(input: {
 }
 
 /**
+ * The tenant scope of a candidate row. Scenario ids can collide across
+ * tenants, since an organization's ids only need its slug as a prefix, so
+ * one tenant's row never makes another tenant's row history.
+ */
+function candidateScopeKey(input: {
+  scenarioId: string;
+  organizationId: string | null;
+}): string {
+  return input.scenarioId + "\n" + (input.organizationId ?? "");
+}
+
+/**
  * A candidate row is the intent "this revision becomes the catalog for this
  * scenario". Two rules decide it:
  *
- *   - only the newest row per scenario can be that intent, so older rows are
- *     history;
+ *   - only the newest row per scenario and tenant can be that intent, so a
+ *     tenant's older rows are history;
  *   - an intent is fulfilled only when the catalog carries that exact
  *     revision and that exact image closure. A candidate can change the
  *     kernel, the initrd, the probes, or the metadata while its disk image is
@@ -442,13 +454,14 @@ export function planCandidateIntentRetention(input: {
   );
   const newest = new Map<string, CandidateIntentRow>();
   for (const row of input.rows) {
-    const current = newest.get(row.scenarioId);
+    const scope = candidateScopeKey(row);
+    const current = newest.get(scope);
     if (
       !current ||
       row.stagedAt > current.stagedAt ||
       (row.stagedAt === current.stagedAt && row.id > current.id)
     ) {
-      newest.set(row.scenarioId, row);
+      newest.set(scope, row);
     }
   }
   const keepIds: string[] = [];
@@ -458,7 +471,7 @@ export function planCandidateIntentRetention(input: {
       keepIds.push(row.id);
       continue;
     }
-    if (newest.get(row.scenarioId) !== row) {
+    if (newest.get(candidateScopeKey(row)) !== row) {
       retireIds.push(row.id);
       continue;
     }

@@ -309,7 +309,8 @@ describe("candidate intent retention", () => {
   it("scopes the active row by tenant, so another tenant's row is not kept", () => {
     const plan = planCandidateIntentRetention({
       rows: [
-        candidate("public-row", "nginx", [LIVE], 10, "revision-old", null),
+        candidate("public-old", "nginx", [LIVE], 10, "revision-old", null),
+        candidate("public-new", "nginx", [LIVE], 30, "revision-new", null),
         candidate("org-row", "nginx", [LIVE], 20, "revision-old", "org-1"),
       ],
       liveRevisionByScenario: liveRevisions({}),
@@ -320,9 +321,27 @@ describe("candidate intent retention", () => {
     });
 
     // Only the row that tenant's run was admitted from is protected; the
-    // identically staged public row is history like any other.
-    expect(plan.keepIds).toEqual(["org-row"]);
-    expect(plan.retireIds).toEqual(["public-row"]);
+    // identically staged public row is history within its own tenant.
+    expect(plan.keepIds).toEqual(["org-row", "public-new"]);
+    expect(plan.retireIds).toEqual(["public-old"]);
+  });
+
+  it("keeps each tenant's newest row when their scenario ids collide", () => {
+    // An organization's scenario ids only need its slug as a prefix, so an
+    // org with slug "nginx" can stage "nginx" too. Its newer row is its own
+    // intent and must not turn the public intent into history.
+    const plan = planCandidateIntentRetention({
+      rows: [
+        candidate("public-row", "nginx", [CANDIDATE_ONLY], 10, "scenarios-a", null),
+        candidate("org-row", "nginx", [PREVIOUS], 20, "org-nginx-b", "org-1"),
+        candidate("org-older", "nginx", [ANCIENT], 5, "org-nginx-a", "org-1"),
+      ],
+      liveRevisionByScenario: liveRevisions({ nginx: "scenarios-live" }),
+      liveClosureByScenario: new Map(),
+    });
+
+    expect(plan.keepIds).toEqual(["org-row", "public-row"]);
+    expect(plan.retireIds).toEqual(["org-older"]);
   });
 
   it("retires every old row when no run is active", () => {
