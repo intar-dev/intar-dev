@@ -65,10 +65,13 @@ export interface ProgressResponse {
 export async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { credentials: "include" });
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as {
-      error?: string;
-    } | null;
-    throw new Error(body?.error ?? `Request failed (${response.status})`);
+    // The typed error lets the query retry policy stop at a refused read
+    // instead of retrying it with backoff.
+    throw HttpResponseError.fromBody(
+      response.status,
+      await response.json().catch(() => null),
+      `Request failed (${response.status})`,
+    );
   }
   return (await response.json()) as T;
 }
