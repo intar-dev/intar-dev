@@ -127,7 +127,7 @@ jobs:
                 break
                 ;;
               3)
-                result="Superseded: a newer commit is already published, so this one was skipped."
+                result="Superseded: the default branch's head is now another commit, so this one was skipped. Follow that commit's run and checks."
                 break
                 ;;
               4)
