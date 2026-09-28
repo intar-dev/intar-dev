@@ -12,6 +12,7 @@ import {
   agentHosts,
   imageBuildBundles,
   imageBuilds,
+  organization,
   runtimeExecutions,
   scenarioRuns,
   user,
@@ -175,6 +176,30 @@ describe("candidate source refusal at the registry routes", () => {
     });
     await expect(blockedWriterCount()).resolves.toBe(0);
     await expect(sweepAcquires()).resolves.toBe(true);
+  });
+
+  it("refuses a bundle rev that another scope owns before replacing its archive", async () => {
+    const db = drizzle(env.DB);
+    await db.insert(organization).values({
+      id: "other-org", name: "Other", slug: "other-org", createdAt: new Date(0),
+    });
+    await db.update(imageBuildBundles).set({ organizationId: "other-org" });
+    const key = `builds/bundles/${REVISION}.tar.gz`;
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(key, "other scope archive");
+    const buildsBefore = await db.select().from(imageBuilds);
+
+    const response = await bundleRequest();
+
+    expect(response?.status).toBe(409);
+    await expect(response?.json()).resolves.toEqual({
+      error: "bundle revision belongs to another scope",
+      code: "rev_scope_conflict",
+    });
+    expect(await (await env.VM_IMAGE_REGISTRY_BUCKET.get(key))?.text()).toBe(
+      "other scope archive",
+    );
+    await expect(db.select().from(imageBuilds)).resolves.toEqual(buildsBefore);
+    await expect(blockedWriterCount()).resolves.toBe(0);
   });
 });
 

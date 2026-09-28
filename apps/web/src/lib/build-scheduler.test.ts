@@ -508,7 +508,9 @@ function queueSchedulerDb(input: {
   cleanedHosts: string[];
   insertedRows: Array<{ id: string }>;
 }) {
-  const bundleOnConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
+  const bundleOnConflictDoUpdate = vi.fn(() => ({
+    returning: vi.fn().mockResolvedValue([{ rev: "bundle" }]),
+  }));
   const bundleInsertValues = vi.fn(() => ({
     onConflictDoUpdate: bundleOnConflictDoUpdate,
   }));

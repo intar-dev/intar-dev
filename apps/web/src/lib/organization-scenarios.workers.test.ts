@@ -80,6 +80,20 @@ describe("organization scenario deletion", () => {
     });
   });
 
+  it("still succeeds when a concurrent delete removed the scenario first", async () => {
+    const batch = env.DB.batch.bind(env.DB);
+    const spy = vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+      await batch(statements);
+      return batch(statements);
+    });
+    try {
+      await remove();
+    } finally {
+      spy.mockRestore();
+    }
+    await expect(remainingRows()).resolves.toEqual({ scenarios: 0, assignments: 0, builds: 0, bundles: [] });
+  });
+
   it("keeps a git bundle without build references in the orphan sweep", async () => {
     const race = interleaveBefore(/^delete from "image_build_bundles"/i, () => insertBundle(GIT_REV));
     try {

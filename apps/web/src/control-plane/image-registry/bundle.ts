@@ -5,11 +5,12 @@ import {
 } from "@/db/schema";
 import type { CourseCatalogSnapshotV2 as CourseCatalogSnapshotV2Wire } from "@/generated/catalog";
 import {
+  assertBundleRevScope,
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
-import { toErrorResponse } from "@/lib/app-error";
+import { AppError, toErrorResponse } from "@/lib/app-error";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
   syncCourseCatalogSnapshot,
@@ -62,7 +63,8 @@ export async function handleBundleUpload(
 
   const meta = await readBundleMeta(form.get("meta"));
   if (!meta.ok) return meta.response;
-  if (meta.value.rev.startsWith("git-")) {
+  // Case-insensitive, like the `LIKE 'git-%'` guards in SQL.
+  if (/^git-/i.test(meta.value.rev)) {
     return jsonResponse(
       { error: "git- revisions are published only by scenario sources" },
       400,
@@ -117,9 +119,10 @@ export async function handleBundleUpload(
   } catch (error) {
     // A refused reused candidate is a settled outcome, exactly as on the
     // publish route: the conditional stage proved that no candidate row
-    // changed. It must answer its own 409, because the router holds any 5xx as
-    // an unsettled write that blocks the collector until an operator reap.
-    if (isCandidateSourceLocked(error)) {
+    // changed. So is a rev that another scope owns. It must answer its own
+    // 409, because the router holds any 5xx as an unsettled write that blocks
+    // the collector until an operator reap.
+    if (isSettledRefusal(error)) {
       const refusal = toErrorResponse(error, "bundle processing failed", 409);
       return jsonResponse(refusal.body, refusal.status);
     }
@@ -127,6 +130,13 @@ export async function handleBundleUpload(
       error instanceof ScenarioBundleIngestError ? error.stage : "unknown";
     return jsonResponse({ error: "bundle processing failed", stage }, 500);
   }
+}
+
+function isSettledRefusal(error: unknown): boolean {
+  return (
+    isCandidateSourceLocked(error) ||
+    (error instanceof AppError && error.code === "rev_scope_conflict")
+  );
 }
 
 /** A failed ingest step. `stage` names the step; the cause stays private. */
@@ -143,8 +153,10 @@ export class ScenarioBundleIngestError extends Error {
  * Writes a validated bundle into one scope. References are checked before the
  * first write, and the scope's catalog changes only with `applyCatalog`, so a
  * candidate-only ingest writes just the bundle, build and candidate rows.
- * A refused candidate stage is rethrown as is; any other failure throws a
- * {@link ScenarioBundleIngestError} and may have committed part of the ingest.
+ * A rev that another scope owns is refused before the put, so it never
+ * replaces that scope's archive. A refusal is rethrown as is; any other failure
+ * throws a {@link ScenarioBundleIngestError} and may have committed part of the
+ * ingest.
  */
 export async function ingestScenarioBundle(
   env: Cloudflare.Env,
@@ -174,6 +186,8 @@ export async function ingestScenarioBundle(
       organizationId,
     });
     if (invalidScenarioIds.length) return { ok: false, invalidScenarioIds };
+    stage = "check_rev_scope";
+    await assertBundleRevScope(db, { rev, organizationId });
 
     const bundleKey = bundleObjectKey(rev);
     stage = "store_bundle";
@@ -215,7 +229,7 @@ export async function ingestScenarioBundle(
     }
     return { ok: true, bundleKey, queued: queued.queued, assigned };
   } catch (error) {
-    if (isCandidateSourceLocked(error)) throw error;
+    if (isSettledRefusal(error)) throw error;
     console.error(
       JSON.stringify({
         message: "bundle processing failed",

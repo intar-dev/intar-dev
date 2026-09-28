@@ -129,7 +129,11 @@ export async function deleteOrganizationScenario(params: {
       )
       .returning({ scenarioId: vmScenarios.scenarioId }),
   ]);
-  if (!deleted.length) throw gitManaged();
+  // An empty delete is either the guard or a concurrent DELETE that already
+  // removed the scenario; only the guard is a refusal.
+  if (!deleted.length && (await gitBundles().limit(1)).length) {
+    throw gitManaged();
+  }
 
   const orphanedBundles = await db
     .delete(imageBuildBundles)

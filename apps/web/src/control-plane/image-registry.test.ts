@@ -1148,6 +1148,11 @@ describe("course catalog bundle metadata", () => {
       { rev: "git-scenarios-abc123-digest" },
       "git- revisions are published only by scenario sources",
     ],
+    [
+      "an upper-case GIT- rev",
+      { rev: "GIT-scenarios-abc123-digest" },
+      "git- revisions are published only by scenario sources",
+    ],
   ])("refuses %s before any write", async (_label, extra, error) => {
     const bucketPut = vi.fn();
     const response = await handleImageRegistryRequest(
