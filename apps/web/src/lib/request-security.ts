@@ -358,12 +358,12 @@ function normalizedOrigin(value: string | null | undefined): string | null {
   }
 }
 
-class BodyLimitExceededError extends Error {}
+export class BodyLimitExceededError extends Error {}
 
-async function readBoundedBody(
+export async function readBoundedBody(
   body: ReadableStream<Uint8Array>,
   maxBytes: number,
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;

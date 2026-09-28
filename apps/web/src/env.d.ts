@@ -27,6 +27,8 @@ declare global {
       GITHUB_CLIENT_SECRET: string;
       /** The Intar GitHub App's PKCS#8 PEM private key. */
       GITHUB_APP_PRIVATE_KEY?: string;
+      /** The Intar GitHub App's webhook secret; unset, the webhook answers 404. */
+      GITHUB_APP_WEBHOOK_SECRET?: string;
       STARGATE_ADMIN_BASE_URL?: string;
       STARGATE_ADMIN_AUTH_SECRET: string;
       /**
