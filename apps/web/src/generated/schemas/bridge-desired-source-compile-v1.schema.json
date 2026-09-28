@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DesiredSourceCompileV1",
+  "description": "One repository snapshot a builder compiles. It carries no secret and no\nscope: the Worker takes both from the compile row.",
+  "type": "object",
+  "properties": {
+    "arch": {
+      "$ref": "#/$defs/ImageArchitecture"
+    },
+    "attempt": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "compile_id": {
+      "type": "string"
+    },
+    "rev": {
+      "type": "string"
+    },
+    "snapshot_ref": {
+      "type": "string"
+    },
+    "validate_only": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "compile_id",
+    "attempt",
+    "snapshot_ref",
+    "rev",
+    "validate_only",
+    "arch"
+  ],
+  "$defs": {
+    "ImageArchitecture": {
+      "type": "string",
+      "enum": [
+        "x86_64",
+        "aarch64"
+      ]
+    }
+  }
+}

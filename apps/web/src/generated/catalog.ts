@@ -107,3 +107,34 @@ export interface ImageChunkV1 {
   encoded_size_bytes: number;
   encoded_sha256: string;
 }
+
+/** `meta.source` of a bundle compiled from an `intar.yaml` repository. */
+export interface BundleSourceV1 {
+  scope: string;
+  courses_root: string;
+  compiler_version: string;
+}
+
+export type SourceRefusalCode =
+  | "compiler_outdated"
+  | "superseded"
+  | "fenced"
+  | "binding_inactive"
+  | "issuer_unsupported";
+
+/** A source route refusal: `AppErrorResponseBody` with a mandatory code. */
+export interface SourceRefusalV1 {
+  error: string;
+  code: SourceRefusalCode;
+}
+
+export type SourceCompileErrorCode =
+  | "manifest_missing"
+  | "manifest_invalid"
+  | "courses_root_missing"
+  | "submodule_unsupported"
+  | "lfs_unsupported"
+  | "bundle_too_large"
+  | "meta_too_large"
+  | "too_many_scenarios"
+  | "compile_failed";

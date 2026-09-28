@@ -429,6 +429,7 @@ mod tests {
                 lease_expires_at_unix_ms: 0,
             }],
             builds: Vec::new(),
+            source_compiles: Vec::new(),
         }
     }
 }

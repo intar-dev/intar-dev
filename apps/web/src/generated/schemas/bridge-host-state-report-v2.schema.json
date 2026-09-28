@@ -269,6 +269,13 @@
         "fast_template_store": {
           "type": "boolean"
         },
+        "source_compile_platform": {
+          "description": "Platform compile digest this host compiles sources for. `None`\nmeans the host takes no source compiles and no `git-` builds.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "supports_cgroup_v2": {
           "type": "boolean"
         },

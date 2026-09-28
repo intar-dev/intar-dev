@@ -534,6 +534,7 @@ fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV2 {
         // Builder hosts never broker learner run CLI requests or completion.
         supports_run_cli_v1: false,
         supports_run_cli_completion_v1: false,
+        source_compile_platform: None,
     }
 }
 
@@ -683,6 +684,7 @@ pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessage
             // Builder hosts never broker learner run CLI requests or completion.
             supports_run_cli_v1: false,
             supports_run_cli_completion_v1: false,
+            source_compile_platform: None,
         },
     })
 }
@@ -989,6 +991,7 @@ mod tests {
             cached_guest_tools: Vec::new(),
             vms: Vec::new(),
             builds: Vec::new(),
+            source_compiles: Vec::new(),
         };
 
         assert_eq!(advertised_desired_version(Some(&desired), false), None);
@@ -1084,6 +1087,7 @@ mod tests {
                 content_hash: "f".repeat(64),
                 bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
             }],
+            source_compiles: Vec::new(),
         };
         validate_desired_state("builder-1", &desired).unwrap();
 

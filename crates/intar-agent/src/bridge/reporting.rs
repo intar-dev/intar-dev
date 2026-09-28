@@ -928,6 +928,8 @@ pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> 
         supports_cgroup_v2: jailer.map_or(supports_cgroup_v2, |capabilities| {
             capabilities.supports_cgroup_v2
         }),
+        // Agents never compile scenario sources.
+        source_compile_platform: None,
     }
 }
 
