@@ -697,10 +697,12 @@ async fn process_next_publication(
                 true
             }
         };
+        // Report first: cleanup waits for the bundle-cache lock, which a
+        // build may hold across a slow bundle download.
+        emit_build_report(cfg, report_tx, &job.build_id).await?;
         if terminal {
             cleanup_reported_build_attempt_artifacts(cfg, &job.build_id).await;
         }
-        emit_build_report(cfg, report_tx, &job.build_id).await?;
         return Ok(true);
     }
 
@@ -1176,7 +1178,8 @@ mod tests {
 
     use super::{PersistedBuildOutput, PersistedEncodedImageChunk, reused_chunks_or_empty};
     use super::{
-        classify_publish_error, missing_reused_chunk_payload, requeue_damaged_completed_output,
+        classify_publish_error, missing_reused_chunk_payload, process_next_publication,
+        requeue_damaged_completed_output,
     };
     use crate::{config, db, now_unix_ms};
 
@@ -1279,6 +1282,52 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    /// A build downloading its bundle holds the bundle-cache lock that
+    /// cleanup waits for. A terminally failed publication must report the
+    /// failure without waiting for that download.
+    #[tokio::test]
+    async fn a_failed_publication_reports_before_waiting_for_bundle_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = rebuild_test_config(temp.path());
+        cfg.jobs.max_attempts = 1;
+        let refused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        cfg.bridge.base_url = format!("http://{}", refused.local_addr().unwrap());
+        drop(refused);
+        let build = intar_contracts::bridge::DesiredBuildV1 {
+            build_id: "build-1".to_string(),
+            scenario_id: "broken-nginx".to_string(),
+            arch: ImageArchitecture::X86_64,
+            rev: "abc123".to_string(),
+            content_hash: "f".repeat(64),
+            bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
+        };
+        let outputs = vec![persisted_output_fixture(temp.path())];
+        let db = db::BuilderDb::open(&cfg.builder.state_db).unwrap();
+        db.upsert_build_job(&build, "building", 1, None, 1000)
+            .unwrap();
+        db.save_completed_build_outputs("build-1", &serde_json::to_string(&outputs).unwrap(), 1000)
+            .unwrap();
+
+        let fetching = crate::BUNDLE_CACHE_LOCK.lock().await;
+        let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(4);
+        let publication =
+            tokio::spawn(async move { process_next_publication(&cfg, &report_tx).await });
+        let failed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let report = report_rx.recv().await.unwrap();
+                if report.phase == intar_contracts::bridge::BuildPhase::Failed {
+                    return report;
+                }
+            }
+        })
+        .await
+        .expect("the failure report must not wait for the bundle-cache lock");
+        assert_eq!(failed.build_id, "build-1");
+
+        drop(fetching);
+        assert!(publication.await.unwrap().unwrap());
     }
 
     fn rebuild_test_config(root: &Path) -> config::BuilderConfig {
