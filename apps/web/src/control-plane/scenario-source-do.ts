@@ -4,8 +4,9 @@
 // head commit's staged bundle, fails or heals the target's builds, and
 // promotes the target as a whole: images, then catalog, then `live`. A public
 // commit that replaces a live image applies its catalog and leaves its images
-// to the drained lane. Every head comparison runs in SQL against the stored
-// head, so a push claim that moves the head mid-alarm is never overwritten.
+// to the drained lane. The head commit's state shows as a GitHub check run.
+// Every head comparison runs in SQL against the stored head, so a push claim
+// that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, inArray, isNull, lt, not, sql } from "drizzle-orm";
@@ -30,9 +31,12 @@ import {
   type BuilderCandidate,
 } from "@/lib/build-scheduler-core";
 import {
+  createCheckRun,
   fetchTarball,
   mintInstallationToken,
   readRepository,
+  updateCheckRun,
+  type CheckRunState,
   type MintOutcome,
 } from "@/lib/github-app";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
@@ -48,6 +52,8 @@ import {
   countUnitGuardRuns,
   endSourceCompiles,
   MAX_COMPILE_ATTEMPTS,
+  parseDiagnostics,
+  redactHostPaths,
   scenarioSourceBinderPredicate,
   scenarioSourceBindingPredicate,
   stagedSourceObjectPrefix,
@@ -98,6 +104,9 @@ const DELIVERY_FLOOR_MS = 60_000;
 const DELIVERED_AT_STORAGE_KEY = "delivered_at";
 /** GitHub's tarball holds the whole repository; the DO never unpacks it. */
 const MAX_SOURCE_ARCHIVE_BYTES = 8 * 1024 * 1024;
+const CHECK_STORAGE_KEY = "deploy_check";
+/** GitHub's cap on a check run's summary. */
+const MAX_CHECK_SUMMARY_CHARS = 65_535;
 
 type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete" | "getAlarm" | "setAlarm">;
 
@@ -257,7 +266,8 @@ async function tickScenarioSource(
     // One promotion per alarm: a finished one leaves the target to the next.
     applyAgain = promoting === null ? await promoteTarget(step) : true;
   }
-  return again || ingestAgain || heal === "again" || applyAgain;
+  const checkAgain = await syncDeployCheckRun(step, active);
+  return again || ingestAgain || heal === "again" || applyAgain || checkAgain;
 }
 
 // Reads the repository through a token minted for the bound id. The mint is
@@ -1107,6 +1117,175 @@ async function loadBundle(env: Cloudflare.Env, rev: string) {
     .where(eq(imageBuildBundles.rev, rev))
     .limit(1);
   return bundle && { organizationId: bundle.organizationId, meta: bundle.meta as ParsedBundleMeta };
+}
+
+/** The last check state sent, and the row and check run it was sent for. */
+interface SentCheck {
+  rowId: string;
+  checkRunId: number;
+  check: CheckRunState;
+}
+
+interface CheckRow {
+  id: string;
+  sha: string;
+  rev: string;
+  state: ScenarioSourceCommitState;
+  detail: string | null;
+  diagnostics_json: string | null;
+  check_run_id: number | null;
+}
+
+const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id
+  FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
+
+// A superseded head row waits to be delivered again, so it shows as queued.
+const DEPLOY_CHECKS = {
+  fetching: { status: "queued", title: "Queued" },
+  ingesting: { status: "queued", title: "Queued" },
+  compiling: { status: "in_progress", title: "Compiling" },
+  building: { status: "in_progress", title: "Building" },
+  waiting: { status: "in_progress", title: "Waiting for active runs" },
+  promoting: { status: "in_progress", title: "Promoting" },
+  awaiting_promote: { status: "in_progress", title: "Promoting" },
+  live: { status: "completed", conclusion: "success", title: "Live" },
+  failed: { status: "completed", conclusion: "failure", title: "Failed" },
+  invalid: { status: "completed", conclusion: "failure", title: "Invalid" },
+  superseded: { status: "completed", conclusion: "neutral", title: "Superseded by a newer commit" },
+  validated: { status: "completed", conclusion: "success", title: "Validated" },
+} as const satisfies Record<ScenarioSourceCommitState, Omit<CheckRunState, "summary">>;
+
+// Shows the head row as the Intar / deploy check run on its commit. Only a
+// change is sent, and the last state sent is all the DO keeps; the check run
+// id goes to D1, where the webhook finds a re-run. A check the head moved
+// away from is closed first, so no replaced commit keeps a running check: a
+// promotion is followed to its end, and any other row shows as superseded.
+// A check on a repository the scope was bound to before is out of the
+// token's reach, and a paused or disconnected binding sends nothing: its
+// alarm only observes and finishes a promotion, so its check keeps the last
+// state until the binding is active again. True when a send failed, so the
+// alarm tries again.
+async function syncDeployCheckRun(step: Step, binding: ActiveBinding): Promise<boolean> {
+  const head = await step.env.DB.prepare(`${CHECK_ROW} AND rev = ${headRev("?1", "?2")}`)
+    .bind(step.scopeKey, step.digest)
+    .first<CheckRow>();
+  let last = await step.storage.get<SentCheck>(CHECK_STORAGE_KEY);
+  if (last && last.rowId !== head?.id && last.check.status !== "completed") {
+    const row = await step.env.DB.prepare(`${CHECK_ROW} AND id = ?2`)
+      .bind(step.scopeKey, last.rowId)
+      .first<CheckRow>();
+    if (row?.rev.startsWith(`git-${binding.githubRepositoryId}-`)) {
+      const check = await deployCheck(step, row, false);
+      if (check.status !== "completed") return false;
+      last = await sendCheck(step, binding, row, check, last);
+      if (!last) return true;
+    }
+  }
+  if (!head) return false;
+  return !(await sendCheck(step, binding, head, await deployCheck(step, head, true), last));
+}
+
+// The tenant projection: the row's own builds by phase, with every error,
+// detail and diagnostic redacted, and no host, fleet or run data.
+async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<CheckRunState> {
+  const bundle = await loadBundle(step.env, row.rev);
+  // A rev another scope owns never shows that scope's bundle.
+  const scenarios = bundle?.organizationId === step.organizationId ? bundle.meta.scenarios : [];
+  const hashes = [...new Set(scenarios.map((scenario) => scenario.contentHash))];
+  const builds = hashes.length
+    ? await drizzle(step.env.DB)
+        .select({
+          scenarioId: imageBuilds.scenarioId,
+          arch: imageBuilds.arch,
+          contentHash: imageBuilds.contentHash,
+          status: imageBuilds.status,
+          phase: imageBuilds.phase,
+          error: imageBuilds.error,
+        })
+        .from(imageBuilds)
+        .where(
+          and(
+            // D1 allows 100 bound parameters, so the hashes travel as one JSON array.
+            sql`${imageBuilds.contentHash} IN (SELECT value FROM json_each(${JSON.stringify(hashes)}))`,
+            sql`${imageBuilds.organizationId} IS ${step.organizationId}`,
+          ),
+        )
+    : [];
+  let built = 0;
+  const lines = scenarios.map(({ scenarioId, arch, contentHash }) => {
+    const build = builds.find(
+      (candidate) =>
+        candidate.scenarioId === scenarioId &&
+        candidate.arch === arch &&
+        candidate.contentHash === contentHash,
+    );
+    if (build?.status === "succeeded") built += 1;
+    const error = build?.error ? `: ${redactHostPaths(build.error)}` : "";
+    return `- ${scenarioId} (${arch}): ${build ? `${build.status}, ${build.phase}${error}` : "queued"}`;
+  });
+  const diagnostics = parseDiagnostics(row.diagnostics_json).map(({ path, line, message }) => {
+    const at = path === undefined ? "" : line === undefined ? `${path}: ` : `${path}:${line}: `;
+    return `- ${at}${message}`;
+  });
+  // A row the head left, except a promotion, is done with.
+  const left =
+    !isHead && row.state !== "promoting" && DEPLOY_CHECKS[row.state].status !== "completed";
+  const state = left ? "superseded" : row.state === "superseded" && isHead ? "fetching" : row.state;
+  const check = DEPLOY_CHECKS[state];
+  const title = state === "building" ? `Building ${built}/${scenarios.length}` : check.title;
+  // GitHub renders the summary as Markdown and drops tags such as `<path>`.
+  const summary = [
+    ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),
+    ...diagnostics,
+    ...lines,
+  ]
+    .join("\n")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  return { ...check, title, summary: (summary || title).slice(0, MAX_CHECK_SUMMARY_CHARS) };
+}
+
+// Sends a changed check. A row's first check, and one that reopens after it
+// completed, as a re-run does, get a new check run: GitHub shows the newest.
+// A mint or a call that fails leaves the last state as it was, so the next
+// alarm sends again.
+async function sendCheck(
+  step: Step,
+  binding: ActiveBinding,
+  row: CheckRow,
+  check: CheckRunState,
+  last: SentCheck | undefined,
+): Promise<SentCheck | undefined> {
+  const prior = last?.rowId === row.id && last.checkRunId === row.check_run_id ? last : undefined;
+  if (prior && isDeepStrictEqual(prior.check, check)) return prior;
+  let mint: MintOutcome;
+  try {
+    mint = await mintInstallationToken(step.env, {
+      installationId: binding.githubInstallationId,
+      fullName: binding.githubRepository,
+      repositoryId: binding.githubRepositoryId,
+    });
+  } catch {
+    return undefined;
+  }
+  if (mint.status !== "ok") return undefined;
+  const reopened = prior?.check.status === "completed" && check.status !== "completed";
+  let checkRunId = prior && !reopened ? prior.checkRunId : null;
+  if (checkRunId !== null) {
+    if (!(await updateCheckRun(mint.token, binding.githubRepository, checkRunId, check))) {
+      return undefined;
+    }
+  } else {
+    checkRunId = await createCheckRun(mint.token, binding.githubRepository, row.sha, check);
+    if (checkRunId === null) return undefined;
+    await step.env.DB.prepare(`UPDATE scenario_source_commits SET check_run_id = ?1 WHERE id = ?2`)
+      .bind(checkRunId, row.id)
+      .run();
+  }
+  const sent = { rowId: row.id, checkRunId, check };
+  await step.storage.put(CHECK_STORAGE_KEY, sent);
+  return sent;
 }
 
 /** The scope `intar.yaml` must name: `public` or the organization's slug. */

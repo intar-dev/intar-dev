@@ -351,7 +351,8 @@ export async function loadScenarioSource(
   };
 }
 
-function parseDiagnostics(
+/** A commit row's compile diagnostics, with host paths removed. */
+export function parseDiagnostics(
   json: string | null,
 ): NonNullable<ScenarioSourceView["commit"]>["diagnostics"] {
   let parsed: unknown = null;

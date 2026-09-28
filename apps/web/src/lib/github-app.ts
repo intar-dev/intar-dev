@@ -1,6 +1,7 @@
-// The Intar GitHub App client for scenario sources. It only reads GitHub
-// state: callers decide what to write. Tokens are never logged, stored or
-// sent anywhere but api.github.com, and their format is never checked.
+// The Intar GitHub App client for scenario sources. It reads GitHub state
+// and writes only deploy check runs, with the state callers pass. Tokens are
+// never logged, stored or sent anywhere but api.github.com, and their format
+// is never checked.
 import { importPKCS8, SignJWT } from "jose";
 import { BodyLimitExceededError, readBoundedBody } from "@/lib/request-security";
 
@@ -242,6 +243,60 @@ export async function fetchTarball(
       ? { status: "too_large" }
       : { status: "transient" };
   }
+}
+
+const DEPLOY_CHECK_NAME = "Intar / deploy";
+
+/** What a check run shows: its status, a completed run's conclusion, and its output. */
+export interface CheckRunState {
+  status: "queued" | "in_progress" | "completed";
+  conclusion?: "success" | "failure" | "neutral";
+  title: string;
+  summary: string;
+}
+
+/** Creates the deploy check run on a commit (checks:write); its id, or null. */
+export async function createCheckRun(
+  token: string,
+  fullName: string,
+  headSha: string,
+  check: CheckRunState,
+): Promise<number | null> {
+  const path = repositoryPath(fullName);
+  if (!path || !SHA_PATTERN.test(headSha)) return null;
+  const response = await githubApi(`${path}/check-runs`, token, {
+    method: "POST",
+    body: JSON.stringify({
+      name: DEPLOY_CHECK_NAME,
+      head_sha: headSha,
+      ...checkRunBody(check),
+    }),
+  });
+  return response?.status === 201 ? idOf(await json(response)) : null;
+}
+
+/** Moves a check run to a new state; false unless GitHub took it. */
+export async function updateCheckRun(
+  token: string,
+  fullName: string,
+  checkRunId: number,
+  check: CheckRunState,
+): Promise<boolean> {
+  const path = repositoryPath(fullName);
+  if (!path) return false;
+  const response = await githubApi(`${path}/check-runs/${checkRunId}`, token, {
+    method: "PATCH",
+    body: JSON.stringify(checkRunBody(check)),
+  });
+  return response?.status === 200;
+}
+
+function checkRunBody({ status, conclusion, title, summary }: CheckRunState) {
+  return {
+    status,
+    ...(conclusion === undefined ? {} : { conclusion }),
+    output: { title, summary },
+  };
 }
 
 // A 422 mint is gone only when the App JWT confirms the installation or the
