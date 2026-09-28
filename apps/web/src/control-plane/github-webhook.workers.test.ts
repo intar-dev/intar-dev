@@ -83,12 +83,19 @@ describe("GitHub App webhook", () => {
       await deliver("check_run", { ...pair, action: "rerequested", check_run: { id } });
     }
     expect(await state("run-failed")).toBe("ingesting");
+    expect(await attempt("run-failed")).toBe(1);
     expect(await state("run-invalid")).toBe("superseded");
     expect(await state("run-live")).toBe("live");
+    expect(await attempt("run-live")).toBe(0);
     expect(await pokedAt("public")).toEqual(expect.any(Number));
+
+    // The same sha rerequested in another repository of the installation.
+    await deliver("check_suite", { ...pair, repository: { id: 43 }, action: "rerequested", check_suite: { head_sha: HEAD_SHA } });
+    expect(await state("suite-failed")).toBe("failed");
 
     await deliver("check_suite", { ...pair, action: "rerequested", check_suite: { head_sha: HEAD_SHA } });
     expect(await state("suite-failed")).toBe("ingesting");
+    expect(await attempt("suite-failed")).toBe(1);
     expect(await state("suite-invalid")).toBe("invalid");
   });
 
@@ -207,4 +214,10 @@ async function state(id: string): Promise<string | null> {
   return env.DB.prepare("SELECT state FROM scenario_source_commits WHERE id = ?1")
     .bind(id)
     .first<string>("state");
+}
+
+async function attempt(id: string): Promise<number | null> {
+  return env.DB.prepare("SELECT attempt FROM scenario_source_commits WHERE id = ?1")
+    .bind(id)
+    .first<number>("attempt");
 }

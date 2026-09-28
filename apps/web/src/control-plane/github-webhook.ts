@@ -24,10 +24,11 @@ const POKE_BINDING = `UPDATE scenario_sources SET poked_at = ?1
     AND disconnected_at IS NULL`;
 
 // A re-run reopens a failed row and retires an invalid one; the DO decides
-// the rest on its next tick.
+// the rest on its next tick. The attempt bump restarts the DO's try cap,
+// which is keyed by (row, attempt, step).
 const flipRerequested = (match: string) => `UPDATE scenario_source_commits
   SET state = CASE state WHEN 'failed' THEN 'ingesting' ELSE 'superseded' END,
-    updated_at = ?1
+    attempt = attempt + 1, updated_at = ?1
   WHERE state IN ('failed', 'invalid') AND ${match}
     AND scope_key IN (SELECT scope_key FROM scenario_sources
       WHERE github_installation_id = ?2 AND github_repository_id = ?3
