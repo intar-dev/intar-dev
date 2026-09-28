@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read as _};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -15,6 +15,7 @@ use flate2::{Compression, GzBuilder};
 use intar_contracts::catalog::{
     CourseCatalogCourseV2, CourseCatalogLectureV2, CourseCatalogSnapshotV2, ScenarioDifficulty,
 };
+use intar_contracts::source::{BundleSourceV1, SOURCE_COMPILER_VERSION, SourceCompileErrorCode};
 use intar_image_scenario::{BaseImageCatalog, Scenario};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -34,6 +35,21 @@ const BUNDLE_BASE_IMAGES_PATH: &str = "base-images.hcl";
 const BUNDLE_SCENARIOS_ROOT: &str = "scenarios";
 const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
 const TAR_BLOCK_SIZE: u64 = 512;
+
+/// The platform base image catalog that `intar.yaml` compiles validate
+/// against. Its sha256 is part of the platform compile digest.
+const PLATFORM_BASE_IMAGES_HCL: &str = include_str!("../../../content/scenarios/base-images.hcl");
+const INTAR_MANIFEST_FILE: &str = "intar.yaml";
+const GITMODULES_FILE: &str = ".gitmodules";
+/// The only loose file a git courses root may hold: an intentional empty deploy.
+const KEEP_FILE: &str = ".keep";
+const LFS_POINTER_LINE: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+const MAX_COURSES_ROOT_COMPONENTS: usize = 8;
+const MAX_SOURCE_BUNDLE_TAR_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SOURCE_BUNDLE_GZIP_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SOURCE_META_BYTES: usize = 1_500_000;
+const MAX_SOURCE_SCENARIOS: usize = 100;
 
 /// The inputs of one bundle compilation.
 #[derive(Debug)]
@@ -121,7 +137,290 @@ struct LectureFrontmatter {
 pub fn compile_bundle(input: &CompileBundleInput<'_>) -> Result<CompiledBundle> {
     let contract_arch = contract_image_arch_slug(input.target_arch)?;
     let curriculum = load_curriculum(input.courses_root)?;
-    let selected_sources = selected_course_scenarios(&curriculum, input.scenario)?;
+    compile_curriculum(&curriculum, contract_arch, input, MAX_BUNDLE_TAR_BYTES)
+}
+
+/// A refused `intar.yaml` compile and the code the Worker shows for it.
+#[derive(Debug, thiserror::Error)]
+#[error("{error:#}")]
+pub struct SourceCompileError {
+    pub code: SourceCompileErrorCode,
+    pub error: anyhow::Error,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "bundle archive would expand to {tar_bytes} bytes, exceeding the {max_tar_bytes} byte limit"
+)]
+struct BundleTooLarge {
+    tar_bytes: u64,
+    max_tar_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntarManifestV1 {
+    version: u32,
+    scope: String,
+    #[serde(default = "default_source_courses_root")]
+    courses_root: String,
+}
+
+fn default_source_courses_root() -> String {
+    "courses".to_owned()
+}
+
+/// The digest of the platform this compiler builds for: the Worker sends
+/// compiles and `git-` builds only to builders that advertise it.
+#[must_use]
+pub fn platform_compile_digest() -> String {
+    compile_digest(&crate::sha256_bytes_hex(
+        PLATFORM_BASE_IMAGES_HCL.as_bytes(),
+    ))
+}
+
+fn compile_digest(base_images_sha256: &str) -> String {
+    intar_contracts::source::platform_compile_digest(
+        BUILD_FORMAT_VERSION,
+        SOURCE_COMPILER_VERSION,
+        base_images_sha256,
+    )
+}
+
+/// Compiles an `intar.yaml` repository tree into a bundle whose meta carries
+/// `source`. Only `intar.yaml`, `.gitmodules` and the courses root are read,
+/// and scenarios validate against the embedded platform base image catalog.
+pub fn compile_source_tree(
+    root: &Path,
+    rev: &str,
+    target_arch: &str,
+) -> Result<CompiledBundle, SourceCompileError> {
+    compile_source_tree_with_catalog(root, rev, target_arch, PLATFORM_BASE_IMAGES_HCL)
+}
+
+fn compile_source_tree_with_catalog(
+    root: &Path,
+    rev: &str,
+    target_arch: &str,
+    base_images_hcl: &str,
+) -> Result<CompiledBundle, SourceCompileError> {
+    let failed = refused(SourceCompileErrorCode::CompileFailed);
+    let contract_arch = contract_image_arch_slug(target_arch).map_err(failed)?;
+    let manifest = read_intar_manifest(root)?;
+    reject_submodules(root, &manifest.courses_root)?;
+    let courses_root = resolve_courses_root(root, &manifest.courses_root)?;
+    if let Some(pointer) = find_lfs_pointer(&courses_root).map_err(failed)? {
+        return Err(refused(SourceCompileErrorCode::LfsUnsupported)(anyhow!(
+            "Git LFS pointer file is not supported: {}",
+            pointer
+                .strip_prefix(root)
+                .unwrap_or(pointer.as_path())
+                .display()
+        )));
+    }
+
+    let curriculum = load_curriculum_tree(&courses_root, true).map_err(failed)?;
+    if curriculum.scenarios.len() > MAX_SOURCE_SCENARIOS {
+        return Err(refused(SourceCompileErrorCode::TooManyScenarios)(anyhow!(
+            "{} scenarios exceed the limit of {MAX_SOURCE_SCENARIOS}",
+            curriculum.scenarios.len()
+        )));
+    }
+    let catalog_dir = tempfile::tempdir()
+        .context("create base image catalog directory")
+        .map_err(failed)?;
+    let base_images = catalog_dir.path().join(BUNDLE_BASE_IMAGES_PATH);
+    fs::write(&base_images, base_images_hcl)
+        .context("write base image catalog")
+        .map_err(failed)?;
+    let input = CompileBundleInput {
+        courses_root: &courses_root,
+        base_images: &base_images,
+        rev,
+        target_arch,
+        scenario: None,
+    };
+    let mut compiled = compile_curriculum(
+        &curriculum,
+        contract_arch,
+        &input,
+        MAX_SOURCE_BUNDLE_TAR_BYTES,
+    )
+    .map_err(|error| {
+        let code = if error.downcast_ref::<BundleTooLarge>().is_some() {
+            SourceCompileErrorCode::BundleTooLarge
+        } else {
+            SourceCompileErrorCode::CompileFailed
+        };
+        refused(code)(error)
+    })?;
+    if compiled.archive.len() > MAX_SOURCE_BUNDLE_GZIP_BYTES {
+        return Err(refused(SourceCompileErrorCode::BundleTooLarge)(anyhow!(
+            "bundle archive is {} bytes compressed, exceeding the {MAX_SOURCE_BUNDLE_GZIP_BYTES} byte limit",
+            compiled.archive.len()
+        )));
+    }
+
+    compiled.meta["source"] = serde_json::to_value(BundleSourceV1 {
+        scope: manifest.scope,
+        courses_root: manifest.courses_root,
+        compiler_version: SOURCE_COMPILER_VERSION.to_owned(),
+    })
+    .context("serialize bundle source")
+    .map_err(failed)?;
+    let meta_bytes = serde_json::to_vec(&compiled.meta)
+        .context("serialize bundle meta")
+        .map_err(failed)?
+        .len();
+    if meta_bytes > MAX_SOURCE_META_BYTES {
+        return Err(refused(SourceCompileErrorCode::MetaTooLarge)(anyhow!(
+            "bundle meta is {meta_bytes} bytes, exceeding the {MAX_SOURCE_META_BYTES} byte limit"
+        )));
+    }
+    Ok(compiled)
+}
+
+fn refused(code: SourceCompileErrorCode) -> impl Fn(anyhow::Error) -> SourceCompileError + Copy {
+    move |error| SourceCompileError { code, error }
+}
+
+fn read_intar_manifest(root: &Path) -> Result<IntarManifestV1, SourceCompileError> {
+    let invalid = refused(SourceCompileErrorCode::ManifestInvalid);
+    let path = root.join(INTAR_MANIFEST_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_MANIFEST_BYTES as u64 => {}
+        Ok(_) => {
+            return Err(invalid(anyhow!(
+                "{INTAR_MANIFEST_FILE} must be a regular file of at most {MAX_MANIFEST_BYTES} bytes"
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(refused(SourceCompileErrorCode::ManifestMissing)(anyhow!(
+                "{INTAR_MANIFEST_FILE} is missing from the repository root"
+            )));
+        }
+        Err(error) => {
+            return Err(refused(SourceCompileErrorCode::CompileFailed)(
+                anyhow::Error::new(error).context(format!("failed to stat {INTAR_MANIFEST_FILE}")),
+            ));
+        }
+    }
+    let manifest = fs::read_to_string(&path)
+        .map_err(anyhow::Error::new)
+        .and_then(|yaml| parse_strict_yaml::<IntarManifestV1>(&yaml, MAX_MANIFEST_BYTES))
+        .with_context(|| format!("invalid {INTAR_MANIFEST_FILE}"))
+        .map_err(invalid)?;
+    if manifest.version != 1 {
+        return Err(invalid(anyhow!(
+            "unsupported {INTAR_MANIFEST_FILE} version {} (expected 1)",
+            manifest.version
+        )));
+    }
+    validate_safe_cli_slug("intar.yaml scope", &manifest.scope).map_err(invalid)?;
+    let components = manifest.courses_root.split('/').collect::<Vec<_>>();
+    if components.len() > MAX_COURSES_ROOT_COMPONENTS
+        || components
+            .iter()
+            .any(|component| validate_safe_cli_slug("component", component).is_err())
+    {
+        return Err(invalid(anyhow!(
+            "courses_root '{}' must be a relative path of 1 to {MAX_COURSES_ROOT_COMPONENTS} [A-Za-z0-9._-] components other than '.' and '..'",
+            manifest.courses_root
+        )));
+    }
+    Ok(manifest)
+}
+
+/// Refuses a submodule that overlaps the courses root: repository archives
+/// hold only an empty directory at a submodule's path.
+fn reject_submodules(root: &Path, courses_root: &str) -> Result<(), SourceCompileError> {
+    let failed = refused(SourceCompileErrorCode::CompileFailed);
+    let path = root.join(GITMODULES_FILE);
+    if matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(());
+    }
+    require_regular_file(&path, GITMODULES_FILE).map_err(failed)?;
+    let gitmodules = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {GITMODULES_FILE}"))
+        .map_err(failed)?;
+    let within = |path: &str, dir: &str| {
+        path.strip_prefix(dir)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    for line in gitmodules.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let submodule = value.trim().trim_matches('"').trim_end_matches('/');
+        if key.trim().eq_ignore_ascii_case("path")
+            && (within(submodule, courses_root) || within(courses_root, submodule))
+        {
+            return Err(refused(SourceCompileErrorCode::SubmoduleUnsupported)(
+                anyhow!("submodule '{submodule}' overlaps courses_root '{courses_root}'"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolves the courses root without following a symlink on the way.
+fn resolve_courses_root(root: &Path, courses_root: &str) -> Result<PathBuf, SourceCompileError> {
+    let mut path = root.to_path_buf();
+    for component in courses_root.split('/') {
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(refused(SourceCompileErrorCode::CompileFailed)(
+                    anyhow::Error::new(error)
+                        .context(format!("failed to stat courses_root '{courses_root}'")),
+                ));
+            }
+            _ => {
+                return Err(refused(SourceCompileErrorCode::CoursesRootMissing)(
+                    anyhow!("courses_root '{courses_root}' is not a directory in the repository"),
+                ));
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn find_lfs_pointer(dir: &Path) -> Result<Option<PathBuf>> {
+    for entry in sorted_directory_entries(dir)? {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to stat '{}'", path.display()))?;
+        if file_type.is_dir() {
+            if let Some(pointer) = find_lfs_pointer(&path)? {
+                return Ok(Some(pointer));
+            }
+        } else if file_type.is_file() {
+            let mut head = Vec::new();
+            fs::File::open(&path)
+                .and_then(|file| {
+                    file.take(LFS_POINTER_LINE.len() as u64 + 2)
+                        .read_to_end(&mut head)
+                })
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            let line = head.split(|byte| *byte == b'\n').next().unwrap_or_default();
+            if line.strip_suffix(b"\r").unwrap_or(line) == LFS_POINTER_LINE {
+                return Ok(Some(path));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn compile_curriculum(
+    curriculum: &CurriculumSource,
+    contract_arch: &str,
+    input: &CompileBundleInput<'_>,
+    max_tar_bytes: u64,
+) -> Result<CompiledBundle> {
+    let selected_sources = selected_course_scenarios(curriculum, input.scenario)?;
     let base_catalog = (!curriculum.scenarios.is_empty())
         .then(|| load_base_image_catalog(input.base_images))
         .transpose()?;
@@ -164,10 +463,10 @@ pub fn compile_bundle(input: &CompileBundleInput<'_>) -> Result<CompiledBundle> 
     let source_files = collect_bundle_source_files(
         &prepared_scenarios,
         base_catalog.as_ref().map(|_| input.base_images),
-        &curriculum,
+        curriculum,
         &compiled_catalog_path,
     )?;
-    let archive = write_bundle_archive(&source_files)?;
+    let archive = write_bundle_archive(&source_files, max_tar_bytes)?;
 
     let scenarios_meta = prepared_scenarios
         .iter()
@@ -198,6 +497,10 @@ pub fn compile_bundle(input: &CompileBundleInput<'_>) -> Result<CompiledBundle> 
 }
 
 pub fn load_curriculum(courses_root: &Path) -> Result<CurriculumSource> {
+    load_curriculum_tree(courses_root, false)
+}
+
+fn load_curriculum_tree(courses_root: &Path, allow_keep: bool) -> Result<CurriculumSource> {
     require_real_directory(courses_root, "courses directory")?;
 
     let mut courses = Vec::new();
@@ -215,6 +518,9 @@ pub fn load_curriculum(courses_root: &Path) -> Result<CurriculumSource> {
                 "symlink is not allowed in course sources: {}",
                 course_path.display()
             );
+        }
+        if allow_keep && file_type.is_file() && entry.file_name() == OsStr::new(KEEP_FILE) {
+            continue;
         }
         if !file_type.is_dir() {
             bail!(
@@ -409,22 +715,26 @@ where
     if body_markdown.trim().is_empty() {
         bail!("{label} markdown '{}' has an empty body", path.display());
     }
+    let value = parse_strict_yaml(frontmatter, MAX_FRONTMATTER_BYTES)
+        .map_err(|error| anyhow!("invalid YAML frontmatter: {error}"))?;
+    Ok((value, body_markdown.to_owned()))
+}
+
+fn parse_strict_yaml<T: DeserializeOwned>(yaml: &str, max_bytes: usize) -> Result<T> {
     let options = serde_saphyr::options! {
         budget: serde_saphyr::budget! {
             max_documents: 1,
             max_events: 512,
             max_nodes: 128,
             max_depth: 16,
-            max_total_scalar_bytes: MAX_FRONTMATTER_BYTES,
-            max_reader_input_bytes: Some(MAX_FRONTMATTER_BYTES),
+            max_total_scalar_bytes: max_bytes,
+            max_reader_input_bytes: Some(max_bytes),
         },
         duplicate_keys: DuplicateKeyPolicy::Error,
         merge_keys: MergeKeyPolicy::Error,
         strict_booleans: true,
     };
-    let value = serde_saphyr::from_str_with_options(frontmatter, options)
-        .map_err(|error| anyhow!("invalid YAML frontmatter: {error}"))?;
-    Ok((value, body_markdown.to_owned()))
+    serde_saphyr::from_str_with_options(yaml, options).map_err(|error| anyhow!("{error}"))
 }
 
 fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
@@ -772,15 +1082,17 @@ fn validate_archive_component(component: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_bundle_archive(source_files: &[BundleSourceFile]) -> Result<Vec<u8>> {
+fn write_bundle_archive(source_files: &[BundleSourceFile], max_tar_bytes: u64) -> Result<Vec<u8>> {
     if source_files.is_empty() {
         bail!("bundle archive requires at least one file");
     }
     let tar_bytes = bundle_tar_size_bytes(source_files)?;
-    if tar_bytes > MAX_BUNDLE_TAR_BYTES {
-        bail!(
-            "bundle archive would expand to {tar_bytes} bytes, exceeding the {MAX_BUNDLE_TAR_BYTES} byte limit"
-        );
+    if tar_bytes > max_tar_bytes {
+        return Err(BundleTooLarge {
+            tar_bytes,
+            max_tar_bytes,
+        }
+        .into());
     }
 
     let encoder = GzBuilder::new()
@@ -897,12 +1209,274 @@ mod tests {
     use std::io::Read;
 
     use flate2::read::GzDecoder;
+    use intar_contracts::source::{SOURCE_COMPILER_VERSION, SourceCompileErrorCode as Code};
 
     use super::{
         BUNDLE_BASE_IMAGES_PATH, CURRICULUM_CATALOG_ARCHIVE_PATH, CompileBundleInput,
-        PreparedBundleScenario, collect_bundle_source_files, compile_bundle, load_curriculum,
+        MAX_BUNDLE_TAR_BYTES, PreparedBundleScenario, collect_bundle_source_files, compile_bundle,
+        compile_digest, compile_source_tree, compile_source_tree_with_catalog, load_curriculum,
         write_bundle_archive,
     };
+
+    const REV: &str = "git-1-0123456789abcdef0123456789abcdef01234567-pe845f1ac";
+
+    #[test]
+    fn compile_source_tree_output_is_byte_stable() {
+        // A fixed catalog keeps this golden on the compiler alone: a platform
+        // catalog change already rotates the digest through its own sha256.
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/release-smoke");
+        let compiled = compile_source_tree_with_catalog(
+            &fixture,
+            REV,
+            "amd64",
+            include_str!("../fixtures/release-smoke/base-images.hcl"),
+        )
+        .unwrap();
+        let archive = crate::sha256_bytes_hex(&compiled.archive);
+        let meta =
+            crate::sha256_bytes_hex(serde_json::to_string(&compiled.meta).unwrap().as_bytes());
+
+        assert_eq!(
+            (archive.as_str(), meta.as_str()),
+            (
+                "a1420968b5dd17fe59ad1c274ead6576448da526039d7c97a4eaaf23e5d29390",
+                "23371067a472ee9b3831110de14aed448af5202813481a24d93e9148738ee261"
+            ),
+            "the intar.yaml compile output changed. Bump SOURCE_COMPILER_VERSION in \
+             intar-contracts (unless BUILD_FORMAT_VERSION changed), then replace these hashes"
+        );
+    }
+
+    #[test]
+    fn platform_compile_digest_matches_the_worker_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/web/src/generated/fixtures/source/compile-digest.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            serde_json::Value::from(compile_digest(
+                fixture["base_images_sha256"].as_str().unwrap()
+            )),
+            fixture["digest"],
+            "update the vector in intar-contracts-typegen and run `just generate-contracts`"
+        );
+    }
+
+    #[test]
+    fn refuses_invalid_intar_manifests() {
+        let temp = tempfile::tempdir().unwrap();
+        write_course(
+            &temp.path().join("courses"),
+            "linux",
+            "01-theory",
+            None,
+            "Unit",
+        );
+        assert_eq!(source_refusal(temp.path()), Code::ManifestMissing);
+
+        for manifest in [
+            "version: 1\n",
+            "version: 2\nscope: public\n",
+            "version: 1\nscope: public\nmode: push\n",
+            "version: 1\nscope: public\nscope: acme\n",
+            "version: 1\nscope: ../acme\n",
+            "version: 1\nscope: public\ncourses_root: ''\n",
+            "version: 1\nscope: public\ncourses_root: courses/\n",
+            "version: 1\nscope: public\ncourses_root: a//courses\n",
+            "version: 1\nscope: public\ncourses_root: ./courses\n",
+            "version: 1\nscope: public\ncourses_root: a/b/c/d/e/f/g/h/i\n",
+            "[not a map]\n",
+        ] {
+            fs::write(temp.path().join("intar.yaml"), manifest).unwrap();
+            assert_eq!(
+                source_refusal(temp.path()),
+                Code::ManifestInvalid,
+                "{manifest}"
+            );
+        }
+
+        fs::write(
+            temp.path().join("intar.yaml"),
+            "version: 1\nscope: public\ncourses_root: a/b/c/d/e/f/g/h\n",
+        )
+        .unwrap();
+        assert_eq!(source_refusal(temp.path()), Code::CoursesRootMissing);
+    }
+
+    #[test]
+    fn refuses_a_courses_root_outside_the_tree_before_reading_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let tree = temp.path().join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        write_course(&temp.path().join("x"), "linux", "01-theory", None, "Unit");
+        write_course(&temp.path().join("etc"), "linux", "01-theory", None, "Unit");
+        for courses_root in [temp.path().join("etc").display().to_string(), "../x".into()] {
+            fs::write(
+                tree.join("intar.yaml"),
+                format!("version: 1\nscope: public\ncourses_root: {courses_root}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                source_refusal(&tree),
+                Code::ManifestInvalid,
+                "{courses_root}"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(temp.path(), tree.join("link")).unwrap();
+            fs::write(
+                tree.join("intar.yaml"),
+                "version: 1\nscope: public\ncourses_root: link/x\n",
+            )
+            .unwrap();
+            assert_eq!(source_refusal(&tree), Code::CoursesRootMissing);
+        }
+    }
+
+    #[test]
+    fn compiles_keep_only_and_theory_only_trees_without_a_base_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("content/courses")).unwrap();
+        fs::write(temp.path().join("content/courses/.keep"), "").unwrap();
+        fs::write(
+            temp.path().join("intar.yaml"),
+            "version: 1\nscope: acme-x1y2z3\ncourses_root: content/courses\n",
+        )
+        .unwrap();
+        let compiled = compile_source_tree(temp.path(), REV, "amd64").unwrap();
+        assert_eq!(compiled.scenario_count, 0);
+        assert_eq!(
+            archive_paths(&compiled.archive),
+            [CURRICULUM_CATALOG_ARCHIVE_PATH]
+        );
+        assert_eq!(
+            compiled.meta["source"],
+            serde_json::json!({
+                "scope": "acme-x1y2z3",
+                "courses_root": "content/courses",
+                "compiler_version": SOURCE_COMPILER_VERSION,
+            })
+        );
+        assert_eq!(
+            compiled.meta["course_catalog"]["courses"],
+            serde_json::json!([])
+        );
+
+        write_course(
+            &temp.path().join("content/courses"),
+            "linux",
+            "01-theory",
+            None,
+            "Unit",
+        );
+        let compiled = compile_source_tree(temp.path(), REV, "amd64").unwrap();
+        let paths = archive_paths(&compiled.archive);
+        assert!(paths.contains(&"curriculum/linux/01-theory/lecture.md".to_owned()));
+        assert!(!paths.contains(&BUNDLE_BASE_IMAGES_PATH.to_owned()));
+        assert_eq!(compiled.meta["scenarios"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn refuses_submodules_under_the_courses_root_and_lfs_pointers() {
+        let temp = tempfile::tempdir().unwrap();
+        write_source_tree(temp.path());
+        fs::write(
+            temp.path().join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = vendor/lib\n\turl = https://example.com/lib.git\n",
+        )
+        .unwrap();
+        compile_source_tree(temp.path(), REV, "amd64").unwrap();
+
+        for path in ["courses/linux/lib", "courses", "\"courses/x\""] {
+            fs::write(
+                temp.path().join(".gitmodules"),
+                format!("[submodule \"lib\"]\n\tpath = {path}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                source_refusal(temp.path()),
+                Code::SubmoduleUnsupported,
+                "{path}"
+            );
+        }
+        fs::write(
+            temp.path().join("intar.yaml"),
+            "version: 1\nscope: public\ncourses_root: courses/linux\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join(".gitmodules"), "\tPath = courses\n").unwrap();
+        assert_eq!(source_refusal(temp.path()), Code::SubmoduleUnsupported);
+
+        fs::remove_file(temp.path().join(".gitmodules")).unwrap();
+        write_source_tree(temp.path());
+        fs::write(
+            temp.path().join("courses/linux/01-theory/diagram.png"),
+            "version https://git-lfs.github.com/spec/v1\noid sha256:00\nsize 1\n",
+        )
+        .unwrap();
+        assert_eq!(source_refusal(temp.path()), Code::LfsUnsupported);
+    }
+
+    #[test]
+    fn refuses_over_cap_source_bundles() {
+        let temp = tempfile::tempdir().unwrap();
+        write_source_tree(temp.path());
+        let support_file = temp.path().join("courses/linux/data.bin");
+        fs::write(&support_file, vec![b'x'; 5 * 1024 * 1024]).unwrap();
+        let error = compile_source_tree(temp.path(), REV, "amd64").unwrap_err();
+        assert_eq!(error.code, Code::BundleTooLarge);
+        assert!(error.to_string().contains("would expand"), "{error}");
+
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let noise = (0..3 * 1024 * 1024)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                state.to_be_bytes()[0]
+            })
+            .collect::<Vec<_>>();
+        fs::write(&support_file, noise).unwrap();
+        let error = compile_source_tree(temp.path(), REV, "amd64").unwrap_err();
+        assert_eq!(error.code, Code::BundleTooLarge);
+        assert!(error.to_string().contains("compressed"), "{error}");
+
+        fs::remove_file(&support_file).unwrap();
+        fs::write(
+            temp.path().join("courses/linux/01-theory/lecture.md"),
+            format!(
+                "---\ntitle: Unit\nsummary: Lecture summary.\ncategory: linux\ntags: [linux]\nestimated_minutes: 5\n---\n\n{}\n",
+                "x".repeat(1_600_000)
+            ),
+        )
+        .unwrap();
+        assert_eq!(source_refusal(temp.path()), Code::MetaTooLarge);
+
+        let temp = tempfile::tempdir().unwrap();
+        write_source_tree(temp.path());
+        for index in 0..101 {
+            write_course(
+                &temp.path().join("courses"),
+                "labs",
+                &format!("lab-{index:03}"),
+                Some(&format!("lab-{index:03}")),
+                "Lab",
+            );
+        }
+        assert_eq!(source_refusal(temp.path()), Code::TooManyScenarios);
+    }
+
+    fn write_source_tree(root: &std::path::Path) {
+        fs::write(root.join("intar.yaml"), "version: 1\nscope: public\n").unwrap();
+        write_course(&root.join("courses"), "linux", "01-theory", None, "Unit");
+    }
+
+    fn source_refusal(root: &std::path::Path) -> Code {
+        compile_source_tree(root, REV, "amd64").unwrap_err().code
+    }
 
     #[test]
     fn compiles_markdown_courses_in_directory_order() {
@@ -1104,7 +1678,7 @@ mod tests {
             ]
         );
 
-        let archive = write_bundle_archive(&files).unwrap();
+        let archive = write_bundle_archive(&files, MAX_BUNDLE_TAR_BYTES).unwrap();
         assert_eq!(archive_paths(&archive), paths);
     }
 
@@ -1124,7 +1698,7 @@ mod tests {
         let long_lecture_path = format!("curriculum/{course_id}/{lecture_id}/lecture.md");
         assert!(long_lecture_path.len() > 100);
 
-        let archive = write_bundle_archive(&files).unwrap();
+        let archive = write_bundle_archive(&files, MAX_BUNDLE_TAR_BYTES).unwrap();
 
         let mut decoder = GzDecoder::new(archive.as_slice());
         let mut tar_bytes = Vec::new();
