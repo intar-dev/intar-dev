@@ -1,0 +1,156 @@
+name: Intar scenario publish
+
+# Reusable workflow for push-mode scenario source repositories. Callers pin it
+# by a protected scenario-publish-vN tag or by that tag's commit, and must
+# grant `permissions: { contents: read, id-token: write }`. The CLI argv used
+# here is frozen for every release the compiler descriptor can name.
+# CLI exits: 0 accepted (202), 3 superseded, 4 compiler_outdated, 75 transient.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# PR runs cancel only their own PR; a publish is never cancelled by a PR, and a
+# dispatch on another branch never replaces a pending default-branch publish.
+concurrency:
+  group: >-
+    ${{ github.event_name == 'pull_request'
+        && format('intar-pr-{0}', github.event.pull_request.number)
+        || format('intar-publish-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  INTAR_ORIGIN: https://intar.dev
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate the commit with the descriptor-pinned CLI
+        run: |
+          set -euo pipefail
+          # The descriptor answers 503 during an Intar deploy; wait it out.
+          descriptor="$(curl --fail --silent --show-error --retry 20 --retry-delay 60 \
+            "${INTAR_ORIGIN}/registry/v1/sources/compiler")"
+          cli_version="$(jq -r '.cli_version' <<<"${descriptor}")"
+          cli_sha256="$(jq -r '.sha256.linux_amd64' <<<"${descriptor}")"
+          if ! [[ "${cli_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${cli_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "The compiler descriptor is malformed: ${descriptor}" >&2
+            exit 1
+          fi
+          archive="${RUNNER_TEMP}/intar-image-cli_${cli_version}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "${archive}" \
+            "https://github.com/intar-dev/intar-dev/releases/download/image-cli%2Fv${cli_version}/${archive##*/}"
+          echo "${cli_sha256}  ${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/cli" "${RUNNER_TEMP}/source"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/cli"
+          git archive --format=tar "${GITHUB_SHA}" | tar -x -C "${RUNNER_TEMP}/source"
+          cd "${RUNNER_TEMP}/source"
+          "${RUNNER_TEMP}/cli/intar-image-cli" validate
+
+  publish:
+    name: Publish
+    needs: validate
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Upload the compiled bundle to Intar
+        run: |
+          set -euo pipefail
+          # Reads the descriptor, then downloads and verifies the CLI it names.
+          install_cli() {
+            local descriptor archive
+            descriptor="$(curl --fail --silent --show-error --retry 20 --retry-delay 60 \
+              "${INTAR_ORIGIN}/registry/v1/sources/compiler")"
+            cli_version="$(jq -r '.cli_version' <<<"${descriptor}")"
+            cli_sha256="$(jq -r '.sha256.linux_amd64' <<<"${descriptor}")"
+            digest="$(jq -r '.digest' <<<"${descriptor}")"
+            if ! [[ "${cli_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${cli_sha256}" =~ ^[0-9a-f]{64}$ && "${digest}" =~ ^p[0-9a-f]{8}$ ]]; then
+              echo "The compiler descriptor is malformed: ${descriptor}" >&2
+              exit 1
+            fi
+            archive="${RUNNER_TEMP}/intar-image-cli_${cli_version}_linux_amd64.tar.gz"
+            curl --fail --silent --show-error --location --retry 3 --output "${archive}" \
+              "https://github.com/intar-dev/intar-dev/releases/download/image-cli%2Fv${cli_version}/${archive##*/}"
+            echo "${cli_sha256}  ${archive}" | sha256sum --check --strict
+            rm -rf "${RUNNER_TEMP}/cli"
+            mkdir -p "${RUNNER_TEMP}/cli"
+            tar -xzf "${archive}" -C "${RUNNER_TEMP}/cli"
+          }
+
+          install_cli
+          mkdir -p "${RUNNER_TEMP}/source"
+          git archive --format=tar "${GITHUB_SHA}" | tar -x -C "${RUNNER_TEMP}/source"
+          cd "${RUNNER_TEMP}/source"
+          outdated=0
+          transient=0
+          while :; do
+            rev="git-${GITHUB_REPOSITORY_ID}-${GITHUB_SHA}-${digest}"
+            # A fresh token per attempt; the default audience fails Intar's check.
+            token="$(curl --fail --silent --show-error --retry 3 \
+              --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${INTAR_ORIGIN}" | jq -er '.value')"
+            echo "::add-mask::${token}"
+            status=0
+            "${RUNNER_TEMP}/cli/intar-image-cli" bundle \
+              --url "${INTAR_ORIGIN}/registry/v1/sources/bundles" \
+              --token "${token}" \
+              --rev "${rev}" \
+              --output "${RUNNER_TEMP}/bundle.tar.gz" || status=$?
+            case "${status}" in
+              0)
+                result="Accepted. Intar reports deploy progress on the commit's checks."
+                break
+                ;;
+              3)
+                result="Superseded: a newer commit is already published, so this one was skipped."
+                break
+                ;;
+              4)
+                outdated=$((outdated + 1))
+                if [ "${outdated}" -gt 3 ]; then
+                  echo "Intar still refuses the compiler after 3 descriptor re-reads." >&2
+                  exit 1
+                fi
+                install_cli
+                ;;
+              75)
+                transient=$((transient + 1))
+                if [ "${transient}" -gt 20 ]; then
+                  echo "Intar stayed unavailable for 20 minutes." >&2
+                  exit 1
+                fi
+                sleep 60
+                ;;
+              *)
+                exit "${status}"
+                ;;
+            esac
+          done
+          {
+            echo "### Intar scenario publish"
+            echo
+            echo "- Revision: \`${rev}\`"
+            echo "- Result: ${result}"
+            echo "- Checks: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}/checks"
+          } >> "${GITHUB_STEP_SUMMARY}"
