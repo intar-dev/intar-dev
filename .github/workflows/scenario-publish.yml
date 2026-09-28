@@ -23,11 +23,15 @@ concurrency:
 
 env:
   INTAR_ORIGIN: https://intar.dev
+  # The runner's system gitconfig enables LFS smudging, so without this
+  # `git archive` downloads LFS objects (or fails on a private repo) instead of
+  # emitting the pointers that the compiler rejects as lfs_unsupported.
+  GIT_LFS_SKIP_SMUDGE: "1"
 
 jobs:
   validate:
     name: Validate
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -63,7 +67,7 @@ jobs:
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
