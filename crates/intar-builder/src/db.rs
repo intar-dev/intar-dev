@@ -256,6 +256,23 @@ WHERE build_id = ?1
         Ok(changed > 0)
     }
 
+    /// Whether a local job that has not reached a terminal phase names this
+    /// bundle rev.
+    pub fn has_unfinished_build_for_rev(&self, rev: &str) -> Result<bool> {
+        self.conn
+            .query_row(
+                r#"
+SELECT EXISTS(
+  SELECT 1 FROM build_jobs
+  WHERE rev = ?1 AND phase NOT IN ('succeeded', 'built', 'failed')
+)
+"#,
+                params![rev],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("failed to look up unfinished builds of rev '{rev}'"))
+    }
+
     pub fn claim_next_queued_build(&self, now_ms: i64) -> Result<Option<BuildJobRow>> {
         let Some(build_id) = self
             .conn

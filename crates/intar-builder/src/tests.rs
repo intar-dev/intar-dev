@@ -1,12 +1,17 @@
 #![allow(clippy::unwrap_used)]
 
-use std::path::Path;
+use std::io::{Read as _, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use super::{
-    bridge, classify_publish_error, cleanup_reported_build_attempt_artifacts, config, db,
-    emit_build_report, ensure_preflight_report_ready, local_bundle_rev, log_upload_warning,
-    non_retryable_build_error, preflight, qemu_build_config_for_job, should_retry_build_error,
-    validate_job_config, validate_run_once_publish_target, validate_run_once_publish_token,
+    BUNDLE_CACHE_LOCK, bridge, classify_publish_error, cleanup_reported_build_attempt_artifacts,
+    config, db, emit_build_report, ensure_preflight_report_ready, fetch_verified_bundle,
+    local_bundle_rev, log_upload_warning, non_retryable_build_error, preflight,
+    qemu_build_config_for_job, should_retry_build_error, unpacked_bundle_root, validate_job_config,
+    validate_run_once_publish_target, validate_run_once_publish_token,
     verify_bundle_or_drop_cached_archive,
 };
 
@@ -68,6 +73,7 @@ async fn cleans_only_reported_build_attempt_artifacts_idempotently() {
     let mut cfg = config::BuilderConfig::default();
     cfg.builder.work_root = temporary.path().join("work");
     cfg.builder.cache_root = temporary.path().join("cache");
+    cfg.builder.state_db = temporary.path().join("builder.sqlite3");
 
     let build_id = "build-1";
     let build_work = cfg
@@ -89,22 +95,226 @@ async fn cleans_only_reported_build_attempt_artifacts_idempotently() {
         std::fs::write(path.join("artifact"), "data").unwrap();
     }
 
-    cleanup_reported_build_attempt_artifacts(&cfg, build_id).await;
+    cleanup_reported_build_attempt_artifacts(&cfg, build_id, "abc123").await;
 
     assert!(!build_work.parent().unwrap().exists());
     assert!(!build_output.parent().unwrap().exists());
     assert!(other_work.join("artifact").exists());
     assert!(other_output.join("artifact").exists());
 
-    cleanup_reported_build_attempt_artifacts(&cfg, build_id).await;
+    cleanup_reported_build_attempt_artifacts(&cfg, build_id, "abc123").await;
 
     assert!(other_work.join("artifact").exists());
     assert!(other_output.join("artifact").exists());
 
-    cleanup_reported_build_attempt_artifacts(&cfg, "../other-build").await;
+    cleanup_reported_build_attempt_artifacts(&cfg, "../other-build", "abc123").await;
 
     assert!(other_work.join("artifact").exists());
     assert!(other_output.join("artifact").exists());
+}
+
+/// A local bridge that serves one bundle archive and counts its downloads.
+fn serve_bundle(archive: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let downloads = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&downloads);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            counter.fetch_add(1, Ordering::SeqCst);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                archive.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&archive);
+        }
+    });
+    (base_url, downloads)
+}
+
+struct BundleCacheFixture {
+    _temporary: tempfile::TempDir,
+    cfg: config::BuilderConfig,
+    downloads: Arc<AtomicUsize>,
+    content_hash: String,
+}
+
+impl BundleCacheFixture {
+    const REV: &str = "abc123";
+
+    fn new() -> Self {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        crate::bundle::tests::write_bundle_fixture(&source);
+        let content_hash = crate::bundle::inspect_bundle_build_input(
+            &source,
+            "broken-nginx",
+            intar_contracts::catalog::ImageArchitecture::X86_64,
+            Self::REV,
+        )
+        .unwrap()
+        .build
+        .content_hash;
+        let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        archive.append_dir_all("", &source).unwrap();
+        let archive = archive.into_inner().unwrap().finish().unwrap();
+
+        let (base_url, downloads) = serve_bundle(archive);
+        let mut cfg = config::BuilderConfig::default();
+        cfg.bridge.base_url = base_url;
+        cfg.builder.work_root = temporary.path().join("work");
+        cfg.builder.cache_root = temporary.path().join("cache");
+        cfg.builder.state_db = temporary.path().join("builder.sqlite3");
+        Self {
+            _temporary: temporary,
+            cfg,
+            downloads,
+            content_hash,
+        }
+    }
+
+    fn build(&self, build_id: &str) -> intar_contracts::bridge::DesiredBuildV1 {
+        intar_contracts::bridge::DesiredBuildV1 {
+            build_id: build_id.to_string(),
+            scenario_id: "broken-nginx".to_string(),
+            arch: intar_contracts::catalog::ImageArchitecture::X86_64,
+            rev: Self::REV.to_string(),
+            content_hash: self.content_hash.clone(),
+            bundle_ref: format!("builds/bundles/{}.tar.gz", Self::REV),
+        }
+    }
+
+    fn set_phase(&self, build_id: &str, phase: &str) {
+        let db = db::BuilderDb::open(&self.cfg.builder.state_db).unwrap();
+        db.upsert_build_job(&self.build(build_id), phase, 1, None, 1000)
+            .unwrap();
+    }
+
+    async fn fetch(&self, build_id: &str) {
+        fetch_verified_bundle(&self.cfg, "token", &self.build(build_id))
+            .await
+            .unwrap();
+    }
+
+    fn paths(&self) -> [PathBuf; 2] {
+        [
+            self.cfg
+                .builder
+                .cache_root
+                .join("bundles")
+                .join(format!("{}.tar.gz", Self::REV)),
+            unpacked_bundle_root(&self.cfg.builder.cache_root, Self::REV),
+        ]
+    }
+
+    fn cached(&self) -> bool {
+        self.paths().iter().all(|path| path.exists())
+    }
+
+    fn evicted(&self) -> bool {
+        self.paths().iter().all(|path| !path.exists())
+    }
+
+    fn downloads(&self) -> usize {
+        self.downloads.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn evicts_a_revs_bundle_after_its_last_build() {
+    let fixture = BundleCacheFixture::new();
+    fixture.set_phase("build-a", "fetching_sources");
+    fixture.set_phase("build-b", "queued");
+    fixture.fetch("build-a").await;
+    assert!(fixture.cached());
+    assert_eq!(fixture.downloads(), 1);
+
+    fixture.set_phase("build-a", "succeeded");
+    cleanup_reported_build_attempt_artifacts(&fixture.cfg, "build-a", BundleCacheFixture::REV)
+        .await;
+    assert!(fixture.cached(), "a queued build still names the rev");
+
+    // A tree left aside by an interrupted eviction does not block the next.
+    let interrupted = fixture.paths()[1].with_file_name(".abc123.evicted");
+    std::fs::create_dir_all(&interrupted).unwrap();
+    std::fs::write(interrupted.join("partial"), "data").unwrap();
+    fixture.set_phase("build-b", "failed");
+    cleanup_reported_build_attempt_artifacts(&fixture.cfg, "build-b", BundleCacheFixture::REV)
+        .await;
+    assert!(fixture.evicted());
+    assert!(!interrupted.exists());
+
+    fixture.set_phase("build-c", "fetching_sources");
+    fixture.fetch("build-c").await;
+    assert!(fixture.cached());
+    assert_eq!(
+        fixture.downloads(),
+        2,
+        "a later build downloads the rev again"
+    );
+}
+
+#[tokio::test]
+async fn eviction_rechecks_builds_under_the_bundle_cache_lock() {
+    let fixture = Arc::new(BundleCacheFixture::new());
+    fixture.set_phase("build-a", "fetching_sources");
+    fixture.fetch("build-a").await;
+    fixture.set_phase("build-a", "succeeded");
+
+    let fetching = BUNDLE_CACHE_LOCK.lock().await;
+    let evicting = Arc::clone(&fixture);
+    let mut eviction = tokio::spawn(async move {
+        cleanup_reported_build_attempt_artifacts(&evicting.cfg, "build-a", BundleCacheFixture::REV)
+            .await;
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut eviction)
+            .await
+            .is_err(),
+        "eviction must wait for the bundle cache lock"
+    );
+    fixture.set_phase("build-b", "fetching_sources");
+    drop(fetching);
+    eviction.await.unwrap();
+
+    assert!(
+        fixture.cached(),
+        "a build inserted while eviction waited keeps the bundle"
+    );
+}
+
+#[tokio::test]
+async fn a_build_fetching_during_an_eviction_downloads_the_bundle_again() {
+    let fixture = Arc::new(BundleCacheFixture::new());
+    fixture.set_phase("build-a", "fetching_sources");
+    fixture.fetch("build-a").await;
+    fixture.set_phase("build-a", "succeeded");
+
+    // An eviction holds the lock and has found no unfinished build of the rev.
+    let evicting = BUNDLE_CACHE_LOCK.lock().await;
+    fixture.set_phase("build-b", "fetching_sources");
+    let fetching = Arc::clone(&fixture);
+    let mut fetch = tokio::spawn(async move { fetching.fetch("build-b").await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut fetch)
+            .await
+            .is_err(),
+        "a build must not use the bundle while an eviction runs"
+    );
+    std::fs::remove_file(&fixture.paths()[0]).unwrap();
+    std::fs::remove_dir_all(&fixture.paths()[1]).unwrap();
+    drop(evicting);
+    fetch.await.unwrap();
+
+    assert!(fixture.cached());
+    assert_eq!(fixture.downloads(), 2);
 }
 
 #[tokio::test]

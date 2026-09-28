@@ -726,7 +726,7 @@ fn validate_safe_path_component(value: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::io::Write;
@@ -991,7 +991,7 @@ mod tests {
         }
     }
 
-    fn write_bundle_fixture(root: &Path) {
+    pub(crate) fn write_bundle_fixture(root: &Path) {
         std::fs::create_dir_all(root.join("scenarios/broken-nginx")).unwrap();
         std::fs::create_dir_all(root.join("curriculum")).unwrap();
         std::fs::write(
