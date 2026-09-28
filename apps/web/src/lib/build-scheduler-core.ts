@@ -14,6 +14,11 @@ export const BUILDER_BUILD_SLOTS = 2;
 /**
  * Phases that hold a build worker. Publishing and log upload run on the
  * builder's separate publication workers, so they free a slot.
+ *
+ * ponytail: a build in the builder's retry backoff also reports `queued` and
+ * holds a slot while no worker runs it, so two backing-off builds idle a
+ * builder for up to the backoff. Reports carry no `next_attempt_at`; add it to
+ * BuildReportV1 and skip backing-off rows if failure-path throughput matters.
  */
 export const PRE_PUBLICATION_BUILD_PHASES = [
   "queued",

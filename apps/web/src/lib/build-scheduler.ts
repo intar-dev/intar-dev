@@ -441,6 +441,10 @@ export async function assignQueuedImageBuilds(
       )
       .returning({ id: imageBuilds.id });
     if (!claimed.length) {
+      // A concurrent pass took the row or filled this builder. Count the slot
+      // as taken so a stale snapshot costs at most two misses per builder;
+      // the next pass reads the real count.
+      builder.prePublicationBuildCount += 1;
       continue;
     }
 
@@ -739,7 +743,9 @@ export async function recordHostBuildReports(
  * Round-robin across scopes: a row ranks by its scope's in-flight builds plus
  * its place in the scope's own queue, and ties go to the older row. A refill
  * frees one slot per pass, so the in-flight term is what makes single-slot
- * refills alternate between scopes.
+ * refills alternate between scopes. Both terms count per arch, since each
+ * arch has its own builders, so a backlog one arch cannot take does not push
+ * the scope back on the other.
  */
 async function loadQueuedBuildRows(db: DrizzleD1Database) {
   return db
@@ -755,7 +761,7 @@ async function loadQueuedBuildRows(db: DrizzleD1Database) {
     .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
     .where(and(eq(imageBuilds.status, "queued"), isNull(imageBuilds.hostId)))
     .orderBy(
-      sql`(SELECT count(*) FROM image_builds AS in_flight WHERE in_flight.organization_id IS ${imageBuilds.organizationId} AND in_flight.status IN ('assigned', 'building')) + row_number() OVER (PARTITION BY ${imageBuilds.organizationId} ORDER BY ${imageBuilds.createdAt}, ${imageBuilds.id})`,
+      sql`(SELECT count(*) FROM image_builds AS in_flight WHERE in_flight.organization_id IS ${imageBuilds.organizationId} AND in_flight.arch = ${imageBuilds.arch} AND in_flight.status IN ('assigned', 'building')) + row_number() OVER (PARTITION BY ${imageBuilds.organizationId}, ${imageBuilds.arch} ORDER BY ${imageBuilds.createdAt}, ${imageBuilds.id})`,
       imageBuilds.createdAt,
       imageBuilds.id,
     );
