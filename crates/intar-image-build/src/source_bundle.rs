@@ -1051,7 +1051,10 @@ mod tests {
     fn compile_bundle_output_is_byte_stable() {
         // Captured with intar-image-cli 0.8.2 over the release smoke fixture.
         // Every bundle the registry receives changes with this output, so a
-        // mismatch must be a deliberate format change.
+        // mismatch must be a deliberate format change. After a deliberate
+        // BUILD_FORMAT_VERSION or GUEST_BOOTSTRAP_ABI bump, replace
+        // fixtures/release-smoke/meta.json with the assertion's left value
+        // (unescaped from its Debug form); the archive sha256 must still match.
         let fixture =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/release-smoke");
         let compiled = compile_bundle(&CompileBundleInput {
