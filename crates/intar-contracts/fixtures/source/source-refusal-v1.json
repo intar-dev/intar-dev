@@ -1,0 +1,4 @@
+{
+  "error": "The bundle was compiled for an outdated platform compiler.",
+  "code": "compiler_outdated"
+}

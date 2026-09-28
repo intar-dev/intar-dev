@@ -2,6 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
+use crate::source::SourceCompileErrorCode;
 
 pub const BRIDGE_PROTOCOL_VERSION: u16 = 8;
 pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 6;
@@ -125,6 +126,8 @@ pub struct HostDesiredStateV2 {
     pub cached_guest_tools: Vec<DesiredGuestToolsV1>,
     pub vms: Vec<DesiredVmV2>,
     pub builds: Vec<DesiredBuildV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_compiles: Vec<DesiredSourceCompileV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -143,6 +146,40 @@ pub struct DesiredBuildV1 {
     pub rev: String,
     pub content_hash: String,
     pub bundle_ref: String,
+}
+
+/// One repository snapshot a builder compiles. It carries no secret and no
+/// scope: the Worker takes both from the compile row.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesiredSourceCompileV1 {
+    pub compile_id: String,
+    pub attempt: u32,
+    pub snapshot_ref: String,
+    pub rev: String,
+    pub validate_only: bool,
+    pub arch: ImageArchitecture,
+}
+
+/// The builder's result body when a source compile fails.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceCompileFailureV1 {
+    pub compile_id: String,
+    pub attempt: u32,
+    pub errors: Vec<SourceCompileErrorV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceCompileErrorV1 {
+    /// Repository-relative path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub code: SourceCompileErrorCode,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -264,6 +301,10 @@ pub struct HostCapabilitiesV2 {
     /// rollout.
     #[serde(default)]
     pub supports_run_cli_completion_v1: bool,
+    /// Platform compile digest this host compiles sources for. `None`
+    /// means the host takes no source compiles and no `git-` builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_compile_platform: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -586,6 +627,47 @@ mod tests {
                 "protocol_version": 8,
                 "host_id": "host-1",
                 "reason": "reconnect",
+            })
+        );
+    }
+
+    #[test]
+    fn source_compile_failure_omits_unknown_locations() {
+        let failure = SourceCompileFailureV1 {
+            compile_id: "compile-1".to_owned(),
+            attempt: 2,
+            errors: vec![
+                SourceCompileErrorV1 {
+                    path: None,
+                    line: None,
+                    code: SourceCompileErrorCode::ManifestMissing,
+                    message: "intar.yaml is missing".to_owned(),
+                },
+                SourceCompileErrorV1 {
+                    path: Some("courses/k8s/lecture.md".to_owned()),
+                    line: Some(3),
+                    code: SourceCompileErrorCode::CompileFailed,
+                    message: "bad frontmatter".to_owned(),
+                },
+            ],
+        };
+
+        let actual = serde_json::to_value(failure).expect("failure should serialize");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "compile_id": "compile-1",
+                "attempt": 2,
+                "errors": [
+                    { "code": "manifest_missing", "message": "intar.yaml is missing" },
+                    {
+                        "path": "courses/k8s/lecture.md",
+                        "line": 3,
+                        "code": "compile_failed",
+                        "message": "bad frontmatter",
+                    },
+                ],
             })
         );
     }

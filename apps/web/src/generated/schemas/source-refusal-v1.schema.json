@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceRefusalV1",
+  "description": "A source route refusal. The Worker's `AppErrorResponseBody` shape, with a\nmandatory code.",
+  "type": "object",
+  "properties": {
+    "code": {
+      "$ref": "#/$defs/SourceRefusalCode"
+    },
+    "error": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "error",
+    "code"
+  ],
+  "$defs": {
+    "SourceRefusalCode": {
+      "type": "string",
+      "enum": [
+        "compiler_outdated",
+        "superseded",
+        "fenced",
+        "binding_inactive",
+        "issuer_unsupported"
+      ]
+    }
+  }
+}

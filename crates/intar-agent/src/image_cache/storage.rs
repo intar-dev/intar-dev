@@ -348,6 +348,7 @@ mod tests {
                 desired_vm(DesiredVmPhase::Absent, &absent_sha256),
             ],
             builds: Vec::new(),
+            source_compiles: Vec::new(),
         };
         let mut protected = ProtectedCacheEntries::default();
         protect_desired_cache_entries(&mut protected, &desired);

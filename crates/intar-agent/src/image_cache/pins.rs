@@ -162,6 +162,7 @@ mod tests {
                 })
                 .collect(),
             builds: Vec::new(),
+            source_compiles: Vec::new(),
         }
     }
 

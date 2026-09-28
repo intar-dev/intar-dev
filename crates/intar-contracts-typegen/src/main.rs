@@ -6,8 +6,9 @@ use anyhow::{Context as _, Result};
 use intar_contracts::{
     bridge::{
         BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV8, BuildReportV1,
-        DesiredBuildV1, HOST_DESIRED_STATE_SCHEMA_VERSION, HOST_STATE_REPORT_SCHEMA_VERSION,
-        HostDesiredStateV2, HostStateReportV2, VM_REPORT_SCHEMA_VERSION, VmReportV2,
+        DesiredBuildV1, DesiredSourceCompileV1, HOST_DESIRED_STATE_SCHEMA_VERSION,
+        HOST_STATE_REPORT_SCHEMA_VERSION, HostDesiredStateV2, HostStateReportV2,
+        VM_REPORT_SCHEMA_VERSION, VmReportV2,
     },
     catalog::{CourseCatalogSnapshotV2, ScenarioManifestV5},
     guest::{
@@ -22,6 +23,10 @@ use intar_contracts::{
         RUN_CLI_MAX_PROBE_ID_BYTES, RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES,
         RUN_CLI_MAX_RETRY_SCOPE_BYTES, RUN_CLI_PROTOCOL_VERSION, RUN_CLI_SCHEMA_VERSION,
         RunCliProbeCheckEventV1, RunCliProbeCheckRequestV1, RunCliRequestV1, RunCliResponseV1,
+    },
+    source::{
+        AGENT_SOURCES_PATH, SOURCE_BUNDLE_FIELD, SOURCE_BUNDLES_PATH, SOURCE_COMPILER_PATH,
+        SOURCE_COMPILER_VERSION, SOURCE_META_FIELD, SourceRefusalV1, platform_compile_digest,
     },
     stargate::{
         ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
@@ -41,6 +46,7 @@ fn main() -> Result<()> {
     fs::create_dir_all(fixture_dir.join("catalog")).context("create catalog fixture directory")?;
     fs::create_dir_all(fixture_dir.join("bridge")).context("create bridge fixture directory")?;
     fs::create_dir_all(fixture_dir.join("run-cli")).context("create run CLI fixture directory")?;
+    fs::create_dir_all(fixture_dir.join("source")).context("create source fixture directory")?;
 
     for obsolete in [
         "schemas/catalog-scenario-manifest-v4.schema.json",
@@ -125,6 +131,14 @@ fn main() -> Result<()> {
         &schema_for!(DesiredBuildV1),
     )?;
     write_schema(
+        &schema_dir.join("bridge-desired-source-compile-v1.schema.json"),
+        &schema_for!(DesiredSourceCompileV1),
+    )?;
+    write_schema(
+        &schema_dir.join("source-refusal-v1.schema.json"),
+        &schema_for!(SourceRefusalV1),
+    )?;
+    write_schema(
         &schema_dir.join("bridge-build-report-v1.schema.json"),
         &schema_for!(BuildReportV1),
     )?;
@@ -204,6 +218,14 @@ fn main() -> Result<()> {
         &fixture_dir.join("bridge/desired-build-v1.json"),
     )?;
     copy_fixture(
+        "crates/intar-contracts/fixtures/bridge/desired-source-compile-v1.json",
+        &fixture_dir.join("bridge/desired-source-compile-v1.json"),
+    )?;
+    copy_fixture(
+        "crates/intar-contracts/fixtures/source/source-refusal-v1.json",
+        &fixture_dir.join("source/source-refusal-v1.json"),
+    )?;
+    copy_fixture(
         "crates/intar-contracts/fixtures/bridge/build-report-v1.json",
         &fixture_dir.join("bridge/build-report-v1.json"),
     )?;
@@ -231,8 +253,25 @@ fn main() -> Result<()> {
         "crates/intar-contracts/fixtures/run-cli/probe-check-complete-v1.json",
         &fixture_dir.join("run-cli/probe-check-complete-v1.json"),
     )?;
+    write_compile_digest_fixture(&fixture_dir.join("source/compile-digest.json"))?;
 
     Ok(())
+}
+
+/// A fixed vector for the platform compile digest formula, so the Worker and
+/// the compilers can each assert that they derive the same value.
+fn write_compile_digest_fixture(path: &Path) -> Result<()> {
+    let format_version = "intar-image-build-v17";
+    let compiler_version = "intar-source-compiler-v1";
+    let base_images_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let fixture = serde_json::json!({
+        "format_version": format_version,
+        "compiler_version": compiler_version,
+        "base_images_sha256": base_images_sha256,
+        "digest": platform_compile_digest(format_version, compiler_version, base_images_sha256),
+    });
+    let body = serde_json::to_string_pretty(&fixture).context("serialize compile digest")?;
+    fs::write(path, format!("{body}\n")).with_context(|| format!("write {}", path.display()))
 }
 
 fn write_schema(path: &Path, schema: &schemars::Schema) -> Result<()> {
@@ -267,6 +306,12 @@ export const HOST_DESIRED_STATE_SCHEMA_VERSION = {};
 export const HOST_STATE_REPORT_SCHEMA_VERSION = {};
 export const BUILD_REPORT_SCHEMA_VERSION = {};
 export const VM_REPORT_SCHEMA_VERSION = {};
+export const SOURCE_COMPILER_VERSION = "{}";
+export const SOURCE_BUNDLES_PATH = "{}";
+export const SOURCE_COMPILER_PATH = "{}";
+export const AGENT_SOURCES_PATH = "{}";
+export const SOURCE_META_FIELD = "{}";
+export const SOURCE_BUNDLE_FIELD = "{}";
 
 export const runtimeEnvKeys = {{
   sshAuthorizedKeysB64: "{}",
@@ -292,6 +337,12 @@ export const runtimeEnvKeys = {{
         HOST_STATE_REPORT_SCHEMA_VERSION,
         BUILD_REPORT_SCHEMA_VERSION,
         VM_REPORT_SCHEMA_VERSION,
+        SOURCE_COMPILER_VERSION,
+        SOURCE_BUNDLES_PATH,
+        SOURCE_COMPILER_PATH,
+        AGENT_SOURCES_PATH,
+        SOURCE_META_FIELD,
+        SOURCE_BUNDLE_FIELD,
         ENV_SSH_AUTHORIZED_KEYS_B64,
         ENV_KINO_VSOCK_CID,
         ENV_KINO_VSOCK_PORT,
@@ -557,12 +608,49 @@ export interface ImageChunkV1 {
   encoded_size_bytes: number;
   encoded_sha256: string;
 }
+
+/** `meta.source` of a bundle compiled from an `intar.yaml` repository. */
+export interface BundleSourceV1 {
+  scope: string;
+  courses_root: string;
+  compiler_version: string;
+}
+
+export type SourceRefusalCode =
+  | "compiler_outdated"
+  | "superseded"
+  | "fenced"
+  | "binding_inactive"
+  | "issuer_unsupported";
+
+/** A source route refusal: `AppErrorResponseBody` with a mandatory code. */
+export interface SourceRefusalV1 {
+  error: string;
+  code: SourceRefusalCode;
+}
+
+export type SourceCompileErrorCode =
+  | "manifest_missing"
+  | "manifest_invalid"
+  | "courses_root_missing"
+  | "submodule_unsupported"
+  | "lfs_unsupported"
+  | "bundle_too_large"
+  | "meta_too_large"
+  | "too_many_scenarios"
+  | "compile_failed";
 "#
 }
 
 fn bridge_ts() -> &'static str {
     r#"// Generated by `cargo run -p intar-contracts-typegen`.
-import type { ImageArchitecture, ImageKey, Mib, ProbePhase } from "./catalog";
+import type {
+  ImageArchitecture,
+  ImageKey,
+  Mib,
+  ProbePhase,
+  SourceCompileErrorCode,
+} from "./catalog";
 
 export type SyncRequestReason =
   | "connect"
@@ -650,6 +738,7 @@ export interface HostDesiredStateV2 {
   cached_guest_tools?: DesiredGuestToolsV1[];
   vms: DesiredVmV2[];
   builds: DesiredBuildV1[];
+  source_compiles?: DesiredSourceCompileV1[];
 }
 
 export interface DesiredCachedImageV1 {
@@ -664,6 +753,31 @@ export interface DesiredBuildV1 {
   rev: string;
   content_hash: string;
   bundle_ref: string;
+}
+
+/** One repository snapshot a builder compiles. No secret and no scope. */
+export interface DesiredSourceCompileV1 {
+  compile_id: string;
+  attempt: number;
+  snapshot_ref: string;
+  rev: string;
+  validate_only: boolean;
+  arch: ImageArchitecture;
+}
+
+/** The builder's result body when a source compile fails. */
+export interface SourceCompileFailureV1 {
+  compile_id: string;
+  attempt: number;
+  errors: SourceCompileErrorV1[];
+}
+
+export interface SourceCompileErrorV1 {
+  /** Repository-relative path. */
+  path?: string;
+  line?: number;
+  code: SourceCompileErrorCode;
+  message: string;
 }
 
 export type DesiredVmPhase = "running" | "absent";
@@ -746,6 +860,7 @@ export interface HostCapabilitiesV2 {
   supports_jailer_v3?: boolean;
   supports_run_cli_v1?: boolean;
   supports_run_cli_completion_v1?: boolean;
+  source_compile_platform?: string;
 }
 
 export interface VmResourceStateV3 {
@@ -1089,7 +1204,47 @@ fn label_to_string(label: [u8; 11]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::stargate_ts;
+    use super::{bridge_ts, catalog_ts, stargate_ts};
+    use intar_contracts::source::{SourceCompileErrorCode, SourceRefusalCode};
+    use schemars::schema_for;
+
+    /// The hand-written source code unions must list exactly the Rust enum
+    /// values, or a CLI or builder could send a code the Worker cannot name.
+    #[test]
+    fn emitted_source_code_unions_match_the_rust_enums() {
+        let ts = catalog_ts();
+        for (name, schema) in [
+            ("SourceRefusalCode", schema_for!(SourceRefusalCode)),
+            (
+                "SourceCompileErrorCode",
+                schema_for!(SourceCompileErrorCode),
+            ),
+        ] {
+            let header = format!("export type {name} =");
+            let start = ts.find(&header).expect("the emitter kept this union");
+            let rest = &ts[start + header.len()..];
+            let union = &rest[..rest.find(';').expect("the union ends")];
+            let mut emitted: Vec<&str> = union
+                .split('|')
+                .map(|value| value.trim().trim_matches('"'))
+                .filter(|value| !value.is_empty())
+                .collect();
+            let mut expected: Vec<&str> = schema
+                .get("enum")
+                .and_then(|values| values.as_array())
+                .expect("a unit enum schema")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect();
+            emitted.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(emitted, expected, "{name} drifted from the Rust enum");
+        }
+
+        let bridge = bridge_ts();
+        assert!(bridge.contains("source_compiles?: DesiredSourceCompileV1[];"));
+        assert!(bridge.contains("source_compile_platform?: string;"));
+    }
 
     /// One emitted interface block, so a check names the type it means. The
     /// workspace app request legitimately keeps `target_username`, and the

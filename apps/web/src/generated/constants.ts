@@ -9,6 +9,12 @@ export const HOST_DESIRED_STATE_SCHEMA_VERSION = 6;
 export const HOST_STATE_REPORT_SCHEMA_VERSION = 7;
 export const BUILD_REPORT_SCHEMA_VERSION = 1;
 export const VM_REPORT_SCHEMA_VERSION = 6;
+export const SOURCE_COMPILER_VERSION = "intar-source-compiler-v1";
+export const SOURCE_BUNDLES_PATH = "/registry/v1/sources/bundles";
+export const SOURCE_COMPILER_PATH = "/registry/v1/sources/compiler";
+export const AGENT_SOURCES_PATH = "/agent/registry/sources";
+export const SOURCE_META_FIELD = "meta";
+export const SOURCE_BUNDLE_FIELD = "bundle";
 
 export const runtimeEnvKeys = {
   sshAuthorizedKeysB64: "INTAR_SSH_AUTHORIZED_KEYS_B64",

@@ -107,6 +107,30 @@ describe("generated contract schemas", () => {
     )).toBe(true);
   });
 
+  it("validates the bridge desired source compile fixture", () => {
+    expect(validateFixture(
+      "schemas/bridge-desired-source-compile-v1.schema.json",
+      "fixtures/bridge/desired-source-compile-v1.json",
+    )).toBe(true);
+  });
+
+  it("validates the source refusal fixture", () => {
+    expect(validateFixture(
+      "schemas/source-refusal-v1.schema.json",
+      "fixtures/source/source-refusal-v1.json",
+    )).toBe(true);
+  });
+
+  it("rejects a source refusal without a known code", () => {
+    const fixture = readJson(
+      "fixtures/source/source-refusal-v1.json",
+    ) as Record<string, unknown>;
+    expect(validateValue(
+      "schemas/source-refusal-v1.schema.json",
+      { ...fixture, code: "internal_error" },
+    )).toBe(false);
+  });
+
   it("validates the bridge build report fixture", () => {
     expect(validateFixture(
       "schemas/bridge-build-report-v1.schema.json",

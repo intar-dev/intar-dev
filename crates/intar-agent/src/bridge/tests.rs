@@ -56,6 +56,7 @@ fn empty_desired_state(version: u64) -> HostDesiredStateV2 {
         cached_guest_tools: Vec::new(),
         vms: Vec::new(),
         builds: Vec::new(),
+        source_compiles: Vec::new(),
     }
 }
 
@@ -523,6 +524,7 @@ fn desired_peer_aliases_map_runtime_names_to_manifest_vm_names() {
         cached_guest_tools: Vec::new(),
         vms: vec![web.clone(), db.clone(), absent, other_run],
         builds: Vec::new(),
+        source_compiles: Vec::new(),
     };
 
     assert_eq!(
@@ -573,6 +575,7 @@ async fn cached_image_state_requires_verified_launch_descriptor() {
         cached_guest_tools: Vec::new(),
         vms: Vec::new(),
         builds: Vec::new(),
+        source_compiles: Vec::new(),
     };
 
     let unverified = cached_image_states_with_cache_root(&desired, 456, Some(temp.path()), false);

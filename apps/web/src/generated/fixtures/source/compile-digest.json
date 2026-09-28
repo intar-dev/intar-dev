@@ -1,0 +1,6 @@
+{
+  "base_images_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "compiler_version": "intar-source-compiler-v1",
+  "digest": "pe845f1ac",
+  "format_version": "intar-image-build-v17"
+}

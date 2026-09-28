@@ -1,9 +1,10 @@
 use intar_contracts::{
     bridge::{
-        BridgeMessageV8, BuildReportV1, DesiredBuildV1, HostDesiredStateV2, HostStateReportV2,
-        VmReportV2,
+        BridgeMessageV8, BuildReportV1, DesiredBuildV1, DesiredSourceCompileV1, HostDesiredStateV2,
+        HostStateReportV2, VmReportV2,
     },
     catalog::{CourseCatalogSnapshotV2, ScenarioManifestV5},
+    source::SourceRefusalV1,
     stargate::{
         ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
         IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse,
@@ -115,6 +116,26 @@ fn old_host_reports_default_run_cli_completion_to_false() {
     assert!(!report.capabilities.supports_run_cli_completion_v1);
 }
 
+/// Hosts and desired states from before source compiles keep their exact
+/// shape: the new fields default on read and stay absent on write.
+#[test]
+fn documents_without_source_fields_keep_their_shape() {
+    let report: HostStateReportV2 =
+        serde_json::from_str(include_str!("../fixtures/bridge/host-state-report-v2.json"))
+            .expect("report fixture");
+    assert_eq!(report.capabilities.source_compile_platform, None);
+    let capabilities = serde_json::to_value(&report.capabilities).expect("capabilities");
+    assert!(capabilities.get("source_compile_platform").is_none());
+
+    let desired: HostDesiredStateV2 = serde_json::from_str(include_str!(
+        "../fixtures/bridge/host-desired-state-v2.json"
+    ))
+    .expect("desired state fixture");
+    assert!(desired.source_compiles.is_empty());
+    let desired = serde_json::to_value(&desired).expect("desired state");
+    assert!(desired.get("source_compiles").is_none());
+}
+
 #[test]
 fn bridge_vm_report_fixture_round_trips() {
     assert_round_trip::<VmReportV2>(include_str!("../fixtures/bridge/vm-report-v2.json"));
@@ -123,6 +144,18 @@ fn bridge_vm_report_fixture_round_trips() {
 #[test]
 fn bridge_desired_build_fixture_round_trips() {
     assert_round_trip::<DesiredBuildV1>(include_str!("../fixtures/bridge/desired-build-v1.json"));
+}
+
+#[test]
+fn bridge_desired_source_compile_fixture_round_trips() {
+    assert_round_trip::<DesiredSourceCompileV1>(include_str!(
+        "../fixtures/bridge/desired-source-compile-v1.json"
+    ));
+}
+
+#[test]
+fn source_refusal_fixture_round_trips() {
+    assert_round_trip::<SourceRefusalV1>(include_str!("../fixtures/source/source-refusal-v1.json"));
 }
 
 #[test]
