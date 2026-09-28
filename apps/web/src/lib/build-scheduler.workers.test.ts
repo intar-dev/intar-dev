@@ -3,7 +3,7 @@
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { and, eq, inArray } from "drizzle-orm";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agentHosts,
   hostActualState,
@@ -673,12 +673,19 @@ describe("build scheduler fairness", () => {
     ]);
 
     // Both passes read the same snapshot: one pre-publication build.
-    const race = interleaveBefore(/^update "image_builds" set "host_id"/iu, () =>
+    const claimSql = /^update "image_builds" set "host_id"/iu;
+    const race = interleaveBefore(claimSql, () =>
       assignQueuedImageBuilds(db, FAIR_NOW),
     );
     try {
       await assignQueuedImageBuilds(db, FAIR_NOW);
       expect(race.fired()).toBe(true);
+      // One claim per pass: the outer pass's miss marks the builder full
+      // instead of retrying it for every queued row.
+      const claims = vi
+        .mocked(env.DB.prepare)
+        .mock.calls.filter(([query]) => claimSql.test(query));
+      expect(claims).toHaveLength(2);
     } finally {
       race.restore();
     }
@@ -693,6 +700,34 @@ describe("build scheduler fairness", () => {
         ),
       );
     expect(held).toHaveLength(2);
+  });
+
+  it("ranks a scope per arch so an unassignable backlog does not hold it back", async () => {
+    const db = drizzle(env.DB);
+    await seedConnectedBuilder(db, "builder-1");
+    await seedConnectedBuilder(db, "builder-arm", undefined, "aarch64");
+    await db.insert(imageBuilds).values([
+      // Scope A fills the aarch64 builder and queues more aarch64 work behind
+      // it, which the x86_64 builder cannot take.
+      ...[1, 2].map((n) =>
+        scheduledBuild(`a-arm-running-${n}`, {
+          organizationId: "org-a",
+          arch: "aarch64",
+          status: "building",
+          phase: "building",
+          hostId: "builder-arm",
+        }),
+      ),
+      scheduledBuild("a-arm-queued", { organizationId: "org-a", arch: "aarch64", createdAt: FAIR_NOW - 40 }),
+      scheduledBuild("public-1", { createdAt: FAIR_NOW - 30 }),
+      scheduledBuild("public-2", { createdAt: FAIR_NOW - 20 }),
+      scheduledBuild("a-x86", { organizationId: "org-a", createdAt: FAIR_NOW - 10 }),
+    ]);
+
+    await expect(assignQueuedImageBuilds(db, FAIR_NOW)).resolves.toEqual([
+      { buildId: "public-1", hostId: "builder-1" },
+      { buildId: "a-x86", hostId: "builder-1" },
+    ]);
   });
 
   it("assigns git- builds only to builders on the Worker's compile digest", async () => {
@@ -758,6 +793,7 @@ async function seedConnectedBuilder(
   db: SchedulerDb,
   hostId: string,
   sourceCompilePlatform?: string,
+  arch: HostStateReportV2["capabilities"]["arch"] = "x86_64",
 ): Promise<void> {
   await db.insert(agentHosts).values({
     id: hostId,
@@ -781,6 +817,7 @@ async function seedConnectedBuilder(
     vms: [],
     builds: [],
   } as HostStateReportV2;
+  report.capabilities.arch = arch;
   if (sourceCompilePlatform) {
     report.capabilities.source_compile_platform = sourceCompilePlatform;
   }
@@ -798,6 +835,7 @@ function scheduledBuild(
   id: string,
   input: {
     organizationId?: string | null;
+    arch?: "x86_64" | "aarch64";
     rev?: string;
     status?: "queued" | "assigned" | "building" | "stale";
     phase?: BuildReportV1["phase"];
@@ -812,7 +850,7 @@ function scheduledBuild(
     id,
     organizationId,
     scenarioId: id,
-    arch: "x86_64" as const,
+    arch: input.arch ?? ("x86_64" as const),
     rev: input.rev ?? `bundle-${organizationId ?? "public"}`,
     contentHash: "a".repeat(64),
     hostId: input.hostId ?? null,
