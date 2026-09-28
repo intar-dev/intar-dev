@@ -264,11 +264,18 @@ export function desiredVmFromRunVm(input: {
   };
 }
 
+// `source_compiles` is present only while non-empty, so a document without
+// compiles normalizes, compares and stores exactly as it did before them.
 function normalizeDesiredState(
   document: HostDesiredStateV2,
 ): HostDesiredStateV2 {
+  const { source_compiles: compiles, ...rest } = document;
+  const sourceCompiles = uniqueLastBy(
+    (compiles ?? []).map((compile) => ({ ...compile })),
+    (compile) => compile.compile_id,
+  ).sort((left, right) => left.compile_id.localeCompare(right.compile_id));
   return {
-    ...document,
+    ...rest,
     cached_images: uniqueLastBy(
       document.cached_images.map(cloneDesiredCachedImage),
       cachedImageIdentity,
@@ -293,6 +300,7 @@ function normalizeDesiredState(
     ).sort((left, right) =>
       desiredBuildIdentity(left).localeCompare(desiredBuildIdentity(right)),
     ),
+    ...(sourceCompiles.length ? { source_compiles: sourceCompiles } : {}),
   };
 }
 
@@ -307,6 +315,9 @@ function comparableDesiredStatePayload(document: HostDesiredStateV2): string {
     cached_guest_tools: normalized.cached_guest_tools,
     vms: normalized.vms,
     builds: normalized.builds,
+    ...(normalized.source_compiles
+      ? { source_compiles: normalized.source_compiles }
+      : {}),
   });
 }
 
@@ -319,6 +330,13 @@ function cloneDesiredState(document: HostDesiredStateV2): HostDesiredStateV2 {
     })),
     vms: document.vms.map(cloneDesiredVm),
     builds: document.builds.map(cloneDesiredBuild),
+    ...(document.source_compiles
+      ? {
+          source_compiles: document.source_compiles.map((compile) => ({
+            ...compile,
+          })),
+        }
+      : {}),
   };
 }
 

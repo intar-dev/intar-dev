@@ -6,12 +6,15 @@ import { drizzle } from "drizzle-orm/d1";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  agentHosts,
+  hostDesiredState,
   imageBuilds,
   member,
   organization,
   scenarioSourceCommits,
   scenarioSources,
 } from "@/db/schema";
+import { reconcileHostSourceCompiles } from "@/lib/build-scheduler";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import {
   BIND_REFUSAL_MESSAGE,
@@ -358,9 +361,12 @@ describe("scenario source changes", () => {
     expect(await binding()).toMatchObject({ pauseReason: "binder_lost_admin" });
   });
 
-  it("supersedes fetching and compiling rows on a mode change", async () => {
+  it("supersedes fetching and compiling rows on a mode change and ends the compile", async () => {
     await insertBinding();
     const db = drizzle(env.DB);
+    await db.insert(agentHosts).values({
+      id: "builder-1", userId: OWNER, name: "builder-1", role: "builder", scope: "platform",
+    });
     await db.insert(scenarioSourceCommits).values(
       (["fetching", "compiling", "building", "live"] as const).map((state) => ({
         id: state,
@@ -370,9 +376,18 @@ describe("scenario source changes", () => {
         rev: `git-9-${state}`,
         via: "pull" as const,
         state,
+        ...(state === "compiling" ? { compileHostId: "builder-1" } : {}),
       })),
     );
+    await reconcileHostSourceCompiles(db, "builder-1", Date.now());
+    const compiles = async () =>
+      (await db.select().from(hostDesiredState))[0]?.docJson.source_compiles;
+    expect(await compiles()).toHaveLength(1);
+
     await change({ action: "mode", mode: "push" });
+
+    // The builder kills the compile once its entry leaves.
+    expect(await compiles()).toBeUndefined();
     const states = await db
       .select({ id: scenarioSourceCommits.id, state: scenarioSourceCommits.state })
       .from(scenarioSourceCommits)

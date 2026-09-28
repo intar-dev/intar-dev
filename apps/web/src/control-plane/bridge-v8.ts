@@ -18,6 +18,7 @@ import {
   HOST_STATE_REPORT_SCHEMA_VERSION,
   VM_REPORT_SCHEMA_VERSION,
 } from "@/generated/constants";
+import { isSafeBundleRev } from "./image-registry/shared";
 
 const textDecoder = new TextDecoder();
 
@@ -205,7 +206,10 @@ function isDesiredState(
       (desiredState.scope !== "personal" || vm.owner_user_id === desiredState.owner_user_id)) &&
     new Set(desiredState.vms.map((vm) => vm.vm_name)).size === desiredState.vms.length &&
     Array.isArray(desiredState.builds) &&
-    desiredState.builds.every(isDesiredBuildPayload)
+    desiredState.builds.every(isDesiredBuildPayload) &&
+    (desiredState.source_compiles === undefined ||
+      (Array.isArray(desiredState.source_compiles) &&
+        desiredState.source_compiles.every(isDesiredSourceCompilePayload)))
   );
 }
 
@@ -378,6 +382,24 @@ function isDesiredBuildPayload(value: unknown): boolean {
     isSha256Hex(value.content_hash) &&
     readString(value.bundle_ref) !== null
   );
+}
+
+// The builder puts the compile id and rev into a request path and argv, and
+// its strict parser drops the whole session over one bad entry.
+function isDesiredSourceCompilePayload(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isSafeSlug(value.compile_id) &&
+    isNonNegativeInteger(value.attempt) &&
+    Number(value.attempt) <= 0xffff_ffff &&
+    isSafeSlug(value.rev) &&
+    typeof value.validate_only === "boolean" &&
+    IMAGE_ARCHITECTURES.has(value.arch as ImageArchitecture)
+  );
+}
+
+function isSafeSlug(value: unknown): boolean {
+  return typeof value === "string" && isSafeBundleRev(value);
 }
 
 function isDesiredVmPayload(value: unknown): boolean {

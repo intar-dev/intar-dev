@@ -8,10 +8,11 @@ import {
   hostDesiredState,
   imageBuildBundles,
   imageBuilds,
+  scenarioSourceCommits,
   type ImageBuildBundleMeta,
   type ImageBuildTimings,
 } from "@/db/schema";
-import type { BuildReportV1 } from "@/generated/bridge";
+import type { BuildReportV1, DesiredSourceCompileV1 } from "@/generated/bridge";
 import { appError } from "@/lib/app-error";
 import {
   BUILDER_BUILD_SLOTS,
@@ -539,6 +540,7 @@ export async function maintainHostBuildAssignments(
     hostId,
     nowUnixMs,
   );
+  await reconcileHostSourceCompiles(db, hostId, nowUnixMs);
   return {
     requeuedAssignedBuildIds,
     staleBuildIds,
@@ -619,6 +621,95 @@ export async function reconcileAssignedBuildsForHost(
   return missingIds.filter((buildId) => activeIds.has(buildId));
 
   });
+}
+
+/**
+ * Makes the host's desired `source_compiles` mirror its `compiling` rows: a
+ * missing entry is added again and one whose row left `compiling` is dropped.
+ * True when the desired state changed, so a caller outside the host runtime
+ * wakes it to dispatch. Two cheap reads when nothing differs.
+ *
+ * ponytail: a write racing a row's exit can re-add its entry; the next report
+ * of the host, every 20 s, drops it again.
+ */
+export async function reconcileHostSourceCompiles(
+  db: DrizzleD1Database,
+  hostId: string,
+  nowUnixMs: number,
+): Promise<boolean> {
+  const [rows, [desired]] = await Promise.all([
+    db
+      .select({
+        id: scenarioSourceCommits.id,
+        attempt: scenarioSourceCommits.attempt,
+        rev: scenarioSourceCommits.rev,
+        purpose: scenarioSourceCommits.purpose,
+        arch: sql<string | null>`json_extract(${hostActualState.reportJson}, '$.capabilities.arch')`,
+      })
+      .from(scenarioSourceCommits)
+      .leftJoin(hostActualState, eq(hostActualState.hostId, hostId))
+      .where(
+        and(
+          eq(scenarioSourceCommits.compileHostId, hostId),
+          eq(scenarioSourceCommits.state, "compiling"),
+        ),
+      ),
+    db
+      .select({
+        compiles: sql<string | null>`json_extract(${hostDesiredState.docJson}, '$.source_compiles')`,
+      })
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, hostId)),
+  ]);
+  const wanted: DesiredSourceCompileV1[] = rows
+    .map((row) => ({
+      compile_id: row.id,
+      attempt: row.attempt,
+      rev: row.rev,
+      validate_only: row.purpose === "validate",
+      // The compile is pure parsing; any builder compiles for its own arch.
+      arch: row.arch === "aarch64" ? ("aarch64" as const) : ("x86_64" as const),
+    }))
+    .sort((left, right) => left.compile_id.localeCompare(right.compile_id));
+  if (JSON.stringify(wanted) === (desired?.compiles ?? "[]")) return false;
+  await mutateStoredHostDesiredState(db, hostId, nowUnixMs, (draft) => {
+    draft.source_compiles = wanted;
+  });
+  return true;
+}
+
+/**
+ * Connected platform builders on this compile digest with no compile in
+ * flight, least loaded first. A lagging builder never qualifies, so it holds
+ * up nothing.
+ */
+export async function freeSourceCompileBuilders(
+  db: DrizzleD1Database,
+  nowUnixMs: number,
+  compileDigest: string,
+): Promise<BuilderCandidate[]> {
+  const [builders, compiling] = await Promise.all([
+    loadBuilderCandidates(db, nowUnixMs),
+    db
+      .select({ hostId: scenarioSourceCommits.compileHostId })
+      .from(scenarioSourceCommits)
+      .where(eq(scenarioSourceCommits.state, "compiling")),
+  ]);
+  const busy = new Set(compiling.map((row) => row.hostId));
+  return builders
+    .filter(
+      (builder) =>
+        builder.role === "builder" &&
+        builder.connected &&
+        !builder.disabled &&
+        builder.sourceCompilePlatform === compileDigest &&
+        !busy.has(builder.hostId),
+    )
+    .sort(
+      (left, right) =>
+        left.activeBuildCount - right.activeBuildCount ||
+        left.hostId.localeCompare(right.hostId),
+    );
 }
 
 export async function recordImageBuildReport(

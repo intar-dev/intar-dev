@@ -36,6 +36,7 @@ import { activeAccountExistsSql, activeAdminSql } from "@/lib/account-access";
 import type { UserContext } from "@/lib/agent-bridge";
 import { type AppError, appError, errorChainMatches } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
+import { reconcileHostSourceCompiles } from "@/lib/build-scheduler";
 import type { FeatureToggleService } from "@/lib/feature-toggles";
 import {
   findRepositoryInstallation,
@@ -50,6 +51,7 @@ import {
   IMAGE_BUILD_FORMAT_VERSION,
   platformCompileDigest,
 } from "@/lib/image-build-format";
+import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { featureToggleService } from "@/lib/organization-access";
 import { administersOrganization } from "@/lib/organizations";
 import { activeAdministrator } from "@/lib/platform-admin-authority";
@@ -511,7 +513,7 @@ export async function changeScenarioSource(input: {
       const switching = and(connected, ne(scenarioSources.mode, change.mode));
       // A fetch or compile under the old mode is dropped; the new mode
       // delivers the head again.
-      await db.batch([
+      const [dropped] = await db.batch([
         db
           .update(scenarioSourceCommits)
           .set({ state: "superseded", updatedAt: now })
@@ -526,12 +528,14 @@ export async function changeScenarioSource(input: {
                   .where(switching),
               ),
             ),
-          ),
+          )
+          .returning({ hostId: scenarioSourceCommits.compileHostId }),
         db
           .update(scenarioSources)
           .set({ mode: change.mode, pokedAt: now, updatedAt: now })
           .where(switching),
       ]);
+      await endSourceCompiles(env, dropped.map((row) => row.hostId));
       break;
     }
   }
@@ -783,6 +787,8 @@ export async function tokenUploadGate(
 export const MAX_SOURCE_UPLOAD_BYTES = 4 * 1024 * 1024;
 /** The expanded git-bundle cap. */
 export const MAX_SOURCE_BUNDLE_TAR_BYTES = 4 * 1024 * 1024;
+/** A pull compile that expires, or is refused as outdated, at this attempt fails its row. */
+export const MAX_COMPILE_ATTEMPTS = 3;
 
 // A row in one of these states already holds the rev; a re-upload is a no-op.
 const SETTLED_STATES: readonly ScenarioSourceCommitState[] = [
@@ -1024,6 +1030,42 @@ export async function acceptScenarioSourceUpload(
     .set({ pokedAt: now })
     .where(eq(scenarioSources.scopeKey, scope.key));
   return receipt(rev);
+}
+
+/**
+ * Every exit from `compiling`: each builder's desired compiles follow its
+ * rows, and a freed builder wakes the pull binding that waited longest for
+ * one. `hostIds` may over-approximate; a host already in step costs two reads.
+ */
+export async function endSourceCompiles(
+  workerEnv: Cloudflare.Env,
+  hostIds: Array<string | null>,
+): Promise<void> {
+  const hosts = [...new Set(hostIds)].filter((id): id is string => id !== null);
+  if (!hosts.length) return;
+  const db = drizzle(workerEnv.DB);
+  const now = Date.now();
+  for (const hostId of hosts) {
+    if (await reconcileHostSourceCompiles(db, hostId, now)) {
+      await tryWakeHostRuntimeViaNamespace(workerEnv.HOST_RUNTIME, hostId);
+    }
+  }
+  const digest = await platformCompileDigest(workerEnv.PLATFORM_BASE_IMAGES_SHA256);
+  if (digest === null) return;
+  // The oldest head with nothing in flight; the every-minute cron delivers it.
+  await workerEnv.DB.prepare(
+    `UPDATE scenario_sources SET poked_at = ?1
+      WHERE scope_key = (SELECT s.scope_key FROM scenario_sources AS s
+        WHERE s.mode = 'pull' AND s.disconnected_at IS NULL
+          AND s.paused_at IS NULL AND s.head_sha IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM scenario_source_commits AS c
+            WHERE c.scope_key = s.scope_key AND c.purpose = 'deploy'
+              AND c.rev = 'git-' || s.github_repository_id || '-' || s.head_sha || '-' || ?2
+              AND c.state NOT IN ('fetching', 'superseded'))
+        ORDER BY s.head_observed_at LIMIT 1)`,
+  )
+    .bind(now, digest)
+    .run();
 }
 
 // The CLI and builder receipt check accepts this; nothing is queued yet.

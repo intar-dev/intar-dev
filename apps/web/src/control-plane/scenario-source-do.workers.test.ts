@@ -6,12 +6,15 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { GITHUB_WEBHOOK_PATH, handleGitHubWebhook } from "@/control-plane/github-webhook";
 import type { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
 import { sweepScenarioSources } from "@/control-plane/scenario-source-do";
 import { normalizeCourseCatalogSnapshot } from "@/control-plane/image-registry/bundle";
 import {
   agentHosts,
   courseCatalogs,
+  hostActualState,
+  hostDesiredState,
   imageBuildBundles,
   imageBuilds,
   member,
@@ -25,8 +28,11 @@ import {
   vmScenarios,
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
+import type { HostStateReportV2 } from "@/generated/bridge";
 import { SOURCE_COMPILER_VERSION } from "@/generated/constants";
-import { queueImageBuildsFromBundle } from "@/lib/build-scheduler";
+import hostReportFixture from "@/generated/fixtures/bridge/host-state-report-v2.json";
+import { maintainHostBuildAssignments, queueImageBuildsFromBundle } from "@/lib/build-scheduler";
+import { BUILDER_REASSIGN_AFTER_MS } from "@/lib/build-scheduler-core";
 import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
 import { setRegistryPause } from "@/lib/image-registry-admission";
 import {
@@ -102,6 +108,7 @@ let scopeKey: string;
 let digest: string;
 let headSha: string;
 let githubCalls: string[];
+let githubRequests: Array<{ url: string; authorization: string | null }>;
 
 const rev = (sha: string, at = digest) => `git-42-${sha}-${at}`;
 const prefix = (sha: string, at = digest) =>
@@ -129,6 +136,7 @@ beforeEach(async () => {
   scopeKey = SCOPE;
   headSha = SHA_A;
   githubCalls = [];
+  githubRequests = [];
   await createFixtureMember({ d1: env.DB, userId: OWNER });
   await db().insert(organization).values({ id: ORG, name: "Acme", slug: "acme", createdAt: new Date() });
   await db().insert(member).values({
@@ -177,6 +185,7 @@ function github(overrides: Record<string, Route> = {}) {
     const request = new Request(input, init);
     const key = `${request.method} ${new URL(request.url).pathname}`;
     githubCalls.push(key);
+    githubRequests.push({ url: request.url, authorization: request.headers.get("authorization") });
     return (await routes[key]?.()) ?? new Response(null, { status: 404 });
   });
 }
@@ -1360,6 +1369,432 @@ describe("unit guard", () => {
     expect(await count([])).toBe(1);
   });
 });
+
+describe("ScenarioSourceDO pull delivery", () => {
+  const SCOPE_B = "organization:org-b";
+  const SNAPSHOT = new Uint8Array([31, 139, 8, 0, 1, 2, 3]);
+  const codeload = (repository: string, sha: string) =>
+    `https://codeload.github.com/${repository}/legacy.tar.gz/${sha}?token=SECRET-CODELOAD-TOKEN`;
+  let woken: string[];
+  const hostRuntime = {
+    idFromName: (name: string) => name,
+    get: (name: string) => ({
+      fetch: async () => {
+        woken.push(name);
+        return new Response(null, { status: 204 });
+      },
+    }),
+  };
+  const pullTick = (overrides: Record<string, unknown> = {}) =>
+    tick({ HOST_RUNTIME: hostRuntime, ...overrides });
+
+  /** The API's 302 to codeload, and codeload's answer: no Content-Length. */
+  function tarball(
+    sha: string,
+    repository = "acme/labs",
+    answer: Route = () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(SNAPSHOT);
+            controller.close();
+          },
+        }),
+      ),
+  ): Record<string, Route> {
+    return {
+      [`GET /repos/${repository}/tarball/${sha}`]: () =>
+        new Response(null, { status: 302, headers: { location: codeload(repository, sha) } }),
+      [`GET /${repository}/legacy.tar.gz/${sha}`]: answer,
+    };
+  }
+
+  async function seedBuilder(hostId: string, platform = digest) {
+    const now = Date.now();
+    await db().insert(agentHosts).values({
+      id: hostId,
+      userId: OWNER,
+      name: hostId,
+      scope: "platform",
+      role: "builder",
+      credentialGeneration: 1,
+      activeSessionId: `${hostId}-session`,
+      lastClientHelloAt: now,
+      connected: true,
+    });
+    const report = {
+      ...structuredClone(hostReportFixture),
+      host_id: hostId,
+      observed_at_unix_ms: now,
+      vms: [],
+      builds: [],
+    } as HostStateReportV2;
+    report.capabilities.source_compile_platform = platform;
+    await db().insert(hostActualState).values({
+      hostId,
+      appliedDesiredVersion: 0,
+      observedAt: now,
+      reportJson: report,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  /** A second pull binding, `acme/other` (id 43), whose head waits longer. */
+  async function seedSecondBinding() {
+    await createFixtureMember({ d1: env.DB, userId: "owner-b" });
+    await db().insert(organization).values({ id: "org-b", name: "Beta", slug: "beta", createdAt: new Date() });
+    await db().insert(member).values({
+      id: "owner-member-b",
+      organizationId: "org-b",
+      userId: "owner-b",
+      role: "owner",
+      createdAt: new Date(),
+    });
+    await db().insert(scenarioSources).values({
+      scopeKey: SCOPE_B,
+      organizationId: "org-b",
+      githubInstallationId: 7,
+      githubRepositoryId: 43,
+      githubRepository: "acme/other",
+      defaultBranch: "main",
+      mode: "pull",
+      boundByUserId: "owner-b",
+      headSha: SHA_B,
+      headObservedAt: 1,
+    });
+  }
+
+  async function rows(scope = SCOPE) {
+    return db()
+      .select()
+      .from(scenarioSourceCommits)
+      .where(eq(scenarioSourceCommits.scopeKey, scope));
+  }
+
+  async function desired(hostId: string) {
+    const [row] = await db().select().from(hostDesiredState).where(eq(hostDesiredState.hostId, hostId));
+    return row ? { version: row.version, compiles: row.docJson.source_compiles } : null;
+  }
+
+  async function clearFloor(scope = scopeKey) {
+    const stub = env.SCENARIO_SOURCE.get(env.SCENARIO_SOURCE.idFromName(scope));
+    await runInDurableObject(stub, (_instance: ScenarioSourceDO, state) =>
+      state.storage.delete("delivered_at"),
+    );
+  }
+
+  const tarballReads = (repository = "acme/labs") =>
+    githubRequests.filter((request) => request.url.includes(`/repos/${repository}/tarball/`)).length;
+
+  function captureConsole(): unknown[][] {
+    const lines: unknown[][] = [];
+    for (const level of ["log", "info", "warn", "error"] as const) {
+      vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+        lines.push(args);
+      });
+    }
+    return lines;
+  }
+
+  beforeEach(async () => {
+    woken = [];
+    await db().update(scenarioSources).set({ mode: "pull" });
+    await seedBuilder("builder-1");
+  });
+
+  it("fetches the head once and hands it to a free builder on this digest", async () => {
+    await seedBuilder("builder-old", "p00000000");
+    github(tarball(SHA_A));
+    const logs = captureConsole();
+
+    expect(await pullTick()).toBeNull();
+
+    const [row] = await rows();
+    expect(row).toMatchObject({
+      rev: rev(SHA_A),
+      via: "pull",
+      state: "compiling",
+      attempt: 1,
+      compileHostId: "builder-1",
+      detail: null,
+    });
+    expect(await desired("builder-1")).toEqual({
+      version: 1,
+      compiles: [
+        { compile_id: row!.id, attempt: 1, rev: rev(SHA_A), validate_only: false, arch: "x86_64" },
+      ],
+    });
+    expect(woken).toEqual(["builder-1"]);
+    expect(await desired("builder-old")).toBeNull();
+
+    const archive = await env.VM_IMAGE_REGISTRY_BUCKET.get(`${prefix(SHA_A)}source.tar.gz`);
+    expect(new Uint8Array(await archive!.arrayBuffer())).toEqual(SNAPSHOT);
+    expect(archive!.customMetadata).toEqual({});
+    // Only codeload is followed, and without the installation token.
+    expect(githubRequests.filter((request) => !request.url.startsWith("https://api.github.com/")))
+      .toEqual([{ url: codeload("acme/labs", SHA_A), authorization: null }]);
+    expect(JSON.stringify(logs)).not.toContain("SECRET-CODELOAD-TOKEN");
+  });
+
+  it.each<[string, Record<string, Route>, { state: string; detail: string }]>([
+    [
+      "a redirect off codeload",
+      {
+        [`GET /repos/acme/labs/tarball/${SHA_A}`]: () =>
+          new Response(null, {
+            status: 302,
+            headers: { location: "https://evil.example/archive?token=SECRET-CODELOAD-TOKEN" },
+          }),
+      },
+      { state: "fetching", detail: "GitHub could not be read; retrying" },
+    ],
+    [
+      "an archive over 8 MiB",
+      tarball(SHA_A, "acme/labs", () => new Response(new Uint8Array(8 * 1024 * 1024 + 1))),
+      { state: "invalid", detail: expect.stringContaining("8 MiB pull limit") },
+    ],
+    [
+      "a codeload 404 for an unknown sha",
+      tarball(SHA_A, "acme/labs", () => new Response(null, { status: 404 })),
+      { state: "invalid", detail: "GitHub has no archive for this commit." },
+    ],
+    [
+      "an API 422",
+      { [`GET /repos/acme/labs/tarball/${SHA_A}`]: () => new Response(null, { status: 422 }) },
+      { state: "invalid", detail: "GitHub has no archive for this commit." },
+    ],
+  ])("handles %s without writing or logging the tarball URL", async (_name, routes, outcome) => {
+    github(routes);
+    const logs = captureConsole();
+
+    await pullTick();
+
+    expect((await rows())[0]).toMatchObject({ ...outcome, diagnosticsJson: null });
+    expect(githubRequests.some((request) => request.url.startsWith("https://evil.example/"))).toBe(false);
+    expect(JSON.stringify([logs, await rows()])).not.toContain("SECRET-CODELOAD-TOKEN");
+    const listed = await env.VM_IMAGE_REGISTRY_BUCKET.list({
+      prefix: "builds/",
+      include: ["customMetadata"],
+    });
+    expect(listed.objects).toEqual([]);
+  });
+
+  it("retries a GitHub error after the floor without counting it, and fails after three crashed fetches", async () => {
+    github(tarball(SHA_A, "acme/labs", () => new Response("bad gateway", { status: 502 })));
+    const before = Date.now();
+    const next = await pullTick();
+    expect(next).toBeGreaterThanOrEqual(before + 60_000);
+    expect((await rows())[0]).toMatchObject({
+      state: "fetching",
+      detail: "GitHub could not be read; retrying",
+    });
+    // The floor holds a poke that comes sooner.
+    expect(await pullTick()).toBe(next);
+    expect(tarballReads()).toBe(1);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await clearFloor();
+      await pullTick();
+    }
+    expect((await rows())[0]).toMatchObject({ state: "fetching" });
+
+    vi.restoreAllMocks();
+    github(tarball(SHA_A));
+    const bucket = new Proxy(env.VM_IMAGE_REGISTRY_BUCKET, {
+      get: (target, key) =>
+        key === "put"
+          ? () => Promise.reject(new Error("R2 is down"))
+          : Reflect.get(target, key).bind(target),
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await clearFloor();
+      await pullTick({ VM_IMAGE_REGISTRY_BUCKET: bucket });
+      expect((await rows())[0]).toMatchObject({ state: "fetching" });
+    }
+    await clearFloor();
+    await pullTick({ VM_IMAGE_REGISTRY_BUCKET: bucket });
+    expect((await rows())[0]).toMatchObject({ state: "failed", detail: "fetch did not finish" });
+  });
+
+  it("waits for a compiler without claiming, and a compile end wakes the binding that waited longest", async () => {
+    await seedSecondBinding();
+    github({ ...tarball(SHA_A), ...tarball(SHA_B, "acme/other") });
+    await pullTick();
+    expect((await rows())[0]).toMatchObject({ state: "compiling", compileHostId: "builder-1" });
+
+    scopeKey = SCOPE_B;
+    expect(await pullTick()).toBeNull();
+    expect(await rows(SCOPE_B)).toEqual([]);
+    expect(tarballReads("acme/other")).toBe(0);
+
+    // A's third delivery expires: its row fails and the builder is free.
+    scopeKey = SCOPE;
+    await db()
+      .update(scenarioSourceCommits)
+      .set({ attempt: 3, compileAssignedAt: Date.now() - BUILDER_REASSIGN_AFTER_MS });
+    await pullTick();
+    expect((await rows())[0]).toMatchObject({ state: "failed", detail: "compiler did not finish" });
+    expect(await desired("builder-1")).toMatchObject({ version: 2, compiles: undefined });
+    const [waiting] = await db().select().from(scenarioSources).where(eq(scenarioSources.scopeKey, SCOPE_B));
+    expect(waiting?.pokedAt).toEqual(expect.any(Number));
+
+    scopeKey = SCOPE_B;
+    await pullTick();
+    expect((await rows(SCOPE_B))[0]).toMatchObject({ state: "compiling", compileHostId: "builder-1" });
+  });
+
+  it("keeps the archive when another binding takes the builder first, and assigns it later without a second download", async () => {
+    await seedSecondBinding();
+    const archive = tarball(SHA_B, "acme/other");
+    github({
+      ...archive,
+      // A's assign lands while B downloads.
+      [`GET /acme/other/legacy.tar.gz/${SHA_B}`]: async () => {
+        await db().insert(scenarioSourceCommits).values({
+          id: "commit-a",
+          scopeKey: SCOPE,
+          purpose: "deploy",
+          sha: SHA_A,
+          rev: rev(SHA_A),
+          via: "pull",
+          attempt: 1,
+          state: "compiling",
+          compileHostId: "builder-1",
+          compileAssignedAt: Date.now(),
+        });
+        return archive[`GET /acme/other/legacy.tar.gz/${SHA_B}`]!();
+      },
+    });
+    scopeKey = SCOPE_B;
+    const before = Date.now();
+    expect(await pullTick()).toBeGreaterThanOrEqual(before + 60_000);
+    expect((await rows(SCOPE_B))[0]).toMatchObject({ state: "fetching", attempt: 0 });
+    const staged = stagedSourceObjectPrefix(SCOPE_B, `git-43-${SHA_B}-${digest}`, "deploy");
+    const listed = await env.VM_IMAGE_REGISTRY_BUCKET.list({ prefix: staged });
+    expect(listed.objects.map((object) => object.key)).toEqual([`${staged}source.tar.gz`]);
+
+    await db()
+      .update(scenarioSourceCommits)
+      .set({ state: "ingesting" })
+      .where(eq(scenarioSourceCommits.id, "commit-a"));
+    await clearFloor();
+    await pullTick();
+    expect((await rows(SCOPE_B))[0]).toMatchObject({ state: "compiling", attempt: 1 });
+    expect(tarballReads("acme/other")).toBe(1);
+  });
+
+  it("does not assign a builder that disconnected during the download", async () => {
+    const archive = tarball(SHA_A);
+    github({
+      ...archive,
+      [`GET /acme/labs/legacy.tar.gz/${SHA_A}`]: async () => {
+        await db().update(agentHosts).set({ connected: false }).where(eq(agentHosts.id, "builder-1"));
+        return archive[`GET /acme/labs/legacy.tar.gz/${SHA_A}`]!();
+      },
+    });
+
+    await pullTick();
+
+    expect((await rows())[0]).toMatchObject({ state: "fetching", attempt: 0, compileHostId: null });
+    expect(await stagedKeys(SHA_A)).toEqual([`${prefix(SHA_A)}source.tar.gz`]);
+    expect(await desired("builder-1")).toBeNull();
+  });
+
+  it("expires a compile back to its stored archive, and fails it on the third expiry", async () => {
+    github(tarball(SHA_A));
+    await pullTick();
+    for (const attempt of [2, 3]) {
+      await db()
+        .update(scenarioSourceCommits)
+        .set({ compileAssignedAt: Date.now() - BUILDER_REASSIGN_AFTER_MS });
+      await clearFloor();
+      await pullTick();
+      expect((await rows())[0]).toMatchObject({ state: "compiling", attempt });
+      expect((await desired("builder-1"))?.compiles).toEqual([expect.objectContaining({ attempt })]);
+    }
+    expect(tarballReads()).toBe(1);
+
+    await db()
+      .update(scenarioSourceCommits)
+      .set({ compileAssignedAt: Date.now() - BUILDER_REASSIGN_AFTER_MS });
+    await pullTick();
+    expect((await rows())[0]).toMatchObject({ state: "failed", detail: "compiler did not finish" });
+    expect(await stagedKeys(SHA_A)).toEqual([]);
+    expect((await desired("builder-1"))?.compiles).toBeUndefined();
+  });
+
+  it("supersedes a compile on a digest bump and removes its entry", async () => {
+    github(tarball(SHA_A));
+    await pullTick();
+    expect(await desired("builder-1")).toMatchObject({ version: 1 });
+    woken = [];
+
+    await clearFloor();
+    await pullTick({ PLATFORM_BASE_IMAGES_SHA256: "f".repeat(64) });
+
+    expect((await rows())[0]).toMatchObject({ state: "superseded" });
+    expect(await desired("builder-1")).toEqual({ version: 2, compiles: undefined });
+    expect(woken).toEqual(["builder-1"]);
+    expect(await stagedKeys(SHA_A)).toEqual([]);
+    // The builder is on the old digest, so the new head waits for a compiler.
+    expect(await rows()).toHaveLength(1);
+  });
+
+  it.each(["invalid", "failed"] as const)("does not deliver a %s head again until a check_suite re-run", async (state) => {
+    github(tarball(SHA_A));
+    await insertCommit(SHA_A, state, { via: "pull", detail: "did not compile" });
+    await pullTick();
+    expect((await rows())[0]).toMatchObject({ state });
+    expect(tarballReads()).toBe(0);
+
+    const body = JSON.stringify({
+      action: "rerequested",
+      check_suite: { head_sha: SHA_A },
+      installation: { id: 7 },
+      repository: { id: 42 },
+    });
+    const response = await handleGitHubWebhook(
+      new Request(`https://intar.dev${GITHUB_WEBHOOK_PATH}`, {
+        method: "POST",
+        headers: { "x-github-event": "check_suite", "x-hub-signature-256": await sign(body) },
+        body,
+      }),
+      env,
+    );
+    expect(response.status).toBe(204);
+    await pullTick();
+    expect((await rows())[0]).toMatchObject({ state: "compiling", attempt: 2, detail: null });
+  });
+
+  it("lets the host runtime re-add a missing compile entry and drop a stale one", async () => {
+    await insertCommit(SHA_A, "compiling", {
+      via: "pull",
+      attempt: 1,
+      compileHostId: "builder-1",
+      compileAssignedAt: Date.now(),
+    });
+    await maintainHostBuildAssignments(db(), "builder-1", Date.now());
+    expect((await desired("builder-1"))?.compiles).toEqual([
+      { compile_id: "commit-a", attempt: 1, rev: rev(SHA_A), validate_only: false, arch: "x86_64" },
+    ]);
+
+    await db().update(scenarioSourceCommits).set({ state: "superseded" });
+    await maintainHostBuildAssignments(db(), "builder-1", Date.now());
+    expect(await desired("builder-1")).toEqual({ version: 2, compiles: undefined });
+  });
+});
+
+async function sign(body: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.GITHUB_APP_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)));
+  return `sha256=${[...mac].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
 
 describe("scenario source cron", () => {
   function recordingEnv() {

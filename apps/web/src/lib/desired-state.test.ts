@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   DesiredCachedImageV1,
   DesiredBuildV1,
+  DesiredSourceCompileV1,
   DesiredVmV2,
   HostDesiredStateV2,
 } from "@/generated/bridge";
@@ -116,6 +117,48 @@ describe("desired state", () => {
     );
 
     expect(next).toBe(current);
+  });
+
+  it("carries source compiles only while there are some", () => {
+    const nowUnixMs = 1_762_041_660_000;
+    const compile: DesiredSourceCompileV1 = {
+      compile_id: "compile-1",
+      attempt: 1,
+      rev: `git-42-${"a".repeat(40)}-p0123abcd`,
+      validate_only: false,
+      arch: "x86_64",
+    };
+    const current = hostDesiredState({ version: 7 });
+    // A stored document without compiles compares unchanged: no dispatch.
+    expect(
+      mutateDesiredState(current, (draft) => {
+        draft.source_compiles = [];
+      }, { nowUnixMs }),
+    ).toBe(current);
+    const withBuild = mutateDesiredState(
+      current,
+      (draft) => upsertDesiredBuild(draft, desiredBuild("build-a")),
+      { nowUnixMs },
+    );
+    expect(Object.keys(withBuild)).not.toContain("source_compiles");
+
+    // A compile alone bumps the version, and the same compile again does not.
+    const compiling = mutateDesiredState(current, (draft) => {
+      draft.source_compiles = [compile];
+    }, { nowUnixMs });
+    expect(compiling).toMatchObject({ version: 8, source_compiles: [compile] });
+    expect(
+      mutateDesiredState(compiling, (draft) => {
+        draft.source_compiles = [{ ...compile }];
+      }, { nowUnixMs }),
+    ).toBe(compiling);
+
+    // Once it leaves, the document is byte-identical to one that never had it.
+    const done = mutateDesiredState(compiling, (draft) => {
+      draft.source_compiles = [];
+      upsertDesiredBuild(draft, desiredBuild("build-a"));
+    }, { nowUnixMs });
+    expect(JSON.stringify(done)).toBe(JSON.stringify({ ...withBuild, version: 9 }));
   });
 
   it("deduplicates by image key and vm identity with last write winning", () => {
