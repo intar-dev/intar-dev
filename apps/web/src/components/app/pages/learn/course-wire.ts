@@ -1,3 +1,4 @@
+import type { QueryClient } from "@tanstack/react-query";
 import type { ScenarioDifficulty } from "@/generated/catalog";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
@@ -117,6 +118,20 @@ export function courseCatalogQueryKey(organizationId: string | null) {
   return organizationId
     ? (["courses", "organization", organizationId] as const)
     : (["courses", "public"] as const);
+}
+
+/** Marks lecture state stale. The public catalog also lists organization courses. */
+export function invalidateCourseCatalogs(
+  queryClient: QueryClient,
+  organizationId: string | null,
+  refetchType: "active" | "none" = "active",
+): void {
+  for (const scope of organizationId ? [organizationId, null] : [null]) {
+    void queryClient.invalidateQueries({
+      queryKey: courseCatalogQueryKey(scope),
+      refetchType,
+    });
+  }
 }
 
 export async function fetchCourseCatalog(

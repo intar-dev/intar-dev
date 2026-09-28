@@ -35,6 +35,7 @@ import {
   courseCatalogQueryKey,
   fetchCourseCatalog,
   fetchCourseLecture,
+  invalidateCourseCatalogs,
   lectureStatePresentation,
   type CourseCatalogCourse,
   type CourseLectureDetail,
@@ -142,9 +143,7 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
         ["courses", "lecture", route.organizationId, route.courseId, lectureId],
         next,
       );
-      void queryClient.invalidateQueries({
-        queryKey: courseCatalogQueryKey(route.organizationId),
-      });
+      invalidateCourseCatalogs(queryClient, route.organizationId);
     },
   });
 

@@ -1,3 +1,4 @@
+import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isAccessResponseError, pollingIntervalUnlessAccessError, retryHttpResponseError } from "@/components/app/lib/http-response-error";
 import {
@@ -9,6 +10,7 @@ import {
   fetchCourseCatalog,
   fetchCourseLecture,
   findNextCourseLecture,
+  invalidateCourseCatalogs,
   type CourseCatalogCourse,
 } from "./course-wire";
 
@@ -224,6 +226,20 @@ describe("course learner wire contract", () => {
       "organization",
       "team-a",
     ]);
+  });
+
+  it("marks the public catalog stale when organization lecture state changes", () => {
+    const queryClient = new QueryClient();
+    const stale = () =>
+      [null, "team-a", "team-b"].map(
+        (scope) => queryClient.getQueryState(courseCatalogQueryKey(scope))?.isInvalidated,
+      );
+    for (const scope of [null, "team-a", "team-b"]) {
+      queryClient.setQueryData(courseCatalogQueryKey(scope), { courses: [] });
+    }
+
+    invalidateCourseCatalogs(queryClient, "team-a", "none");
+    expect(stale()).toEqual([true, true, false]);
   });
 });
 
