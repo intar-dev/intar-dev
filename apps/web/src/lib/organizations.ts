@@ -357,7 +357,14 @@ export async function deleteOrganization(params: {
       ),
     )
     .returning({ id: organization.id });
-  if (deleted.length !== 1) throw notEmpty();
+  if (deleted.length === 1) return;
+  // A concurrent delete that already removed the organization is not a block.
+  const remaining = await db
+    .select({ id: organization.id })
+    .from(organization)
+    .where(eq(organization.id, params.organizationId))
+    .limit(1);
+  if (remaining.length > 0) throw notEmpty();
 }
 
 export async function leaveOrganization(params: {
