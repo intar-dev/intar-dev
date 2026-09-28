@@ -19,6 +19,7 @@ import {
   type CachedImageRetentionScope,
   loadLiveFamilyImageIds,
 } from "@/lib/image-artifact-retention";
+import { toErrorResponse } from "@/lib/app-error";
 import { pruneSupersededHostCachedImages } from "@/lib/registry-host-cache-eviction";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
@@ -46,7 +47,15 @@ import {
   vmInsert,
   type ScenarioCatalogRollbackV1,
 } from "@/lib/scenario-catalog-rollback";
+import {
+  isCandidateSourceLocked,
+  stageReusableCandidateManifests,
+} from "@/lib/scenario-catalog-candidates";
 import { reconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
+import {
+  publicSourceRevPromotable,
+  recordPublicSourceLive,
+} from "@/lib/scenario-sources";
 import {
   hasRegistryPublishToken,
   isImageArchitecture,
@@ -72,7 +81,11 @@ export interface CandidatePromotionOutcome {
 export type CandidatePromotionRefusal =
   | {
       ok: false;
-      kind: "incomplete_builds" | "incomplete_catalog" | "ownership_conflict";
+      kind:
+        | "incomplete_builds"
+        | "incomplete_catalog"
+        | "ownership_conflict"
+        | "not_promotable";
       status: 409;
       error: string;
     }
@@ -89,6 +102,8 @@ export type CandidatePromotionRefusal =
 export type CandidatePromotionResult =
   | { ok: true; outcome: CandidatePromotionOutcome }
   | CandidatePromotionRefusal;
+
+const SOURCE_NOT_PROMOTABLE = "scenario source revision is not promotable";
 
 export async function handleCandidateCatalogPromotion(
   request: Request,
@@ -145,6 +160,12 @@ export async function handleCandidateCatalogPromotion(
       409,
     );
   }
+  // A scenario source rev goes live here only as the applied public catalog,
+  // or as the public live rev when image-ops retries a committed 503.
+  const source = revision.startsWith("git-");
+  if (source && !(await publicSourceRevPromotable(env.DB, revision))) {
+    return jsonResponse({ error: SOURCE_NOT_PROMOTABLE }, 409);
+  }
   // Promotion is not complete until retired artifacts are actually gone, so
   // the cleanup service must be reachable. This check runs after the request
   // validation above, so a bad request keeps its own status code, and it still
@@ -189,10 +210,37 @@ export async function handleCandidateCatalogPromotion(
   const writer = createRegistryWriterGuard(admitted.lease);
   let promoted: CandidatePromotionOutcome | undefined;
   try {
+    if (source) {
+      // The collector may have retired reused candidates since the catalog
+      // applied; the held writer keeps it out from here to the commit.
+      try {
+        await stageReusableCandidateManifests(db, {
+          revision,
+          organizationId: bundle.organizationId,
+          meta: bundle.meta,
+          nowUnixMs: now,
+          wakeHost: (hostId) =>
+            tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+        });
+      } catch (error) {
+        if (!isCandidateSourceLocked(error)) {
+          writer.markWriteStarted();
+          throw error;
+        }
+        await writer.release("ok");
+        const refusal = toErrorResponse(error, "candidate staging refused", 409);
+        return jsonResponse(refusal.body, refusal.status);
+      }
+    }
     const result = await promoteCandidateRevision(env, db, writer, {
       revision,
       bundle,
       nowUnixMs: now,
+      // Admission ran before the locks, and the DO's catalog sync runs
+      // outside them, so the check repeats right before the commit.
+      beforeCommit: source
+        ? () => publicSourceRevPromotable(env.DB, revision)
+        : undefined,
     });
     if (!result.ok) {
       return jsonResponse(
@@ -222,6 +270,9 @@ export async function handleCandidateCatalogPromotion(
     // assigns the outcome, so this branch is defensive only.
     return jsonResponse({ error: "catalog promotion did not run" }, 500);
   }
+  // Committed: live_rev follows the images before any answer, so the retry
+  // after a 503 is admitted and a head move cannot leave live_rev behind.
+  if (source) await recordPublicSourceLive(env.DB, revision);
   if (promoted.failedHostIds.length > 0) {
     return jsonResponse(
       {
@@ -283,6 +334,8 @@ export async function promoteCandidateRevision(
     revision: string;
     bundle: { organizationId: string | null; meta: ImageBuildBundleMeta };
     nowUnixMs: number;
+    /** Runs under the family locks right before the commit; false refuses. */
+    beforeCommit?: (() => Promise<boolean>) | undefined;
   },
 ): Promise<CandidatePromotionResult> {
   const { revision, bundle, nowUnixMs: now } = input;
@@ -465,6 +518,14 @@ export async function promoteCandidateRevision(
         );
         for (const vm of rows.vms) statements.push(vmInsert(env.DB, vm));
         for (const probe of rows.probes) statements.push(probeInsert(env.DB, probe));
+      }
+      if (input.beforeCommit && !(await input.beforeCommit())) {
+        return {
+          ok: false,
+          kind: "not_promotable",
+          status: 409,
+          error: SOURCE_NOT_PROMOTABLE,
+        };
       }
       // The first mutating write of this promotion. From here a throw must
       // leave the writer unresolved instead of claiming nothing changed.
@@ -806,7 +867,7 @@ export function incomingFamilyImages(
     .sort((left, right) => familyKey(left).localeCompare(familyKey(right)));
 }
 
-async function loadFamilyImageIdsMap(
+export async function loadFamilyImageIdsMap(
   db: DrizzleD1Database,
   families: readonly IncomingFamily[],
 ): Promise<Map<string, string[]>> {
@@ -842,7 +903,7 @@ async function loadFamilyImageIdsMap(
 }
 
 /** Live images the promotion replaces and that may still be needed. */
-function outgoingFamilyImageIds(
+export function outgoingFamilyImageIds(
   families: readonly IncomingFamily[],
   liveImageIdsByFamily: Map<string, string[]>,
 ): string[] {

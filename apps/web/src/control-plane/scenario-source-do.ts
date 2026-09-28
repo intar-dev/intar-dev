@@ -2,13 +2,14 @@
 // Its alarm observes the repository, pauses a binding whose binder lost the
 // scope, delivers a pull binding's head to a platform builder, ingests the
 // head commit's staged bundle, fails or heals the target's builds, and
-// promotes an organization's target as a whole: images, then catalog, then
-// `live`. Every head comparison runs in SQL against the stored head, so a
-// push claim that moves the head mid-alarm is never overwritten.
+// promotes the target as a whole: images, then catalog, then `live`. A public
+// commit that replaces a live image applies its catalog and leaves its images
+// to the drained lane. Every head comparison runs in SQL against the stored
+// head, so a push claim that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, inArray, isNull, lt, not, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   imageBuildBundles,
   imageBuilds,
@@ -41,6 +42,7 @@ import {
   admitInternalRegistryOperation,
   createRegistryWriterGuard,
 } from "@/lib/image-registry-admission";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
   countUnitGuardRuns,
@@ -64,6 +66,9 @@ import {
   type ParsedBundleMeta,
 } from "./image-registry/bundle";
 import {
+  incomingFamilyImages,
+  loadFamilyImageIdsMap,
+  outgoingFamilyImageIds,
   promoteCandidateRevision,
   type CandidatePromotionRefusal,
   type CandidatePromotionResult,
@@ -219,10 +224,9 @@ async function tickScenarioSource(
 
   await dropInactive(env, scopeKey);
 
-  // A started promotion finishes even while the binding is paused or the
-  // digest is unset, and it is the alarm's only promotion.
-  const promoting =
-    organizationId === null ? null : await finishPromotion(env, scopeKey, organizationId);
+  // A started promotion finishes even while the binding is paused, the digest
+  // is unset or the fleet is drained, and it is the alarm's only promotion.
+  const promoting = await finishPromotion(env, scopeKey, organizationId);
 
   // Without a digest there is no head rev, so rows stay as they are rather
   // than be compared against NULL.
@@ -246,12 +250,12 @@ async function tickScenarioSource(
   // After ingest, so a re-run failed row that ingest finds without its
   // staged objects is delivered again in the same pass.
   if (active.mode === "pull") await deliver(step, active);
+  await retargetLiveRev(step);
   const heal = await failOrHeal(step);
   let applyAgain = promoting === true;
-  // Only an organization commit applies here; `public` needs the drain hold.
-  if (heal === "ready" && organizationId !== null) {
+  if (heal === "ready") {
     // One promotion per alarm: a finished one leaves the target to the next.
-    applyAgain = promoting === null ? await promoteTarget({ ...step, organizationId }) : true;
+    applyAgain = promoting === null ? await promoteTarget(step) : true;
   }
   return again || ingestAgain || heal === "again" || applyAgain;
 }
@@ -757,6 +761,32 @@ async function writeBundle(
   }
 }
 
+// A public head back at live_rev while another rev's catalog is applied: that
+// rev took the catalog-first route and was abandoned by a force-push or a
+// reset, and nothing else would restore live_rev. live_rev becomes the target
+// again, so heal restages it and apply promotes it once more, which restores
+// its catalog and re-enables what the other catalog disabled. The drain hold
+// and the unit guard hold it like any target.
+async function retargetLiveRev(step: Step): Promise<void> {
+  if (step.organizationId !== null) return;
+  const abandoned = `SELECT live_rev FROM scenario_sources WHERE scope_key = ?1
+      AND live_rev = ${headRev("?1", "?2")}
+      AND live_rev IS NOT (SELECT source_revision FROM course_catalogs WHERE scope_key = 'public')
+      AND NOT EXISTS (SELECT 1 FROM scenario_source_commits
+        WHERE scope_key = ?1 AND purpose = 'deploy' AND state = 'promoting')`;
+  const now = Date.now();
+  await step.env.DB.batch([
+    step.env.DB.prepare(
+      `UPDATE scenario_sources SET target_rev = live_rev, updated_at = ?3
+        WHERE scope_key = ?1 AND target_rev IS NOT live_rev AND live_rev IN (${abandoned})`,
+    ).bind(step.scopeKey, step.digest, now),
+    step.env.DB.prepare(
+      `UPDATE scenario_source_commits SET state = 'building', detail = NULL, updated_at = ?3
+        WHERE scope_key = ?1 AND purpose = 'deploy' AND state = 'live' AND rev IN (${abandoned})`,
+    ).bind(step.scopeKey, step.digest, now),
+  ]);
+}
+
 // While the target is not live: an exact build that failed or went silent
 // fails the row, and nothing retries it, so a build that hangs every time
 // cannot loop. One superseded or retired is requeued, and reusable candidates
@@ -769,7 +799,6 @@ async function failOrHeal(step: Step): Promise<"again" | "ready" | "idle"> {
     `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
       JOIN scenario_sources AS s ON s.scope_key = c.scope_key
       WHERE c.scope_key = ?1 AND c.purpose = 'deploy' AND c.rev = s.target_rev
-        AND s.target_rev IS NOT s.live_rev
         AND c.state IN ('building', 'waiting', 'awaiting_promote')`,
   )
     .bind(step.scopeKey)
@@ -863,7 +892,7 @@ async function failOrHeal(step: Step): Promise<"again" | "ready" | "idle"> {
 interface Promotion {
   env: Cloudflare.Env;
   scopeKey: string;
-  organizationId: string;
+  organizationId: string | null;
 }
 
 const REFUSAL_STATES = {
@@ -871,17 +900,34 @@ const REFUSAL_STATES = {
   incomplete_catalog: "building",
   image_in_use: "waiting",
   ownership_conflict: "invalid",
+  // Only the drained lane asks; the DO never does.
+  not_promotable: "waiting",
 } as const satisfies Record<CandidatePromotionRefusal["kind"], ScenarioSourceCommitState>;
 
+const fleetDrained = sql`EXISTS (SELECT 1 FROM runtime_operation_gates
+  WHERE key = ${IMAGE_CUTOVER_GATE} AND state = 'drained')`;
+
+/**
+ * The target may start to apply: it is still the head, the binding may write,
+ * and for `public` no image release has drained the fleet.
+ */
+const mayApply = (step: Step, rev: string) => sql`EXISTS (SELECT 1 FROM scenario_sources
+  WHERE scope_key = ${step.scopeKey} AND target_rev = ${rev}
+    AND target_rev = 'git-' || github_repository_id || '-' || head_sha || '-' || ${step.digest}
+    AND ${scenarioSourceBindingPredicate()}
+    AND (organization_id IS NOT NULL OR NOT ${fleetDrained}))`;
+
 // Promotes a ready target that is still the head. The unit guard holds it in
-// `waiting` while a run with access would lose it. `promoting` is written only
-// while the binding may write, so a pause during this alarm stops it here.
-async function promoteTarget(step: Step & Promotion): Promise<boolean> {
+// `waiting` while a run with access would lose it, and for `public` so does an
+// image release's drain. `promoting` is written only while the target may
+// apply, so a pause or a drain during this alarm stops it here. A public
+// commit that replaces a live image takes the catalog-first route instead.
+async function promoteTarget(step: Step): Promise<boolean> {
   const target = await step.env.DB.prepare(
     `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
       JOIN scenario_sources AS s ON s.scope_key = c.scope_key
       WHERE c.scope_key = ?1 AND c.purpose = 'deploy' AND c.rev = s.target_rev
-        AND s.target_rev IS NOT s.live_rev AND c.state IN ('building', 'waiting')`,
+        AND c.state IN ('building', 'waiting')`,
   )
     .bind(step.scopeKey)
     .first<CommitRow>();
@@ -896,27 +942,95 @@ async function promoteTarget(step: Step & Promotion): Promise<boolean> {
     await settle(step, target, invalid("the bundle does not belong to this binding"));
     return false;
   }
+  const db = drizzle(step.env.DB);
+  if (
+    step.organizationId === null &&
+    (await db.get<{ drained: number }>(sql`SELECT ${fleetDrained} AS drained`))?.drained
+  ) {
+    await settle(step, target, { state: "waiting", detail: "an image release has drained the fleet" });
+    return false;
+  }
   if (await countUnitGuardRuns(step.env.DB, step.organizationId, bundle.meta.courseCatalog)) {
     await settle(step, target, { state: "waiting", detail: "active runs would lose access" });
     return false;
   }
-  const written = await drizzle(step.env.DB).run(sql`UPDATE scenario_source_commits
+  if (step.organizationId === null && (await replacesLiveImages(db, bundle.meta))) {
+    return applyCatalogFirst(step, target, bundle.meta);
+  }
+  const written = await db.run(sql`UPDATE scenario_source_commits
     SET state = 'promoting', detail = NULL, updated_at = ${Date.now()}
     WHERE id = ${target.id} AND attempt = ${target.attempt} AND state = ${target.state}
-      AND EXISTS (SELECT 1 FROM scenario_sources WHERE scope_key = ${step.scopeKey}
-        AND target_rev = scenario_source_commits.rev
-        AND scenario_source_commits.rev =
-          'git-' || github_repository_id || '-' || head_sha || '-' || ${step.digest}
-        AND ${scenarioSourceBindingPredicate()})`);
+      AND ${mayApply(step, target.rev)}`);
   if (!written.meta.changes) return false;
   return promote(step, { ...target, state: "promoting" });
+}
+
+/** Whether promoting `meta` replaces a live image, by the core's own measure. */
+async function replacesLiveImages(
+  db: DrizzleD1Database,
+  meta: ParsedBundleMeta,
+): Promise<boolean> {
+  const hashes = [...new Set(meta.scenarios.map((scenario) => scenario.contentHash))];
+  if (!hashes.length) return false;
+  const builds = await db
+    .select({
+      scenarioId: imageBuilds.scenarioId,
+      arch: imageBuilds.arch,
+      contentHash: imageBuilds.contentHash,
+      manifest: imageBuilds.publishedManifestJson,
+    })
+    .from(imageBuilds)
+    .where(inArray(imageBuilds.contentHash, hashes));
+  const incoming = incomingFamilyImages(
+    meta.scenarios,
+    meta.scenarios.map((item) =>
+      builds.find(
+        (build) =>
+          build.scenarioId === item.scenarioId &&
+          build.arch === item.arch &&
+          build.contentHash === item.contentHash,
+      ),
+    ),
+  );
+  const live = await loadFamilyImageIdsMap(db, incoming);
+  return outgoingFamilyImageIds(incoming, live).length > 0;
+}
+
+// A public commit that replaces a live image: its catalog applies here, and
+// its images go live only through the drained lane. The re-read right before
+// the sync stops an alarm whose binding was paused, or whose fleet was
+// drained, since it began. `awaiting_promote` needs the complete candidate
+// set; a candidate the collector retired meanwhile is heal's to restage.
+async function applyCatalogFirst(
+  step: Step,
+  target: CommitRow,
+  meta: ParsedBundleMeta,
+): Promise<boolean> {
+  const db = drizzle(step.env.DB);
+  if (!(await db.get(sql`SELECT 1 AS open WHERE ${mayApply(step, target.rev)}`))) {
+    return false;
+  }
+  await syncCourseCatalogSnapshot(db, {
+    snapshot: meta.courseCatalog,
+    sourceRevision: target.rev,
+    organizationId: null,
+    nowUnixMs: Date.now(),
+  });
+  const ids = [...new Set(meta.scenarios.map((scenario) => scenario.scenarioId))];
+  const entered = await db.run(sql`UPDATE scenario_source_commits
+    SET state = 'awaiting_promote', detail = NULL, updated_at = ${Date.now()}
+    WHERE id = ${target.id} AND attempt = ${target.attempt} AND state = ${target.state}
+      AND NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(ids)}) AS expected
+        WHERE expected.value NOT IN (SELECT scenario_id FROM scenario_catalog_candidates
+          WHERE revision = ${target.rev} AND organization_id IS NULL))`);
+  return !entered.meta.changes;
 }
 
 /** Finishes a `promoting` row. Null when there is none, else whether to re-arm. */
 async function finishPromotion(
   env: Cloudflare.Env,
   scopeKey: string,
-  organizationId: string,
+  organizationId: string | null,
 ): Promise<boolean | null> {
   const row = await env.DB.prepare(
     `SELECT id, rev, attempt, state FROM scenario_source_commits

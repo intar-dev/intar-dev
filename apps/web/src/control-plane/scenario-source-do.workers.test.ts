@@ -23,15 +23,18 @@ import {
   imageBuilds,
   member,
   organization,
+  runtimeOperationGates,
   scenarioCatalogCandidates,
   scenarioCatalogSnapshots,
   scenarioRuns,
   scenarioSourceCommits,
   scenarioSources,
   user,
+  vmScenarioProbes,
+  vmScenarioVms,
   vmScenarios,
 } from "@/db/schema";
-import type { ScenarioManifestV5 } from "@/generated/catalog";
+import type { ScenarioManifestV5, ScenarioProbeManifestV3 } from "@/generated/catalog";
 import type { HostStateReportV2 } from "@/generated/bridge";
 import {
   AGENT_SOURCES_PATH,
@@ -44,9 +47,11 @@ import { maintainHostBuildAssignments, queueImageBuildsFromBundle } from "@/lib/
 import { BUILDER_REASSIGN_AFTER_MS } from "@/lib/build-scheduler-core";
 import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
 import { setRegistryPause } from "@/lib/image-registry-admission";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import {
   countUnitGuardRuns,
   loadScenarioSource,
+  publicSourceRevPromotable,
   scenarioSourceScope,
   stagedSourceObjectPrefix,
 } from "@/lib/scenario-sources";
@@ -216,7 +221,7 @@ async function tick(overrides: Record<string, unknown> = {}): Promise<number | n
   });
 }
 
-function catalog(scenarioIds: string[]) {
+function catalog(scenarioIds: string[], title = "Lecture") {
   return {
     version: 2,
     courses: [
@@ -229,7 +234,7 @@ function catalog(scenarioIds: string[]) {
         lectures: scenarioIds.length
           ? scenarioIds.map((id, index) => ({
               lecture_id: `lecture-${index}`,
-              title: "Lecture",
+              title,
               summary: "Summary",
               body_markdown: "Body",
               category: "linux",
@@ -260,6 +265,7 @@ interface Commit {
   scenarioIds?: string[];
   hash?: string;
   scope?: string;
+  title?: string;
   meta?: Record<string, unknown>;
   archiveCatalog?: unknown;
   extraFiles?: Array<[string, Uint8Array]>;
@@ -270,7 +276,7 @@ async function compiled(commit: Commit = {}) {
   const sha = commit.sha ?? SHA_A;
   const at = commit.digest ?? digest;
   const scenarioIds = commit.scenarioIds ?? ["acme-web"];
-  const courseCatalog = catalog(scenarioIds);
+  const courseCatalog = catalog(scenarioIds, commit.title);
   const meta = {
     rev: rev(sha, at),
     build_format_version: IMAGE_BUILD_FORMAT_VERSION,
@@ -705,6 +711,7 @@ describe("ScenarioSourceDO fail and heal", () => {
   it("skips heal when the target is live", async () => {
     await building();
     await db().update(scenarioSources).set({ liveRev: rev(SHA_A) });
+    await db().update(scenarioSourceCommits).set({ state: "live" });
     await db().update(imageBuilds).set({ status: "stale", error: "superseded by bundle late-rev" });
     await tick();
     expect(await db().select({ status: imageBuilds.status }).from(imageBuilds)).toEqual([{ status: "stale" }]);
@@ -872,25 +879,28 @@ describe("ScenarioSourceDO observe", () => {
   });
 });
 
-describe("ScenarioSourceDO public binding", () => {
-  const ADMIN = "platform-admin";
+const ADMIN = "platform-admin";
 
-  beforeEach(async () => {
-    await createFixtureMember({ d1: env.DB, userId: ADMIN, role: "admin" });
-    await db().delete(scenarioSources);
-    await db().insert(scenarioSources).values({
-      scopeKey: "public",
-      organizationId: null,
-      githubInstallationId: 7,
-      githubRepositoryId: 42,
-      githubRepository: "acme/labs",
-      defaultBranch: "main",
-      mode: "push",
-      boundByUserId: ADMIN,
-    });
-    scopeKey = "public";
-    github();
+/** Binds the fixture repository to `public` instead, as a platform admin. */
+async function bindPublic() {
+  await createFixtureMember({ d1: env.DB, userId: ADMIN, role: "admin" });
+  await db().delete(scenarioSources);
+  await db().insert(scenarioSources).values({
+    scopeKey: "public",
+    organizationId: null,
+    githubInstallationId: 7,
+    githubRepositoryId: 42,
+    githubRepository: "acme/labs",
+    defaultBranch: "main",
+    mode: "push",
+    boundByUserId: ADMIN,
   });
+  scopeKey = "public";
+  github();
+}
+
+describe("ScenarioSourceDO public binding", () => {
+  beforeEach(bindPublic);
 
   it("refuses an id with an organization slug prefix", async () => {
     await stage({ scope: "public", scenarioIds: ["acme-web"] });
@@ -962,18 +972,23 @@ function scenarioManifest(scenarioId: string): ScenarioManifestV5 {
 }
 
 /** What the builder publish leaves: each open build succeeded, its candidate staged for `sha`. */
-async function publish(sha: string, at = digest) {
+async function publish(
+  sha: string,
+  organizationId: string | null = ORG,
+  manifestOf: (scenarioId: string) => ScenarioManifestV5 = scenarioManifest,
+  at = digest,
+) {
   const open = await db().select().from(imageBuilds);
   for (const build of open.filter((row) => row.status !== "succeeded")) {
-    const manifest = scenarioManifest(build.scenarioId);
+    const manifest = manifestOf(build.scenarioId);
     await db()
       .update(imageBuilds)
       .set({ status: "succeeded", phase: "succeeded", publishedManifestJson: manifest })
       .where(eq(imageBuilds.id, build.id));
     await db().insert(scenarioCatalogCandidates).values({
-      id: `${ORG}:${rev(sha, at)}:${build.scenarioId}`,
+      id: `${organizationId ?? "public"}:${rev(sha, at)}:${build.scenarioId}`,
       revision: rev(sha, at),
-      organizationId: ORG,
+      organizationId,
       scenarioId: build.scenarioId,
       buildId: build.id,
       manifestJson: manifest,
@@ -1384,6 +1399,196 @@ describe("unit guard", () => {
     await startRun("run-1", { courseScopeKey: "public" });
     // Its public lecture stays, but the commit disables the scenario.
     expect(await count([])).toBe(1);
+  });
+
+  it("counts runs in and outside organizations for a public commit", async () => {
+    const [scenario] = await db().select().from(vmScenarios);
+    await db().insert(vmScenarios).values({ ...scenario!, scenarioId: "web", organizationId: null });
+    await db().insert(courseCatalogs).values({
+      scopeKey: "public",
+      organizationId: null,
+      catalogJson: snapshot(["web"]),
+      sourceRevision: "public-rev",
+    });
+    const web = { scenarioId: "web", courseScopeKey: "public" };
+    await startRun("run-org", web);
+    await startRun("run-public", { ...web, organizationId: null });
+
+    expect(await countUnitGuardRuns(env.DB, null, snapshot(["web"]))).toBe(0);
+    expect(await countUnitGuardRuns(env.DB, null, snapshot([]))).toBe(2);
+  });
+});
+
+describe("ScenarioSourceDO public apply", () => {
+  const IMAGE_B = "9".repeat(64);
+  const PROBE: ScenarioProbeManifestV3 = {
+    id: "nginx-up",
+    phase: "scenario",
+    kind: "port_open",
+    display_name: "nginx answers",
+    hints: [],
+  };
+  const withImage = (imageId: string, probes: ScenarioProbeManifestV3[] = []) =>
+    (scenarioId: string): ScenarioManifestV5 => {
+      const manifest = scenarioManifest(scenarioId);
+      manifest.vms = manifest.vms.map((vm) => ({ ...vm, image_id: imageId, probes }));
+      return manifest;
+    };
+  const publicCommit = (sha: string, commit: Commit = {}) =>
+    deliver({ sha, scope: "public", scenarioIds: ["web"], ...commit });
+  const catalogRev = async () =>
+    (await db().select().from(courseCatalogs).where(eq(courseCatalogs.scopeKey, "public")))[0]
+      ?.sourceRevision;
+  const liveImages = () => db().select({ imageId: vmScenarioVms.imageSha256 }).from(vmScenarioVms);
+  const drain = () =>
+    db().insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "drained" });
+
+  beforeEach(async () => {
+    await bindPublic();
+    // `web` goes live from A: nothing was live, so nothing goes out.
+    await publicCommit(SHA_A);
+    await publish(SHA_A, null);
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+  });
+
+  it("applies a lecture-only and a probe-only commit over identical images without a drain", async () => {
+    // B reuses A's build and goes live in its ingest alarm.
+    await publicCommit(SHA_B, { title: "Reworded" });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+    expect(await db().select({ title: vmScenarios.title }).from(vmScenarios)).toEqual([
+      { title: "Reworded" },
+    ]);
+
+    // C builds again, and its image comes out byte-identical.
+    await publicCommit(SHA_C, { hash: HASH_B });
+    await publish(SHA_C, null, withImage(IMAGE_A, [PROBE]));
+    await tick();
+
+    expect(await commitState(SHA_C)).toMatchObject({ state: "live" });
+    expect(await db().select({ name: vmScenarioProbes.name }).from(vmScenarioProbes)).toEqual([
+      { name: "nginx-up" },
+    ]);
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_C), liveSha: SHA_C });
+    expect(await catalogRev()).toBe(rev(SHA_C));
+    expect(promotion.calls).toBe(3);
+  });
+
+  it("applies an image-replacing commit's catalog and awaits the drained lane once its candidates are complete", async () => {
+    await publicCommit(SHA_B, { hash: HASH_B, title: "Next" });
+    await publish(SHA_B, null, withImage(IMAGE_B));
+    // The collector retires B's candidate between heal and apply.
+    guard.before = async () => {
+      guard.before = undefined;
+      await db()
+        .delete(scenarioCatalogCandidates)
+        .where(eq(scenarioCatalogCandidates.revision, rev(SHA_B)));
+    };
+
+    expect(await tick()).not.toBeNull();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
+    expect(await catalogRev()).toBe(rev(SHA_B));
+
+    // Heal restages the candidate, and the next alarm enters awaiting_promote.
+    await tick();
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "awaiting_promote" });
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "awaiting_promote" });
+
+    // The images wait for the drained lane.
+    expect(promotion.calls).toBe(1);
+    expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), targetRev: rev(SHA_B) });
+  });
+
+  it("holds a new head in waiting while the fleet is drained", async () => {
+    await drain();
+    await publicCommit(SHA_B, { title: "Next" });
+
+    expect(await commitState(SHA_B)).toEqual({
+      state: "waiting",
+      detail: "an image release has drained the fleet",
+    });
+    expect(await catalogRev()).toBe(rev(SHA_A));
+
+    await db().update(runtimeOperationGates).set({ state: "open" });
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+  });
+
+  it("starts no apply once the fleet drains during the alarm", async () => {
+    const drainDuringAlarm = async () => {
+      guard.before = undefined;
+      await drain();
+    };
+
+    // Nothing outgoing: the promoting write carries the gate.
+    guard.before = drainDuringAlarm;
+    await publicCommit(SHA_B, { title: "Next" });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
+
+    // Images replaced: the re-read before the catalog sync sees the gate.
+    await db().delete(runtimeOperationGates);
+    await publicCommit(SHA_C, { hash: HASH_B });
+    await publish(SHA_C, null, withImage(IMAGE_B));
+    guard.before = drainDuringAlarm;
+    await tick();
+    expect(await commitState(SHA_C)).toMatchObject({ state: "building" });
+
+    expect(await catalogRev()).toBe(rev(SHA_A));
+    expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
+    expect(promotion.calls).toBe(1);
+  });
+
+  it("promotes live_rev again when the head returns to it after another rev's catalog applied", async () => {
+    // B adds `db` over A's image and goes live without a drain.
+    await publicCommit(SHA_B, { scenarioIds: ["web", "db"] });
+    await publish(SHA_B, null);
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+
+    // C replaces web's image and drops `db`: its catalog applies first.
+    await publicCommit(SHA_C, { hash: HASH_B, title: "Next" });
+    await publish(SHA_C, null, withImage(IMAGE_B));
+    await tick();
+    expect(await commitState(SHA_C)).toMatchObject({ state: "awaiting_promote" });
+    expect(await catalogRev()).toBe(rev(SHA_C));
+    const scenarios = () =>
+      db()
+        .select({ id: vmScenarios.scenarioId, title: vmScenarios.title, enabled: vmScenarios.enabled })
+        .from(vmScenarios)
+        .orderBy(vmScenarios.scenarioId);
+    expect(await scenarios()).toEqual([
+      { id: "db", title: "Lecture", enabled: false },
+      { id: "web", title: "Next", enabled: true },
+    ]);
+
+    // The author resets main back to B while the collector retires B's
+    // candidates and an image release drains the fleet.
+    await db().delete(scenarioCatalogCandidates).where(eq(scenarioCatalogCandidates.revision, rev(SHA_B)));
+    await drain();
+    headSha = SHA_B;
+    await tick();
+    await tick();
+    expect(await commitState(SHA_C)).toMatchObject({ state: "superseded" });
+    expect(await commitState(SHA_B)).toEqual({
+      state: "waiting",
+      detail: "an image release has drained the fleet",
+    });
+    expect(await catalogRev()).toBe(rev(SHA_C));
+
+    await db().delete(runtimeOperationGates);
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_B), targetRev: rev(SHA_B), liveSha: SHA_B });
+    expect(await catalogRev()).toBe(rev(SHA_B));
+    expect(await scenarios()).toEqual([
+      { id: "db", title: "Lecture", enabled: true },
+      { id: "web", title: "Lecture", enabled: true },
+    ]);
+    expect(await liveImages()).toEqual([{ imageId: IMAGE_A }, { imageId: IMAGE_A }]);
+    expect(await publicSourceRevPromotable(env.DB, rev(SHA_C))).toBe(false);
   });
 });
 
@@ -1816,7 +2021,7 @@ describe("ScenarioSourceDO pull delivery", () => {
 
     await pullTick(overrides);
     expect(await commitState(SHA_A, at)).toMatchObject({ state: "building" });
-    await publish(SHA_A, at);
+    await publish(SHA_A, ORG, scenarioManifest, at);
     await pullTick(overrides);
     expect(await commitState(SHA_A, at)).toMatchObject({ state: "live" });
     expect(await binding()).toMatchObject({ liveRev: rev(SHA_A, at), liveSha: SHA_A });

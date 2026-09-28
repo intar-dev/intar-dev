@@ -150,25 +150,27 @@ export function scenarioSourceBinderPredicate(): SQL {
 }
 
 /**
- * The unit guard: the organization's unfinished runs that have content access
- * now and would lose it once `snapshot` replaces the organization's catalog,
- * or whose scenario the commit disables. Runs without access never count.
+ * The unit guard: the scope's unfinished runs that have content access now
+ * and would lose it once `snapshot` replaces the scope's catalog, or whose
+ * scenario the commit disables. Runs without access never count. For
+ * `public` (null) every organization's runs can hold public content.
  */
 export async function countUnitGuardRuns(
   d1: D1Database,
-  organizationId: string,
+  organizationId: string | null,
   snapshot: CourseCatalogSnapshotV2,
 ): Promise<number> {
   const access = currentScenarioRunContentAccessCondition();
+  const scope = organizationId === null ? "" : "run.organization_id = ?1 AND ";
   // The CTE shadows course_catalogs for the proposed check only; the other
   // scopes' catalogs are read from the table itself.
   const row = await d1
     .prepare(
       `SELECT COUNT(*) AS runs FROM scenario_runs AS run
-        WHERE run.organization_id = ?1 AND run.state NOT IN ('completed', 'failed')
+        WHERE ${scope}run.state NOT IN ('completed', 'failed')
           AND (${access})
           AND (run.scenario_id IN (SELECT scenario_id FROM vm_scenarios
-                WHERE organization_id = ?1 AND enabled = 1
+                WHERE organization_id IS ?1 AND enabled = 1
                   AND scenario_id NOT IN (SELECT json_extract(lecture.value, '$.scenarioId')
                     FROM json_each(?3, '$.courses') AS course,
                       json_each(course.value, '$.lectures') AS lecture
@@ -182,6 +184,52 @@ export async function countUnitGuardRuns(
     .bind(organizationId, courseCatalogScopeKey(organizationId), JSON.stringify(snapshot))
     .first<{ runs: number }>();
   return row?.runs ?? 0;
+}
+
+/**
+ * Whether the drained lane may promote a `git-` rev: it is the rev whose
+ * catalog `public` applied, or the public binding's live rev (image-ops
+ * retrying a committed 503), and no public promotion of another rev is in
+ * flight. The drained handler, its in-lock recheck and build-status share it.
+ */
+export async function publicSourceRevPromotable(
+  d1: D1Database,
+  rev: string,
+): Promise<boolean> {
+  const row = await d1
+    .prepare(
+      `SELECT ?1 IN (SELECT source_revision FROM course_catalogs WHERE scope_key = 'public'
+            UNION ALL SELECT live_rev FROM scenario_sources WHERE scope_key = 'public')
+          AND NOT EXISTS (SELECT 1 FROM scenario_source_commits
+            WHERE scope_key = 'public' AND purpose = 'deploy' AND state = 'promoting'
+              AND rev <> ?1) AS promotable`,
+    )
+    .bind(rev)
+    .first<{ promotable: number | null }>();
+  return row?.promotable === 1;
+}
+
+/**
+ * The drained lane committed a public rev. One transaction makes it the
+ * binding's live commit, whatever state its row was left in, and supersedes
+ * the previous live row.
+ */
+export async function recordPublicSourceLive(
+  d1: D1Database,
+  rev: string,
+): Promise<void> {
+  const statements = [
+    `UPDATE scenario_sources SET live_rev = ?1, live_at = ?2, updated_at = ?2,
+        live_sha = (SELECT sha FROM scenario_source_commits
+          WHERE scope_key = 'public' AND purpose = 'deploy' AND rev = ?1)
+      WHERE scope_key = 'public' AND live_rev IS NOT ?1`,
+    `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?2
+      WHERE scope_key = 'public' AND purpose = 'deploy' AND state = 'live' AND rev <> ?1`,
+    `UPDATE scenario_source_commits SET state = 'live', detail = NULL, updated_at = ?2
+      WHERE scope_key = 'public' AND purpose = 'deploy' AND rev = ?1 AND state <> 'live'`,
+  ];
+  const now = Date.now();
+  await d1.batch(statements.map((statement) => d1.prepare(statement).bind(rev, now)));
 }
 
 /** Removes every absolute path; repository-relative paths stay readable. */

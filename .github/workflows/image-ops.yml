@@ -239,6 +239,32 @@ jobs:
             "https://intar.dev/registry/v1/cutover/gate" \
             | jq -e '.ok == true and .state == "drained"' >/dev/null
 
+      - name: Require a promotable scenario source revision
+        run: |
+          set -euo pipefail
+          # A git- revision promotes only as the applied public catalog, or as
+          # the public live revision on a retry. The drain now holds every new
+          # public apply, so the answer stays put until the promotion.
+          [[ "${REVISION}" == git-* ]] || exit 0
+          status="${RUNNER_TEMP}/source-status.json"
+          if curl --fail --silent --show-error --retry 3 \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
+            > "${status}" && jq -e '.source_promotable == true' "${status}" >/dev/null; then
+            jq -c '{source_state, source_promotable}' "${status}"
+            exit 0
+          fi
+          echo "The scenario source revision is not promotable; reopening the gate." >&2
+          jq -c '{source_state, source_promotable}' "${status}" >&2 || true
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data '{"state":"open"}' \
+            "https://intar.dev/registry/v1/cutover/gate" \
+            | jq -e '.ok == true and .state == "open"' >/dev/null
+          exit 1
+
       - name: Let active VMs finish
         run: |
           set -euo pipefail
