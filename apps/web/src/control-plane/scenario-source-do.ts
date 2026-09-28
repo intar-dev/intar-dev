@@ -27,7 +27,7 @@ import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
   scenarioSourceBinderPredicate,
   scenarioSourceBindingPredicate,
-  scenarioSourceObjectPrefix,
+  stagedSourceObjectPrefix,
 } from "@/lib/scenario-sources";
 import {
   controlPlaneMaintenanceEnabled,
@@ -367,7 +367,7 @@ async function readStagedCommit(
   rev: string,
 ): Promise<Settled | { meta: ParsedBundleMeta; payload: ArrayBuffer }> {
   const bucket = step.env.VM_IMAGE_REGISTRY_BUCKET;
-  const prefix = scenarioSourceObjectPrefix(step.scopeKey, rev, "deploy");
+  const prefix = stagedSourceObjectPrefix(step.scopeKey, rev, "deploy");
   const [metaObject, bundleObject] = await Promise.all([
     bucket.get(`${prefix}meta.json`),
     bucket.get(`${prefix}bundle.tar.gz`),
@@ -636,7 +636,7 @@ async function deleteStagedObjects(
   rows: Array<{ rev: string; purpose: "deploy" | "validate" }>,
 ): Promise<void> {
   const keys = rows.flatMap(({ rev, purpose }) =>
-    STAGED_FILES.map((file) => `${scenarioSourceObjectPrefix(scopeKey, rev, purpose)}${file}`),
+    STAGED_FILES.map((file) => `${stagedSourceObjectPrefix(scopeKey, rev, purpose)}${file}`),
   );
   if (keys.length) await env.VM_IMAGE_REGISTRY_BUCKET.delete(keys);
 }
@@ -720,7 +720,7 @@ async function pruneStagedObjects(env: Cloudflare.Env, now: number): Promise<voi
       WHERE state IN ('fetching', 'compiling', 'ingesting')`,
   ).all<{ scope_key: string; rev: string; purpose: "deploy" | "validate" }>();
   const held = new Set(
-    results.map((row) => scenarioSourceObjectPrefix(row.scope_key, row.rev, row.purpose)),
+    results.map((row) => stagedSourceObjectPrefix(row.scope_key, row.rev, row.purpose)),
   );
   const keys = expired
     .map((object) => object.key)

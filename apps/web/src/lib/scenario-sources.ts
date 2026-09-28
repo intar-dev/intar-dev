@@ -141,15 +141,6 @@ export function scenarioSourceBinderPredicate(): SQL {
       AND ${sql.raw(activeAccountExistsSql("scenario_sources.bound_by_user_id"))}))`;
 }
 
-/** Where a commit's staged bundle, meta and pull snapshot live in R2. */
-export function scenarioSourceObjectPrefix(
-  scopeKey: string,
-  rev: string,
-  purpose: "deploy" | "validate",
-): string {
-  return `builds/sources/${scopeKey}/${rev}/${purpose}/`;
-}
-
 /** Removes every absolute path; repository-relative paths stay readable. */
 export function redactHostPaths(text: string): string {
   return text.replace(/(?<![\w.-])\/[^\s'"():,]+/g, "<path>");
