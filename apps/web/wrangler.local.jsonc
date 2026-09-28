@@ -17,6 +17,7 @@
     "STARGATE_ADMIN_AUTH_HEADER": "cf-access-jwt-assertion",
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
+    "GITHUB_APP_CLIENT_ID": "",
   },
   "assets": {
     "directory": "./dist",
