@@ -180,7 +180,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-type Route = () => Response | Promise<Response>;
+type Route = (request: Request) => Response | Promise<Response>;
 
 /** GitHub for `acme/labs` (id 42) under installation 7, head `headSha`. */
 function github(overrides: Record<string, Route> = {}) {
@@ -193,6 +193,8 @@ function github(overrides: Record<string, Route> = {}) {
       }),
     "GET /repos/acme/labs/git/ref/heads/main": () =>
       Response.json({ object: { sha: headSha } }),
+    ...checkRunRoutes("acme/other"),
+    ...checkRunRoutes(),
     ...overrides,
   };
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -200,8 +202,60 @@ function github(overrides: Record<string, Route> = {}) {
     const key = `${request.method} ${new URL(request.url).pathname}`;
     githubCalls.push(key);
     githubRequests.push({ url: request.url, authorization: request.headers.get("authorization") });
-    return (await routes[key]?.()) ?? new Response(null, { status: 404 });
+    return (await routes[key]?.(request)) ?? new Response(null, { status: 404 });
   });
+}
+
+interface CheckRunCall {
+  call: string;
+  body: {
+    name?: string;
+    head_sha?: string;
+    status: string;
+    conclusion?: string;
+    output: { title: string; summary: string };
+  };
+}
+
+let checkRuns: CheckRunCall[];
+
+/** GitHub's check-run API for `repository`; created runs get ids 901, 902, ... */
+function checkRunRoutes(repository = "acme/labs"): Record<string, Route> {
+  checkRuns = [];
+  const record = async (call: string, request: Request) => {
+    checkRuns.push({ call, body: (await request.json()) as CheckRunCall["body"] });
+  };
+  const routes: Record<string, Route> = {
+    [`POST /repos/${repository}/check-runs`]: async (request) => {
+      await record("POST", request);
+      const created = checkRuns.filter((entry) => entry.call === "POST").length;
+      return Response.json({ id: 900 + created }, { status: 201 });
+    },
+  };
+  for (const id of [901, 902, 903]) {
+    routes[`PATCH /repos/${repository}/check-runs/${id}`] = async (request) => {
+      await record(`PATCH ${id}`, request);
+      return Response.json({ id });
+    };
+  }
+  return routes;
+}
+
+/** Each check-run call as its target, status, conclusion and title. */
+const shownChecks = () =>
+  checkRuns.map(({ call, body }) => ({
+    call,
+    status: body.status,
+    conclusion: body.conclusion,
+    title: body.output.title,
+  }));
+
+async function checkRunId(sha: string) {
+  const [row] = await db()
+    .select({ checkRunId: scenarioSourceCommits.checkRunId })
+    .from(scenarioSourceCommits)
+    .where(eq(scenarioSourceCommits.rev, rev(sha)));
+  return row?.checkRunId;
 }
 
 /** Runs one alarm; answers the re-arm time it left, if any. */
@@ -974,12 +1028,22 @@ function scenarioManifest(scenarioId: string): ScenarioManifestV5 {
 /** What the builder publish leaves: each open build succeeded, its candidate staged for `sha`. */
 async function publish(
   sha: string,
-  organizationId: string | null = ORG,
-  manifestOf: (scenarioId: string) => ScenarioManifestV5 = scenarioManifest,
-  at = digest,
+  {
+    organizationId = ORG,
+    manifestOf = scenarioManifest,
+    at = digest,
+    scenarioIds,
+  }: {
+    organizationId?: string | null;
+    manifestOf?: (scenarioId: string) => ScenarioManifestV5;
+    at?: string;
+    scenarioIds?: string[];
+  } = {},
 ) {
   const open = await db().select().from(imageBuilds);
-  for (const build of open.filter((row) => row.status !== "succeeded")) {
+  for (const build of open.filter(
+    (row) => row.status !== "succeeded" && (!scenarioIds || scenarioIds.includes(row.scenarioId)),
+  )) {
     const manifest = manifestOf(build.scenarioId);
     await db()
       .update(imageBuilds)
@@ -1447,7 +1511,7 @@ describe("ScenarioSourceDO public apply", () => {
     await bindPublic();
     // `web` goes live from A: nothing was live, so nothing goes out.
     await publicCommit(SHA_A);
-    await publish(SHA_A, null);
+    await publish(SHA_A, { organizationId: null });
     await tick();
     expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
   });
@@ -1462,7 +1526,7 @@ describe("ScenarioSourceDO public apply", () => {
 
     // C builds again, and its image comes out byte-identical.
     await publicCommit(SHA_C, { hash: HASH_B });
-    await publish(SHA_C, null, withImage(IMAGE_A, [PROBE]));
+    await publish(SHA_C, { organizationId: null, manifestOf: withImage(IMAGE_A, [PROBE]) });
     await tick();
 
     expect(await commitState(SHA_C)).toMatchObject({ state: "live" });
@@ -1476,7 +1540,7 @@ describe("ScenarioSourceDO public apply", () => {
 
   it("applies an image-replacing commit's catalog and awaits the drained lane once its candidates are complete", async () => {
     await publicCommit(SHA_B, { hash: HASH_B, title: "Next" });
-    await publish(SHA_B, null, withImage(IMAGE_B));
+    await publish(SHA_B, { organizationId: null, manifestOf: withImage(IMAGE_B) });
     // The collector retires B's candidate between heal and apply.
     guard.before = async () => {
       guard.before = undefined;
@@ -1531,7 +1595,7 @@ describe("ScenarioSourceDO public apply", () => {
     // Images replaced: the re-read before the catalog sync sees the gate.
     await db().delete(runtimeOperationGates);
     await publicCommit(SHA_C, { hash: HASH_B });
-    await publish(SHA_C, null, withImage(IMAGE_B));
+    await publish(SHA_C, { organizationId: null, manifestOf: withImage(IMAGE_B) });
     guard.before = drainDuringAlarm;
     await tick();
     expect(await commitState(SHA_C)).toMatchObject({ state: "building" });
@@ -1544,13 +1608,13 @@ describe("ScenarioSourceDO public apply", () => {
   it("promotes live_rev again when the head returns to it after another rev's catalog applied", async () => {
     // B adds `db` over A's image and goes live without a drain.
     await publicCommit(SHA_B, { scenarioIds: ["web", "db"] });
-    await publish(SHA_B, null);
+    await publish(SHA_B, { organizationId: null });
     await tick();
     expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
 
     // C replaces web's image and drops `db`: its catalog applies first.
     await publicCommit(SHA_C, { hash: HASH_B, title: "Next" });
-    await publish(SHA_C, null, withImage(IMAGE_B));
+    await publish(SHA_C, { organizationId: null, manifestOf: withImage(IMAGE_B) });
     await tick();
     expect(await commitState(SHA_C)).toMatchObject({ state: "awaiting_promote" });
     expect(await catalogRev()).toBe(rev(SHA_C));
@@ -1880,7 +1944,7 @@ describe("ScenarioSourceDO pull delivery", () => {
     github({
       ...archive,
       // A's assign lands while B downloads.
-      [`GET /acme/other/legacy.tar.gz/${SHA_B}`]: async () => {
+      [`GET /acme/other/legacy.tar.gz/${SHA_B}`]: async (request) => {
         await db().insert(scenarioSourceCommits).values({
           id: "commit-a",
           scopeKey: SCOPE,
@@ -1893,7 +1957,7 @@ describe("ScenarioSourceDO pull delivery", () => {
           compileHostId: "builder-1",
           compileAssignedAt: Date.now(),
         });
-        return archive[`GET /acme/other/legacy.tar.gz/${SHA_B}`]!();
+        return archive[`GET /acme/other/legacy.tar.gz/${SHA_B}`]!(request);
       },
     });
     scopeKey = SCOPE_B;
@@ -1918,9 +1982,9 @@ describe("ScenarioSourceDO pull delivery", () => {
     const archive = tarball(SHA_A);
     github({
       ...archive,
-      [`GET /acme/labs/legacy.tar.gz/${SHA_A}`]: async () => {
+      [`GET /acme/labs/legacy.tar.gz/${SHA_A}`]: async (request) => {
         await db().update(agentHosts).set({ connected: false }).where(eq(agentHosts.id, "builder-1"));
-        return archive[`GET /acme/labs/legacy.tar.gz/${SHA_A}`]!();
+        return archive[`GET /acme/labs/legacy.tar.gz/${SHA_A}`]!(request);
       },
     });
 
@@ -2021,7 +2085,7 @@ describe("ScenarioSourceDO pull delivery", () => {
 
     await pullTick(overrides);
     expect(await commitState(SHA_A, at)).toMatchObject({ state: "building" });
-    await publish(SHA_A, ORG, scenarioManifest, at);
+    await publish(SHA_A, { at });
     await pullTick(overrides);
     expect(await commitState(SHA_A, at)).toMatchObject({ state: "live" });
     expect(await binding()).toMatchObject({ liveRev: rev(SHA_A, at), liveSha: SHA_A });
@@ -2080,6 +2144,23 @@ describe("ScenarioSourceDO pull delivery", () => {
     }
     await expireCompile();
     expect((await rows())[0]).toMatchObject({ state: "failed", detail: "compiler did not finish" });
+  });
+
+  it("shows a delivered head as compiling on a new deploy check run", async () => {
+    github(tarball(SHA_A));
+    await pullTick();
+    expect(shownChecks()).toEqual([{ call: "POST", status: "in_progress", title: "Compiling" }]);
+    expect(checkRuns[0]!.body).toMatchObject({ name: "Intar / deploy", head_sha: SHA_A });
+    expect(await checkRunId(SHA_A)).toBe(901);
+  });
+
+  it("fails the deploy check run of an archive over 8 MiB", async () => {
+    github(tarball(SHA_A, "acme/labs", () => new Response(new Uint8Array(8 * 1024 * 1024 + 1))));
+    await pullTick();
+    expect(shownChecks()).toEqual([
+      { call: "POST", status: "completed", conclusion: "failure", title: "Invalid" },
+    ]);
+    expect(checkRuns[0]!.body.output.summary).toContain("8 MiB pull limit");
   });
 
   it("lets the host runtime re-add a missing compile entry and drop a stale one", async () => {
@@ -2189,5 +2270,282 @@ describe("scenario source cron", () => {
     await sweepScenarioSources(cronEnv, Date.now() + 11 * 60_000);
     expect(await stagedKeys(SHA_A)).toHaveLength(2);
     expect(await stagedKeys(SHA_B)).toEqual([]);
+  });
+});
+
+describe("ScenarioSourceDO deploy check run", () => {
+  it("is created on the first claim and follows every state to live, sending only changes", async () => {
+    github();
+    await stage({ scenarioIds: ["acme-web", "acme-db"] });
+    await insertCommit(SHA_A, "ingesting");
+    // A refused writer keeps the claim ingesting.
+    await setRegistryPause(env, { paused: true });
+    await tick();
+    await setRegistryPause(env, { paused: false });
+    await tick();
+    await tick();
+    await publish(SHA_A, { scenarioIds: ["acme-web"] });
+    await tick();
+    await publish(SHA_A);
+    await tick();
+
+    expect(shownChecks()).toEqual([
+      { call: "POST", status: "queued", title: "Queued" },
+      { call: "PATCH 901", status: "in_progress", title: "Building 0/2" },
+      { call: "PATCH 901", status: "in_progress", title: "Building 1/2" },
+      { call: "PATCH 901", status: "completed", conclusion: "success", title: "Live" },
+    ]);
+    expect(checkRuns[0]!.body).toMatchObject({ name: "Intar / deploy", head_sha: SHA_A });
+    expect(checkRuns[2]!.body.output.summary).toBe(
+      "- acme-web (x86_64): succeeded, succeeded\n- acme-db (x86_64): queued, queued",
+    );
+    expect(await checkRunId(SHA_A)).toBe(901);
+    // Every check-run call carries the installation token, never the App JWT.
+    expect(
+      githubRequests
+        .filter((request) => request.url.includes("/check-runs"))
+        .map((request) => request.authorization),
+    ).toEqual(Array(4).fill("Bearer ghs_test"));
+  });
+
+  it("shows a failed build's phase and redacted error, and no host data", async () => {
+    github();
+    await stage();
+    await insertCommit(SHA_A, "ingesting");
+    await tick();
+    await db().insert(agentHosts).values({
+      id: "builder-7f3a",
+      userId: OWNER,
+      name: "builder-7f3a.fleet.internal",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await db().update(imageBuilds).set({
+      status: "failed",
+      phase: "building_base",
+      hostId: "builder-7f3a",
+      error: "failed to unpack '/var/lib/intar-builder/revs/x/bundle.tar.gz': disk full (/dev/nvme0n1)",
+    });
+
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "failed" });
+    expect(checkRuns.at(-1)).toEqual({
+      call: "PATCH 901",
+      body: {
+        status: "completed",
+        conclusion: "failure",
+        output: {
+          title: "Failed",
+          summary:
+            "image build acme-web (x86_64) failed: failed to unpack '&lt;path&gt;': disk full (&lt;path&gt;)\n" +
+            "- acme-web (x86_64): failed, building_base: failed to unpack '&lt;path&gt;': disk full (&lt;path&gt;)",
+        },
+      },
+    });
+    expect(JSON.stringify(checkRuns)).not.toMatch(/builder-7f3a|fleet|\/var\/|\/dev\//);
+  });
+
+  it("waits for active runs without showing them", async () => {
+    await liveWeb();
+    vi.restoreAllMocks();
+    github();
+    await seedLearner();
+    await startRun("run-1");
+
+    await deliver({ sha: SHA_B, scenarioIds: [] });
+
+    expect(await commitState(SHA_B)).toMatchObject({ state: "waiting" });
+    expect(checkRuns).toEqual([
+      {
+        call: "POST",
+        body: {
+          name: "Intar / deploy",
+          head_sha: SHA_B,
+          status: "in_progress",
+          output: { title: "Waiting for active runs", summary: "active runs would lose access" },
+        },
+      },
+    ]);
+  });
+
+  it("closes the check of a commit the head replaced before showing the new head", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    await deliver({ sha: SHA_B, hash: HASH_B });
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
+    expect(shownChecks()).toEqual([
+      { call: "POST", status: "in_progress", title: "Building 0/1" },
+      {
+        call: "PATCH 901",
+        status: "completed",
+        conclusion: "neutral",
+        title: "Superseded by a newer commit",
+      },
+      { call: "POST", status: "in_progress", title: "Building 0/1" },
+    ]);
+    expect(checkRuns[2]!.body.head_sha).toBe(SHA_B);
+    expect(await checkRunId(SHA_B)).toBe(902);
+  });
+
+  it("closes the check of a row the head left outside a promotion", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    // A row on the live rev that is not live stays where observe leaves it.
+    await db().update(scenarioSourceCommits).set({ state: "waiting" });
+    await db().update(scenarioSources).set({ liveRev: rev(SHA_A) });
+    await deliver({ sha: SHA_B, hash: HASH_B });
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "waiting" });
+    expect(shownChecks()).toEqual([
+      { call: "POST", status: "in_progress", title: "Building 0/1" },
+      {
+        call: "PATCH 901",
+        status: "completed",
+        conclusion: "neutral",
+        title: "Superseded by a newer commit",
+      },
+      { call: "POST", status: "in_progress", title: "Building 0/1" },
+    ]);
+  });
+
+  it("shows a commit of 100 scenarios within D1's 100 bound parameters", async () => {
+    github();
+    const scenarioIds = Array.from({ length: 100 }, (_, index) => `acme-s${index}`);
+    await stage({
+      scenarioIds,
+      meta: {
+        scenarios: scenarioIds.map((id, index) => ({
+          scenario_id: id,
+          arch: "x86_64",
+          content_hash: String(index).padStart(64, "0"),
+        })),
+      },
+    });
+    await insertCommit(SHA_A, "ingesting");
+    await tick();
+    await publish(SHA_A, { scenarioIds: ["acme-s0"] });
+    // D1 refuses a statement over 100 bound parameters; the local SQLite does not.
+    const limited = <T extends object>(target: T, wrap: (key: PropertyKey, value: unknown) => unknown) =>
+      new Proxy(target, {
+        get(object, key) {
+          const value = Reflect.get(object, key, object);
+          return wrap(key, typeof value === "function" ? value.bind(object) : value);
+        },
+      });
+    const DB = limited(env.DB, (key, prepare) =>
+      key !== "prepare"
+        ? prepare
+        : (query: string) =>
+            limited((prepare as D1Database["prepare"])(query), (name, bind) =>
+              name !== "bind"
+                ? bind
+                : (...values: unknown[]) => {
+                    if (values.length > 100) throw new Error("too many SQL variables");
+                    return (bind as D1PreparedStatement["bind"])(...values);
+                  },
+            ),
+    );
+    await tick({ DB });
+
+    expect(shownChecks()).toEqual([
+      { call: "POST", status: "in_progress", title: "Building 0/100" },
+      { call: "PATCH 901", status: "in_progress", title: "Building 1/100" },
+    ]);
+  });
+
+  it("shows a head that waits to be delivered again as queued", async () => {
+    github();
+    await insertCommit(SHA_A, "ingesting");
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
+    expect(checkRuns.map(({ body }) => [body.status, body.output])).toEqual([
+      ["queued", { title: "Queued", summary: "the staged bundle is gone" }],
+    ]);
+  });
+
+  it("re-runs a failed commit through the check_run webhook on a new check run", async () => {
+    github();
+    await stage();
+    await insertCommit(SHA_A, "ingesting");
+    await tick();
+    await db().update(imageBuilds).set({ status: "failed", error: "boom" });
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "failed" });
+
+    const body = JSON.stringify({
+      action: "rerequested",
+      check_run: { id: await checkRunId(SHA_A) },
+      installation: { id: 7 },
+      repository: { id: 42 },
+    });
+    const response = await handleGitHubWebhook(
+      new Request(`https://intar.dev${GITHUB_WEBHOOK_PATH}`, {
+        method: "POST",
+        headers: { "x-github-event": "check_run", "x-hub-signature-256": await sign(body) },
+        body,
+      }),
+      env,
+    );
+    expect(response.status).toBe(204);
+    expect(await commitState(SHA_A)).toMatchObject({ state: "ingesting" });
+
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "building" });
+    expect(shownChecks()).toEqual([
+      { call: "POST", status: "in_progress", title: "Building 0/1" },
+      { call: "PATCH 901", status: "completed", conclusion: "failure", title: "Failed" },
+      { call: "POST", status: "in_progress", title: "Building 0/1" },
+    ]);
+    expect(await checkRunId(SHA_A)).toBe(902);
+  });
+
+  it("sends a state again after GitHub refused it", async () => {
+    github({
+      "POST /repos/acme/labs/check-runs": () => new Response(null, { status: 502 }),
+    });
+    await stage();
+    await insertCommit(SHA_A, "ingesting");
+    await tick();
+    await tick();
+    expect(await checkRunId(SHA_A)).toBeNull();
+    // Only the refused send wants the alarm again.
+    expect(await tick()).not.toBeNull();
+
+    vi.restoreAllMocks();
+    github();
+    expect(await tick()).toBeNull();
+    expect(shownChecks()).toEqual([{ call: "POST", status: "in_progress", title: "Building 0/1" }]);
+    expect(await checkRunId(SHA_A)).toBe(901);
+  });
+
+  it("leaves the check of a repository the scope was bound to before", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    // A reconnect re-binds the same scope to acme/other (id 43).
+    await db()
+      .update(scenarioSources)
+      .set({ githubRepositoryId: 43, githubRepository: "acme/other", headSha: SHA_B });
+    await db().insert(scenarioSourceCommits).values({
+      id: "commit-other",
+      scopeKey,
+      purpose: "deploy",
+      sha: SHA_B,
+      rev: `git-43-${SHA_B}-${digest}`,
+      via: "push",
+      state: "ingesting",
+    });
+
+    await tick();
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
+    expect(githubCalls.filter((call) => call.includes("/check-runs"))).toEqual([
+      "POST /repos/acme/labs/check-runs",
+      "POST /repos/acme/other/check-runs",
+    ]);
   });
 });
