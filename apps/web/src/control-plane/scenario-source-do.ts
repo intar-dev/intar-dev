@@ -106,7 +106,7 @@ interface Step {
 
 type ActiveBinding = Pick<
   typeof scenarioSources.$inferSelect,
-  "organizationId" | "mode" | "githubInstallationId" | "githubRepository" | "githubRepositoryId"
+  "mode" | "githubInstallationId" | "githubRepository" | "githubRepositoryId"
 >;
 
 interface CommitRow {
@@ -232,7 +232,6 @@ async function tickScenarioSource(
 
   const [active] = await db
     .select({
-      organizationId: scenarioSources.organizationId,
       mode: scenarioSources.mode,
       githubInstallationId: scenarioSources.githubInstallationId,
       githubRepository: scenarioSources.githubRepository,
