@@ -95,19 +95,19 @@ async fn cleans_only_reported_build_attempt_artifacts_idempotently() {
         std::fs::write(path.join("artifact"), "data").unwrap();
     }
 
-    cleanup_reported_build_attempt_artifacts(&cfg, build_id, "abc123").await;
+    cleanup_reported_build_attempt_artifacts(&cfg, build_id).await;
 
     assert!(!build_work.parent().unwrap().exists());
     assert!(!build_output.parent().unwrap().exists());
     assert!(other_work.join("artifact").exists());
     assert!(other_output.join("artifact").exists());
 
-    cleanup_reported_build_attempt_artifacts(&cfg, build_id, "abc123").await;
+    cleanup_reported_build_attempt_artifacts(&cfg, build_id).await;
 
     assert!(other_work.join("artifact").exists());
     assert!(other_output.join("artifact").exists());
 
-    cleanup_reported_build_attempt_artifacts(&cfg, "../other-build", "abc123").await;
+    cleanup_reported_build_attempt_artifacts(&cfg, "../other-build").await;
 
     assert!(other_work.join("artifact").exists());
     assert!(other_output.join("artifact").exists());
@@ -237,8 +237,7 @@ async fn evicts_a_revs_bundle_after_its_last_build() {
     assert_eq!(fixture.downloads(), 1);
 
     fixture.set_phase("build-a", "succeeded");
-    cleanup_reported_build_attempt_artifacts(&fixture.cfg, "build-a", BundleCacheFixture::REV)
-        .await;
+    cleanup_reported_build_attempt_artifacts(&fixture.cfg, "build-a").await;
     assert!(fixture.cached(), "a queued build still names the rev");
 
     // A tree left aside by an interrupted eviction does not block the next.
@@ -246,8 +245,7 @@ async fn evicts_a_revs_bundle_after_its_last_build() {
     std::fs::create_dir_all(&interrupted).unwrap();
     std::fs::write(interrupted.join("partial"), "data").unwrap();
     fixture.set_phase("build-b", "failed");
-    cleanup_reported_build_attempt_artifacts(&fixture.cfg, "build-b", BundleCacheFixture::REV)
-        .await;
+    cleanup_reported_build_attempt_artifacts(&fixture.cfg, "build-b").await;
     assert!(fixture.evicted());
     assert!(!interrupted.exists());
 
@@ -262,6 +260,23 @@ async fn evicts_a_revs_bundle_after_its_last_build() {
 }
 
 #[tokio::test]
+async fn evicts_a_rev_whose_last_build_left_without_a_cleanup() {
+    let fixture = BundleCacheFixture::new();
+    fixture.set_phase("build-a", "fetching_sources");
+    fixture.fetch("build-a").await;
+    fixture.set_phase("build-a", "queued");
+
+    // The control plane takes the queued build off this host, which deletes
+    // its row without a cleanup.
+    let db = db::BuilderDb::open(&fixture.cfg.builder.state_db).unwrap();
+    crate::jobs::reconcile_desired_builds(&db, &[], 2000).unwrap();
+    assert!(fixture.cached());
+
+    cleanup_reported_build_attempt_artifacts(&fixture.cfg, "unrelated-build").await;
+    assert!(fixture.evicted());
+}
+
+#[tokio::test]
 async fn eviction_rechecks_builds_under_the_bundle_cache_lock() {
     let fixture = Arc::new(BundleCacheFixture::new());
     fixture.set_phase("build-a", "fetching_sources");
@@ -271,8 +286,7 @@ async fn eviction_rechecks_builds_under_the_bundle_cache_lock() {
     let fetching = BUNDLE_CACHE_LOCK.lock().await;
     let evicting = Arc::clone(&fixture);
     let mut eviction = tokio::spawn(async move {
-        cleanup_reported_build_attempt_artifacts(&evicting.cfg, "build-a", BundleCacheFixture::REV)
-            .await;
+        cleanup_reported_build_attempt_artifacts(&evicting.cfg, "build-a").await;
     });
     assert!(
         tokio::time::timeout(Duration::from_millis(300), &mut eviction)

@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, Read, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
@@ -18,6 +19,13 @@ use intar_image_scenario::{BaseImageCatalog, Scenario};
 
 const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
 const BUNDLE_UNPACK_MARKER: &str = ".intar-bundle-v1.complete";
+/// Builds hold the bundle-cache lock across the download, so a stalled
+/// download must not hold it forever.
+const BUNDLE_DOWNLOAD_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(300)
+};
 static BUNDLE_UNPACK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -51,7 +59,10 @@ pub async fn download_bundle_archive(
     }
 
     let url = bundle_download_url(base_url, rev)?;
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .timeout(BUNDLE_DOWNLOAD_TIMEOUT)
+        .build()
+        .context("failed to initialize bundle download http client")?
         .get(&url)
         .bearer_auth(bearer_token.trim())
         .send()
@@ -729,7 +740,7 @@ fn validate_safe_path_component(value: &str) -> Result<()> {
 pub(crate) mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::io::Write;
+    use std::io::{Read as _, Write};
     use std::path::Path;
 
     use flate2::Compression;
@@ -738,10 +749,10 @@ pub(crate) mod tests {
     use intar_image_build::{ScenarioContentHashInput, scenario_content_hash};
 
     use super::{
-        bundle_archive_path, bundle_download_url, inspect_bundle_build_input,
-        safe_archive_entry_path, unpack_bundle_archive, validate_bundle_archive,
-        validate_bundle_archive_with_limit, validate_desired_build_identity,
-        verify_bundle_for_build,
+        BUNDLE_DOWNLOAD_TIMEOUT, bundle_archive_path, bundle_download_url, download_bundle_archive,
+        inspect_bundle_build_input, safe_archive_entry_path, unpack_bundle_archive,
+        validate_bundle_archive, validate_bundle_archive_with_limit,
+        validate_desired_build_identity, verify_bundle_for_build,
     };
 
     #[test]
@@ -751,6 +762,28 @@ pub(crate) mod tests {
             "https://intar.dev/agent/registry/bundles/abc123"
         );
         assert!(bundle_download_url("https://intar.dev", "../escape").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stalled_bundle_download_gives_up() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut stalled = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.read(&mut [0_u8; 4096]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\n");
+                stalled.push(stream);
+            }
+        });
+        let cache = tempfile::tempdir().unwrap();
+
+        let download = download_bundle_archive(&base_url, "token", "abc123", cache.path());
+        let result = tokio::time::timeout(BUNDLE_DOWNLOAD_TIMEOUT * 3, download)
+            .await
+            .expect("a stalled download must not hold the bundle-cache lock forever");
+        assert!(result.is_err());
     }
 
     #[test]
