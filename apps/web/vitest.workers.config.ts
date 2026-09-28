@@ -21,6 +21,7 @@ export default defineConfig({
           GITHUB_CLIENT_SECRET: "test-client-secret",
           PLATFORM_BASE_IMAGES_SHA256:
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          GITHUB_APP_WEBHOOK_SECRET: "test-github-webhook-secret",
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",
           SCENARIO_RUN_KEY_ENCRYPTION_SECRET: "test-run-key-secret",
           SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON:

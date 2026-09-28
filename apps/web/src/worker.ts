@@ -8,6 +8,10 @@ import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
+  GITHUB_WEBHOOK_PATH,
+  handleGitHubWebhook,
+} from "@/control-plane/github-webhook";
+import {
   handleMaintenanceMode,
   handleRegistryCleanupGateRequest,
 } from "@/maintenance";
@@ -75,6 +79,12 @@ export default {
       if (response) {
         return respond(response);
       }
+    }
+
+    // GitHub signs its deliveries instead of sending browser credentials, so
+    // the webhook answers before the application API security layer.
+    if (url.pathname === GITHUB_WEBHOOK_PATH) {
+      return respond(await traceOperation("github.webhook", () => handleGitHubWebhook(request, env)));
     }
 
     const securedRequest = await traceOperation("request.security", () => secureApplicationApiRequest(request, env));

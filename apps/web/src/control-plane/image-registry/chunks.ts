@@ -505,7 +505,7 @@ function invalidManifest(message: string): { ok: false; response: Response } {
   return { ok: false, response: jsonResponse({ error: message }, 400) };
 }
 
-function hexToBytes(value: string): Uint8Array {
+export function hexToBytes(value: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(32);
   for (let index = 0; index < bytes.length; index += 1) {
     bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
