@@ -393,6 +393,20 @@ fn maps_upload_outcomes_to_exit_codes() {
         ),
         token: "token".to_owned(),
     };
+    // A misconfigured target fails the same on every retry.
+    for (url, token) in [
+        ("not a url", "token"),
+        ("ftp://127.0.0.1/registry/v1/sources/bundles", "token"),
+        ("http://127.0.0.1:1/registry/v1/sources/bundles", "to\nken"),
+    ] {
+        let misconfigured = BundleUploadTarget {
+            url: url.to_owned(),
+            token: token.to_owned(),
+        };
+        let error =
+            upload_bundle(None, &misconfigured, archive.path(), GIT_REV, &meta).unwrap_err();
+        assert_eq!(exit_code(&error), 1, "{url}: {error:?}");
+    }
     // A refused connection.
     let closed = TcpListener::bind("127.0.0.1:0").unwrap();
     let refused = target(&closed);

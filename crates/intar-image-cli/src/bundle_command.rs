@@ -172,6 +172,13 @@ fn post_bundle(
     rev: &str,
     meta: &serde_json::Value,
 ) -> Result<BundleUploadReceipt> {
+    // reqwest rejects a non-HTTP scheme only while it streams the body, where
+    // it can surface as a transport error, so a bad target fails here with 1.
+    let url = reqwest::Url::parse(&target.url)
+        .with_context(|| format!("invalid bundle upload URL {}", target.url))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("bundle upload URL {} must use http or https", target.url);
+    }
     let part = reqwest::blocking::multipart::Part::file(archive_path)
         .with_context(|| format!("failed to read bundle {}", archive_path.display()))?
         .file_name(format!("{rev}.tar.gz"))
@@ -184,15 +191,20 @@ fn post_bundle(
     let mut request = reqwest::blocking::Client::builder()
         .timeout(BUNDLE_UPLOAD_TIMEOUT)
         .build()?
-        .post(&target.url)
+        .post(url)
         .bearer_auth(target.token.trim());
     if let Some(session) = session {
         request = request.header(REGISTRY_SESSION_HEADER, session.id());
     }
-    let response = request
-        .multipart(form)
-        .send()
-        .with_context(|| transient(format!("failed to upload bundle to {}", target.url)))?;
+    let response = request.multipart(form).send().map_err(|error| {
+        let message = format!("failed to upload bundle to {}", target.url);
+        // A builder error, such as a bad token header, fails the same on a retry.
+        if error.is_builder() {
+            anyhow::Error::new(error).context(message)
+        } else {
+            anyhow::Error::new(error).context(transient(message))
+        }
+    })?;
     let status = response.status();
     let body = response
         .text()
