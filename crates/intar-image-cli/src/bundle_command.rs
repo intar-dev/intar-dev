@@ -1,6 +1,47 @@
 use super::*;
+use intar_contracts::source::{
+    SOURCE_BUNDLE_FIELD, SOURCE_META_FIELD, SourceRefusalCode, SourceRefusalV1,
+};
 use intar_image_build::source_bundle::validate_safe_cli_slug;
 use intar_image_upload::{REGISTRY_SESSION_HEADER, RegistryUploadSession, UploadOutcome};
+use std::fmt;
+use std::time::Duration;
+
+/// The whole bundle request, the body upload included.
+const BUNDLE_UPLOAD_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 120 });
+/// Exit codes of a failed upload that the scenario-publish workflow acts on.
+/// Every other failure exits 1.
+const EXIT_SUPERSEDED: u8 = 3;
+const EXIT_COMPILER_OUTDATED: u8 = 4;
+/// `EX_TEMPFAIL`: a transport error, a client timeout, a 429 or a 5xx.
+const EXIT_TRANSIENT: u8 = 75;
+
+/// A failed bundle upload and the exit code it ends the process with.
+#[derive(Debug)]
+struct UploadFailed {
+    exit_code: u8,
+    message: String,
+}
+
+impl fmt::Display for UploadFailed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+/// The process exit code for a failed command.
+pub(super) fn exit_code(error: &anyhow::Error) -> u8 {
+    error
+        .downcast_ref::<UploadFailed>()
+        .map_or(1, |failed| failed.exit_code)
+}
+
+fn transient(message: String) -> UploadFailed {
+    UploadFailed {
+        exit_code: EXIT_TRANSIENT,
+        message,
+    }
+}
 
 pub(super) fn load_build_config(path: Option<&Path>) -> Result<BuildConfig> {
     match path {
@@ -135,11 +176,14 @@ fn post_bundle(
         .with_context(|| format!("failed to read bundle {}", archive_path.display()))?
         .file_name(format!("{rev}.tar.gz"))
         .mime_str("application/gzip")?;
+    // Part::file has a known length, so reqwest sends a Content-Length.
     let form = reqwest::blocking::multipart::Form::new()
-        .text("meta", serde_json::to_string(meta)?)
-        .part("bundle", part);
+        .text(SOURCE_META_FIELD, serde_json::to_string(meta)?)
+        .part(SOURCE_BUNDLE_FIELD, part);
 
-    let mut request = reqwest::blocking::Client::new()
+    let mut request = reqwest::blocking::Client::builder()
+        .timeout(BUNDLE_UPLOAD_TIMEOUT)
+        .build()?
         .post(&target.url)
         .bearer_auth(target.token.trim());
     if let Some(session) = session {
@@ -148,9 +192,11 @@ fn post_bundle(
     let response = request
         .multipart(form)
         .send()
-        .with_context(|| format!("failed to upload bundle to {}", target.url))?;
+        .with_context(|| transient(format!("failed to upload bundle to {}", target.url)))?;
     let status = response.status();
-    let body = response.text().context("failed to read bundle response")?;
+    let body = response
+        .text()
+        .with_context(|| transient("failed to read bundle response".to_owned()))?;
     parse_bundle_upload_response(status, &body, rev)
 }
 
@@ -171,7 +217,22 @@ pub(super) fn parse_bundle_upload_response(
     requested_rev: &str,
 ) -> Result<BundleUploadReceipt> {
     if status != reqwest::StatusCode::ACCEPTED {
-        bail!("bundle upload failed with status {status}: {body}");
+        let exit_code =
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                EXIT_TRANSIENT
+            } else if status == reqwest::StatusCode::CONFLICT {
+                match serde_json::from_str::<SourceRefusalV1>(body).map(|refusal| refusal.code) {
+                    Ok(SourceRefusalCode::Superseded) => EXIT_SUPERSEDED,
+                    Ok(SourceRefusalCode::CompilerOutdated) => EXIT_COMPILER_OUTDATED,
+                    _ => 1,
+                }
+            } else {
+                1
+            };
+        return Err(anyhow!(UploadFailed {
+            exit_code,
+            message: format!("bundle upload failed with status {status}: {body}"),
+        }));
     }
 
     let value: serde_json::Value =

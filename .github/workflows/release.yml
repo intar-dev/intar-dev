@@ -639,16 +639,29 @@ jobs:
           "${smoke_root}/amd64/intar-image-cli" validate \
             --courses-root "${fixture_root}/courses" \
             --base-images "${smoke_root}/amd64/base-images.hcl"
-          "${smoke_root}/amd64/intar-image-cli" bundle \
+          "${smoke_root}/amd64/intar-image-cli" bundle broken-nginx \
             --courses-root "${fixture_root}/courses" \
             --base-images "${smoke_root}/amd64/base-images.hcl" \
             --rev release-smoke \
             --output "${fixture_root}/bundle.tar.gz" \
             --no-upload
 
-          bundle_listing="${fixture_root}/bundle-listing.txt"
-          tar -tzf "${fixture_root}/bundle.tar.gz" | LC_ALL=C sort > "${bundle_listing}"
-          mapfile -t bundled_files < "${bundle_listing}"
+          # The frozen scenario-publish argv: intar.yaml mode, no flags.
+          printf 'version: 1\nscope: release-smoke\n' > "${fixture_root}/intar.yaml"
+          digest="$(cd "${fixture_root}" && "${smoke_root}/amd64/intar-image-cli" validate \
+            | sed -n 's/^compile digest: //p')"
+          if ! [[ "${digest}" =~ ^p[0-9a-f]{8}$ ]]; then
+            echo "validate printed no compile digest" >&2
+            exit 1
+          fi
+          (
+            cd "${fixture_root}"
+            "${smoke_root}/amd64/intar-image-cli" bundle \
+              --rev "git-1-0123456789abcdef0123456789abcdef01234567-${digest}" \
+              --output "${fixture_root}/source-bundle.tar.gz" \
+              --no-upload
+          )
+
           expected_bundle_files=(
             base-images.hcl
             curriculum/catalog.json
@@ -657,10 +670,15 @@ jobs:
             curriculum/release-smoke/course.md
             scenarios/broken-nginx/scenario.hcl
           )
-          if [ "${bundled_files[*]}" != "${expected_bundle_files[*]}" ]; then
-            echo "unexpected nested-course bundle paths: ${bundled_files[*]}" >&2
-            exit 1
-          fi
+          for bundle in bundle source-bundle; do
+            bundle_listing="${fixture_root}/${bundle}-listing.txt"
+            tar -tzf "${fixture_root}/${bundle}.tar.gz" | LC_ALL=C sort > "${bundle_listing}"
+            mapfile -t bundled_files < "${bundle_listing}"
+            if [ "${bundled_files[*]}" != "${expected_bundle_files[*]}" ]; then
+              echo "unexpected nested-course ${bundle} paths: ${bundled_files[*]}" >&2
+              exit 1
+            fi
+          done
 
       - name: Preserve exact release payload
         id: release_payload
