@@ -190,7 +190,9 @@ export async function countUnitGuardRuns(
  * Whether the drained lane may promote a `git-` rev: it is the rev whose
  * catalog `public` applied, or the public binding's live rev (image-ops
  * retrying a committed 503), and no public promotion of another rev is in
- * flight. The drained handler, its in-lock recheck and build-status share it.
+ * flight. A superseded rev the binding abandoned, because its head went back
+ * to live_rev, never goes live. The drained handler, its in-lock recheck and
+ * build-status share it.
  */
 export async function publicSourceRevPromotable(
   d1: D1Database,
@@ -202,7 +204,11 @@ export async function publicSourceRevPromotable(
             UNION ALL SELECT live_rev FROM scenario_sources WHERE scope_key = 'public')
           AND NOT EXISTS (SELECT 1 FROM scenario_source_commits
             WHERE scope_key = 'public' AND purpose = 'deploy' AND state = 'promoting'
-              AND rev <> ?1) AS promotable`,
+              AND rev <> ?1)
+          AND NOT EXISTS (SELECT 1 FROM scenario_source_commits AS c
+            JOIN scenario_sources AS s ON s.scope_key = c.scope_key
+            WHERE c.scope_key = 'public' AND c.purpose = 'deploy' AND c.rev = ?1
+              AND c.state = 'superseded' AND s.target_rev IS s.live_rev) AS promotable`,
     )
     .bind(rev)
     .first<{ promotable: number | null }>();
@@ -212,14 +218,15 @@ export async function publicSourceRevPromotable(
 /**
  * The drained lane committed a public rev. One transaction makes it the
  * binding's live commit, whatever state its row was left in, and supersedes
- * the previous live row.
+ * the previous live row. The poke lets the check leave `Promoting` within a
+ * minute.
  */
 export async function recordPublicSourceLive(
   d1: D1Database,
   rev: string,
 ): Promise<void> {
   const statements = [
-    `UPDATE scenario_sources SET live_rev = ?1, live_at = ?2, updated_at = ?2,
+    `UPDATE scenario_sources SET live_rev = ?1, live_at = ?2, updated_at = ?2, poked_at = ?2,
         live_sha = (SELECT sha FROM scenario_source_commits
           WHERE scope_key = 'public' AND purpose = 'deploy' AND rev = ?1)
       WHERE scope_key = 'public' AND live_rev IS NOT ?1`,

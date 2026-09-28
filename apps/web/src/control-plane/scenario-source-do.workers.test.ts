@@ -114,6 +114,7 @@ const OWNER = "owner";
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const SHA_C = "c".repeat(40);
+const SHA_D = "d".repeat(40);
 const HASH_A = "1".repeat(64);
 const HASH_B = "2".repeat(64);
 
@@ -317,6 +318,8 @@ interface Commit {
   sha?: string;
   digest?: string;
   scenarioIds?: string[];
+  /** The scenarios the catalog links, when not exactly the bundled ones. */
+  catalogIds?: string[];
   hash?: string;
   scope?: string;
   title?: string;
@@ -330,7 +333,7 @@ async function compiled(commit: Commit = {}) {
   const sha = commit.sha ?? SHA_A;
   const at = commit.digest ?? digest;
   const scenarioIds = commit.scenarioIds ?? ["acme-web"];
-  const courseCatalog = catalog(scenarioIds, commit.title);
+  const courseCatalog = catalog(commit.catalogIds ?? scenarioIds, commit.title);
   const meta = {
     rev: rev(sha, at),
     build_format_version: IMAGE_BUILD_FORMAT_VERSION,
@@ -602,6 +605,26 @@ describe("ScenarioSourceDO ingest", () => {
     stageLock.locked = false;
     await tick();
     expect(await commitState(SHA_A)).toMatchObject({ state: "building" });
+  });
+
+  it("refuses a meta with more than 100 scenario builds, even under 100 ids", async () => {
+    github();
+    const scenarioIds = Array.from({ length: 51 }, (_, index) => `acme-s${index}`);
+    await deliver({
+      sha: SHA_A,
+      scenarioIds,
+      meta: {
+        scenarios: scenarioIds.flatMap((id, index) => [
+          { scenario_id: id, arch: "x86_64", content_hash: (2 * index + 1).toString(16).padStart(64, "0") },
+          { scenario_id: id, arch: "aarch64", content_hash: (2 * index + 2).toString(16).padStart(64, "0") },
+        ]),
+      },
+    });
+
+    expect(await commitState(SHA_A)).toEqual({
+      state: "invalid",
+      detail: "102 scenario builds exceed the limit of 100",
+    });
   });
 
   it("fails after three tries that throw", async () => {
@@ -1131,6 +1154,26 @@ async function seedLearner() {
 
 const snapshot = (scenarioIds: string[]) => normalizeCourseCatalogSnapshot(catalog(scenarioIds))!;
 
+/** Enabled scenarios a catalog may link, in one statement. */
+async function seedScenarios(organizationId: string | null, scenarioIds: string[]) {
+  await env.DB.prepare(
+    `INSERT INTO vm_scenarios (scenario_id, organization_id, title, description, difficulty,
+       estimated_minutes, tags_json, briefing_markdown, solution_markdown, hints_json, enabled)
+     SELECT value, ?2, 'Seeded', '', 'easy', 5, '[]', '', '', '[]', 1 FROM json_each(?1)`,
+  )
+    .bind(JSON.stringify(scenarioIds), organizationId)
+    .run();
+}
+
+const enabledScenarioIds = async () =>
+  (
+    await db()
+      .select({ id: vmScenarios.scenarioId })
+      .from(vmScenarios)
+      .where(eq(vmScenarios.enabled, true))
+      .orderBy(vmScenarios.scenarioId)
+  ).map((row) => row.id);
+
 describe("ScenarioSourceDO organization apply", () => {
   it("promotes a commit as a whole and leaves public content alone", async () => {
     await db().insert(courseCatalogs).values({
@@ -1401,6 +1444,51 @@ describe("ScenarioSourceDO organization apply", () => {
     await deliver({ sha: SHA_C });
     expect(await commitState(SHA_C)).toMatchObject({ state: "live" });
   });
+
+  // D1 refuses a statement with more than 100 bound parameters.
+  it("rotates the images of 60 scenarios within D1's bound parameters", async () => {
+    github();
+    const scenarioIds = Array.from({ length: 60 }, (_, index) => `acme-s${index}`);
+    const withImages = (tag: string) => (scenarioId: string): ScenarioManifestV5 => {
+      const manifest = scenarioManifest(scenarioId);
+      const image = tag + scenarioIds.indexOf(scenarioId).toString(16).padStart(63, "0");
+      manifest.vms = manifest.vms.map((vm) => ({ ...vm, image_id: image }));
+      return manifest;
+    };
+    await deliver({ sha: SHA_A, scenarioIds });
+    await publish(SHA_A, { manifestOf: withImages("a") });
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+
+    await deliver({ sha: SHA_B, scenarioIds, hash: HASH_B });
+    await publish(SHA_B, { manifestOf: withImages("b") });
+    await tick();
+
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+    const [rollback] = await db().select().from(scenarioCatalogSnapshots);
+    expect(rollback?.snapshotJson.targetScenarioIds).toHaveLength(60);
+  });
+
+  it("promotes and syncs a catalog that links 120 scenarios", async () => {
+    github();
+    const own = Array.from({ length: 20 }, (_, index) => `acme-s${index}`);
+    const shared = Array.from({ length: 100 }, (_, index) => `shared-${index}`);
+    await seedScenarios(null, shared);
+    await seedScenarios(ORG, ["acme-old"]);
+
+    await deliver({ sha: SHA_A, scenarioIds: own, catalogIds: [...own, ...shared] });
+    await publish(SHA_A);
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(
+      await db()
+        .select({ sourceRevision: courseCatalogs.sourceRevision })
+        .from(courseCatalogs)
+        .where(eq(courseCatalogs.scopeKey, SCOPE)),
+    ).toEqual([{ sourceRevision: rev(SHA_A) }]);
+    expect(await enabledScenarioIds()).toEqual([...own, ...shared].sort());
+  });
 });
 
 describe("unit guard", () => {
@@ -1653,6 +1741,70 @@ describe("ScenarioSourceDO public apply", () => {
     ]);
     expect(await liveImages()).toEqual([{ imageId: IMAGE_A }, { imageId: IMAGE_A }]);
     expect(await publicSourceRevPromotable(env.DB, rev(SHA_C))).toBe(false);
+  });
+
+  it("applies a catalog-first catalog that links 120 scenarios within D1's bound parameters", async () => {
+    const shared = Array.from({ length: 119 }, (_, index) => `shared-${index}`);
+    await seedScenarios(null, [...shared, "old"]);
+
+    await publicCommit(SHA_B, { hash: HASH_B, catalogIds: ["web", ...shared] });
+    await publish(SHA_B, { organizationId: null, manifestOf: withImage(IMAGE_B) });
+    await tick();
+
+    expect(await commitState(SHA_B)).toMatchObject({ state: "awaiting_promote" });
+    expect(await catalogRev()).toBe(rev(SHA_B));
+    expect(await enabledScenarioIds()).toEqual([...shared, "web"].sort());
+  });
+
+  it("returns live_rev's row to live when the head moves on from its restore", async () => {
+    await publicCommit(SHA_C, { hash: HASH_B });
+    await publish(SHA_C, { organizationId: null, manifestOf: withImage(IMAGE_B) });
+    await tick();
+    expect(await commitState(SHA_C)).toMatchObject({ state: "awaiting_promote" });
+
+    // The author resets main back to A while an image release drains the fleet.
+    await drain();
+    headSha = SHA_A;
+    const sent = checkRuns.length;
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "waiting" });
+    // The drained lane no longer takes the abandoned catalog-first rev.
+    expect(await publicSourceRevPromotable(env.DB, rev(SHA_C))).toBe(false);
+
+    // Then pushes D before the restore could run.
+    await publicCommit(SHA_D, { hash: "3".repeat(64) });
+
+    expect(await commitState(SHA_A)).toEqual({ state: "live", detail: null });
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), targetRev: rev(SHA_D) });
+    expect(shownChecks().slice(sent)).toEqual([
+      { call: "PATCH 902", status: "completed", conclusion: "neutral", title: "Superseded by a newer commit" },
+      { call: "POST", status: "in_progress", title: "Restoring" },
+      { call: "PATCH 903", status: "completed", conclusion: "success", title: "Live" },
+      { call: "POST", status: "in_progress", title: "Building 0/1" },
+    ]);
+  });
+
+  it("re-enables what an abandoned catalog-first commit disabled when live_rev is restored", async () => {
+    // B adds `old`, and C drops it again over the same `web` build.
+    await publicCommit(SHA_B, { scenarioIds: ["web", "old"] });
+    await publish(SHA_B, { organizationId: null });
+    await tick();
+    await publicCommit(SHA_C, { title: "Reworded" });
+    expect(await commitState(SHA_C)).toMatchObject({ state: "live" });
+
+    // D replaces `old`'s image and links nothing else: its catalog disables `web`.
+    await publicCommit(SHA_D, { scenarioIds: ["old"], hash: HASH_B });
+    await publish(SHA_D, { organizationId: null, manifestOf: withImage(IMAGE_B) });
+    await tick();
+    expect(await commitState(SHA_D)).toMatchObject({ state: "awaiting_promote" });
+    expect(await enabledScenarioIds()).toEqual([]);
+
+    headSha = SHA_C;
+    await tick();
+
+    expect(await commitState(SHA_C)).toMatchObject({ state: "live" });
+    expect(await catalogRev()).toBe(rev(SHA_C));
+    expect(await enabledScenarioIds()).toEqual(["web"]);
   });
 });
 
@@ -2363,7 +2515,7 @@ describe("ScenarioSourceDO deploy check run", () => {
           name: "Intar / deploy",
           head_sha: SHA_B,
           status: "in_progress",
-          output: { title: "Waiting for active runs", summary: "active runs would lose access" },
+          output: { title: "Waiting", summary: "active runs would lose access" },
         },
       },
     ]);

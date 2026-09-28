@@ -491,9 +491,11 @@ export async function loadOutgoingReferenceBlockers(
       )
       .where(
         and(
-          inArray(runtimeVms.imageSha256, [...input.outgoingImageIds]),
+          // D1 allows 100 bound parameters, and a whole commit's images and
+          // scenarios exceed that, so each list travels as one JSON array.
+          sql`${runtimeVms.imageSha256} IN (SELECT value FROM json_each(${JSON.stringify(input.outgoingImageIds)}))`,
           inArray(runtimeExecutions.state, [...ACTIVE_RUNTIME_EXECUTION_STATES]),
-          inArray(scenarioRuns.scenarioId, [...input.scenarioIds]),
+          sql`${scenarioRuns.scenarioId} IN (SELECT value FROM json_each(${JSON.stringify(input.scenarioIds)}))`,
         ),
       ),
     db
