@@ -2,10 +2,11 @@
 
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
+  hostActualState,
   hostDesiredState,
   imageBuildCoordinationLocks,
   imageBuildBundles,
@@ -14,10 +15,16 @@ import {
   user,
   type ImageBuildBundleMeta,
 } from "@/db/schema";
-import type { BuildReportV1, DesiredBuildV1 } from "@/generated/bridge";
+import type {
+  BuildReportV1,
+  DesiredBuildV1,
+  HostStateReportV2,
+} from "@/generated/bridge";
+import hostReportFixture from "@/generated/fixtures/bridge/host-state-report-v2.json";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import {
   assertBundleRevScope,
+  assignQueuedImageBuilds,
   maintainHostBuildAssignments,
   queueImageBuildsFromBundle,
   reconcileAssignedBuildsForHost,
@@ -28,7 +35,11 @@ import {
   withImageBuildCoordinationLock,
   withImageBuildCoordinationLocks,
 } from "@/lib/image-build-lock";
-import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
+import {
+  IMAGE_BUILD_FORMAT_VERSION,
+  platformCompileDigest,
+} from "@/lib/image-build-format";
+import { interleaveBefore } from "@/test/d1-interleave";
 import { resetD1Database } from "@/test/d1-migrations";
 
 type SchedulerDb = Parameters<typeof queueImageBuildsFromBundle>[0];
@@ -582,6 +593,239 @@ describe("build scheduler bundle supersession", () => {
     );
   });
 });
+
+describe("build scheduler fairness", () => {
+  beforeEach(async () => {
+    await resetD1Database();
+    await seedScopes(drizzle(env.DB));
+  });
+
+  it("alternates single-slot refills between scopes", async () => {
+    const db = drizzle(env.DB);
+    await seedConnectedBuilder(db, "builder-1");
+    await db.insert(imageBuilds).values([
+      scheduledBuild("public-1", { status: "building", phase: "building", hostId: "builder-1" }),
+      scheduledBuild("public-2", { status: "building", phase: "building", hostId: "builder-1" }),
+      // Scope A's backlog is older, so an age-only queue would drain it first.
+      ...[1, 2, 3].map((n) =>
+        scheduledBuild(`a-${n}`, { organizationId: "org-a", createdAt: FAIR_NOW - 100 + n }),
+      ),
+    ]);
+    await db.insert(imageBuilds).values(
+      [1, 2, 3].map((n) =>
+        scheduledBuild(`b-${n}`, { organizationId: "org-b", createdAt: FAIR_NOW - 50 + n }),
+      ),
+    );
+
+    const inFlight = ["public-1", "public-2"];
+    const refills: string[] = [];
+    for (let report = 0; report < 4; report++) {
+      await db
+        .update(imageBuilds)
+        .set({ status: "succeeded", phase: "succeeded" })
+        .where(eq(imageBuilds.id, inFlight.shift() ?? ""));
+      const assigned = await assignQueuedImageBuilds(db, FAIR_NOW);
+      expect(assigned).toHaveLength(1);
+      inFlight.push(assigned[0]?.buildId ?? "");
+      refills.push(assigned[0]?.buildId ?? "");
+    }
+    expect(refills).toEqual(["a-1", "b-1", "a-2", "b-2"]);
+  });
+
+  it.each([
+    [
+      "publishing builds",
+      [
+        { status: "building", phase: "publishing" },
+        { status: "building", phase: "uploading_logs" },
+      ],
+    ],
+    [
+      "stale rows still in phase building",
+      [
+        { status: "stale", phase: "building", error: "superseded by bundle next" },
+        { status: "stale", phase: "building", error: "builder stopped reporting build progress" },
+      ],
+    ],
+  ] as const)("does not count %s toward the slot cap", async (_name, rows) => {
+    const db = drizzle(env.DB);
+    await seedConnectedBuilder(db, "builder-1");
+    await db.insert(imageBuilds).values([
+      ...rows.map((row, index) =>
+        scheduledBuild(`held-${index}`, { ...row, hostId: "builder-1" }),
+      ),
+      scheduledBuild("queued-1", { createdAt: FAIR_NOW - 2 }),
+      scheduledBuild("queued-2", { createdAt: FAIR_NOW - 1 }),
+    ]);
+
+    await expect(assignQueuedImageBuilds(db, FAIR_NOW)).resolves.toEqual([
+      { buildId: "queued-1", hostId: "builder-1" },
+      { buildId: "queued-2", hostId: "builder-1" },
+    ]);
+  });
+
+  it("holds the slot cap against a concurrent assignment pass", async () => {
+    const db = drizzle(env.DB);
+    await seedConnectedBuilder(db, "builder-1");
+    await db.insert(imageBuilds).values([
+      scheduledBuild("running", { status: "building", phase: "building", hostId: "builder-1" }),
+      ...[1, 2, 3].map((n) => scheduledBuild(`queued-${n}`, { createdAt: FAIR_NOW - 10 + n })),
+    ]);
+
+    // Both passes read the same snapshot: one pre-publication build.
+    const race = interleaveBefore(/^update "image_builds" set "host_id"/iu, () =>
+      assignQueuedImageBuilds(db, FAIR_NOW),
+    );
+    try {
+      await assignQueuedImageBuilds(db, FAIR_NOW);
+      expect(race.fired()).toBe(true);
+    } finally {
+      race.restore();
+    }
+
+    const held = await db
+      .select({ id: imageBuilds.id })
+      .from(imageBuilds)
+      .where(
+        and(
+          eq(imageBuilds.hostId, "builder-1"),
+          inArray(imageBuilds.status, ["assigned", "building"]),
+        ),
+      );
+    expect(held).toHaveLength(2);
+  });
+
+  it("assigns git- builds only to builders on the Worker's compile digest", async () => {
+    const db = drizzle(env.DB);
+    const digest = await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
+    expect(digest).toMatch(/^p[0-9a-f]{8}$/u);
+    // A deduplicated build keeps the rev that first queued it, here one from
+    // an older digest.
+    const rev = `git-1-${"a".repeat(40)}-p00000000`;
+    await db.insert(imageBuildBundles).values(scheduledBundle(rev, null));
+    await db.insert(imageBuilds).values(scheduledBuild("git-build", { rev }));
+    await seedConnectedBuilder(db, "builder-old", "p00000000");
+
+    await expect(assignQueuedImageBuilds(db, FAIR_NOW)).resolves.toEqual([]);
+
+    await seedConnectedBuilder(db, "builder-current", digest ?? undefined);
+    await expect(assignQueuedImageBuilds(db, FAIR_NOW)).resolves.toEqual([
+      { buildId: "git-build", hostId: "builder-current" },
+    ]);
+  });
+});
+
+const FAIR_NOW = 1_762_041_660_000;
+
+async function seedScopes(db: SchedulerDb): Promise<void> {
+  await db.insert(user).values({
+    id: "user-1",
+    name: "Test User",
+    email: "test@example.com",
+    emailVerified: true,
+    createdAt: new Date(FAIR_NOW),
+    updatedAt: new Date(FAIR_NOW),
+  });
+  await db.insert(organization).values(
+    ["org-a", "org-b"].map((id) => ({
+      id,
+      name: id,
+      slug: id,
+      createdAt: new Date(FAIR_NOW),
+    })),
+  );
+  await db
+    .insert(imageBuildBundles)
+    .values([
+      scheduledBundle("bundle-public", null),
+      scheduledBundle("bundle-org-a", "org-a"),
+      scheduledBundle("bundle-org-b", "org-b"),
+    ]);
+}
+
+function scheduledBundle(rev: string, organizationId: string | null) {
+  return {
+    rev,
+    organizationId,
+    r2Key: `builds/bundles/${rev}.tar.gz`,
+    metaJson: { buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION, scenarios: [] },
+    createdAt: FAIR_NOW,
+    updatedAt: FAIR_NOW,
+  };
+}
+
+async function seedConnectedBuilder(
+  db: SchedulerDb,
+  hostId: string,
+  sourceCompilePlatform?: string,
+): Promise<void> {
+  await db.insert(agentHosts).values({
+    id: hostId,
+    userId: "user-1",
+    name: hostId,
+    scope: "platform",
+    credentialGeneration: 1,
+    activeSessionId: `${hostId}-session`,
+    lastClientHelloAt: FAIR_NOW,
+    role: "builder",
+    scenarioEnabled: false,
+    disabled: false,
+    connected: true,
+    createdAt: FAIR_NOW,
+    updatedAt: FAIR_NOW,
+  });
+  const report = {
+    ...structuredClone(hostReportFixture),
+    host_id: hostId,
+    observed_at_unix_ms: FAIR_NOW,
+    vms: [],
+    builds: [],
+  } as HostStateReportV2;
+  if (sourceCompilePlatform) {
+    report.capabilities.source_compile_platform = sourceCompilePlatform;
+  }
+  await db.insert(hostActualState).values({
+    hostId,
+    appliedDesiredVersion: 0,
+    observedAt: FAIR_NOW,
+    reportJson: report,
+    createdAt: FAIR_NOW,
+    updatedAt: FAIR_NOW,
+  });
+}
+
+function scheduledBuild(
+  id: string,
+  input: {
+    organizationId?: string | null;
+    rev?: string;
+    status?: "queued" | "assigned" | "building" | "stale";
+    phase?: BuildReportV1["phase"];
+    hostId?: string;
+    error?: string;
+    createdAt?: number;
+  },
+) {
+  const organizationId = input.organizationId ?? null;
+  const createdAt = input.createdAt ?? FAIR_NOW - 1_000;
+  return {
+    id,
+    organizationId,
+    scenarioId: id,
+    arch: "x86_64" as const,
+    rev: input.rev ?? `bundle-${organizationId ?? "public"}`,
+    contentHash: "a".repeat(64),
+    hostId: input.hostId ?? null,
+    status: input.status ?? "queued",
+    phase: input.phase ?? "queued",
+    attempt: 0,
+    error: input.error ?? null,
+    logR2Key: null,
+    timingsJson: {},
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
 
 async function queueBundle(
   db: SchedulerDb,

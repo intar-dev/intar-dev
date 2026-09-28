@@ -18,6 +18,7 @@
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
     "GITHUB_APP_CLIENT_ID": "",
+    "PLATFORM_BASE_IMAGES_SHA256": "",
   },
   "assets": {
     "directory": "./dist",

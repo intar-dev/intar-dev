@@ -28,6 +28,9 @@
     // The GitHub App client fails closed while this or the
     // GITHUB_APP_PRIVATE_KEY secret is empty.
     "GITHUB_APP_CLIENT_ID": "",
+    // sha256 of the released base-images.hcl. It feeds the platform compile
+    // digest; while it is empty no builder takes a `git-` image build.
+    "PLATFORM_BASE_IMAGES_SHA256": "",
   },
   "vpc_services": [
     {
