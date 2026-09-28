@@ -95,7 +95,7 @@ afterEach(() => {
 });
 
 /** GitHub for `acme/labs` (id 42), whose default-branch head is `head`. */
-function github(head = SHA) {
+function github(head = SHA, overrides: Record<string, () => Response> = {}) {
   const routes: Record<string, () => Response> = {
     "GET /.well-known/jwks": () => Response.json(jwks),
     "POST /app/installations/7/access_tokens": () =>
@@ -105,6 +105,7 @@ function github(head = SHA) {
         repositories: [{ id: 42, full_name: "acme/labs", default_branch: "main" }],
       }),
     "GET /repos/acme/labs/git/ref/heads/main": () => Response.json({ object: { sha: head } }),
+    ...overrides,
   };
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
@@ -365,6 +366,32 @@ describe("push uploads", () => {
   it("refuses a commit that is no longer the head", async () => {
     github("d".repeat(40));
     await expectRefusal(await push(), 409, "superseded");
+    expect(await commits()).toEqual([]);
+  });
+
+  it("refuses the default branch's head sha under another ref", async () => {
+    github();
+    await expectRefusal(await push({ token: await oidcToken({ ref: "refs/heads/feature" }) }), 409, "superseded");
+    expect(await commits()).toEqual([]);
+  });
+
+  it("refuses a repository no push-mode binding holds", async () => {
+    github();
+    await expectRefusal(await push({ token: await oidcToken({ repository_id: "99" }) }), 409, "binding_inactive");
+    expect(await commits()).toEqual([]);
+  });
+
+  it("refuses a binding the App can no longer read", async () => {
+    github(SHA, { "POST /app/installations/7/access_tokens": () => new Response(null, { status: 404 }) });
+    await expectRefusal(await push(), 409, "binding_inactive");
+    expect(await commits()).toEqual([]);
+  });
+
+  it("answers 503 while the head cannot be read", async () => {
+    github(SHA, { "GET /repos/acme/labs/git/ref/heads/main": () => new Response(null, { status: 502 }) });
+    const response = await push();
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({ code: "github_unavailable" });
     expect(await commits()).toEqual([]);
   });
 
