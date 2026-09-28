@@ -19,6 +19,8 @@
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
     "GITHUB_APP_CLIENT_ID": "",
     "PLATFORM_BASE_IMAGES_SHA256": "",
+    "GITHUB_APP_SLUG": "",
+    "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "",
   },
   "assets": {
     "directory": "./dist",

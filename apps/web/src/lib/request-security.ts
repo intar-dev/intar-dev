@@ -21,7 +21,8 @@ type SensitiveRateLimitAction =
   | "support-write"
   | "scenario-start"
   | "ssh-issuance"
-  | "build-retry";
+  | "build-retry"
+  | "scenario-source";
 
 export type ApiRequestSecurityResult =
   { ok: true; request: Request } | { ok: false; response: Response };
@@ -244,21 +245,34 @@ export function sensitiveRateLimitActionFor(
   if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {
     return "build-retry";
   }
+  if (
+    /^\/api\/organizations\/[^/]+\/scenario-source$/u.test(pathname) ||
+    pathname === "/api/admin/scenario-source"
+  ) {
+    return "scenario-source";
+  }
   return null;
 }
 
-async function enforceRateLimit(
+/**
+ * Charges the shared limiter under a hash of the caller's address, or under
+ * `key` once a route has resolved its session (for example `user:<id>`).
+ */
+export async function enforceRateLimit(
   request: Request,
   workerEnv: Pick<Cloudflare.Env, "ACCESS_INVITE_RATE_LIMITER">,
   action: SensitiveRateLimitAction,
+  key?: string,
 ): Promise<ApiRequestSecurityResult> {
-  const remoteAddress =
-    request.headers.get("cf-connecting-ip")?.trim() || "unknown";
-  const remoteKey = await sha256Prefix(remoteAddress);
+  const limitKey =
+    key ??
+    (await sha256Prefix(
+      request.headers.get("cf-connecting-ip")?.trim() || "unknown",
+    ));
   let result: { success: boolean };
   try {
     result = await workerEnv.ACCESS_INVITE_RATE_LIMITER.limit({
-      key: `web-edge:${action}:${remoteKey}`,
+      key: `web-edge:${action}:${limitKey}`,
     });
   } catch (error) {
     console.error(
