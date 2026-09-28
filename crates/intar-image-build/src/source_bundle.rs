@@ -220,6 +220,16 @@ fn compile_source_tree_with_catalog(
     }
 
     let curriculum = load_curriculum_tree(&courses_root, true).map_err(failed)?;
+    // Archives hold an empty directory only at a gitlink, so an empty deploy
+    // must be explicit.
+    if curriculum.courses.is_empty() && !courses_root.join(KEEP_FILE).is_file() {
+        return Err(refused(SourceCompileErrorCode::CoursesRootMissing)(
+            anyhow!(
+                "courses_root '{0}' is empty; an intentional empty deploy needs {0}/{KEEP_FILE}",
+                manifest.courses_root
+            ),
+        ));
+    }
     if curriculum.scenarios.len() > MAX_SOURCE_SCENARIOS {
         return Err(refused(SourceCompileErrorCode::TooManyScenarios)(anyhow!(
             "{} scenarios exceed the limit of {MAX_SOURCE_SCENARIOS}",
@@ -352,7 +362,17 @@ fn reject_submodules(root: &Path, courses_root: &str) -> Result<(), SourceCompil
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let submodule = value.trim().trim_matches('"').trim_end_matches('/');
+        // Git ends a value at an unquoted `#` or `;` and drops its quotes.
+        let mut quoted = false;
+        let submodule = value
+            .chars()
+            .take_while(|&c| {
+                quoted ^= c == '"';
+                quoted || !matches!(c, '#' | ';')
+            })
+            .filter(|&c| c != '"')
+            .collect::<String>();
+        let submodule = submodule.trim().trim_end_matches('/');
         if key.trim().eq_ignore_ascii_case("path")
             && (within(submodule, courses_root) || within(courses_root, submodule))
         {
@@ -1364,6 +1384,9 @@ mod tests {
             compiled.meta["course_catalog"]["courses"],
             serde_json::json!([])
         );
+        // A gitlink archives as an empty directory: only `.keep` means empty.
+        fs::remove_file(temp.path().join("content/courses/.keep")).unwrap();
+        assert_eq!(source_refusal(temp.path()), Code::CoursesRootMissing);
 
         write_course(
             &temp.path().join("content/courses"),
@@ -1390,7 +1413,14 @@ mod tests {
         .unwrap();
         compile_source_tree(temp.path(), REV, "amd64").unwrap();
 
-        for path in ["courses/linux/lib", "courses", "\"courses/x\""] {
+        for path in [
+            "courses/linux/lib",
+            "courses",
+            "\"courses/x\"",
+            "courses # vendored",
+            "courses ; vendored course",
+            "\"courses\"#x",
+        ] {
             fs::write(
                 temp.path().join(".gitmodules"),
                 format!("[submodule \"lib\"]\n\tpath = {path}\n"),
