@@ -97,6 +97,7 @@ export function ScenarioSourceSection({
                 )}{" "}
                 on the repository with “Only select repositories”.
               </li>
+              <li>Push at least one commit to the repository's default branch.</li>
             </ol>
             <form
               className="flex flex-wrap items-center gap-2"
@@ -252,12 +253,14 @@ function ConnectedSource({
         </ul>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        {source.pausedAt === null ? (
+        {/* An admin pause replaces a suspension, so a later unsuspend does not resume. */}
+        {source.pausedAt === null || source.pauseReason === "suspended" ? (
           <Button variant="outline" disabled={pending} onClick={() => onChange({ action: "pause" })}>
             <Pause className="size-4" />
             Pause
           </Button>
-        ) : (
+        ) : null}
+        {source.pausedAt === null ? null : (
           <Button
             variant="outline"
             disabled={!enabled || pending}

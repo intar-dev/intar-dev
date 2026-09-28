@@ -347,6 +347,10 @@ export async function changeScenarioSource(input: {
       const bound = await confirmRepositoryAdmin({
         ...input,
         fullName: binding.githubRepository,
+        bound: {
+          installationId: binding.githubInstallationId,
+          repositoryId: binding.githubRepositoryId,
+        },
       });
       if (bound.repository.id !== binding.githubRepositoryId) {
         throw appError(
@@ -535,13 +539,16 @@ function requirePinnedPublicRepository(
  * Runs the GitHub bind checks in order: the installation Intar looks up
  * itself, a token minted for the repository by name, the repository read
  * through that token, then admin for the caller's linked GitHub account,
- * identified by its numeric id.
+ * identified by its numeric id. A bound repository is first minted by id
+ * under its stored installation, so a renamed or transferred repository still
+ * resolves; the name lookup runs only when that mint fails.
  */
 async function confirmRepositoryAdmin(input: {
   actorUserId: string;
   fullName: string;
   startedAt: number;
   appEnv?: ScenarioSourceEnv;
+  bound?: { installationId: number; repositoryId: number };
 }): Promise<{ installationId: number; repository: RepositoryHead }> {
   const appEnv = input.appEnv ?? env;
   const [github] = await drizzle(env.DB)
@@ -567,22 +574,30 @@ async function confirmRepositoryAdmin(input: {
   }
   const [owner = "", repo = ""] = input.fullName.split("/");
   try {
-    const installation = await findRepositoryInstallation(appEnv, owner, repo);
-    const mint = installation
-      ? await mintInstallationToken(appEnv, {
-          installationId: installation.id,
-          fullName: input.fullName,
-        })
+    let installationId = input.bound?.installationId ?? null;
+    let mint = input.bound
+      ? await mintInstallationToken(appEnv, { ...input.bound, fullName: input.fullName })
       : null;
+    if (mint?.status !== "ok") {
+      installationId =
+        (await findRepositoryInstallation(appEnv, owner, repo))?.id ?? null;
+      mint =
+        installationId === null
+          ? null
+          : await mintInstallationToken(appEnv, {
+              installationId,
+              fullName: input.fullName,
+            });
+    }
     const repository =
       mint?.status === "ok" ? await readRepository(mint.token) : null;
     if (
-      installation &&
+      installationId !== null &&
       mint?.status === "ok" &&
       repository &&
       (await verifyRepositoryAdmin(mint.token, repository.fullName, github.accountId))
     ) {
-      return { installationId: installation.id, repository };
+      return { installationId, repository };
     }
   } catch (error) {
     console.error(

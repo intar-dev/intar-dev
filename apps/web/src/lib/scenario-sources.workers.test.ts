@@ -83,7 +83,7 @@ function github(overrides: Record<string, Route> = {}, accountId = GITHUB_ID) {
       Response.json({ permission: "admin", user: { id: Number(accountId) } }),
     ...overrides,
   };
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
     const route = routes[`${request.method} ${new URL(request.url).pathname}`];
     return route ? route() : new Response(null, { status: 404 });
@@ -298,6 +298,29 @@ describe("binding a repository", () => {
       pauseReason: null,
       boundByUserId: "admin-2",
       githubInstallationId: 7,
+    });
+  });
+
+  it("resumes a renamed repository through a token minted by its bound id", async () => {
+    const fetch = github();
+    await insertBinding({
+      githubInstallationId: 7,
+      githubRepositoryId: 42,
+      githubRepository: "acme/old",
+      pausedAt: 1,
+      pauseReason: "binder_lost_admin",
+    });
+    await change({ action: "resume" });
+    expect(await binding()).toMatchObject({
+      pausedAt: null,
+      githubRepository: "acme/labs",
+    });
+    const mints = fetch.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/7/access_tokens"),
+    );
+    expect(mints).toHaveLength(1);
+    expect(JSON.parse(String(mints[0]?.[1]?.body))).toMatchObject({
+      repository_ids: [42],
     });
   });
 });
