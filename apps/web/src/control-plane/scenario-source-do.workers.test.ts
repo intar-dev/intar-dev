@@ -14,6 +14,7 @@ import {
   imageBuilds,
   member,
   organization,
+  scenarioCatalogCandidates,
   scenarioSourceCommits,
   scenarioSources,
   user,
@@ -53,12 +54,13 @@ const HASH_A = "1".repeat(64);
 const HASH_B = "2".repeat(64);
 
 let appEnv: Record<string, string>;
+let scopeKey: string;
 let digest: string;
 let headSha: string;
 let githubCalls: string[];
 
 const rev = (sha: string) => `git-42-${sha}-${digest}`;
-const prefix = (sha: string) => scenarioSourceObjectPrefix(SCOPE, rev(sha), "deploy");
+const prefix = (sha: string) => scenarioSourceObjectPrefix(scopeKey, rev(sha), "deploy");
 const db = () => drizzle(env.DB);
 
 beforeAll(async () => {
@@ -75,6 +77,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await resetD1Database();
   stageLock.locked = false;
+  scopeKey = SCOPE;
   headSha = SHA_A;
   githubCalls = [];
   await createFixtureMember({ d1: env.DB, userId: OWNER });
@@ -135,10 +138,10 @@ async function tick(overrides: Record<string, unknown> = {}): Promise<number | n
   const doEnv = new Proxy(env, {
     get: (target, key) => (Object.hasOwn(values, key) ? values[key] : Reflect.get(target, key)),
   });
-  const stub = env.SCENARIO_SOURCE.get(env.SCENARIO_SOURCE.idFromName(SCOPE));
+  const stub = env.SCENARIO_SOURCE.get(env.SCENARIO_SOURCE.idFromName(scopeKey));
   return runInDurableObject(stub, async (instance: ScenarioSourceDO, state) => {
     Object.defineProperty(instance, "env", { configurable: true, value: doEnv });
-    await state.storage.put("scope", SCOPE);
+    await state.storage.put("scope", scopeKey);
     await instance.alarm();
     const next = await state.storage.getAlarm();
     await state.storage.deleteAlarm();
@@ -247,7 +250,7 @@ async function insertCommit(
     .insert(scenarioSourceCommits)
     .values({
       id: `commit-${sha[0]}`,
-      scopeKey: SCOPE,
+      scopeKey,
       purpose: "deploy",
       sha,
       rev: rev(sha),
@@ -266,7 +269,7 @@ async function commitState(sha: string) {
 }
 
 async function binding() {
-  const [row] = await db().select().from(scenarioSources).where(eq(scenarioSources.scopeKey, SCOPE));
+  const [row] = await db().select().from(scenarioSources).where(eq(scenarioSources.scopeKey, scopeKey));
   return row!;
 }
 
@@ -507,6 +510,38 @@ describe("ScenarioSourceDO ingest", () => {
     expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
     expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
   });
+
+  it("does not finish an ingest whose rev stopped being the head during the write", async () => {
+    github();
+    await stage();
+    await stage({ sha: SHA_B });
+    await insertCommit(SHA_A, "ingesting");
+    let claimed = false;
+    const bucket = new Proxy(env.VM_IMAGE_REGISTRY_BUCKET, {
+      get: (target, key) =>
+        key === "put"
+          ? async (...args: Parameters<R2Bucket["put"]>) => {
+              if (!claimed) {
+                claimed = true;
+                headSha = SHA_B;
+                await db().update(scenarioSources).set({ headSha: SHA_B, headObservedAt: Date.now() });
+                await insertCommit(SHA_B, "ingesting");
+              }
+              return target.put(...args);
+            }
+          : Reflect.get(target, key).bind(target),
+    });
+    await tick({ VM_IMAGE_REGISTRY_BUCKET: bucket });
+
+    expect(claimed).toBe(true);
+    expect(await commitState(SHA_A)).toMatchObject({ state: "ingesting" });
+    expect((await binding()).targetRev).toBeNull();
+
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
+    expect((await binding()).targetRev).toBe(rev(SHA_B));
+  });
 });
 
 describe("ScenarioSourceDO fail and heal", () => {
@@ -543,6 +578,40 @@ describe("ScenarioSourceDO fail and heal", () => {
       { contentHash: HASH_B, status: "stale" },
     ]));
     expect(await commitState(SHA_A)).toMatchObject({ state: "building" });
+  });
+
+  it("restages a candidate the target lacks after sharing an older rev's build", async () => {
+    await building();
+    // B leaves acme-web unchanged, so its ingest dedups onto A's queued build.
+    headSha = SHA_B;
+    await stage({ sha: SHA_B });
+    await insertCommit(SHA_B, "ingesting");
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
+    expect(await db().select({ rev: imageBuilds.rev }).from(imageBuilds)).toEqual([{ rev: rev(SHA_A) }]);
+
+    // The build succeeds under A, and its publish stages A's candidate only.
+    const [build] = await db().select({ id: imageBuilds.id }).from(imageBuilds);
+    const manifest = { scenario_id: "acme-web", vms: [] } as never;
+    await db().update(imageBuilds).set({ status: "succeeded", publishedManifestJson: manifest });
+    await db().insert(scenarioCatalogCandidates).values({
+      id: `${ORG}:${rev(SHA_A)}:acme-web`,
+      revision: rev(SHA_A),
+      organizationId: ORG,
+      scenarioId: "acme-web",
+      buildId: build!.id,
+      manifestJson: manifest,
+    });
+
+    await tick();
+
+    expect(
+      await db()
+        .select({ organizationId: scenarioCatalogCandidates.organizationId })
+        .from(scenarioCatalogCandidates)
+        .where(eq(scenarioCatalogCandidates.revision, rev(SHA_B))),
+    ).toEqual([{ organizationId: ORG }]);
+    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
   });
 
   it("fails a stale exact build without the superseded prefix", async () => {
@@ -591,6 +660,9 @@ describe("ScenarioSourceDO fail and heal", () => {
     }
     await tick();
     expect(await commitState(SHA_A)).toEqual({ state: "failed", detail: "heal did not finish" });
+    // Each throw came before the first write, so none left a writer hold.
+    const writers = await env.DB.prepare("SELECT id FROM image_registry_operation_writers").all();
+    expect(writers.results).toEqual([]);
   });
 });
 
@@ -710,6 +782,64 @@ describe("ScenarioSourceDO observe", () => {
     expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
     expect(await commitState("c".repeat(40))).toMatchObject({ state: "waiting" });
     expect(await stagedKeys(SHA_A)).toHaveLength(2);
+
+    // A paused binding still drops its in-flight rows: that compares no rev.
+    await db().update(scenarioSources).set({ pausedAt: 1, pauseReason: "admin" });
+    await tick({ PLATFORM_BASE_IMAGES_SHA256: "" });
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
+    expect(await stagedKeys(SHA_A)).toEqual([]);
+    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
+    expect(await commitState("c".repeat(40))).toMatchObject({ state: "waiting" });
+  });
+});
+
+describe("ScenarioSourceDO public binding", () => {
+  const ADMIN = "platform-admin";
+
+  beforeEach(async () => {
+    await createFixtureMember({ d1: env.DB, userId: ADMIN, role: "admin" });
+    await db().delete(scenarioSources);
+    await db().insert(scenarioSources).values({
+      scopeKey: "public",
+      organizationId: null,
+      githubInstallationId: 7,
+      githubRepositoryId: 42,
+      githubRepository: "acme/labs",
+      defaultBranch: "main",
+      mode: "push",
+      boundByUserId: ADMIN,
+    });
+    scopeKey = "public";
+    github();
+  });
+
+  it("refuses an id with an organization slug prefix", async () => {
+    await stage({ scope: "public", scenarioIds: ["acme-web"] });
+    await insertCommit(SHA_A, "ingesting");
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({
+      state: "invalid",
+      detail: "acme-web is outside your namespace",
+    });
+  });
+
+  it("ingests a clean id without an organization and pauses when the admin is demoted", async () => {
+    await stage({ scope: "public", scenarioIds: ["web"] });
+    await insertCommit(SHA_A, "ingesting");
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "building" });
+    expect(await binding()).toMatchObject({ targetRev: rev(SHA_A), pausedAt: null });
+    expect(
+      await db().select({ organizationId: imageBuildBundles.organizationId }).from(imageBuildBundles),
+    ).toEqual([{ organizationId: null }]);
+    expect(await db().select({ organizationId: imageBuilds.organizationId }).from(imageBuilds)).toEqual([
+      { organizationId: null },
+    ]);
+
+    await db().update(user).set({ role: "user" }).where(eq(user.id, ADMIN));
+    await tick();
+    expect(await binding()).toMatchObject({ pauseReason: "binder_lost_admin" });
   });
 });
 

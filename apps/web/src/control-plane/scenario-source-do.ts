@@ -5,12 +5,13 @@
 // so a push claim that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, inArray, isNull, lt, not } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, not, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   imageBuildBundles,
   imageBuilds,
   organization,
+  scenarioCatalogCandidates,
   scenarioSources,
 } from "@/db/schema";
 import { AppError } from "@/lib/app-error";
@@ -37,6 +38,7 @@ import {
   readBundleMeta,
   readGzipBundleArchive,
   readTarFile,
+  ScenarioBundleIngestError,
   validateBundleArchivePayload,
   type ParsedBundleMeta,
 } from "./image-registry/bundle";
@@ -172,6 +174,8 @@ async function tickScenarioSource(
       ),
     );
 
+  await dropInactive(env, scopeKey);
+
   // Without a digest there is no head rev, so rows stay as they are rather
   // than be compared against NULL.
   const digest = await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
@@ -253,36 +257,40 @@ async function observe(
   return false;
 }
 
+// Supersedes every fetch, compile and ingest of a paused or disconnected
+// binding. It compares no head rev, so it also runs while the digest is unset.
+async function dropInactive(env: Cloudflare.Env, scopeKey: string): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?1
+      WHERE scope_key = ?2 AND state IN ('fetching', 'compiling', 'ingesting')
+        AND EXISTS (SELECT 1 FROM scenario_sources WHERE scope_key = ?2
+          AND (paused_at IS NOT NULL OR disconnected_at IS NOT NULL))
+      RETURNING rev, purpose`,
+  )
+    .bind(Date.now(), scopeKey)
+    .all<{ rev: string; purpose: "deploy" | "validate" }>();
+  await deleteStagedObjects(env, scopeKey, results);
+}
+
 // Supersedes rows that are neither head nor live, except a promotion that
-// must finish, and every fetch, compile and ingest of an inactive binding.
+// must finish.
 async function supersede(
   env: Cloudflare.Env,
   scopeKey: string,
   digest: string,
 ): Promise<void> {
-  const now = Date.now();
-  const [stale, inactive] = await env.DB.batch<{ rev: string; purpose: "deploy" | "validate" }>([
-    env.DB.prepare(
-      `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?1
-        WHERE scope_key = ?2 AND purpose = 'deploy'
-          AND state IN ('fetching', 'compiling', 'ingesting', 'building', 'waiting',
-            'awaiting_promote', 'failed')
-          AND rev IS NOT ${headRev("?2", "?3")}
-          AND rev IS NOT (SELECT live_rev FROM scenario_sources WHERE scope_key = ?2)
-        RETURNING rev, purpose`,
-    ).bind(now, scopeKey, digest),
-    env.DB.prepare(
-      `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?1
-        WHERE scope_key = ?2 AND state IN ('fetching', 'compiling', 'ingesting')
-          AND EXISTS (SELECT 1 FROM scenario_sources WHERE scope_key = ?2
-            AND (paused_at IS NOT NULL OR disconnected_at IS NOT NULL))
-        RETURNING rev, purpose`,
-    ).bind(now, scopeKey),
-  ]);
-  await deleteStagedObjects(env, scopeKey, [
-    ...(stale?.results ?? []),
-    ...(inactive?.results ?? []),
-  ]);
+  const { results } = await env.DB.prepare(
+    `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?1
+      WHERE scope_key = ?2 AND purpose = 'deploy'
+        AND state IN ('fetching', 'compiling', 'ingesting', 'building', 'waiting',
+          'awaiting_promote', 'failed')
+        AND rev IS NOT ${headRev("?2", "?3")}
+        AND rev IS NOT (SELECT live_rev FROM scenario_sources WHERE scope_key = ?2)
+      RETURNING rev, purpose`,
+  )
+    .bind(Date.now(), scopeKey, digest)
+    .all<{ rev: string; purpose: "deploy" | "validate" }>();
+  await deleteStagedObjects(env, scopeKey, results);
 }
 
 async function ingest(step: Step): Promise<boolean> {
@@ -441,8 +449,9 @@ async function namespaceRefusal(
 }
 
 // Writes under an internal registry writer. A refused writer and a locked
-// candidate source are settled and retried; any other throw after the first
-// write stays an `unknown` hold for the operator reap, and the try counts.
+// candidate source are settled and retried. A throw before the first write
+// settles the writer; any other stays an `unknown` hold for the operator reap.
+// Every throw counts as a try.
 async function writeBundle(
   step: Step,
   rev: string,
@@ -481,6 +490,12 @@ async function writeBundle(
       outcome = "error";
       return invalid(REV_SCOPE_CONFLICT);
     }
+    if (
+      error instanceof ScenarioBundleIngestError &&
+      ["validate_catalog_references", "check_rev_scope"].includes(error.stage)
+    ) {
+      outcome = "error";
+    }
     throw error;
   } finally {
     await admitted.lease.complete(outcome);
@@ -489,8 +504,9 @@ async function writeBundle(
 
 // While the target is not live: an exact build that failed or went silent
 // fails the row, and nothing retries it, so a build that hangs every time
-// cannot loop. One superseded or retired is requeued, and its reusable
-// candidates restaged, under the same try cap.
+// cannot loop. One superseded or retired is requeued, and reusable candidates
+// the target lacks are restaged, under the same try cap. That covers a build
+// deduplicated onto an older rev's and a candidate row the collector retired.
 async function failOrHeal(step: Step): Promise<boolean> {
   const target = await step.env.DB.prepare(
     `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
@@ -520,10 +536,24 @@ async function failOrHeal(step: Step): Promise<boolean> {
           status: imageBuilds.status,
           error: imageBuilds.error,
           artifactsRetiredAt: imageBuilds.artifactsRetiredAt,
+          published: sql<number>`${imageBuilds.publishedManifestJson} IS NOT NULL`,
         })
         .from(imageBuilds)
         .where(inArray(imageBuilds.contentHash, hashes))
     : [];
+  const staged = new Set(
+    (
+      await db
+        .select({ scenarioId: scenarioCatalogCandidates.scenarioId })
+        .from(scenarioCatalogCandidates)
+        .where(
+          and(
+            eq(scenarioCatalogCandidates.revision, target.rev),
+            sql`${scenarioCatalogCandidates.organizationId} IS ${step.organizationId}`,
+          ),
+        )
+    ).map((row) => row.scenarioId),
+  );
   let heal = false;
   for (const scenario of meta.scenarios) {
     const build = builds.find(
@@ -544,7 +574,11 @@ async function failOrHeal(step: Step): Promise<boolean> {
       });
       return false;
     }
-    heal ||= !build || superseded || build.artifactsRetiredAt !== null;
+    const unstaged =
+      build?.status === "succeeded" &&
+      Boolean(build.published) &&
+      !staged.has(scenario.scenarioId);
+    heal ||= !build || superseded || build.artifactsRetiredAt !== null || unstaged;
   }
   if (!heal) return false;
 
