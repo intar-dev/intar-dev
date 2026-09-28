@@ -157,13 +157,14 @@ struct BundleTooLarge {
     max_tar_bytes: u64,
 }
 
+/// An `intar.yaml` that [`parse_intar_manifest`] has validated.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IntarManifestV1 {
+pub struct IntarManifestV1 {
     version: u32,
-    scope: String,
+    pub scope: String,
     #[serde(default = "default_source_courses_root")]
-    courses_root: String,
+    pub courses_root: String,
 }
 
 fn default_source_courses_root() -> String {
@@ -209,14 +210,17 @@ fn compile_source_tree_with_catalog(
     let manifest = read_intar_manifest(root)?;
     reject_submodules(root, &manifest.courses_root)?;
     let courses_root = resolve_courses_root(root, &manifest.courses_root)?;
-    if let Some(pointer) = find_lfs_pointer(&courses_root).map_err(failed)? {
-        return Err(refused(SourceCompileErrorCode::LfsUnsupported)(anyhow!(
-            "Git LFS pointer file is not supported: {}",
-            pointer
-                .strip_prefix(root)
-                .unwrap_or(pointer.as_path())
-                .display()
-        )));
+    if let Some((code, path)) = find_unarchived_entry(&courses_root).map_err(failed)? {
+        let path = path.strip_prefix(root).unwrap_or(path.as_path()).display();
+        return Err(refused(code)(
+            if code == SourceCompileErrorCode::LfsUnsupported {
+                anyhow!("Git LFS pointer file is not supported: {path}")
+            } else {
+                anyhow!(
+                    "empty directory '{path}' is not supported: repository archives hold one only at a submodule"
+                )
+            },
+        ));
     }
 
     let curriculum = load_curriculum_tree(&courses_root, true).map_err(failed)?;
@@ -315,9 +319,22 @@ fn read_intar_manifest(root: &Path) -> Result<IntarManifestV1, SourceCompileErro
             ));
         }
     }
-    let manifest = fs::read_to_string(&path)
-        .map_err(anyhow::Error::new)
-        .and_then(|yaml| parse_strict_yaml::<IntarManifestV1>(&yaml, MAX_MANIFEST_BYTES))
+    let yaml = fs::read_to_string(&path)
+        .with_context(|| format!("invalid {INTAR_MANIFEST_FILE}"))
+        .map_err(invalid)?;
+    parse_intar_manifest(&yaml)
+}
+
+/// Parses and validates `intar.yaml`, including the `courses_root` path rules,
+/// so a builder can apply them before it unpacks a repository.
+pub fn parse_intar_manifest(yaml: &str) -> Result<IntarManifestV1, SourceCompileError> {
+    let invalid = refused(SourceCompileErrorCode::ManifestInvalid);
+    if yaml.len() > MAX_MANIFEST_BYTES {
+        return Err(invalid(anyhow!(
+            "{INTAR_MANIFEST_FILE} must be at most {MAX_MANIFEST_BYTES} bytes"
+        )));
+    }
+    let manifest = parse_strict_yaml::<IntarManifestV1>(yaml, MAX_MANIFEST_BYTES)
         .with_context(|| format!("invalid {INTAR_MANIFEST_FILE}"))
         .map_err(invalid)?;
     if manifest.version != 1 {
@@ -358,20 +375,41 @@ fn reject_submodules(root: &Path, courses_root: &str) -> Result<(), SourceCompil
         path.strip_prefix(dir)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     };
-    for line in gitmodules.lines() {
-        let Some((key, value)) = line.split_once('=') else {
+    let mut lines = gitmodules.lines();
+    while let Some(line) = lines.next() {
+        // A section header may share its line with a key.
+        let mut line = line.trim_start();
+        while let Some(header) = line.strip_prefix('[') {
+            line = header
+                .split_once(']')
+                .map_or("", |(_, rest)| rest.trim_start());
+        }
+        let Some((key, mut value)) = line.split_once('=') else {
             continue;
         };
-        // Git ends a value at an unquoted `#` or `;` and drops its quotes.
+        // Git ends a value at an unquoted `#` or `;`, drops its quotes, takes
+        // the character after a `\`, and joins the next line after a final `\`.
         let mut quoted = false;
-        let submodule = value
-            .chars()
-            .take_while(|&c| {
-                quoted ^= c == '"';
-                quoted || !matches!(c, '#' | ';')
-            })
-            .filter(|&c| c != '"')
-            .collect::<String>();
+        let mut submodule = String::new();
+        loop {
+            let mut chars = value.chars();
+            let mut continued = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => match chars.next() {
+                        Some(escaped) => submodule.push(escaped),
+                        None => continued = true,
+                    },
+                    '"' => quoted = !quoted,
+                    '#' | ';' if !quoted => break,
+                    c => submodule.push(c),
+                }
+            }
+            match continued.then(|| lines.next()).flatten() {
+                Some(next) => value = next,
+                None => break,
+            }
+        }
         let submodule = submodule.trim().trim_end_matches('/');
         if key.trim().eq_ignore_ascii_case("path")
             && (within(submodule, courses_root) || within(courses_root, submodule))
@@ -407,15 +445,24 @@ fn resolve_courses_root(root: &Path, courses_root: &str) -> Result<PathBuf, Sour
     Ok(path)
 }
 
-fn find_lfs_pointer(dir: &Path) -> Result<Option<PathBuf>> {
+/// Finds content a repository archive does not carry under `dir`: a Git LFS
+/// pointer, or an empty directory, which an archive holds only at a submodule.
+fn find_unarchived_entry(dir: &Path) -> Result<Option<(SourceCompileErrorCode, PathBuf)>> {
     for entry in sorted_directory_entries(dir)? {
         let path = entry.path();
         let file_type = entry
             .file_type()
             .with_context(|| format!("failed to stat '{}'", path.display()))?;
         if file_type.is_dir() {
-            if let Some(pointer) = find_lfs_pointer(&path)? {
-                return Ok(Some(pointer));
+            let is_empty = fs::read_dir(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?
+                .next()
+                .is_none();
+            if is_empty {
+                return Ok(Some((SourceCompileErrorCode::SubmoduleUnsupported, path)));
+            }
+            if let Some(found) = find_unarchived_entry(&path)? {
+                return Ok(Some(found));
             }
         } else if file_type.is_file() {
             let mut head = Vec::new();
@@ -427,7 +474,7 @@ fn find_lfs_pointer(dir: &Path) -> Result<Option<PathBuf>> {
                 .with_context(|| format!("failed to read {}", path.display()))?;
             let line = head.split(|byte| *byte == b'\n').next().unwrap_or_default();
             if line.strip_suffix(b"\r").unwrap_or(line) == LFS_POINTER_LINE {
-                return Ok(Some(path));
+                return Ok(Some((SourceCompileErrorCode::LfsUnsupported, path)));
             }
         }
     }
@@ -1235,7 +1282,7 @@ mod tests {
         BUNDLE_BASE_IMAGES_PATH, CURRICULUM_CATALOG_ARCHIVE_PATH, CompileBundleInput,
         MAX_BUNDLE_TAR_BYTES, PreparedBundleScenario, collect_bundle_source_files, compile_bundle,
         compile_digest, compile_source_tree, compile_source_tree_with_catalog, load_curriculum,
-        write_bundle_archive,
+        parse_intar_manifest, write_bundle_archive,
     };
 
     const REV: &str = "git-1-0123456789abcdef0123456789abcdef01234567-pe845f1ac";
@@ -1253,14 +1300,20 @@ mod tests {
             include_str!("../fixtures/release-smoke/base-images.hcl"),
         )
         .unwrap();
-        let archive = crate::sha256_bytes_hex(&compiled.archive);
+        // The tar, not the gzip: deflate output may change with flate2, and
+        // nothing downstream depends on the compressed bytes.
+        let mut tar = Vec::new();
+        GzDecoder::new(compiled.archive.as_slice())
+            .read_to_end(&mut tar)
+            .unwrap();
+        let tar = crate::sha256_bytes_hex(&tar);
         let meta =
             crate::sha256_bytes_hex(serde_json::to_string(&compiled.meta).unwrap().as_bytes());
 
         assert_eq!(
-            (archive.as_str(), meta.as_str()),
+            (tar.as_str(), meta.as_str()),
             (
-                "a1420968b5dd17fe59ad1c274ead6576448da526039d7c97a4eaaf23e5d29390",
+                "7f49f74cd299fa4a41cb149ff6be3f697ab44104f8f9a1efe58402ba663c2949",
                 "23371067a472ee9b3831110de14aed448af5202813481a24d93e9148738ee261"
             ),
             "the intar.yaml compile output changed. Bump SOURCE_COMPILER_VERSION in \
@@ -1322,6 +1375,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(source_refusal(temp.path()), Code::CoursesRootMissing);
+
+        // The builder parses the manifest it unpacks with the same rules.
+        let manifest = parse_intar_manifest("version: 1\nscope: acme\n").unwrap();
+        assert_eq!(
+            (manifest.scope.as_str(), manifest.courses_root.as_str()),
+            ("acme", "courses")
+        );
+        let oversized = format!("version: 1\nscope: acme\n#{}\n", "x".repeat(64 * 1024));
+        assert_eq!(
+            parse_intar_manifest(&oversized).unwrap_err().code,
+            Code::ManifestInvalid
+        );
     }
 
     #[test]
@@ -1412,26 +1477,38 @@ mod tests {
         )
         .unwrap();
         compile_source_tree(temp.path(), REV, "amd64").unwrap();
+        // A trailing `\` continues the url, so git reads no path here.
+        fs::write(
+            temp.path().join(".gitmodules"),
+            "[submodule \"lib\"]\n\turl = https://example.com/lib\\\npath = courses\n",
+        )
+        .unwrap();
+        compile_source_tree(temp.path(), REV, "amd64").unwrap();
 
-        for path in [
-            "courses/linux/lib",
-            "courses",
-            "\"courses/x\"",
-            "courses # vendored",
-            "courses ; vendored course",
-            "\"courses\"#x",
+        for gitmodules in [
+            "[submodule \"lib\"]\n\tpath = courses/linux/lib\n",
+            "[submodule \"lib\"]\n\tpath = courses\n",
+            "[submodule \"lib\"]\n\tpath = \"courses/x\"\n",
+            "[submodule \"lib\"]\n\tpath = courses # vendored\n",
+            "[submodule \"lib\"]\n\tpath = courses ; vendored course\n",
+            "[submodule \"lib\"]\n\tpath = \"courses\"#x\n",
+            "[submodule \"lib\"] path = courses/linux\n",
+            "[submodule \"lib\"]\n\tpath = cour\\\nses/linux\n",
+            "[submodule \"lib\"] # vendored \\\npath = courses\n",
         ] {
-            fs::write(
-                temp.path().join(".gitmodules"),
-                format!("[submodule \"lib\"]\n\tpath = {path}\n"),
-            )
-            .unwrap();
+            fs::write(temp.path().join(".gitmodules"), gitmodules).unwrap();
             assert_eq!(
                 source_refusal(temp.path()),
                 Code::SubmoduleUnsupported,
-                "{path}"
+                "{gitmodules}"
             );
         }
+        // An archive holds an empty directory only at a gitlink, which may
+        // have no `.gitmodules` entry at all.
+        fs::remove_file(temp.path().join(".gitmodules")).unwrap();
+        fs::create_dir(temp.path().join("courses/linux/01-theory/vendor")).unwrap();
+        assert_eq!(source_refusal(temp.path()), Code::SubmoduleUnsupported);
+        fs::remove_dir(temp.path().join("courses/linux/01-theory/vendor")).unwrap();
         fs::write(
             temp.path().join("intar.yaml"),
             "version: 1\nscope: public\ncourses_root: courses/linux\n",
