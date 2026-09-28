@@ -8,6 +8,8 @@
     "required": [
       "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET",
       "STARGATE_EGRESS_IPV4_CIDRS",
+      "GITHUB_APP_PRIVATE_KEY",
+      "GITHUB_APP_WEBHOOK_SECRET",
     ],
   },
   "vars": {
@@ -27,22 +29,22 @@
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
     // The GitHub App client fails closed while this or the
     // GITHUB_APP_PRIVATE_KEY secret is empty.
-    "GITHUB_APP_CLIENT_ID": "",
+    "GITHUB_APP_CLIENT_ID": "Iv23lifjtuTYzowesJsG",
     // sha256 of the released base-images.hcl. It feeds the platform compile
     // digest; while it is empty no builder takes a `git-` image build.
-    "PLATFORM_BASE_IMAGES_SHA256": "",
+    "PLATFORM_BASE_IMAGES_SHA256": "f23d63aa99d7dc99b4acd7d6063e0b606a4d94c778b433cd3ecf5d46184162c6",
     // The App's URL name, for the scenario source card's install link.
-    "GITHUB_APP_SLUG": "",
+    "GITHUB_APP_SLUG": "intar-dev-image-builder",
     // The only GitHub repository id the public scope may bind. Empty: none.
-    "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "",
+    "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "1305773952",
     // Peeled commit SHAs of the released scenario-publish-vN tags, separated
     // by commas or whitespace. Empty: every push upload is refused.
-    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "",
+    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "a73e571caccc35b499fa11e021f4ac6a9546b647",
     // The intar-image-cli release the compiler descriptor names, and its
     // release tarball sha256 per target as JSON, e.g. {"linux_amd64":"<hex>"}.
     // While either is empty the descriptor answers 503.
-    "SCENARIO_COMPILER_CLI_VERSION": "",
-    "SCENARIO_COMPILER_CLI_SHA256": "",
+    "SCENARIO_COMPILER_CLI_VERSION": "0.9.0",
+    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"ddba666ecc584f26811d0e149aaeb74d0c2407b058a5eab8a179a4447f4b5255\",\"linux_arm64\":\"3a368da215404ff450069a1dc4e2f286877675996fa730e336c4033246017afa\"}",
   },
   "vpc_services": [
     {
