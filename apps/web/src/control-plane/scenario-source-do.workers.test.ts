@@ -23,7 +23,7 @@ import { SOURCE_COMPILER_VERSION } from "@/generated/constants";
 import { queueImageBuildsFromBundle } from "@/lib/build-scheduler";
 import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
 import { setRegistryPause } from "@/lib/image-registry-admission";
-import { scenarioSourceObjectPrefix } from "@/lib/scenario-sources";
+import { stagedSourceObjectPrefix } from "@/lib/scenario-sources";
 import { buildTar, gzipBytes } from "@/lib/tar";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -60,7 +60,7 @@ let headSha: string;
 let githubCalls: string[];
 
 const rev = (sha: string) => `git-42-${sha}-${digest}`;
-const prefix = (sha: string) => scenarioSourceObjectPrefix(scopeKey, rev(sha), "deploy");
+const prefix = (sha: string) => stagedSourceObjectPrefix(scopeKey, rev(sha), "deploy");
 const db = () => drizzle(env.DB);
 
 beforeAll(async () => {
