@@ -227,7 +227,7 @@ test("organization course breadcrumbs stay inside the learner frame", async ({
   });
   await expect(
     privateBreadcrumb.getByRole("link", { name: "Courses" }),
-  ).toHaveAttribute("href", "/organizations/org-platform/courses");
+  ).toHaveAttribute("href", "/courses");
   await expect(
     privateBreadcrumb.getByRole("link", { name: "Platform repair sequence" }),
   ).toHaveAttribute(
