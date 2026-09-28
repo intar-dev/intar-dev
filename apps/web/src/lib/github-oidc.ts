@@ -4,6 +4,7 @@
 import {
   createRemoteJWKSet,
   decodeJwt,
+  errors,
   jwtVerify,
   type JWTVerifyGetKey,
 } from "jose";
@@ -61,7 +62,16 @@ export async function verifyGithubActionsToken(
       algorithms: ["RS256"],
       clockTolerance: 60,
     }));
-  } catch {
+  } catch (error) {
+    // A timeout, a rejected fetch or a non-200 answer from GitHub's key host
+    // (jose's generic error) is an outage the workflow waits out.
+    if (
+      !(error instanceof errors.JOSEError) ||
+      error instanceof errors.JWKSTimeout ||
+      error.code === errors.JOSEError.code
+    ) {
+      throw appError(503, "github_unavailable", "GitHub could not be read. Try again.");
+    }
     throw refused();
   }
 

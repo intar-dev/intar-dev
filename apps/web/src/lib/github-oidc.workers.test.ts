@@ -1,5 +1,6 @@
 import {
   createLocalJWKSet,
+  createRemoteJWKSet,
   exportJWK,
   generateKeyPair,
   SignJWT,
@@ -124,6 +125,20 @@ describe("GitHub Actions OIDC", () => {
         job_workflow_sha: "f".repeat(40),
       },
     ]);
+  });
+
+  it.each([
+    ["answers 503", async () => new Response(null, { status: 503 })],
+    ["is unreachable", async () => Promise.reject(new TypeError("fetch failed"))],
+  ])("answers 503 while GitHub's key host %s", async (_name, answer) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(answer);
+    await expect(
+      verifyGithubActionsToken(
+        await token(),
+        { audience: AUDIENCE, workflowShas: WORKFLOW_SHA },
+        createRemoteJWKSet(new URL(`${GITHUB_ACTIONS_ISSUER}/.well-known/jwks`)),
+      ),
+    ).rejects.toMatchObject({ status: 503, code: "github_unavailable" });
   });
 
   it("reads keys only from GitHub's constant JWKS URL", async () => {
