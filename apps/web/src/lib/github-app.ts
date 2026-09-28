@@ -2,9 +2,12 @@
 // state: callers decide what to write. Tokens are never logged, stored or
 // sent anywhere but api.github.com, and their format is never checked.
 import { importPKCS8, SignJWT } from "jose";
+import { BodyLimitExceededError, readBoundedBody } from "@/lib/request-security";
 
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_TIMEOUT_MS = 10_000;
+const CODELOAD_HOST = "codeload.github.com";
+const TARBALL_TIMEOUT_MS = 60_000;
 // A repository owner, repository name or login: one URL-safe path segment.
 const NAME_PATTERN = /^(?!\.\.?$)[A-Za-z0-9_.-]+$/;
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -17,6 +20,10 @@ export interface GitHubAppEnv {
 export type MintOutcome =
   | { status: "ok"; token: string }
   | { status: "gone" | "suspended" | "transient" };
+
+export type TarballOutcome =
+  | { status: "ok"; archive: Uint8Array<ArrayBuffer> }
+  | { status: "too_large" | "missing" | "transient" };
 
 export interface RepositoryHead {
   id: number;
@@ -186,6 +193,55 @@ export async function verifyRepositoryAdmin(
     user?: { id?: unknown } | null;
   } | null;
   return body?.permission === "admin" && body.user?.id === Number(accountId);
+}
+
+/**
+ * Downloads a commit's repository tarball. The API answers 302 to codeload,
+ * even for an unknown sha; that one hop is followed without the token, and
+ * only to codeload. For a private repository the Location is a short-lived
+ * bearer URL, so it is never logged or returned, and no failure names it.
+ * The body is read to at most `maxBytes`, with or without a Content-Length.
+ */
+export async function fetchTarball(
+  token: string,
+  fullName: string,
+  sha: string,
+  maxBytes: number,
+): Promise<TarballOutcome> {
+  const path = repositoryPath(fullName);
+  if (!path || !SHA_PATTERN.test(sha)) return { status: "missing" };
+  const api = await githubApi(`${path}/tarball/${sha}`, token);
+  if (api?.status === 404 || api?.status === 422) return { status: "missing" };
+  const location = URL.parse(api?.headers.get("location") ?? "");
+  if (
+    api?.status !== 302 ||
+    location?.protocol !== "https:" ||
+    location.host !== CODELOAD_HOST ||
+    location.username ||
+    location.password
+  ) {
+    return { status: "transient" };
+  }
+  try {
+    const response = await fetch(location, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(TARBALL_TIMEOUT_MS),
+      headers: { "user-agent": "intar.dev" },
+    });
+    if (response.status === 404) return { status: "missing" };
+    if (response.status !== 200 || !response.body) {
+      await response.body?.cancel();
+      return { status: "transient" };
+    }
+    return {
+      status: "ok",
+      archive: await readBoundedBody(response.body, maxBytes),
+    };
+  } catch (error) {
+    return error instanceof BodyLimitExceededError
+      ? { status: "too_large" }
+      : { status: "transient" };
+  }
 }
 
 // A 422 mint is gone only when the App JWT confirms the installation or the

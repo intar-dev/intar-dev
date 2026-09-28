@@ -1,9 +1,10 @@
 // One Durable Object per scenario source binding, named by its scope key.
 // Its alarm observes the repository, pauses a binding whose binder lost the
-// scope, ingests the head commit's staged bundle, fails or heals the target's
-// builds, and promotes an organization's target as a whole: images, then
-// catalog, then `live`. Every head comparison runs in SQL against the stored
-// head, so a push claim that moves the head mid-alarm is never overwritten.
+// scope, delivers a pull binding's head to a platform builder, ingests the
+// head commit's staged bundle, fails or heals the target's builds, and
+// promotes an organization's target as a whole: images, then catalog, then
+// `live`. Every head comparison runs in SQL against the stored head, so a
+// push claim that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, inArray, isNull, lt, not, sql } from "drizzle-orm";
@@ -17,13 +18,24 @@ import {
 } from "@/db/schema";
 import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import { AppError } from "@/lib/app-error";
-import { SUPERSEDED_BUILD_ERROR_PREFIX } from "@/lib/build-scheduler-core";
 import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
 import {
+  freeSourceCompileBuilders,
+  reconcileHostSourceCompiles,
+} from "@/lib/build-scheduler";
+import {
+  BUILDER_REASSIGN_AFTER_MS,
+  SUPERSEDED_BUILD_ERROR_PREFIX,
+  type BuilderCandidate,
+} from "@/lib/build-scheduler-core";
+import {
+  fetchTarball,
   mintInstallationToken,
   readRepository,
   type MintOutcome,
 } from "@/lib/github-app";
+import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
+import { createAppId } from "@/lib/id";
 import { platformCompileDigest } from "@/lib/image-build-format";
 import {
   admitInternalRegistryOperation,
@@ -32,6 +44,8 @@ import {
 import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
   countUnitGuardRuns,
+  endSourceCompiles,
+  MAX_COMPILE_ATTEMPTS,
   scenarioSourceBinderPredicate,
   scenarioSourceBindingPredicate,
   stagedSourceObjectPrefix,
@@ -74,8 +88,13 @@ const MAX_SCENARIOS = 100;
 const MAX_DETAIL_CHARS = 4096;
 const STAGED_FILES = ["bundle.tar.gz", "meta.json", "source.tar.gz"];
 const REV_SCOPE_CONFLICT = "rev_scope_conflict: this commit is owned by another scope";
+/** A pull binding fetches or starts a compile at most once a minute. */
+const DELIVERY_FLOOR_MS = 60_000;
+const DELIVERED_AT_STORAGE_KEY = "delivered_at";
+/** GitHub's tarball holds the whole repository; the DO never unpacks it. */
+const MAX_SOURCE_ARCHIVE_BYTES = 8 * 1024 * 1024;
 
-type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete">;
+type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete" | "getAlarm" | "setAlarm">;
 
 interface Step {
   env: Cloudflare.Env;
@@ -84,6 +103,11 @@ interface Step {
   organizationId: string | null;
   digest: string;
 }
+
+type ActiveBinding = Pick<
+  typeof scenarioSources.$inferSelect,
+  "organizationId" | "mode" | "githubInstallationId" | "githubRepository" | "githubRepositoryId"
+>;
 
 interface CommitRow {
   id: string;
@@ -147,11 +171,17 @@ export class ScenarioSourceDO extends DurableObject<Cloudflare.Env> {
     }
     const retries = (await this.ctx.storage.get<number>(RETRIES_STORAGE_KEY)) ?? 0;
     await this.ctx.storage.put(RETRIES_STORAGE_KEY, retries + 1);
-    const at = Date.now() + Math.min(RETRY_BASE_MS * 2 ** retries, RETRY_MAX_MS);
-    // A poke that arrived during this alarm keeps its earlier time.
-    const pending = await this.ctx.storage.getAlarm();
-    if (pending === null || pending > at) await this.ctx.storage.setAlarm(at);
+    await armAt(
+      this.ctx.storage,
+      Date.now() + Math.min(RETRY_BASE_MS * 2 ** retries, RETRY_MAX_MS),
+    );
   }
+}
+
+/** A poke, or an earlier step, that armed a sooner alarm keeps its time. */
+async function armAt(storage: Storage, at: number): Promise<void> {
+  const pending = await storage.getAlarm();
+  if (pending === null || pending > at) await storage.setAlarm(at);
 }
 
 /**
@@ -201,13 +231,22 @@ async function tickScenarioSource(
   await supersede(env, scopeKey, digest);
 
   const [active] = await db
-    .select({ scopeKey: scenarioSources.scopeKey })
+    .select({
+      organizationId: scenarioSources.organizationId,
+      mode: scenarioSources.mode,
+      githubInstallationId: scenarioSources.githubInstallationId,
+      githubRepository: scenarioSources.githubRepository,
+      githubRepositoryId: scenarioSources.githubRepositoryId,
+    })
     .from(scenarioSources)
     .where(and(eq(scenarioSources.scopeKey, scopeKey), scenarioSourceBindingPredicate()))
     .limit(1);
   if (!active) return again || promoting === true;
   const step = { env, storage, scopeKey, organizationId, digest };
   const ingestAgain = await ingest(step);
+  // After ingest, so a re-run failed row that ingest finds without its
+  // staged objects is delivered again in the same pass.
+  if (active.mode === "pull") await deliver(step, active);
   const heal = await failOrHeal(step);
   let applyAgain = promoting === true;
   // Only an organization commit applies here; `public` needs the drain hold.
@@ -289,11 +328,24 @@ async function dropInactive(env: Cloudflare.Env, scopeKey: string): Promise<void
       WHERE scope_key = ?2 AND state IN ('fetching', 'compiling', 'ingesting')
         AND EXISTS (SELECT 1 FROM scenario_sources WHERE scope_key = ?2
           AND (paused_at IS NOT NULL OR disconnected_at IS NOT NULL))
-      RETURNING rev, purpose`,
+      RETURNING rev, purpose, compile_host_id`,
   )
     .bind(Date.now(), scopeKey)
-    .all<{ rev: string; purpose: "deploy" | "validate" }>();
-  await deleteStagedObjects(env, scopeKey, results);
+    .all<DroppedRow>();
+  await dropped(env, scopeKey, results);
+}
+
+interface DroppedRow {
+  rev: string;
+  purpose: "deploy" | "validate";
+  compile_host_id: string | null;
+}
+
+// A dropped row's objects go, and so does the compile of one that was
+// compiling: its builder kills the child once the entry leaves.
+async function dropped(env: Cloudflare.Env, scopeKey: string, rows: DroppedRow[]) {
+  await deleteStagedObjects(env, scopeKey, rows);
+  await endSourceCompiles(env, rows.map((row) => row.compile_host_id));
 }
 
 // Supersedes rows that are neither head nor live, except a promotion that
@@ -310,11 +362,198 @@ async function supersede(
           'awaiting_promote', 'failed')
         AND rev IS NOT ${headRev("?2", "?3")}
         AND rev IS NOT (SELECT live_rev FROM scenario_sources WHERE scope_key = ?2)
-      RETURNING rev, purpose`,
+      RETURNING rev, purpose, compile_host_id`,
   )
     .bind(Date.now(), scopeKey, digest)
-    .all<{ rev: string; purpose: "deploy" | "validate" }>();
-  await deleteStagedObjects(env, scopeKey, results);
+    .all<DroppedRow>();
+  await dropped(env, scopeKey, results);
+}
+
+interface HeadRow {
+  sha: string;
+  rev: string;
+  id: string | null;
+  attempt: number | null;
+  state: string | null;
+}
+
+/** The head rev while the binding is a pull binding that may write, else NULL. */
+const pullHeadRev = (scopeKey: string, digest: string) =>
+  sql`(SELECT 'git-' || github_repository_id || '-' || head_sha || '-' || ${digest}
+    FROM scenario_sources WHERE scope_key = ${scopeKey} AND mode = 'pull'
+      AND ${scenarioSourceBindingPredicate()})`;
+
+// Pull delivery: the head is fetched once into R2 and compiled on a free
+// builder on this digest. Only a head with no row or a superseded one is
+// claimed, so a poll never delivers an invalid or failed head again; a re-run
+// flips it first. Every wait re-arms the alarm itself; a wait for a builder
+// ends when a compile does, which wakes the binding that waited longest.
+async function deliver(step: Step, binding: ActiveBinding): Promise<void> {
+  const { env, storage, scopeKey, digest } = step;
+  const db = drizzle(env.DB);
+  const now = Date.now();
+  await expireCompiles(step, now);
+  const head = await db.get<HeadRow>(sql`SELECT s.head_sha AS sha, c.id, c.attempt, c.state,
+      'git-' || s.github_repository_id || '-' || s.head_sha || '-' || ${digest} AS rev
+    FROM scenario_sources AS s
+    LEFT JOIN scenario_source_commits AS c ON c.scope_key = s.scope_key
+      AND c.purpose = 'deploy'
+      AND c.rev = 'git-' || s.github_repository_id || '-' || s.head_sha || '-' || ${digest}
+    WHERE s.scope_key = ${scopeKey} AND s.head_sha IS NOT NULL`);
+  if (!head || (head.state !== null && head.state !== "superseded" && head.state !== "fetching")) {
+    return;
+  }
+  const deliveredAt = (await storage.get<number>(DELIVERED_AT_STORAGE_KEY)) ?? 0;
+  if (now < deliveredAt + DELIVERY_FLOOR_MS) {
+    await armAt(storage, deliveredAt + DELIVERY_FLOOR_MS);
+    return;
+  }
+  // Waiting for a compiler: nothing is fetched or claimed.
+  let builders = await freeSourceCompileBuilders(db, now, digest);
+  if (!builders.length) return;
+  await storage.put(DELIVERED_AT_STORAGE_KEY, now);
+  const row =
+    head.state === "fetching" && head.id !== null && head.attempt !== null
+      ? { id: head.id, rev: head.rev, attempt: head.attempt, state: head.state }
+      : await claim(step, head, now);
+  if (!row) return;
+  const archive = `${stagedSourceObjectPrefix(scopeKey, row.rev, "deploy")}source.tar.gz`;
+  if (!(await env.VM_IMAGE_REGISTRY_BUCKET.head(archive))) {
+    const fetched = await fetchSource(step, binding, row, head.sha, archive);
+    if (fetched === "retry") await armAt(storage, now + DELIVERY_FLOOR_MS);
+    if (fetched !== "stored") return;
+    // A builder can drop off, be disabled or roll during the download.
+    builders = await freeSourceCompileBuilders(db, Date.now(), digest);
+  }
+  for (const builder of builders) {
+    if (await assign(step, row, builder, now)) return;
+  }
+  // Another binding took the builder first, or it left; the stored archive waits.
+  await armAt(storage, now + DELIVERY_FLOOR_MS);
+}
+
+// A compile past the builder lease comes back to fetching with its archive,
+// and one that expires on its third delivery fails the row.
+async function expireCompiles(step: Step, now: number): Promise<void> {
+  const { results } = await step.env.DB.prepare(
+    `UPDATE scenario_source_commits
+      SET state = CASE WHEN attempt >= ?4 THEN 'failed' ELSE 'fetching' END,
+        detail = CASE WHEN attempt >= ?4 THEN 'compiler did not finish' ELSE detail END,
+        updated_at = ?1
+      WHERE scope_key = ?2 AND state = 'compiling' AND compile_assigned_at <= ?3
+      RETURNING rev, purpose, state, compile_host_id`,
+  )
+    .bind(now, step.scopeKey, now - BUILDER_REASSIGN_AFTER_MS, MAX_COMPILE_ATTEMPTS)
+    .all<DroppedRow & { state: string }>();
+  await deleteStagedObjects(
+    step.env,
+    step.scopeKey,
+    results.filter((row) => row.state === "failed"),
+  );
+  await endSourceCompiles(step.env, results.map((row) => row.compile_host_id));
+}
+
+async function claim(step: Step, head: HeadRow, now: number): Promise<CommitRow | null> {
+  const row = await drizzle(step.env.DB).get<CommitRow>(sql`INSERT INTO scenario_source_commits
+      (id, scope_key, purpose, sha, rev, via, state, created_at, updated_at)
+    SELECT ${createAppId()}, scope_key, 'deploy', head_sha, ${head.rev}, 'pull', 'fetching',
+      ${now}, ${now}
+    FROM scenario_sources WHERE scope_key = ${step.scopeKey} AND mode = 'pull'
+      AND head_sha = ${head.sha} AND ${scenarioSourceBindingPredicate()}
+    ON CONFLICT (scope_key, rev, purpose) DO UPDATE SET state = 'fetching', via = 'pull',
+      detail = NULL, diagnostics_json = NULL, updated_at = excluded.updated_at
+      WHERE scenario_source_commits.state = 'superseded'
+    RETURNING id, rev, attempt, state`);
+  if (row) await step.storage.delete(tryKey(row, "fetch"));
+  return row ?? null;
+}
+
+// Stores the head's repository tarball as the row's archive. GitHub not
+// answering is not counted, and neither is a mint that says gone or
+// suspended: the next observe applies it.
+async function fetchSource(
+  step: Step,
+  binding: ActiveBinding,
+  row: CommitRow,
+  sha: string,
+  archive: string,
+): Promise<"stored" | "retry" | "settled"> {
+  const key = tryKey(row, "fetch");
+  const tries = ((await step.storage.get<number>(key)) ?? 0) + 1;
+  await step.storage.put(key, tries);
+  if (tries > MAX_TRIES) {
+    await settle(step, row, { state: "failed", detail: "fetch did not finish" });
+    await step.storage.delete(key);
+    return "settled";
+  }
+  let mint: MintOutcome;
+  try {
+    mint = await mintInstallationToken(step.env, {
+      installationId: binding.githubInstallationId,
+      fullName: binding.githubRepository,
+      repositoryId: binding.githubRepositoryId,
+    });
+  } catch {
+    mint = { status: "transient" };
+  }
+  // Right after the mint: a private repository's tarball URL lives minutes.
+  const tarball =
+    mint.status === "ok"
+      ? await fetchTarball(mint.token, binding.githubRepository, sha, MAX_SOURCE_ARCHIVE_BYTES)
+      : ({ status: "transient" } as const);
+  if (tarball.status === "transient") {
+    await step.storage.put(key, tries - 1);
+    await step.env.DB.prepare(
+      `UPDATE scenario_source_commits SET detail = ?1, updated_at = ?2
+        WHERE id = ?3 AND attempt = ?4 AND state = 'fetching'`,
+    )
+      .bind("GitHub could not be read; retrying", Date.now(), row.id, row.attempt)
+      .run();
+    return "retry";
+  }
+  if (tarball.status !== "ok") {
+    await step.storage.delete(key);
+    await settle(
+      step,
+      row,
+      invalid(
+        tarball.status === "too_large"
+          ? "The repository is over the 8 MiB pull limit. Use push mode or slim the repository."
+          : "GitHub has no archive for this commit.",
+      ),
+    );
+    return "settled";
+  }
+  await step.env.VM_IMAGE_REGISTRY_BUCKET.put(archive, tarball.archive, {
+    httpMetadata: { contentType: "application/gzip" },
+  });
+  await step.storage.delete(key);
+  return "stored";
+}
+
+// One conditional statement picks the builder, so two bindings never share
+// one: the row must still be the fetching head, and the builder must have no
+// compile in flight.
+async function assign(
+  step: Step,
+  row: CommitRow,
+  builder: BuilderCandidate,
+  now: number,
+): Promise<boolean> {
+  const db = drizzle(step.env.DB);
+  const assigned = await db.get<{ attempt: number }>(sql`UPDATE scenario_source_commits
+    SET state = 'compiling', attempt = attempt + 1, compile_host_id = ${builder.hostId},
+      compile_assigned_at = ${now}, detail = NULL, updated_at = ${now}
+    WHERE id = ${row.id} AND attempt = ${row.attempt} AND state = 'fetching'
+      AND rev = ${pullHeadRev(step.scopeKey, step.digest)}
+      AND NOT EXISTS (SELECT 1 FROM scenario_source_commits AS busy
+        WHERE busy.compile_host_id = ${builder.hostId} AND busy.state = 'compiling')
+    RETURNING attempt`);
+  if (!assigned) return false;
+  if (await reconcileHostSourceCompiles(db, builder.hostId, now)) {
+    await tryWakeHostRuntimeViaNamespace(step.env.HOST_RUNTIME, builder.hostId);
+  }
+  return true;
 }
 
 async function ingest(step: Step): Promise<boolean> {
@@ -768,7 +1007,7 @@ async function scopeLabel(step: Pick<Step, "env" | "organizationId">) {
 
 // ponytail: a counter of a row that observe supersedes mid-try stays in DO
 // storage; clear them by prefix if a binding ever holds many.
-function tryKey(row: CommitRow, step: "ingest" | "heal"): string {
+function tryKey(row: CommitRow, step: "fetch" | "ingest" | "heal"): string {
   return `try:${row.id}:${row.attempt}:${step}`;
 }
 
@@ -791,7 +1030,7 @@ async function settle(
       row.state,
     )
     .run();
-  if (row.state === "ingesting") {
+  if (row.state === "fetching" || row.state === "ingesting") {
     await deleteStagedObjects(step.env, step.scopeKey, [{ rev: row.rev, purpose: "deploy" }]);
   }
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type {
   BridgeMessageV8,
   BuildReportV1,
+  DesiredSourceCompileV1,
   HostDesiredStateV2,
   HostStateReportV2,
   VmReportV2,
@@ -271,6 +272,37 @@ describe("bridge v7 protocol", () => {
         ),
       ).toBeNull();
     }
+  });
+
+  it("accepts the source compile fixture and refuses a malformed entry", () => {
+    const desiredState = readFixture<HostDesiredStateV2>(
+      "host-desired-state-v2.json",
+    );
+    const compile = readFixture<DesiredSourceCompileV1>(
+      "desired-source-compile-v1.json",
+    );
+    const parse = (entries: unknown) =>
+      parseBridgeMessageV8(
+        JSON.stringify({
+          type: "desired_state",
+          protocol_version: 8,
+          host_id: desiredState.host_id,
+          desired_state: { ...desiredState, source_compiles: entries },
+        }),
+      );
+
+    expect(parse([compile])).not.toBeNull();
+    for (const bad of [
+      { ...compile, compile_id: "../escape" },
+      { ...compile, rev: "" },
+      { ...compile, attempt: -1 },
+      { ...compile, attempt: 2 ** 32 },
+      { ...compile, validate_only: "false" },
+      { ...compile, arch: "riscv64" },
+    ]) {
+      expect(parse([bad])).toBeNull();
+    }
+    expect(parse({})).toBeNull();
   });
 
   it("rejects zero CPU entitlements and malformed sandbox accounting", () => {

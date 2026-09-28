@@ -15,6 +15,8 @@ import {
   handleAgentArtifactDownload,
   handleAgentBundleDownload,
   handleAgentBuildLogUpload,
+  handleAgentSourceResult,
+  handleAgentSourceSnapshot,
 } from "./agent";
 import {
   handleAgentImageChunkDownload,
@@ -49,6 +51,7 @@ import {
 } from "@/lib/image-registry-admission";
 import type { ImageRegistryOperationKind } from "@/db/schema";
 import {
+  AGENT_SOURCES_PATH,
   SOURCE_BUNDLES_PATH,
   SOURCE_COMPILER_PATH,
 } from "@/generated/constants";
@@ -262,6 +265,16 @@ export async function handleImageRegistryRequest(
       env,
       decodeURIComponent(bundleMatch[1] ?? ""),
     );
+  }
+
+  // Fenced by row, host and attempt; like the bundle download, no writer.
+  const sourceMatch = url.pathname.match(
+    new RegExp(`^${AGENT_SOURCES_PATH}/([^/]+)(/result)?$`),
+  );
+  if (sourceMatch) {
+    return sourceMatch[2]
+      ? handleAgentSourceResult(request, env, sourceMatch[1] ?? "")
+      : handleAgentSourceSnapshot(request, env, sourceMatch[1] ?? "");
   }
 
   const buildLogMatch = url.pathname.match(/^\/agent\/builds\/([^/]+)\/log$/);
