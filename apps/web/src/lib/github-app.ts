@@ -73,7 +73,7 @@ export async function mintInstallationToken(
         ...(input.repositoryId === undefined
           ? { repositories: [input.fullName.split("/")[1]] }
           : { repository_ids: [input.repositoryId] }),
-        // Repository and collaborator reads are Metadata endpoints.
+        // The collaborator-permission read is a Metadata endpoint.
         permissions: { contents: "read", checks: "write", metadata: "read" },
       }),
     },
