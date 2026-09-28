@@ -28,8 +28,8 @@ use tracing::{info, warn};
 
 use crate::bridge::host_architecture;
 use crate::bundle::{
-    BundleBuildInput, download_bundle_archive, inspect_bundle_build_input, unpack_bundle_archive,
-    validate_build_id, validate_bundle_rev, validate_desired_build_identity,
+    BundleBuildInput, bundle_archive_path, download_bundle_archive, inspect_bundle_build_input,
+    unpack_bundle_archive, validate_build_id, validate_bundle_rev, validate_desired_build_identity,
     verify_bundle_for_build,
 };
 
@@ -37,6 +37,12 @@ const FIRST_RETRY_DELAY_MS: i64 = 60_000;
 const LATER_RETRY_DELAY_MS: i64 = 300_000;
 const RUN_ONCE_PUBLISH_TOKEN_ENV: &str = "INTAR_REGISTRY_PUBLISH_TOKEN";
 const PUBLICATION_WORKERS: u16 = 2;
+
+/// Held while a build fetches, unpacks and verifies its bundle, and while a
+/// rev's bundle is evicted, so an eviction never removes files a build is about
+/// to use.
+// ponytail: global bundle-cache lock; per-rev locks if downloads contend
+static BUNDLE_CACHE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug)]
 struct NonRetryableBuildError {
@@ -509,6 +515,28 @@ async fn resolve_bundle_archive(
     Ok((archive, bundle_arg.to_owned()))
 }
 
+/// Fetch, unpack and verify a build's bundle under the bundle-cache lock. The
+/// build's job row already exists, so a later eviction keeps these files.
+async fn fetch_verified_bundle(
+    cfg: &config::BuilderConfig,
+    access_token: &str,
+    desired_build: &intar_contracts::bridge::DesiredBuildV1,
+) -> Result<BundleBuildInput> {
+    let _bundle_cache = BUNDLE_CACHE_LOCK.lock().await;
+    let bundle_archive = download_bundle_archive(
+        &cfg.bridge.base_url,
+        access_token,
+        &desired_build.rev,
+        &cfg.builder.cache_root,
+    )
+    .await?;
+    let bundle_root = unpacked_bundle_root(&cfg.builder.cache_root, &desired_build.rev);
+    unpack_bundle_archive(&bundle_archive, &bundle_root)?;
+    verify_bundle_or_drop_cached_archive(&bundle_archive, &bundle_root, desired_build)
+        .await
+        .map_err(non_retryable_build_error)
+}
+
 async fn verify_bundle_or_drop_cached_archive(
     bundle_archive: &Path,
     bundle_root: &Path,
@@ -592,6 +620,7 @@ fn qemu_build_config_for_job(
 pub(crate) async fn cleanup_reported_build_attempt_artifacts(
     cfg: &config::BuilderConfig,
     build_id: &str,
+    rev: &str,
 ) {
     if let Err(error) = validate_build_id(build_id) {
         warn!(build_id, error = %error, "refused builder build-attempt artifact cleanup");
@@ -612,6 +641,49 @@ pub(crate) async fn cleanup_reported_build_attempt_artifacts(
                 "failed to remove completed builder build-attempt artifacts"
             );
         }
+    }
+    evict_unused_bundle(cfg, rev).await;
+}
+
+/// Remove a rev's bundle and unpacked tree once no unfinished local job names
+/// the rev. A later build of the rev downloads it again.
+async fn evict_unused_bundle(cfg: &config::BuilderConfig, rev: &str) {
+    let _bundle_cache = BUNDLE_CACHE_LOCK.lock().await;
+    let archive = match bundle_archive_path(&cfg.builder.cache_root, rev) {
+        Ok(archive) => archive,
+        Err(error) => {
+            warn!(rev, error = %error, "refused builder bundle eviction");
+            return;
+        }
+    };
+    match db::BuilderDb::open(&cfg.builder.state_db)
+        .and_then(|db| db.has_unfinished_build_for_rev(rev))
+    {
+        Ok(false) => {}
+        Ok(true) => return,
+        Err(error) => {
+            warn!(rev, error = %error, "failed to check builder bundle use; keeping it");
+            return;
+        }
+    }
+    if let Err(error) = tokio::fs::remove_file(&archive).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(rev, error = %error, "failed to evict builder bundle archive");
+    }
+    // A partial tree at the rev's path would wedge later unpacks of the rev,
+    // so move the tree aside in one rename before removing it.
+    let unpacked = unpacked_bundle_root(&cfg.builder.cache_root, rev);
+    let evicted = unpacked.with_file_name(format!(".{rev}.evicted"));
+    let _ = tokio::fs::remove_dir_all(&evicted).await;
+    match tokio::fs::rename(&unpacked, &evicted).await {
+        Ok(()) => {
+            if let Err(error) = tokio::fs::remove_dir_all(&evicted).await {
+                warn!(rev, error = %error, "failed to remove evicted builder bundle tree");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => warn!(rev, error = %error, "failed to evict builder bundle tree"),
     }
 }
 
