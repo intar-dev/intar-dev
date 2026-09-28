@@ -54,6 +54,10 @@ export default defineConfig({
             className: "HostRuntimeDO",
             useSQLite: true,
           },
+          SCENARIO_SOURCE: {
+            className: "ScenarioSourceDO",
+            useSQLite: true,
+          },
         },
         r2Buckets: ["VM_IMAGE_REGISTRY_BUCKET", "VM_RUN_ARTIFACTS_BUCKET"],
       },

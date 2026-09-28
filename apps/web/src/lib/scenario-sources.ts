@@ -120,18 +120,34 @@ export function scenarioSourceScope(
 
 /**
  * Holds while a `scenario_sources` row may write: it is connected and not
- * paused, and its binder is still an owner or admin of the organization with
- * an active account, or for `public` an active platform admin.
+ * paused, and its binder still holds the scope.
  */
 export function scenarioSourceBindingPredicate(): SQL {
-  const binder = sql`${scenarioSources.boundByUserId}`;
   return sql`(${scenarioSources.disconnectedAt} IS NULL
     AND ${scenarioSources.pausedAt} IS NULL
-    AND ((${scenarioSources.organizationId} IS NULL
-        AND EXISTS (SELECT 1 FROM user AS binder
-          WHERE binder.id = ${binder} AND ${sql.raw(activeAdminSql("binder"))}))
-      OR (${administersOrganization(sql`${scenarioSources.organizationId}`, binder)}
-        AND ${sql.raw(activeAccountExistsSql("scenario_sources.bound_by_user_id"))})))`;
+    AND ${scenarioSourceBinderPredicate()})`;
+}
+
+/**
+ * Holds while the binder is still an owner or admin of the organization with
+ * an active account, or for `public` an active platform admin. Never NULL.
+ */
+export function scenarioSourceBinderPredicate(): SQL {
+  const binder = sql`${scenarioSources.boundByUserId}`;
+  return sql`((${scenarioSources.organizationId} IS NULL
+      AND EXISTS (SELECT 1 FROM user AS binder
+        WHERE binder.id = ${binder} AND ${sql.raw(activeAdminSql("binder"))}))
+    OR (${administersOrganization(sql`${scenarioSources.organizationId}`, binder)}
+      AND ${sql.raw(activeAccountExistsSql("scenario_sources.bound_by_user_id"))}))`;
+}
+
+/** Where a commit's staged bundle, meta and pull snapshot live in R2. */
+export function scenarioSourceObjectPrefix(
+  scopeKey: string,
+  rev: string,
+  purpose: "deploy" | "validate",
+): string {
+  return `builds/sources/${scopeKey}/${rev}/${purpose}/`;
 }
 
 /** Removes every absolute path; repository-relative paths stay readable. */

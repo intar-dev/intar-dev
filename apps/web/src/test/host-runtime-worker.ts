@@ -1,4 +1,5 @@
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
+import { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
 
 export default {
   async fetch() {
@@ -6,4 +7,4 @@ export default {
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 
-export { HostRuntimeDO };
+export { HostRuntimeDO, ScenarioSourceDO };
