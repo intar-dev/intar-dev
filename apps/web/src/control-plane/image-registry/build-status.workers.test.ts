@@ -7,11 +7,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   agentHosts,
+  courseCatalogs,
   hostActualState,
   hostDesiredState,
   imageBuildBundles,
   imageBuilds,
   runtimeOperationGates,
+  scenarioSourceCommits,
+  scenarioSources,
   user,
 } from "@/db/schema";
 import type {
@@ -301,6 +304,57 @@ describe("image revision completion status", () => {
     });
   });
 
+  it("reports a git- rev's source state and the drained lane's admission of it", async () => {
+    const REV = `git-42-${"a".repeat(40)}-${"d".repeat(64)}`;
+    const OTHER = `git-42-${"b".repeat(40)}-${"d".repeat(64)}`;
+    const db = drizzle(env.DB);
+    const [bundle] = await db.select().from(imageBuildBundles);
+    await db.insert(imageBuildBundles).values({ ...bundle!, rev: REV });
+    await db.insert(scenarioSources).values({
+      scopeKey: "public",
+      githubInstallationId: 7,
+      githubRepositoryId: 42,
+      githubRepository: "intar-dev/scenarios",
+      defaultBranch: "main",
+    });
+    const commit = (rev: string, state: "awaiting_promote" | "promoting") => ({
+      id: rev,
+      scopeKey: "public",
+      purpose: "deploy" as const,
+      sha: rev.split("-")[2]!,
+      rev,
+      via: "pull" as const,
+      state,
+    });
+    await db.insert(scenarioSourceCommits).values(commit(REV, "awaiting_promote"));
+    const source = async () => {
+      const body = (await (await status("stable", REV)).json()) as Record<string, unknown>;
+      return [body.source_state, body.source_promotable];
+    };
+
+    // Neither the applied catalog nor live_rev.
+    expect(await source()).toEqual(["awaiting_promote", false]);
+    await db.insert(courseCatalogs).values({
+      scopeKey: "public",
+      catalogJson: { version: 2, courses: [] },
+      sourceRevision: REV,
+    });
+    expect(await source()).toEqual(["awaiting_promote", true]);
+    // A public promotion of another rev is in flight.
+    await db.insert(scenarioSourceCommits).values(commit(OTHER, "promoting"));
+    expect(await source()).toEqual(["awaiting_promote", false]);
+    await db.delete(scenarioSourceCommits).where(eq(scenarioSourceCommits.rev, OTHER));
+    // A retry after a committed 503, once the applied catalog moved on.
+    await db.update(courseCatalogs).set({ sourceRevision: OTHER });
+    await db.update(scenarioSources).set({ liveRev: REV });
+    await db.update(scenarioSourceCommits).set({ state: "live" });
+    expect(await source()).toEqual(["live", true]);
+
+    const token = (await (await status()).json()) as Record<string, unknown>;
+    expect(token).not.toHaveProperty("source_state");
+    expect(token).not.toHaveProperty("source_promotable");
+  });
+
   it("fails closed when the published channel pin is absent", async () => {
     await env.VM_IMAGE_REGISTRY_BUCKET.delete(
       "guest-tools/scenario/stable.json",
@@ -331,10 +385,13 @@ describe("image revision completion status", () => {
   });
 });
 
-async function status(channel: "candidate" | "stable" = "stable"): Promise<Response> {
+async function status(
+  channel: "candidate" | "stable" = "stable",
+  revision = "revision-1",
+): Promise<Response> {
   const response = await handleImageRegistryRequest(
     new Request(
-      `https://intar.test/registry/v1/builds/revisions/revision-1?tools=${channel}`,
+      `https://intar.test/registry/v1/builds/revisions/${revision}?tools=${channel}`,
       {
         headers: { authorization: "Bearer test-publish-token" },
       },

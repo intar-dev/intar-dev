@@ -22,6 +22,10 @@ import {
   type ScenarioGuestToolsChannel,
 } from "@/lib/scenario-guest-tools";
 import {
+  publicSourceRevPromotable,
+  scenarioSourceScope,
+} from "@/lib/scenario-sources";
+import {
   hasRegistryPublishToken,
   isSafeBundleRev,
   jsonResponse,
@@ -184,7 +188,29 @@ export async function handleImageBuildRevisionStatus(
     builds: builds.map(({ manifest: _manifest, ...build }) => build),
     images: requiredImages,
     hosts: cacheReports,
+    ...(revision.startsWith("git-")
+      ? await scenarioSourceStatus(env.DB, revision, bundle.organizationId)
+      : {}),
   });
+}
+
+/** A `git-` rev's commit state, and whether the drained lane admits it. */
+async function scenarioSourceStatus(
+  d1: D1Database,
+  revision: string,
+  organizationId: string | null,
+) {
+  const commit = await d1
+    .prepare(
+      `SELECT state FROM scenario_source_commits
+        WHERE scope_key = ?1 AND rev = ?2 AND purpose = 'deploy'`,
+    )
+    .bind(scenarioSourceScope(organizationId).key, revision)
+    .first<{ state: string }>();
+  return {
+    source_state: commit?.state ?? null,
+    source_promotable: await publicSourceRevPromotable(d1, revision),
+  };
 }
 
 function readToolsChannel(url: URL): ScenarioGuestToolsChannel | null {

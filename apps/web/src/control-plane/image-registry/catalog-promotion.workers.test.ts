@@ -3,7 +3,7 @@
 import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   type CandidatePromotionOutcome,
@@ -11,6 +11,7 @@ import {
 } from "@/control-plane/image-registry/catalog-promotion";
 import {
   agentHosts,
+  courseCatalogs,
   hostDesiredState,
   imageBuildBundles,
   imageBuilds,
@@ -18,6 +19,8 @@ import {
   runtimeOperationGates,
   scenarioCatalogCandidates,
   scenarioCatalogSnapshots,
+  scenarioSourceCommits,
+  scenarioSources,
   user,
   vmScenarioVms,
   vmScenarios,
@@ -40,6 +43,22 @@ import {
   seedLegacyImage,
   type SeededChunkedImage,
 } from "./registry-artifact-fixtures";
+
+// Runs after the drained lane restages a scenario source rev's candidates.
+const staging = vi.hoisted(() => ({ after: undefined as (() => Promise<void>) | undefined }));
+vi.mock("@/lib/scenario-catalog-candidates", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/scenario-catalog-candidates")>();
+  return {
+    ...actual,
+    stageReusableCandidateManifests: async (
+      ...args: Parameters<typeof actual.stageReusableCandidateManifests>
+    ) => {
+      const staged = await actual.stageReusableCandidateManifests(...args);
+      await staging.after?.();
+      return staged;
+    },
+  };
+});
 
 const CONTENT_HASH = "a".repeat(64);
 describe("candidate scenario catalog promotion", () => {
@@ -328,9 +347,12 @@ describe("candidate scenario catalog promotion", () => {
   });
 });
 
-async function promoteDrained(): Promise<Response> {
+async function promoteDrained(
+  revision = "revision-1",
+  cleanup: Parameters<typeof createCleanupServiceDouble>[1] = {},
+): Promise<Response> {
   const response = await handleImageRegistryRequest(
-    new Request("https://intar.test/registry/v1/catalog/promote/revision-1", {
+    new Request(`https://intar.test/registry/v1/catalog/promote/${revision}`, {
       method: "POST",
       headers: {
         authorization: "Bearer test-publish-token",
@@ -339,10 +361,13 @@ async function promoteDrained(): Promise<Response> {
     }),
     {
       ...env,
-      REGISTRY_CLEANUP: createCleanupServiceDouble({
-        DB: env.DB,
-        VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
-      }),
+      REGISTRY_CLEANUP: createCleanupServiceDouble(
+        {
+          DB: env.DB,
+          VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
+        },
+        cleanup,
+      ),
     } as unknown as Cloudflare.Env,
   );
   if (!response) throw new Error("the promotion route did not answer");
@@ -490,6 +515,139 @@ describe("promotion rollback snapshots", () => {
     expect(rolledBackImageIds(projection)).toEqual(
       [a1.imageId, b1.imageId].sort(),
     );
+  });
+});
+
+describe("scenario source revisions in the drained lane", () => {
+  const sha = (char: string) => char.repeat(40);
+  const gitRev = (char: string) => `git-42-${sha(char)}-${"d".repeat(64)}`;
+  // LIVE is the public source's live commit, and REV replaces its image.
+  const LIVE = gitRev("c");
+  const REV = gitRev("a");
+  const OTHER = gitRev("b");
+  const db = () => drizzle(env.DB);
+  const commit = (id: string, rev: string, state: "live" | "awaiting_promote" | "promoting") => ({
+    id,
+    scopeKey: "public",
+    purpose: "deploy" as const,
+    sha: rev.split("-")[2]!,
+    rev,
+    via: "pull" as const,
+    state,
+  });
+  const states = async () =>
+    Object.fromEntries(
+      (await db().select().from(scenarioSourceCommits)).map((row) => [row.rev, row.state]),
+    );
+  const liveRevision = async () =>
+    (await db().select({ sourceRevision: vmScenarios.sourceRevision }).from(vmScenarios))[0]
+      ?.sourceRevision;
+
+  beforeEach(async () => {
+    await resetD1Database();
+    await enableRegistryDeletion(env.DB);
+    staging.after = undefined;
+    await stageAndPromote(LIVE, [{ image: await image("live") }]);
+    await stage(REV, [{ image: await image("next") }]);
+    await db().insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "drained" });
+    await db().insert(scenarioSources).values({
+      scopeKey: "public",
+      githubInstallationId: 7,
+      githubRepositoryId: 42,
+      githubRepository: "intar-dev/scenarios",
+      defaultBranch: "main",
+      targetRev: REV,
+      liveRev: LIVE,
+      liveSha: sha("c"),
+    });
+    await db()
+      .insert(scenarioSourceCommits)
+      .values([commit("commit-c", LIVE, "live"), commit("commit-a", REV, "awaiting_promote")]);
+    // The DO applied REV's catalog before REV entered awaiting_promote.
+    await db().insert(courseCatalogs).values({
+      scopeKey: "public",
+      catalogJson: { version: 2, courses: [] },
+      sourceRevision: REV,
+    });
+  });
+
+  it("promotes a rev that observe superseded during the drain, and live_rev follows", async () => {
+    await db()
+      .update(scenarioSourceCommits)
+      .set({ state: "superseded" })
+      .where(eq(scenarioSourceCommits.rev, REV));
+    await db().update(scenarioSources).set({ headSha: sha("b") });
+
+    const response = await promoteDrained(REV);
+
+    expect(response.status).toBe(200);
+    expect(await liveRevision()).toBe(REV);
+    expect(await states()).toEqual({ [LIVE]: "superseded", [REV]: "live" });
+    const [binding] = await db().select().from(scenarioSources);
+    expect(binding).toMatchObject({ liveRev: REV, liveSha: sha("a"), liveAt: expect.any(Number) });
+  });
+
+  it("restages the candidates the collector retired", async () => {
+    await db()
+      .delete(scenarioCatalogCandidates)
+      .where(eq(scenarioCatalogCandidates.revision, REV));
+
+    expect((await promoteDrained(REV)).status).toBe(200);
+    expect(await liveRevision()).toBe(REV);
+  });
+
+  it("refuses a rev that is neither the applied catalog nor live_rev", async () => {
+    await db().update(courseCatalogs).set({ sourceRevision: OTHER });
+
+    const response = await promoteDrained(REV);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "scenario source revision is not promotable",
+    });
+    expect(await liveRevision()).toBe(LIVE);
+  });
+
+  it("refuses while a public promotion of another rev is in flight, also inside the locks", async () => {
+    await db().insert(scenarioSourceCommits).values(commit("commit-b", OTHER, "promoting"));
+    expect((await promoteDrained(REV)).status).toBe(409);
+
+    // The DO writes its promoting row after this request's admission.
+    await db().delete(scenarioSourceCommits).where(eq(scenarioSourceCommits.rev, OTHER));
+    staging.after = async () => {
+      await db().insert(scenarioSourceCommits).values(commit("commit-b", OTHER, "promoting"));
+    };
+    const response = await promoteDrained(REV);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "scenario source revision is not promotable",
+    });
+    expect(await liveRevision()).toBe(LIVE);
+    expect(await states()).toMatchObject({ [LIVE]: "live", [REV]: "awaiting_promote" });
+    const writers = await env.DB.prepare("SELECT id FROM image_registry_operation_writers").all();
+    expect(writers.results).toEqual([]);
+  });
+
+  it("sets live_rev with a committed 503 and admits the retry through it", async () => {
+    const failed = await promoteDrained(REV, {
+      onRun: async () => {
+        throw new Error("the collector is down");
+      },
+    });
+    expect(failed.status).toBe(503);
+    await expect(failed.json()).resolves.toMatchObject({ catalog_promoted: true, retry: true });
+    expect(await db().select({ liveRev: scenarioSources.liveRev }).from(scenarioSources)).toEqual([
+      { liveRev: REV },
+    ]);
+
+    // Only live_rev admits the retry once the applied catalog moves on.
+    await db().update(courseCatalogs).set({ sourceRevision: OTHER });
+    const retry = await promoteDrained(REV);
+
+    expect(retry.status).toBe(200);
+    await expect(retry.json()).resolves.toMatchObject({ ok: true, retried: true });
+    expect(await states()).toEqual({ [LIVE]: "superseded", [REV]: "live" });
   });
 });
 
