@@ -49,6 +49,8 @@ export {
   scenarioCatalogCandidates,
   scenarioCatalogSnapshots,
   courseCatalogs,
+  scenarioSourceCommits,
+  scenarioSources,
   vmScenarioProbes,
   vmScenarios,
   vmScenarioVms,

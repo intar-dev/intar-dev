@@ -155,6 +155,8 @@ describe("Drizzle-managed production D1 schema", () => {
         "scenario_runs",
         "course_unit_completions",
         "runtime_executions",
+        "scenario_sources",
+        "scenario_source_commits",
       ]),
     );
     for (const removed of [
@@ -166,7 +168,6 @@ describe("Drizzle-managed production D1 schema", () => {
       "hetzner_allocations",
       "organization_provider_connections",
       "scenario_course_catalogs",
-      "scenario_sources",
     ]) {
       expect(names).not.toContain(removed);
     }
@@ -227,6 +228,80 @@ describe("Drizzle-managed production D1 schema", () => {
       ]),
     );
 
+  });
+
+  it("keeps one connected binding per repository and checks source values", async () => {
+    await env.DB.batch(
+      ["org-a", "org-b"].map((id) =>
+        env.DB
+          .prepare(
+            "INSERT INTO organization (id, name, slug, created_at) VALUES (?, ?, ?, 1)",
+          )
+          .bind(id, id, id),
+      ),
+    );
+    const bind = (values: Record<string, string | number | null>) => {
+      const row = {
+        organization_id: null,
+        github_installation_id: 1,
+        github_repository_id: 42,
+        github_repository: "acme/scenarios",
+        default_branch: "main",
+        ...values,
+      };
+      const columns = Object.keys(row);
+      return env.DB.prepare(
+        `INSERT INTO scenario_sources (${columns.join(", ")})
+         VALUES (${columns.map(() => "?").join(", ")})`,
+      )
+        .bind(...Object.values(row))
+        .run();
+    };
+
+    await bind({ scope_key: "public", disconnected_at: 1 });
+    await bind({ scope_key: "organization:org-a", organization_id: "org-a" });
+    await expect(
+      bind({ scope_key: "organization:org-b", organization_id: "org-b" }),
+    ).rejects.toThrow(/UNIQUE constraint failed/u);
+    await expect(
+      env.DB.prepare(
+        "UPDATE scenario_sources SET disconnected_at = NULL WHERE scope_key = 'public'",
+      ).run(),
+    ).rejects.toThrow(/UNIQUE constraint failed/u);
+
+    for (const values of [
+      { scope_key: "organization:org-a", organization_id: "org-b" },
+      { scope_key: "public", organization_id: "org-b" },
+      { scope_key: "organization:org-b", organization_id: null },
+      { scope_key: "organization:org-b", organization_id: "org-b", mode: "poll" },
+      { scope_key: "organization:org-b", organization_id: "org-b", pause_reason: "other" },
+    ]) {
+      await expect(
+        bind({ ...values, github_repository_id: 7 }),
+      ).rejects.toThrow(/CHECK constraint failed/u);
+    }
+
+    const commit = (id: string, purpose: string, via: string, state: string) =>
+      env.DB.prepare(
+        `INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, state)
+         VALUES (?, 'public', ?, 'abc', 'git-abc', ?, ?)`,
+      )
+        .bind(id, purpose, via, state)
+        .run();
+    for (const [purpose, via, state] of [
+      ["deploy", "pull", "queued"],
+      ["release", "pull", "live"],
+      ["deploy", "api", "live"],
+    ] as const) {
+      await expect(commit("bad", purpose, via, state)).rejects.toThrow(
+        /CHECK constraint failed/u,
+      );
+    }
+    await commit("deploy", "deploy", "pull", "live");
+    await commit("validate", "validate", "push", "validated");
+    await expect(commit("again", "deploy", "push", "failed")).rejects.toThrow(
+      /UNIQUE constraint failed/u,
+    );
   });
 });
 

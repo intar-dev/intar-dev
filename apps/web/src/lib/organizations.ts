@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
-import { and, count, desc, eq, inArray, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import { and, count, desc, eq, exists, inArray, isNull, ne, notExists, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   account,
   agentHosts,
@@ -13,6 +13,8 @@ import {
   organizationMemberRemovedLogins,
   personalImagePreparations,
   scenarioRuns,
+  scenarioSourceCommits,
+  scenarioSources,
   ssoProvider,
   user,
   vmScenarios,
@@ -334,16 +336,28 @@ export async function deleteOrganization(params: {
       "only the organization owner can delete the organization",
     );
   }
-  if (await organizationHasOwnedResources(params.organizationId)) {
-    throw appError(
+  const notEmpty = () =>
+    appError(
       409,
       "organization_not_empty",
       "remove the organization servers, scenarios, builds, and runs before deleting it",
     );
+  if (await organizationHasOwnedResources(params.organizationId)) {
+    throw notEmpty();
   }
-  await drizzle(env.DB)
+  const db = drizzle(env.DB);
+  // Scenario source bindings are checked in the DELETE itself, so a binding
+  // that starts writing after the read above still blocks the cascade.
+  const deleted = await db
     .delete(organization)
-    .where(eq(organization.id, params.organizationId));
+    .where(
+      and(
+        eq(organization.id, params.organizationId),
+        notExists(writableScenarioSources(db, params.organizationId)),
+      ),
+    )
+    .returning({ id: organization.id });
+  if (deleted.length !== 1) throw notEmpty();
 }
 
 export async function leaveOrganization(params: {
@@ -828,6 +842,40 @@ async function organizationHasOwnedResources(
       .limit(1),
   ]);
   return results.some((rows) => rows.length > 0);
+}
+
+/** Scenario source bindings of the organization that can still write. */
+function writableScenarioSources(
+  db: DrizzleD1Database,
+  organizationId: string,
+) {
+  return db
+    .select({ id: scenarioSources.scopeKey })
+    .from(scenarioSources)
+    .where(
+      and(
+        eq(scenarioSources.organizationId, organizationId),
+        or(
+          isNull(scenarioSources.disconnectedAt),
+          exists(
+            db
+              .select({ id: scenarioSourceCommits.id })
+              .from(scenarioSourceCommits)
+              .where(
+                and(
+                  eq(scenarioSourceCommits.scopeKey, scenarioSources.scopeKey),
+                  inArray(scenarioSourceCommits.state, [
+                    "fetching",
+                    "compiling",
+                    "ingesting",
+                    "promoting",
+                  ]),
+                ),
+              ),
+          ),
+        ),
+      ),
+    );
 }
 
 function validateOrganizationName(raw: string): string {

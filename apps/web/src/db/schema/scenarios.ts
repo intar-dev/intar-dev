@@ -12,7 +12,8 @@ import type {
   ScenarioHintManifestV3,
   ScenarioManifestV5,
 } from "@/generated/catalog";
-import { organization } from "./core";
+import { organization, user } from "./core";
+import { agentHosts } from "./platform";
 import {
   type CourseCatalogSnapshotV2,
   jsonText,
@@ -43,6 +44,119 @@ export const courseCatalogs = sqliteTable(
     check(
       "course_catalogs_catalog_json_check",
       sql`json_valid(${table.catalogJson})`,
+    ),
+  ],
+);
+
+export type ScenarioSourceCommitState =
+  | "fetching"
+  | "compiling"
+  | "ingesting"
+  | "building"
+  | "waiting"
+  | "promoting"
+  | "awaiting_promote"
+  | "live"
+  | "failed"
+  | "invalid"
+  | "superseded"
+  | "validated";
+
+export const scenarioSources = sqliteTable(
+  "scenario_sources",
+  {
+    scopeKey: text("scope_key").primaryKey(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
+    githubInstallationId: integer("github_installation_id").notNull(),
+    githubRepositoryId: integer("github_repository_id").notNull(),
+    githubRepository: text("github_repository").notNull(),
+    defaultBranch: text("default_branch").notNull(),
+    mode: text("mode").$type<"push" | "pull">().default("pull").notNull(),
+    headSha: text("head_sha"),
+    headObservedAt: integer("head_observed_at").default(0).notNull(),
+    pokedAt: integer("poked_at"),
+    polledAt: integer("polled_at"),
+    targetRev: text("target_rev"),
+    liveRev: text("live_rev"),
+    liveSha: text("live_sha"),
+    liveAt: integer("live_at"),
+    pausedAt: integer("paused_at"),
+    pauseReason: text("pause_reason").$type<
+      "admin" | "binder_lost_admin" | "suspended"
+    >(),
+    disconnectedAt: integer("disconnected_at"),
+    disconnectReason: text("disconnect_reason"),
+    boundByUserId: text("bound_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_sources_organization_uidx").on(
+      table.organizationId,
+    ),
+    uniqueIndex("scenario_sources_connected_repository_uidx")
+      .on(table.githubRepositoryId)
+      .where(sql`${table.disconnectedAt} IS NULL`),
+    check(
+      "scenario_sources_scope_check",
+      sql`(${table.scopeKey} = 'public' AND ${table.organizationId} IS NULL) OR (${table.scopeKey} = 'organization:' || ${table.organizationId} AND ${table.organizationId} IS NOT NULL)`,
+    ),
+    check("scenario_sources_mode_check", sql`${table.mode} IN ('push', 'pull')`),
+    check(
+      "scenario_sources_pause_reason_check",
+      sql`${table.pauseReason} IN ('admin', 'binder_lost_admin', 'suspended')`,
+    ),
+  ],
+);
+
+export const scenarioSourceCommits = sqliteTable(
+  "scenario_source_commits",
+  {
+    id: text("id").primaryKey(),
+    scopeKey: text("scope_key")
+      .notNull()
+      .references(() => scenarioSources.scopeKey, { onDelete: "cascade" }),
+    purpose: text("purpose").$type<"deploy" | "validate">().notNull(),
+    sha: text("sha").notNull(),
+    rev: text("rev").notNull(),
+    via: text("via").$type<"push" | "pull">().notNull(),
+    attempt: integer("attempt").default(0).notNull(),
+    state: text("state").$type<ScenarioSourceCommitState>().notNull(),
+    detail: text("detail"),
+    diagnosticsJson: text("diagnostics_json"),
+    compileHostId: text("compile_host_id").references(() => agentHosts.id, {
+      onDelete: "set null",
+    }),
+    compileAssignedAt: integer("compile_assigned_at"),
+    checkRunId: integer("check_run_id"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_source_commits_scope_rev_purpose_uidx").on(
+      table.scopeKey,
+      table.rev,
+      table.purpose,
+    ),
+    index("scenario_source_commits_state_updated_idx").on(
+      table.state,
+      table.updatedAt,
+    ),
+    check(
+      "scenario_source_commits_purpose_check",
+      sql`${table.purpose} IN ('deploy', 'validate')`,
+    ),
+    check(
+      "scenario_source_commits_via_check",
+      sql`${table.via} IN ('push', 'pull')`,
+    ),
+    check(
+      "scenario_source_commits_state_check",
+      sql`${table.state} IN ('fetching', 'compiling', 'ingesting', 'building', 'waiting', 'promoting', 'awaiting_promote', 'live', 'failed', 'invalid', 'superseded', 'validated')`,
     ),
   ],
 );
