@@ -218,7 +218,7 @@ pub(super) async fn process_next_queued_build(
     if result.is_err() {
         // A durable output belongs to the publication worker. Only remove
         // files after an unsuccessful compute attempt.
-        cleanup_reported_build_attempt_artifacts(cfg, &job.build_id, &job.rev).await;
+        cleanup_reported_build_attempt_artifacts(cfg, &job.build_id).await;
     }
     result
 }
@@ -381,7 +381,7 @@ async fn run_claimed_build_job_inner(
         db.save_completed_build_outputs(&job.build_id, &completed_outputs_json, now_unix_ms())?;
     }
     emit_build_report(cfg, report_tx, &job.build_id).await?;
-    wait_for_publication_claim(cfg, &job.build_id, &job.rev).await?;
+    wait_for_publication_claim(cfg, &job.build_id).await?;
     Ok(())
 }
 
@@ -564,11 +564,7 @@ fn validate_output_file(
     Ok(())
 }
 
-async fn wait_for_publication_claim(
-    cfg: &config::BuilderConfig,
-    build_id: &str,
-    rev: &str,
-) -> Result<()> {
+async fn wait_for_publication_claim(cfg: &config::BuilderConfig, build_id: &str) -> Result<()> {
     loop {
         let row = {
             let db = db::BuilderDb::open(&cfg.builder.state_db)?;
@@ -584,7 +580,7 @@ async fn wait_for_publication_claim(
             }
             Some(_) => tokio::time::sleep(PUBLICATION_POLL_INTERVAL).await,
             None => {
-                cleanup_reported_build_attempt_artifacts(cfg, build_id, rev).await;
+                cleanup_reported_build_attempt_artifacts(cfg, build_id).await;
                 return Ok(());
             }
         }
@@ -702,7 +698,7 @@ async fn process_next_publication(
             }
         };
         if terminal {
-            cleanup_reported_build_attempt_artifacts(cfg, &job.build_id, &job.rev).await;
+            cleanup_reported_build_attempt_artifacts(cfg, &job.build_id).await;
         }
         emit_build_report(cfg, report_tx, &job.build_id).await?;
         return Ok(true);
@@ -786,7 +782,7 @@ async fn publish_claimed_build_outputs(
         db.clear_completed_build_outputs(&job.build_id)?;
     }
     emit_build_report(cfg, report_tx, &job.build_id).await?;
-    cleanup_reported_build_attempt_artifacts(cfg, &job.build_id, &job.rev).await;
+    cleanup_reported_build_attempt_artifacts(cfg, &job.build_id).await;
     Ok(())
 }
 
@@ -805,7 +801,7 @@ async fn requeue_damaged_completed_output(
         db.schedule_build_job_retry(&job.build_id, 0, &error_message, now, now)?;
     }
     emit_build_report(cfg, report_tx, &job.build_id).await?;
-    cleanup_reported_build_attempt_artifacts(cfg, &job.build_id, &job.rev).await;
+    cleanup_reported_build_attempt_artifacts(cfg, &job.build_id).await;
     Ok(())
 }
 

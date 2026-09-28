@@ -7,7 +7,7 @@ mod db;
 mod jobs;
 mod preflight;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -38,9 +38,9 @@ const LATER_RETRY_DELAY_MS: i64 = 300_000;
 const RUN_ONCE_PUBLISH_TOKEN_ENV: &str = "INTAR_REGISTRY_PUBLISH_TOKEN";
 const PUBLICATION_WORKERS: u16 = 2;
 
-/// Held while a build fetches, unpacks and verifies its bundle, and while a
-/// rev's bundle is evicted, so an eviction never removes files a build is about
-/// to use.
+/// Held while a build fetches, unpacks and verifies its bundle, and while
+/// cached bundles are evicted, so an eviction never removes files a build is
+/// about to use.
 // ponytail: global bundle-cache lock; per-rev locks if downloads contend
 static BUNDLE_CACHE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -620,7 +620,6 @@ fn qemu_build_config_for_job(
 pub(crate) async fn cleanup_reported_build_attempt_artifacts(
     cfg: &config::BuilderConfig,
     build_id: &str,
-    rev: &str,
 ) {
     if let Err(error) = validate_build_id(build_id) {
         warn!(build_id, error = %error, "refused builder build-attempt artifact cleanup");
@@ -642,13 +641,55 @@ pub(crate) async fn cleanup_reported_build_attempt_artifacts(
             );
         }
     }
-    evict_unused_bundle(cfg, rev).await;
+    evict_unused_bundles(cfg).await;
 }
 
-/// Remove a rev's bundle and unpacked tree once no unfinished local job names
-/// the rev. A later build of the rev downloads it again.
-async fn evict_unused_bundle(cfg: &config::BuilderConfig, rev: &str) {
+/// Remove every cached bundle and unpacked tree that no unfinished local job
+/// names. Sweeping the whole cache also clears revs whose last job left this
+/// host without a cleanup. A later build of an evicted rev downloads it again.
+async fn evict_unused_bundles(cfg: &config::BuilderConfig) {
     let _bundle_cache = BUNDLE_CACHE_LOCK.lock().await;
+    let db = match db::BuilderDb::open(&cfg.builder.state_db) {
+        Ok(db) => db,
+        Err(error) => {
+            warn!(error = %error, "failed to open builder db; keeping cached bundles");
+            return;
+        }
+    };
+    for rev in cached_bundle_revs(&cfg.builder.cache_root) {
+        match db.has_unfinished_build_for_rev(&rev) {
+            Ok(false) => evict_bundle(cfg, &rev).await,
+            Ok(true) => {}
+            Err(error) => {
+                warn!(rev, error = %error, "failed to check builder bundle use; keeping it");
+            }
+        }
+    }
+}
+
+/// Revs with a cached archive, an unpacked tree, or a tree an interrupted
+/// eviction left aside. Unpack locks and staging trees are not revs.
+fn cached_bundle_revs(cache_root: &Path) -> BTreeSet<String> {
+    let names = |dir: &str| {
+        std::fs::read_dir(cache_root.join(dir))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+    };
+    let archives =
+        names("bundles").filter_map(|name| name.strip_suffix(".tar.gz").map(str::to_owned));
+    let trees = names("bundles-unpacked").filter_map(|name| match name.strip_prefix('.') {
+        Some(hidden) => hidden.strip_suffix(".evicted").map(str::to_owned),
+        None => Some(name),
+    });
+    archives
+        .chain(trees)
+        .filter(|rev| validate_bundle_rev(rev).is_ok())
+        .collect()
+}
+
+async fn evict_bundle(cfg: &config::BuilderConfig, rev: &str) {
     let archive = match bundle_archive_path(&cfg.builder.cache_root, rev) {
         Ok(archive) => archive,
         Err(error) => {
@@ -656,16 +697,6 @@ async fn evict_unused_bundle(cfg: &config::BuilderConfig, rev: &str) {
             return;
         }
     };
-    match db::BuilderDb::open(&cfg.builder.state_db)
-        .and_then(|db| db.has_unfinished_build_for_rev(rev))
-    {
-        Ok(false) => {}
-        Ok(true) => return,
-        Err(error) => {
-            warn!(rev, error = %error, "failed to check builder bundle use; keeping it");
-            return;
-        }
-    }
     if let Err(error) = tokio::fs::remove_file(&archive).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
