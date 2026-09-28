@@ -20,7 +20,7 @@ import {
 } from "@/db/schema";
 import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import { AppError } from "@/lib/app-error";
-import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
+import { linkedScenarioIds, syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
 import {
   freeSourceCompileBuilders,
   reconcileHostSourceCompiles,
@@ -1100,6 +1100,15 @@ async function promote(step: Promotion, row: CommitRow): Promise<boolean> {
     organizationId: step.organizationId,
     nowUnixMs: Date.now(),
   });
+  const now = Date.now();
+  // Only a retarget promotes live_rev again. Its catalog went live with every
+  // linked scenario enabled; the core re-enables the bundled ones, and this
+  // the others that the abandoned catalog disabled.
+  const linked = JSON.stringify(linkedScenarioIds(bundle.meta.courseCatalog));
+  await db.run(sql`UPDATE vm_scenarios SET enabled = 1, enabled_at = ${now}, updated_at = ${now}
+    WHERE organization_id IS ${step.organizationId} AND enabled = 0
+      AND scenario_id IN (SELECT value FROM json_each(${linked}))
+      AND EXISTS (SELECT 1 FROM scenario_sources WHERE scope_key = ${step.scopeKey} AND live_rev = ${row.rev})`);
   // One transaction: the live commit moves with its row, and the previous
   // live row is superseded, so its rev can be delivered again.
   const promoting = `EXISTS (SELECT 1 FROM scenario_source_commits
@@ -1113,7 +1122,6 @@ async function promote(step: Promotion, row: CommitRow): Promise<boolean> {
     `UPDATE scenario_source_commits SET state = 'live', detail = NULL, updated_at = ?5
       WHERE id = ?1 AND attempt = ?2 AND state = 'promoting'`,
   ];
-  const now = Date.now();
   await step.env.DB.batch(
     statements.map((statement) =>
       step.env.DB.prepare(statement).bind(row.id, row.attempt, row.rev, step.scopeKey, now),

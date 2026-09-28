@@ -1806,6 +1806,60 @@ describe("ScenarioSourceDO public apply", () => {
     expect(await catalogRev()).toBe(rev(SHA_C));
     expect(await enabledScenarioIds()).toEqual(["web"]);
   });
+
+  it("re-enables a scenario live_rev links outside its bundle when live_rev is restored", async () => {
+    await seedScenarios(null, ["shared-x"]);
+    // B reuses A's build and also links an existing public scenario.
+    await publicCommit(SHA_B, { title: "Linked", catalogIds: ["web", "shared-x"] });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+
+    // C replaces web's image and links only `web`: its catalog disables `shared-x`.
+    await publicCommit(SHA_C, { hash: HASH_B });
+    await publish(SHA_C, { organizationId: null, manifestOf: withImage(IMAGE_B) });
+    await tick();
+    expect(await commitState(SHA_C)).toMatchObject({ state: "awaiting_promote" });
+    expect(await enabledScenarioIds()).toEqual(["web"]);
+
+    headSha = SHA_B;
+    await tick();
+    await tick();
+
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+    expect(await catalogRev()).toBe(rev(SHA_B));
+    expect(await enabledScenarioIds()).toEqual(["shared-x", "web"]);
+  });
+
+  it("leaves a linked scenario disabled when a new rev promotes", async () => {
+    await seedScenarios(null, ["shared-x"]);
+    await drain();
+    await publicCommit(SHA_B, { title: "Linked", catalogIds: ["web", "shared-x"] });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "waiting" });
+    // An admin disables it after ingest validated the link.
+    await db().update(vmScenarios).set({ enabled: false }).where(eq(vmScenarios.scenarioId, "shared-x"));
+
+    await db().delete(runtimeOperationGates);
+    await tick();
+
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+    expect(await enabledScenarioIds()).toEqual(["web"]);
+  });
+
+  it("refuses an abandoned catalog-first rev while a paused binding cannot retarget", async () => {
+    await publicCommit(SHA_C, { hash: HASH_B });
+    await publish(SHA_C, { organizationId: null, manifestOf: withImage(IMAGE_B) });
+    await tick();
+    expect(await commitState(SHA_C)).toMatchObject({ state: "awaiting_promote" });
+    expect(await publicSourceRevPromotable(env.DB, rev(SHA_C))).toBe(true);
+
+    // The binder loses admin, then the author resets main back to A.
+    await db().update(scenarioSources).set({ pausedAt: 1, pauseReason: "binder_lost_admin" });
+    headSha = SHA_A;
+    await tick();
+
+    expect(await commitState(SHA_C)).toMatchObject({ state: "superseded" });
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), targetRev: rev(SHA_C) });
+    expect(await publicSourceRevPromotable(env.DB, rev(SHA_C))).toBe(false);
+  });
 });
 
 describe("ScenarioSourceDO pull delivery", () => {

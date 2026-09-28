@@ -1080,7 +1080,7 @@ function isScenarioReady(
   );
 }
 
-function linkedScenarioIds(snapshot: CourseCatalogSnapshotV2): string[] {
+export function linkedScenarioIds(snapshot: CourseCatalogSnapshotV2): string[] {
   return [
     ...new Set(
       snapshot.courses.flatMap((course) =>
