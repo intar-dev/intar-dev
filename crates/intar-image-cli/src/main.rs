@@ -1,10 +1,15 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use flate2::{Compression, GzBuilder};
+use intar_image_build::source_bundle::{
+    CompileBundleInput, CourseScenario, DEFAULT_COURSES_ROOT, compile_bundle,
+    load_base_image_catalog, load_course_scenario, load_curriculum,
+    scenario_base_definition_identity, selected_course_scenarios, selected_vm_names,
+    validate_scenario,
+};
 use intar_image_build::{
-    BUILD_FORMAT_VERSION, BuildConfig, DirectBuildOutput, DirectBuildRequest, RawUploadConfig,
-    ScenarioContentHashInput, combine_scenario_manifests, render_direct_build, run_direct_build,
-    scenario_content_hash, write_guest_tools_disk,
+    BuildConfig, DirectBuildOutput, DirectBuildRequest, RawUploadConfig, ScenarioContentHashInput,
+    combine_scenario_manifests, render_direct_build, run_direct_build, scenario_content_hash,
+    write_guest_tools_disk,
 };
 use intar_image_scenario::{BaseImageCatalog, Scenario};
 use intar_image_upload::{
@@ -13,39 +18,20 @@ use intar_image_upload::{
 };
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsStr;
-use std::io::Cursor;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::{fs, process::Command as ProcessCommand};
 
 mod clean_base_command;
 mod reconstruct_command;
 
 const BASE_IMAGES_PATH: &str = "content/scenarios/base-images.hcl";
-const BUNDLE_BASE_IMAGES_PATH: &str = "base-images.hcl";
-const BUNDLE_SCENARIOS_ROOT: &str = "scenarios";
 const IMAGE_PUBLISH_TOKEN_ENV: &str = "INTAR_IMAGE_PUBLISH_TOKEN";
 const DEFAULT_BUNDLE_OUTPUT_ROOT: &str = "dist/bundles";
-const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
-const TAR_BLOCK_SIZE: u64 = 512;
 
 struct CompletedBuild {
     scenario_name: String,
     vm_name: String,
     output: DirectBuildOutput,
-}
-
-#[derive(Debug, Clone)]
-struct BundleSourceFile {
-    source_path: PathBuf,
-    archive_path: String,
-}
-
-#[derive(Debug)]
-struct PreparedBundleScenario {
-    scenario_id: String,
-    scenario_dir: PathBuf,
-    content_hash: String,
 }
 
 #[derive(Debug)]
@@ -393,90 +379,34 @@ fn hash_command(args: &HashCommand) -> Result<()> {
 
 fn bundle_command(args: &BundleCommand) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
-    let contract_arch = contract_image_arch_slug(&config.qemu.target_arch)?;
     let rev = args
         .rev
         .clone()
         .map(Ok)
         .unwrap_or_else(default_bundle_rev)?;
     validate_bundle_rev(&rev)?;
-    let curriculum = load_curriculum(&args.courses_root)?;
-    let selected_sources = selected_course_scenarios(&curriculum, args.scenario.as_deref())?;
-    let base_catalog = (!curriculum.scenarios.is_empty())
-        .then(|| load_base_image_catalog(&args.base_images))
-        .transpose()?;
-
-    if let Some(base_catalog) = &base_catalog {
-        for source in &curriculum.scenarios {
-            let scenario = load_course_scenario(&source.scenario_path)?;
-            validate_scenario(&scenario, base_catalog, None, &config.qemu.target_arch)?;
-        }
-    }
-
-    let mut prepared_scenarios = Vec::new();
-    for source in selected_sources {
-        let scenario = load_course_scenario(&source.scenario_path)?;
-        let base_catalog = base_catalog
-            .as_ref()
-            .context("scenario bundle is missing a base image catalog")?;
-        let base_definition =
-            scenario_base_definition_identity(&scenario, base_catalog, &config.qemu.target_arch)?;
-        let content_hash = scenario_content_hash(&ScenarioContentHashInput {
-            scenario_id: &scenario.name,
-            scenario_dir: &source.scenario_dir,
-            base_definition: &base_definition,
-            target_arch: &config.qemu.target_arch,
-        })?;
-        prepared_scenarios.push(PreparedBundleScenario {
-            scenario_id: scenario.name,
-            scenario_dir: source.scenario_dir,
-            content_hash,
-        });
-    }
-
-    let compiled_catalog = tempfile::tempdir().context("create compiled curriculum directory")?;
-    let compiled_catalog_path = compiled_catalog.path().join("catalog.json");
-    fs::write(
-        &compiled_catalog_path,
-        serde_json::to_vec(&curriculum.catalog).context("serialize curriculum catalog")?,
-    )
-    .with_context(|| format!("write {}", compiled_catalog_path.display()))?;
-    let source_files = collect_bundle_source_files(
-        &prepared_scenarios,
-        base_catalog.as_ref().map(|_| args.base_images.as_path()),
-        &curriculum,
-        &compiled_catalog_path,
-    )?;
+    let compiled = compile_bundle(&CompileBundleInput {
+        courses_root: &args.courses_root,
+        base_images: &args.base_images,
+        rev: &rev,
+        target_arch: &config.qemu.target_arch,
+        scenario: args.scenario.as_deref(),
+    })?;
     let output_path = args
         .output
         .clone()
         .unwrap_or_else(|| default_bundle_output_path(&rev));
-    write_bundle_archive(&output_path, &source_files)?;
-
-    let scenarios_meta = prepared_scenarios
-        .iter()
-        .map(|scenario| {
-            serde_json::json!({
-                "scenario_id": scenario.scenario_id,
-                "arch": contract_arch,
-                "content_hash": scenario.content_hash,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut meta = serde_json::json!({
-        "rev": rev,
-        "guest_bootstrap_abi": intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2,
-        "build_format_version": BUILD_FORMAT_VERSION,
-        "catalog_channel": "candidate",
-        "target_arch": config.qemu.target_arch,
-        "scenarios": scenarios_meta,
-    });
-    meta["course_catalog"] = serde_json::to_value(&curriculum.catalog)?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&output_path, &compiled.archive)
+        .with_context(|| format!("failed to create {}", output_path.display()))?;
 
     println!(
         "bundled {} scenarios ({} files) -> {}",
-        prepared_scenarios.len(),
-        source_files.len(),
+        compiled.scenario_count,
+        compiled.file_count,
         output_path.display()
     );
 
@@ -493,7 +423,13 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
             ))?),
             None => None,
         };
-        let receipt = upload_bundle(uploader.as_ref(), &target, &output_path, &rev, &meta)?;
+        let receipt = upload_bundle(
+            uploader.as_ref(),
+            &target,
+            &output_path,
+            &rev,
+            &compiled.meta,
+        )?;
         println!(
             "uploaded bundle {rev} -> {} ({} queued, {} assigned)",
             target.url, receipt.queued, receipt.assigned
@@ -505,8 +441,6 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
 
 mod bundle_command;
 use bundle_command::*;
-mod curriculum;
-use curriculum::*;
 
 fn prepare_direct_render_request(
     config: &BuildConfig,
@@ -577,52 +511,6 @@ fn build_vm(request: &DirectBuildRequest) -> Result<DirectBuildOutput> {
             request.scenario.name, request.vm_name
         )
     })
-}
-
-fn validate_scenario(
-    scenario: &Scenario,
-    base_catalog: &BaseImageCatalog,
-    vm_filter: Option<&str>,
-    target_arch: &str,
-) -> Result<()> {
-    scenario
-        .validate_technical_for_builder_arch(target_arch)
-        .with_context(|| format!("scenario '{}' failed validation", scenario.name))?;
-    base_catalog
-        .validate_for_builder_arch(target_arch)
-        .with_context(|| format!("base image catalog failed validation for '{target_arch}'"))?;
-    base_catalog
-        .validate_scenario_for_builder_arch(scenario, target_arch)
-        .with_context(|| format!("scenario '{}' base images failed validation", scenario.name))?;
-
-    for vm_name in selected_vm_names(scenario, vm_filter)? {
-        scenario
-            .derive_kino_config_for_vm(&vm_name)
-            .with_context(|| {
-                format!(
-                    "failed to derive kino config for {}:{}",
-                    scenario.name, vm_name
-                )
-            })?;
-    }
-
-    Ok(())
-}
-
-fn selected_vm_names(scenario: &Scenario, vm_filter: Option<&str>) -> Result<Vec<String>> {
-    if let Some(vm_name) = vm_filter {
-        if scenario.vm_by_name(vm_name).is_none() {
-            bail!("vm '{}' not found in scenario '{}'", vm_name, scenario.name);
-        }
-        return Ok(vec![vm_name.to_string()]);
-    }
-
-    Ok(scenario.vms.iter().map(|vm| vm.name.clone()).collect())
-}
-
-fn load_course_scenario(path: &Path) -> Result<Scenario> {
-    Scenario::from_course_file(path)
-        .with_context(|| format!("failed to load scenario from {}", path.display()))
 }
 
 fn upload_completed_builds(

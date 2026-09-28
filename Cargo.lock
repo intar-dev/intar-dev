@@ -2323,6 +2323,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "fatfs",
+ "flate2",
  "fs2",
  "hcl-rs",
  "intar-contracts",
@@ -2332,6 +2333,7 @@ dependencies = [
  "russh",
  "rustix",
  "serde",
+ "serde-saphyr 1.2.0",
  "serde_json",
  "sha2 0.11.0",
  "tar",
@@ -2347,7 +2349,6 @@ version = "0.8.2"
 dependencies = [
  "anyhow",
  "clap",
- "flate2",
  "hcl-rs",
  "intar-contracts",
  "intar-image-build",
@@ -2355,9 +2356,7 @@ dependencies = [
  "intar-image-upload",
  "reqwest",
  "serde",
- "serde-saphyr 1.2.0",
  "serde_json",
- "tar",
  "tempfile",
  "tokio",
 ]

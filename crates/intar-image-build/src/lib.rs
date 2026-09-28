@@ -15,6 +15,7 @@ mod qemu;
 mod rootfs;
 mod seed;
 mod sha256;
+pub mod source_bundle;
 mod ssh;
 
 pub use artifact::{RawZstdArtifact, sha256_file_hex, write_raw_zstd_artifact};
