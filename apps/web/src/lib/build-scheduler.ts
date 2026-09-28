@@ -67,6 +67,8 @@ export async function queueImageBuildsFromBundle(
         metaJson: input.meta,
         updatedAt: input.nowUnixMs,
       },
+      // A rev never changes scope.
+      setWhere: sql`${imageBuildBundles.organizationId} IS excluded.organization_id`,
     });
 
   let queued = 0;
