@@ -229,8 +229,11 @@ fn rejects_links_and_devices_it_would_keep() {
 }
 
 #[test]
-fn holds_the_expanded_size_limit_on_kept_files() {
+fn holds_the_expanded_size_limit_on_kept_entries() {
+    // Four kept entries take a 512-byte header each, and the manifest one
+    // more block, so `b.md` may take the rest of 4 MiB in whole blocks.
     let half = vec![b'x'; 2 * 1024 * 1024];
+    let fits = half.len() - 5 * 512;
     let mut snapshot = Snapshot::new();
     snapshot
         .file("intar.yaml", MANIFEST)
@@ -238,7 +241,7 @@ fn holds_the_expanded_size_limit_on_kept_files() {
         .file("assets/bigger.bin", &half)
         .dir("courses")
         .file("courses/a.md", &half)
-        .file("courses/b.md", &half[..half.len() - MANIFEST.len()]);
+        .file("courses/b.md", &half[..fits]);
     unpack(snapshot).1.unwrap();
 
     let mut snapshot = Snapshot::new();
@@ -246,11 +249,20 @@ fn holds_the_expanded_size_limit_on_kept_files() {
         .file("intar.yaml", MANIFEST)
         .dir("courses")
         .file("courses/a.md", &half)
-        .file("courses/b.md", &half[..half.len() - MANIFEST.len() + 1]);
+        .file("courses/b.md", &half[..fits + 1]);
     assert_eq!(
         refusal(unpack(snapshot).1).0,
         SourceCompileErrorCode::BundleTooLarge
     );
+
+    let mut snapshot = Snapshot::new();
+    snapshot.file("intar.yaml", MANIFEST).dir("courses");
+    for index in 0..8192 {
+        snapshot.file(&format!("courses/{index}.md"), b"");
+    }
+    let (temp, result) = unpack(snapshot);
+    assert_eq!(refusal(result).0, SourceCompileErrorCode::BundleTooLarge);
+    assert!(!temp.path().join("tree/courses/8191.md").exists());
 }
 
 /// Runs the child entry in this process and reads what it wrote.
@@ -760,6 +772,43 @@ async fn leaving_the_desired_state_kills_the_child_without_a_result() {
     .await;
     assert!(!alive(&supervisor.pids()[0]));
     assert_eq!(supervisor.worker.result_count(), 0);
+}
+
+#[tokio::test]
+async fn starting_removes_what_a_killed_builder_left() {
+    let temp = tempfile::tempdir().unwrap();
+    let work_dir = temp.path().join("work");
+    std::fs::create_dir_all(work_dir.join("tree")).unwrap();
+    std::fs::write(work_dir.join("source.tar.gz"), b"snapshot").unwrap();
+    let (_, receiver) = watch::channel(Vec::new());
+    run_supervisor(
+        BridgeConfig::default(),
+        work_dir.clone(),
+        PathBuf::new(),
+        receiver,
+    )
+    .await;
+    assert!(!work_dir.exists());
+}
+
+#[tokio::test]
+async fn the_child_keeps_its_temporary_files_in_the_work_directory() {
+    let supervisor = Supervisor::start(
+        r#"printf '{"tmpdir":"%s"}' "$TMPDIR" > "$5/meta.json"
+printf 'archive' > "$5/bundle.tar.gz""#,
+        Worker::serve(b"snapshot".to_vec(), Vec::new()),
+    );
+    supervisor
+        .desired
+        .send_replace(vec![compile("compile-1", true)]);
+    eventually("the result is posted", || {
+        supervisor.worker.result_count() == 1
+    })
+    .await;
+
+    let body = supervisor.worker.results()[0].body_text();
+    let tmpdir = format!("{{\"tmpdir\":\"{}\"}}", supervisor.work_dir.display());
+    assert!(body.contains(&tmpdir), "{body}");
 }
 
 #[tokio::test]
