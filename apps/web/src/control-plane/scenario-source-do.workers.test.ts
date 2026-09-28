@@ -8,22 +8,33 @@ import { exportPKCS8, generateKeyPair } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
 import { sweepScenarioSources } from "@/control-plane/scenario-source-do";
+import { normalizeCourseCatalogSnapshot } from "@/control-plane/image-registry/bundle";
 import {
+  agentHosts,
   courseCatalogs,
   imageBuildBundles,
   imageBuilds,
   member,
   organization,
   scenarioCatalogCandidates,
+  scenarioCatalogSnapshots,
+  scenarioRuns,
   scenarioSourceCommits,
   scenarioSources,
   user,
+  vmScenarios,
 } from "@/db/schema";
+import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { SOURCE_COMPILER_VERSION } from "@/generated/constants";
 import { queueImageBuildsFromBundle } from "@/lib/build-scheduler";
 import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
 import { setRegistryPause } from "@/lib/image-registry-admission";
-import { stagedSourceObjectPrefix } from "@/lib/scenario-sources";
+import {
+  countUnitGuardRuns,
+  loadScenarioSource,
+  scenarioSourceScope,
+  stagedSourceObjectPrefix,
+} from "@/lib/scenario-sources";
 import { buildTar, gzipBytes } from "@/lib/tar";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -45,11 +56,44 @@ vi.mock("@/lib/scenario-catalog-candidates", async (importOriginal) => {
   };
 });
 
+// Hooks around the promotion core and the unit guard.
+const promotion = vi.hoisted(() => ({
+  calls: 0,
+  before: undefined as (() => Promise<void>) | undefined,
+  after: undefined as ((result: unknown) => unknown) | undefined,
+}));
+vi.mock("@/control-plane/image-registry/catalog-promotion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/control-plane/image-registry/catalog-promotion")>();
+  return {
+    ...actual,
+    promoteCandidateRevision: async (
+      ...args: Parameters<typeof actual.promoteCandidateRevision>
+    ) => {
+      promotion.calls += 1;
+      await promotion.before?.();
+      const result = await actual.promoteCandidateRevision(...args);
+      return promotion.after ? await promotion.after(result) : result;
+    },
+  };
+});
+const guard = vi.hoisted(() => ({ before: undefined as (() => Promise<void>) | undefined }));
+vi.mock("@/lib/scenario-sources", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/scenario-sources")>();
+  return {
+    ...actual,
+    countUnitGuardRuns: async (...args: Parameters<typeof actual.countUnitGuardRuns>) => {
+      await guard.before?.();
+      return actual.countUnitGuardRuns(...args);
+    },
+  };
+});
+
 const ORG = "org-a";
 const SCOPE = `organization:${ORG}`;
 const OWNER = "owner";
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
+const SHA_C = "c".repeat(40);
 const HASH_A = "1".repeat(64);
 const HASH_B = "2".repeat(64);
 
@@ -59,8 +103,9 @@ let digest: string;
 let headSha: string;
 let githubCalls: string[];
 
-const rev = (sha: string) => `git-42-${sha}-${digest}`;
-const prefix = (sha: string) => stagedSourceObjectPrefix(scopeKey, rev(sha), "deploy");
+const rev = (sha: string, at = digest) => `git-42-${sha}-${at}`;
+const prefix = (sha: string, at = digest) =>
+  stagedSourceObjectPrefix(scopeKey, rev(sha, at), "deploy");
 const db = () => drizzle(env.DB);
 
 beforeAll(async () => {
@@ -77,6 +122,10 @@ beforeAll(async () => {
 beforeEach(async () => {
   await resetD1Database();
   stageLock.locked = false;
+  promotion.calls = 0;
+  promotion.before = undefined;
+  promotion.after = undefined;
+  guard.before = undefined;
   scopeKey = SCOPE;
   headSha = SHA_A;
   githubCalls = [];
@@ -189,6 +238,7 @@ function catalog(scenarioIds: string[]) {
 
 interface Commit {
   sha?: string;
+  digest?: string;
   scenarioIds?: string[];
   hash?: string;
   scope?: string;
@@ -200,10 +250,11 @@ interface Commit {
 /** A compiled commit's meta and bundle, as the producers stage them. */
 async function stage(commit: Commit = {}): Promise<void> {
   const sha = commit.sha ?? SHA_A;
+  const at = commit.digest ?? digest;
   const scenarioIds = commit.scenarioIds ?? ["acme-web"];
   const courseCatalog = catalog(scenarioIds);
   const meta = {
-    rev: rev(sha),
+    rev: rev(sha, at),
     build_format_version: IMAGE_BUILD_FORMAT_VERSION,
     catalog_channel: "candidate",
     scenarios: scenarioIds.map((id) => ({
@@ -237,8 +288,8 @@ async function stage(commit: Commit = {}): Promise<void> {
     ...(commit.extraFiles ?? []),
   ];
   const bundle = await gzipBytes(buildTar(files.map(([path, bytes]) => ({ path, bytes }))));
-  await env.VM_IMAGE_REGISTRY_BUCKET.put(`${prefix(sha)}meta.json`, JSON.stringify(meta));
-  await env.VM_IMAGE_REGISTRY_BUCKET.put(`${prefix(sha)}bundle.tar.gz`, bundle);
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(`${prefix(sha, at)}meta.json`, JSON.stringify(meta));
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(`${prefix(sha, at)}bundle.tar.gz`, bundle);
 }
 
 async function insertCommit(
@@ -260,11 +311,11 @@ async function insertCommit(
     });
 }
 
-async function commitState(sha: string) {
+async function commitState(sha: string, at = digest) {
   const [row] = await db()
     .select({ state: scenarioSourceCommits.state, detail: scenarioSourceCommits.detail })
     .from(scenarioSourceCommits)
-    .where(eq(scenarioSourceCommits.rev, rev(sha)));
+    .where(eq(scenarioSourceCommits.rev, rev(sha, at)));
   return row;
 }
 
@@ -392,7 +443,8 @@ describe("ScenarioSourceDO ingest", () => {
     await stage({ sha: SHA_B, scenarioIds: [] });
     await insertCommit(SHA_B, "ingesting");
     await tick();
-    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
+    // With no builds to wait for, it is promoted in the same alarm.
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
   });
 
   it("supersedes a row whose staged objects are gone and refuses a rev another scope owns", async () => {
@@ -840,6 +892,458 @@ describe("ScenarioSourceDO public binding", () => {
     await db().update(user).set({ role: "user" }).where(eq(user.id, ADMIN));
     await tick();
     expect(await binding()).toMatchObject({ pauseReason: "binder_lost_admin" });
+  });
+});
+
+const LEARNER = "learner";
+const IMAGE_A = "f".repeat(64);
+
+function scenarioManifest(scenarioId: string): ScenarioManifestV5 {
+  return {
+    schema_version: 5,
+    scenario_id: scenarioId,
+    name: scenarioId,
+    title: "Web",
+    category: "linux",
+    description: "Repair the web server",
+    difficulty: "easy",
+    estimated_minutes: 10,
+    tags: [],
+    briefing_markdown: "briefing",
+    solution_markdown: "solution",
+    hints: [],
+    vms: [
+      {
+        name: "web",
+        image_key: { scenario: scenarioId, vm: "web", arch: "x86_64" },
+        image_id: IMAGE_A,
+        image_format: "raw_chunks_v1",
+        image_virtual_size_bytes: 4_096,
+        chunk_manifest_sha256: "c".repeat(64),
+        guest_bootstrap_abi: 2,
+        boot: {
+          kernel_sha256: "d".repeat(64),
+          initrd_sha256: "e".repeat(64),
+          cmdline: "console=ttyS0",
+        },
+        cpu_millis: 1_000,
+        memory_mib: 512,
+        disk_mib: 1_024,
+        probes: [],
+      },
+    ],
+  };
+}
+
+/** What the builder publish leaves: each open build succeeded, its candidate staged for `sha`. */
+async function publish(sha: string) {
+  const open = await db().select().from(imageBuilds);
+  for (const build of open.filter((row) => row.status !== "succeeded")) {
+    const manifest = scenarioManifest(build.scenarioId);
+    await db()
+      .update(imageBuilds)
+      .set({ status: "succeeded", phase: "succeeded", publishedManifestJson: manifest })
+      .where(eq(imageBuilds.id, build.id));
+    await db().insert(scenarioCatalogCandidates).values({
+      id: `${ORG}:${rev(sha)}:${build.scenarioId}`,
+      revision: rev(sha),
+      organizationId: ORG,
+      scenarioId: build.scenarioId,
+      buildId: build.id,
+      manifestJson: manifest,
+    });
+  }
+}
+
+/** Delivers `sha` as the head and runs the alarm that ingests it. */
+async function deliver(commit: Commit & { sha: string }) {
+  headSha = commit.sha;
+  await stage(commit);
+  await insertCommit(commit.sha, "ingesting");
+  return tick();
+}
+
+/** Takes a settled row over for its rev again, as a producer re-delivery does. */
+async function redeliver(sha: string, at = digest) {
+  await env.DB.prepare(
+    `UPDATE scenario_source_commits SET state = 'ingesting', attempt = attempt + 1
+      WHERE rev = ?1`,
+  )
+    .bind(rev(sha, at))
+    .run();
+}
+
+/** `acme-web` goes live from commit A. */
+async function liveWeb() {
+  github();
+  await deliver({ sha: SHA_A });
+  await publish(SHA_A);
+  await tick();
+  expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+}
+
+/** A run of the learner on `course-1`/`lecture-0` of `acme-web`. */
+async function startRun(runId: string, values: Partial<typeof scenarioRuns.$inferInsert> = {}) {
+  await db().insert(scenarioRuns).values({
+    runId,
+    userId: LEARNER,
+    organizationId: ORG,
+    hostId: "host",
+    scenarioId: "acme-web",
+    scenarioName: "acme-web",
+    courseScopeKey: SCOPE,
+    courseId: "course-1",
+    lectureId: "lecture-0",
+    title: "Web",
+    tagline: "Test",
+    briefingMarkdown: "",
+    objectivesJson: "[]",
+    difficulty: "easy",
+    estimatedMinutes: 5,
+    tagsJson: [],
+    hintsJson: [],
+    solutionMarkdown: "",
+    vmCount: 1,
+    state: "running",
+    stateRank: 1,
+    stateJson: "{}",
+    ...values,
+  });
+}
+
+/** A member of the organization, and a host for their runs. */
+async function seedLearner() {
+  await createFixtureMember({ d1: env.DB, userId: LEARNER });
+  await db().insert(member).values({
+    id: "learner-member",
+    organizationId: ORG,
+    userId: LEARNER,
+    role: "member",
+    createdAt: new Date(),
+  });
+  await db().insert(agentHosts).values({ id: "host", userId: OWNER, name: "Host", createdAt: 1, updatedAt: 1 });
+}
+
+const snapshot = (scenarioIds: string[]) => normalizeCourseCatalogSnapshot(catalog(scenarioIds))!;
+
+describe("ScenarioSourceDO organization apply", () => {
+  it("promotes a commit as a whole and leaves public content alone", async () => {
+    await db().insert(courseCatalogs).values({
+      scopeKey: "public",
+      organizationId: null,
+      catalogJson: snapshot(["web"]),
+      sourceRevision: "public-rev",
+    });
+    await env.DB.prepare(
+      `INSERT INTO vm_scenarios (scenario_id, organization_id, title, description, difficulty,
+         estimated_minutes, tags_json, briefing_markdown, solution_markdown, hints_json, enabled)
+       VALUES ('web', NULL, 'Public', '', 'easy', 5, '[]', '', '', '[]', 1)`,
+    ).run();
+    const publicRows = async () => ({
+      catalogs: await db().select().from(courseCatalogs).where(eq(courseCatalogs.scopeKey, "public")),
+      scenarios: await db().select().from(vmScenarios).where(eq(vmScenarios.scenarioId, "web")),
+    });
+    const before = await publicRows();
+
+    await liveWeb();
+
+    expect(await binding()).toMatchObject({
+      targetRev: rev(SHA_A),
+      liveRev: rev(SHA_A),
+      liveSha: SHA_A,
+      liveAt: expect.any(Number),
+    });
+    expect(
+      await db()
+        .select({
+          organizationId: vmScenarios.organizationId,
+          enabled: vmScenarios.enabled,
+          sourceRevision: vmScenarios.sourceRevision,
+        })
+        .from(vmScenarios)
+        .where(eq(vmScenarios.scenarioId, "acme-web")),
+    ).toEqual([{ organizationId: ORG, enabled: true, sourceRevision: rev(SHA_A) }]);
+    expect(
+      await db()
+        .select({ organizationId: courseCatalogs.organizationId, sourceRevision: courseCatalogs.sourceRevision })
+        .from(courseCatalogs)
+        .where(eq(courseCatalogs.scopeKey, SCOPE)),
+    ).toEqual([{ organizationId: ORG, sourceRevision: rev(SHA_A) }]);
+    expect(await publicRows()).toEqual(before);
+
+    // A second poke finds the target live and promotes nothing.
+    await tick();
+    expect(promotion.calls).toBe(1);
+    const writers = await env.DB.prepare("SELECT id FROM image_registry_operation_writers").all();
+    expect(writers.results).toEqual([]);
+  });
+
+  it("promotes a .keep-only commit in its ingest alarm without a rollback snapshot", async () => {
+    github();
+    await deliver({ sha: SHA_A, scenarioIds: [] });
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(await db().select().from(scenarioCatalogSnapshots)).toEqual([]);
+    expect(await db().select({ scopeKey: courseCatalogs.scopeKey }).from(courseCatalogs)).toEqual([
+      { scopeKey: SCOPE },
+    ]);
+  });
+
+  it("re-enables a removed scenario without a rebuild", async () => {
+    await liveWeb();
+    await deliver({ sha: SHA_B, scenarioIds: [] });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+    const enabled = async () =>
+      (await db().select({ enabled: vmScenarios.enabled }).from(vmScenarios))[0]?.enabled;
+    expect(await enabled()).toBe(false);
+
+    await deliver({ sha: SHA_C });
+
+    expect(await commitState(SHA_C)).toMatchObject({ state: "live" });
+    expect(await enabled()).toBe(true);
+    expect(await db().select({ rev: imageBuilds.rev }).from(imageBuilds)).toEqual([{ rev: rev(SHA_A) }]);
+  });
+
+  it("supersedes the previous live row and redeploys a rev that was live before", async () => {
+    github();
+    const other = await platformCompileDigest("0".repeat(64));
+    if (!other) throw new Error("the second digest is unset");
+    const liveRev = async () => (await binding()).liveRev;
+
+    await deliver({ sha: SHA_A, scenarioIds: [] });
+    expect(await liveRev()).toBe(rev(SHA_A));
+
+    // A digest change d1 -> d2 -> d1 with an unchanged sha.
+    await stage({ sha: SHA_A, digest: other, scenarioIds: [] });
+    await insertCommit(SHA_A, "ingesting", { id: "commit-a2", rev: rev(SHA_A, other) });
+    await tick({ PLATFORM_BASE_IMAGES_SHA256: "0".repeat(64) });
+    expect(await commitState(SHA_A, other)).toMatchObject({ state: "live" });
+    expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
+    expect(await liveRev()).toBe(rev(SHA_A, other));
+
+    await redeliver(SHA_A);
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(await commitState(SHA_A, other)).toMatchObject({ state: "superseded" });
+    expect(await liveRev()).toBe(rev(SHA_A));
+
+    // A force-push to B and back to A.
+    await deliver({ sha: SHA_B, scenarioIds: [] });
+    expect(await commitState(SHA_A)).toMatchObject({ state: "superseded" });
+    headSha = SHA_A;
+    await redeliver(SHA_A);
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "superseded" });
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), liveSha: SHA_A });
+  });
+
+  it.each([
+    ["incomplete_builds", "building"],
+    ["incomplete_catalog", "building"],
+    ["image_in_use", "waiting"],
+    ["ownership_conflict", "invalid"],
+  ] as const)("maps a %s refusal to %s", async (kind, state) => {
+    github();
+    await deliver({ sha: SHA_A });
+    await publish(SHA_A);
+    promotion.after = () => ({ ok: false, kind, status: 409, error: `refused: ${kind}` });
+
+    await tick();
+
+    expect(await commitState(SHA_A)).toEqual({ state, detail: `refused: ${kind}` });
+    expect(await binding()).toMatchObject({ liveRev: null });
+    expect(await db().select().from(courseCatalogs)).toEqual([]);
+  });
+
+  it("keeps promoting after a writer refusal or a throw after the commit", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    await publish(SHA_A);
+
+    await setRegistryPause(env, { paused: true });
+    expect(await tick()).not.toBeNull();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "promoting" });
+    expect(promotion.calls).toBe(0);
+    await setRegistryPause(env, { paused: false });
+
+    promotion.after = () => {
+      throw new Error("desired-state CAS ran out of attempts");
+    };
+    expect(await tick()).not.toBeNull();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "promoting" });
+    // The core committed; the catalog step did not run.
+    expect(await db().select({ scenarioId: vmScenarios.scenarioId }).from(vmScenarios)).toEqual([
+      { scenarioId: "acme-web" },
+    ]);
+    expect(await db().select().from(courseCatalogs)).toEqual([]);
+
+    promotion.after = undefined;
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(
+      await db().select({ sourceRevision: courseCatalogs.sourceRevision }).from(courseCatalogs),
+    ).toEqual([{ sourceRevision: rev(SHA_A) }]);
+  });
+
+  it("finishes a promoting row while the binding is paused and the digest is unset", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    await publish(SHA_A);
+    promotion.after = () => {
+      throw new Error("family lock timed out");
+    };
+    await tick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "promoting" });
+    await db().update(scenarioSources).set({ pausedAt: 1, pauseReason: "admin" });
+
+    promotion.after = undefined;
+    await tick({ PLATFORM_BASE_IMAGES_SHA256: "" });
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), pausedAt: 1 });
+  });
+
+  it("syncs the catalog after a commit whose host reconcile failed", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    await publish(SHA_A);
+    promotion.after = (result) => {
+      const committed = result as { ok: true; outcome: Record<string, unknown> };
+      return { ...committed, outcome: { ...committed.outcome, failedHostIds: ["host-1"] } };
+    };
+
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(
+      await db().select({ sourceRevision: courseCatalogs.sourceRevision }).from(courseCatalogs),
+    ).toEqual([{ sourceRevision: rev(SHA_A) }]);
+  });
+
+  it.each<[string, Partial<typeof scenarioSources.$inferInsert>]>([
+    ["is paused", { pausedAt: 1, pauseReason: "admin" }],
+    ["moves its head", { headSha: SHA_B, headObservedAt: Date.now() + 60_000 }],
+  ])("writes no promoting row once the binding %s during the alarm", async (_name, change) => {
+    github();
+    await deliver({ sha: SHA_A });
+    await publish(SHA_A);
+    guard.before = async () => {
+      await db().update(scenarioSources).set(change);
+    };
+
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "building" });
+    expect(promotion.calls).toBe(0);
+  });
+
+  it("finishes a promotion whose head moved before the catalog step", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    await publish(SHA_A);
+    promotion.after = async (result) => {
+      headSha = SHA_B;
+      await db().update(scenarioSources).set({ headSha: SHA_B, headObservedAt: Date.now() + 60_000 });
+      return result;
+    };
+
+    await tick();
+
+    expect(await commitState(SHA_A)).toMatchObject({ state: "live" });
+    expect(await binding()).toMatchObject({ headSha: SHA_B, liveRev: rev(SHA_A) });
+  });
+
+  it("holds a commit in waiting while a run with access would lose it", async () => {
+    await liveWeb();
+    await seedLearner();
+    await startRun("run-1");
+
+    await deliver({ sha: SHA_B, scenarioIds: [] });
+
+    expect(await commitState(SHA_B)).toEqual({ state: "waiting", detail: "active runs would lose access" });
+    expect(await loadScenarioSource(scenarioSourceScope(ORG))).toMatchObject({ activeRuns: 1 });
+
+    await db().update(scenarioRuns).set({ state: "completed", completedAt: 1 });
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+    expect(await loadScenarioSource(scenarioSourceScope(ORG))).toMatchObject({ activeRuns: 0 });
+  });
+
+  it("is not held by a run that starts during the promotion", async () => {
+    await liveWeb();
+    await seedLearner();
+    promotion.before = () => startRun("run-1");
+
+    await deliver({ sha: SHA_B, scenarioIds: [] });
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+
+    // The run lost access with B, so it holds no newer commit either.
+    promotion.before = undefined;
+    await deliver({ sha: SHA_C });
+    expect(await commitState(SHA_C)).toMatchObject({ state: "live" });
+  });
+});
+
+describe("unit guard", () => {
+  beforeEach(async () => {
+    await seedLearner();
+    await db().insert(vmScenarios).values({
+      scenarioId: "acme-web",
+      organizationId: ORG,
+      title: "Web",
+      description: "",
+      difficulty: "easy",
+      estimatedMinutes: 5,
+      tagsJson: [],
+      briefingMarkdown: "",
+      solutionMarkdown: "",
+      hintsJson: [],
+      enabled: true,
+      enabledAt: 1,
+    });
+    await db().insert(courseCatalogs).values({
+      scopeKey: SCOPE,
+      organizationId: ORG,
+      catalogJson: snapshot(["acme-web"]),
+      sourceRevision: "old",
+    });
+  });
+
+  const count = (scenarioIds: string[]) => countUnitGuardRuns(env.DB, ORG, snapshot(scenarioIds));
+
+  it("counts only unfinished runs that have access and would lose it", async () => {
+    await startRun("run-1");
+    await startRun("run-done", { state: "completed", completedAt: 1 });
+    expect(await count(["acme-web"])).toBe(0);
+    expect(await count([])).toBe(1);
+
+    const moved = snapshot(["acme-web"]);
+    moved.courses[0]!.courseId = "course-2";
+    expect(await countUnitGuardRuns(env.DB, ORG, moved)).toBe(1);
+
+    // A removed member's run already lacks access.
+    await db().delete(member).where(eq(member.userId, LEARNER));
+    expect(await count([])).toBe(0);
+  });
+
+  it("does not count a run without access in another organization", async () => {
+    await db().insert(organization).values({ id: "org-b", name: "Beta", slug: "beta", createdAt: new Date() });
+    await startRun("run-b", { organizationId: "org-b", courseScopeKey: "organization:org-b" });
+    expect(await count([])).toBe(0);
+  });
+
+  it("counts a run whose scenario the commit disables", async () => {
+    // The run reaches the organization's scenario through another catalog.
+    await db().insert(courseCatalogs).values({
+      scopeKey: "public",
+      organizationId: null,
+      catalogJson: snapshot(["acme-web"]),
+      sourceRevision: "public-rev",
+    });
+    await db().update(courseCatalogs).set({ catalogJson: snapshot([]) }).where(eq(courseCatalogs.scopeKey, SCOPE));
+    await startRun("run-1", { courseScopeKey: "public" });
+    // Its public lecture stays, but the commit disables the scenario.
+    expect(await count([])).toBe(1);
   });
 });
 

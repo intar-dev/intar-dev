@@ -17,10 +17,12 @@ import {
 } from "@/control-plane/image-registry/shared";
 import {
   account,
+  imageBuildBundles,
   imageBuilds,
   scenarioSourceCommits,
   scenarioSources,
   vmScenarios,
+  type CourseCatalogSnapshotV2,
 } from "@/db/schema";
 import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import type { SourceCompileErrorV1 } from "@/generated/bridge";
@@ -33,6 +35,7 @@ import {
 import { activeAccountExistsSql, activeAdminSql } from "@/lib/account-access";
 import type { UserContext } from "@/lib/agent-bridge";
 import { type AppError, appError, errorChainMatches } from "@/lib/app-error";
+import { courseCatalogScopeKey } from "@/lib/course-catalogs";
 import type { FeatureToggleService } from "@/lib/feature-toggles";
 import {
   findRepositoryInstallation,
@@ -50,6 +53,7 @@ import {
 import { featureToggleService } from "@/lib/organization-access";
 import { administersOrganization } from "@/lib/organizations";
 import { activeAdministrator } from "@/lib/platform-admin-authority";
+import { currentScenarioRunContentAccessCondition } from "@/lib/scenario-runs/content-access";
 import {
   BodyLimitExceededError,
   enforceRateLimit,
@@ -85,6 +89,8 @@ export interface ScenarioSourceView {
   disconnectedAt: number | null;
   liveSha: string | null;
   liveAt: number | null;
+  /** The organization's runs that hold the pending target: the unit guard's count. */
+  activeRuns: number;
   commit: {
     sha: string;
     state: ScenarioSourceCommitState;
@@ -139,6 +145,41 @@ export function scenarioSourceBinderPredicate(): SQL {
         WHERE binder.id = ${binder} AND ${sql.raw(activeAdminSql("binder"))}))
     OR (${administersOrganization(sql`${scenarioSources.organizationId}`, binder)}
       AND ${sql.raw(activeAccountExistsSql("scenario_sources.bound_by_user_id"))}))`;
+}
+
+/**
+ * The unit guard: the organization's unfinished runs that have content access
+ * now and would lose it once `snapshot` replaces the organization's catalog,
+ * or whose scenario the commit disables. Runs without access never count.
+ */
+export async function countUnitGuardRuns(
+  d1: D1Database,
+  organizationId: string,
+  snapshot: CourseCatalogSnapshotV2,
+): Promise<number> {
+  const access = currentScenarioRunContentAccessCondition();
+  // The CTE shadows course_catalogs for the proposed check only; the other
+  // scopes' catalogs are read from the table itself.
+  const row = await d1
+    .prepare(
+      `SELECT COUNT(*) AS runs FROM scenario_runs AS run
+        WHERE run.organization_id = ?1 AND run.state NOT IN ('completed', 'failed')
+          AND (${access})
+          AND (run.scenario_id IN (SELECT scenario_id FROM vm_scenarios
+                WHERE organization_id = ?1 AND enabled = 1
+                  AND scenario_id NOT IN (SELECT json_extract(lecture.value, '$.scenarioId')
+                    FROM json_each(?3, '$.courses') AS course,
+                      json_each(course.value, '$.lectures') AS lecture
+                    WHERE json_extract(lecture.value, '$.scenarioId') IS NOT NULL))
+            OR NOT (WITH course_catalogs AS (
+                SELECT scope_key, organization_id, catalog_json FROM main.course_catalogs
+                  WHERE scope_key <> ?2
+                UNION ALL SELECT ?2, ?1, ?3)
+              SELECT ${access}))`,
+    )
+    .bind(organizationId, courseCatalogScopeKey(organizationId), JSON.stringify(snapshot))
+    .first<{ runs: number }>();
+  return row?.runs ?? 0;
 }
 
 /** Removes every absolute path; repository-relative paths stay readable. */
@@ -215,6 +256,25 @@ export async function loadScenarioSource(
         )
         .orderBy(asc(imageBuilds.scenarioId), asc(imageBuilds.arch))
     : [];
+  const [target] =
+    scope.organizationId !== null &&
+    binding.targetRev !== null &&
+    binding.targetRev !== binding.liveRev
+      ? await db
+          .select({ meta: imageBuildBundles.metaJson })
+          .from(imageBuildBundles)
+          .where(
+            and(
+              eq(imageBuildBundles.rev, binding.targetRev),
+              eq(imageBuildBundles.organizationId, scope.organizationId),
+            ),
+          )
+          .limit(1)
+      : [];
+  const activeRuns =
+    scope.organizationId !== null && target?.meta.courseCatalog
+      ? await countUnitGuardRuns(env.DB, scope.organizationId, target.meta.courseCatalog)
+      : 0;
   return {
     repository: binding.githubRepository,
     defaultBranch: binding.defaultBranch,
@@ -224,6 +284,7 @@ export async function loadScenarioSource(
     disconnectedAt: binding.disconnectedAt,
     liveSha: binding.liveSha,
     liveAt: binding.liveAt,
+    activeRuns,
     commit: commit
       ? {
           sha: commit.sha,
