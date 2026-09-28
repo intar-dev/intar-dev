@@ -1088,6 +1088,20 @@ describe("ScenarioSourceDO organization apply", () => {
     ]);
   });
 
+  it("promotes a target its heal made ready in the re-armed alarm", async () => {
+    github();
+    await deliver({ sha: SHA_A });
+    // B leaves acme-web unchanged, so its ingest dedups onto A's open build.
+    await deliver({ sha: SHA_B });
+    await publish(SHA_A);
+
+    // The build's terminal poke runs the heal, which restages B's candidate.
+    expect(await tick()).not.toBeNull();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "building" });
+    await tick();
+    expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+  });
+
   it("re-enables a removed scenario without a rebuild", async () => {
     await liveWeb();
     await deliver({ sha: SHA_B, scenarioIds: [] });

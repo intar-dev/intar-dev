@@ -522,7 +522,8 @@ async function writeBundle(
 // cannot loop. One superseded or retired is requeued, and reusable candidates
 // the target lacks are restaged, under the same try cap. That covers a build
 // deduplicated onto an older rev's and a candidate row the collector retired.
-// `ready` means every exact build succeeded and its candidate is staged.
+// `ready` means every exact build succeeded and its candidate is staged. A
+// finished heal answers `again`: nothing else pokes a target it made ready.
 async function failOrHeal(step: Step): Promise<"again" | "ready" | "idle"> {
   const target = await step.env.DB.prepare(
     `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
@@ -614,7 +615,8 @@ async function failOrHeal(step: Step): Promise<"again" | "ready" | "idle"> {
     return "again";
   }
   await step.storage.delete(key);
-  if (outcome !== "done") await settle(step, target, outcome);
+  if (outcome === "done") return "again";
+  await settle(step, target, outcome);
   return "idle";
 }
 
