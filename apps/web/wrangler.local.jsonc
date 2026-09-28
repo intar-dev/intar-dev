@@ -21,6 +21,9 @@
     "PLATFORM_BASE_IMAGES_SHA256": "",
     "GITHUB_APP_SLUG": "",
     "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "",
+    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "",
+    "SCENARIO_COMPILER_CLI_VERSION": "",
+    "SCENARIO_COMPILER_CLI_SHA256": "",
   },
   "assets": {
     "directory": "./dist",

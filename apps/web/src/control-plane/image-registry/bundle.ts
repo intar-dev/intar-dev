@@ -9,8 +9,21 @@ import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
-import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
-import { AppError, toErrorResponse } from "@/lib/app-error";
+import {
+  IMAGE_BUILD_FORMAT_VERSION,
+  platformCompileDigest,
+} from "@/lib/image-build-format";
+import { AppError, appError, toErrorResponse } from "@/lib/app-error";
+import { mintInstallationToken, readRepository } from "@/lib/github-app";
+import { verifyGithubActionsToken } from "@/lib/github-oidc";
+import { canonicalApplicationOrigin } from "@/lib/request-security";
+import {
+  acceptScenarioSourceUpload,
+  loadPushScenarioSource,
+  scenarioSourceScope,
+  sourceRefusal,
+  tokenUploadGate,
+} from "@/lib/scenario-sources";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
   syncCourseCatalogSnapshot,
@@ -28,6 +41,7 @@ import {
   readString,
   isSafeBundleRev,
   normalizeSha256,
+  SHA256_HEX_RE,
   isImageArchitecture,
   isPositiveU32,
   isScenarioDifficulty,
@@ -70,6 +84,24 @@ export async function handleBundleUpload(
       400,
     );
   }
+  const db = drizzle(env.DB);
+  // The benchmark lane samples builds; it never replaces the public catalog.
+  const benchmark = meta.value.rev.startsWith("image-build-benchmark-");
+  const gate = await tokenUploadGate(db, {
+    scenarioIds: meta.value.bundleMeta.scenarios.map(
+      (scenario) => scenario.scenarioId,
+    ),
+    benchmark,
+  });
+  if (gate.refusedScenarioIds.length) {
+    return jsonResponse(
+      {
+        error: "a connected scenario source publishes these scenarios",
+        scenario_ids: gate.refusedScenarioIds,
+      },
+      409,
+    );
+  }
 
   const bundle = form.get("bundle");
   if (!(bundle instanceof File)) {
@@ -86,15 +118,14 @@ export async function handleBundleUpload(
   );
   if (archiveError) return archiveError;
 
-  const db = drizzle(env.DB);
   try {
     const ingested = await ingestScenarioBundle(env, db, {
       rev: meta.value.rev,
       payload,
       meta: meta.value.bundleMeta,
       organizationId: null,
-      // The benchmark lane samples builds; it never replaces the public catalog.
-      applyCatalog: !meta.value.rev.startsWith("image-build-benchmark-"),
+      // While `public` is connected, only its binding changes its catalog.
+      applyCatalog: !benchmark && !gate.publicConnected,
     });
     if (!ingested.ok) {
       return jsonResponse(
@@ -130,6 +161,112 @@ export async function handleBundleUpload(
       error instanceof ScenarioBundleIngestError ? error.stage : "unknown";
     return jsonResponse({ error: "bundle processing failed", stage }, 500);
   }
+}
+
+/**
+ * The push producer: a GitHub Actions OIDC token from the pinned reusable
+ * workflow, for a push-mode binding whose default-branch head, re-read through
+ * the App, is the token's commit. It then runs the shared request half.
+ */
+export async function handleSourceBundleUpload(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+  try {
+    const token = /^Bearer\s+(\S+)$/i.exec(
+      request.headers.get("authorization") ?? "",
+    )?.[1];
+    if (!token) throw appError(401, "unauthorized", "unauthorized");
+    const claims = await verifyGithubActionsToken(token, {
+      audience: canonicalApplicationOrigin(env),
+      workflowShas: env.SCENARIO_PUBLISH_WORKFLOW_SHAS,
+    });
+    const binding = await loadPushScenarioSource(
+      drizzle(env.DB),
+      claims.repositoryId,
+    );
+    if (!binding) {
+      throw sourceRefusal(
+        409,
+        "binding_inactive",
+        "No active push-mode scenario source is connected to this repository.",
+      );
+    }
+    const observedAt = Date.now();
+    const mint = await mintInstallationToken(env, {
+      installationId: binding.githubInstallationId,
+      fullName: binding.githubRepository,
+      repositoryId: binding.githubRepositoryId,
+    }).catch(() => ({ status: "transient" }) as const);
+    if (mint.status === "gone" || mint.status === "suspended") {
+      throw sourceRefusal(
+        409,
+        "binding_inactive",
+        "The Intar GitHub App can no longer read this repository.",
+      );
+    }
+    const head = mint.status === "ok" ? await readRepository(mint.token) : null;
+    if (!head) {
+      throw appError(503, "github_unavailable", "GitHub could not be read. Try again.");
+    }
+    if (
+      claims.ref !== `refs/heads/${head.defaultBranch}` ||
+      claims.sha !== head.headSha
+    ) {
+      throw sourceRefusal(
+        409,
+        "superseded",
+        "This commit is no longer the head of the default branch.",
+      );
+    }
+    return await acceptScenarioSourceUpload(request, env, {
+      scope: scenarioSourceScope(binding.organizationId),
+      repositoryId: binding.githubRepositoryId,
+      sha: claims.sha,
+      purpose: "deploy",
+      claim: { via: "push", headSha: head.headSha, observedAt },
+    });
+  } catch (error) {
+    const refusal = toErrorResponse(error, "scenario source upload failed");
+    return jsonResponse(refusal.body, refusal.status);
+  }
+}
+
+/**
+ * The public compiler descriptor the reusable workflow reads: the CLI release,
+ * its sha256 per target, and the platform compile digest. 503 until all three
+ * are configured.
+ */
+export async function handleSourceCompilerDescriptor(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+  const digest = await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
+  const version = env.SCENARIO_COMPILER_CLI_VERSION ?? "";
+  let sha256: unknown = null;
+  try {
+    sha256 = JSON.parse(env.SCENARIO_COMPILER_CLI_SHA256 || "null");
+  } catch {
+    // An unreadable value is unconfigured.
+  }
+  if (
+    !digest ||
+    !/^\d+\.\d+\.\d+$/.test(version) ||
+    !isRecord(sha256) ||
+    !Object.keys(sha256).length ||
+    !Object.values(sha256).every(
+      (value) => typeof value === "string" && SHA256_HEX_RE.test(value),
+    )
+  ) {
+    return jsonResponse({ error: "the scenario compiler is not configured" }, 503);
+  }
+  return jsonResponse({ cli_version: version, sha256, digest });
 }
 
 function isSettledRefusal(error: unknown): boolean {
@@ -824,6 +961,27 @@ export function inspectTarArchive(bytes: Uint8Array): TarInspectionResult {
   }
 
   return { ok: true, files };
+}
+
+/** The first regular file at `path`, or null when the archive has none. */
+export function readTarFile(bytes: Uint8Array, path: string): Uint8Array | null {
+  let offset = 0;
+  while (offset + TAR_BLOCK_SIZE <= bytes.length) {
+    const header = bytes.subarray(offset, offset + TAR_BLOCK_SIZE);
+    offset += TAR_BLOCK_SIZE;
+    const size = tarHeaderSize(header);
+    if (size === null || offset + size > bytes.length) return null;
+    const typeflag = String.fromCharCode(header[156] ?? 0);
+    if (
+      (typeflag === "\0" || typeflag === "0") &&
+      !isZeroBlock(header) &&
+      tarHeaderPath(header) === path
+    ) {
+      return bytes.subarray(offset, offset + size);
+    }
+    offset += Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+  }
+  return null;
 }
 
 export function isZeroBlock(bytes: Uint8Array): boolean {

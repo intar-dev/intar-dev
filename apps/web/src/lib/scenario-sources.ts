@@ -3,18 +3,36 @@
 // about where a repository may publish.
 import { env } from "cloudflare:workers";
 import { and, asc, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
+import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
+import {
+  readBundleMeta,
+  readGzipBundleArchive,
+  readTarFile,
+} from "@/control-plane/image-registry/bundle";
+import {
+  isRecord,
+  jsonResponse,
+  sha256Hex,
+} from "@/control-plane/image-registry/shared";
 import {
   account,
   imageBuilds,
   scenarioSourceCommits,
   scenarioSources,
+  vmScenarios,
 } from "@/db/schema";
 import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import type { SourceCompileErrorV1 } from "@/generated/bridge";
+import type { SourceRefusalCode } from "@/generated/catalog";
+import {
+  SOURCE_BUNDLE_FIELD,
+  SOURCE_COMPILER_VERSION,
+  SOURCE_META_FIELD,
+} from "@/generated/constants";
 import { activeAccountExistsSql, activeAdminSql } from "@/lib/account-access";
 import type { UserContext } from "@/lib/agent-bridge";
-import { appError, errorChainMatches } from "@/lib/app-error";
+import { type AppError, appError, errorChainMatches } from "@/lib/app-error";
 import type { FeatureToggleService } from "@/lib/feature-toggles";
 import {
   findRepositoryInstallation,
@@ -24,10 +42,19 @@ import {
   type GitHubAppEnv,
   type RepositoryHead,
 } from "@/lib/github-app";
+import { createAppId } from "@/lib/id";
+import {
+  IMAGE_BUILD_FORMAT_VERSION,
+  platformCompileDigest,
+} from "@/lib/image-build-format";
 import { featureToggleService } from "@/lib/organization-access";
 import { administersOrganization } from "@/lib/organizations";
 import { activeAdministrator } from "@/lib/platform-admin-authority";
-import { enforceRateLimit } from "@/lib/request-security";
+import {
+  BodyLimitExceededError,
+  enforceRateLimit,
+  readBoundedBody,
+} from "@/lib/request-security";
 
 export const SCENARIO_GIT_SOURCES_FLAG = "scenario_git_sources";
 
@@ -610,4 +637,337 @@ async function confirmRepositoryAdmin(input: {
   const wait = input.startedAt + BIND_REFUSAL_FLOOR_MS - Date.now();
   if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
   throw appError(422, "scenario_source_bind_refused", BIND_REFUSAL_MESSAGE);
+}
+
+/** A refusal whose body is a `SourceRefusalV1`. */
+export function sourceRefusal(
+  status: number,
+  code: SourceRefusalCode,
+  message: string,
+): AppError {
+  return appError(status, code, message);
+}
+
+/** The connected push-mode binding of a repository, while it may write. */
+export async function loadPushScenarioSource(
+  db: DrizzleD1Database,
+  repositoryId: number,
+) {
+  const [binding] = await db
+    .select()
+    .from(scenarioSources)
+    .where(
+      and(
+        eq(scenarioSources.githubRepositoryId, repositoryId),
+        eq(scenarioSources.mode, "push"),
+        scenarioSourceBindingPredicate(),
+      ),
+    )
+    .limit(1);
+  return binding ?? null;
+}
+
+/**
+ * Token-route gates. Scenario ids owned by a connected binding's scope are
+ * refused, except public-owned ids in a benchmark rev, and while `public` is
+ * connected the token route leaves the public catalog alone. A paused binding
+ * still gates; a disconnected one does not.
+ */
+export async function tokenUploadGate(
+  db: DrizzleD1Database,
+  input: { scenarioIds: string[]; benchmark: boolean },
+): Promise<{ refusedScenarioIds: string[]; publicConnected: boolean }> {
+  const connected = isNull(scenarioSources.disconnectedAt);
+  const [owned, publicSource] = await Promise.all([
+    db
+      .select({
+        scenarioId: vmScenarios.scenarioId,
+        organizationId: vmScenarios.organizationId,
+      })
+      .from(vmScenarios)
+      .innerJoin(
+        scenarioSources,
+        and(
+          sql`${scenarioSources.organizationId} IS ${vmScenarios.organizationId}`,
+          connected,
+        ),
+      ),
+    db
+      .select({ scopeKey: scenarioSources.scopeKey })
+      .from(scenarioSources)
+      .where(and(eq(scenarioSources.scopeKey, "public"), connected))
+      .limit(1),
+  ]);
+  const ids = new Set(input.scenarioIds);
+  return {
+    refusedScenarioIds: owned
+      .filter(
+        (row) =>
+          ids.has(row.scenarioId) &&
+          !(input.benchmark && row.organizationId === null),
+      )
+      .map((row) => row.scenarioId),
+    publicConnected: publicSource.length > 0,
+  };
+}
+
+/** 2 MiB of compressed git bundle, plus 2 MiB for the meta part and framing. */
+export const MAX_SOURCE_UPLOAD_BYTES = 4 * 1024 * 1024;
+/** The expanded git-bundle cap. */
+export const MAX_SOURCE_BUNDLE_TAR_BYTES = 4 * 1024 * 1024;
+
+// A row in one of these states already holds the rev; a re-upload is a no-op.
+const SETTLED_STATES: readonly ScenarioSourceCommitState[] = [
+  "ingesting",
+  "building",
+  "waiting",
+  "promoting",
+  "awaiting_promote",
+  "live",
+];
+
+/**
+ * How an upload claims its row. A push inserts the head rev as `ingesting`,
+ * or takes over a failed, invalid or superseded row for it. A pull compile
+ * result moves its own `compiling` row, fenced on (row, attempt, host).
+ */
+export type SourceUploadClaim =
+  | { via: "push"; headSha: string; observedAt: number }
+  | { via: "pull"; commitId: string; attempt: number; hostId: string };
+
+/** Where a row's staged `bundle.tar.gz` and `meta.json` live. */
+export function stagedSourceObjectPrefix(
+  scopeKey: string,
+  rev: string,
+  purpose: "deploy" | "validate",
+): string {
+  return `builds/sources/${scopeKey}/${rev}/${purpose}/`;
+}
+
+/**
+ * The request half of ingest, shared by the push route and the pull result
+ * route: the size and producer checks, the base-catalog check, the stage and
+ * the claim. It holds no registry writer, so a cancelled request leaves only
+ * staged objects, which the prune removes. Refusals throw an AppError; the
+ * named ones are `SourceRefusalV1`.
+ */
+export async function acceptScenarioSourceUpload(
+  request: Request,
+  workerEnv: Cloudflare.Env,
+  input: {
+    scope: ScenarioSourceScope;
+    repositoryId: number;
+    sha: string;
+    purpose: "deploy" | "validate";
+    claim: SourceUploadClaim;
+  },
+): Promise<Response> {
+  const { scope, purpose, claim } = input;
+  // Checked before anything is buffered; the CLI and the builder send it.
+  const declared = request.headers.get("content-length");
+  if (
+    !declared ||
+    !/^\d+$/.test(declared) ||
+    Number(declared) > MAX_SOURCE_UPLOAD_BYTES
+  ) {
+    throw appError(
+      413,
+      "payload_too_large",
+      "The upload needs a Content-Length of at most 4 MiB.",
+    );
+  }
+  let form: FormData;
+  try {
+    const body = request.body
+      ? await readBoundedBody(request.body, MAX_SOURCE_UPLOAD_BYTES)
+      : new Uint8Array();
+    form = await new Response(body, {
+      headers: { "content-type": request.headers.get("content-type") ?? "" },
+    }).formData();
+  } catch (error) {
+    if (error instanceof BodyLimitExceededError) {
+      throw appError(413, "payload_too_large", "The upload is too large.");
+    }
+    throw appError(400, "multipart_required", "multipart form data is required");
+  }
+
+  const metaField = form.get(SOURCE_META_FIELD);
+  const rawMeta =
+    typeof metaField === "string" ? metaField : await metaField?.text();
+  const digest = await platformCompileDigest(
+    workerEnv.PLATFORM_BASE_IMAGES_SHA256,
+  );
+  const revPrefix = `git-${input.repositoryId}-${input.sha}-`;
+  const rev = digest === null ? null : `${revPrefix}${digest}`;
+  // An older CLI or builder is told to re-read the descriptor before any
+  // other meta check can call its output malformed.
+  const lenient = parseRecord(rawMeta);
+  const compilerVersion = isRecord(lenient.source)
+    ? lenient.source.compiler_version
+    : undefined;
+  const formatVersion =
+    lenient.build_format_version ?? lenient.buildFormatVersion;
+  if (
+    (typeof lenient.rev === "string" &&
+      lenient.rev.startsWith(revPrefix) &&
+      lenient.rev !== rev) ||
+    (typeof compilerVersion === "string" &&
+      compilerVersion !== SOURCE_COMPILER_VERSION) ||
+    (typeof formatVersion === "string" &&
+      formatVersion !== IMAGE_BUILD_FORMAT_VERSION)
+  ) {
+    throw sourceRefusal(
+      409,
+      "compiler_outdated",
+      "Intar now compiles with another compiler. Re-read the compiler descriptor and publish again.",
+    );
+  }
+  const meta = await readBundleMeta(rawMeta ?? null);
+  if (!meta.ok) return meta.response;
+  if (rev === null || meta.value.rev !== rev) {
+    throw appError(400, "source_rev_invalid", "meta.rev does not name this commit");
+  }
+  const source = meta.value.bundleMeta.source;
+  if (
+    !isRecord(source) ||
+    typeof source.scope !== "string" ||
+    typeof source.courses_root !== "string" ||
+    typeof source.compiler_version !== "string"
+  ) {
+    throw appError(400, "source_meta_invalid", "meta.source is required");
+  }
+  const bundle = form.get(SOURCE_BUNDLE_FIELD);
+  if (!(bundle instanceof File) || bundle.size === 0) {
+    throw appError(400, "bundle_required", "bundle form field is required");
+  }
+
+  const db = drizzle(workerEnv.DB);
+  // Before any decompression, so a repeated upload costs only the form read.
+  const [existing] = await db
+    .select({ state: scenarioSourceCommits.state })
+    .from(scenarioSourceCommits)
+    .where(
+      and(
+        eq(scenarioSourceCommits.scopeKey, scope.key),
+        eq(scenarioSourceCommits.rev, rev),
+        eq(scenarioSourceCommits.purpose, purpose),
+      ),
+    )
+    .limit(1);
+  if (existing && SETTLED_STATES.includes(existing.state)) return receipt(rev);
+
+  const payload = await bundle.arrayBuffer();
+  // Empty and theory-only commits carry no base catalog.
+  if (meta.value.bundleMeta.scenarios.length) {
+    const archive = await readGzipBundleArchive(
+      payload,
+      MAX_SOURCE_BUNDLE_TAR_BYTES,
+    );
+    if (!archive.ok) return archive.response;
+    const baseImages = readTarFile(archive.bytes, "base-images.hcl");
+    if (!baseImages) {
+      throw appError(
+        400,
+        "bundle_invalid",
+        "bundle archive is missing base-images.hcl",
+      );
+    }
+    if (
+      (await sha256Hex(baseImages.slice().buffer)) !==
+      workerEnv.PLATFORM_BASE_IMAGES_SHA256
+    ) {
+      throw sourceRefusal(
+        409,
+        "compiler_outdated",
+        "The bundle was compiled against another base-image catalog. Re-read the compiler descriptor and publish again.",
+      );
+    }
+  }
+
+  const staged = stagedSourceObjectPrefix(scope.key, rev, purpose);
+  await Promise.all([
+    workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}bundle.tar.gz`, payload, {
+      httpMetadata: { contentType: "application/gzip" },
+    }),
+    workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}meta.json`, rawMeta ?? "", {
+      httpMetadata: { contentType: "application/json" },
+    }),
+  ]);
+
+  const now = Date.now();
+  const headIsRev = sql`EXISTS (SELECT 1 FROM scenario_sources
+    WHERE scope_key = ${scope.key} AND mode = ${claim.via}
+      AND ${scenarioSourceBindingPredicate()}
+      AND 'git-' || github_repository_id || '-' || head_sha || '-' || ${digest} = ${rev})`;
+  const queries =
+    claim.via === "push"
+      ? [
+          // Monotonic: an older read never replaces a newer head, and the
+          // first push after a bind needs no observe first.
+          sql`UPDATE scenario_sources
+            SET head_sha = ${claim.headSha},
+              head_observed_at = ${claim.observedAt}, updated_at = ${now}
+            WHERE scope_key = ${scope.key} AND mode = 'push'
+              AND head_observed_at < ${claim.observedAt}
+              AND ${scenarioSourceBindingPredicate()}`,
+          sql`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha,
+              rev, via, state, created_at, updated_at)
+            SELECT ${createAppId()}, ${scope.key}, ${purpose}, ${input.sha},
+              ${rev}, 'push', 'ingesting', ${now}, ${now}
+            WHERE ${headIsRev}
+            ON CONFLICT (scope_key, rev, purpose) DO UPDATE SET
+              state = 'ingesting', via = 'push', attempt = attempt + 1,
+              detail = NULL, diagnostics_json = NULL,
+              updated_at = excluded.updated_at
+            WHERE scenario_source_commits.state IN
+              ('failed', 'invalid', 'superseded')`,
+        ]
+      : [
+          sql`UPDATE scenario_source_commits
+            SET state = 'ingesting', updated_at = ${now}
+            WHERE id = ${claim.commitId} AND attempt = ${claim.attempt}
+              AND compile_host_id = ${claim.hostId} AND state = 'compiling'
+              AND scope_key = ${scope.key} AND rev = ${rev}
+              AND purpose = ${purpose} AND ${headIsRev}`,
+        ];
+  // One D1 batch, so the head write and the claim commit together.
+  const dialect = new SQLiteSyncDialect();
+  const claimed = await workerEnv.DB.batch(
+    queries.map((query) => {
+      const compiled = dialect.sqlToQuery(query);
+      return workerEnv.DB.prepare(compiled.sql).bind(...compiled.params);
+    }),
+  );
+  if (!claimed.at(-1)?.meta.changes) {
+    throw claim.via === "push"
+      ? sourceRefusal(
+          409,
+          "superseded",
+          "This commit is no longer the head of the default branch.",
+        )
+      : sourceRefusal(
+          409,
+          "fenced",
+          "This compile is no longer assigned to this builder.",
+        );
+  }
+  await db
+    .update(scenarioSources)
+    .set({ pokedAt: now })
+    .where(eq(scenarioSources.scopeKey, scope.key));
+  return receipt(rev);
+}
+
+// The CLI and builder receipt check accepts this; nothing is queued yet.
+function receipt(rev: string): Response {
+  return jsonResponse({ ok: true, rev, queued: 0, assigned: [] }, 202);
+}
+
+function parseRecord(raw: string | undefined): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(raw ?? "");
+    return isRecord(value) ? value : {};
+  } catch {
+    return {};
+  }
 }

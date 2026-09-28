@@ -35,6 +35,14 @@
     "GITHUB_APP_SLUG": "",
     // The only GitHub repository id the public scope may bind. Empty: none.
     "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "",
+    // Peeled commit SHAs of the released scenario-publish-vN tags, separated
+    // by commas or whitespace. Empty: every push upload is refused.
+    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "",
+    // The intar-image-cli release the compiler descriptor names, and its
+    // release tarball sha256 per target as JSON, e.g. {"linux_amd64":"<hex>"}.
+    // While either is empty the descriptor answers 503.
+    "SCENARIO_COMPILER_CLI_VERSION": "",
+    "SCENARIO_COMPILER_CLI_SHA256": "",
   },
   "vpc_services": [
     {

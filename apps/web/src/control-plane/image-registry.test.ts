@@ -27,6 +27,16 @@ const {
   candidateCatalogMock,
 } = imageRegistryMocks();
 
+// The token-route gates read D1; the Workers tests cover them. Here no
+// scenario source is connected.
+vi.mock("@/lib/scenario-sources", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/scenario-sources")>()),
+  tokenUploadGate: async () => ({
+    refusedScenarioIds: [],
+    publicConnected: false,
+  }),
+}));
+
 describe("image registry source bundles", () => {
   beforeEach(resetImageRegistryMocks);
 
