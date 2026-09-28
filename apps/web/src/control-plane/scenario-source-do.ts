@@ -1,8 +1,9 @@
 // One Durable Object per scenario source binding, named by its scope key.
 // Its alarm observes the repository, pauses a binding whose binder lost the
-// scope, ingests the head commit's staged bundle, and fails or heals the
-// target's builds. Every head comparison runs in SQL against the stored head,
-// so a push claim that moves the head mid-alarm is never overwritten.
+// scope, ingests the head commit's staged bundle, fails or heals the target's
+// builds, and promotes an organization's target as a whole: images, then
+// catalog, then `live`. Every head comparison runs in SQL against the stored
+// head, so a push claim that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, inArray, isNull, lt, not, sql } from "drizzle-orm";
@@ -14,17 +15,23 @@ import {
   scenarioCatalogCandidates,
   scenarioSources,
 } from "@/db/schema";
+import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import { AppError } from "@/lib/app-error";
 import { SUPERSEDED_BUILD_ERROR_PREFIX } from "@/lib/build-scheduler-core";
+import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
 import {
   mintInstallationToken,
   readRepository,
   type MintOutcome,
 } from "@/lib/github-app";
 import { platformCompileDigest } from "@/lib/image-build-format";
-import { admitInternalRegistryOperation } from "@/lib/image-registry-admission";
+import {
+  admitInternalRegistryOperation,
+  createRegistryWriterGuard,
+} from "@/lib/image-registry-admission";
 import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
+  countUnitGuardRuns,
   scenarioSourceBinderPredicate,
   scenarioSourceBindingPredicate,
   stagedSourceObjectPrefix,
@@ -42,6 +49,11 @@ import {
   validateBundleArchivePayload,
   type ParsedBundleMeta,
 } from "./image-registry/bundle";
+import {
+  promoteCandidateRevision,
+  type CandidatePromotionRefusal,
+  type CandidatePromotionResult,
+} from "./image-registry/catalog-promotion";
 import { isRecord } from "./image-registry/shared";
 
 const SCOPE_PATTERN = /^(?:public|organization:[^/?#]+)$/;
@@ -160,6 +172,7 @@ async function tickScenarioSource(
     .limit(1);
   if (!binding) return false;
   const again = await observe(env, binding);
+  const organizationId = binding.organizationId;
 
   const now = Date.now();
   await db
@@ -176,22 +189,33 @@ async function tickScenarioSource(
 
   await dropInactive(env, scopeKey);
 
+  // A started promotion finishes even while the binding is paused or the
+  // digest is unset, and it is the alarm's only promotion.
+  const promoting =
+    organizationId === null ? null : await finishPromotion(env, scopeKey, organizationId);
+
   // Without a digest there is no head rev, so rows stay as they are rather
   // than be compared against NULL.
   const digest = await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
-  if (digest === null) return again;
+  if (digest === null) return again || promoting === true;
   await supersede(env, scopeKey, digest);
 
   const [active] = await db
-    .select({ organizationId: scenarioSources.organizationId })
+    .select({ scopeKey: scenarioSources.scopeKey })
     .from(scenarioSources)
     .where(and(eq(scenarioSources.scopeKey, scopeKey), scenarioSourceBindingPredicate()))
     .limit(1);
-  if (!active) return again;
-  const step = { env, storage, scopeKey, organizationId: active.organizationId, digest };
+  if (!active) return again || promoting === true;
+  const step = { env, storage, scopeKey, organizationId, digest };
   const ingestAgain = await ingest(step);
-  const healAgain = await failOrHeal(step);
-  return again || ingestAgain || healAgain;
+  const heal = await failOrHeal(step);
+  let applyAgain = promoting === true;
+  // Only an organization commit applies here; `public` needs the drain hold.
+  if (heal === "ready" && organizationId !== null) {
+    // One promotion per alarm: a finished one leaves the target to the next.
+    applyAgain = promoting === null ? await promoteTarget({ ...step, organizationId }) : true;
+  }
+  return again || ingestAgain || heal === "again" || applyAgain;
 }
 
 // Reads the repository through a token minted for the bound id. The mint is
@@ -385,16 +409,7 @@ async function readStagedCommit(
   if (!parsed.ok) return invalid(await refusalText(parsed.response));
   const meta = parsed.value.bundleMeta;
   if (parsed.value.rev !== rev) return invalid("meta.rev is not this commit's rev");
-  const label =
-    step.organizationId === null
-      ? "public"
-      : (
-          await drizzle(step.env.DB)
-            .select({ slug: organization.slug })
-            .from(organization)
-            .where(eq(organization.id, step.organizationId))
-            .limit(1)
-        )[0]?.slug;
+  const label = await scopeLabel(step);
   if (!isRecord(meta.source) || meta.source.scope !== label) {
     return invalid("the intar.yaml scope does not match this binding");
   }
@@ -507,7 +522,8 @@ async function writeBundle(
 // cannot loop. One superseded or retired is requeued, and reusable candidates
 // the target lacks are restaged, under the same try cap. That covers a build
 // deduplicated onto an older rev's and a candidate row the collector retired.
-async function failOrHeal(step: Step): Promise<boolean> {
+// `ready` means every exact build succeeded and its candidate is staged.
+async function failOrHeal(step: Step): Promise<"again" | "ready" | "idle"> {
   const target = await step.env.DB.prepare(
     `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
       JOIN scenario_sources AS s ON s.scope_key = c.scope_key
@@ -517,14 +533,14 @@ async function failOrHeal(step: Step): Promise<boolean> {
   )
     .bind(step.scopeKey)
     .first<CommitRow>();
-  if (!target) return false;
+  if (!target) return "idle";
   const db = drizzle(step.env.DB);
   const [bundle] = await db
     .select({ metaJson: imageBuildBundles.metaJson })
     .from(imageBuildBundles)
     .where(eq(imageBuildBundles.rev, target.rev))
     .limit(1);
-  if (!bundle) return false;
+  if (!bundle) return "idle";
   const meta = bundle.metaJson as ParsedBundleMeta;
   const hashes = [...new Set(meta.scenarios.map((scenario) => scenario.contentHash))];
   const builds = hashes.length
@@ -555,6 +571,7 @@ async function failOrHeal(step: Step): Promise<boolean> {
     ).map((row) => row.scenarioId),
   );
   let heal = false;
+  let ready = true;
   for (const scenario of meta.scenarios) {
     const build = builds.find(
       (candidate) =>
@@ -572,15 +589,16 @@ async function failOrHeal(step: Step): Promise<boolean> {
           `image build ${scenario.scenarioId} (${scenario.arch}) ${build.status}: ` +
           (build.error ?? "no error"),
       });
-      return false;
+      return "idle";
     }
     const unstaged =
       build?.status === "succeeded" &&
       Boolean(build.published) &&
       !staged.has(scenario.scenarioId);
     heal ||= !build || superseded || build.artifactsRetiredAt !== null || unstaged;
+    ready &&= build?.status === "succeeded" && staged.has(scenario.scenarioId);
   }
-  if (!heal) return false;
+  if (!heal) return ready ? "ready" : "idle";
 
   const key = tryKey(target, "heal");
   const tries = ((await step.storage.get<number>(key)) ?? 0) + 1;
@@ -588,16 +606,162 @@ async function failOrHeal(step: Step): Promise<boolean> {
   if (tries > MAX_TRIES) {
     await settle(step, target, { state: "failed", detail: "heal did not finish" });
     await step.storage.delete(key);
-    return false;
+    return "idle";
   }
   const outcome = await writeBundle(step, target.rev, meta);
   if (outcome === "retry") {
     await step.storage.put(key, tries - 1);
-    return true;
+    return "again";
   }
   await step.storage.delete(key);
   if (outcome !== "done") await settle(step, target, outcome);
+  return "idle";
+}
+
+interface Promotion {
+  env: Cloudflare.Env;
+  scopeKey: string;
+  organizationId: string;
+}
+
+const REFUSAL_STATES = {
+  incomplete_builds: "building",
+  incomplete_catalog: "building",
+  image_in_use: "waiting",
+  ownership_conflict: "invalid",
+} as const satisfies Record<CandidatePromotionRefusal["kind"], ScenarioSourceCommitState>;
+
+// Promotes a ready target that is still the head. The unit guard holds it in
+// `waiting` while a run with access would lose it. `promoting` is written only
+// while the binding may write, so a pause during this alarm stops it here.
+async function promoteTarget(step: Step & Promotion): Promise<boolean> {
+  const target = await step.env.DB.prepare(
+    `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
+      JOIN scenario_sources AS s ON s.scope_key = c.scope_key
+      WHERE c.scope_key = ?1 AND c.purpose = 'deploy' AND c.rev = s.target_rev
+        AND s.target_rev IS NOT s.live_rev AND c.state IN ('building', 'waiting')`,
+  )
+    .bind(step.scopeKey)
+    .first<CommitRow>();
+  if (!target) return false;
+  const bundle = await loadBundle(step.env, target.rev);
+  if (
+    !bundle ||
+    bundle.organizationId !== step.organizationId ||
+    !isRecord(bundle.meta.source) ||
+    bundle.meta.source.scope !== (await scopeLabel(step))
+  ) {
+    await settle(step, target, invalid("the bundle does not belong to this binding"));
+    return false;
+  }
+  if (await countUnitGuardRuns(step.env.DB, step.organizationId, bundle.meta.courseCatalog)) {
+    await settle(step, target, { state: "waiting", detail: "active runs would lose access" });
+    return false;
+  }
+  const written = await drizzle(step.env.DB).run(sql`UPDATE scenario_source_commits
+    SET state = 'promoting', detail = NULL, updated_at = ${Date.now()}
+    WHERE id = ${target.id} AND attempt = ${target.attempt} AND state = ${target.state}
+      AND EXISTS (SELECT 1 FROM scenario_sources WHERE scope_key = ${step.scopeKey}
+        AND target_rev = scenario_source_commits.rev
+        AND scenario_source_commits.rev =
+          'git-' || github_repository_id || '-' || head_sha || '-' || ${step.digest}
+        AND ${scenarioSourceBindingPredicate()})`);
+  if (!written.meta.changes) return false;
+  return promote(step, { ...target, state: "promoting" });
+}
+
+/** Finishes a `promoting` row. Null when there is none, else whether to re-arm. */
+async function finishPromotion(
+  env: Cloudflare.Env,
+  scopeKey: string,
+  organizationId: string,
+): Promise<boolean | null> {
+  const row = await env.DB.prepare(
+    `SELECT id, rev, attempt, state FROM scenario_source_commits
+      WHERE scope_key = ?1 AND purpose = 'deploy' AND state = 'promoting'`,
+  )
+    .bind(scopeKey)
+    .first<CommitRow>();
+  return row ? promote({ env, scopeKey, organizationId }, row) : null;
+}
+
+// Runs the promotion core under a pointer_mutation writer, then the catalog,
+// then one batch that makes the row live. The core is idempotent through
+// `alreadyPromoted`, so a refused writer or a throw keeps `promoting` and a
+// later alarm finishes it. A refusal from the core has written nothing.
+async function promote(step: Promotion, row: CommitRow): Promise<boolean> {
+  const bundle = await loadBundle(step.env, row.rev);
+  if (!bundle) throw new Error(`promoting rev ${row.rev} has no bundle`);
+  const admitted = await admitInternalRegistryOperation(step.env, {
+    operation: "pointer_mutation",
+    owner: { kind: "system", id: `source:${step.scopeKey}` },
+  });
+  if (!admitted.ok) return true;
+  const db = drizzle(step.env.DB);
+  const writer = createRegistryWriterGuard(admitted.lease);
+  let result: CandidatePromotionResult;
+  try {
+    result = await promoteCandidateRevision(step.env, db, writer, {
+      revision: row.rev,
+      bundle,
+      nowUnixMs: Date.now(),
+    });
+    if (result.ok) await writer.release("ok");
+  } finally {
+    await writer.finish();
+  }
+  if (!result.ok) {
+    await settle(step, row, { state: REFUSAL_STATES[result.kind], detail: result.error });
+    return false;
+  }
+  // Committed, including a host reconcile that failed: the host alarms finish
+  // it. There is no second unit guard.
+  await syncCourseCatalogSnapshot(db, {
+    snapshot: bundle.meta.courseCatalog,
+    sourceRevision: row.rev,
+    organizationId: step.organizationId,
+    nowUnixMs: Date.now(),
+  });
+  // One transaction: the live commit moves with its row, and the previous
+  // live row is superseded, so its rev can be delivered again.
+  const promoting = `EXISTS (SELECT 1 FROM scenario_source_commits
+    WHERE id = ?1 AND attempt = ?2 AND state = 'promoting')`;
+  const statements = [
+    `UPDATE scenario_sources SET live_rev = ?3, live_at = ?5, updated_at = ?5,
+        live_sha = (SELECT sha FROM scenario_source_commits WHERE id = ?1)
+      WHERE scope_key = ?4 AND ${promoting}`,
+    `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?5
+      WHERE scope_key = ?4 AND purpose = 'deploy' AND state = 'live' AND ${promoting}`,
+    `UPDATE scenario_source_commits SET state = 'live', detail = NULL, updated_at = ?5
+      WHERE id = ?1 AND attempt = ?2 AND state = 'promoting'`,
+  ];
+  const now = Date.now();
+  await step.env.DB.batch(
+    statements.map((statement) =>
+      step.env.DB.prepare(statement).bind(row.id, row.attempt, row.rev, step.scopeKey, now),
+    ),
+  );
   return false;
+}
+
+async function loadBundle(env: Cloudflare.Env, rev: string) {
+  const [bundle] = await drizzle(env.DB)
+    .select({ organizationId: imageBuildBundles.organizationId, meta: imageBuildBundles.metaJson })
+    .from(imageBuildBundles)
+    .where(eq(imageBuildBundles.rev, rev))
+    .limit(1);
+  return bundle && { organizationId: bundle.organizationId, meta: bundle.meta as ParsedBundleMeta };
+}
+
+/** The scope `intar.yaml` must name: `public` or the organization's slug. */
+async function scopeLabel(step: Pick<Step, "env" | "organizationId">) {
+  if (step.organizationId === null) return "public";
+  const [owner] = await drizzle(step.env.DB)
+    .select({ slug: organization.slug })
+    .from(organization)
+    .where(eq(organization.id, step.organizationId))
+    .limit(1);
+  return owner?.slug;
 }
 
 // ponytail: a counter of a row that observe supersedes mid-try stays in DO
@@ -608,9 +772,9 @@ function tryKey(row: CommitRow, step: "ingest" | "heal"): string {
 
 /** Moves a row out of the state it was read in, unless it changed since. */
 async function settle(
-  step: Step,
+  step: Pick<Step, "env" | "scopeKey">,
   row: CommitRow,
-  to: { state: "failed" | "invalid" | "superseded"; detail: string },
+  to: { state: ScenarioSourceCommitState; detail: string },
 ): Promise<void> {
   await step.env.DB.prepare(
     `UPDATE scenario_source_commits SET state = ?1, detail = ?2, updated_at = ?3
