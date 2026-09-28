@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -149,17 +150,52 @@ describe("organization boundaries", () => {
       sha: "abc",
       rev: "git-abc",
       via: "pull",
-      state: "ingesting",
+      state: "fetching",
     });
-    await expect(remove()).rejects.toMatchObject({
-      code: "organization_not_empty",
-    });
+    for (const state of [
+      "fetching",
+      "compiling",
+      "ingesting",
+      "promoting",
+    ] as const) {
+      await db.update(scenarioSourceCommits).set({ state });
+      await expect(remove(), state).rejects.toMatchObject({
+        code: "organization_not_empty",
+      });
+    }
 
     await db.update(scenarioSourceCommits).set({ state: "failed" });
     await remove();
     expect(await db.select().from(organization)).toEqual([]);
     expect(await db.select().from(scenarioSources)).toEqual([]);
     expect(await db.select().from(scenarioSourceCommits)).toEqual([]);
+  });
+
+  it("treats a concurrent deletion of the organization as done", async () => {
+    const db = drizzle(env.DB);
+    await insertUser("owner");
+    await insertOrganization("org-a");
+    await db.insert(member).values({
+      id: "owner-member",
+      organizationId: "org-a",
+      userId: "owner",
+      role: "owner",
+      createdAt: new Date(),
+    });
+
+    const race = interleaveBefore(/^delete from "organization"/iu, () =>
+      db.delete(organization).where(eq(organization.id, "org-a")),
+    );
+    try {
+      await deleteOrganization({
+        organizationId: "org-a",
+        actorUserId: "owner",
+      });
+      expect(race.fired()).toBe(true);
+    } finally {
+      race.restore();
+    }
+    expect(await db.select().from(organization)).toEqual([]);
   });
 });
 
