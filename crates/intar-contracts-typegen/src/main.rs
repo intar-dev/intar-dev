@@ -309,6 +309,11 @@ export const VM_REPORT_SCHEMA_VERSION = {};
 export const SOURCE_COMPILER_VERSION = "{}";
 export const SOURCE_BUNDLES_PATH = "{}";
 export const SOURCE_COMPILER_PATH = "{}";
+/**
+ * `GET <prefix>/<compile_id>?attempt=<n>` returns the snapshot, and
+ * `POST <prefix>/<compile_id>/result?attempt=<n>` takes a multipart success
+ * or a JSON `SourceCompileFailureV1`, told apart by `Content-Type`.
+ */
 export const AGENT_SOURCES_PATH = "{}";
 export const SOURCE_META_FIELD = "{}";
 export const SOURCE_BUNDLE_FIELD = "{}";
@@ -623,7 +628,11 @@ export type SourceRefusalCode =
   | "binding_inactive"
   | "issuer_unsupported";
 
-/** A source route refusal: `AppErrorResponseBody` with a mandatory code. */
+/**
+ * A refusal named by a `SourceRefusalCode`: `AppErrorResponseBody` with a
+ * mandatory code. Any other non-2xx source route answer is a plain
+ * `AppErrorResponseBody`.
+ */
 export interface SourceRefusalV1 {
   error: string;
   code: SourceRefusalCode;
@@ -755,11 +764,13 @@ export interface DesiredBuildV1 {
   bundle_ref: string;
 }
 
-/** One repository snapshot a builder compiles. No secret and no scope. */
+/**
+ * One repository snapshot a builder compiles, fetched by `compile_id` and
+ * `attempt`. No secret and no scope.
+ */
 export interface DesiredSourceCompileV1 {
   compile_id: string;
   attempt: number;
-  snapshot_ref: string;
   rev: string;
   validate_only: boolean;
   arch: ImageArchitecture;

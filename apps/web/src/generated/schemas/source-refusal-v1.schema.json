@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SourceRefusalV1",
-  "description": "A source route refusal. The Worker's `AppErrorResponseBody` shape, with a\nmandatory code.",
+  "description": "The body of a refusal named by a `SourceRefusalCode`: the Worker's\n`AppErrorResponseBody` shape, with a mandatory code. Every other non-2xx\nanswer from a source route is a plain `AppErrorResponseBody` whose `code`\nis absent or outside this enum, so clients decode it leniently and still\nprint its `error`.",
   "type": "object",
   "properties": {
     "code": {

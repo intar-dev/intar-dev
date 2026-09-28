@@ -110,11 +110,13 @@ export interface DesiredBuildV1 {
   bundle_ref: string;
 }
 
-/** One repository snapshot a builder compiles. No secret and no scope. */
+/**
+ * One repository snapshot a builder compiles, fetched by `compile_id` and
+ * `attempt`. No secret and no scope.
+ */
 export interface DesiredSourceCompileV1 {
   compile_id: string;
   attempt: number;
-  snapshot_ref: string;
   rev: string;
   validate_only: boolean;
   arch: ImageArchitecture;

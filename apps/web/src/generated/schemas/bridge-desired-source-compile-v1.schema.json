@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DesiredSourceCompileV1",
-  "description": "One repository snapshot a builder compiles. It carries no secret and no\nscope: the Worker takes both from the compile row.",
+  "description": "One repository snapshot a builder compiles, fetched by `compile_id` and\n`attempt`. It carries no secret and no scope: the Worker takes both from\nthe compile row.",
   "type": "object",
   "properties": {
     "arch": {
@@ -18,9 +18,6 @@
     "rev": {
       "type": "string"
     },
-    "snapshot_ref": {
-      "type": "string"
-    },
     "validate_only": {
       "type": "boolean"
     }
@@ -28,7 +25,6 @@
   "required": [
     "compile_id",
     "attempt",
-    "snapshot_ref",
     "rev",
     "validate_only",
     "arch"

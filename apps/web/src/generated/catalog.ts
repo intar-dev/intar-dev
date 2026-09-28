@@ -122,7 +122,11 @@ export type SourceRefusalCode =
   | "binding_inactive"
   | "issuer_unsupported";
 
-/** A source route refusal: `AppErrorResponseBody` with a mandatory code. */
+/**
+ * A refusal named by a `SourceRefusalCode`: `AppErrorResponseBody` with a
+ * mandatory code. Any other non-2xx source route answer is a plain
+ * `AppErrorResponseBody`.
+ */
 export interface SourceRefusalV1 {
   error: string;
   code: SourceRefusalCode;

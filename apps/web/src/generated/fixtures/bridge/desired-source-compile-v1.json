@@ -1,7 +1,6 @@
 {
   "compile_id": "compile-acme-x1y2z3-001",
   "attempt": 1,
-  "snapshot_ref": "builds/sources/acme-x1y2z3/git-123456-0123456789abcdef0123456789abcdef01234567-pe845f1ac/deploy/source.tar.gz",
   "rev": "git-123456-0123456789abcdef0123456789abcdef01234567-pe845f1ac",
   "validate_only": false,
   "arch": "x86_64"
