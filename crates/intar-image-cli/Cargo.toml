@@ -9,7 +9,6 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-flate2.workspace = true
 hcl-rs.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 intar-image-build = { path = "../intar-image-build" }
@@ -18,8 +17,6 @@ intar-image-upload = { path = "../intar-image-upload" }
 reqwest = { workspace = true, features = ["blocking", "multipart", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
-serde-saphyr.workspace = true
-tar.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 
