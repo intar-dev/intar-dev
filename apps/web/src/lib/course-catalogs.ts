@@ -5,6 +5,7 @@ import {
   isNotNull,
   isNull,
   not,
+  or,
   sql,
   type SQLWrapper,
 } from "drizzle-orm";
@@ -12,6 +13,7 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   courseUnitCompletions,
   member,
+  organization,
   courseCatalogs,
   scenarioRuns,
   vmScenarios,
@@ -72,6 +74,7 @@ export interface CourseCatalogLectureSummary {
 export interface CourseCatalogCourseForUser {
   courseId: string;
   organizationId: string | null;
+  organizationName: string | null;
   title: string;
   summary: string;
   bodyMarkdown: string;
@@ -140,6 +143,7 @@ export type LecturePresentation = Pick<
 interface CourseSource {
   scopeKey: string;
   organizationId: string | null;
+  organizationName: string | null;
   course: CourseCatalogCourseV2;
 }
 
@@ -380,6 +384,8 @@ async function disableUnlinkedScenariosFromCourseCatalog(
 /**
  * Lists public courses plus the current organization catalog. An organization
  * lecture that links a scenario hides the public lecture for that scenario.
+ * Without an organization, it lists every member organization's catalog and
+ * hides nothing.
  */
 export async function listCourseCatalogForUser(input: {
   db: DrizzleD1Database;
@@ -389,7 +395,7 @@ export async function listCourseCatalogForUser(input: {
   resourceCapacity?: ResourceCapacity | null;
   allowSequenceBypass?: boolean;
 }): Promise<CourseCatalogForUser> {
-  const views = await loadCourseViews(input);
+  const views = await loadCourseViews({ ...input, includeMemberCatalogs: true });
   return {
     courses: views.map(toCourseCatalogCourseForUser),
     capacityPressure: input.capacityPressure ?? null,
@@ -439,6 +445,7 @@ export async function loadCourseLectureDetailForUser(input: {
       course: {
         courseId: course.course.courseId,
         organizationId: course.organizationId,
+        organizationName: course.organizationName,
         title: course.course.title,
         summary: course.course.summary,
         sequential: course.course.sequential,
@@ -804,6 +811,7 @@ async function loadCourseViews(input: {
   userId: string;
   organizationId: string | null;
   allowSequenceBypass?: boolean;
+  includeMemberCatalogs?: boolean;
 }): Promise<CourseView[]> {
   if (input.organizationId) {
     const [membership] = await input.db
@@ -818,7 +826,11 @@ async function loadCourseViews(input: {
       .limit(1);
     if (!membership) return [];
   }
-  const sources = await loadVisibleCourseSources(input.db, input.organizationId);
+  const sources = await loadVisibleCourseSources(
+    input.db,
+    input.organizationId,
+    input.includeMemberCatalogs && !input.organizationId ? input.userId : null,
+  );
   if (!sources.length) return [];
 
   const scopeKeys = [...new Set(sources.map((source) => source.scopeKey))];
@@ -842,7 +854,7 @@ async function loadCourseViews(input: {
       .where(
         and(
           eq(courseUnitCompletions.userId, input.userId),
-          inArray(courseUnitCompletions.scopeKey, scopeKeys),
+          inJson(courseUnitCompletions.scopeKey, scopeKeys),
         ),
       ),
     input.db
@@ -901,7 +913,7 @@ async function loadCourseViews(input: {
       const scenarioReady = lecture.scenarioId
         ? isScenarioReady(
             scenarioById.get(lecture.scenarioId),
-            input.organizationId,
+            source.organizationId ?? input.organizationId,
           )
         : null;
       const blockedBy =
@@ -929,9 +941,14 @@ async function loadCourseViews(input: {
   });
 }
 
+/**
+ * Loads the public catalog, the current organization's catalog, and, for
+ * `memberUserId`, the catalog of every organization that user belongs to.
+ */
 async function loadVisibleCourseSources(
   db: DrizzleD1Database,
   organizationId: string | null,
+  memberUserId: string | null,
 ): Promise<CourseSource[]> {
   const scopeKeys = [
     courseCatalogScopeKey(null),
@@ -941,23 +958,37 @@ async function loadVisibleCourseSources(
     .select({
       scopeKey: courseCatalogs.scopeKey,
       organizationId: courseCatalogs.organizationId,
+      organizationName: organization.name,
       catalog: courseCatalogs.catalogJson,
     })
     .from(courseCatalogs)
-    .where(inArray(courseCatalogs.scopeKey, scopeKeys));
-  const byScope = new Map(rows.map((row) => [row.scopeKey, row]));
-  const publicSnapshot = byScope.get(courseCatalogScopeKey(null))
+    .leftJoin(organization, eq(organization.id, courseCatalogs.organizationId))
+    .where(
+      or(
+        inArray(courseCatalogs.scopeKey, scopeKeys),
+        memberUserId
+          ? inArray(
+              courseCatalogs.organizationId,
+              db
+                .select({ organizationId: member.organizationId })
+                .from(member)
+                .where(eq(member.userId, memberUserId)),
+            )
+          : undefined,
+      ),
+    )
+    .orderBy(courseCatalogs.scopeKey);
+  for (const row of rows) assertV2Snapshot(row.catalog);
+  const publicSnapshot = rows.find((row) => row.organizationId === null)
     ?.catalog;
-  const organizationSnapshot = organizationId
-    ? byScope.get(courseCatalogScopeKey(organizationId))?.catalog
-    : undefined;
-  if (publicSnapshot) assertV2Snapshot(publicSnapshot);
-  if (organizationSnapshot) assertV2Snapshot(organizationSnapshot);
+  const organizationRows = rows.filter((row) => row.organizationId !== null);
 
   const organizationScenarioIds = new Set(
-    organizationSnapshot
-      ? linkedScenarioIds(organizationSnapshot)
-      : [],
+    organizationRows.flatMap((row) =>
+      row.organizationId === organizationId
+        ? linkedScenarioIds(row.catalog)
+        : [],
+    ),
   );
   const publicSources = (publicSnapshot?.courses ?? []).flatMap((course) => {
     const lectures = course.lectures.filter(
@@ -969,17 +1000,19 @@ async function loadVisibleCourseSources(
           {
             scopeKey: courseCatalogScopeKey(null),
             organizationId: null,
+            organizationName: null,
             course: { ...course, lectures },
           },
         ]
       : [];
   });
-  const organizationSources = (organizationSnapshot?.courses ?? []).map(
-    (course) => ({
-      scopeKey: courseCatalogScopeKey(organizationId),
-      organizationId,
+  const organizationSources = organizationRows.flatMap((row) =>
+    row.catalog.courses.map((course) => ({
+      scopeKey: row.scopeKey,
+      organizationId: row.organizationId,
+      organizationName: row.organizationName,
       course,
-    }),
+    })),
   );
   return [...publicSources, ...organizationSources];
 }
@@ -1025,6 +1058,7 @@ function toCourseCatalogCourseForUser(
   return {
     courseId: course.course.courseId,
     organizationId: course.organizationId,
+    organizationName: course.organizationName,
     title: course.course.title,
     summary: course.course.summary,
     bodyMarkdown: course.course.bodyMarkdown,

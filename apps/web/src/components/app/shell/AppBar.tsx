@@ -132,7 +132,13 @@ export function buildCrumbs(
         ? { label: labelForFinal(acc, segment, overrides) }
         : {
             label: labelForAncestor(acc, segment, overrides),
-            to: breadcrumbTarget(acc),
+            // Private organization courses are listed on /courses too.
+            to:
+              organizationRoot &&
+              acc === `${organizationRoot}/courses` &&
+              pathname.startsWith(`${organizationRoot}/courses/private/`)
+                ? "/courses"
+                : breadcrumbTarget(acc),
           },
     );
   });

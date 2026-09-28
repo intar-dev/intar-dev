@@ -194,6 +194,9 @@ test("organization course breadcrumbs stay inside the learner frame", async ({
     "/organizations/org-platform/courses/public/operations",
   );
   await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
+  await expect(
+    page.getByRole("link", { name: "All organization courses" }),
+  ).toHaveAttribute("href", "/organizations/org-platform/courses");
 
   await page
     .getByRole("link", { name: /Repair a broken nginx service.*Resume/i })
@@ -214,6 +217,9 @@ test("organization course breadcrumbs stay inside the learner frame", async ({
 
   await publicBreadcrumb.getByRole("link", { name: "Courses" }).click();
   await page.getByRole("link", { name: /Platform repair sequence/i }).click();
+  await expect(
+    page.getByRole("link", { name: "All courses", exact: true }),
+  ).toHaveAttribute("href", "/courses");
   await page.getByRole("link", { name: /Private service context.*Read/i }).click();
   await expect(page.locator('[data-page-variant="page"]')).toHaveCount(1);
   const privateBreadcrumb = page.getByRole("navigation", {
@@ -221,7 +227,7 @@ test("organization course breadcrumbs stay inside the learner frame", async ({
   });
   await expect(
     privateBreadcrumb.getByRole("link", { name: "Courses" }),
-  ).toHaveAttribute("href", "/organizations/org-platform/courses");
+  ).toHaveAttribute("href", "/courses");
   await expect(
     privateBreadcrumb.getByRole("link", { name: "Platform repair sequence" }),
   ).toHaveAttribute(

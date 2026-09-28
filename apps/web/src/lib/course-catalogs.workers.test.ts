@@ -462,6 +462,65 @@ describe("V2 course catalogs", () => {
     expect(noMembership.courses).toEqual([]);
   });
 
+  it("adds member organization courses to the public catalog", async () => {
+    const db = drizzle(env.DB);
+    await seedLearnerAndHost();
+    await insertOrganization("org-a");
+    await insertOrganization("org-b");
+    await insertMembership("org-a");
+    await insertScenario(null, "shared");
+    await insertScenario("org-a", "org-a-task");
+    for (const [organizationId, catalog] of [
+      [null, snapshot(course("public-course", [lecture("public-shared", "shared")]))],
+      ["org-a", snapshot(course("org-a-course", [
+        lecture("org-a-shared", "shared"),
+        lecture("org-a-task", "org-a-task"),
+      ], false))],
+      ["org-b", snapshot(course("org-b-course", [lecture("org-b-theory")]))],
+    ] as const) {
+      await syncCourseCatalogSnapshot(db, {
+        snapshot: catalog,
+        sourceRevision: "revision",
+        organizationId,
+        nowUnixMs: 100,
+      });
+    }
+
+    const catalog = await listCourseCatalogForUser({
+      db,
+      userId: learnerId,
+      organizationId: null,
+    });
+
+    expect(catalog.courses.map((item) => item.courseId)).toEqual([
+      "public-course",
+      "org-a-course",
+    ]);
+    expect(catalog.courses).toMatchObject([
+      {
+        organizationId: null,
+        organizationName: null,
+        lectures: [{ lectureId: "public-shared", scenarioReady: true }],
+      },
+      {
+        organizationId: "org-a",
+        organizationName: "org-a",
+        lectures: [
+          { lectureId: "org-a-shared", scenarioReady: true },
+          { lectureId: "org-a-task", scenarioReady: true },
+        ],
+      },
+    ]);
+    await expect(
+      resolveCourseLectureForScenario({
+        db,
+        userId: learnerId,
+        organizationId: null,
+        scenarioId: "org-a-task",
+      }),
+    ).resolves.toBeNull();
+  });
+
   it("enforces sequence order, completes pure lectures, and resolves starts", async () => {
     const db = drizzle(env.DB);
     await seedLearnerAndHost();

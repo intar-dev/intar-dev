@@ -1,3 +1,4 @@
+import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isAccessResponseError, pollingIntervalUnlessAccessError, retryHttpResponseError } from "@/components/app/lib/http-response-error";
 import {
@@ -9,12 +10,14 @@ import {
   fetchCourseCatalog,
   fetchCourseLecture,
   findNextCourseLecture,
+  invalidateCourseCatalogs,
   type CourseCatalogCourse,
 } from "./course-wire";
 
 const publicCourse: CourseCatalogCourse = {
   courseId: "kubernetes",
   organizationId: null,
+  organizationName: null,
   title: "Kubernetes basics",
   summary: "Learn the core model.",
   bodyMarkdown: "Course theory.",
@@ -55,6 +58,16 @@ describe("course learner wire contract", () => {
       courseRouteForCatalogCourse(
         { ...publicCourse, organizationId: "team-a" },
         "team-a",
+      ),
+    ).toEqual({
+      scope: "organization-private",
+      courseId: "kubernetes",
+      organizationId: "team-a",
+    });
+    expect(
+      courseRouteForCatalogCourse(
+        { ...publicCourse, organizationId: "team-a" },
+        null,
       ),
     ).toEqual({
       scope: "organization-private",
@@ -213,6 +226,20 @@ describe("course learner wire contract", () => {
       "organization",
       "team-a",
     ]);
+  });
+
+  it("marks the public catalog stale when organization lecture state changes", () => {
+    const queryClient = new QueryClient();
+    const stale = () =>
+      [null, "team-a", "team-b"].map(
+        (scope) => queryClient.getQueryState(courseCatalogQueryKey(scope))?.isInvalidated,
+      );
+    for (const scope of [null, "team-a", "team-b"]) {
+      queryClient.setQueryData(courseCatalogQueryKey(scope), { courses: [] });
+    }
+
+    invalidateCourseCatalogs(queryClient, "team-a", "none");
+    expect(stale()).toEqual([true, true, false]);
   });
 });
 

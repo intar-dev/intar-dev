@@ -48,6 +48,7 @@ import {
   courseRouteForRun,
   fetchCourseCatalog,
   findNextCourseLecture,
+  invalidateCourseCatalogs,
   type CourseCatalogResponse,
   type CourseLectureDetailResponse,
   type CourseRouteRef,
@@ -219,10 +220,7 @@ export function ScenarioRunStart() {
         );
         // Mark stale without refetching: this page is about to leave, and the
         // next page that shows them reloads them on mount.
-        void queryClient.invalidateQueries({
-          queryKey: courseCatalogQueryKey(organizationId),
-          refetchType: "none",
-        });
+        invalidateCourseCatalogs(queryClient, organizationId, "none");
         void queryClient.invalidateQueries({
           queryKey: ["scenario-runs"],
           refetchType: "none",

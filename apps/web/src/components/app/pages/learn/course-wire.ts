@@ -1,3 +1,4 @@
+import type { QueryClient } from "@tanstack/react-query";
 import type { ScenarioDifficulty } from "@/generated/catalog";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
@@ -58,6 +59,7 @@ export interface CourseLectureSummary {
 export interface CourseCatalogCourse {
   courseId: string;
   organizationId: string | null;
+  organizationName: string | null;
   title: string;
   summary: string;
   bodyMarkdown: string;
@@ -118,6 +120,20 @@ export function courseCatalogQueryKey(organizationId: string | null) {
     : (["courses", "public"] as const);
 }
 
+/** Marks lecture state stale. The public catalog also lists organization courses. */
+export function invalidateCourseCatalogs(
+  queryClient: QueryClient,
+  organizationId: string | null,
+  refetchType: "active" | "none" = "active",
+): void {
+  for (const scope of organizationId ? [organizationId, null] : [null]) {
+    void queryClient.invalidateQueries({
+      queryKey: courseCatalogQueryKey(scope),
+      refetchType,
+    });
+  }
+}
+
 export async function fetchCourseCatalog(
   organizationId: string | null,
 ): Promise<CourseCatalogResponse> {
@@ -158,16 +174,18 @@ export function courseRouteForCatalogCourse(
   course: Pick<CourseCatalogCourse, "courseId" | "organizationId">,
   organizationId: string | null,
 ): CourseRouteRef {
-  if (!organizationId) {
+  // The public catalog links an organization's own course into that organization.
+  const routeOrganizationId = organizationId ?? course.organizationId;
+  if (!routeOrganizationId) {
     return { scope: "public", courseId: course.courseId, organizationId: null };
   }
   return {
     scope:
-      course.organizationId === organizationId
+      course.organizationId === routeOrganizationId
         ? "organization-private"
         : "organization-public",
     courseId: course.courseId,
-    organizationId,
+    organizationId: routeOrganizationId,
   };
 }
 

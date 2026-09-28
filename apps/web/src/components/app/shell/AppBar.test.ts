@@ -101,7 +101,7 @@ describe("buildCrumbs", () => {
         organizationOverrides,
       ),
     ).toEqual([
-      { label: "Courses", to: "/organizations/acme/courses" },
+      { label: "Courses", to: "/courses" },
       {
         label: "Linux operations",
         to: "/organizations/acme/courses/private/linux",

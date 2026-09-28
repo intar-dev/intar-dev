@@ -429,7 +429,7 @@ function CourseIndexItem({
         <span className="block pt-1">
           <MetaLine
             items={[
-              organizationId ? `${courseScope} course` : null,
+              organizationId ? `${courseScope} course` : course.organizationName,
               `${completed} of ${course.lectures.length} complete`,
               `${course.lectures.length} ${course.lectures.length === 1 ? "lecture" : "lectures"}`,
               totalMinutes ? `~${totalMinutes} min` : null,
@@ -476,7 +476,7 @@ function CourseDetail({
   return (
     <PageShell>
       <div className="space-y-4">
-        <CourseIndexBackLink organizationId={organizationId} />
+        <CourseIndexBackLink route={route} />
         <ContentHeader
           title={course.title}
           titleClassName="max-sm:sr-only"
@@ -547,11 +547,13 @@ function CourseDetail({
   );
 }
 
-function CourseIndexBackLink({ organizationId }: { organizationId: string | null }) {
-  return organizationId ? (
+// Private organization courses are listed on /courses too, so only an
+// organization's view of a public course returns to the organization catalog.
+function CourseIndexBackLink({ route }: { route: CourseRouteRef }) {
+  return route.scope === "organization-public" && route.organizationId ? (
     <Link
       to="/organizations/$orgId/courses"
-      params={{ orgId: organizationId }}
+      params={{ orgId: route.organizationId }}
       className="-ml-2 inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
     >
       <ArrowLeft className="size-4" aria-hidden />
