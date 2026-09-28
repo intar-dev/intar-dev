@@ -49,8 +49,9 @@ const RETRY_DELAY: Duration = if cfg!(test) {
 };
 /// The maintenance fence answers 503 without `Retry-After`.
 const UNAVAILABLE_RETRY_DELAY: Duration = Duration::from_secs(60);
-/// The expanded size of the kept files, the source bundle's own cap.
+/// The kept entries' size as a tar archive, the source bundle's own cap.
 const MAX_KEPT_BYTES: u64 = 4 * 1024 * 1024;
+const TAR_BLOCK_SIZE: u64 = 512;
 const MANIFEST_PATH: &str = "intar.yaml";
 const GITMODULES_PATH: &str = ".gitmodules";
 const SNAPSHOT_FILE: &str = "source.tar.gz";
@@ -126,21 +127,21 @@ fn unpack_snapshot(snapshot: &Path, root: &Path) -> Result<(), SourceCompileErro
         }
         let output = root.join(path);
         let entry_type = entry.header().entry_type();
-        if entry_type.is_dir() {
-            // An empty directory is how an archive shows a submodule, so
-            // the compile must see every one.
-            fs::create_dir_all(&output)
-                .with_context(|| format!("failed to create '{}'", path.display()))
-                .map_err(failed)?;
-            return Ok(ControlFlow::Continue(()));
-        }
-        if !entry_type.is_file() {
+        if !entry_type.is_dir() && !entry_type.is_file() {
             return Err(failed(anyhow!(
                 "'{}' is a link or special file; only regular files are supported",
                 path.display()
             )));
         }
-        kept_bytes = kept_bytes.saturating_add(entry.size());
+        // Charged as the bundle archive charges a file: a header block and
+        // the content in whole blocks, so empty entries count too.
+        kept_bytes = kept_bytes.saturating_add(
+            entry
+                .size()
+                .div_ceil(TAR_BLOCK_SIZE)
+                .saturating_mul(TAR_BLOCK_SIZE)
+                .saturating_add(TAR_BLOCK_SIZE),
+        );
         if kept_bytes > MAX_KEPT_BYTES {
             return Err(SourceCompileError {
                 code: SourceCompileErrorCode::BundleTooLarge,
@@ -149,6 +150,14 @@ fn unpack_snapshot(snapshot: &Path, root: &Path) -> Result<(), SourceCompileErro
                     path.display()
                 ),
             });
+        }
+        if entry_type.is_dir() {
+            // An empty directory is how an archive shows a submodule, so
+            // the compile must see every one.
+            fs::create_dir_all(&output)
+                .with_context(|| format!("failed to create '{}'", path.display()))
+                .map_err(failed)?;
+            return Ok(ControlFlow::Continue(()));
         }
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)
@@ -269,6 +278,8 @@ pub(crate) async fn run_supervisor(
     program: PathBuf,
     mut desired: watch::Receiver<Vec<DesiredSourceCompileV1>>,
 ) {
+    // A builder killed mid-compile left that compile's snapshot behind.
+    remove_work_dir(&work_dir).await;
     // Compiles that ended on this host; skipped while they stay desired.
     let mut finished: Vec<DesiredSourceCompileV1> = Vec::new();
     loop {
@@ -287,11 +298,7 @@ pub(crate) async fn run_supervisor(
             continue;
         };
         let result = run_compile(&bridge, &work_dir, &program, &compile, &mut desired).await;
-        if let Err(error) = tokio::fs::remove_dir_all(&work_dir).await
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            warn!(error = %error, "failed to remove the source compile directory");
-        }
+        remove_work_dir(&work_dir).await;
         match result {
             Ok(()) => finished.push(compile),
             Err(error) => {
@@ -304,6 +311,14 @@ pub(crate) async fn run_supervisor(
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         }
+    }
+}
+
+async fn remove_work_dir(work_dir: &Path) {
+    if let Err(error) = tokio::fs::remove_dir_all(work_dir).await
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        warn!(error = %error, "failed to remove the source compile directory");
     }
 }
 
@@ -346,6 +361,8 @@ async fn run_compile(
         .arg(work_dir)
         .arg(format!("--rev={}", compile.rev))
         .args(["--arch", builder_arch(&compile.arch)])
+        // The child's temporary directories go where a kill still removes them.
+        .env("TMPDIR", work_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .kill_on_drop(true)
