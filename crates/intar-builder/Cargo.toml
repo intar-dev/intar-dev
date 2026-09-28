@@ -17,7 +17,7 @@ intar-contracts = { path = "../intar-contracts" }
 intar-image-build = { path = "../intar-image-build" }
 intar-image-scenario = { path = "../intar-image-scenario" }
 intar-image-upload = { path = "../intar-image-upload" }
-reqwest = { workspace = true, features = ["rustls"] }
+reqwest = { workspace = true, features = ["multipart", "rustls"] }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -12,11 +12,13 @@ use fs2::{available_space, total_space};
 use futures_util::{Sink, SinkExt, StreamExt};
 use intar_contracts::bridge::{
     BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV8, BuildPhase,
-    BuildReportV1, ClientHelloV8, DesiredStateV8, HOST_DESIRED_STATE_SCHEMA_VERSION,
-    HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
-    HostRoleV1, HostStateReportV2, StateReportV8, SyncRequestReason, SyncRequestV8,
+    BuildReportV1, ClientHelloV8, DesiredSourceCompileV1, DesiredStateV8,
+    HOST_DESIRED_STATE_SCHEMA_VERSION, HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2,
+    HostCapacityV2, HostDesiredStateV2, HostRoleV1, HostStateReportV2, StateReportV8,
+    SyncRequestReason, SyncRequestV8,
 };
 use intar_contracts::catalog::{ImageArchitecture, Mib};
+use intar_image_build::source_bundle::platform_compile_digest;
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
@@ -27,7 +29,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
 
-use crate::bundle::validate_desired_build_identity;
+use crate::bundle::{validate_desired_build_identity, validate_desired_source_compile};
 use crate::config::{BridgeConfig, BuilderConfig};
 use crate::db::{BuildJobRow, BuilderDb};
 use crate::jobs::reconcile_desired_builds;
@@ -56,11 +58,18 @@ struct BuilderBootstrapResponse {
     ws_url: Option<String>,
 }
 
+/// Where an applied desired state goes: the build workers wait for `ready`
+/// to move, and the source compile supervisor follows `source_compiles`.
+pub struct DesiredStateSenders {
+    pub ready: watch::Sender<u64>,
+    pub source_compiles: watch::Sender<Vec<DesiredSourceCompileV1>>,
+}
+
 pub async fn run(
     cfg: BuilderConfig,
     db: BuilderDb,
     mut build_reports: mpsc::Receiver<BuildReportV1>,
-    desired_ready: watch::Sender<u64>,
+    desired: DesiredStateSenders,
 ) -> Result<()> {
     let http = HttpClient::builder()
         .timeout(Duration::from_secs(30))
@@ -83,7 +92,7 @@ pub async fn run(
             &db,
             &mut build_reports,
             &mut current_desired_state,
-            &desired_ready,
+            &desired,
             reconnect,
         )
         .await
@@ -108,7 +117,7 @@ async fn connect_once(
     db: &BuilderDb,
     build_reports: &mut mpsc::Receiver<BuildReportV1>,
     current_desired_state: &mut Option<HostDesiredStateV2>,
-    desired_ready: &watch::Sender<u64>,
+    desired: &DesiredStateSenders,
     reconnect: bool,
 ) -> Result<()> {
     let bootstrap = bootstrap_builder_access(&cfg.bridge, http).await?;
@@ -147,7 +156,7 @@ async fn connect_once(
             // the first connection attempt fails.
             last_applied_desired_version: advertised_desired_version(
                 current_desired_state.as_ref(),
-                *desired_ready.borrow() > 0,
+                *desired.ready.borrow() > 0,
             ),
         }),
     )
@@ -217,7 +226,7 @@ async fn connect_once(
                         cfg,
                         db,
                         current_desired_state,
-                        desired_ready,
+                        desired,
                         message,
                     ).await?;
                 }
@@ -244,7 +253,7 @@ async fn handle_server_message<W>(
     cfg: &BuilderConfig,
     db: &BuilderDb,
     current_desired_state: &mut Option<HostDesiredStateV2>,
-    desired_ready: &watch::Sender<u64>,
+    desired: &DesiredStateSenders,
     message: BridgeMessageV8,
 ) -> Result<()>
 where
@@ -256,8 +265,13 @@ where
             let desired_state = message.desired_state.clone();
             apply_desired_state(&cfg.bridge, db, &message)
                 .context("failed to apply builder desired state")?;
+            desired
+                .source_compiles
+                .send_replace(desired_state.source_compiles.clone());
             *current_desired_state = Some(desired_state);
-            desired_ready.send_modify(|revision| *revision = revision.saturating_add(1));
+            desired
+                .ready
+                .send_modify(|revision| *revision = revision.saturating_add(1));
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
             replay_desired_build_reports(
                 write,
@@ -534,7 +548,7 @@ fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV2 {
         // Builder hosts never broker learner run CLI requests or completion.
         supports_run_cli_v1: false,
         supports_run_cli_completion_v1: false,
-        source_compile_platform: None,
+        source_compile_platform: Some(platform_compile_digest()),
     }
 }
 
@@ -684,7 +698,7 @@ pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessage
             // Builder hosts never broker learner run CLI requests or completion.
             supports_run_cli_v1: false,
             supports_run_cli_completion_v1: false,
-            source_compile_platform: None,
+            source_compile_platform: Some(platform_compile_digest()),
         },
     })
 }
@@ -817,6 +831,9 @@ fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2) -> Result
     for build in &desired.builds {
         validate_desired_build_identity(build)?;
     }
+    for compile in &desired.source_compiles {
+        validate_desired_source_compile(compile)?;
+    }
     Ok(())
 }
 
@@ -889,17 +906,101 @@ mod tests {
 
     use std::path::Path;
 
-    use intar_contracts::bridge::{BridgeMessageV8, HostRoleV1};
+    use intar_contracts::bridge::{
+        BRIDGE_PROTOCOL_VERSION, BridgeMessageV8, DesiredSourceCompileV1, DesiredStateV8,
+        HostDesiredStateV2, HostRoleV1,
+    };
     use intar_contracts::catalog::ImageArchitecture;
+    use intar_image_build::source_bundle::platform_compile_digest;
+    use tokio::sync::watch;
 
     use crate::config::{BridgeConfig, BuilderConfig};
     use crate::db::BuilderDb;
 
     use super::{
-        BuilderClientHelloInput, advertised_desired_version, build_host_state_report,
-        build_reports_for_desired_jobs, builder_client_hello, can_open_char_device,
-        parse_meminfo_kib, validate_desired_state,
+        BuilderClientHelloInput, DesiredStateSenders, advertised_desired_version,
+        build_host_state_report, build_reports_for_desired_jobs, builder_client_hello,
+        can_open_char_device, handle_server_message, parse_meminfo_kib, validate_desired_state,
     };
+
+    fn desired_source_compiles(source_compiles: Vec<DesiredSourceCompileV1>) -> HostDesiredStateV2 {
+        HostDesiredStateV2 {
+            scope: intar_contracts::bridge::HostScope::Platform,
+            owner_user_id: "builder-owner".into(),
+            schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
+            host_id: "builder-1".to_string(),
+            version: 1,
+            generated_at_unix_ms: 1000,
+            cached_images: Vec::new(),
+            cached_guest_tools: Vec::new(),
+            vms: Vec::new(),
+            builds: Vec::new(),
+            source_compiles,
+        }
+    }
+
+    fn source_compile() -> DesiredSourceCompileV1 {
+        DesiredSourceCompileV1 {
+            compile_id: "compile-1".to_string(),
+            attempt: 1,
+            rev: "git-1-0123456789abcdef0123456789abcdef01234567-p00000000".to_string(),
+            validate_only: false,
+            arch: ImageArchitecture::X86_64,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_applied_desired_state_hands_its_compiles_to_the_supervisor() {
+        let db = BuilderDb::open_in_memory().unwrap();
+        let cfg = BuilderConfig {
+            bridge: BridgeConfig {
+                host_id: "builder-1".to_string(),
+                ..BridgeConfig::default()
+            },
+            ..BuilderConfig::default()
+        };
+        let (ready, ready_rx) = watch::channel(0);
+        let (source_compiles, source_compiles_rx) = watch::channel(Vec::new());
+        let senders = DesiredStateSenders {
+            ready,
+            source_compiles,
+        };
+        let message = BridgeMessageV8::DesiredState(DesiredStateV8 {
+            protocol_version: BRIDGE_PROTOCOL_VERSION,
+            host_id: "builder-1".to_string(),
+            desired_state: desired_source_compiles(vec![source_compile()]),
+            relay: None,
+        });
+
+        handle_server_message(
+            &mut futures_util::sink::drain(),
+            &cfg,
+            &db,
+            &mut None,
+            &senders,
+            message,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*source_compiles_rx.borrow(), [source_compile()]);
+        assert_eq!(*ready_rx.borrow(), 1);
+    }
+
+    #[test]
+    fn desired_state_rejects_an_unsafe_source_compile() {
+        let mut desired = desired_source_compiles(vec![source_compile()]);
+        validate_desired_state("builder-1", &desired).unwrap();
+
+        desired.source_compiles[0].compile_id = "../escape".to_string();
+        let error = validate_desired_state("builder-1", &desired).unwrap_err();
+        assert!(format!("{error:#}").contains("invalid compile id"));
+
+        desired.source_compiles[0] = source_compile();
+        desired.source_compiles[0].rev = "git-1 --out /".to_string();
+        let error = validate_desired_state("builder-1", &desired).unwrap_err();
+        assert!(format!("{error:#}").contains("invalid bundle rev"));
+    }
 
     #[test]
     fn reconnect_replays_reports_for_every_still_desired_local_job() {
@@ -976,6 +1077,10 @@ mod tests {
         assert!(!hello.capabilities.supports_vsock);
         assert!(!hello.capabilities.supports_run_cli_v1);
         assert!(!hello.capabilities.supports_run_cli_completion_v1);
+        assert_eq!(
+            hello.capabilities.source_compile_platform,
+            Some(platform_compile_digest())
+        );
     }
 
     #[test]
@@ -1028,6 +1133,10 @@ mod tests {
         assert_eq!(report.builds.len(), 1);
         assert_eq!(report.builds[0].build_id, "build-1");
         assert_eq!(report.builds[0].current_vm.as_deref(), Some("web"));
+        assert_eq!(
+            report.capabilities.source_compile_platform,
+            Some(platform_compile_digest())
+        );
     }
 
     #[test]

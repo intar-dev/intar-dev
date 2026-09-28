@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
 use fs2::FileExt as _;
-use intar_contracts::bridge::DesiredBuildV1;
+use intar_contracts::bridge::{DesiredBuildV1, DesiredSourceCompileV1};
 use intar_contracts::catalog::{
     CourseCatalogLectureV2, CourseCatalogSnapshotV2, ImageArchitecture,
 };
@@ -59,10 +59,7 @@ pub async fn download_bundle_archive(
     }
 
     let url = bundle_download_url(base_url, rev)?;
-    let response = reqwest::Client::builder()
-        .timeout(BUNDLE_DOWNLOAD_TIMEOUT)
-        .build()
-        .context("failed to initialize bundle download http client")?
+    let response = agent_http_client()?
         .get(&url)
         .bearer_auth(bearer_token.trim())
         .send()
@@ -104,6 +101,14 @@ pub async fn download_bundle_archive(
             )
         })?;
     Ok(archive_path)
+}
+
+/// The HTTP client for the builder's fenced agent registry routes.
+pub(crate) fn agent_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(BUNDLE_DOWNLOAD_TIMEOUT)
+        .build()
+        .context("failed to initialize agent registry http client")
 }
 
 pub fn validate_bundle_archive(archive_path: &Path) -> Result<()> {
@@ -638,6 +643,12 @@ pub fn validate_desired_build_identity(build: &DesiredBuildV1) -> Result<()> {
     Ok(())
 }
 
+/// The compile id and rev go into a request path and the child's argv.
+pub(crate) fn validate_desired_source_compile(compile: &DesiredSourceCompileV1) -> Result<()> {
+    validate_safe_slug(&compile.compile_id, "compile id")?;
+    validate_bundle_rev(&compile.rev)
+}
+
 pub(crate) fn validate_build_id(value: &str) -> Result<()> {
     validate_safe_slug(value, "build id")
 }
@@ -698,7 +709,7 @@ fn safe_archive_entry_path(path: &Path) -> Result<PathBuf> {
     Ok(safe)
 }
 
-fn builder_arch(arch: &ImageArchitecture) -> &'static str {
+pub(crate) fn builder_arch(arch: &ImageArchitecture) -> &'static str {
     match arch {
         ImageArchitecture::X86_64 => "amd64",
         ImageArchitecture::Aarch64 => "arm64",
