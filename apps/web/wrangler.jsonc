@@ -25,6 +25,9 @@
     "STARGATE_ADMIN_AUTH_HEADER": "cf-access-jwt-assertion",
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
+    // The GitHub App client fails closed while this or the
+    // GITHUB_APP_PRIVATE_KEY secret is empty.
+    "GITHUB_APP_CLIENT_ID": "",
   },
   "vpc_services": [
     {
