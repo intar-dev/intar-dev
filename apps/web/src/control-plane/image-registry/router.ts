@@ -1,4 +1,8 @@
-import { handleBundleUpload } from "./bundle";
+import {
+  handleBundleUpload,
+  handleSourceBundleUpload,
+  handleSourceCompilerDescriptor,
+} from "./bundle";
 import { handlePublish } from "./publish";
 import {
   handleUploadCreate,
@@ -44,6 +48,10 @@ import {
   type RegistryOperationLease,
 } from "@/lib/image-registry-admission";
 import type { ImageRegistryOperationKind } from "@/db/schema";
+import {
+  SOURCE_BUNDLES_PATH,
+  SOURCE_COMPILER_PATH,
+} from "@/generated/constants";
 
 export async function handleImageRegistryRequest(
   request: Request,
@@ -79,6 +87,15 @@ export async function handleImageRegistryRequest(
     return admitted(request, env, "POST", "bundle_put", () =>
       handleBundleUpload(request, env),
     );
+  }
+
+  // Scenario sources hold no writer: they only stage under builds/**, which
+  // the collector never sweeps.
+  if (url.pathname === SOURCE_BUNDLES_PATH) {
+    return handleSourceBundleUpload(request, env);
+  }
+  if (url.pathname === SOURCE_COMPILER_PATH) {
+    return handleSourceCompilerDescriptor(request, env);
   }
 
   if (url.pathname === "/registry/v1/publish") {
