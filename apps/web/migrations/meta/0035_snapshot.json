@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2f21f6a4-c859-474a-b78b-5a26adf7411a",
-  "prevId": "fbf23851-85d4-41e2-91e1-885121125401",
+  "id": "55dd132e-25d3-4c99-9cd7-1173212faeef",
+  "prevId": "2f21f6a4-c859-474a-b78b-5a26adf7411a",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -6381,6 +6381,406 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "scenario_source_commits": {
+      "name": "scenario_source_commits",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scope_key": {
+          "name": "scope_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sha": {
+          "name": "sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rev": {
+          "name": "rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "via": {
+          "name": "via",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "attempt": {
+          "name": "attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "detail": {
+          "name": "detail",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "diagnostics_json": {
+          "name": "diagnostics_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "compile_host_id": {
+          "name": "compile_host_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "compile_assigned_at": {
+          "name": "compile_assigned_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "check_run_id": {
+          "name": "check_run_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "scenario_source_commits_scope_rev_purpose_uidx": {
+          "name": "scenario_source_commits_scope_rev_purpose_uidx",
+          "columns": [
+            "scope_key",
+            "rev",
+            "purpose"
+          ],
+          "isUnique": true
+        },
+        "scenario_source_commits_state_updated_idx": {
+          "name": "scenario_source_commits_state_updated_idx",
+          "columns": [
+            "state",
+            "updated_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "scenario_source_commits_scope_key_scenario_sources_scope_key_fk": {
+          "name": "scenario_source_commits_scope_key_scenario_sources_scope_key_fk",
+          "tableFrom": "scenario_source_commits",
+          "tableTo": "scenario_sources",
+          "columnsFrom": [
+            "scope_key"
+          ],
+          "columnsTo": [
+            "scope_key"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "scenario_source_commits_compile_host_id_agent_hosts_id_fk": {
+          "name": "scenario_source_commits_compile_host_id_agent_hosts_id_fk",
+          "tableFrom": "scenario_source_commits",
+          "tableTo": "agent_hosts",
+          "columnsFrom": [
+            "compile_host_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "scenario_source_commits_purpose_check": {
+          "name": "scenario_source_commits_purpose_check",
+          "value": "\"scenario_source_commits\".\"purpose\" IN ('deploy', 'validate')"
+        },
+        "scenario_source_commits_via_check": {
+          "name": "scenario_source_commits_via_check",
+          "value": "\"scenario_source_commits\".\"via\" IN ('push', 'pull')"
+        },
+        "scenario_source_commits_state_check": {
+          "name": "scenario_source_commits_state_check",
+          "value": "\"scenario_source_commits\".\"state\" IN ('fetching', 'compiling', 'ingesting', 'building', 'waiting', 'promoting', 'awaiting_promote', 'live', 'failed', 'invalid', 'superseded', 'validated')"
+        }
+      }
+    },
+    "scenario_sources": {
+      "name": "scenario_sources",
+      "columns": {
+        "scope_key": {
+          "name": "scope_key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "github_installation_id": {
+          "name": "github_installation_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "github_repository_id": {
+          "name": "github_repository_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "github_repository": {
+          "name": "github_repository",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "default_branch": {
+          "name": "default_branch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mode": {
+          "name": "mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pull'"
+        },
+        "head_sha": {
+          "name": "head_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "head_observed_at": {
+          "name": "head_observed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "poked_at": {
+          "name": "poked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "polled_at": {
+          "name": "polled_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "target_rev": {
+          "name": "target_rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "live_rev": {
+          "name": "live_rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "live_sha": {
+          "name": "live_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "live_at": {
+          "name": "live_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "paused_at": {
+          "name": "paused_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "pause_reason": {
+          "name": "pause_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "disconnected_at": {
+          "name": "disconnected_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "disconnect_reason": {
+          "name": "disconnect_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "bound_by_user_id": {
+          "name": "bound_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "scenario_sources_organization_uidx": {
+          "name": "scenario_sources_organization_uidx",
+          "columns": [
+            "organization_id"
+          ],
+          "isUnique": true
+        },
+        "scenario_sources_connected_repository_uidx": {
+          "name": "scenario_sources_connected_repository_uidx",
+          "columns": [
+            "github_repository_id"
+          ],
+          "isUnique": true,
+          "where": "\"scenario_sources\".\"disconnected_at\" IS NULL"
+        }
+      },
+      "foreignKeys": {
+        "scenario_sources_organization_id_organization_id_fk": {
+          "name": "scenario_sources_organization_id_organization_id_fk",
+          "tableFrom": "scenario_sources",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "scenario_sources_bound_by_user_id_user_id_fk": {
+          "name": "scenario_sources_bound_by_user_id_user_id_fk",
+          "tableFrom": "scenario_sources",
+          "tableTo": "user",
+          "columnsFrom": [
+            "bound_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "scenario_sources_scope_check": {
+          "name": "scenario_sources_scope_check",
+          "value": "(\"scenario_sources\".\"scope_key\" = 'public' AND \"scenario_sources\".\"organization_id\" IS NULL) OR (\"scenario_sources\".\"scope_key\" = 'organization:' || \"scenario_sources\".\"organization_id\" AND \"scenario_sources\".\"organization_id\" IS NOT NULL)"
+        },
+        "scenario_sources_mode_check": {
+          "name": "scenario_sources_mode_check",
+          "value": "\"scenario_sources\".\"mode\" IN ('push', 'pull')"
+        },
+        "scenario_sources_pause_reason_check": {
+          "name": "scenario_sources_pause_reason_check",
+          "value": "\"scenario_sources\".\"pause_reason\" IN ('admin', 'binder_lost_admin', 'suspended')"
+        }
+      }
     },
     "session": {
       "name": "session",

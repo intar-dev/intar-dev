@@ -6,14 +6,17 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   member,
   organization,
+  scenarioSourceCommits,
+  scenarioSources,
   user,
   vmScenarios,
   vmScenarioVms,
 } from "@/db/schema";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import { errorChainMatches } from "@/lib/app-error";
-import { createOrganization } from "@/lib/organizations";
+import { createOrganization, deleteOrganization } from "@/lib/organizations";
 import { listEnabledScenarios, loadScenario } from "@/lib/scenarios";
+import { interleaveBefore } from "@/test/d1-interleave";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("organization boundaries", () => {
@@ -98,6 +101,65 @@ describe("organization boundaries", () => {
       scenarioId: "org-a-private",
       organizationId: "org-a",
     });
+  });
+
+  it("refuses deletion while a scenario source binding can still write", async () => {
+    const db = drizzle(env.DB);
+    await insertUser("owner");
+    await insertOrganization("org-a");
+    await db.insert(member).values({
+      id: "owner-member",
+      organizationId: "org-a",
+      userId: "owner",
+      role: "owner",
+      createdAt: new Date(),
+    });
+    const remove = () =>
+      deleteOrganization({ organizationId: "org-a", actorUserId: "owner" });
+    const binding = {
+      scopeKey: "organization:org-a",
+      organizationId: "org-a",
+      githubInstallationId: 1,
+      githubRepositoryId: 42,
+      githubRepository: "acme/scenarios",
+      defaultBranch: "main",
+    };
+
+    // A binding connected between the owned-resources read and the DELETE.
+    const race = interleaveBefore(/^delete from "organization"/iu, () =>
+      db.insert(scenarioSources).values(binding),
+    );
+    try {
+      await expect(remove()).rejects.toMatchObject({
+        code: "organization_not_empty",
+      });
+      expect(race.fired()).toBe(true);
+    } finally {
+      race.restore();
+    }
+    await expect(remove()).rejects.toMatchObject({
+      code: "organization_not_empty",
+    });
+
+    await db.update(scenarioSources).set({ disconnectedAt: 1 });
+    await db.insert(scenarioSourceCommits).values({
+      id: "commit-1",
+      scopeKey: binding.scopeKey,
+      purpose: "deploy",
+      sha: "abc",
+      rev: "git-abc",
+      via: "pull",
+      state: "ingesting",
+    });
+    await expect(remove()).rejects.toMatchObject({
+      code: "organization_not_empty",
+    });
+
+    await db.update(scenarioSourceCommits).set({ state: "failed" });
+    await remove();
+    expect(await db.select().from(organization)).toEqual([]);
+    expect(await db.select().from(scenarioSources)).toEqual([]);
+    expect(await db.select().from(scenarioSourceCommits)).toEqual([]);
   });
 });
 
