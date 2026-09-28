@@ -191,8 +191,9 @@ export async function countUnitGuardRuns(
  * catalog `public` applied, or the public binding's live rev (image-ops
  * retrying a committed 503), and no public promotion of another rev is in
  * flight. A superseded rev the binding abandoned, because its head went back
- * to live_rev, never goes live. The drained handler, its in-lock recheck and
- * build-status share it.
+ * to live_rev's commit, never goes live, even before a paused binding
+ * retargets. The drained handler, its in-lock recheck and build-status share
+ * it.
  */
 export async function publicSourceRevPromotable(
   d1: D1Database,
@@ -208,7 +209,8 @@ export async function publicSourceRevPromotable(
           AND NOT EXISTS (SELECT 1 FROM scenario_source_commits AS c
             JOIN scenario_sources AS s ON s.scope_key = c.scope_key
             WHERE c.scope_key = 'public' AND c.purpose = 'deploy' AND c.rev = ?1
-              AND c.state = 'superseded' AND s.target_rev IS s.live_rev) AS promotable`,
+              AND c.state = 'superseded'
+              AND (s.target_rev IS s.live_rev OR s.head_sha IS s.live_sha)) AS promotable`,
     )
     .bind(rev)
     .first<{ promotable: number | null }>();
