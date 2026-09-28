@@ -102,7 +102,12 @@ export async function mintInstallationToken(
         : { status: "transient" };
     }
     case 422:
-      return (await installationGone(jwt, input.installationId, path))
+      return (await installationGone(
+        jwt,
+        input.installationId,
+        path,
+        input.repositoryId,
+      ))
         ? { status: "gone" }
         : { status: "transient" };
     default:
@@ -184,18 +189,29 @@ export async function verifyRepositoryAdmin(
 }
 
 // A 422 mint is gone only when the App JWT confirms the installation or the
-// repository's installation is gone; a 301 or any other answer is transient.
+// repository's installation is gone. A bound repository renamed or
+// transferred since its name was stored answers 301; that is followed once,
+// and only to the bound id's installation. Any other answer is transient.
 async function installationGone(
   jwt: string,
   installationId: number,
   path: string,
+  repositoryId: number | undefined,
 ): Promise<boolean> {
   const installation = await githubApi(
     `/app/installations/${installationId}`,
     jwt,
   );
   if (installation?.status === 404) return true;
-  const repository = await githubApi(`${path}/installation`, jwt);
+  let repository = await githubApi(`${path}/installation`, jwt);
+  const moved = `/repositories/${repositoryId}/installation`;
+  if (
+    repository?.status === 301 &&
+    repositoryId !== undefined &&
+    repository.headers.get("location") === `${GITHUB_API}${moved}`
+  ) {
+    repository = await githubApi(moved, jwt);
+  }
   if (repository?.status === 404) return true;
   if (repository?.status !== 200) return false;
   const id = idOf(await json(repository));

@@ -90,6 +90,10 @@ function status(code: number): Route {
   return () => new Response(null, { status: code });
 }
 
+function moved(location: string): Route {
+  return () => new Response(null, { status: 301, headers: { location } });
+}
+
 function json(body: unknown, code = 200): Route {
   return () => Response.json(body, { status: code });
 }
@@ -267,12 +271,37 @@ describe("mintInstallationToken", () => {
       { [MINT_PATH]: status(422), [INSTALLATION_PATH]: status(404) },
     ],
     [
-      "a 422 whose repository answers 301",
+      "a 422 whose repository was transferred to another installation",
+      "gone",
+      {
+        [MINT_PATH]: status(422),
+        [INSTALLATION_PATH]: json({ id: 7, suspended_at: null }),
+        [REPO_INSTALLATION_PATH]: moved(
+          "https://api.github.com/repositories/42/installation",
+        ),
+        "GET /repositories/42/installation": json({ id: 8 }),
+      },
+    ],
+    [
+      "a 422 whose repository redirects to another repository",
       "transient",
       {
         [MINT_PATH]: status(422),
         [INSTALLATION_PATH]: json({ id: 7, suspended_at: null }),
-        [REPO_INSTALLATION_PATH]: status(301),
+        [REPO_INSTALLATION_PATH]: moved(
+          "https://api.github.com/repositories/43/installation",
+        ),
+      },
+    ],
+    [
+      "a 422 whose repository redirects off api.github.com",
+      "transient",
+      {
+        [MINT_PATH]: status(422),
+        [INSTALLATION_PATH]: json({ id: 7, suspended_at: null }),
+        [REPO_INSTALLATION_PATH]: moved(
+          "https://example.com/repositories/42/installation",
+        ),
       },
     ],
     ["a 502", "transient", { [MINT_PATH]: status(502) }],
