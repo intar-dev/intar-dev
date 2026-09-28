@@ -208,10 +208,10 @@ export async function handleCandidateCatalogPromotion(
       );
     }
     promoted = result.outcome;
-    // Every write of this promotion has landed: the rollback record, the catalog
-    // rows, the retirement markers, and the host cache updates. The writer is
-    // settled here and not later, because the sweep below is exactly the work a
-    // held writer would block.
+    // Every write of this promotion has landed: the rollback record (when an
+    // image rotated), the catalog rows, the retirement markers, and the host
+    // cache updates. The writer is settled here and not later, because the
+    // sweep below is exactly the work a held writer would block.
     await writer.release("ok");
   } finally {
     await writer.finish();
