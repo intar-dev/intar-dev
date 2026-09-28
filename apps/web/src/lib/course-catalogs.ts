@@ -4,8 +4,9 @@ import {
   inArray,
   isNotNull,
   isNull,
-  notInArray,
+  not,
   sql,
+  type SQLWrapper,
 } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
@@ -32,6 +33,11 @@ export type {
 const PUBLIC_COURSE_CATALOG_SCOPE = "public";
 const COURSE_COMPLETION_SCENARIO_READ_BATCH_SIZE = 96;
 const COURSE_COMPLETION_INSERT_BATCH_SIZE = 16;
+
+// D1 allows 100 bound parameters, and a catalog can link more scenarios than
+// that, so an id list travels as one JSON array.
+const inJson = (column: SQLWrapper, ids: readonly string[]) =>
+  sql`${column} IN (SELECT value FROM json_each(${JSON.stringify(ids)}))`;
 
 export type CourseLectureState =
   | "locked"
@@ -326,7 +332,7 @@ async function syncScenarioPresentationFromCourseCatalog(
       difficulty: vmScenarios.difficulty,
     })
     .from(vmScenarios)
-    .where(inArray(vmScenarios.scenarioId, scenarioIds));
+    .where(inJson(vmScenarios.scenarioId, scenarioIds));
   for (const row of rows) {
     if (row.organizationId !== input.organizationId) continue;
     const lecture = byScenario.get(row.scenarioId);
@@ -362,7 +368,7 @@ async function disableUnlinkedScenariosFromCourseCatalog(
     ? eq(vmScenarios.organizationId, input.organizationId)
     : isNull(vmScenarios.organizationId);
   const omitted = scenarioIds.length
-    ? notInArray(vmScenarios.scenarioId, scenarioIds)
+    ? not(inJson(vmScenarios.scenarioId, scenarioIds))
     : undefined;
 
   await db
@@ -862,7 +868,7 @@ async function loadCourseViews(input: {
             enabledAt: vmScenarios.enabledAt,
           })
           .from(vmScenarios)
-          .where(inArray(vmScenarios.scenarioId, scenarioIds))
+          .where(inJson(vmScenarios.scenarioId, scenarioIds))
       : Promise.resolve([]),
   ]);
   const completedUnitKeys = new Set(

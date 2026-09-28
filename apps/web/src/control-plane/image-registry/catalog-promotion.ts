@@ -919,7 +919,9 @@ export function outgoingFamilyImageIds(
 
 /**
  * True when the live catalog already carries exactly this revision and image
- * set, which makes the promotion request a retry of a committed promotion.
+ * set, enabled, which makes the promotion request a retry of a committed
+ * promotion. A later catalog may have disabled a row since; promoting the
+ * revision again enables it.
  */
 async function isCatalogAtRevision(
   db: DrizzleD1Database,
@@ -933,11 +935,12 @@ async function isCatalogAtRevision(
     .select({
       scenarioId: vmScenarios.scenarioId,
       sourceRevision: vmScenarios.sourceRevision,
+      enabled: vmScenarios.enabled,
     })
     .from(vmScenarios)
     .where(inArray(vmScenarios.scenarioId, scenarioIds));
   if (scenarios.length !== scenarioIds.length) return false;
-  if (scenarios.some((row) => row.sourceRevision !== revision)) return false;
+  if (scenarios.some((row) => row.sourceRevision !== revision || !row.enabled)) return false;
   return families.every((family) => {
     const live = liveImageIdsByFamily.get(familyKey(family)) ?? [];
     return (

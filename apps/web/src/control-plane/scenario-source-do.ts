@@ -9,7 +9,7 @@
 // that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, inArray, isNull, lt, not, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, not, sql } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   imageBuildBundles,
@@ -135,6 +135,10 @@ type Settled = { state: "invalid" | "superseded"; detail: string };
 type WriteOutcome = "done" | "retry" | Settled;
 
 const invalid = (detail: string): Settled => ({ state: "invalid", detail });
+
+/** D1 allows 100 bound parameters, so a commit's hashes travel as one JSON array. */
+const hashIn = (hashes: string[]) =>
+  sql`${imageBuilds.contentHash} IN (SELECT value FROM json_each(${JSON.stringify(hashes)}))`;
 
 /** The head rev, as SQL over the stored head sha. */
 const headRev = (scope: string, digest: string) =>
@@ -667,10 +671,11 @@ async function readStagedCommit(
   if (!isRecord(meta.source) || meta.source.scope !== label) {
     return invalid("the intar.yaml scope does not match this binding");
   }
-  const ids = [...new Set(meta.scenarios.map((scenario) => scenario.scenarioId))];
-  if (ids.length > MAX_SCENARIOS) {
-    return invalid(`${ids.length} scenarios exceed the limit of ${MAX_SCENARIOS}`);
+  // Entries, not ids: every later step reads one build per entry.
+  if (meta.scenarios.length > MAX_SCENARIOS) {
+    return invalid(`${meta.scenarios.length} scenario builds exceed the limit of ${MAX_SCENARIOS}`);
   }
+  const ids = [...new Set(meta.scenarios.map((scenario) => scenario.scenarioId))];
   const namespace = await namespaceRefusal(step, ids, step.organizationId === null ? null : label);
   if (namespace) return invalid(namespace);
 
@@ -776,7 +781,8 @@ async function writeBundle(
 // reset, and nothing else would restore live_rev. live_rev becomes the target
 // again, so heal restages it and apply promotes it once more, which restores
 // its catalog and re-enables what the other catalog disabled. The drain hold
-// and the unit guard hold it like any target.
+// and the unit guard hold it like any target. Supersede skips live_rev's row,
+// so a restore the head moved on from returns that row to `live`.
 async function retargetLiveRev(step: Step): Promise<void> {
   if (step.organizationId !== null) return;
   const abandoned = `SELECT live_rev FROM scenario_sources WHERE scope_key = ?1
@@ -793,6 +799,12 @@ async function retargetLiveRev(step: Step): Promise<void> {
     step.env.DB.prepare(
       `UPDATE scenario_source_commits SET state = 'building', detail = NULL, updated_at = ?3
         WHERE scope_key = ?1 AND purpose = 'deploy' AND state = 'live' AND rev IN (${abandoned})`,
+    ).bind(step.scopeKey, step.digest, now),
+    step.env.DB.prepare(
+      `UPDATE scenario_source_commits SET state = 'live', detail = NULL, updated_at = ?3
+        WHERE scope_key = ?1 AND purpose = 'deploy' AND state IN ('building', 'waiting', 'failed')
+          AND rev = (SELECT live_rev FROM scenario_sources WHERE scope_key = ?1)
+          AND rev IS NOT ${headRev("?1", "?2")}`,
     ).bind(step.scopeKey, step.digest, now),
   ]);
 }
@@ -835,7 +847,7 @@ async function failOrHeal(step: Step): Promise<"again" | "ready" | "idle"> {
           published: sql<number>`${imageBuilds.publishedManifestJson} IS NOT NULL`,
         })
         .from(imageBuilds)
-        .where(inArray(imageBuilds.contentHash, hashes))
+        .where(hashIn(hashes))
     : [];
   const staged = new Set(
     (
@@ -990,7 +1002,7 @@ async function replacesLiveImages(
       manifest: imageBuilds.publishedManifestJson,
     })
     .from(imageBuilds)
-    .where(inArray(imageBuilds.contentHash, hashes));
+    .where(hashIn(hashes));
   const incoming = incomingFamilyImages(
     meta.scenarios,
     meta.scenarios.map((item) =>
@@ -1134,18 +1146,21 @@ interface CheckRow {
   detail: string | null;
   diagnostics_json: string | null;
   check_run_id: number | null;
+  is_live_rev: number;
 }
 
-const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id
+const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id,
+    rev IS (SELECT live_rev FROM scenario_sources WHERE scope_key = ?1) AS is_live_rev
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
+// The summary says what a row waits for.
 const DEPLOY_CHECKS = {
   fetching: { status: "queued", title: "Queued" },
   ingesting: { status: "queued", title: "Queued" },
   compiling: { status: "in_progress", title: "Compiling" },
   building: { status: "in_progress", title: "Building" },
-  waiting: { status: "in_progress", title: "Waiting for active runs" },
+  waiting: { status: "in_progress", title: "Waiting" },
   promoting: { status: "in_progress", title: "Promoting" },
   awaiting_promote: { status: "in_progress", title: "Promoting" },
   live: { status: "completed", conclusion: "success", title: "Live" },
@@ -1204,11 +1219,7 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
         })
         .from(imageBuilds)
         .where(
-          and(
-            // D1 allows 100 bound parameters, so the hashes travel as one JSON array.
-            sql`${imageBuilds.contentHash} IN (SELECT value FROM json_each(${JSON.stringify(hashes)}))`,
-            sql`${imageBuilds.organizationId} IS ${step.organizationId}`,
-          ),
+          and(hashIn(hashes), sql`${imageBuilds.organizationId} IS ${step.organizationId}`),
         )
     : [];
   let built = 0;
@@ -1232,7 +1243,13 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
     !isHead && row.state !== "promoting" && DEPLOY_CHECKS[row.state].status !== "completed";
   const state = left ? "superseded" : row.state === "superseded" && isHead ? "fetching" : row.state;
   const check = DEPLOY_CHECKS[state];
-  const title = state === "building" ? `Building ${built}/${scenarios.length}` : check.title;
+  // live_rev in progress is a retarget restoring its catalog, not a new deploy.
+  const title =
+    row.is_live_rev && check.status !== "completed"
+      ? "Restoring"
+      : state === "building"
+        ? `Building ${built}/${scenarios.length}`
+        : check.title;
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),

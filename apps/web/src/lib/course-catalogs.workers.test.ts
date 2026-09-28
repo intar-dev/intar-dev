@@ -251,6 +251,63 @@ describe("V2 course catalogs", () => {
     await expectScenarioEnabled(db, "org-b-kept", true, 100);
   });
 
+  it("syncs a catalog that links more than D1's 100 bound parameters", async () => {
+    const db = drizzle(env.DB);
+    await insertOrganization("org-a");
+    const linked = Array.from({ length: 110 }, (_, index) => `org-a-${index}`);
+    for (const scenarioId of linked) await insertScenario("org-a", scenarioId);
+    await insertScenario("org-a", "org-a-removed");
+
+    await syncCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("organization", linked.map((scenarioId) => lecture(scenarioId, scenarioId))),
+      ),
+      sourceRevision: "organization-wide",
+      organizationId: "org-a",
+      nowUnixMs: 200,
+    });
+
+    const rows = await db
+      .select({ enabled: vmScenarios.enabled, sourceRevision: vmScenarios.sourceRevision })
+      .from(vmScenarios);
+    expect(rows.filter((row) => row.enabled && row.sourceRevision === "organization-wide"))
+      .toHaveLength(110);
+    await expectScenarioEnabled(db, "org-a-removed", false, null);
+  });
+
+  it("lists public and organization courses that link more than 100 scenarios", async () => {
+    const db = drizzle(env.DB);
+    await seedLearnerAndHost();
+    await insertOrganization("org-a");
+    await insertMembership("org-a");
+    for (const [organizationId, prefix] of [[null, "public"], ["org-a", "org-a"]] as const) {
+      const ids = Array.from({ length: 60 }, (_, index) => `${prefix}-${index}`);
+      for (const scenarioId of ids) await insertScenario(organizationId, scenarioId);
+      await syncCourseCatalogSnapshot(db, {
+        snapshot: snapshot(
+          course(`${prefix}-course`, ids.map((scenarioId) => lecture(scenarioId, scenarioId)), false),
+        ),
+        sourceRevision: `${prefix}-revision`,
+        organizationId,
+        nowUnixMs: 200,
+      });
+    }
+
+    const catalog = await listCourseCatalogForUser({
+      db,
+      userId: learnerId,
+      organizationId: "org-a",
+    });
+
+    expect(catalog.courses.map((item) => [item.courseId, item.lectures.length])).toEqual([
+      ["public-course", 60],
+      ["org-a-course", 60],
+    ]);
+    expect(
+      catalog.courses.flatMap((item) => item.lectures).every((item) => item.scenarioReady),
+    ).toBe(true);
+  });
+
   it("updates stored presentation fields for a Markdown-only publish", async () => {
     const db = drizzle(env.DB);
     await insertScenario(null, "task");

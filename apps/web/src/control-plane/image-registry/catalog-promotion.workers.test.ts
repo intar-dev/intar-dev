@@ -584,7 +584,13 @@ describe("scenario source revisions in the drained lane", () => {
     expect(await liveRevision()).toBe(REV);
     expect(await states()).toEqual({ [LIVE]: "superseded", [REV]: "live" });
     const [binding] = await db().select().from(scenarioSources);
-    expect(binding).toMatchObject({ liveRev: REV, liveSha: sha("a"), liveAt: expect.any(Number) });
+    // The poke lets the DO move the check off `Promoting` within a minute.
+    expect(binding).toMatchObject({
+      liveRev: REV,
+      liveSha: sha("a"),
+      liveAt: expect.any(Number),
+      pokedAt: expect.any(Number),
+    });
   });
 
   it("restages the candidates the collector retired", async () => {
