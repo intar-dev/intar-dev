@@ -1,3 +1,4 @@
+import { env } from "cloudflare:workers";
 import { traceOperation } from "./tracing";
 import { and, eq, exists, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
@@ -13,6 +14,8 @@ import {
 import type { BuildReportV1 } from "@/generated/bridge";
 import { appError } from "@/lib/app-error";
 import {
+  BUILDER_BUILD_SLOTS,
+  PRE_PUBLICATION_BUILD_PHASES,
   buildStatusFromPhase,
   SUPERSEDED_BUILD_ERROR_PREFIX,
   canRetryImageBuild,
@@ -37,6 +40,7 @@ import {
   withImageBuildCoordinationLock,
   withImageBuildCoordinationLocks,
 } from "@/lib/image-build-lock";
+import { platformCompileDigest } from "@/lib/image-build-format";
 
 /** Refuses a bundle rev that another scope already owns. */
 export async function assertBundleRevScope(
@@ -403,24 +407,15 @@ export async function assignQueuedImageBuilds(
   nowUnixMs: number,
 ): Promise<Array<{ buildId: string; hostId: string }>> {
   return traceOperation("build.assign", async () => {
-  const [queuedBuilds, builders] = await Promise.all([
+  const [queuedBuilds, builders, compileDigest] = await Promise.all([
     loadQueuedBuildRows(db),
     loadBuilderCandidates(db, nowUnixMs),
+    platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256),
   ]);
   const assigned: Array<{ buildId: string; hostId: string }> = [];
-  const activeCounts = new Map(
-    builders.map((builder) => [builder.hostId, builder.activeBuildCount]),
-  );
 
   for (const build of queuedBuilds) {
-    const builder = chooseLeastLoadedBuilder(
-      builders.map((candidate) => ({
-        ...candidate,
-        activeBuildCount:
-          activeCounts.get(candidate.hostId) ?? candidate.activeBuildCount,
-      })),
-      build.arch,
-    );
+    const builder = chooseLeastLoadedBuilder(builders, build, compileDigest);
     if (!builder) {
       continue;
     }
@@ -438,6 +433,10 @@ export async function assignQueuedImageBuilds(
           eq(imageBuilds.id, build.id),
           eq(imageBuilds.status, "queued"),
           isNull(imageBuilds.hostId),
+          // The candidate filter reads a snapshot. Passes run concurrently
+          // from every host's reports, and D1 runs each claim alone, so the
+          // slot cap holds only here.
+          sql`(SELECT count(*) FROM image_builds AS slot WHERE slot.host_id = ${builder.hostId} AND slot.status IN ('assigned', 'building') AND slot.phase IN ${PRE_PUBLICATION_BUILD_PHASES}) < ${BUILDER_BUILD_SLOTS}`,
         ),
       )
       .returning({ id: imageBuilds.id });
@@ -506,10 +505,8 @@ export async function assignQueuedImageBuilds(
       continue;
     }
 
-    activeCounts.set(
-      builder.hostId,
-      (activeCounts.get(builder.hostId) ?? 0) + 1,
-    );
+    builder.activeBuildCount += 1;
+    builder.prePublicationBuildCount += 1;
     assigned.push({ buildId: build.id, hostId: builder.hostId });
   }
 
@@ -738,6 +735,12 @@ export async function recordHostBuildReports(
   return { terminalBuildIds };
 }
 
+/**
+ * Round-robin across scopes: a row ranks by its scope's in-flight builds plus
+ * its place in the scope's own queue, and ties go to the older row. A refill
+ * frees one slot per pass, so the in-flight term is what makes single-slot
+ * refills alternate between scopes.
+ */
 async function loadQueuedBuildRows(db: DrizzleD1Database) {
   return db
     .select({
@@ -750,7 +753,12 @@ async function loadQueuedBuildRows(db: DrizzleD1Database) {
     })
     .from(imageBuilds)
     .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
-    .where(and(eq(imageBuilds.status, "queued"), isNull(imageBuilds.hostId)));
+    .where(and(eq(imageBuilds.status, "queued"), isNull(imageBuilds.hostId)))
+    .orderBy(
+      sql`(SELECT count(*) FROM image_builds AS in_flight WHERE in_flight.organization_id IS ${imageBuilds.organizationId} AND in_flight.status IN ('assigned', 'building')) + row_number() OVER (PARTITION BY ${imageBuilds.organizationId} ORDER BY ${imageBuilds.createdAt}, ${imageBuilds.id})`,
+      imageBuilds.createdAt,
+      imageBuilds.id,
+    );
 }
 
 async function requeueAssignedBuildsForDisconnectedHost(
@@ -970,18 +978,27 @@ async function loadBuilderCandidates(
     db
       .select({
         hostId: imageBuilds.hostId,
+        phase: imageBuilds.phase,
       })
       .from(imageBuilds)
       .where(inArray(imageBuilds.status, ["assigned", "building"])),
   ]);
 
   const activeBuildCount = new Map<string, number>();
+  const prePublicationBuildCount = new Map<string, number>();
+  const prePublicationPhases: readonly string[] = PRE_PUBLICATION_BUILD_PHASES;
   for (const build of activeBuilds) {
     if (!build.hostId) continue;
     activeBuildCount.set(
       build.hostId,
       (activeBuildCount.get(build.hostId) ?? 0) + 1,
     );
+    if (prePublicationPhases.includes(build.phase)) {
+      prePublicationBuildCount.set(
+        build.hostId,
+        (prePublicationBuildCount.get(build.hostId) ?? 0) + 1,
+      );
+    }
   }
 
   return hosts.map((host) => ({
@@ -999,6 +1016,9 @@ async function loadBuilderCandidates(
     ),
     disabled: Boolean(host.disabled),
     activeBuildCount: activeBuildCount.get(host.hostId) ?? 0,
+    prePublicationBuildCount: prePublicationBuildCount.get(host.hostId) ?? 0,
+    sourceCompilePlatform:
+      host.reportJson?.capabilities.source_compile_platform ?? null,
     capacity: host.reportJson?.capacity ?? null,
   }));
 }

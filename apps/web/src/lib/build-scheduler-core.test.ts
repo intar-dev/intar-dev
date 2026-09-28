@@ -174,9 +174,49 @@ describe("build scheduler core", () => {
           { ...builder("offline", "x86_64", 0), connected: false },
           { ...builder("agent", "x86_64", 0), role: "agent" },
         ],
-        "x86_64",
+        { arch: "x86_64", rev: "abc123" },
+        null,
       )?.hostId,
     ).toBe("builder-a");
+  });
+
+  it("skips builders whose build slots are taken before publication", () => {
+    expect(
+      chooseLeastLoadedBuilder(
+        [
+          { ...builder("full", "x86_64", 2), prePublicationBuildCount: 2 },
+          // Publishing builds free their build worker.
+          { ...builder("publishing", "x86_64", 4), prePublicationBuildCount: 1 },
+        ],
+        { arch: "x86_64", rev: "abc123" },
+        null,
+      )?.hostId,
+    ).toBe("publishing");
+    expect(
+      chooseLeastLoadedBuilder(
+        [{ ...builder("full", "x86_64", 2), prePublicationBuildCount: 2 }],
+        { arch: "x86_64", rev: "abc123" },
+        null,
+      ),
+    ).toBeNull();
+  });
+
+  it("sends git- builds only to builders on the Worker's compile digest", () => {
+    const candidates = [
+      { ...builder("old", "x86_64", 0), sourceCompilePlatform: "pold0000" },
+      builder("none", "x86_64", 0),
+      { ...builder("current", "x86_64", 1), sourceCompilePlatform: "pcur0000" },
+    ];
+    // The rev's own suffix is ignored: a deduplicated build keeps an old rev.
+    const git = { arch: "x86_64" as const, rev: "git-1-abc-pold0000" };
+    expect(chooseLeastLoadedBuilder(candidates, git, "pcur0000")?.hostId).toBe(
+      "current",
+    );
+    expect(chooseLeastLoadedBuilder(candidates, git, null)).toBeNull();
+    expect(
+      chooseLeastLoadedBuilder(candidates, { ...git, rev: "abc123" }, null)
+        ?.hostId,
+    ).toBe("none");
   });
 
   it("uses reported capacity as the equal-load builder tie-break", () => {
@@ -190,7 +230,8 @@ describe("build scheduler core", () => {
             memoryAvailableMib: 32_768,
           }),
         ],
-        "x86_64",
+        { arch: "x86_64", rev: "abc123" },
+        null,
       )?.hostId,
     ).toBe("builder-c");
   });
@@ -298,6 +339,8 @@ function builder(
     connected: true,
     disabled: false,
     activeBuildCount,
+    prePublicationBuildCount: 0,
+    sourceCompilePlatform: null as string | null,
     capacity: {
       total_cpu_millis: (capacity.cpuCount ?? 4) * 1_000,
       reserved_cpu_millis: 0,

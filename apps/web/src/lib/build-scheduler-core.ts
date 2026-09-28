@@ -9,6 +9,18 @@ import type { ImageBuildStatus, ImageBuildTimings } from "@/db/schema";
 export const BUILDER_REASSIGN_AFTER_MS = 10 * 60 * 1000;
 export const BUILD_REPORT_STALE_AFTER_MS = 30 * 60 * 1000;
 export const SUPERSEDED_BUILD_ERROR_PREFIX = "superseded by bundle ";
+/** intar-builder's maximum build workers (main.rs validate_job_config). */
+export const BUILDER_BUILD_SLOTS = 2;
+/**
+ * Phases that hold a build worker. Publishing and log upload run on the
+ * builder's separate publication workers, so they free a slot.
+ */
+export const PRE_PUBLICATION_BUILD_PHASES = [
+  "queued",
+  "fetching_sources",
+  "building_base",
+  "building",
+] as const satisfies readonly BuildPhase[];
 
 export interface BuilderCandidate {
   hostId: string;
@@ -17,6 +29,10 @@ export interface BuilderCandidate {
   connected: boolean;
   disabled: boolean;
   activeBuildCount: number;
+  /** Assigned or building rows still in a pre-publication phase. */
+  prePublicationBuildCount: number;
+  /** The platform compile digest the builder advertises. */
+  sourceCompilePlatform: string | null;
   capacity: HostCapacityV2 | null;
 }
 
@@ -131,10 +147,17 @@ export function canRetryImageBuild(
   );
 }
 
+/**
+ * A `git-` build goes only to a builder on the Worker's current compile
+ * digest, never one matched on the rev's suffix: a deduplicated build keeps
+ * the rev that first queued it.
+ */
 export function chooseLeastLoadedBuilder(
   candidates: BuilderCandidate[],
-  arch: ImageArchitecture,
+  build: { arch: ImageArchitecture; rev: string },
+  compileDigest: string | null,
 ): BuilderCandidate | null {
+  const needsDigest = build.rev.startsWith("git-");
   return (
     candidates
       .filter(
@@ -142,7 +165,11 @@ export function chooseLeastLoadedBuilder(
           candidate.role === "builder" &&
           candidate.connected &&
           !candidate.disabled &&
-          candidate.arch === arch,
+          candidate.arch === build.arch &&
+          candidate.prePublicationBuildCount < BUILDER_BUILD_SLOTS &&
+          (!needsDigest ||
+            (compileDigest !== null &&
+              candidate.sourceCompilePlatform === compileDigest)),
       )
       .sort((left, right) => {
         const load = left.activeBuildCount - right.activeBuildCount;

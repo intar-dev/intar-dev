@@ -20,6 +20,7 @@ const imageBuildLockMock = vi.hoisted(() => ({
   withImageBuildCoordinationLock: vi.fn(),
 }));
 
+vi.mock("cloudflare:workers", () => ({ env: {} }));
 vi.mock("@/lib/desired-state-store", () => desiredStateStoreMock);
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeWakeMock);
 vi.mock("@/lib/image-build-lock", () => imageBuildLockMock);
@@ -585,6 +586,7 @@ function assignmentDb(input: {
       innerJoin: vi.fn(() => chain),
       leftJoin: vi.fn(() => chain),
       where: vi.fn(() => chain),
+      orderBy: vi.fn(() => chain),
       limit: vi.fn(() => rows),
       then: rows.then.bind(rows),
     };

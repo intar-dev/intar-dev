@@ -19,6 +19,8 @@ export default defineConfig({
           BETTER_AUTH_URL: "http://localhost",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
+          PLATFORM_BASE_IMAGES_SHA256:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",
           SCENARIO_RUN_KEY_ENCRYPTION_SECRET: "test-run-key-secret",
           SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON:
