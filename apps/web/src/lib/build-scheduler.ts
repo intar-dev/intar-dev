@@ -11,6 +11,7 @@ import {
   type ImageBuildTimings,
 } from "@/db/schema";
 import type { BuildReportV1 } from "@/generated/bridge";
+import { appError } from "@/lib/app-error";
 import {
   buildStatusFromPhase,
   SUPERSEDED_BUILD_ERROR_PREFIX,
@@ -37,6 +38,28 @@ import {
   withImageBuildCoordinationLocks,
 } from "@/lib/image-build-lock";
 
+/** Refuses a bundle rev that another scope already owns. */
+export async function assertBundleRevScope(
+  db: DrizzleD1Database,
+  input: { rev: string; organizationId: string | null },
+): Promise<void> {
+  const [owner] = await db
+    .select({ organizationId: imageBuildBundles.organizationId })
+    .from(imageBuildBundles)
+    .where(eq(imageBuildBundles.rev, input.rev));
+  if (owner && owner.organizationId !== input.organizationId) {
+    throw revScopeConflict();
+  }
+}
+
+function revScopeConflict() {
+  return appError(
+    409,
+    "rev_scope_conflict",
+    "bundle revision belongs to another scope",
+  );
+}
+
 export async function queueImageBuildsFromBundle(
   db: DrizzleD1Database,
   input: {
@@ -49,7 +72,7 @@ export async function queueImageBuildsFromBundle(
 ): Promise<{ queued: number }> {
   return traceOperation("build.queue", async () => {
   const organizationId = input.organizationId ?? null;
-  await db
+  const [bundle] = await db
     .insert(imageBuildBundles)
     .values({
       rev: input.rev,
@@ -69,7 +92,9 @@ export async function queueImageBuildsFromBundle(
       },
       // A rev never changes scope.
       setWhere: sql`${imageBuildBundles.organizationId} IS excluded.organization_id`,
-    });
+    })
+    .returning({ rev: imageBuildBundles.rev });
+  if (!bundle) throw revScopeConflict();
 
   let queued = 0;
   for (const scenario of input.meta.scenarios) {

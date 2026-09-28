@@ -12,10 +12,12 @@ import {
   imageBuilds,
   organization,
   user,
+  type ImageBuildBundleMeta,
 } from "@/db/schema";
 import type { BuildReportV1, DesiredBuildV1 } from "@/generated/bridge";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import {
+  assertBundleRevScope,
   maintainHostBuildAssignments,
   queueImageBuildsFromBundle,
   reconcileAssignedBuildsForHost,
@@ -207,17 +209,31 @@ describe("build scheduler bundle supersession", () => {
     await db.insert(organization).values({
       id: "org-a", name: "Org A", slug: "org-a", createdAt: new Date(now),
     });
-    const queue = (organizationId: string | null, nowUnixMs: number) =>
+    const rev = "git-repo-sha-digest";
+    const queue = (
+      organizationId: string | null,
+      nowUnixMs: number,
+      scenarios: ImageBuildBundleMeta["scenarios"] = [],
+    ) =>
       queueImageBuildsFromBundle(db, {
-        rev: "git-repo-sha-digest",
-        r2Key: "builds/bundles/git-repo-sha-digest.tar.gz",
-        meta: { buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION, scenarios: [] },
+        rev,
+        r2Key: `builds/bundles/${rev}.tar.gz`,
+        meta: { buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION, scenarios },
         organizationId,
         nowUnixMs,
       });
+    const conflict = { status: 409, code: "rev_scope_conflict" };
 
+    await expect(assertBundleRevScope(db, { rev, organizationId: null })).resolves.toBeUndefined();
     await queue("org-a", now);
-    await queue(null, now + 1);
+    await expect(assertBundleRevScope(db, { rev, organizationId: null })).rejects.toMatchObject(conflict);
+    await expect(assertBundleRevScope(db, { rev, organizationId: "org-a" })).resolves.toBeUndefined();
+    // The other scope is refused before it queues a build for the rev.
+    await expect(
+      queue(null, now + 1, [
+        { scenarioId: "broken-nginx", arch: "x86_64", contentHash: "a".repeat(64) },
+      ]),
+    ).rejects.toMatchObject(conflict);
 
     await expect(
       db
@@ -227,6 +243,7 @@ describe("build scheduler bundle supersession", () => {
         })
         .from(imageBuildBundles),
     ).resolves.toEqual([{ organizationId: "org-a", updatedAt: now }]);
+    await expect(db.select().from(imageBuilds)).resolves.toEqual([]);
     // The same scope still refreshes its row.
     await queue("org-a", now + 2);
     await expect(

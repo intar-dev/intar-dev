@@ -17,6 +17,7 @@ const dbMock = vi.hoisted(() => {
 });
 
 const schedulerMock = vi.hoisted(() => ({
+  assertBundleRevScope: vi.fn(),
   assignQueuedImageBuilds: vi.fn(),
   queueImageBuildsFromBundle: vi.fn(),
 }));
@@ -168,6 +169,7 @@ export function resetImageRegistryMocks(): void {
   resetRegistryAdmissionMock();
   dbMock.drizzle.mockReset();
   dbMock.drizzle.mockImplementation(() => defaultAgentVisibilityDb());
+  schedulerMock.assertBundleRevScope.mockReset();
   schedulerMock.assignQueuedImageBuilds.mockReset();
   schedulerMock.queueImageBuildsFromBundle.mockReset();
   courseCatalogMock.syncCourseCatalogSnapshot.mockReset();
