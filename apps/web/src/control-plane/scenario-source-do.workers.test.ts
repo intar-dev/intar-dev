@@ -6,11 +6,15 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleAgentBootstrap, sha256Hex as sha256Text } from "@/control-plane/auth";
 import { GITHUB_WEBHOOK_PATH, handleGitHubWebhook } from "@/control-plane/github-webhook";
 import type { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
 import { sweepScenarioSources } from "@/control-plane/scenario-source-do";
+import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { normalizeCourseCatalogSnapshot } from "@/control-plane/image-registry/bundle";
+import { sha256Hex } from "@/control-plane/image-registry/shared";
 import {
+  agentBootstrapTokens,
   agentHosts,
   courseCatalogs,
   hostActualState,
@@ -29,7 +33,12 @@ import {
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import type { HostStateReportV2 } from "@/generated/bridge";
-import { SOURCE_COMPILER_VERSION } from "@/generated/constants";
+import {
+  AGENT_SOURCES_PATH,
+  SOURCE_BUNDLE_FIELD,
+  SOURCE_COMPILER_VERSION,
+  SOURCE_META_FIELD,
+} from "@/generated/constants";
 import hostReportFixture from "@/generated/fixtures/bridge/host-state-report-v2.json";
 import { maintainHostBuildAssignments, queueImageBuildsFromBundle } from "@/lib/build-scheduler";
 import { BUILDER_REASSIGN_AFTER_MS } from "@/lib/build-scheduler-core";
@@ -256,8 +265,8 @@ interface Commit {
   extraFiles?: Array<[string, Uint8Array]>;
 }
 
-/** A compiled commit's meta and bundle, as the producers stage them. */
-async function stage(commit: Commit = {}): Promise<void> {
+/** A compiled commit's meta and bundle, as the producers send them. */
+async function compiled(commit: Commit = {}) {
   const sha = commit.sha ?? SHA_A;
   const at = commit.digest ?? digest;
   const scenarioIds = commit.scenarioIds ?? ["acme-web"];
@@ -297,6 +306,14 @@ async function stage(commit: Commit = {}): Promise<void> {
     ...(commit.extraFiles ?? []),
   ];
   const bundle = await gzipBytes(buildTar(files.map(([path, bytes]) => ({ path, bytes }))));
+  return { meta, bundle };
+}
+
+/** A compiled commit, staged as the producers stage it. */
+async function stage(commit: Commit = {}): Promise<void> {
+  const sha = commit.sha ?? SHA_A;
+  const at = commit.digest ?? digest;
+  const { meta, bundle } = await compiled(commit);
   await env.VM_IMAGE_REGISTRY_BUCKET.put(`${prefix(sha, at)}meta.json`, JSON.stringify(meta));
   await env.VM_IMAGE_REGISTRY_BUCKET.put(`${prefix(sha, at)}bundle.tar.gz`, bundle);
 }
@@ -945,7 +962,7 @@ function scenarioManifest(scenarioId: string): ScenarioManifestV5 {
 }
 
 /** What the builder publish leaves: each open build succeeded, its candidate staged for `sha`. */
-async function publish(sha: string) {
+async function publish(sha: string, at = digest) {
   const open = await db().select().from(imageBuilds);
   for (const build of open.filter((row) => row.status !== "succeeded")) {
     const manifest = scenarioManifest(build.scenarioId);
@@ -954,8 +971,8 @@ async function publish(sha: string) {
       .set({ status: "succeeded", phase: "succeeded", publishedManifestJson: manifest })
       .where(eq(imageBuilds.id, build.id));
     await db().insert(scenarioCatalogCandidates).values({
-      id: `${ORG}:${rev(sha)}:${build.scenarioId}`,
-      revision: rev(sha),
+      id: `${ORG}:${rev(sha, at)}:${build.scenarioId}`,
+      revision: rev(sha, at),
       organizationId: ORG,
       scenarioId: build.scenarioId,
       buildId: build.id,
@@ -1484,6 +1501,15 @@ describe("ScenarioSourceDO pull delivery", () => {
     );
   }
 
+  /** Expires the running compile and runs the alarm that delivers it again. */
+  async function expireCompile() {
+    await db()
+      .update(scenarioSourceCommits)
+      .set({ compileAssignedAt: Date.now() - BUILDER_REASSIGN_AFTER_MS });
+    await clearFloor();
+    await pullTick();
+  }
+
   const tarballReads = (repository = "acme/labs") =>
     githubRequests.filter((request) => request.url.includes(`/repos/${repository}/tarball/`)).length;
 
@@ -1723,6 +1749,84 @@ describe("ScenarioSourceDO pull delivery", () => {
     expect((await desired("builder-1"))?.compiles).toBeUndefined();
   });
 
+  it("gives a formerly live row that is head again three fresh compile tries", async () => {
+    // It went live from attempt 1 and was superseded when live_rev moved.
+    await insertCommit(SHA_A, "superseded", { via: "pull", attempt: 1 });
+    github(tarball(SHA_A));
+    await pullTick();
+    expect((await rows())[0]).toMatchObject({ state: "compiling", attempt: 2, claimedAttempt: 1 });
+    for (const attempt of [3, 4]) {
+      await expireCompile();
+      expect((await rows())[0]).toMatchObject({ state: "compiling", attempt });
+    }
+
+    await expireCompile();
+    expect((await rows())[0]).toMatchObject({ state: "failed", detail: "compiler did not finish" });
+  });
+
+  it("takes an organization pull commit from its compile result to live", async () => {
+    // A digest whose base catalog is the staged base-images.hcl.
+    const baseImages = new TextEncoder().encode("base_image {}\n");
+    const overrides = { PLATFORM_BASE_IMAGES_SHA256: await sha256Hex(baseImages.buffer) };
+    const at = await platformCompileDigest(overrides.PLATFORM_BASE_IMAGES_SHA256);
+    if (!at) throw new Error("the base catalog digest is unset");
+    await seedBuilder("builder-2", at);
+    github(tarball(SHA_A));
+
+    await pullTick(overrides);
+    const [row] = await rows();
+    expect(row).toMatchObject({ rev: rev(SHA_A, at), state: "compiling", compileHostId: "builder-2" });
+
+    await db().insert(agentBootstrapTokens).values({
+      id: "builder-2-bootstrap",
+      hostId: "builder-2",
+      tokenHash: await sha256Text("builder-2-token"),
+      credentialGeneration: 1,
+      expiresAt: Date.now() + 60_000,
+    });
+    const bootstrap = await handleAgentBootstrap(
+      new Request("https://intar.test/agent/bootstrap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ hostId: "builder-2", bootstrapToken: "builder-2-token" }),
+      }),
+      env,
+    );
+    const { accessToken } = (await bootstrap.json()) as { accessToken: string };
+    const { meta, bundle } = await compiled({ sha: SHA_A, digest: at });
+    const form = new FormData();
+    form.set(SOURCE_META_FIELD, JSON.stringify(meta));
+    form.set(SOURCE_BUNDLE_FIELD, new Blob([new Uint8Array(bundle)]), `${rev(SHA_A, at)}.tar.gz`);
+    const multipart = new Response(form);
+    const body = await multipart.arrayBuffer();
+    const result = await handleImageRegistryRequest(
+      new Request(`https://intar.test${AGENT_SOURCES_PATH}/${row!.id}/result?attempt=${row!.attempt}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": multipart.headers.get("content-type") ?? "",
+          "content-length": String(body.byteLength),
+        },
+        body,
+      }),
+      { ...env, HOST_RUNTIME: hostRuntime, ...overrides } as unknown as Cloudflare.Env,
+    );
+    expect(result?.status, await result?.clone().text()).toBe(202);
+    expect(await commitState(SHA_A, at)).toMatchObject({ state: "ingesting" });
+
+    await pullTick(overrides);
+    expect(await commitState(SHA_A, at)).toMatchObject({ state: "building" });
+    await publish(SHA_A, at);
+    await pullTick(overrides);
+    expect(await commitState(SHA_A, at)).toMatchObject({ state: "live" });
+    expect(await binding()).toMatchObject({ liveRev: rev(SHA_A, at), liveSha: SHA_A });
+    expect(
+      await db()
+        .select({ organizationId: vmScenarios.organizationId, sourceRevision: vmScenarios.sourceRevision })
+        .from(vmScenarios),
+    ).toEqual([{ organizationId: ORG, sourceRevision: rev(SHA_A, at) }]);
+  });
+
   it("supersedes a compile on a digest bump and removes its entry", async () => {
     github(tarball(SHA_A));
     await pullTick();
@@ -1740,9 +1844,10 @@ describe("ScenarioSourceDO pull delivery", () => {
     expect(await rows()).toHaveLength(1);
   });
 
-  it.each(["invalid", "failed"] as const)("does not deliver a %s head again until a check_suite re-run", async (state) => {
+  it.each(["invalid", "failed"] as const)("does not deliver a %s head again until a check_suite re-run, which restarts its compile tries", async (state) => {
     github(tarball(SHA_A));
-    await insertCommit(SHA_A, state, { via: "pull", detail: "did not compile" });
+    // Three compiles used up.
+    await insertCommit(SHA_A, state, { via: "pull", attempt: 3, detail: "did not compile" });
     await pullTick();
     expect((await rows())[0]).toMatchObject({ state });
     expect(tarballReads()).toBe(0);
@@ -1763,7 +1868,13 @@ describe("ScenarioSourceDO pull delivery", () => {
     );
     expect(response.status).toBe(204);
     await pullTick();
-    expect((await rows())[0]).toMatchObject({ state: "compiling", attempt: 2, detail: null });
+    expect((await rows())[0]).toMatchObject({ state: "compiling", attempt: 5, detail: null });
+    for (const attempt of [6, 7]) {
+      await expireCompile();
+      expect((await rows())[0]).toMatchObject({ state: "compiling", attempt });
+    }
+    await expireCompile();
+    expect((await rows())[0]).toMatchObject({ state: "failed", detail: "compiler did not finish" });
   });
 
   it("lets the host runtime re-add a missing compile entry and drop a stale one", async () => {

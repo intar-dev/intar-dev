@@ -327,7 +327,8 @@ async function settleRefusedResult(
     .update(scenarioSourceCommits)
     .set({
       state: outdated
-        ? sql`CASE WHEN attempt >= ${MAX_COMPILE_ATTEMPTS} THEN 'failed' ELSE 'fetching' END`
+        ? sql`CASE WHEN attempt - COALESCE(claimed_attempt, 0) >= ${MAX_COMPILE_ATTEMPTS}
+            THEN 'failed' ELSE 'fetching' END`
         : "invalid",
       detail: body?.error ?? `refused with ${response.status}`,
       updatedAt: Date.now(),

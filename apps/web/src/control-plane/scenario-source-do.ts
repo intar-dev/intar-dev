@@ -432,12 +432,13 @@ async function deliver(step: Step, binding: ActiveBinding): Promise<void> {
 }
 
 // A compile past the builder lease comes back to fetching with its archive,
-// and one that expires on its third delivery fails the row.
+// and one that expires on the third delivery since its claim fails the row.
 async function expireCompiles(step: Step, now: number): Promise<void> {
+  const capped = "attempt - COALESCE(claimed_attempt, 0) >= ?4";
   const { results } = await step.env.DB.prepare(
     `UPDATE scenario_source_commits
-      SET state = CASE WHEN attempt >= ?4 THEN 'failed' ELSE 'fetching' END,
-        detail = CASE WHEN attempt >= ?4 THEN 'compiler did not finish' ELSE detail END,
+      SET state = CASE WHEN ${capped} THEN 'failed' ELSE 'fetching' END,
+        detail = CASE WHEN ${capped} THEN 'compiler did not finish' ELSE detail END,
         updated_at = ?1
       WHERE scope_key = ?2 AND state = 'compiling' AND compile_assigned_at <= ?3
       RETURNING rev, purpose, state, compile_host_id`,
@@ -460,7 +461,8 @@ async function claim(step: Step, head: HeadRow, now: number): Promise<CommitRow 
     FROM scenario_sources WHERE scope_key = ${step.scopeKey} AND mode = 'pull'
       AND head_sha = ${head.sha} AND ${scenarioSourceBindingPredicate()}
     ON CONFLICT (scope_key, rev, purpose) DO UPDATE SET state = 'fetching', via = 'pull',
-      detail = NULL, diagnostics_json = NULL, updated_at = excluded.updated_at
+      claimed_attempt = attempt, detail = NULL, diagnostics_json = NULL,
+      updated_at = excluded.updated_at
       WHERE scenario_source_commits.state = 'superseded'
     RETURNING id, rev, attempt, state`);
   if (row) await step.storage.delete(tryKey(row, "fetch"));

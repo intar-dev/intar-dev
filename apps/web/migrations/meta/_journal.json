@@ -253,6 +253,13 @@
       "when": 1790571718522,
       "tag": "0035_motionless_green_goblin",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1790603821610,
+      "tag": "0036_slim_quicksilver",
+      "breakpoints": true
     }
   ]
 }

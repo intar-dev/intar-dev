@@ -787,7 +787,10 @@ export async function tokenUploadGate(
 export const MAX_SOURCE_UPLOAD_BYTES = 4 * 1024 * 1024;
 /** The expanded git-bundle cap. */
 export const MAX_SOURCE_BUNDLE_TAR_BYTES = 4 * 1024 * 1024;
-/** A pull compile that expires, or is refused as outdated, at this attempt fails its row. */
+/**
+ * A pull compile that expires, or is refused as outdated, this many attempts
+ * after the row's claim fails its row.
+ */
 export const MAX_COMPILE_ATTEMPTS = 3;
 
 // A row in one of these states already holds the rev; a re-upload is a no-op.

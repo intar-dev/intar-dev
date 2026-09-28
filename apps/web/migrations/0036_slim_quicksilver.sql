@@ -1,0 +1,1 @@
+ALTER TABLE `scenario_source_commits` ADD `claimed_attempt` integer;
