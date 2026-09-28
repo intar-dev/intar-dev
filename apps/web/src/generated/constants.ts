@@ -12,6 +12,11 @@ export const VM_REPORT_SCHEMA_VERSION = 6;
 export const SOURCE_COMPILER_VERSION = "intar-source-compiler-v1";
 export const SOURCE_BUNDLES_PATH = "/registry/v1/sources/bundles";
 export const SOURCE_COMPILER_PATH = "/registry/v1/sources/compiler";
+/**
+ * `GET <prefix>/<compile_id>?attempt=<n>` returns the snapshot, and
+ * `POST <prefix>/<compile_id>/result?attempt=<n>` takes a multipart success
+ * or a JSON `SourceCompileFailureV1`, told apart by `Content-Type`.
+ */
 export const AGENT_SOURCES_PATH = "/agent/registry/sources";
 export const SOURCE_META_FIELD = "meta";
 export const SOURCE_BUNDLE_FIELD = "bundle";

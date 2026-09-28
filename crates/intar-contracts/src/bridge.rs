@@ -148,14 +148,14 @@ pub struct DesiredBuildV1 {
     pub bundle_ref: String,
 }
 
-/// One repository snapshot a builder compiles. It carries no secret and no
-/// scope: the Worker takes both from the compile row.
+/// One repository snapshot a builder compiles, fetched by `compile_id` and
+/// `attempt`. It carries no secret and no scope: the Worker takes both from
+/// the compile row.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DesiredSourceCompileV1 {
     pub compile_id: String,
     pub attempt: u32,
-    pub snapshot_ref: String,
     pub rev: String,
     pub validate_only: bool,
     pub arch: ImageArchitecture,

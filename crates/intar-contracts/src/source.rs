@@ -14,8 +14,13 @@ pub const SOURCE_COMPILER_VERSION: &str = "intar-source-compiler-v1";
 pub const SOURCE_BUNDLES_PATH: &str = "/registry/v1/sources/bundles";
 /// Public descriptor of the CLI release that compiles source bundles.
 pub const SOURCE_COMPILER_PATH: &str = "/registry/v1/sources/compiler";
-/// Builder prefix: the snapshot is `GET <prefix>/<compile_id>?attempt=<n>`
-/// and the result is `POST <prefix>/<compile_id>/result`.
+/// Builder prefix. Both routes are fenced on the `attempt` query parameter:
+/// - `GET <prefix>/<compile_id>?attempt=<n>` returns the snapshot;
+/// - `POST <prefix>/<compile_id>/result?attempt=<n>` takes the result. A
+///   success is `multipart/form-data` with the meta and bundle fields, and a
+///   failure is an `application/json` `SourceCompileFailureV1` whose
+///   `compile_id` and `attempt` match the path and query. The route tells
+///   the two apart by `Content-Type`.
 pub const AGENT_SOURCES_PATH: &str = "/agent/registry/sources";
 
 /// Multipart field carrying the bundle meta JSON.
@@ -58,8 +63,11 @@ pub enum SourceRefusalCode {
     IssuerUnsupported,
 }
 
-/// A source route refusal. The Worker's `AppErrorResponseBody` shape, with a
-/// mandatory code.
+/// The body of a refusal named by a `SourceRefusalCode`: the Worker's
+/// `AppErrorResponseBody` shape, with a mandatory code. Every other non-2xx
+/// answer from a source route is a plain `AppErrorResponseBody` whose `code`
+/// is absent or outside this enum, so clients decode it leniently and still
+/// print its `error`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceRefusalV1 {
