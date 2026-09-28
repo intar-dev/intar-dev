@@ -6,6 +6,7 @@ mod config;
 mod db;
 mod jobs;
 mod preflight;
+mod source_compile;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -81,6 +82,9 @@ enum Command {
     Doctor(DoctorCommand),
     Run(RunCommand),
     RunOnce(RunOnceCommand),
+    /// Compiles one repository snapshot; `run` starts it as a child process.
+    #[command(hide = true)]
+    CompileSource(source_compile::CompileSourceCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -131,6 +135,7 @@ async fn main() -> Result<()> {
         Command::Doctor(args) => doctor(args),
         Command::Run(args) => run(args).await,
         Command::RunOnce(args) => run_once(args).await,
+        Command::CompileSource(args) => source_compile::compile_source(&args),
     }
 }
 
@@ -193,6 +198,13 @@ async fn run(args: RunCommand) -> Result<()> {
         });
     }
     drop(report_tx);
+    let (source_compiles_tx, source_compiles_rx) = watch::channel(Vec::new());
+    tokio::spawn(source_compile::run_supervisor(
+        cfg.bridge.clone(),
+        cfg.builder.work_root.join("source-compile"),
+        builder_binary()?,
+        source_compiles_rx,
+    ));
 
     info!(
         host_id = %cfg.bridge.host_id,
@@ -203,7 +215,26 @@ async fn run(args: RunCommand) -> Result<()> {
         publication_workers = PUBLICATION_WORKERS,
         "builder daemon starting"
     );
-    bridge::run(cfg, db, report_rx, desired_ready_tx).await
+    bridge::run(
+        cfg,
+        db,
+        report_rx,
+        bridge::DesiredStateSenders {
+            ready: desired_ready_tx,
+            source_compiles: source_compiles_tx,
+        },
+    )
+    .await
+}
+
+/// The running binary, so a compile child always matches the compile digest
+/// this process advertises. On Linux `/proc/self/exe` still names it after an
+/// upgrade replaced the file on disk.
+fn builder_binary() -> Result<PathBuf> {
+    if cfg!(target_os = "linux") {
+        return Ok(PathBuf::from("/proc/self/exe"));
+    }
+    std::env::current_exe().context("failed to locate the intar-builder binary")
 }
 
 async fn run_once(args: RunOnceCommand) -> Result<()> {
