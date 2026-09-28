@@ -183,6 +183,27 @@ describe("mintInstallationToken", () => {
     await expect(verifyAppJwt(bearer(request))).resolves.toBeDefined();
   });
 
+  it("scopes a bind-time token by name before the id is known", async () => {
+    github({ [MINT_PATH]: json({ token: TOKEN }, 201) });
+
+    await expect(
+      mintInstallationToken(env, { installationId: 7, fullName: FULL_NAME }),
+    ).resolves.toEqual({ status: "ok", token: TOKEN });
+    expect(await requests[0]?.json()).toStrictEqual({
+      repositories: ["scenarios"],
+      permissions: { contents: "read", checks: "write", metadata: "read" },
+    });
+  });
+
+  it("refuses a name that is not owner/repo without calling GitHub", async () => {
+    github({});
+
+    await expect(
+      mintInstallationToken(env, { installationId: 7, fullName: "a/b/c" }),
+    ).resolves.toEqual({ status: "transient" });
+    expect(requests).toHaveLength(0);
+  });
+
   it.each<[string, string, Record<string, Route>]>([
     ["201", "ok", { [MINT_PATH]: json({ token: TOKEN }, 201) }],
     ["404", "gone", { [MINT_PATH]: status(404) }],
@@ -274,29 +295,61 @@ describe("mintInstallationToken", () => {
 });
 
 describe("readRepository", () => {
-  it("reads the name, the default branch and its head with the token", async () => {
+  const LISTING_PATH = "GET /installation/repositories";
+  const REPOSITORY = {
+    id: 42,
+    full_name: "acme/intar-scenarios",
+    default_branch: "release/main",
+  };
+
+  it("reads the token's repository under its current name, with its id", async () => {
+    // The repository was bound as intar-dev/scenarios, then transferred and
+    // renamed; its old name is never called.
     github({
-      "GET /repos/intar-dev/scenarios": json({
-        full_name: "intar-dev/Scenarios",
-        default_branch: "release/main",
-      }),
-      "GET /repos/intar-dev/scenarios/git/ref/heads/release/main": json({
+      [LISTING_PATH]: json({ total_count: 1, repositories: [REPOSITORY] }),
+      "GET /repos/acme/intar-scenarios/git/ref/heads/release/main": json({
         object: { sha: HEAD_SHA, type: "commit" },
       }),
     });
 
-    await expect(readRepository(TOKEN, FULL_NAME)).resolves.toEqual({
-      fullName: "intar-dev/Scenarios",
+    await expect(readRepository(TOKEN)).resolves.toEqual({
+      id: 42,
+      fullName: "acme/intar-scenarios",
       defaultBranch: "release/main",
       headSha: HEAD_SHA,
     });
     expect(requests.map(bearer)).toEqual([TOKEN, TOKEN]);
   });
 
-  it("returns null for a moved repository", async () => {
-    github({ "GET /repos/intar-dev/scenarios": status(301) });
+  it.each<[string, Record<string, Route>]>([
+    [
+      "a listing without a repository",
+      { [LISTING_PATH]: json({ repositories: [] }) },
+    ],
+    [
+      "a listing with two repositories",
+      {
+        [LISTING_PATH]: json({
+          repositories: [REPOSITORY, { ...REPOSITORY, id: 43 }],
+        }),
+      },
+    ],
+    [
+      "a repository without a numeric id",
+      { [LISTING_PATH]: json({ repositories: [{ ...REPOSITORY, id: "42" }] }) },
+    ],
+    [
+      "a ref that moved between the two reads",
+      {
+        [LISTING_PATH]: json({ repositories: [REPOSITORY] }),
+        "GET /repos/acme/intar-scenarios/git/ref/heads/release/main":
+          status(301),
+      },
+    ],
+  ])("returns null for %s", async (_, routes) => {
+    github(routes);
 
-    await expect(readRepository(TOKEN, FULL_NAME)).resolves.toBeNull();
+    await expect(readRepository(TOKEN)).resolves.toBeNull();
   });
 });
 

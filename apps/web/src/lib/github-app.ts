@@ -19,6 +19,7 @@ export type MintOutcome =
   | { status: "gone" | "suspended" | "transient" };
 
 export interface RepositoryHead {
+  id: number;
   fullName: string;
   defaultBranch: string;
   headSha: string;
@@ -47,19 +48,21 @@ export async function findRepositoryInstallation(
   const path = repositoryPath(`${owner}/${repo}`);
   if (!path) return null;
   const response = await githubApi(`${path}/installation`, await appJwt(env));
-  const id =
-    response?.status === 200 ? installationIdOf(await json(response)) : null;
+  const id = response?.status === 200 ? idOf(await json(response)) : null;
   return id === null ? null : { id };
 }
 
 /**
- * Mints a token for one repository. Only a 404 means gone outright; a 403,
- * 429 or 422 is confirmed through the App JWT, and no body text is read.
+ * Mints a token for one repository: by id once bound, and by name at bind
+ * time, before the id is known. Only a 404 means gone outright; a 403, 429
+ * or 422 is confirmed through the App JWT, and no body text is read.
  */
 export async function mintInstallationToken(
   env: GitHubAppEnv,
-  input: { installationId: number; repositoryId: number; fullName: string },
+  input: { installationId: number; fullName: string; repositoryId?: number },
 ): Promise<MintOutcome> {
+  const path = repositoryPath(input.fullName);
+  if (!path) return { status: "transient" };
   const jwt = await appJwt(env);
   const response = await githubApi(
     `/app/installations/${input.installationId}/access_tokens`,
@@ -67,7 +70,9 @@ export async function mintInstallationToken(
     {
       method: "POST",
       body: JSON.stringify({
-        repository_ids: [input.repositoryId],
+        ...(input.repositoryId === undefined
+          ? { repositories: [input.fullName.split("/")[1]] }
+          : { repository_ids: [input.repositoryId] }),
         // Repository and collaborator reads are Metadata endpoints.
         permissions: { contents: "read", checks: "write", metadata: "read" },
       }),
@@ -97,7 +102,7 @@ export async function mintInstallationToken(
         : { status: "transient" };
     }
     case 422:
-      return (await installationGone(jwt, input))
+      return (await installationGone(jwt, input.installationId, path))
         ? { status: "gone" }
         : { status: "transient" };
     default:
@@ -105,27 +110,35 @@ export async function mintInstallationToken(
   }
 }
 
-/** Reads the repository and its default-branch head; null when unreadable. */
+/**
+ * Reads the one repository the token is scoped to, and its default-branch
+ * head. No stored name is used, so a renamed or transferred repository is
+ * read under its current name. Null when unreadable, or when the listing
+ * holds anything but exactly one repository.
+ */
 export async function readRepository(
   token: string,
-  fullName: string,
 ): Promise<RepositoryHead | null> {
-  const path = repositoryPath(fullName);
-  if (!path) return null;
-  const repository = await githubApi(path, token);
-  if (repository?.status !== 200) return null;
-  const body = (await json(repository)) as {
+  const listing = await githubApi("/installation/repositories", token);
+  if (listing?.status !== 200) return null;
+  const repositories = (
+    (await json(listing)) as { repositories?: unknown } | null
+  )?.repositories;
+  if (!Array.isArray(repositories) || repositories.length !== 1) return null;
+  const body = repositories[0] as {
     full_name?: unknown;
     default_branch?: unknown;
   } | null;
   if (
     typeof body?.full_name !== "string" ||
-    !repositoryPath(body.full_name) ||
     typeof body.default_branch !== "string" ||
     !body.default_branch
   ) {
     return null;
   }
+  const id = idOf(body);
+  const path = repositoryPath(body.full_name);
+  if (id === null || !path) return null;
   const branch = body.default_branch
     .split("/")
     .map(encodeURIComponent)
@@ -136,6 +149,7 @@ export async function readRepository(
   const headSha = head?.object?.sha;
   if (typeof headSha !== "string" || !SHA_PATTERN.test(headSha)) return null;
   return {
+    id,
     fullName: body.full_name,
     defaultBranch: body.default_branch,
     headSha,
@@ -173,20 +187,19 @@ export async function verifyRepositoryAdmin(
 // repository's installation is gone; a 301 or any other answer is transient.
 async function installationGone(
   jwt: string,
-  input: { installationId: number; fullName: string },
+  installationId: number,
+  path: string,
 ): Promise<boolean> {
   const installation = await githubApi(
-    `/app/installations/${input.installationId}`,
+    `/app/installations/${installationId}`,
     jwt,
   );
   if (installation?.status === 404) return true;
-  const path = repositoryPath(input.fullName);
-  if (!path) return false;
   const repository = await githubApi(`${path}/installation`, jwt);
   if (repository?.status === 404) return true;
   if (repository?.status !== 200) return false;
-  const id = installationIdOf(await json(repository));
-  return id !== null && id !== input.installationId;
+  const id = idOf(await json(repository));
+  return id !== null && id !== installationId;
 }
 
 function repositoryPath(fullName: string): string | null {
@@ -196,7 +209,7 @@ function repositoryPath(fullName: string): string | null {
     : null;
 }
 
-function installationIdOf(body: unknown): number | null {
+function idOf(body: unknown): number | null {
   const id = (body as { id?: unknown } | null)?.id;
   return typeof id === "number" && Number.isSafeInteger(id) && id > 0
     ? id
