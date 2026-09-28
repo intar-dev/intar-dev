@@ -30,11 +30,14 @@ import {
 import {
   admitRegistryOperation,
   createRegistryWriterGuard,
+  type RegistryWriterGuard,
 } from "@/lib/image-registry-admission";
 import { withImageBuildCoordinationLocks } from "@/lib/image-build-lock";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import {
+  catalogRollbackRotates,
   catalogRollbackSnapshotStatement,
+  liveCatalogTransitionId,
   loadOutgoingReferenceBlockers,
   loadScenarioCatalogRollback,
   nextCatalogRollbackTimestamp,
@@ -55,13 +58,37 @@ import {
  * The committed result of one candidate promotion. Every field is read under
  * the per-family lock, so it describes the state this promotion installed.
  */
-interface CandidatePromotionOutcome {
+export interface CandidatePromotionOutcome {
   scenarioIds: string[];
   changedHostIds: string[];
   failedHostIds: string[];
   alreadyPromoted: boolean;
   evictedHostIds: string[];
+  /** True when this promotion wrote a rollback snapshot row. */
+  rollbackSnapshotRetained: boolean;
 }
+
+/** Why the promotion core refused. It wrote nothing. */
+export type CandidatePromotionRefusal =
+  | {
+      ok: false;
+      kind: "incomplete_builds" | "incomplete_catalog" | "ownership_conflict";
+      status: 409;
+      error: string;
+    }
+  | {
+      ok: false;
+      kind: "image_in_use";
+      status: 409;
+      error: string;
+      blockingExecutionIds: string[];
+      blockingHostIds: string[];
+      outgoingImageIds: string[];
+    };
+
+export type CandidatePromotionResult =
+  | { ok: true; outcome: CandidatePromotionOutcome }
+  | CandidatePromotionRefusal;
 
 export async function handleCandidateCatalogPromotion(
   request: Request,
@@ -162,188 +189,25 @@ export async function handleCandidateCatalogPromotion(
   const writer = createRegistryWriterGuard(admitted.lease);
   let promoted: CandidatePromotionOutcome | undefined;
   try {
-    const expected = bundle.meta.scenarios;
-    // The candidate and build reads are deliberately inside the same per-family
-    // locks a direct live publish takes, so no other replacement can move the
-    // catalog between the read and the commit.
-    const locked = await withImageBuildCoordinationLocks(
-      db,
-      expected.map((item) => ({ scenarioId: item.scenarioId, arch: item.arch })),
-      async () => {
-        const builds = await db
-          .select({
-            id: imageBuilds.id,
-            scenarioId: imageBuilds.scenarioId,
-            arch: imageBuilds.arch,
-            contentHash: imageBuilds.contentHash,
-            status: imageBuilds.status,
-            manifest: imageBuilds.publishedManifestJson,
-          })
-          .from(imageBuilds)
-          .where(inArray(imageBuilds.contentHash, expected.map((item) => item.contentHash)));
-        const exactBuilds = expected.map((item) =>
-          builds.find(
-            (build) =>
-              build.scenarioId === item.scenarioId &&
-              build.arch === item.arch &&
-              build.contentHash === item.contentHash,
-          ),
-        );
-        if (
-          exactBuilds.some(
-            (build) => !build || build.status !== "succeeded" || !build.manifest,
-          )
-        ) {
-          return jsonResponse({ error: "candidate builds are not complete" }, 409);
-        }
-
-        const expectedScenarioIds = [...new Set(expected.map((item) => item.scenarioId))].sort();
-        const incomingFamilies = incomingFamilyImages(expected, exactBuilds);
-        const liveImageIdsByFamily = await loadFamilyImageIdsMap(db, incomingFamilies);
-        // A retry of an already promoted revision must not re-snapshot the promoted
-        // catalog into the rollback slot, and must not re-validate candidate rows
-        // the first attempt already consumed.
-        const alreadyPromoted = await isCatalogAtRevision(
-          db,
-          revision,
-          incomingFamilies,
-          liveImageIdsByFamily,
-        );
-        const outgoingImageIds = outgoingFamilyImageIds(
-          incomingFamilies,
-          liveImageIdsByFamily,
-        );
-
-        const candidates = alreadyPromoted
-          ? []
-          : await db
-          .select({
-            scenarioId: scenarioCatalogCandidates.scenarioId,
-            buildId: scenarioCatalogCandidates.buildId,
-            manifest: scenarioCatalogCandidates.manifestJson,
-          })
-          .from(scenarioCatalogCandidates)
-          .where(
-            and(
-              eq(scenarioCatalogCandidates.revision, revision),
-              bundle.organizationId
-                ? eq(scenarioCatalogCandidates.organizationId, bundle.organizationId)
-                : isNull(scenarioCatalogCandidates.organizationId),
-            ),
-          );
-        const candidateScenarioIds = candidates.map((item) => item.scenarioId).sort();
-        if (
-          !alreadyPromoted &&
-          JSON.stringify(candidateScenarioIds) !== JSON.stringify(expectedScenarioIds)
-        ) {
-          return jsonResponse({ error: "candidate catalog is incomplete" }, 409);
-        }
-
-        const ownership = await db
-          .select({
-            scenarioId: vmScenarios.scenarioId,
-            organizationId: vmScenarios.organizationId,
-          })
-          .from(vmScenarios)
-          .where(inArray(vmScenarios.scenarioId, expectedScenarioIds));
-        if (
-          ownership.some(
-            (row) => row.organizationId !== bundle.organizationId,
-          )
-        ) {
-          return jsonResponse({ error: "candidate catalog ownership conflict" }, 409);
-        }
-
-        const blockers = await loadOutgoingReferenceBlockers(db, {
-          organizationId: bundle.organizationId,
-          scenarioIds: expectedScenarioIds,
-          outgoingImageIds,
-        });
-        if (blockers.executionIds.length || blockers.hostIds.length) {
-          return jsonResponse(
-            {
-              error: "catalog promotion is blocked by active image use",
-              blocking_execution_ids: blockers.executionIds,
-              blocking_host_ids: blockers.hostIds,
-              outgoing_image_ids: outgoingImageIds,
-            },
-            409,
-          );
-        }
-
-          // The previous rows are the rollback of record. They are captured through
-        // the shared replacement helper, so a promotion and a direct live publish
-        // record the same shape and neither can rotate a rollback on a repeat.
-        const rollbackSnapshot = await loadScenarioCatalogRollback(
-          db,
-          expectedScenarioIds,
-        );
-        const statements: D1PreparedStatement[] = [];
-        if (!alreadyPromoted) {
-          statements.push(
-            catalogRollbackSnapshotStatement(env.DB, {
-              id: catalogSnapshotId(bundle.organizationId, revision),
-              revision,
-              organizationId: bundle.organizationId,
-              rollback: rollbackSnapshot,
-              // The record must be the newest one for the family, so a live publish
-              // that already recorded a rollback cannot carry a later timestamp than
-              // the promotion that replaced it.
-              createdAt: await nextCatalogRollbackTimestamp(db, {
-                organizationId: bundle.organizationId,
-                previous: rollbackSnapshot,
-                nowUnixMs: now,
-              }),
-            }),
-          );
-        }
-        for (const candidate of candidates) {
-          const rows = catalogRowsFromScenarioManifest(candidate.manifest, {
-            enabled: true,
-            organizationId: bundle.organizationId,
-            sourceRevision: revision,
-            nowUnixMs: now,
-          });
-          statements.push(
-            scenarioUpsert(env.DB, rows.scenario),
-            env.DB.prepare("DELETE FROM vm_scenario_probes WHERE scenario_id = ?").bind(
-              rows.scenario.scenarioId,
-            ),
-            env.DB.prepare("DELETE FROM vm_scenario_vms WHERE scenario_id = ?").bind(
-              rows.scenario.scenarioId,
-            ),
-          );
-          for (const vm of rows.vms) statements.push(vmInsert(env.DB, vm));
-          for (const probe of rows.probes) statements.push(probeInsert(env.DB, probe));
-        }
-        // The first mutating write of this promotion. From here a throw must
-        // leave the writer unresolved instead of claiming nothing changed.
-        writer.markWriteStarted();
-        if (statements.length) await env.DB.batch(statements);
-
-        const retention = await applyImageRetentionAfterCatalogChange(db, env, {
-          organizationId: bundle.organizationId,
-          incomingFamilies,
-          previousImageIdsByFamily: liveImageIdsByFamily,
-          nowUnixMs: now,
-        });
-        const cache = await reconcileScenarioImagesForPublicationScope(db, {
-          publicationOrganizationId: bundle.organizationId,
-          nowUnixMs: now,
-          wakeHostRuntime: (hostId) =>
-            tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
-        });
-        return {
-          scenarioIds: expectedScenarioIds,
-          changedHostIds: cache.changedHostIds,
-          failedHostIds: cache.failedHostIds,
-          alreadyPromoted,
-          evictedHostIds: retention.evictedHostIds,
-        };
-      },
-    );
-    if (locked instanceof Response) return locked;
-    promoted = locked;
+    const result = await promoteCandidateRevision(env, db, writer, {
+      revision,
+      bundle,
+      nowUnixMs: now,
+    });
+    if (!result.ok) {
+      return jsonResponse(
+        result.kind === "image_in_use"
+          ? {
+              error: result.error,
+              blocking_execution_ids: result.blockingExecutionIds,
+              blocking_host_ids: result.blockingHostIds,
+              outgoing_image_ids: result.outgoingImageIds,
+            }
+          : { error: result.error },
+        result.status,
+      );
+    }
+    promoted = result.outcome;
     // Every write of this promotion has landed: the rollback record, the catalog
     // rows, the retirement markers, and the host cache updates. The writer is
     // settled here and not later, because the sweep below is exactly the work a
@@ -399,11 +263,254 @@ export async function handleCandidateCatalogPromotion(
     revision,
     scenario_ids: promoted.scenarioIds,
     changed_host_ids: promoted.changedHostIds,
-    rollback_snapshot_retained: true,
+    rollback_snapshot_retained: promoted.rollbackSnapshotRetained,
     retried: promoted.alreadyPromoted,
     evicted_host_ids: promoted.evictedHostIds,
     cleanup: cleanupPayload(cleanup),
   });
+}
+
+/**
+ * The locked promotion core: validates a candidate revision under the
+ * per-family locks and commits it. The caller admits `writer` before the call
+ * and settles it after, and a refusal has written nothing.
+ */
+export async function promoteCandidateRevision(
+  env: Cloudflare.Env,
+  db: DrizzleD1Database,
+  writer: RegistryWriterGuard,
+  input: {
+    revision: string;
+    bundle: { organizationId: string | null; meta: ImageBuildBundleMeta };
+    nowUnixMs: number;
+  },
+): Promise<CandidatePromotionResult> {
+  const { revision, bundle, nowUnixMs: now } = input;
+  const expected = bundle.meta.scenarios;
+  // The candidate and build reads are deliberately inside the same per-family
+  // locks a direct live publish takes, so no other replacement can move the
+  // catalog between the read and the commit.
+  return withImageBuildCoordinationLocks(
+    db,
+    expected.map((item) => ({ scenarioId: item.scenarioId, arch: item.arch })),
+    async (): Promise<CandidatePromotionResult> => {
+      const builds = await db
+        .select({
+          id: imageBuilds.id,
+          scenarioId: imageBuilds.scenarioId,
+          arch: imageBuilds.arch,
+          contentHash: imageBuilds.contentHash,
+          status: imageBuilds.status,
+          manifest: imageBuilds.publishedManifestJson,
+        })
+        .from(imageBuilds)
+        .where(inArray(imageBuilds.contentHash, expected.map((item) => item.contentHash)));
+      const exactBuilds = expected.map((item) =>
+        builds.find(
+          (build) =>
+            build.scenarioId === item.scenarioId &&
+            build.arch === item.arch &&
+            build.contentHash === item.contentHash,
+        ),
+      );
+      if (
+        exactBuilds.some(
+          (build) => !build || build.status !== "succeeded" || !build.manifest,
+        )
+      ) {
+        return {
+          ok: false,
+          kind: "incomplete_builds",
+          status: 409,
+          error: "candidate builds are not complete",
+        };
+      }
+
+      const expectedScenarioIds = [...new Set(expected.map((item) => item.scenarioId))].sort();
+      const incomingFamilies = incomingFamilyImages(expected, exactBuilds);
+      const liveImageIdsByFamily = await loadFamilyImageIdsMap(db, incomingFamilies);
+      // A retry of an already promoted revision must not re-snapshot the promoted
+      // catalog into the rollback slot, and must not re-validate candidate rows
+      // the first attempt already consumed.
+      const alreadyPromoted = await isCatalogAtRevision(
+        db,
+        revision,
+        incomingFamilies,
+        liveImageIdsByFamily,
+      );
+      const outgoingImageIds = outgoingFamilyImageIds(
+        incomingFamilies,
+        liveImageIdsByFamily,
+      );
+
+      const candidates = alreadyPromoted
+        ? []
+        : await db
+        .select({
+          scenarioId: scenarioCatalogCandidates.scenarioId,
+          buildId: scenarioCatalogCandidates.buildId,
+          manifest: scenarioCatalogCandidates.manifestJson,
+        })
+        .from(scenarioCatalogCandidates)
+        .where(
+          and(
+            eq(scenarioCatalogCandidates.revision, revision),
+            bundle.organizationId
+              ? eq(scenarioCatalogCandidates.organizationId, bundle.organizationId)
+              : isNull(scenarioCatalogCandidates.organizationId),
+          ),
+        );
+      const candidateScenarioIds = candidates.map((item) => item.scenarioId).sort();
+      if (
+        !alreadyPromoted &&
+        JSON.stringify(candidateScenarioIds) !== JSON.stringify(expectedScenarioIds)
+      ) {
+        return {
+          ok: false,
+          kind: "incomplete_catalog",
+          status: 409,
+          error: "candidate catalog is incomplete",
+        };
+      }
+
+      const ownership = await db
+        .select({
+          scenarioId: vmScenarios.scenarioId,
+          organizationId: vmScenarios.organizationId,
+        })
+        .from(vmScenarios)
+        .where(inArray(vmScenarios.scenarioId, expectedScenarioIds));
+      if (
+        ownership.some(
+          (row) => row.organizationId !== bundle.organizationId,
+        )
+      ) {
+        return {
+          ok: false,
+          kind: "ownership_conflict",
+          status: 409,
+          error: "candidate catalog ownership conflict",
+        };
+      }
+
+      const blockers = await loadOutgoingReferenceBlockers(db, {
+        organizationId: bundle.organizationId,
+        scenarioIds: expectedScenarioIds,
+        outgoingImageIds,
+      });
+      if (blockers.executionIds.length || blockers.hostIds.length) {
+        return {
+          ok: false,
+          kind: "image_in_use",
+          status: 409,
+          error: "catalog promotion is blocked by active image use",
+          blockingExecutionIds: blockers.executionIds,
+          blockingHostIds: blockers.hostIds,
+          outgoingImageIds,
+        };
+      }
+
+      // The previous rows are the rollback of record. A live publish records one
+      // only when an image changes, and so does a promotion: only the scenarios
+      // whose artifact identity rotates are captured. A text-only commit, a
+      // first publication, and a committed retry (which has no candidates)
+      // rotate nothing, so the last image release's rollback stays the newest
+      // row and no row ever has empty targets.
+      const previous = await loadScenarioCatalogRollback(db, expectedScenarioIds);
+      const rotatingIds = candidates
+        .filter((candidate) =>
+          catalogRollbackRotates({
+            previous: rollbackOf(previous, [candidate.scenarioId]),
+            manifest: candidate.manifest,
+          }),
+        )
+        .map((candidate) => candidate.scenarioId);
+      const statements: D1PreparedStatement[] = [];
+      if (rotatingIds.length) {
+        const rollback = rollbackOf(previous, rotatingIds);
+        statements.push(
+          catalogRollbackSnapshotStatement(env.DB, {
+            // Every transition gets its own row: d1 -> d2 -> d1 records d2's
+            // state in a new row instead of reusing the first d1 row.
+            id: liveCatalogTransitionId(now),
+            revision,
+            organizationId: bundle.organizationId,
+            rollback,
+            // The record must be the newest one for the family, so a live publish
+            // that already recorded a rollback cannot carry a later timestamp than
+            // the promotion that replaced it.
+            createdAt: await nextCatalogRollbackTimestamp(db, {
+              organizationId: bundle.organizationId,
+              previous: rollback,
+              nowUnixMs: now,
+            }),
+          }),
+        );
+      }
+      for (const candidate of candidates) {
+        const rows = catalogRowsFromScenarioManifest(candidate.manifest, {
+          enabled: true,
+          organizationId: bundle.organizationId,
+          sourceRevision: revision,
+          nowUnixMs: now,
+        });
+        statements.push(
+          scenarioUpsert(env.DB, rows.scenario),
+          env.DB.prepare("DELETE FROM vm_scenario_probes WHERE scenario_id = ?").bind(
+            rows.scenario.scenarioId,
+          ),
+          env.DB.prepare("DELETE FROM vm_scenario_vms WHERE scenario_id = ?").bind(
+            rows.scenario.scenarioId,
+          ),
+        );
+        for (const vm of rows.vms) statements.push(vmInsert(env.DB, vm));
+        for (const probe of rows.probes) statements.push(probeInsert(env.DB, probe));
+      }
+      // The first mutating write of this promotion. From here a throw must
+      // leave the writer unresolved instead of claiming nothing changed.
+      writer.markWriteStarted();
+      if (statements.length) await env.DB.batch(statements);
+
+      const retention = await applyImageRetentionAfterCatalogChange(db, env, {
+        organizationId: bundle.organizationId,
+        incomingFamilies,
+        previousImageIdsByFamily: liveImageIdsByFamily,
+        nowUnixMs: now,
+      });
+      const cache = await reconcileScenarioImagesForPublicationScope(db, {
+        publicationOrganizationId: bundle.organizationId,
+        nowUnixMs: now,
+        wakeHostRuntime: (hostId) =>
+          tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+      });
+      return {
+        ok: true,
+        outcome: {
+          scenarioIds: expectedScenarioIds,
+          changedHostIds: cache.changedHostIds,
+          failedHostIds: cache.failedHostIds,
+          alreadyPromoted,
+          evictedHostIds: retention.evictedHostIds,
+          rollbackSnapshotRetained: rotatingIds.length > 0,
+        },
+      };
+    },
+  );
+}
+
+/** The part of a rollback capture that covers the given scenarios. */
+function rollbackOf(
+  previous: ScenarioCatalogRollbackV1,
+  scenarioIds: readonly string[],
+): ScenarioCatalogRollbackV1 {
+  const keep = new Set(scenarioIds);
+  return {
+    schemaVersion: 1,
+    targetScenarioIds: previous.targetScenarioIds.filter((id) => keep.has(id)),
+    scenarios: previous.scenarios.filter((row) => keep.has(row.scenarioId)),
+    vms: previous.vms.filter((row) => keep.has(row.scenarioId)),
+    probes: previous.probes.filter((row) => keep.has(row.scenarioId)),
+  };
 }
 
 /**
@@ -632,13 +739,6 @@ export async function handleCatalogRollback(
     restored_scenario_ids: restored.scenarioIds,
     changed_host_ids: restored.changedHostIds,
   });
-}
-
-function catalogSnapshotId(
-  organizationId: string | null,
-  revision: string,
-): string {
-  return `${organizationId ?? "public"}:${revision}:pre-promotion`;
 }
 
 export interface IncomingFamily {
