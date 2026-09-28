@@ -12,6 +12,7 @@ import {
   imageBuildBundles,
   imageBuilds,
   organization,
+  scenarioSources,
   user,
   type ImageBuildBundleMeta,
 } from "@/db/schema";
@@ -28,6 +29,7 @@ import {
   maintainHostBuildAssignments,
   queueImageBuildsFromBundle,
   reconcileAssignedBuildsForHost,
+  recordHostBuildReports,
   recordImageBuildReport,
   retryImageBuild,
 } from "@/lib/build-scheduler";
@@ -747,6 +749,49 @@ describe("build scheduler fairness", () => {
     await expect(assignQueuedImageBuilds(db, FAIR_NOW)).resolves.toEqual([
       { buildId: "git-build", hostId: "builder-current" },
     ]);
+  });
+
+  it("pokes a bound scope's source when a report ends one of its git- builds", async () => {
+    const db = drizzle(env.DB);
+    await seedConnectedBuilder(db, "builder-1");
+    const gitRev = (org: string) => `git-${org.length}-${org}-p00000000`;
+    await db
+      .insert(imageBuildBundles)
+      .values([scheduledBundle(gitRev("org-a"), "org-a"), scheduledBundle(gitRev("org-b"), "org-b")]);
+    const running = { status: "building", phase: "building", hostId: "builder-1" } as const;
+    await db.insert(imageBuilds).values([
+      scheduledBuild("legacy-a", { ...running, organizationId: "org-a" }),
+      scheduledBuild("git-b", { ...running, organizationId: "org-b", rev: gitRev("org-b") }),
+      scheduledBuild("git-a", { ...running, organizationId: "org-a", rev: gitRev("org-a") }),
+    ]);
+    await db.insert(scenarioSources).values({
+      scopeKey: "organization:org-a",
+      organizationId: "org-a",
+      githubInstallationId: 1,
+      githubRepositoryId: 1,
+      githubRepository: "acme/labs",
+      defaultBranch: "main",
+      boundByUserId: "user-1",
+    });
+    const record = (ids: string[]) =>
+      recordHostBuildReports(
+        db,
+        "builder-1",
+        ids.map((id) => ({ ...buildReport(id, "a"), scenario_id: id })),
+        FAIR_NOW,
+        { sessionId: "builder-1-session", credentialGeneration: 1 },
+      );
+    const pokedAt = async () =>
+      (await db.select({ pokedAt: scenarioSources.pokedAt }).from(scenarioSources))[0]?.pokedAt;
+
+    // A legacy build of the bound scope and a git- build of an unbound one.
+    await expect(record(["legacy-a", "git-b"])).resolves.toEqual({
+      terminalBuildIds: ["legacy-a", "git-b"],
+    });
+    expect(await pokedAt()).toBeNull();
+
+    await record(["git-a"]);
+    expect(await pokedAt()).toBe(FAIR_NOW);
   });
 });
 

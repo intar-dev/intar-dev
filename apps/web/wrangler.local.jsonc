@@ -78,12 +78,20 @@
         "name": "HOST_RUNTIME",
         "class_name": "HostRuntimeDO",
       },
+      {
+        "name": "SCENARIO_SOURCE",
+        "class_name": "ScenarioSourceDO",
+      },
     ],
   },
   "migrations": [
     {
       "tag": "v3",
       "new_sqlite_classes": ["HostRuntimeDO"],
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["ScenarioSourceDO"],
     },
   ],
 }

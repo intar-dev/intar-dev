@@ -736,6 +736,15 @@ export async function recordHostBuildReports(
       terminalBuildIds.push(report.build_id);
     }
   }
+  if (terminalBuildIds.length) {
+    // An ended `git-` build pokes its scope's scenario source, so the next
+    // cron tick promotes the commit; an unbound scope matches no row.
+    await db.run(sql`UPDATE scenario_sources SET poked_at = ${nowUnixMs}
+      WHERE scope_key IN (SELECT CASE WHEN organization_id IS NULL THEN 'public'
+          ELSE 'organization:' || organization_id END
+        FROM image_builds
+        WHERE rev LIKE 'git-%' AND ${inArray(imageBuilds.id, terminalBuildIds)})`);
+  }
   return { terminalBuildIds };
 }
 

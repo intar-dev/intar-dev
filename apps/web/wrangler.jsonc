@@ -118,6 +118,11 @@
         "name": "HOST_RUNTIME",
         "class_name": "HostRuntimeDO",
       },
+      {
+        // One per scenario source binding, named by its scope key.
+        "name": "SCENARIO_SOURCE",
+        "class_name": "ScenarioSourceDO",
+      },
     ],
   },
   "migrations": [
@@ -143,6 +148,12 @@
         "ScenarioWorkflowDO",
         "ScenarioWorkflowSchedulerDO",
       ],
+    },
+    {
+      // A revert that stops exporting ScenarioSourceDO must add a
+      // `deleted_classes: ["ScenarioSourceDO"]` migration in the same deploy.
+      "tag": "v5",
+      "new_sqlite_classes": ["ScenarioSourceDO"],
     },
   ],
   "observability": {

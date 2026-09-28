@@ -6,6 +6,10 @@ import { handleHostEnrollment } from "@/control-plane/host-enrollment";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
 import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
+import {
+  ScenarioSourceDO,
+  sweepScenarioSources,
+} from "@/control-plane/scenario-source-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   GITHUB_WEBHOOK_PATH,
@@ -116,7 +120,17 @@ export default {
         }),
       );
     }
+    try {
+      await sweepScenarioSources(env);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "scenario_source_sweep_failed",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 
-export { HostRuntimeDO, MaintenanceState };
+export { HostRuntimeDO, MaintenanceState, ScenarioSourceDO };

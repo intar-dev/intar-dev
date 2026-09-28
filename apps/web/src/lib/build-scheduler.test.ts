@@ -692,6 +692,8 @@ function buildReportDb(input: {
     select,
     update,
     updateSet,
+    // The scenario source poke after terminal reports.
+    run: vi.fn().mockResolvedValue({}),
   };
 }
 

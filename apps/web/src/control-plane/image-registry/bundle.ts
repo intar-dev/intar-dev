@@ -47,7 +47,7 @@ import {
   isScenarioDifficulty,
 } from "./shared";
 
-type ParsedBundleMeta = ImageBuildBundleMeta & {
+export type ParsedBundleMeta = ImageBuildBundleMeta & {
   courseCatalog: CourseCatalogSnapshotV2;
 };
 
@@ -291,7 +291,8 @@ export class ScenarioBundleIngestError extends Error {
  * first write, and the scope's catalog changes only with `applyCatalog`, so a
  * candidate-only ingest writes just the bundle, build and candidate rows.
  * A rev that another scope owns is refused before the put, so it never
- * replaces that scope's archive. A refusal is rethrown as is; any other failure
+ * replaces that scope's archive. Without a payload, the archive this rev
+ * already stored is reused. A refusal is rethrown as is; any other failure
  * throws a {@link ScenarioBundleIngestError} and may have committed part of the
  * ingest.
  */
@@ -300,7 +301,7 @@ export async function ingestScenarioBundle(
   db: DrizzleD1Database,
   input: {
     rev: string;
-    payload: ArrayBuffer;
+    payload?: ArrayBuffer | undefined;
     meta: ParsedBundleMeta;
     organizationId: string | null;
     applyCatalog: boolean;
@@ -327,11 +328,13 @@ export async function ingestScenarioBundle(
     await assertBundleRevScope(db, { rev, organizationId });
 
     const bundleKey = bundleObjectKey(rev);
-    stage = "store_bundle";
-    await env.VM_IMAGE_REGISTRY_BUCKET.put(bundleKey, input.payload, {
-      httpMetadata: { contentType: "application/gzip" },
-      customMetadata: { rev },
-    });
+    if (input.payload) {
+      stage = "store_bundle";
+      await env.VM_IMAGE_REGISTRY_BUCKET.put(bundleKey, input.payload, {
+        httpMetadata: { contentType: "application/gzip" },
+        customMetadata: { rev },
+      });
+    }
 
     const now = Date.now();
     stage = "queue_builds";
@@ -963,20 +966,26 @@ export function inspectTarArchive(bytes: Uint8Array): TarInspectionResult {
   return { ok: true, files };
 }
 
-/** The first regular file at `path`, or null when the archive has none. */
+/**
+ * The first regular file at `path`, or null when the archive has none. Stops
+ * at the end-of-archive marker and refuses a header whose size is invalid or
+ * runs past the archive.
+ */
 export function readTarFile(bytes: Uint8Array, path: string): Uint8Array | null {
   let offset = 0;
-  while (offset + TAR_BLOCK_SIZE <= bytes.length) {
+  let zeroBlocks = 0;
+  while (offset + TAR_BLOCK_SIZE <= bytes.length && zeroBlocks < 2) {
     const header = bytes.subarray(offset, offset + TAR_BLOCK_SIZE);
     offset += TAR_BLOCK_SIZE;
+    if (isZeroBlock(header)) {
+      zeroBlocks += 1;
+      continue;
+    }
+    zeroBlocks = 0;
     const size = tarHeaderSize(header);
     if (size === null || offset + size > bytes.length) return null;
     const typeflag = String.fromCharCode(header[156] ?? 0);
-    if (
-      (typeflag === "\0" || typeflag === "0") &&
-      !isZeroBlock(header) &&
-      tarHeaderPath(header) === path
-    ) {
+    if ((typeflag === "\0" || typeflag === "0") && tarHeaderPath(header) === path) {
       return bytes.subarray(offset, offset + size);
     }
     offset += Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
