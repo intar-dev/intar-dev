@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, eq, inArray, notExists } from "drizzle-orm";
+import { and, eq, inArray, like, notExists, notLike } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   imageBuildBundles,
@@ -39,7 +39,25 @@ export async function deleteOrganizationScenario(params: {
       "organization scenario not found",
     );
   }
-  const [runs, activeBuilds] = await Promise.all([
+  // Once a git source has ingested into the org, its scope changes only
+  // through commits.
+  const gitBundles = () =>
+    db
+      .select({ rev: imageBuildBundles.rev })
+      .from(imageBuildBundles)
+      .where(
+        and(
+          eq(imageBuildBundles.organizationId, params.organizationId),
+          like(imageBuildBundles.rev, "git-%"),
+        ),
+      );
+  const gitManaged = () =>
+    appError(
+      409,
+      "scenario_managed_by_git_source",
+      "organization scenarios are managed by a git source and change only through commits",
+    );
+  const [runs, activeBuilds, gitRevs] = await Promise.all([
     db
       .select({ id: scenarioRuns.runId })
       .from(scenarioRuns)
@@ -61,7 +79,9 @@ export async function deleteOrganizationScenario(params: {
         ),
       )
       .limit(1),
+    gitBundles().limit(1),
   ]);
+  if (gitRevs.length) throw gitManaged();
   if (runs.length) {
     throw appError(
       409,
@@ -77,13 +97,16 @@ export async function deleteOrganizationScenario(params: {
     );
   }
 
-  await db.batch([
+  // Every statement repeats the guard, so a git ingest that lands after the
+  // read above makes the whole batch delete nothing.
+  const [, , deleted] = await db.batch([
     db
       .delete(scenarioAssignments)
       .where(
         and(
           eq(scenarioAssignments.organizationId, params.organizationId),
           eq(scenarioAssignments.scenarioId, params.scenarioId),
+          notExists(gitBundles()),
         ),
       ),
     db
@@ -92,6 +115,7 @@ export async function deleteOrganizationScenario(params: {
         and(
           eq(imageBuilds.organizationId, params.organizationId),
           eq(imageBuilds.scenarioId, params.scenarioId),
+          notExists(gitBundles()),
         ),
       ),
     db
@@ -100,15 +124,21 @@ export async function deleteOrganizationScenario(params: {
         and(
           eq(vmScenarios.organizationId, params.organizationId),
           eq(vmScenarios.scenarioId, params.scenarioId),
+          notExists(gitBundles()),
         ),
-      ),
+      )
+      .returning({ scenarioId: vmScenarios.scenarioId }),
   ]);
+  if (!deleted.length) throw gitManaged();
 
   const orphanedBundles = await db
     .delete(imageBuildBundles)
     .where(
       and(
         eq(imageBuildBundles.organizationId, params.organizationId),
+        // A git bundle whose builds all deduped onto existing builds has no
+        // build reference, but it is still the scope's source.
+        notLike(imageBuildBundles.rev, "git-%"),
         notExists(
           db
             .select({ id: imageBuilds.id })

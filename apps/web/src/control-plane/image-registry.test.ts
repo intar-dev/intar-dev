@@ -1,15 +1,21 @@
 import { gzipSync } from "node:zlib";
 import {
+  bundleFixtureFiles,
   imageRegistryMocks,
   sourceBundleFixture,
   sourceBundleFixtureWithCurriculum,
   sourceBundleFixtureWithInvalidTarHeader,
   sourceBundleFixtureWithMetadataEntry,
   resetImageRegistryMocks,
+  tarArchiveFixture,
+  toArrayBuffer,
 } from "./image-registry/test-fixtures";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
-import { readBundleMeta } from "@/control-plane/image-registry/bundle";
+import {
+  readBundleMeta,
+  validateBundleArchivePayload,
+} from "@/control-plane/image-registry/bundle";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 
 const {
@@ -175,6 +181,7 @@ describe("image registry source bundles", () => {
               ],
             },
           },
+          organizationId: null,
           nowUnixMs: now,
         },
       );
@@ -1127,6 +1134,101 @@ describe("course catalog bundle metadata", () => {
     expect(
       courseCatalogMock.syncCourseCatalogSnapshot,
     ).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a live channel", { catalog_channel: "live" }, "invalid catalog_channel"],
+    [
+      "a live channel on a benchmark rev",
+      { rev: "image-build-benchmark-1", catalog_channel: "live" },
+      "invalid catalog_channel",
+    ],
+    [
+      "a git- rev",
+      { rev: "git-scenarios-abc123-digest" },
+      "git- revisions are published only by scenario sources",
+    ],
+  ])("refuses %s before any write", async (_label, extra, error) => {
+    const bucketPut = vi.fn();
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/bundles", {
+        method: "POST",
+        headers: { authorization: "Bearer publish-secret" },
+        body: sourceBundleForm(
+          courseCatalogWire(),
+          sourceBundleFixtureWithCurriculum(
+            ["broken-nginx"],
+            [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
+          ),
+          extra,
+        ),
+      }),
+      {
+        DB: "db-binding",
+        REGISTRY_PUBLISH_TOKEN: "publish-secret",
+        VM_IMAGE_REGISTRY_BUCKET: { put: bucketPut },
+      } as unknown as Cloudflare.Env,
+    );
+
+    expect(response?.status).toBe(400);
+    await expect(response?.json()).resolves.toEqual({ error });
+    expect(bucketPut).not.toHaveBeenCalled();
+    expect(schedulerMock.queueImageBuildsFromBundle).not.toHaveBeenCalled();
+  });
+
+  it("ingests a benchmark rev candidate-only with its real queued count", async () => {
+    schedulerMock.queueImageBuildsFromBundle.mockResolvedValue({ queued: 1 });
+    schedulerMock.assignQueuedImageBuilds.mockResolvedValue([]);
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/bundles", {
+        method: "POST",
+        headers: { authorization: "Bearer publish-secret" },
+        body: sourceBundleForm(
+          courseCatalogWire(),
+          sourceBundleFixtureWithCurriculum(
+            ["broken-nginx"],
+            [{ courseId: "linux-operations", lectureIds: ["01-broken-nginx"] }],
+          ),
+          { rev: "image-build-benchmark-1" },
+        ),
+      }),
+      {
+        DB: "db-binding",
+        REGISTRY_PUBLISH_TOKEN: "publish-secret",
+        VM_IMAGE_REGISTRY_BUCKET: { put: vi.fn() },
+      } as unknown as Cloudflare.Env,
+    );
+
+    expect(response?.status).toBe(202);
+    await expect(response?.json()).resolves.toMatchObject({
+      rev: "image-build-benchmark-1",
+      queued: 1,
+    });
+    expect(schedulerMock.queueImageBuildsFromBundle).toHaveBeenCalledOnce();
+    expect(
+      courseCatalogMock.syncCourseCatalogSnapshot,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("applies the expanded archive cap it is given", async () => {
+    const payload = toArrayBuffer(
+      gzipSync(
+        tarArchiveFixture([
+          ...bundleFixtureFiles(["broken-nginx"]),
+          ["padding.bin", "x".repeat(5 * 1024 * 1024)],
+        ]),
+      ),
+    );
+    const meta = {
+      buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
+      scenarios: [
+        { scenarioId: "broken-nginx", arch: "x86_64" as const, contentHash: "d".repeat(64) },
+      ],
+    };
+
+    const refused = await validateBundleArchivePayload(payload, meta, 4 * 1024 * 1024);
+    expect(refused?.status).toBe(413);
+    await expect(validateBundleArchivePayload(payload, meta)).resolves.toBeNull();
   });
 });
 

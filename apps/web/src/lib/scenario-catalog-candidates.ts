@@ -176,6 +176,9 @@ export async function warmCandidateScenarioManifest(
     wakeHost: (hostId: string) => Promise<void>;
   },
 ): Promise<string[]> {
+  // Only public candidates are warmed: nothing un-pins an org candidate that
+  // never goes live, and org live images are warmed after promotion.
+  if (input.organizationId !== null) return [];
   const hosts = await loadCandidateAgentHosts(db);
   const warmed: string[] = [];
   for (const host of hosts) {
@@ -211,7 +214,7 @@ async function warmReusableCandidateManifests(
     wakeHost: (hostId: string) => Promise<void>;
   },
 ): Promise<void> {
-  if (!input.manifests.length) return;
+  if (input.organizationId !== null || !input.manifests.length) return;
 
   const hosts = await loadCandidateAgentHosts(db);
   for (const host of hosts) {

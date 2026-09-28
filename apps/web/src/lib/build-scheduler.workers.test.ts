@@ -10,6 +10,7 @@ import {
   imageBuildCoordinationLocks,
   imageBuildBundles,
   imageBuilds,
+  organization,
   user,
 } from "@/db/schema";
 import type { BuildReportV1, DesiredBuildV1 } from "@/generated/bridge";
@@ -198,6 +199,39 @@ describe("build scheduler bundle supersession", () => {
     await expect(db.select().from(imageBuildCoordinationLocks)).resolves.toEqual(
       [],
     );
+  });
+
+  it("never moves a bundle rev to another scope", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+    await db.insert(organization).values({
+      id: "org-a", name: "Org A", slug: "org-a", createdAt: new Date(now),
+    });
+    const queue = (organizationId: string | null, nowUnixMs: number) =>
+      queueImageBuildsFromBundle(db, {
+        rev: "git-repo-sha-digest",
+        r2Key: "builds/bundles/git-repo-sha-digest.tar.gz",
+        meta: { buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION, scenarios: [] },
+        organizationId,
+        nowUnixMs,
+      });
+
+    await queue("org-a", now);
+    await queue(null, now + 1);
+
+    await expect(
+      db
+        .select({
+          organizationId: imageBuildBundles.organizationId,
+          updatedAt: imageBuildBundles.updatedAt,
+        })
+        .from(imageBuildBundles),
+    ).resolves.toEqual([{ organizationId: "org-a", updatedAt: now }]);
+    // The same scope still refreshes its row.
+    await queue("org-a", now + 2);
+    await expect(
+      db.select({ updatedAt: imageBuildBundles.updatedAt }).from(imageBuildBundles),
+    ).resolves.toEqual([{ updatedAt: now + 2 }]);
   });
 
   it("retries only a failed build that is still current", async () => {

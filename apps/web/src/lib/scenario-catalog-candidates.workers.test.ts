@@ -37,7 +37,11 @@ describe("reused candidate presentation", () => {
   beforeEach(resetD1Database);
 
   describe.each(["new", "reused"])("%s candidate host selection", (kind) => {
-    it.each([null, "private-org"])("warms only enabled platform agents for catalog %s", async (organizationId) => {
+    // Org candidates are never warmed: nothing un-pins one that never goes live.
+    it.each([
+      [null, ["agent-1", "platform-second"]],
+      ["private-org", []],
+    ])("warms only enabled platform agents for catalog %s", async (organizationId, warmed) => {
       const db = drizzle(env.DB);
       await seedReusedBuilds(db, ["task"]);
       await seedAgentHost(db, [], false);
@@ -65,15 +69,15 @@ describe("reused candidate presentation", () => {
       if (kind === "new") {
         expect(await warmCandidateScenarioManifest(db, {
           organizationId, manifest: technicalManifest(), nowUnixMs: 2, wakeHost,
-        })).toEqual(["agent-1", "platform-second"]);
+        })).toEqual(warmed);
       } else {
         expect(await stageReusableCandidateManifests(db, {
           organizationId, revision: "warm-reuse", meta: reusedMeta(["task"]), nowUnixMs: 2, wakeHost,
         })).toEqual(["task"]);
       }
-      expect(wakeHost.mock.calls.map(([host]) => host).sort()).toEqual(["agent-1", "platform-second"]);
+      expect(wakeHost.mock.calls.map(([host]) => host).sort()).toEqual(warmed);
       const desired = await db.select().from(hostDesiredState);
-      expect(desired.map((row) => row.hostId).sort()).toEqual(["agent-1", "platform-second"]);
+      expect(desired.map((row) => row.hostId).sort()).toEqual(warmed);
       for (const row of desired) expect(row.docJson.cached_images).toEqual([
         { image_key: technicalManifest().vms[0]!.image_key, image_id: technicalManifest().vms[0]!.image_id },
       ]);

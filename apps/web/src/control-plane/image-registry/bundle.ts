@@ -1,4 +1,4 @@
-import { drizzle } from "drizzle-orm/d1";
+import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   type CourseCatalogSnapshotV2,
   type ImageBuildBundleMeta,
@@ -15,7 +15,6 @@ import {
   syncCourseCatalogSnapshot,
   validateCourseCatalogReferences,
 } from "@/lib/course-catalogs";
-import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import {
   isCandidateSourceLocked,
   stageReusableCandidateManifests,
@@ -63,6 +62,12 @@ export async function handleBundleUpload(
 
   const meta = await readBundleMeta(form.get("meta"));
   if (!meta.ok) return meta.response;
+  if (meta.value.rev.startsWith("git-")) {
+    return jsonResponse(
+      { error: "git- revisions are published only by scenario sources" },
+      400,
+    );
+  }
 
   const bundle = form.get("bundle");
   if (!(bundle instanceof File)) {
@@ -80,91 +85,32 @@ export async function handleBundleUpload(
   if (archiveError) return archiveError;
 
   const db = drizzle(env.DB);
-  const courseCatalog = meta.value.bundleMeta.courseCatalog;
-  let stage = "validate_catalog_references";
   try {
-    const invalidScenarioIds = await validateCourseCatalogReferences(
-      db,
-      {
-        snapshot: courseCatalog,
-        bundleScenarioIds: meta.value.bundleMeta.scenarios.map(
-          (scenario) => scenario.scenarioId,
-        ),
-        organizationId: null,
-      },
-    );
-    if (invalidScenarioIds.length) {
+    const ingested = await ingestScenarioBundle(env, db, {
+      rev: meta.value.rev,
+      payload,
+      meta: meta.value.bundleMeta,
+      organizationId: null,
+      // The benchmark lane samples builds; it never replaces the public catalog.
+      applyCatalog: !meta.value.rev.startsWith("image-build-benchmark-"),
+    });
+    if (!ingested.ok) {
       return jsonResponse(
         {
           error: "course catalog references unavailable scenarios",
-          scenario_ids: invalidScenarioIds,
+          scenario_ids: ingested.invalidScenarioIds,
         },
         400,
       );
-    }
-
-    const objectKey = bundleObjectKey(meta.value.rev);
-    stage = "store_bundle";
-    await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
-      httpMetadata: { contentType: "application/gzip" },
-      customMetadata: {
-        rev: meta.value.rev,
-      },
-    });
-
-    const now = Date.now();
-    stage = "queue_builds";
-    const queued = await queueImageBuildsFromBundle(db, {
-      rev: meta.value.rev,
-      r2Key: objectKey,
-      meta: meta.value.bundleMeta,
-      nowUnixMs: now,
-    });
-    stage = "sync_course_catalog";
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: courseCatalog,
-      sourceRevision: meta.value.rev,
-      organizationId: null,
-      nowUnixMs: now,
-    });
-    stage = "assign_builds";
-    const assigned = await assignQueuedImageBuilds(db, now);
-    if (queued.queued < meta.value.bundleMeta.scenarios.length) {
-      stage = "stage_reused_candidates";
-      await stageReusableCandidateManifests(db, {
-        revision: meta.value.rev,
-        organizationId: null,
-        meta: meta.value.bundleMeta,
-        nowUnixMs: now,
-        wakeHost: (hostId) =>
-          tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
-      });
-    }
-    // Run this after the bundle/course/build pipeline has committed whenever at
-    // least one accepted image has no new publication event ahead of it. This is
-    // the key path for unchanged bundles (queued=0) and hosts added since the
-    // original publication, without duplicating fan-out for all-new builds.
-    if (
-      queued.queued < meta.value.bundleMeta.scenarios.length &&
-      meta.value.bundleMeta.catalogChannel !== "candidate"
-    ) {
-      stage = "reconcile_live_images";
-      await tryReconcileScenarioImagesForPublicationScope(db, {
-        publicationOrganizationId: null,
-        nowUnixMs: now,
-        reason: "public_bundle_accepted_without_full_rebuild",
-        wakeHostRuntime: (hostId) =>
-          tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
-      });
     }
 
     return jsonResponse(
       {
         ok: true,
         rev: meta.value.rev,
-        bundle_key: objectKey,
-        queued: queued.queued,
-        assigned,
+        bundle_key: ingested.bundleKey,
+        queued: ingested.queued,
+        assigned: ingested.assigned,
       },
       202,
     );
@@ -177,15 +123,108 @@ export async function handleBundleUpload(
       const refusal = toErrorResponse(error, "bundle processing failed", 409);
       return jsonResponse(refusal.body, refusal.status);
     }
+    const stage =
+      error instanceof ScenarioBundleIngestError ? error.stage : "unknown";
+    return jsonResponse({ error: "bundle processing failed", stage }, 500);
+  }
+}
+
+/** A failed ingest step. `stage` names the step; the cause stays private. */
+export class ScenarioBundleIngestError extends Error {
+  constructor(
+    readonly stage: string,
+    cause: unknown,
+  ) {
+    super(`bundle processing failed at ${stage}`, { cause });
+  }
+}
+
+/**
+ * Writes a validated bundle into one scope. References are checked before the
+ * first write, and the scope's catalog changes only with `applyCatalog`, so a
+ * candidate-only ingest writes just the bundle, build and candidate rows.
+ * A refused candidate stage is rethrown as is; any other failure throws a
+ * {@link ScenarioBundleIngestError} and may have committed part of the ingest.
+ */
+export async function ingestScenarioBundle(
+  env: Cloudflare.Env,
+  db: DrizzleD1Database,
+  input: {
+    rev: string;
+    payload: ArrayBuffer;
+    meta: ParsedBundleMeta;
+    organizationId: string | null;
+    applyCatalog: boolean;
+  },
+): Promise<
+  | {
+      ok: true;
+      bundleKey: string;
+      queued: number;
+      assigned: Awaited<ReturnType<typeof assignQueuedImageBuilds>>;
+    }
+  | { ok: false; invalidScenarioIds: string[] }
+> {
+  const { rev, meta, organizationId } = input;
+  let stage = "validate_catalog_references";
+  try {
+    const invalidScenarioIds = await validateCourseCatalogReferences(db, {
+      snapshot: meta.courseCatalog,
+      bundleScenarioIds: meta.scenarios.map((scenario) => scenario.scenarioId),
+      organizationId,
+    });
+    if (invalidScenarioIds.length) return { ok: false, invalidScenarioIds };
+
+    const bundleKey = bundleObjectKey(rev);
+    stage = "store_bundle";
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(bundleKey, input.payload, {
+      httpMetadata: { contentType: "application/gzip" },
+      customMetadata: { rev },
+    });
+
+    const now = Date.now();
+    stage = "queue_builds";
+    const queued = await queueImageBuildsFromBundle(db, {
+      rev,
+      r2Key: bundleKey,
+      meta,
+      organizationId,
+      nowUnixMs: now,
+    });
+    if (input.applyCatalog) {
+      stage = "sync_course_catalog";
+      await syncCourseCatalogSnapshot(db, {
+        snapshot: meta.courseCatalog,
+        sourceRevision: rev,
+        organizationId,
+        nowUnixMs: now,
+      });
+    }
+    stage = "assign_builds";
+    const assigned = await assignQueuedImageBuilds(db, now);
+    if (queued.queued < meta.scenarios.length) {
+      stage = "stage_reused_candidates";
+      await stageReusableCandidateManifests(db, {
+        revision: rev,
+        organizationId,
+        meta,
+        nowUnixMs: now,
+        wakeHost: (hostId) =>
+          tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+      });
+    }
+    return { ok: true, bundleKey, queued: queued.queued, assigned };
+  } catch (error) {
+    if (isCandidateSourceLocked(error)) throw error;
     console.error(
       JSON.stringify({
         message: "bundle processing failed",
-        revision: meta.value.rev,
+        revision: rev,
         stage,
         error: error instanceof Error ? error.message : String(error),
       }),
     );
-    return jsonResponse({ error: "bundle processing failed", stage }, 500);
+    throw new ScenarioBundleIngestError(stage, error);
   }
 }
 
@@ -266,7 +305,9 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
     readString(parsed.catalog_channel) ??
     readString(parsed.catalogChannel) ??
     "candidate";
-  if (catalogChannel !== "candidate" && catalogChannel !== "live") {
+  // Bundles are candidate-only. A live build row would take the builder
+  // publish's live branch and skip catalog promotion.
+  if (catalogChannel !== "candidate") {
     return {
       ok: false,
       response: jsonResponse({ error: "invalid catalog_channel" }, 400),
@@ -590,8 +631,9 @@ export function normalizeBundleScenario(
 export async function validateBundleArchivePayload(
   payload: ArrayBuffer,
   meta: ImageBuildBundleMeta,
+  maxBytes = MAX_BUNDLE_TAR_BYTES,
 ): Promise<Response | null> {
-  const archive = await readGzipBundleArchive(payload);
+  const archive = await readGzipBundleArchive(payload, maxBytes);
   if (!archive.ok) return archive.response;
 
   const entries = inspectTarArchive(archive.bytes);
@@ -613,6 +655,7 @@ export async function validateBundleArchivePayload(
 
 export async function readGzipBundleArchive(
   payload: ArrayBuffer,
+  maxBytes = MAX_BUNDLE_TAR_BYTES,
 ): Promise<
   { ok: true; bytes: Uint8Array } | { ok: false; response: Response }
 > {
@@ -632,7 +675,7 @@ export async function readGzipBundleArchive(
   }
 
   try {
-    return await readLimitedBundleArchiveStream(stream);
+    return await readLimitedBundleArchiveStream(stream, maxBytes);
   } catch {
     return {
       ok: false,
@@ -646,6 +689,7 @@ export async function readGzipBundleArchive(
 
 export async function readLimitedBundleArchiveStream(
   stream: ReadableStream<Uint8Array>,
+  maxBytes = MAX_BUNDLE_TAR_BYTES,
 ): Promise<
   { ok: true; bytes: Uint8Array } | { ok: false; response: Response }
 > {
@@ -659,7 +703,7 @@ export async function readLimitedBundleArchiveStream(
     if (!value) continue;
 
     length += value.byteLength;
-    if (length > MAX_BUNDLE_TAR_BYTES) {
+    if (length > maxBytes) {
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
       return {
