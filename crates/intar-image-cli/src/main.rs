@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use intar_image_build::source_bundle::{
-    CompileBundleInput, CourseScenario, DEFAULT_COURSES_ROOT, compile_bundle,
-    load_base_image_catalog, load_course_scenario, load_curriculum,
+    CompileBundleInput, CourseScenario, DEFAULT_COURSES_ROOT, compile_bundle, compile_source_tree,
+    load_base_image_catalog, load_course_scenario, load_curriculum, platform_compile_digest,
     scenario_base_definition_identity, selected_course_scenarios, selected_vm_names,
     validate_scenario,
 };
@@ -19,6 +19,7 @@ use intar_image_upload::{
 use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::{fs, process::Command as ProcessCommand};
 
 mod clean_base_command;
@@ -74,12 +75,14 @@ struct ScenarioCommand {
     scenario: Option<String>,
     #[arg(long)]
     vm: Option<String>,
-    #[arg(long, default_value = DEFAULT_COURSES_ROOT)]
-    courses_root: PathBuf,
+    /// Selects the legacy mode [default: content/courses]
+    #[arg(long)]
+    courses_root: Option<PathBuf>,
     #[arg(long)]
     config: Option<PathBuf>,
-    #[arg(long, default_value = BASE_IMAGES_PATH)]
-    base_images: PathBuf,
+    /// Selects the legacy mode [default: content/scenarios/base-images.hcl]
+    #[arg(long)]
+    base_images: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -142,10 +145,12 @@ struct BuildGuestToolsCommand {
 #[derive(Debug, Args)]
 struct BundleCommand {
     scenario: Option<String>,
-    #[arg(long, default_value = DEFAULT_COURSES_ROOT)]
-    courses_root: PathBuf,
-    #[arg(long, default_value = BASE_IMAGES_PATH)]
-    base_images: PathBuf,
+    /// Selects the legacy mode [default: content/courses]
+    #[arg(long)]
+    courses_root: Option<PathBuf>,
+    /// Selects the legacy mode [default: content/scenarios/base-images.hcl]
+    #[arg(long)]
+    base_images: Option<PathBuf>,
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
@@ -160,10 +165,11 @@ struct BundleCommand {
     no_upload: bool,
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Validate(args) => validate_command(&args),
+    let working_dir = Path::new(".");
+    let result = match cli.command {
+        Command::Validate(args) => validate_command(&args, working_dir),
         Command::Render(args) => render_command(&args),
         Command::Build(args) => build_command(&args),
         Command::BuildAll(args) => build_all_command(&args),
@@ -171,7 +177,51 @@ fn main() -> Result<()> {
         Command::BuildGuestTools(args) => build_guest_tools_command(&args),
         Command::Reconstruct(args) => reconstruct_command::reconstruct(&args),
         Command::Hash(args) => hash_command(&args),
-        Command::Bundle(args) => bundle_command(&args),
+        Command::Bundle(args) => bundle_command(&args, working_dir),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // The report `fn main() -> Result<()>` prints.
+            eprintln!("Error: {error:?}");
+            ExitCode::from(exit_code(&error))
+        }
+    }
+}
+
+/// What `validate` and `bundle` compile.
+#[derive(Debug, PartialEq, Eq)]
+enum CompileMode {
+    /// 0.8.2's token lane: it reads no `intar.yaml` and writes no `meta.source`.
+    Legacy {
+        courses_root: PathBuf,
+        base_images: PathBuf,
+    },
+    /// The `intar.yaml` repository at the working directory.
+    Source,
+}
+
+/// An explicit `--courses-root` or `--base-images` selects the legacy mode.
+/// Otherwise an `intar.yaml` in the working directory selects the source mode,
+/// and without one the legacy defaults apply.
+fn compile_mode(
+    courses_root: Option<&Path>,
+    base_images: Option<&Path>,
+    working_dir: &Path,
+) -> CompileMode {
+    if courses_root.is_none()
+        && base_images.is_none()
+        && fs::symlink_metadata(working_dir.join("intar.yaml")).is_ok()
+    {
+        return CompileMode::Source;
+    }
+    CompileMode::Legacy {
+        courses_root: courses_root
+            .unwrap_or(Path::new(DEFAULT_COURSES_ROOT))
+            .to_owned(),
+        base_images: base_images
+            .unwrap_or(Path::new(BASE_IMAGES_PATH))
+            .to_owned(),
     }
 }
 
@@ -195,14 +245,34 @@ fn build_guest_tools_command(args: &BuildGuestToolsCommand) -> Result<()> {
     Ok(())
 }
 
-fn validate_command(args: &ScenarioCommand) -> Result<()> {
+fn validate_command(args: &ScenarioCommand, working_dir: &Path) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
-    let curriculum = load_curriculum(&args.courses_root)?;
+    let (courses_root, base_images) = match compile_mode(
+        args.courses_root.as_deref(),
+        args.base_images.as_deref(),
+        working_dir,
+    ) {
+        CompileMode::Legacy {
+            courses_root,
+            base_images,
+        } => (courses_root, base_images),
+        CompileMode::Source => {
+            if args.scenario.is_some() || args.vm.is_some() {
+                bail!(
+                    "intar.yaml mode validates the whole repository; pass --courses-root to select a scenario or VM"
+                );
+            }
+            compile_source_tree(working_dir, "validate", &config.qemu.target_arch)?;
+            println!("compile digest: {}", platform_compile_digest());
+            return Ok(());
+        }
+    };
+    let curriculum = load_curriculum(&courses_root)?;
     let scenarios = selected_course_scenarios(&curriculum, args.scenario.as_deref())?;
     if scenarios.is_empty() {
         return Ok(());
     }
-    let base_catalog = load_base_image_catalog(&args.base_images)?;
+    let base_catalog = load_base_image_catalog(&base_images)?;
     for source in scenarios {
         let scenario = load_course_scenario(&source.scenario_path)?;
         validate_scenario(
@@ -377,7 +447,7 @@ fn hash_command(args: &HashCommand) -> Result<()> {
     Ok(())
 }
 
-fn bundle_command(args: &BundleCommand) -> Result<()> {
+fn bundle_command(args: &BundleCommand, working_dir: &Path) -> Result<()> {
     let config = load_build_config(args.config.as_deref())?;
     let rev = args
         .rev
@@ -385,13 +455,30 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
         .map(Ok)
         .unwrap_or_else(default_bundle_rev)?;
     validate_bundle_rev(&rev)?;
-    let compiled = compile_bundle(&CompileBundleInput {
-        courses_root: &args.courses_root,
-        base_images: &args.base_images,
-        rev: &rev,
-        target_arch: &config.qemu.target_arch,
-        scenario: args.scenario.as_deref(),
-    })?;
+    let compiled = match compile_mode(
+        args.courses_root.as_deref(),
+        args.base_images.as_deref(),
+        working_dir,
+    ) {
+        CompileMode::Legacy {
+            courses_root,
+            base_images,
+        } => compile_bundle(&CompileBundleInput {
+            courses_root: &courses_root,
+            base_images: &base_images,
+            rev: &rev,
+            target_arch: &config.qemu.target_arch,
+            scenario: args.scenario.as_deref(),
+        })?,
+        CompileMode::Source => {
+            if args.scenario.is_some() {
+                bail!(
+                    "intar.yaml mode bundles the whole repository; pass --courses-root to select a scenario"
+                );
+            }
+            compile_source_tree(working_dir, &rev, &config.qemu.target_arch)?
+        }
+    };
     let output_path = args
         .output
         .clone()
