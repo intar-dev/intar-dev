@@ -125,6 +125,9 @@ export const scenarioSourceCommits = sqliteTable(
     rev: text("rev").notNull(),
     via: text("via").$type<"push" | "pull">().notNull(),
     attempt: integer("attempt").default(0).notNull(),
+    // `attempt` when a pull delivery last claimed the row; the compile cap
+    // counts from it. NULL counts from 0.
+    claimedAttempt: integer("claimed_attempt"),
     state: text("state").$type<ScenarioSourceCommitState>().notNull(),
     detail: text("detail"),
     diagnosticsJson: text("diagnostics_json"),

@@ -321,6 +321,19 @@ describe("pull compile routes", () => {
     expect(await stagedKeys()).toEqual([]);
   });
 
+  it("counts outdated results from the row's last claim", async () => {
+    const outdated = { build_format_version: "0" };
+    await drizzle(env.DB).update(scenarioSourceCommits).set({ attempt: 3, claimedAttempt: 1 });
+    await expectRefusal(await send(builderResult({ attempt: 3, meta: outdated })), "compiler_outdated");
+    expect(await row()).toMatchObject({ state: "fetching", attempt: 3 });
+
+    await drizzle(env.DB)
+      .update(scenarioSourceCommits)
+      .set({ state: "compiling", attempt: 4 });
+    await expectRefusal(await send(builderResult({ attempt: 4, meta: outdated })), "compiler_outdated");
+    expect(await row()).toMatchObject({ state: "failed", detail: expect.stringContaining("another compiler") });
+  });
+
   it("records a compile failure as invalid with diagnostics bounded to 64 KiB", async () => {
     const first = { path: "intar.yaml", line: 3, code: "manifest_invalid", message: "courses_root is required" };
     const filler = { code: "compile_failed", message: "x".repeat(40 * 1024) };

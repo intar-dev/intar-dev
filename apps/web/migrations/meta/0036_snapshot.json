@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "55dd132e-25d3-4c99-9cd7-1173212faeef",
-  "prevId": "2f21f6a4-c859-474a-b78b-5a26adf7411a",
+  "id": "5129fc89-5f61-4962-b12b-0efad33e7eba",
+  "prevId": "55dd132e-25d3-4c99-9cd7-1173212faeef",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -6434,6 +6434,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "claimed_attempt": {
+          "name": "claimed_attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "state": {
           "name": "state",
