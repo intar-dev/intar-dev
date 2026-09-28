@@ -72,9 +72,13 @@ export function isOrganizationAdminRole(role: OrganizationRole): boolean {
 
 /**
  * Drizzle condition that holds while `userId` is an owner or admin of the
- * organization, for writes that recheck their actor in the statement.
+ * organization, for writes that recheck their actor in the statement. Either
+ * argument may be a column, which the template inlines.
  */
-function administersOrganization(organizationId: string, userId: string): SQL {
+export function administersOrganization(
+  organizationId: string | SQL,
+  userId: string | SQL,
+): SQL {
   return sql`EXISTS (SELECT 1 FROM member actor WHERE actor.organization_id = ${organizationId}
     AND actor.user_id = ${userId} AND actor.role IN ('owner', 'admin'))`;
 }

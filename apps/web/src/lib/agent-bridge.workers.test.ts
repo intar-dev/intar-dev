@@ -225,8 +225,12 @@ describe("requireUserContext", () => {
     expect(result.context.activeOrganizationId).toBe(
       testCase.expectedActiveOrganizationId,
     );
+    expect(result.context.impersonated).toBe(
+      testCase.account.startsWith("impersonated"),
+    );
     expect(Object.keys(result.context).toSorted()).toEqual([
       "activeOrganizationId",
+      "impersonated",
       "isAdmin",
       "organizationIds",
       "role",

@@ -31,6 +31,7 @@ import { startOrganizationSignIn } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
 import { useSession } from "../../hooks/useSession";
 import { invalidateOrganizationDetail } from "./queries";
+import { ScenarioSourceSection } from "./scenario-source";
 import {
   signupPolicyText,
   useSignupPolicy,
@@ -600,6 +601,13 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
             </form>
           )}
         </Section>
+      ) : null}
+
+      {admin ? (
+        <ScenarioSourceSection
+          endpoint={`/api/organizations/${encodeURIComponent(detail.id)}/scenario-source`}
+          scope={detail.slug}
+        />
       ) : null}
 
       <Section

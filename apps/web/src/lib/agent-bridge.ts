@@ -3,7 +3,10 @@ import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, member, user } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
-import { sessionMayActCondition } from "@/lib/account-access";
+import {
+  isImpersonatedSession,
+  sessionMayActCondition,
+} from "@/lib/account-access";
 import { auth } from "@/lib/auth";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
@@ -51,6 +54,8 @@ export interface UserContext {
   isAdmin: boolean;
   organizationIds: string[];
   activeOrganizationId: string | null;
+  /** Set when an admin opened this session as its user. */
+  impersonated?: boolean;
 }
 
 type AuthzResult =
@@ -149,6 +154,7 @@ export async function requireUserContext(
       isAdmin: isAdminRole(role),
       organizationIds,
       activeOrganizationId,
+      impersonated: isImpersonatedSession(session.session),
     },
   };
 }

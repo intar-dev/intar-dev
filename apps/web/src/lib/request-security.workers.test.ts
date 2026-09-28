@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   MAX_API_JSON_BODY_BYTES,
+  enforceRateLimit,
   guardBetterAuthRequest,
   guardCanonicalRequestPath,
   guardCustomApiMutation,
@@ -447,6 +448,34 @@ describe("worker API request security", () => {
         new Request("https://intar.dev/api/account-links/sso/start"),
       ),
     ).toBeNull();
+    for (const path of [
+      "/api/organizations/org/scenario-source",
+      "/api/admin/scenario-source",
+    ]) {
+      expect(sensitiveRateLimitActionFor(customMutation(path))).toBe(
+        "scenario-source",
+      );
+      expect(
+        sensitiveRateLimitActionFor(new Request(`https://intar.dev${path}`)),
+      ).toBeNull();
+    }
+  });
+
+  it("charges a route's own key and keeps address keys for everything else", async () => {
+    const keys: string[] = [];
+    const limiter = securityEnv(async ({ key }) => {
+      keys.push(key);
+      return { success: true };
+    });
+    const request = customMutation("/api/organizations/org/scenario-source", {
+      headers: { "cf-connecting-ip": "203.0.113.7" },
+    });
+    await enforceRateLimit(request, limiter, "scenario-source", "user:u1");
+    await enforceRateLimit(request, limiter, "scenario-source");
+    await enforceRateLimit(request, limiter, "sso-link");
+    expect(keys[0]).toBe("web-edge:scenario-source:user:u1");
+    expect(keys[1]).toMatch(/^web-edge:scenario-source:[0-9a-f]{24}$/u);
+    expect(keys[2]).toBe(keys[1]?.replace("scenario-source", "sso-link"));
   });
 
   it("charges the sso-link action before the SSO start route reads its body", async () => {

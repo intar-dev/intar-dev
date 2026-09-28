@@ -31,6 +31,10 @@
     // sha256 of the released base-images.hcl. It feeds the platform compile
     // digest; while it is empty no builder takes a `git-` image build.
     "PLATFORM_BASE_IMAGES_SHA256": "",
+    // The App's URL name, for the scenario source card's install link.
+    "GITHUB_APP_SLUG": "",
+    // The only GitHub repository id the public scope may bind. Empty: none.
+    "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "",
   },
   "vpc_services": [
     {

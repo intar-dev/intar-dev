@@ -1405,6 +1405,14 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, { provider: server.state.organizationOidc });
         return;
       }
+      // Scenario sources stay dark: no flag and no binding hide the card.
+      if (
+        /^\/api\/organizations\/[^/]+\/scenario-source$/.test(pathname) &&
+        method === "GET"
+      ) {
+        await json(route, { enabled: false, appSlug: null, source: null });
+        return;
+      }
       if (
         /^\/api\/admin\/organizations\/[^/]+\/sso-policy$/.test(pathname) &&
         method === "PUT"
@@ -1574,6 +1582,15 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
 
       if (pathname === "/api/admin/scenarios" && method === "GET") {
         await json(route, { scenarios: server.state.adminScenarios });
+        return;
+      }
+      if (pathname === "/api/admin/scenario-source" && method === "GET") {
+        await json(route, {
+          enabled: false,
+          configured: false,
+          appSlug: null,
+          source: null,
+        });
         return;
       }
       const adminScenarioId = segment(
