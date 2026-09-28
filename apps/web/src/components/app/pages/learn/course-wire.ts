@@ -58,6 +58,7 @@ export interface CourseLectureSummary {
 export interface CourseCatalogCourse {
   courseId: string;
   organizationId: string | null;
+  organizationName: string | null;
   title: string;
   summary: string;
   bodyMarkdown: string;
@@ -158,16 +159,18 @@ export function courseRouteForCatalogCourse(
   course: Pick<CourseCatalogCourse, "courseId" | "organizationId">,
   organizationId: string | null,
 ): CourseRouteRef {
-  if (!organizationId) {
+  // The public catalog links an organization's own course into that organization.
+  const routeOrganizationId = organizationId ?? course.organizationId;
+  if (!routeOrganizationId) {
     return { scope: "public", courseId: course.courseId, organizationId: null };
   }
   return {
     scope:
-      course.organizationId === organizationId
+      course.organizationId === routeOrganizationId
         ? "organization-private"
         : "organization-public",
     courseId: course.courseId,
-    organizationId,
+    organizationId: routeOrganizationId,
   };
 }
 

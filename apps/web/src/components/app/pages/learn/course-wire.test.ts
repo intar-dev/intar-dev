@@ -15,6 +15,7 @@ import {
 const publicCourse: CourseCatalogCourse = {
   courseId: "kubernetes",
   organizationId: null,
+  organizationName: null,
   title: "Kubernetes basics",
   summary: "Learn the core model.",
   bodyMarkdown: "Course theory.",
@@ -55,6 +56,16 @@ describe("course learner wire contract", () => {
       courseRouteForCatalogCourse(
         { ...publicCourse, organizationId: "team-a" },
         "team-a",
+      ),
+    ).toEqual({
+      scope: "organization-private",
+      courseId: "kubernetes",
+      organizationId: "team-a",
+    });
+    expect(
+      courseRouteForCatalogCourse(
+        { ...publicCourse, organizationId: "team-a" },
+        null,
       ),
     ).toEqual({
       scope: "organization-private",

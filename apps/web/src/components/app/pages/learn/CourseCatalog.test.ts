@@ -5,6 +5,7 @@ import type { CourseCatalogCourse } from "./course-wire";
 const course: CourseCatalogCourse = {
   courseId: "operations",
   organizationId: null,
+  organizationName: null,
   title: "Linux operations",
   summary: "Repair common services.",
   bodyMarkdown: "Course overview.",

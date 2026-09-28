@@ -429,7 +429,7 @@ function CourseIndexItem({
         <span className="block pt-1">
           <MetaLine
             items={[
-              organizationId ? `${courseScope} course` : null,
+              organizationId ? `${courseScope} course` : course.organizationName,
               `${completed} of ${course.lectures.length} complete`,
               `${course.lectures.length} ${course.lectures.length === 1 ? "lecture" : "lectures"}`,
               totalMinutes ? `~${totalMinutes} min` : null,
