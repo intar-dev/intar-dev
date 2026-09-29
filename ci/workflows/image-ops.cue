@@ -258,6 +258,11 @@ package workflows
 					"persist-credentials": false
 				}
 			}, {
+				name: "Set up cuenv"
+				uses: "./.github/actions/setup-cuenv"
+			}, {
+				// Stays inline: cuenv task sets CLICOLOR_FORCE=1 when it is unset, and gh
+				// then colours its --json output, which jq can not parse.
 				name: "Verify published Kino source"
 				env: GH_TOKEN: "${{ github.token }}"
 				run: """
@@ -276,11 +281,7 @@ package workflows
 					"""
 			}, {
 				name: "Install Rust toolchain"
-				run: """
-					rustup toolchain install 1.97.0 --profile minimal
-					rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
-
-					"""
+				run:  "cuenv task image-ops-install-rust-toolchain"
 			}, {
 				name: "Set up Rust cache"
 				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
@@ -295,53 +296,13 @@ package workflows
 				with: version: "0.16.0"
 			}, {
 				name: "Verify runner disk tools"
-				run: """
-					test -x /usr/sbin/mke2fs
-					command -v zstd
-
-					"""
+				run:  "cuenv task image-ops-verify-runner-disk-tools"
 			}, {
 				name: "Prepare Kino source workspace"
-				run: """
-					set -euo pipefail
-					# Cargo resolves the whole workspace of the pinned Kino revision, so a
-					# revision that does not commit the libnbd bindings needs them
-					# prepared inside that source tree before any Cargo command reads it.
-					# Run the script through bash so the checkout's file mode cannot decide
-					# whether preparation happens.
-					kino_prepare="${RUNNER_TEMP}/kino-source/tools/image-build/prepare-libnbd-rust.sh"
-					if [ -f "$kino_prepare" ]; then
-					  bash "$kino_prepare"
-					elif [ -f "${RUNNER_TEMP}/kino-source/third_party/libnbd-rust/Cargo.toml" ]; then
-					  echo 'Kino source revision commits the libnbd bindings; nothing to prepare.'
-					else
-					  echo "neither a preparation script nor committed libnbd bindings under ${RUNNER_TEMP}/kino-source" >&2
-					  exit 1
-					fi
-
-					"""
+				run:  "cuenv task image-ops-prepare-kino-source"
 			}, {
 				name: "Build guest Kino and tools disk"
-				run: """
-					set -euo pipefail
-					cargo zigbuild --locked --manifest-path "${RUNNER_TEMP}/kino-source/Cargo.toml" \\
-					  --target-dir "${RUNNER_TEMP}/kino-target" \\
-					  -p kino --profile guest --target x86_64-unknown-linux-musl
-					cp "${RUNNER_TEMP}/kino-target/x86_64-unknown-linux-musl/guest/kino" "${TOOLS_DIR}/kino"
-					tools/image-build/with-libnbd-env.sh -- cargo build --locked -p intar-image-cli
-					target/debug/intar-image-cli build-guest-tools \\
-					  --kino-binary "${TOOLS_DIR}/kino" --output-root "${TOOLS_DIR}" \\
-					  --mke2fs-binary /usr/sbin/mke2fs > "${TOOLS_DIR}/build.json"
-					jq 'del(.compressed_disk_path)' "${TOOLS_DIR}/build.json" > "${TOOLS_DIR}/candidate.json"
-					jq -e '.schema_version == 1 and .bootstrap_abi == 2' "${TOOLS_DIR}/candidate.json" >/dev/null
-					cd "${TOOLS_DIR}"
-					disk="$(jq -r .tools_disk_sha256 candidate.json)"
-					jq -r '"\\(.kino_sha256)  kino", "\\(.tools_disk_sha256)  \\(.tools_disk_sha256).ext4", "\\(.compressed_disk_sha256)  \\(.tools_disk_sha256).ext4.zst"' \\
-					  candidate.json > SHA256SUMS
-					sha256sum --check SHA256SUMS
-					zstd --decompress --stdout "${disk}.ext4.zst" | sha256sum | cut -d ' ' -f 1 | diff - <(printf '%s\\n' "${disk}")
-
-					"""
+				run:  "cuenv task image-ops-build-guest-tools"
 			}, {
 				name: "Set up the CI runtime"
 				uses: "./.github/actions/setup-runtime"
@@ -350,61 +311,20 @@ package workflows
 				run:  "bun install --frozen-lockfile"
 			}, {
 				name:                "Upload candidate objects"
-				"working-directory": "apps/web"
+				"working-directory": "."
 				env: {
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: """
-					set -euo pipefail
-					disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
-					kino="$(jq -r .kino_sha256 "${TOOLS_DIR}/candidate.json")"
-					bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/disks/${disk}.ext4.zst" \\
-					  --remote --jurisdiction eu --file "${TOOLS_DIR}/${disk}.ext4.zst"
-					bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/kino/${kino}/kino" \\
-					  --remote --jurisdiction eu --file "${TOOLS_DIR}/kino"
-					bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/candidate.json" \\
-					  --remote --jurisdiction eu --file "${TOOLS_DIR}/candidate.json" --content-type application/json
-
-					"""
+				run: "cuenv task image-ops-upload-tools-candidate"
 			}, {
 				name:                "Verify uploaded objects by re-download"
-				"working-directory": "apps/web"
+				"working-directory": "."
 				env: {
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: """
-					set -euo pipefail
-					# Byte-level verification of the published objects. This lane
-					# builds and publishes only; it never calls the control plane, so it
-					# can run while the previous ABI is still serving. Promotion to the
-					# stable channel is a separate lane that needs the new plane.
-					verify_dir="${TOOLS_DIR}/verify"
-					mkdir -p "${verify_dir}"
-					disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
-					kino="$(jq -r .kino_sha256 "${TOOLS_DIR}/candidate.json")"
-					bunx wrangler r2 object get \\
-					  "${BUCKET}/guest-tools/scenario/disks/${disk}.ext4.zst" \\
-					  --remote --jurisdiction eu --file "${verify_dir}/${disk}.ext4.zst"
-					bunx wrangler r2 object get \\
-					  "${BUCKET}/guest-tools/scenario/kino/${kino}/kino" \\
-					  --remote --jurisdiction eu --file "${verify_dir}/kino"
-					bunx wrangler r2 object get \\
-					  "${BUCKET}/guest-tools/scenario/candidate.json" \\
-					  --remote --jurisdiction eu --file "${verify_dir}/candidate.json"
-					cmp --silent "${TOOLS_DIR}/candidate.json" "${verify_dir}/candidate.json"
-					cmp --silent "${TOOLS_DIR}/${disk}.ext4.zst" "${verify_dir}/${disk}.ext4.zst"
-					cmp --silent "${TOOLS_DIR}/kino" "${verify_dir}/kino"
-					test "$(sha256sum "${verify_dir}/${disk}.ext4.zst" | cut -d ' ' -f 1)" = \\
-					  "$(jq -r .compressed_disk_sha256 "${TOOLS_DIR}/candidate.json")"
-					test "$(sha256sum "${verify_dir}/kino" | cut -d ' ' -f 1)" = "${kino}"
-					jq -n --arg disk "${disk}" --arg kino "${kino}" \\
-					  '{uploaded_objects_verified: 3, tools_disk_sha256: $disk, kino_sha256: $kino}' \\
-					  > "${TOOLS_DIR}/upload-verification.json"
-					cat "${TOOLS_DIR}/upload-verification.json"
-
-					"""
+				run: "cuenv task image-ops-verify-tools-upload"
 			}, {
 				name: "Retain build and deployment evidence"
 				if:   "always()"
@@ -453,6 +373,9 @@ package workflows
 					"persist-credentials": false
 				}
 			}, {
+				name: "Set up cuenv"
+				uses: "./.github/actions/setup-cuenv"
+			}, {
 				name: "Set up the CI runtime"
 				uses: "./.github/actions/setup-runtime"
 			}, {
@@ -460,50 +383,21 @@ package workflows
 				run:  "bun install --frozen-lockfile"
 			}, {
 				name:                "Read the candidate pin from the registry bucket"
-				"working-directory": "apps/web"
+				"working-directory": "."
 				env: {
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: """
-					set -euo pipefail
-					bunx wrangler r2 object get "${BUCKET}/guest-tools/scenario/candidate.json" \\
-					  --remote --jurisdiction eu --file "${TOOLS_DIR}/candidate.json"
-					jq -e '.schema_version == 1 and .bootstrap_abi == 2' \\
-					  "${TOOLS_DIR}/candidate.json" >/dev/null
-					# Bind the promotion to the exact candidate the cutover pinned. The
-					# build lane may run again between the cutover and this promotion, so
-					# the downloaded manifest must equal the digest that was chosen, or
-					# this run would promote a different release than the running worker
-					# was deployed with.
-					measured_sha="$(sha256sum "${TOOLS_DIR}/candidate.json" | cut -d ' ' -f 1)"
-					if [ "${measured_sha}" != "${EXPECTED_CANDIDATE_SHA256}" ]; then
-					  echo 'The published candidate does not match the expected digest.' >&2
-					  echo "expected=${EXPECTED_CANDIDATE_SHA256}" >&2
-					  echo "measured=${measured_sha}" >&2
-					  exit 1
-					fi
-					printf 'candidate_sha256=%s\\n' "${measured_sha}"
-
-					"""
+				run: "cuenv task image-ops-read-tools-candidate"
 			}, {
 				name:                "Require drained host and retain previous stable pin"
-				"working-directory": "apps/web"
+				"working-directory": "."
 				env: {
 					CLOUDFLARE_ACCOUNT_ID:     "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:      "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 					INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				}
-				run: """
-					set -euo pipefail
-					curl --fail --silent --show-error --max-time 30 \\
-					  --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \\
-					  https://intar.dev/registry/v1/cutover/gate \\
-					  | jq -e '.state == "drained" and .active_desired_vms == 0' >/dev/null
-					bunx wrangler r2 object get "${BUCKET}/guest-tools/scenario/stable.json" \\
-					  --remote --jurisdiction eu --file "${TOOLS_DIR}/previous-stable.json"
-
-					"""
+				run: "cuenv task image-ops-require-drain-retain-stable"
 			}, {
 				name: "Retain rollback pin before promotion"
 				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
@@ -515,79 +409,11 @@ package workflows
 			}, {
 				name: "Warm every host and wait for the candidate cache"
 				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				run: """
-					set -euo pipefail
-					curl --fail --silent --show-error --max-time 60 --request POST \\
-					  --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \\
-					  --header "x-intar-candidate-sha256: ${EXPECTED_CANDIDATE_SHA256}" \\
-					  https://intar.dev/registry/v1/guest-tools/warm > "${TOOLS_DIR}/warm.json"
-					disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
-					jq -e --arg disk "${disk}" '.ok == true and .candidate.tools_disk_sha256 == $disk and (.warmed_host_ids | length > 0)' \\
-					  "${TOOLS_DIR}/warm.json" >/dev/null
-					# The warm set is the expected fleet for this promotion. Readiness
-					# must cover that set: a host that drops out is a failed promotion,
-					# not a smaller success.
-					expected_hosts="$(jq -c '[.warmed_host_ids[]] | sort' "${TOOLS_DIR}/warm.json")"
-					for _ in $(seq 1 24); do
-					  curl --fail --silent --show-error --max-time 30 \\
-					    --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \\
-					    "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=candidate" > "${TOOLS_DIR}/cache.json"
-					  # A stale or failed build set is terminal: its artifacts are
-					  # retired, so waiting can never warm it. Name the builds and stop.
-					  if jq -e '
-					    (.builds // [])
-					    | map(select(.status == "stale" or .phase == "failed"))
-					    | length > 0
-					  ' "${TOOLS_DIR}/cache.json" >/dev/null 2>&1; then
-					    jq -c '[.builds[] | select(.status == "stale" or .phase == "failed")
-					      | {scenario_id, status, phase, artifacts_retired}]' \\
-					      "${TOOLS_DIR}/cache.json" >&2
-					    echo 'The revision has stale or failed image builds.' >&2
-					    echo 'Rebuild and republish the revision before promoting it.' >&2
-					    exit 1
-					  fi
-					  if jq -e --arg disk "${disk}" --argjson expected "${expected_hosts}" '
-					    .ok == true and .guest_tools.tools_disk_sha256 == $disk and
-					    ([.hosts[].host_id] | sort) == $expected and
-					    all(.hosts[]; .ready == true and .desired_guest_tools_ready == true and .actual_guest_tools_ready == true)
-					  ' "${TOOLS_DIR}/cache.json" >/dev/null; then
-					    exit 0
-					  fi
-					  sleep 5
-					done
-					jq -c '{state, hosts: [.hosts[]? | {host_id, ready, desired_guest_tools_ready, actual_guest_tools_ready}]}' \\
-					  "${TOOLS_DIR}/cache.json" >&2 || true
-					echo 'The candidate host cache did not become ready for every warmed host.' >&2
-					exit 1
-
-					"""
+				run: "cuenv task image-ops-warm-tools-candidate"
 			}, {
 				name: "Promote the exact candidate while drained"
 				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				run: """
-					set -euo pipefail
-					curl --fail --silent --show-error --max-time 30 \\
-					  --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \\
-					  https://intar.dev/registry/v1/cutover/gate \\
-					  | jq -e '.state == "drained" and .active_desired_vms == 0' >/dev/null
-					curl --fail --silent --show-error --max-time 60 --request POST \\
-					  --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \\
-					  --header "x-intar-candidate-sha256: ${EXPECTED_CANDIDATE_SHA256}" \\
-					  https://intar.dev/registry/v1/guest-tools/promote > "${TOOLS_DIR}/promotion.json"
-					disk="$(jq -r .tools_disk_sha256 "${TOOLS_DIR}/candidate.json")"
-					jq -e --arg disk "${disk}" '.ok == true and .stable.tools_disk_sha256 == $disk' \\
-					  "${TOOLS_DIR}/promotion.json" >/dev/null
-					curl --fail --silent --show-error --max-time 30 \\
-					  --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \\
-					  "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" > "${TOOLS_DIR}/stable.json"
-					jq -e --arg disk "${disk}" '.ok == true and .tools_channel == "stable" and .guest_tools.tools_disk_sha256 == $disk' \\
-					  "${TOOLS_DIR}/stable.json" >/dev/null
-					# The promoted stable tuple must name the Kino of the exact release
-					# that was verified. The disk is already checked above.
-					jq -e --arg kino "$(jq -r .kino_sha256 "${TOOLS_DIR}/candidate.json")" \\
-					  '.stable.kino_sha256 == $kino' "${TOOLS_DIR}/promotion.json" >/dev/null
-
-					"""
+				run: "cuenv task image-ops-promote-tools-candidate"
 			}, {
 				name: "Retain promotion evidence"
 				if:   "always()"
@@ -630,6 +456,9 @@ package workflows
 				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
 				with: "persist-credentials": false
 			}, {
+				name: "Set up cuenv"
+				uses: "./.github/actions/setup-cuenv"
+			}, {
 				name: "Set up Bun"
 				// status and resolve are curl and jq only, so they stay fast. plan and run
 				// delegate to the gate script, which resolves wrangler through the locked
@@ -648,225 +477,14 @@ package workflows
 				run:  "bun install --frozen-lockfile"
 			}, {
 				name: "Validate cleanup authority"
-				run: """
-					set -euo pipefail
-					test "${GITHUB_REF}" = refs/heads/main
-					test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
-					case "${ACTION}" in
-					  status|plan|run|resolve) ;;
-					  *) echo "action must be status, plan, run, or resolve" >&2; exit 1 ;;
-					esac
-					if [ "${ACTION}" = run ]; then
-					  if [ "${CONFIRMATION}" != 'RUN IMAGE REGISTRY CLEANUP' ]; then
-					    echo 'the run action needs the exact confirmation.' >&2
-					    exit 1
-					  fi
-					fi
-					if [ "${ACTION}" = resolve ]; then
-					  if [ "${CONFIRMATION}" != 'RESOLVE STALLED IMAGE CLEANUP' ]; then
-					    echo 'the resolve action needs the exact confirmation.' >&2
-					    exit 1
-					  fi
-					  # The run id reaches SQL as a bound parameter, and it is checked
-					  # here so a typo stops before any call.
-					  if ! [[ "${EXPECTED_GC_RUN_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
-					    echo 'resolve needs expected_gc_run_id as a lowercase UUID.' >&2
-					    exit 1
-					  fi
-					fi
-					test -n "${CLOUDFLARE_ACCOUNT_ID}"
-					test -n "${CLOUDFLARE_API_TOKEN}"
-					test -n "${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}"
-					mkdir -p "${RUNNER_TEMP}/intar-image-registry-cleanup"
-
-					"""
+				run:  "cuenv task image-ops-validate-cleanup-authority"
 			}, {
 				name: "Read the collector status and the shared ledger"
-				run: """
-					set -euo pipefail
-					evidence_dir="${RUNNER_TEMP}/intar-image-registry-cleanup"
-					state_file="${evidence_dir}/state.json"
-					collector_file="${evidence_dir}/collector-status.json"
-					collector_http_status=''
-					collector_problem=''
-					ledger_problem=''
-
-					# The request body carries the machine credential, so it is built from
-					# the environment, piped on standard input, and never printed.
-					collector_http_status="$(
-					  BYPASS_SECRET="${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" \\
-					    jq -cn '{secret: env.BYPASS_SECRET, action: "status"}' \\
-					    | curl --silent --show-error --max-time 60 \\
-					        --request POST \\
-					        --header 'Content-Type: application/json' \\
-					        --data-binary @- \\
-					        --output "${collector_file}" --write-out '%{http_code}' \\
-					        "${GATE_URL}" || true
-					)"
-					if [ "${collector_http_status}" != 200 ]; then
-					  collector_problem="the parent maintenance action answered HTTP ${collector_http_status:-none}"
-					  : > "${collector_file}"
-					fi
-
-					# Read-only. The admission row is named one row by its primary key, and
-					# the GC rows are the recent ledger window. Neither sweep_token nor
-					# owner is selected: they are per-run tokens, not state an operator
-					# needs, and they never leave the database.
-					query_ledger() {
-					  local name="$1"
-					  local sql="$2"
-					  local reply="${evidence_dir}/d1-${name}.json"
-					  local request="${evidence_dir}/d1-${name}-request.json"
-					  local status
-					  jq -cn --arg sql "${sql}" '{sql: $sql, params: []}' > "${request}"
-					  status="$(curl --silent --show-error --max-time 60 \\
-					    --request POST \\
-					    --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \\
-					    --header 'Content-Type: application/json' \\
-					    --data-binary "@${request}" \\
-					    --output "${reply}" --write-out '%{http_code}' \\
-					    "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/query" \\
-					    || true)"
-					  if [ "${status}" != 200 ] || \\
-					    ! jq -e '.success == true and (.result | type == "array") and
-					      (.result | length == 1) and (.result[0].success == true) and
-					      (.result[0].results | type == "array")' "${reply}" >/dev/null 2>&1; then
-					    ledger_problem="${ledger_problem}${ledger_problem:+, }the ${name} query answered HTTP ${status:-none}"
-					    printf '{"result":[{"success":false,"results":[]}]}' > "${reply}"
-					  fi
-					}
-					query_ledger admission \\
-					  "SELECT key, protocol_version, enforcement, epoch, state, sweep_started_at, sweep_heartbeat_at, sweep_expires_at, paused_at, pause_reason, updated_at FROM image_registry_admission"
-					query_ledger gc-runs \\
-					  "SELECT id, state, started_at, heartbeat_at, finished_at, scanned_objects, deleted_objects, blocked_objects, bytes_reclaimed, error, detail_json, created_at, updated_at FROM image_registry_gc_runs ORDER BY started_at DESC LIMIT 5"
-					query_ledger counts \\
-					  "SELECT (SELECT COUNT(*) FROM image_registry_gc_runs WHERE state = 'running') AS running_gc_runs, (SELECT COUNT(*) FROM image_registry_upload_sessions WHERE state = 'open') AS open_sessions, (SELECT COUNT(*) FROM image_registry_operation_writers WHERE released_at IS NULL OR outcome = 'unknown') AS pending_writers"
-
-					# One record for an operator and for the plan and run preconditions. The
-					# raw bodies stay as their own files, so this names the scalars instead
-					# of copying them twice.
-					jq -n \\
-					  --arg source_sha "${GITHUB_SHA}" \\
-					  --arg run_id "${GITHUB_RUN_ID}" \\
-					  --arg action "${ACTION}" \\
-					  --arg collector_http_status "${collector_http_status}" \\
-					  --arg collector_problem "${collector_problem}" \\
-					  --arg ledger_problem "${ledger_problem}" \\
-					  --slurpfile collector "${collector_file}" \\
-					  --slurpfile admission "${evidence_dir}/d1-admission.json" \\
-					  --slurpfile gc_runs "${evidence_dir}/d1-gc-runs.json" \\
-					  --slurpfile counts "${evidence_dir}/d1-counts.json" \\
-					  '($collector[0] // {}) as $raw |
-					   ($raw.result // {}) as $report |
-					   ($admission[0].result[0].results[0] // null) as $row |
-					   ($counts[0].result[0].results[0] // null) as $totals |
-					   {
-					     schema_version: 1,
-					     operation: "image-registry-cleanup-state",
-					     source_sha: $source_sha,
-					     run_id: $run_id,
-					     action: $action,
-					     observed_at_ms: (now * 1000 | floor),
-					     collector_http_status: ($collector_http_status | tonumber? // null),
-					     collector_problem: (if ($collector_problem | length) == 0 then null else $collector_problem end),
-					    collector: {
-					      mode: ($report.mode // null),
-					      # Booleans are read directly. `// null` treats a present false
-					      # as absent, which would erase exactly the answer that matters
-					      # most here, and a missing field already yields null.
-					      mode_valid: $report.modeValid,
-					      configured_mode: ($report.configuredMode // null),
-					      maintenance: ($report.maintenance // null),
-					      maintenance_source: ($report.maintenanceSource // null),
-					      enforcement: ($report.enforcement // null),
-					      session_required: $report.sessionRequired,
-					      paused: $report.paused,
-					      pause_reason: ($report.pauseReason // null),
-					      sweep_active: $report.sweepActive,
-					      running: $report.running,
-					      idle: $report.idle,
-					       active_sessions: ($report.activeSessions // null),
-					       active_writers: ($report.activeWriters // null),
-					       last_run: ($report.lastRun // null),
-					       observed_at_ms: ($report.observedAtMs // null)
-					     },
-					     admission_problem: (if ($admission[0].result[0].success // false) then null else "the admission row could not be read" end),
-					     admission: (if $row == null then null else {
-					       enforcement: $row.enforcement,
-					       admission_state: $row.state,
-					       protocol_version: $row.protocol_version,
-					       epoch: $row.epoch,
-					       sweep_started_at: $row.sweep_started_at,
-					       sweep_heartbeat_at: $row.sweep_heartbeat_at,
-					       sweep_expires_at: $row.sweep_expires_at,
-					       paused_at: $row.paused_at,
-					       pause_reason: $row.pause_reason,
-					       updated_at: $row.updated_at
-					     } end),
-					     ledger_problem: (if ($ledger_problem | length) == 0 then null else $ledger_problem end),
-					     counts: (if $totals == null then null else {
-					       running_gc_runs: $totals.running_gc_runs,
-					       open_sessions: $totals.open_sessions,
-					       pending_writers: $totals.pending_writers
-					     } end),
-					     gc_runs: ($gc_runs[0].result[0].results // []),
-					     idle: (
-					       ($report.paused == false) and
-					       ($report.sweepActive == false) and
-					       ($report.activeSessions == 0) and
-					       ($report.activeWriters == 0) and
-					       (($totals.running_gc_runs // 1) == 0)
-					     )
-					   }' > "${state_file}"
-
-					jq -c '{collector_http_status, collector: .collector, admission, counts, gc_runs: (.gc_runs | length), idle, collector_problem, ledger_problem}' \\
-					  "${state_file}" > "${evidence_dir}/state-summary.jsonl"
-
-					# The summary is written only from files that proved clean, because a
-					# failed run's step summary can not be retracted by deleting evidence
-					# afterwards. A reflected credential is still reported, without its
-					# value, and the step stops before anything is summarised.
-					reflected=0
-					for candidate in "${evidence_dir}"/*; do
-					  [ -f "${candidate}" ] || continue
-					  if grep -qF -- "${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" "${candidate}" 2>/dev/null; then
-					    rm -f -- "${candidate}"
-					    echo "removed a file that reflected the machine credential: ${candidate}" >&2
-					    reflected=1
-					  fi
-					done
-					if [ "${reflected}" = 1 ]; then
-					  echo 'an answer reflected the maintenance bypass secret, so nothing was summarised.' >&2
-					  exit 1
-					fi
-					cat "${evidence_dir}/state-summary.jsonl" >> "${GITHUB_STEP_SUMMARY}"
-
-					# Visibility is the point of this step, so the record is written before
-					# the decision. Unreadable input still stops the step: plan and run must
-					# never act on a state they could not read.
-					if [ -n "${collector_problem}" ]; then
-					  echo "${collector_problem}" >&2
-					  exit 1
-					fi
-					if [ -n "${ledger_problem}" ]; then
-					  echo "${ledger_problem}" >&2
-					  exit 1
-					fi
-
-					"""
+				run:  "cuenv task image-ops-read-cleanup-state"
 			}, {
 				name: "List the candidate set"
 				if:   "needs.request.outputs.action == 'plan'"
-				run: """
-					set -euo pipefail
-					evidence_dir="${RUNNER_TEMP}/intar-image-registry-cleanup"
-					# A plan runs only while the collector is idle, so the listing can not
-					# race a sweep that is already in flight.
-					jq -e '.idle == true' "${evidence_dir}/state.json" >/dev/null
-					tools/deploy/registry-cleanup-gate.sh plan delete \\
-					  "${evidence_dir}/registry-cleanup-plan.json"
-
-					"""
+				run:  "cuenv task image-ops-plan-cleanup"
 			}, {
 				name: "Run the delete campaign"
 				if:   "needs.request.outputs.action == 'run'"
@@ -876,18 +494,7 @@ package workflows
 					// CI gets 60 minutes here, inside the job's 75.
 					REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
 				}
-				run: """
-					set -euo pipefail
-					evidence_dir="${RUNNER_TEMP}/intar-image-registry-cleanup"
-					# A run needs an idle collector and no unresolved sweep: no running GC
-					# row, no open upload session, and no unresolved writer. That is the
-					# same state the collector's own assertion reads before it deletes.
-					jq -e '.idle == true and .counts.running_gc_runs == 0 and .counts.open_sessions == 0 and .counts.pending_writers == 0' \\
-					  "${evidence_dir}/state.json" >/dev/null
-					tools/deploy/registry-cleanup-gate.sh run delete \\
-					  "${evidence_dir}/registry-cleanup-run.json"
-
-					"""
+				run: "cuenv task image-ops-run-cleanup"
 			}, {
 				name: "Resolve one stalled sweep"
 				if:   "needs.request.outputs.action == 'resolve'"
@@ -898,176 +505,7 @@ package workflows
 					// and the service's grace window can not disagree.
 					STALE_MS: "600000"
 				}
-				run: """
-					set -euo pipefail
-					evidence_dir="${RUNNER_TEMP}/intar-image-registry-cleanup"
-					state_file="${evidence_dir}/state.json"
-					reap_file="${evidence_dir}/stalled-sweep-resolution.json"
-					post_file="${evidence_dir}/stalled-sweep-post-state.json"
-					test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
-
-					# Every precondition is read from the status step's record, which came
-					# from the collector itself and from D1. This resolves exactly one named
-					# abandoned sweep: one running GC run, that id, its heartbeat and lease
-					# already past the grace window, the plane healthy and open, the child in
-					# delete with enforcement on, and no other outstanding work.
-					jq -e --arg id "${EXPECTED_GC_RUN_ID}" --argjson stale "${STALE_MS}" '
-					  # The ledger window carries history, so only the running rows are the
-					  # guard: exactly one sweep may be in flight, and it must be the named
-					  # run. A completed row is the record of an earlier pass and is kept.
-					  [.gc_runs[] | select(.state == "running")] as $running |
-					  ($running[0] // {}) as $sweep |
-					  (.admission // {}) as $admission |
-					  # jq orders null below every number, so an unreadable stamp would
-					  # satisfy the lease test below instead of failing it.
-					  (($sweep.heartbeat_at | type) == "number") and
-					  (($admission.sweep_heartbeat_at | type) == "number") and
-					  (($admission.sweep_expires_at | type) == "number") and
-					  (.collector_http_status == 200) and
-					  (.collector_problem == null) and
-					  (.ledger_problem == null) and
-					  (.collector |
-					    (.maintenance == "off") and
-					    (.maintenance_source == "control-plane") and
-					    (.mode == "delete") and
-					    (.enforcement == "enforce") and
-					    (.session_required == true) and
-					    (.active_sessions == 0) and
-					    (.active_writers == 0)) and
-					  (.counts |
-					    (.running_gc_runs == 1) and
-					    (.open_sessions == 0) and
-					    (.pending_writers == 0)) and
-					  (($running | length) == 1) and
-					  ($sweep.id == $id) and
-					  ($admission.admission_state == "sweeping") and
-					  # Acquisition writes both rows from one clock reading.
-					  ($admission.sweep_started_at == $sweep.started_at) and
-					  # A recorded batch advances the row heartbeat alone, so the row is
-					  # legitimately at or ahead of the gate heartbeat.
-					  ($sweep.heartbeat_at >= $admission.sweep_heartbeat_at) and
-					  # Both heartbeats, and the lease, must be past the grace window: the
-					  # same two stamps the reap statement itself tests.
-					  ((.observed_at_ms - $sweep.heartbeat_at) > $stale) and
-					  ((.observed_at_ms - $admission.sweep_heartbeat_at) > $stale) and
-					  ((.observed_at_ms - $admission.sweep_expires_at) > $stale)
-					' "${state_file}" >/dev/null || {
-					  echo 'the stalled-sweep preconditions do not hold for that gc run id.' >&2
-					  jq -c '{counts, running_gc_runs: [.gc_runs[] | select(.state == "running") | {id, heartbeat_at}], admission: {admission_state: .admission.admission_state, sweep_heartbeat_at: .admission.sweep_heartbeat_at, sweep_expires_at: .admission.sweep_expires_at}, observed_at_ms, collector: {mode: .collector.mode, enforcement: .collector.enforcement, maintenance: .collector.maintenance}}' "${state_file}" >&2
-					  exit 1
-					}
-
-					# The existing operator endpoint. The body carries no credential, and
-					# the token travels only in this call's authorization header.
-					request_body="$(jq -cn --argjson grace "${STALE_MS}" '{resolve_stalled_sweeps: true, grace_ms: $grace}')"
-					reap_status="$(printf '%s' "${request_body}" | curl --silent --show-error --max-time 60 \\
-					  --request POST \\
-					  --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \\
-					  --header 'Content-Type: application/json' \\
-					  --data-binary @- \\
-					  --output "${reap_file}" --write-out '%{http_code}' \\
-					  "${REAP_URL}" || true)"
-					unset request_body
-					test "${reap_status}" = 200 || {
-					  echo "the stalled-sweep resolution answered HTTP ${reap_status:-none}." >&2
-					  exit 1
-					}
-
-					# Exactly one sweep resolved, and nothing else touched: no session and
-					# no writer was reaped, which is what a bounded resolution looks like.
-					jq -e '
-					  (.ok == true) and
-					  ((.reaped_sessions | length) == 0) and
-					  ((.reaped_writers | length) == 0) and
-					  ((.resolved_sweeps | length) == 1) and
-					  (.sweep_active == false) and
-					  (.active.sessions == 0) and
-					  (.active.writers == 0)
-					' "${reap_file}" >/dev/null || {
-					  echo 'the resolution did not reap exactly one sweep with nothing else.' >&2
-					  jq -c '{ok, reaped_sessions, reaped_writers, resolved_sweeps, active, sweep_active, sweep_stalled}' "${reap_file}" >&2
-					  exit 1
-					}
-
-					# Fresh state, not the response: one query bound to the run id proves the
-					# row is aborted, the gate is open with no sweep fields, nothing is running,
-					# and the claimed counters this sweep had already written are preserved.
-					query_sql="SELECT
-					    (SELECT state FROM image_registry_gc_runs WHERE id = ?1) AS gc_state,
-					    (SELECT finished_at FROM image_registry_gc_runs WHERE id = ?1) AS gc_finished_at,
-					    (SELECT scanned_objects FROM image_registry_gc_runs WHERE id = ?1) AS scanned_objects,
-					    (SELECT deleted_objects FROM image_registry_gc_runs WHERE id = ?1) AS deleted_objects,
-					    (SELECT blocked_objects FROM image_registry_gc_runs WHERE id = ?1) AS blocked_objects,
-					    (SELECT bytes_reclaimed FROM image_registry_gc_runs WHERE id = ?1) AS bytes_reclaimed,
-					    (SELECT state FROM image_registry_admission) AS admission_state,
-					    (SELECT sweep_started_at FROM image_registry_admission) AS sweep_started_at,
-					    (SELECT sweep_heartbeat_at FROM image_registry_admission) AS sweep_heartbeat_at,
-					    (SELECT sweep_expires_at FROM image_registry_admission) AS sweep_expires_at,
-					    (SELECT COUNT(*) FROM image_registry_gc_runs WHERE state = 'running') AS running_gc_runs;"
-					jq -cn --arg sql "${query_sql}" --arg id "${EXPECTED_GC_RUN_ID}" '{sql: $sql, params: [$id]}' \\
-					  > "${evidence_dir}/stalled-sweep-post-request.json"
-					post_status="$(curl --silent --show-error --max-time 60 \\
-					  --request POST \\
-					  --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \\
-					  --header 'Content-Type: application/json' \\
-					  --data-binary "@${evidence_dir}/stalled-sweep-post-request.json" \\
-					  --output "${post_file}" --write-out '%{http_code}' \\
-					  "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/query" \\
-					  || true)"
-					test "${post_status}" = 200 || {
-					  echo "the post-resolution state read answered HTTP ${post_status:-none}." >&2
-					  exit 1
-					}
-					# The comparison row is the named run, selected by id: the ledger window
-					# may also hold completed history.
-					jq -e --argjson before "$(jq -c --arg id "${EXPECTED_GC_RUN_ID}" '[.gc_runs[] | select(.id == $id)][0]' "${state_file}")" '
-					  (.success == true) and
-					  (.result[0].success == true) and
-					  (.result[0].results | length == 1) and
-					  (.result[0].results[0]) as $r |
-					  ($r.gc_state == "aborted") and
-					  ($r.gc_finished_at != null) and
-					  ($r.running_gc_runs == 0) and
-					  ($r.admission_state == "open") and
-					  ($r.sweep_started_at == null) and
-					  ($r.sweep_heartbeat_at == null) and
-					  ($r.sweep_expires_at == null) and
-					  ($r.scanned_objects == $before.scanned_objects) and
-					  ($r.deleted_objects == $before.deleted_objects) and
-					  ($r.blocked_objects == $before.blocked_objects) and
-					  ($r.bytes_reclaimed == $before.bytes_reclaimed)
-					' "${post_file}" >/dev/null || {
-					  echo 'the aborted sweep is not the expected state, or its counters moved.' >&2
-					  jq -c '.result[0].results[0]' "${post_file}" >&2
-					  exit 1
-					}
-					# Staged, not written straight to the summary: a failed step's summary
-					# can not be retracted, so the credential check below runs first, exactly
-					# as the status step does.
-					summary_file="${evidence_dir}/stalled-sweep-summary.jsonl"
-					jq -c '{reaped_sessions: (.reaped_sessions | length), reaped_writers: (.reaped_writers | length), resolved_sweeps: (.resolved_sweeps | length), sweep_active, sweep_stalled}' "${reap_file}" \\
-					  > "${summary_file}"
-					jq -c '.result[0].results[0]' "${post_file}" >> "${summary_file}"
-					reflected=0
-					for secret in "${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET:-}" "${INTAR_IMAGE_PUBLISH_TOKEN:-}" "${CLOUDFLARE_API_TOKEN:-}"; do
-					  # An absent credential can not be reflected by anything.
-					  [ -n "${secret}" ] || continue
-					  for candidate in "${evidence_dir}"/*; do
-					    [ -f "${candidate}" ] || continue
-					    if grep -qF -- "${secret}" "${candidate}" 2>/dev/null; then
-					      rm -f -- "${candidate}"
-					      echo "removed a file that reflected a machine credential: ${candidate}" >&2
-					      reflected=1
-					    fi
-					  done
-					done
-					if [ "${reflected}" = 1 ]; then
-					  echo 'an answer reflected a machine credential, so nothing was summarised.' >&2
-					  exit 1
-					fi
-					cat "${summary_file}" >> "${GITHUB_STEP_SUMMARY}"
-
-					"""
+				run: "cuenv task image-ops-resolve-stalled-sweep"
 			}, {
 				name: "Remove any response that reflected the machine credential"
 				if:   "always()"
@@ -1075,30 +513,7 @@ package workflows
 					// The scrub compares both credentials, and keeps neither.
 					INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				}
-				run: """
-					set -euo pipefail
-					evidence_dir="${RUNNER_TEMP}/intar-image-registry-cleanup"
-					[ -d "${evidence_dir}" ] || exit 0
-					removed=0
-					# Both machine credentials used by this lane are checked: the bypass
-					# secret reaches the parent, and the publish token reaches the registry.
-					for secret in "${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET:-}" "${INTAR_IMAGE_PUBLISH_TOKEN:-}"; do
-					  [ -n "${secret}" ] || continue
-					  for candidate in "${evidence_dir}"/*; do
-					    [ -f "${candidate}" ] || continue
-					    if grep -qF -- "${secret}" "${candidate}" 2>/dev/null; then
-					      rm -f -- "${candidate}"
-					      echo "removed a file that reflected a machine credential: ${candidate}" >&2
-					      removed=1
-					    fi
-					  done
-					done
-					if [ "${removed}" = 1 ]; then
-					  echo 'the image registry cleanup evidence reflected a machine credential.' >&2
-					  exit 1
-					fi
-
-					"""
+				run: "cuenv task image-ops-scrub-cleanup-evidence"
 			}, {
 				name: "Retain cleanup evidence"
 				if:   "always()"
@@ -1126,4 +541,26 @@ package workflows
 			}]
 		}
 	}
+}
+
+// The run steps above, one script each in tools/workflows/image-ops. A task
+// that authenticates to production or changes anything outside the runner is
+// _production; the authority check and the evidence scrub touch only the runner.
+tasks: {
+	"image-ops-install-rust-toolchain": #Script & {_script: "tools/workflows/image-ops/install-rust-toolchain.sh"}
+	"image-ops-verify-runner-disk-tools": #Script & {_script: "tools/workflows/image-ops/verify-runner-disk-tools.sh"}
+	"image-ops-prepare-kino-source": #Script & {_script: "tools/workflows/image-ops/prepare-kino-source.sh"}
+	"image-ops-build-guest-tools": #Script & {_script: "tools/workflows/image-ops/build-guest-tools.sh"}
+	"image-ops-upload-tools-candidate": #Script & {_script: "tools/workflows/image-ops/upload-tools-candidate.sh", _production: true}
+	"image-ops-verify-tools-upload": #Script & {_script: "tools/workflows/image-ops/verify-tools-upload.sh", _production: true}
+	"image-ops-read-tools-candidate": #Script & {_script: "tools/workflows/image-ops/read-tools-candidate.sh", _production: true}
+	"image-ops-require-drain-retain-stable": #Script & {_script: "tools/workflows/image-ops/require-drain-retain-stable.sh", _production: true}
+	"image-ops-warm-tools-candidate": #Script & {_script: "tools/workflows/image-ops/warm-tools-candidate.sh", _production: true}
+	"image-ops-promote-tools-candidate": #Script & {_script: "tools/workflows/image-ops/promote-tools-candidate.sh", _production: true}
+	"image-ops-validate-cleanup-authority": #Script & {_script: "tools/workflows/image-ops/validate-cleanup-authority.sh"}
+	"image-ops-read-cleanup-state": #Script & {_script: "tools/workflows/image-ops/read-cleanup-state.sh", _production: true}
+	"image-ops-plan-cleanup": #Script & {_script: "tools/workflows/image-ops/plan-cleanup.sh", _production: true}
+	"image-ops-run-cleanup": #Script & {_script: "tools/workflows/image-ops/run-cleanup.sh", _production: true}
+	"image-ops-resolve-stalled-sweep": #Script & {_script: "tools/workflows/image-ops/resolve-stalled-sweep.sh", _production: true}
+	"image-ops-scrub-cleanup-evidence": #Script & {_script: "tools/workflows/image-ops/scrub-cleanup-evidence.sh"}
 }
