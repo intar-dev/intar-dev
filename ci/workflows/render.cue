@@ -2,7 +2,6 @@ package workflows
 
 import (
 	"encoding/yaml"
-	"regexp"
 	"strings"
 )
 
@@ -18,8 +17,8 @@ workflows: [Name=string]: {...}
 
 // Every external action pin and its release tag. The workflow policy requires
 // the tag as a comment on each pin, and YAML rendering drops comments, so the
-// renderer writes it back from here. A pin missing from this table fails
-// evaluation.
+// renderer writes it back from here. A pin missing from this table renders
+// without its tag and fails `bun tools/ci/check-workflow-security.ts`.
 pins: [string]: string
 pins: {
 	"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1":                      "v7"
@@ -33,22 +32,26 @@ pins: {
 	"taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29":                "v2"
 }
 
-let _uses = #"^\s*(- )?uses: [^./\s][^\s]*@[0-9a-f]{40}$"#
+let _refs = [for ref, _ in pins {ref}]
+
+// One replacement per pin over the whole document, chained through _annotated.
+// A per-line regexp pass doubled the cost of every cuenv invocation.
+_annotated: {
+	for name, workflow in workflows {
+		(name): "0": yaml.Marshal(workflow)
+		for i, ref in _refs {
+			(name): "\(i+1)": strings.Replace(_annotated[name]["\(i)"], "uses: \(ref)\n", "uses: \(ref) # \(pins[ref])\n", -1)
+		}
+	}
+}
 
 // Rendered file content, keyed by path relative to the repository root.
 files: {
-	for name, workflow in workflows {
-		let _lines = strings.Split(yaml.Marshal(workflow), "\n")
-		".github/workflows/\(name).yml": strings.Join([
-			"# Generated from ci/workflows/\(name).cue by cuenv; do not edit manually.",
-			"# Regenerate with: cuenv sync codegen",
-			for line in _lines {
-				if regexp.Match(_uses, line) {
-					let _ref = strings.TrimSpace(strings.Split(line, "uses: ")[1])
-					"\(line) # \(pins[_ref])"
-				}
-				if !regexp.Match(_uses, line) {line}
-			},
-		], "\n")
+	for name, _ in workflows {
+		".github/workflows/\(name).yml": """
+			# Generated from ci/workflows/\(name).cue by cuenv; do not edit manually.
+			# Regenerate with: cuenv sync codegen
+			\(_annotated[name]["\(len(_refs))"])
+			"""
 	}
 }

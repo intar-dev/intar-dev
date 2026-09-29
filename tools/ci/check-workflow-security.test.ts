@@ -24,6 +24,7 @@ function check(
   Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()
   Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'
 `,
+  files: Record<string, string> = {},
 ): string[] {
   const root = mkdtempSync(join(tmpdir(), "intar-workflow-security-"));
   roots.push(root);
@@ -55,6 +56,10 @@ function check(
     const staticHeadersPath = join(root, path);
     mkdirSync(join(staticHeadersPath, ".."), { recursive: true });
     writeFileSync(staticHeadersPath, staticHeaders);
+  }
+  for (const [path, contents] of Object.entries(files)) {
+    mkdirSync(join(root, path, ".."), { recursive: true });
+    writeFileSync(join(root, path), contents);
   }
   return checkWorkflowSecurity(root);
 }
@@ -209,6 +214,28 @@ jobs:
         "must use a 40-character commit SHA",
       );
     }
+  });
+
+  it("requires each rendered pin in a file Dependabot scans", () => {
+    const rendered = `# Generated from ci/workflows/security.cue by cuenv; do not edit manually.
+jobs:
+  build:
+    steps:
+      - uses: ${pinnedCheckout}
+`;
+    const pins = `runs:
+  using: composite
+  steps:
+    - uses: ${pinnedCheckout}
+`;
+    expect(
+      check(rendered, undefined, undefined, {
+        ".github/actions/workflow-pins/action.yml": pins,
+      }),
+    ).toEqual([]);
+    expect(check(rendered).join("\n")).toContain(
+      ".github/workflows/security.yml:5: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 must also be pinned in a file Dependabot scans",
+    );
   });
 
   it("rejects Worker compatibility-date drift", () => {

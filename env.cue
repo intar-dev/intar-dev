@@ -316,8 +316,35 @@ schema.#Project & {
 
 		actionlint: #Host & {command: "tools/ci/actionlint.sh"}
 
-		// Generated workflows must match env.cue.
-		"sync-check": #Bash & {_script: "cuenv sync ci --check\ncuenv sync codegen --check"}
+		// Generated workflows must match env.cue. The sync checks compare only
+		// the files they generate, so a leftover or hand-written workflow, or a
+		// rendered one Dependabot would edit, is caught here.
+		"sync-check": #Bash & {
+			_script: """
+				cuenv sync ci --check
+				cuenv sync codegen --check
+				if ! diff <(printf '%s\\n' "$@" | sort) <(find .github/workflows -type f | sort) >&2; then
+				  echo 'Every workflow must be rendered by cuenv or be scenario-publish.yml.' >&2
+				  exit 1
+				fi
+				for path in "$@"; do
+				  case "${path}" in
+				    */scenario-publish.yml) continue ;;
+				    */intar-*.yml) exclude='.github/workflows/intar-*.yml' ;;
+				    *) exclude="${path}" ;;
+				  esac
+				  if ! grep -qF -- "- \\"${exclude}\\"" .github/dependabot.yml; then
+				    echo "${path} must be in the exclude-paths of .github/dependabot.yml." >&2
+				    exit 1
+				  fi
+				done
+				"""
+			_argv: list.Concat([
+				[for path, _ in workflows.files {path}],
+				[for lane, _ in ci.pipelines {".github/workflows/intar-\(lane).yml"}],
+				[".github/workflows/scenario-publish.yml"],
+			])
+		}
 
 		lanes: {
 			type: "group"
