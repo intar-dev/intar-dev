@@ -1,5 +1,4 @@
-The `@better-auth/sso` patch adds two things the pinned release lacks. Both
-are still missing from the latest release (1.7.5) and from upstream `main`.
+The `@better-auth/sso` patch adds two things the pinned release (1.7.6) lacks.
 
 1. Token authentication method `none`. The SSO callback maps every method it
    doesn't know to `client_secret_basic`, and Better Auth core then refuses the
@@ -21,3 +20,16 @@ token request, the callback, and the link hook.
 Remove the `none` hunk when the SSO library supports `none` directly, and the
 link hook once auth data lives in a store with interactive transactions so
 `resolveUser` can replace it.
+
+The `@better-auth/core` patch keeps the pre-1.7.6 after-hook semantics for
+adapters without native transactions, such as Intar's D1 adapter. Since 1.7.6
+`runWithTransaction` drops queued after hooks when the callback fails and
+reports their errors only to a logger. Without a native transaction nothing
+rolls back, so the rows those hooks guard already exist: the account hook must
+still remove an identity whose provider was deleted mid-sign-up, and a session
+hook's refusal must still fail the callback. With the patch, those adapters run
+every queued hook, and a hook's error fails the request. Adapters with native
+transactions keep upstream behavior. `organization-sso.workers.test.ts` covers
+both races.
+
+Remove it once auth data lives in a store with interactive transactions.

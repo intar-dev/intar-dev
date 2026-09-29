@@ -179,17 +179,28 @@ function isIdentityPreservingProviderLock(
     updateKeys[0] !== "providerId" ||
     typeof providerId !== "string" ||
     !Array.isArray(value.where) ||
-    value.where.length !== 1 ||
-    !isRecord(value.where[0])
+    value.where.length === 0 ||
+    value.where.length > 2 ||
+    !value.where.every(isEqualityClause)
   ) {
     return false;
   }
-  const where = value.where[0];
+  // The plugin narrows the lock by row id when it knows it.
+  const [first, second] = value.where as Record<string, unknown>[];
+  const [idClause, providerClause] = second ? [first, second] : [undefined, first];
   return (
-    where.field === "providerId" &&
-    where.value === providerId &&
-    (where.operator === undefined || where.operator === "eq") &&
-    (where.connector === undefined || where.connector === "AND")
+    providerClause?.field === "providerId" &&
+    providerClause.value === providerId &&
+    (idClause === undefined ||
+      (idClause.field === "id" && typeof idClause.value === "string"))
+  );
+}
+
+function isEqualityClause(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value.operator === undefined || value.operator === "eq") &&
+    (value.connector === undefined || value.connector === "AND")
   );
 }
 

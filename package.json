@@ -29,10 +29,9 @@
     "build": "bun run build:web"
   },
   "overrides": {
-    "@better-auth/core": "1.7.0-beta.10",
+    "@better-auth/core": "1.7.6",
     "@cloudflare/vite-plugin": "1.62.0",
     "@hono/node-server": "1.19.17",
-    "@xmldom/xmldom": "0.8.15",
     "ajv": "8.20.0",
     "astro": "7.3.5",
     "defu": "6.1.7",
@@ -55,6 +54,7 @@
     "yaml": "2.9.1"
   },
   "patchedDependencies": {
-    "@better-auth/sso@1.7.0-beta.10": "patches/@better-auth%2Fsso@1.7.0-beta.10.patch"
+    "@better-auth/sso@1.7.6": "patches/@better-auth%2Fsso@1.7.6.patch",
+    "@better-auth/core@1.7.6": "patches/@better-auth%2Fcore@1.7.6.patch"
   }
 }

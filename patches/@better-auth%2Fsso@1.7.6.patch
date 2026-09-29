@@ -1,16 +1,16 @@
-diff --git a/dist/index-A_DJ_AqL.d.mts b/dist/index-A_DJ_AqL.d.mts
-index 4b12a6f922364928b743ef09336d1d9b54a0a24e..ff3ee14b94eedfe8a47ebd1079b808a3c37a4f8e 100644
---- a/dist/index-A_DJ_AqL.d.mts
-+++ b/dist/index-A_DJ_AqL.d.mts
-@@ -2,6 +2,7 @@ import { APIError } from "better-auth/api";
- import * as z from "zod";
+diff --git a/dist/index-sM6JWXeV.d.mts b/dist/index-sM6JWXeV.d.mts
+index 2fe04042d5bf37bd1f8da2dda60190df6250ced6..2860db42d3e2f6fa9d35548d1fd5acbb92b924cf 100644
+--- a/dist/index-sM6JWXeV.d.mts
++++ b/dist/index-sM6JWXeV.d.mts
+@@ -3,6 +3,7 @@ import * as z from "zod";
+ import samlifyDefault from "samlify";
  import { DBFieldAttribute, FieldAttributeToObject, InferAdditionalFieldsFromPluginOptions, RemoveFieldsWithReturnedFalse } from "better-auth/db";
- import { Awaitable, OAuth2Tokens, User } from "better-auth";
+ import { Awaitable, DBTransactionAdapter, OAuth2Tokens, User } from "better-auth";
 +import { GenericEndpointContext } from "@better-auth/core";
- import * as better_call0 from "better-call";
- 
+ import * as _$better_call0 from "better-call";
  //#region src/saml/algorithms.d.ts
-@@ -226,6 +227,26 @@ interface SSOOptions {
+ declare const SignatureAlgorithm: {
+@@ -361,6 +362,26 @@ interface SSOOptions {
       */
      provider: SSOProvider<SSOOptions>;
    }) => Awaitable<void>) | undefined;
@@ -38,21 +38,21 @@ index 4b12a6f922364928b743ef09336d1d9b54a0a24e..ff3ee14b94eedfe8a47ebd1079b808a3
     * If true, the `provisionUser` callback will be called on every login,
     * not just when a new user is registered. This is useful when you need
 diff --git a/dist/index.mjs b/dist/index.mjs
-index b62dd8f6706f8efe36df35f9609bf406896dafda..ecb84d91a558e738fe800e583ea8a70d6aed2a83 100644
+index b793a72226b6a185a8e3a9d87ae60af6689f005b..1ab4eb7d7191490b6d08c057e7bbcd903007ac6f 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -3236,7 +3236,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData) {
+@@ -3833,7 +3833,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
  	};
- 	if (!config.tokenEndpoint) throw ctx.redirect(`${errorURL || callbackURL}?error=invalid_provider&error_description=token_endpoint_not_found`);
+ 	if (!config.tokenEndpoint) return redirectOIDCError("invalid_provider", "token_endpoint_not_found");
  	const tokenEndpoint = config.tokenEndpoint;
 -	let tokenEndpointAuth = config.tokenEndpointAuthentication === "client_secret_post" ? { method: "client_secret_post" } : { method: "client_secret_basic" };
 +	let tokenEndpointAuth = config.tokenEndpointAuthentication === "none" ? { method: "none" } : config.tokenEndpointAuthentication === "client_secret_post" ? { method: "client_secret_post" } : { method: "client_secret_basic" };
  	if (config.tokenEndpointAuthentication === "private_key_jwt") {
  		let resolved;
  		const matchingDefault = options?.defaultSSO?.find((p) => p.providerId === provider.providerId && "privateKey" in p && p.privateKey);
-@@ -3330,6 +3330,19 @@ async function handleOIDCCallback(ctx, options, providerId, stateData) {
- 	const userInfoEmail = userInfo.email;
- 	const userInfoId = userInfo.id;
+@@ -3950,6 +3950,19 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
+ 		accountId: userInfoId
+ 	};
  	const isTrustedProvider = "domainVerified" in provider && provider.domainVerified === true && validateEmailDomain(userInfoEmail, provider.domain);
 +	const applicationRedirect = await options?.beforeOIDCUserResolution?.({
 +		context: ctx,
@@ -69,4 +69,4 @@ index b62dd8f6706f8efe36df35f9609bf406896dafda..ecb84d91a558e738fe800e583ea8a70d
 +	if (applicationRedirect) throw ctx.redirect(applicationRedirect);
  	let linked;
  	try {
- 		linked = await runWithTransaction(ctx.context.adapter, async () => {
+ 		if (options?.resolveUser) {

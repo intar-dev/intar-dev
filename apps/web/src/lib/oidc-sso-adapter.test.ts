@@ -32,7 +32,10 @@ describe("OIDC SSO Better Auth adapter decorator", () => {
     });
     const locked = await adapter.update({
       model: "ssoProvider",
-      where: [{ field: "providerId", value: identity.providerId }],
+      where: [
+        { field: "id", value: "provider-row" },
+        { field: "providerId", value: identity.providerId },
+      ],
       update: { providerId: identity.providerId },
     });
     for (const result of [found, locked]) {
@@ -153,6 +156,24 @@ describe("OIDC SSO Better Auth adapter decorator", () => {
         update: { oidcConfig: JSON.stringify({ clientSecret: "replacement" }) },
       }),
     ).rejects.toBeInstanceOf(OidcSsoProviderWriteDisabledError);
+    for (const where of [
+      [
+        { field: "id", value: "provider-row" },
+        { field: "providerId", value: "org-other" },
+      ],
+      [
+        { field: "providerId", value: identity.providerId },
+        { field: "id", value: "provider-row", operator: "ne" as const },
+      ],
+    ]) {
+      await expect(
+        adapter.update({
+          model: "ssoProvider",
+          where,
+          update: { providerId: identity.providerId },
+        }),
+      ).rejects.toBeInstanceOf(OidcSsoProviderWriteDisabledError);
+    }
     await expect(
       adapter.delete({
         model: "ssoProvider",

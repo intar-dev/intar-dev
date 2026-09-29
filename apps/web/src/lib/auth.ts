@@ -484,7 +484,7 @@ const accountAccessBeforeRequest = createAuthMiddleware(async (context) => {
     throw new APIError("FORBIDDEN", { message: "Profile details come from your sign-in provider" });
   }
   // Better Auth's id-token shortcut signs in or links without the state-bound
-  // redirect, and its link path skips validateUserInfo in 1.7.0-beta.10.
+  // redirect, and its link path skips validateUserInfo in 1.7.6.
   if (
     (context.path === "/sign-in/social" || context.path === "/link-social") &&
     isRecord(context.body) &&
@@ -1333,7 +1333,7 @@ function buildAuthInstance() {
             organizationId: provider.organizationId,
           });
         },
-        // Added by patches/@better-auth%2Fsso@1.7.0-beta.10.patch. A login its
+        // Added by patches/@better-auth%2Fsso@1.7.6.patch. A login its
         // organization removed goes no further. An explicit link binds the
         // verified identity to the signed-in account before the plugin
         // resolves a user by subject or email.
