@@ -753,6 +753,14 @@ export function createMockApiState(input?: {
     },
     hosts: empty ? [] : [host],
     hostRuns: empty ? { liveVms: [], archivedRuns: [] } : hostRuns,
+    // No attempt yet keeps the admin scenarios page free of relative times.
+    imagePromotion: {
+      attempt: null,
+      holdingRuns: false,
+      operatorDrained: false,
+      pendingRevision: null,
+      runningVms: 0,
+    },
     adminScenarios: empty
       ? []
       : [

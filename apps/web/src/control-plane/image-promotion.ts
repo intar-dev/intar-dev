@@ -225,11 +225,16 @@ async function outgoingImageUse(
   return { executionIds: blockers.executionIds, hostIds: blockers.hostIds };
 }
 
+/** "1 VM", "2 VMs". */
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
 function readinessDetail(status: RevisionStatus): string {
   const builds = status.builds.filter((build) => build.status !== "succeeded").length;
-  if (builds) return `${builds} image build${builds === 1 ? "" : "s"} not finished`;
+  if (builds) return `${counted(builds, "image build")} not finished`;
   const hosts = status.hosts.filter((host) => !host.ready).length;
-  if (hosts) return `new images still warming on ${hosts} host${hosts === 1 ? "" : "s"}`;
+  if (hosts) return `new images still warming on ${counted(hosts, "host")}`;
   if (!status.hosts.length) return "no connected platform host holds the new images";
   return `the revision is ${status.state}`;
 }
@@ -272,7 +277,7 @@ async function drainRefusal(
   }
   const use = imageUse ? await outgoingImageUse(db, revision) : { executionIds: [], hostIds: [] };
   if (use.executionIds.length || use.hostIds.length) {
-    return `the old images are still in use by ${use.executionIds.length} run(s) and ${use.hostIds.length} host(s)`;
+    return `the old images are still in use by ${counted(use.executionIds.length, "run")} and ${counted(use.hostIds.length, "host")}`;
   }
   return null;
 }
@@ -378,7 +383,7 @@ async function step(
       );
       if (!drained) {
         const running = await runningVms(db);
-        await setDetail(db, gate, `waiting for an idle moment: ${running} VM(s) running`);
+        await setDetail(db, gate, `waiting for an idle moment: ${counted(running, "VM")} running`);
       }
       return drained;
     }
@@ -393,7 +398,7 @@ async function step(
       }
       const running = await runningVms(db);
       const refusal = running
-        ? `${running} VM(s) still running`
+        ? `${counted(running, "VM")} still running`
         : await drainRefusal(env, attempt.revision, true);
       if (refusal) {
         await setDetail(db, gate, refusal);

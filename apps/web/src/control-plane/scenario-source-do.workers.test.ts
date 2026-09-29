@@ -2002,7 +2002,7 @@ describe("ScenarioSourceDO public apply", () => {
         origin: "auto",
         revision: rev(SHA_B),
         phase: "waiting",
-        detail: "waiting for an idle moment: 1 VM(s) running",
+        detail: "waiting for an idle moment: 1 VM running",
       });
       expect(await gate()).toMatchObject({ state: "open" });
       expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
@@ -2035,7 +2035,7 @@ describe("ScenarioSourceDO public apply", () => {
         origin: "admin",
         requestedBy: ADMIN,
         phase: "drained",
-        detail: "1 VM(s) still running",
+        detail: "1 VM still running",
       });
       expect(await gate()).toMatchObject({ state: "drained" });
       await tick();
