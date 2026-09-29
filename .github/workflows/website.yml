@@ -67,7 +67,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
-      - "justfile"
+      - "env.cue"
       - "package.json"
       - "bun.lock"
       - "patches/**"

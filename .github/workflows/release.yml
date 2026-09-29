@@ -349,7 +349,11 @@ jobs:
         if: steps.next.outputs.resume != 'true'
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
-          tool: just@1.58.0,cargo-nextest@0.9.143,cargo-zigbuild@0.23.0
+          tool: cargo-nextest@0.9.143,cargo-zigbuild@0.23.0
+
+      - name: Set up cuenv
+        if: steps.next.outputs.resume != 'true'
+        uses: ./.github/actions/setup-cuenv
 
       - name: Install Zig
         if: steps.next.outputs.resume != 'true'
@@ -408,7 +412,7 @@ jobs:
 
       - name: Run checks
         if: steps.next.outputs.resume != 'true'
-        run: just verify
+        run: cuenv task verify
 
       - name: Build release artifacts
         if: steps.next.outputs.resume != 'true'
@@ -537,9 +541,7 @@ jobs:
 
       - name: Test personal-host installer
         if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
-        run: |
-          python3 -m unittest discover -s deploy/personal-metal -p 'test_*.py'
-          sh -n apps/web/public/install.sh deploy/personal-metal/package.sh
+        run: cuenv task installer-tests
 
       - name: Run privileged agent package smoke
         if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
