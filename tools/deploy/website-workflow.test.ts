@@ -16,6 +16,13 @@ const steps = workflow.jobs.deploy.steps;
 const request = workflow.jobs.plan.steps.find(step => step.name === "Validate the release request")!;
 const sha = "a".repeat(40);
 
+// A step runs its body inline or as `cuenv task website-<name>`, whose body is
+// tools/workflows/website/<name>.sh.
+function body(step: Step) {
+  const task = /^cuenv task website-([a-z0-9-]+)$/.exec(step.run ?? "");
+  return task ? readFileSync(`tools/workflows/website/${task[1]}.sh`, "utf8") : step.run;
+}
+
 function context(operation: string, guard = "active", action = operation.replace(/^metal-/, "")) {
   return {
     github: { ref: "refs/heads/main", event_name: operation === "push" ? "push" : "workflow_dispatch" },
@@ -55,7 +62,7 @@ it.each(["deploy", "open-platform-registration", "open-admission"])("isolates me
   expect(runs(workflow.jobs.deploy.if, state)).toBe(true);
   expect(runs(workflow.jobs.plan.if, context(`metal-${action}`, ""))).toBe(false);
   expect(runs(workflow.jobs.deploy.if, context(`metal-${action}`, ""))).toBe(false);
-  const normalMutations = steps.filter(step => /tools\/deploy\/(deploy-web|deploy-registry-cleanup|registry-cleanup-(gate|child-gate))\.sh|bun tools\/database\/apply-generated-migrations\.ts/.test(step.run ?? ""));
+  const normalMutations = steps.filter(step => /tools\/deploy\/(deploy-web|deploy-registry-cleanup|registry-cleanup-(gate|child-gate))\.sh|bun tools\/database\/apply-generated-migrations\.ts/.test(body(step) ?? ""));
   expect(normalMutations.length).toBeGreaterThan(5);
   for (const failed of [false, true]) for (const step of normalMutations) {
     expect(runs(step.if, state, failed), step.name).toBe(false);
@@ -97,8 +104,9 @@ it("requires the fixed revision, prior deploy, and actual proof artifact input b
 
 it("parses every workflow shell block", () => {
   for (const job of Object.values(workflow.jobs)) for (const step of job.steps) {
-    if (!step.run) continue;
-    const result = spawnSync("bash", ["-n"], { input: step.run, encoding: "utf8" });
+    const run = body(step);
+    if (!run) continue;
+    const result = spawnSync("bash", ["-n"], { input: run, encoding: "utf8" });
     expect(result.status, `${step.name}: ${result.stderr}`).toBe(0);
   }
 });
@@ -138,7 +146,7 @@ sys.stdout.buffer.write(open(os.path.join(root, files[key]), 'rb').read())
 `);
     chmodSync(gh, 0o755);
     const restore = steps.find(step => step.name === "Restore metal retirement evidence")!;
-    const result = spawnSync("bash", ["-c", restore.run!], { encoding: "utf8", env: {
+    const result = spawnSync("bash", ["-c", body(restore)!], { encoding: "utf8", env: {
       ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_ROOT: temp, RUNNER_TEMP: temp,
       GITHUB_REPOSITORY: "intar-dev/intar-dev", GITHUB_SHA: sha, SOURCE_RUN_ID: "123", METAL_ACTION: action, PROOF_ARTIFACT_ID: "",
     } });
