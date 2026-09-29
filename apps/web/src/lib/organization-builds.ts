@@ -1,28 +1,24 @@
 import { env } from "cloudflare:workers";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import { and, desc, eq, inArray } from "drizzle-orm";
+import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { imageBuilds, member } from "@/db/schema";
 import { serializeAdminBuildSummary } from "@/lib/admin-build-response";
-import { administersOrganization } from "@/lib/organizations";
 import { redactHostPaths } from "@/lib/scenario-sources";
 
-const administeredBy = (userId: string) =>
-  administersOrganization(sql`${imageBuilds.organizationId}`, userId);
-
 /**
- * The builds of every organization `userId` owns or administers, in the
- * tenant projection of the Scenario source card: no builder host, no bundle
- * key, and host paths removed from errors. `null` when they administer none.
+ * The organizations `userId` owns or administers. Builds match it as an `IN`
+ * subquery: the organization index serves the lookup, where a correlated
+ * `EXISTS` scanned every tenant's builds, and no id list is bound.
  */
-export async function listAdministeredBuilds(userId: string) {
-  const db = drizzle(env.DB);
-  const [administers] = await db
-    .select({ id: member.id })
+const administeredOrganizations = (db: DrizzleD1Database, userId: string) =>
+  db
+    .select({ id: member.organizationId })
     .from(member)
-    .where(and(eq(member.userId, userId), inArray(member.role, ["owner", "admin"])))
-    .limit(1);
-  if (!administers) return null;
-  const rows = await db
+    .where(and(eq(member.userId, userId), inArray(member.role, ["owner", "admin"])));
+
+/** The newest builds of the organizations `userId` owns or administers. */
+export function administeredBuildsQuery(db: DrizzleD1Database, userId: string) {
+  return db
     .select({
       id: imageBuilds.id,
       scenarioId: imageBuilds.scenarioId,
@@ -39,9 +35,21 @@ export async function listAdministeredBuilds(userId: string) {
       updatedAt: imageBuilds.updatedAt,
     })
     .from(imageBuilds)
-    .where(administeredBy(userId))
+    .where(inArray(imageBuilds.organizationId, administeredOrganizations(db, userId)))
     .orderBy(desc(imageBuilds.updatedAt))
     .limit(200);
+}
+
+/**
+ * The builds of every organization `userId` owns or administers, in the
+ * tenant projection of the Scenario source card: no builder host, no bundle
+ * key, and host paths removed from errors. `null` when they administer none.
+ */
+export async function listAdministeredBuilds(userId: string) {
+  const db = drizzle(env.DB);
+  const [administers] = await administeredOrganizations(db, userId).limit(1);
+  if (!administers) return null;
+  const rows = await administeredBuildsQuery(db, userId);
   return rows.map((row) => ({
     ...serializeAdminBuildSummary({
       ...row,
@@ -67,10 +75,16 @@ export async function readAdministeredBuildLog(
   userId: string,
   buildId: string,
 ): Promise<string | null> {
-  const [build] = await drizzle(env.DB)
+  const db = drizzle(env.DB);
+  const [build] = await db
     .select({ logR2Key: imageBuilds.logR2Key })
     .from(imageBuilds)
-    .where(and(eq(imageBuilds.id, buildId), administeredBy(userId)))
+    .where(
+      and(
+        eq(imageBuilds.id, buildId),
+        inArray(imageBuilds.organizationId, administeredOrganizations(db, userId)),
+      ),
+    )
     .limit(1);
   const object = build?.logR2Key
     ? await env.VM_IMAGE_REGISTRY_BUCKET.get(build.logR2Key, {
