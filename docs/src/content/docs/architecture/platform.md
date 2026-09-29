@@ -88,11 +88,12 @@ per-scenario/architecture D1 lease used by supersession, so an old build cannot
 seed the catalog after its replacement wins. The static registry token remains
 the explicit privileged path for release tooling and manual `run-once` publishes.
 
-The catalog-promotion workflow closes the D1 run-admission gate and waits for
-zero running desired VMs. It requires exact host image and stable guest-tool
-cache reports before it switches every candidate catalog row in one D1 batch.
-It does not change the guest-tool pin. The batch also stores the previous
-catalog as a rollback snapshot.
+Intar's image promotion, a state machine the minute cron advances, holds new
+runs on its own gate key at an idle moment, or when an admin asks, and waits
+for zero running desired VMs. It requires exact host image and stable
+guest-tool cache reports before it switches every candidate catalog row in one
+D1 batch, fenced on the attempt record. It does not change the guest-tool pin.
+The batch also stores the previous catalog as a rollback snapshot.
 
 Agents list and download images through the Worker registry endpoint. The agent
 caches only compressed chunks, manifests, boot artifacts, and the pinned tools

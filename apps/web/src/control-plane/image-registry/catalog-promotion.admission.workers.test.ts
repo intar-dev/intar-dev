@@ -4,20 +4,18 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
-import { handleCandidateCatalogPromotion } from "@/control-plane/image-registry/catalog-promotion";
 import {
   imageBuildBundles,
   imageBuilds,
-  runtimeOperationGates,
   scenarioCatalogCandidates,
   vmScenarioVms,
   vmScenarios,
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
 import { createCleanupServiceDouble } from "./cleanup-service-double";
+import { promoteThroughDrainedLane } from "./promotion-lane-double";
 import {
   enableRegistryDeletion,
   seedChunkedImage,
@@ -153,10 +151,6 @@ async function seed(): Promise<void> {
       ],
     },
   });
-  await db.insert(runtimeOperationGates).values({
-    key: IMAGE_CUTOVER_GATE,
-    state: "drained",
-  });
   await db.insert(imageBuilds).values([
     {
       id: "build-new",
@@ -266,7 +260,7 @@ describe("catalog promotion admission and cleanup", () => {
     const double = createCleanupServiceDouble(
       { DB: env.DB, VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET },
       {
-        // This runs while the promotion request is still open. It is the proof
+        // This runs while the promotion is still open. It is the proof
         // that the pointer-mutation guard was released before the sweep: a
         // pending writer makes the collector refuse its exclusive lease.
         onRun: async () => {
@@ -278,17 +272,7 @@ describe("catalog promotion admission and cleanup", () => {
       },
     );
 
-    const response = await handleCandidateCatalogPromotion(
-      new Request(
-        "https://intar.test/registry/v1/catalog/promote/" + REVISION,
-        {
-          method: "POST",
-          headers: {
-            authorization: "Bearer test-publish-token",
-            "x-intar-drained": "true",
-          },
-        },
-      ),
+    const response = await promoteThroughDrainedLane(
       { ...env, REGISTRY_CLEANUP: double } as unknown as Cloudflare.Env,
       REVISION,
     );

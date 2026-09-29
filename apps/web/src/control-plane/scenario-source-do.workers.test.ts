@@ -47,7 +47,15 @@ import { maintainHostBuildAssignments, queueImageBuildsFromBundle } from "@/lib/
 import { BUILDER_REASSIGN_AFTER_MS } from "@/lib/build-scheduler-core";
 import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
 import { setRegistryPause } from "@/lib/image-registry-admission";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gate";
+import {
+  advanceImagePromotion,
+  releaseImagePromotion,
+  startImagePromotion,
+  type PromotionAttempt,
+} from "./image-promotion";
+import { createCleanupServiceDouble } from "./image-registry/cleanup-service-double";
+import { enableRegistryDeletion } from "./image-registry/registry-artifact-fixtures";
 import {
   countUnitGuardRuns,
   loadScenarioSource,
@@ -59,7 +67,10 @@ import { buildTar, gzipBytes } from "@/lib/tar";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
-const stageLock = vi.hoisted(() => ({ locked: false }));
+const stageLock = vi.hoisted(() => ({
+  locked: false,
+  before: undefined as (() => Promise<void>) | undefined,
+}));
 vi.mock("@/lib/scenario-catalog-candidates", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/scenario-catalog-candidates")>();
   return {
@@ -67,12 +78,37 @@ vi.mock("@/lib/scenario-catalog-candidates", async (importOriginal) => {
     stageReusableCandidateManifests: async (
       ...args: Parameters<typeof actual.stageReusableCandidateManifests>
     ) => {
+      await stageLock.before?.();
       if (stageLock.locked) {
         const { appError } = await import("@/lib/app-error");
         throw appError(409, "candidate_source_locked", "locked");
       }
       return actual.stageReusableCandidateManifests(...args);
     },
+  };
+});
+
+// Warm host caches and a stable guest-tools pin need a platform host and R2
+// objects this suite has no use for; revisionReady has its own tests. `ready`
+// answers per call, so a test can drain on a ready revision and then withhold.
+const readiness = vi.hoisted(() => ({
+  calls: 0,
+  ready: ((_call: number) => true) as (call: number) => boolean,
+  builds: [] as Array<{ status: string }>,
+}));
+vi.mock("@/control-plane/image-registry/build-status", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/control-plane/image-registry/build-status")>();
+  return {
+    ...actual,
+    loadRevisionStatus: async () => {
+      readiness.calls += 1;
+      const ready = readiness.ready(readiness.calls);
+      return {
+        ok: true as const,
+        body: { ok: ready, state: ready ? "ready" : "warming", builds: readiness.builds, hosts: [] },
+      };
+    },
+    revisionReady: (body: { ok: boolean }) => body.ok,
   };
 });
 
@@ -96,7 +132,10 @@ vi.mock("@/control-plane/image-registry/catalog-promotion", async (importOrigina
     },
   };
 });
-const guard = vi.hoisted(() => ({ before: undefined as (() => Promise<void>) | undefined }));
+const guard = vi.hoisted(() => ({
+  before: undefined as (() => Promise<void>) | undefined,
+  beforeLive: undefined as (() => Promise<void>) | undefined,
+}));
 vi.mock("@/lib/scenario-sources", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/scenario-sources")>();
   return {
@@ -104,6 +143,10 @@ vi.mock("@/lib/scenario-sources", async (importOriginal) => {
     countUnitGuardRuns: async (...args: Parameters<typeof actual.countUnitGuardRuns>) => {
       await guard.before?.();
       return actual.countUnitGuardRuns(...args);
+    },
+    recordPublicSourceLive: async (...args: Parameters<typeof actual.recordPublicSourceLive>) => {
+      await guard.beforeLive?.();
+      return actual.recordPublicSourceLive(...args);
     },
   };
 });
@@ -144,10 +187,15 @@ beforeAll(async () => {
 beforeEach(async () => {
   await resetD1Database();
   stageLock.locked = false;
+  stageLock.before = undefined;
+  readiness.calls = 0;
+  readiness.ready = () => true;
+  readiness.builds = [];
   promotion.calls = 0;
   promotion.before = undefined;
   promotion.after = undefined;
   guard.before = undefined;
+  guard.beforeLive = undefined;
   scopeKey = SCOPE;
   headSha = SHA_A;
   githubCalls = [];
@@ -1654,13 +1702,13 @@ describe("ScenarioSourceDO public apply", () => {
     expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), targetRev: rev(SHA_B) });
   });
 
-  it("holds a new head in waiting while the fleet is drained", async () => {
-    await drain();
+  it.each([IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE])("holds a new head in waiting while %s is drained", async (key) => {
+    await db().insert(runtimeOperationGates).values({ key, state: "drained" });
     await publicCommit(SHA_B, { title: "Next" });
 
     expect(await commitState(SHA_B)).toEqual({
       state: "waiting",
-      detail: "an image release has drained the fleet",
+      detail: "the fleet is drained for an image swap",
     });
     expect(await catalogRev()).toBe(rev(SHA_A));
 
@@ -1726,7 +1774,7 @@ describe("ScenarioSourceDO public apply", () => {
     expect(await commitState(SHA_C)).toMatchObject({ state: "superseded" });
     expect(await commitState(SHA_B)).toEqual({
       state: "waiting",
-      detail: "an image release has drained the fleet",
+      detail: "the fleet is drained for an image swap",
     });
     expect(await catalogRev()).toBe(rev(SHA_C));
 
@@ -1859,6 +1907,354 @@ describe("ScenarioSourceDO public apply", () => {
     expect(await commitState(SHA_C)).toMatchObject({ state: "superseded" });
     expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), targetRev: rev(SHA_C) });
     expect(await publicSourceRevPromotable(env.DB, rev(SHA_C))).toBe(false);
+  });
+
+  describe("Intar's image promotion", () => {
+    // The collector's sweep verifies every retained artifact, and this suite's
+    // images are ids without objects; the promotion tests run the real sweep.
+    // Here a pass either completes or reports it could not.
+    let cleanupApplies = true;
+    const promotionEnv = () => {
+      const double = createCleanupServiceDouble({
+        DB: env.DB,
+        VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
+      });
+      const run = async () => ({
+        ...(await double.plan()),
+        status: cleanupApplies ? ("ok" as const) : ("core-failed" as const),
+        plan: null,
+        result: null,
+        error: cleanupApplies ? null : "the sweep is stuck",
+      });
+      return { ...env, REGISTRY_CLEANUP: { ...double, run } } as unknown as Cloudflare.Env;
+    };
+    const advance = () => advanceImagePromotion(promotionEnv());
+    const gate = async (key = PROMOTION_HOLD_GATE) =>
+      (await db().select().from(runtimeOperationGates).where(eq(runtimeOperationGates.key, key)))[0];
+    const attempt = async () =>
+      JSON.parse((await gate())?.evidenceJson ?? "null") as PromotionAttempt | null;
+    /** B replaces A's image, so its catalog applies and its images wait. */
+    const awaitB = async () => {
+      await publicCommit(SHA_B, { hash: HASH_B, title: "Next" });
+      await publish(SHA_B, { organizationId: null, manifestOf: withImage(IMAGE_B) });
+      for (let pass = 0; pass < 4 && (await commitState(SHA_B))?.state !== "awaiting_promote"; pass += 1) {
+        await tick();
+      }
+      expect(await commitState(SHA_B)).toMatchObject({ state: "awaiting_promote" });
+    };
+    // A learner VM on a user's host: counted as running, never an image user
+    // of the platform catalog.
+    const runVm = async () => {
+      await db().insert(agentHosts).values({
+        id: "learner-host",
+        userId: OWNER,
+        name: "Learner",
+        scope: "personal",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await env.DB.prepare(
+        "INSERT INTO host_desired_state (host_id, version, doc_json) VALUES ('learner-host', 1, ?1)",
+      )
+        .bind(JSON.stringify({ vms: [{ desired_phase: "running" }] }))
+        .run();
+    };
+    const stopVm = () => db().delete(agentHosts).where(eq(agentHosts.id, "learner-host"));
+
+    // Deletes happen only under enforced admission, as in production.
+    beforeEach(async () => {
+      cleanupApplies = true;
+      await enableRegistryDeletion(env.DB);
+    });
+
+    it("reopens an automatic hold after 30 minutes of pending cleanup", async () => {
+      await awaitB();
+      cleanupApplies = false;
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "cleaning", detail: "the sweep is stuck" });
+      expect(await gate()).toMatchObject({ state: "drained" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+
+      const held = JSON.parse((await gate())?.evidenceJson ?? "{}") as PromotionAttempt;
+      await db()
+        .update(runtimeOperationGates)
+        .set({ evidenceJson: JSON.stringify({ ...held, committedAt: (held.committedAt ?? 0) - 31 * 60_000 }) })
+        .where(eq(runtimeOperationGates.key, PROMOTION_HOLD_GATE));
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "done",
+        detail: "the registry cleanup is still pending",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("drains nothing while the registry cleanup could not delete", async () => {
+      await awaitB();
+      await env.DB.prepare("UPDATE image_registry_admission SET enforcement = 'report_only'").run();
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "waiting",
+        detail: "registry admission is report_only, so the cleanup cannot delete",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("waits for an idle moment, then swaps the images and reopens runs", async () => {
+      await awaitB();
+      expect(shownChecks().at(-1)).toMatchObject({
+        status: "in_progress",
+        title: "Waiting for an idle moment",
+      });
+      await runVm();
+
+      await advance();
+      expect(await attempt()).toMatchObject({
+        origin: "auto",
+        revision: rev(SHA_B),
+        phase: "waiting",
+        detail: "waiting for an idle moment: 1 VM running",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
+
+      await stopVm();
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "done", detail: null });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+      expect(await binding()).toMatchObject({ liveRev: rev(SHA_B), liveSha: SHA_B });
+      expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+      await tick();
+      expect(shownChecks().at(-1)).toMatchObject({ status: "completed", title: "Live" });
+    });
+
+    it("lets an admin promote inside an operator drain and leaves that drain in place", async () => {
+      await awaitB();
+      await drain();
+      await advance();
+      expect(await attempt()).toMatchObject({
+        origin: "auto",
+        phase: "waiting",
+        detail: "an operator drain is active",
+      });
+
+      await runVm();
+      await startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: ADMIN });
+      await advance();
+      expect(await attempt()).toMatchObject({
+        origin: "admin",
+        requestedBy: ADMIN,
+        phase: "drained",
+        detail: "1 VM still running",
+      });
+      expect(await gate()).toMatchObject({ state: "drained" });
+      await tick();
+      expect(shownChecks().at(-1)).toMatchObject({ status: "in_progress", title: "Promoting images" });
+
+      await stopVm();
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "done" });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await gate(IMAGE_CUTOVER_GATE)).toMatchObject({ state: "drained" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+    });
+
+    it("commits nothing when an admin reopens runs while the swap is in flight", async () => {
+      await awaitB();
+      // Runs inside the promotion call, after the machine decided to commit.
+      stageLock.before = async () => {
+        stageLock.before = undefined;
+        await releaseImagePromotion(promotionEnv(), { actorUserId: ADMIN });
+      };
+
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "cancelled", detail: "cancelled by an admin" });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
+      expect(await commitState(SHA_B)).toMatchObject({ state: "awaiting_promote" });
+      // The fenced-out writer settled; an `unknown` one would hold the collector.
+      await expect(
+        env.DB.prepare("SELECT COUNT(*) AS count FROM image_registry_operation_writers").first(),
+      ).resolves.toEqual({ count: 0 });
+
+      // A cancelled revision is not started again automatically.
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "cancelled" });
+    });
+
+    it("yields to an operator drain and waits for it to end", async () => {
+      await awaitB();
+      readiness.ready = (call) => call === 1;
+      await advance();
+      const drained = await attempt();
+      expect(drained).toMatchObject({ phase: "drained" });
+
+      await drain();
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "yielded", detail: "an operator drain took over" });
+      expect(await gate()).toMatchObject({ state: "open" });
+
+      // Yielding does not count against the revision.
+      readiness.ready = () => true;
+      await advance();
+      const next = await attempt();
+      expect(next).toMatchObject({ phase: "waiting", detail: "an operator drain is active" });
+      expect(next?.id).not.toBe(drained?.id);
+    });
+
+    it("fails an automatic drain that is not ready in time, then cools down", async () => {
+      await awaitB();
+      readiness.ready = (call) => call === 1;
+      await advance();
+      const held = await gate();
+      const late = { ...(JSON.parse(held?.evidenceJson ?? "{}") as PromotionAttempt) };
+      late.drainedAt = (late.drainedAt ?? 0) - 11 * 60_000;
+      await db()
+        .update(runtimeOperationGates)
+        .set({ evidenceJson: JSON.stringify(late) })
+        .where(eq(runtimeOperationGates.key, PROMOTION_HOLD_GATE));
+
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "failed" });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
+
+      readiness.ready = () => true;
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "failed", id: late.id });
+    });
+
+    it("steps aside when the commit moved on", async () => {
+      await awaitB();
+      readiness.ready = () => false;
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "waiting", revision: rev(SHA_B) });
+
+      // C reuses A's image, so it goes live directly and B is superseded.
+      await publicCommit(SHA_C, { title: "Reworded" });
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "yielded",
+        detail: "the public commit is no longer waiting",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("waits for a retired build to heal and fails only on a failed one", async () => {
+      await awaitB();
+      readiness.ready = () => false;
+      readiness.builds = [{ status: "stale" }];
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "waiting", detail: "1 image build not finished" });
+
+      readiness.builds = [{ status: "failed" }];
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "failed",
+        detail: "an image build of the revision failed",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("starts again after a pause of the public source", async () => {
+      await awaitB();
+      readiness.ready = () => false;
+      await advance();
+      const paused = () =>
+        db().update(scenarioSources).set({ pausedAt: Date.now(), pauseReason: "admin" })
+          .where(eq(scenarioSources.scopeKey, "public"));
+      await paused();
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "yielded" });
+
+      await db().update(scenarioSources).set({ pausedAt: null, pauseReason: null })
+        .where(eq(scenarioSources.scopeKey, "public"));
+      readiness.ready = () => true;
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "done", revision: rev(SHA_B) });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+    });
+
+    it("ends a hold at once when the revision can no longer be promoted", async () => {
+      await awaitB();
+      await runVm();
+      await startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: ADMIN });
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "drained" });
+
+      // The public catalog moves back to A, as a retarget does.
+      await db().update(courseCatalogs).set({ sourceRevision: rev(SHA_A) })
+        .where(eq(courseCatalogs.scopeKey, "public"));
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "failed",
+        detail: "the scenario source revision is no longer promotable",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
+    });
+
+    it("records the swap live when runs reopen after its tick died, and a retry promotes nothing twice", async () => {
+      await awaitB();
+      cleanupApplies = false;
+      let died = false;
+      guard.beforeLive = async () => {
+        if (!died) {
+          died = true;
+          throw new Error("the tick died");
+        }
+      };
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "cleaning" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+      expect(await binding()).toMatchObject({ liveRev: rev(SHA_A) });
+
+      await releaseImagePromotion(promotionEnv(), { actorUserId: ADMIN });
+      expect(await attempt()).toMatchObject({ phase: "released" });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await binding()).toMatchObject({ liveRev: rev(SHA_B) });
+      expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+
+      // An admin retry of the committed revision swaps nothing and finishes.
+      cleanupApplies = true;
+      await startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: ADMIN });
+      await advance();
+      expect(await attempt()).toMatchObject({ origin: "admin", phase: "done" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+    });
+
+    it("reopens an automatic hold after 10 minutes of hosts that did not converge", async () => {
+      await awaitB();
+      // Ready for the three checks before the commit, then not.
+      readiness.ready = (call) => call <= 3;
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "verifying" });
+      expect(await gate()).toMatchObject({ state: "drained" });
+
+      const held = JSON.parse((await gate())?.evidenceJson ?? "{}") as PromotionAttempt;
+      await db()
+        .update(runtimeOperationGates)
+        .set({ evidenceJson: JSON.stringify({ ...held, cleanedAt: (held.cleanedAt ?? 0) - 11 * 60_000 }) })
+        .where(eq(runtimeOperationGates.key, PROMOTION_HOLD_GATE));
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "done",
+        detail: "the hosts had not reported the new images yet",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("lets only an active platform admin start or end a promotion", async () => {
+      await awaitB();
+      await expect(
+        startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: OWNER }),
+      ).rejects.toMatchObject({ status: 409, code: "promotion_changed" });
+      await startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: ADMIN });
+      await expect(
+        releaseImagePromotion(promotionEnv(), { actorUserId: OWNER }),
+      ).rejects.toMatchObject({ status: 409, code: "promotion_changed" });
+      expect(await attempt()).toMatchObject({ origin: "admin", phase: "waiting" });
+    });
   });
 });
 

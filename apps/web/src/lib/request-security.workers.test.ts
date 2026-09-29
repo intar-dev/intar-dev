@@ -451,6 +451,7 @@ describe("worker API request security", () => {
     for (const path of [
       "/api/organizations/org/scenario-source",
       "/api/admin/scenario-source",
+      "/api/admin/image-promotion",
     ]) {
       expect(sensitiveRateLimitActionFor(customMutation(path))).toBe(
         "scenario-source",

@@ -4,9 +4,9 @@
 // head commit's staged bundle, fails or heals the target's builds, and
 // promotes the target as a whole: images, then catalog, then `live`. A public
 // commit that replaces a live image applies its catalog and leaves its images
-// to the drained lane. The head commit's state shows as a GitHub check run.
-// Every head comparison runs in SQL against the stored head, so a push claim
-// that moves the head mid-alarm is never overwritten.
+// to Intar's image promotion. The head commit's state shows as a GitHub check
+// run. Every head comparison runs in SQL against the stored head, so a push
+// claim that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, isNull, lt, not, sql } from "drizzle-orm";
@@ -46,7 +46,8 @@ import {
   admitInternalRegistryOperation,
   createRegistryWriterGuard,
 } from "@/lib/image-registry-admission";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { runsHeldCondition } from "@/lib/run-admission-gate";
+import { promotionHolding } from "./image-promotion";
 import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
   countUnitGuardRuns,
@@ -922,16 +923,18 @@ const REFUSAL_STATES = {
   incomplete_catalog: "building",
   image_in_use: "waiting",
   ownership_conflict: "invalid",
-  // Only the drained lane asks; the DO never does.
+  // Only Intar's image promotion asks; the DO never does.
   not_promotable: "waiting",
+  // Only Intar's image promotion passes a fence; the DO never does.
+  fenced: "waiting",
 } as const satisfies Record<CandidatePromotionRefusal["kind"], ScenarioSourceCommitState>;
 
-const fleetDrained = sql`EXISTS (SELECT 1 FROM runtime_operation_gates
-  WHERE key = ${IMAGE_CUTOVER_GATE} AND state = 'drained')`;
+// An operator's image release or Intar's own promotion hold.
+const fleetDrained = sql.raw(runsHeldCondition());
 
 /**
  * The target may start to apply: it is still the head, the binding may write,
- * and for `public` no image release has drained the fleet.
+ * and for `public` no drain holds the fleet.
  */
 const mayApply = (step: Step, rev: string) => sql`EXISTS (SELECT 1 FROM scenario_sources
   WHERE scope_key = ${step.scopeKey} AND target_rev = ${rev}
@@ -940,8 +943,8 @@ const mayApply = (step: Step, rev: string) => sql`EXISTS (SELECT 1 FROM scenario
     AND (organization_id IS NOT NULL OR NOT ${fleetDrained}))`;
 
 // Promotes a ready target that is still the head. The unit guard holds it in
-// `waiting` while a run with access would lose it, and for `public` so does an
-// image release's drain. `promoting` is written only while the target may
+// `waiting` while a run with access would lose it, and for `public` so does a
+// fleet drain. `promoting` is written only while the target may
 // apply, so a pause or a drain during this alarm stops it here. A public
 // commit that replaces a live image takes the catalog-first route instead.
 async function promoteTarget(step: Step): Promise<boolean> {
@@ -969,7 +972,7 @@ async function promoteTarget(step: Step): Promise<boolean> {
     step.organizationId === null &&
     (await db.get<{ drained: number }>(sql`SELECT ${fleetDrained} AS drained`))?.drained
   ) {
-    await settle(step, target, { state: "waiting", detail: "an image release has drained the fleet" });
+    await settle(step, target, { state: "waiting", detail: "the fleet is drained for an image swap" });
     return false;
   }
   if (await countUnitGuardRuns(step.env.DB, step.organizationId, bundle.meta.courseCatalog)) {
@@ -1019,7 +1022,7 @@ async function replacesLiveImages(
 }
 
 // A public commit that replaces a live image: its catalog applies here, and
-// its images go live only through the drained lane. The re-read right before
+// its images go live only through Intar's image promotion. The re-read before
 // the sync stops an alarm whose binding was paused, or whose fleet was
 // drained, since it began. `awaiting_promote` needs the complete candidate
 // set; a candidate the collector retired meanwhile is heal's to restage.
@@ -1162,7 +1165,8 @@ const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_r
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
-// The summary says what a row waits for.
+// The summary says what a row waits for. A catalog-first row waits for Intar's
+// image promotion, which runs at the next idle moment.
 const DEPLOY_CHECKS = {
   fetching: { status: "queued", title: "Queued" },
   ingesting: { status: "queued", title: "Queued" },
@@ -1170,7 +1174,7 @@ const DEPLOY_CHECKS = {
   building: { status: "in_progress", title: "Building" },
   waiting: { status: "in_progress", title: "Waiting" },
   promoting: { status: "in_progress", title: "Promoting" },
-  awaiting_promote: { status: "in_progress", title: "Promoting" },
+  awaiting_promote: { status: "in_progress", title: "Waiting for an idle moment" },
   live: { status: "completed", conclusion: "success", title: "Live" },
   failed: { status: "completed", conclusion: "failure", title: "Failed" },
   invalid: { status: "completed", conclusion: "failure", title: "Invalid" },
@@ -1257,7 +1261,9 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
       ? "Restoring"
       : state === "building"
         ? `Building ${built}/${scenarios.length}`
-        : check.title;
+        : state === "awaiting_promote" && (await promotionHolding(drizzle(step.env.DB), row.rev))
+          ? "Promoting images"
+          : check.title;
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),

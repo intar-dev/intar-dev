@@ -219,20 +219,34 @@ secret.
 
 ## Promote an image catalog
 
-The **Image catalog promotion** workflow drains the fleet, promotes the catalog,
-and then waits for the collector. The promotion endpoint deletes the retired
-artifacts before it reports success: while that cleanup runs, the endpoint
-answers HTTP 503 with `catalog_promoted` true and `retry` true, and the
-workflow repeats the call until the endpoint reports completion. The workflow
-never opens the fleet gate, so the gate opens only after the cleanup is
-complete.
+Intar promotes image catalogs itself. A public scenario source commit that
+replaces a live image applies its course catalog at once and waits in
+`awaiting_promote`; its GitHub check reads "Waiting for an idle moment". Every
+minute the cron checks the revision: every build succeeded, every platform host
+holds the new images and the stable guest tools, the collector is in delete
+mode under enforced registry admission, no registry writer is `unknown`, and no
+run or host still uses an outgoing image. At the first minute with no VM
+running and no operator drain, Intar holds new runs on its own gate key,
+`image_promotion`, promotes the catalog, runs the registry cleanup, waits for
+the hosts to report the new images, and reopens runs. The check reads
+"Promoting images" while runs are held. Intar never writes the operators'
+`image_cutover` gate.
 
-The promotion refuses when another reference still needs an outgoing image. It
-answers HTTP 409 "catalog promotion is blocked by active image use" and names
-the blocking executions and hosts, and it answers HTTP 409 while a desired VM
-is running, so the fleet drains first. The live image, the rollback, and the
-running VM are never removed to meet that limit: the lane stops and reports the
-conflict instead.
+**Admin → Scenarios → Image promotion** shows the attempt and offers **Promote
+now**, which drains without waiting for an idle moment and lets active runs
+finish, **Promote a revision…** for any candidate revision, also inside an
+operator drain, which stays in place, and **Reopen runs**.
+
+An automatic attempt that has not committed reopens runs 10 minutes after its
+hold. After the commit it reopens runs after 30 minutes of pending cleanup or
+10 minutes of hosts that have not reported the new images; the collector's own
+schedule and the host reports finish the rest. It does not retry a failed
+revision for an hour. An admin-started attempt keeps runs held until an admin
+reopens them.
+
+The promotion never removes the live image, the rollback, or an image a run
+still uses: it waits while a run or host references an outgoing image, and the
+admin page shows the count.
 
 ## Reopen the control plane
 

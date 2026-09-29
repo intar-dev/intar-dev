@@ -1,6 +1,6 @@
 import { drizzle } from "drizzle-orm/d1";
 import { runtimeOperationGates } from "@/db/schema";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, promotionHoldActive } from "@/lib/run-admission-gate";
 import { hasRegistryPublishToken, isRecord, jsonResponse } from "./shared";
 
 export async function handleImageCutoverGate(
@@ -51,10 +51,13 @@ export async function handleImageCutoverGate(
        JOIN json_each(host_desired_state.doc_json, '$.vms') AS vm
       WHERE host.scope = 'platform' AND json_extract(vm.value, '$.desired_phase') = 'running'`,
   ).first<{ count: number }>();
+  // `state` stays the operators' drain; Intar's own hold is reported apart,
+  // so a runbook sees a promotion in progress before it acts.
   return jsonResponse({
     ok: true,
     state: gate?.state ?? "open",
     active_desired_vms: active?.count ?? 0,
     updated_at_unix_ms: gate?.updated_at ?? null,
+    promotion_hold: (await promotionHoldActive(env.DB)) ? "drained" : "open",
   });
 }

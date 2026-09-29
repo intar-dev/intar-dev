@@ -28,7 +28,9 @@ If Website was disabled before the push, enable it only after the guarded
 workflow reaches `main`. Stop or finish any old Website deployment first; a new
 workflow file cannot change a run that already uses the old file. Keep the guard
 active through the deferred test period. Do not dispatch the separate image
-operations gate-open or collector-release actions during this hold.
+operations gate-open or collector-release actions during this hold, and do not
+start an image promotion from the admin page; automatic promotions wait while
+`image_cutover` is drained.
 
 Finish package releases and the matching guest-tools `tools-build` run first.
 Then record the full `main` commit SHA and keep `main` at that revision for all

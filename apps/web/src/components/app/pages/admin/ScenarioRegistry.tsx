@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
 import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenarios";
 import { ScenarioSourceSection } from "@/components/app/pages/organization-detail/scenario-source";
+import { ImagePromotionSection } from "@/components/app/pages/admin/ImagePromotion";
 import { cn } from "@/lib/utils";
 
 type StateFilter = "enabled" | "disabled" | null;
@@ -145,6 +146,7 @@ export function ScenarioRegistry() {
   return (
     <PageShell variant="workspace" density="compact">
       <ScenarioSourceSection endpoint="/api/admin/scenario-source" scope="public" />
+      <ImagePromotionSection />
       {scenarios.error ? (
         <ErrorState
           title="Could not load scenarios"

@@ -1584,6 +1584,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, { scenarios: server.state.adminScenarios });
         return;
       }
+      if (pathname === "/api/admin/image-promotion" && method === "GET") {
+        await json(route, server.state.imagePromotion);
+        return;
+      }
       if (pathname === "/api/admin/scenario-source" && method === "GET") {
         await json(route, {
           enabled: false,

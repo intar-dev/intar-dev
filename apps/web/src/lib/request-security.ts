@@ -247,7 +247,8 @@ export function sensitiveRateLimitActionFor(
   }
   if (
     /^\/api\/organizations\/[^/]+\/scenario-source$/u.test(pathname) ||
-    pathname === "/api/admin/scenario-source"
+    pathname === "/api/admin/scenario-source" ||
+    pathname === "/api/admin/image-promotion"
   ) {
     return "scenario-source";
   }

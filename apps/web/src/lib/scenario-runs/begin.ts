@@ -49,7 +49,7 @@ import {
   admitInternalRegistryOperation,
   type RegistryOperationLease,
 } from "@/lib/image-registry-admission";
-import { assertAgentKvmRunsOpen } from "@/lib/run-admission-gate";
+import { assertAgentKvmRunsOpen, runsHeldCondition } from "@/lib/run-admission-gate";
 import {
   availableRuntimeHostResources,
   loadActiveRuntimeResourceSnapshot,
@@ -1700,15 +1700,12 @@ const RUN_INSERT_COLUMNS = [
 ];
 
 /**
- * The cut-over gate travels inside the insert so a drain that lands in the
+ * The cut-over gates travel inside the insert so a drain that lands in the
  * commit window refuses the run instead of racing the fleet's pause. An
- * administrative proof start is the one caller that may bypass it.
+ * administrative proof start may bypass only the operator drain.
  */
 function drainGateCondition(allowDrainedAdminProof: boolean | undefined) {
-  return allowDrainedAdminProof
-    ? ""
-    : " AND NOT EXISTS (SELECT 1 FROM runtime_operation_gates gate" +
-        " WHERE gate.key = 'image_cutover' AND gate.state = 'drained')";
+  return " AND NOT " + runsHeldCondition(allowDrainedAdminProof);
 }
 
 /**

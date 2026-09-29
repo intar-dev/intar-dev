@@ -11,6 +11,7 @@ import {
   sweepScenarioSources,
 } from "@/control-plane/scenario-source-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
+import { advanceImagePromotion } from "@/control-plane/image-promotion";
 import {
   GITHUB_WEBHOOK_PATH,
   handleGitHubWebhook,
@@ -126,6 +127,18 @@ export default {
       console.error(
         JSON.stringify({
           event: "scenario_source_sweep_failed",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+    // After the sources, so a commit that just reached awaiting_promote is
+    // seen in the same tick.
+    try {
+      await advanceImagePromotion(env);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "image_promotion_tick_failed",
           error: error instanceof Error ? error.message : String(error),
         }),
       );
