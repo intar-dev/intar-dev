@@ -187,13 +187,13 @@ export async function countUnitGuardRuns(
 }
 
 /**
- * Whether the drained lane may promote a `git-` rev: it is the rev whose
- * catalog `public` applied, or the public binding's live rev (image-ops
- * retrying a committed 503), and no public promotion of another rev is in
+ * Whether Intar's image promotion may promote a `git-` rev: it is the rev
+ * whose catalog `public` applied, or the public binding's live rev (a retry
+ * of a committed promotion), and no public promotion of another rev is in
  * flight. A superseded rev the binding abandoned, because its head went back
  * to live_rev's commit, never goes live, even before a paused binding
- * retargets. The drained handler, its in-lock recheck and build-status share
- * it.
+ * retargets. The promotion's checks, its in-lock recheck and build-status
+ * share it.
  */
 export async function publicSourceRevPromotable(
   d1: D1Database,
@@ -218,7 +218,7 @@ export async function publicSourceRevPromotable(
 }
 
 /**
- * The drained lane committed a public rev. One transaction makes it the
+ * Intar's image promotion committed a public rev. One transaction makes it the
  * binding's live commit, whatever state its row was left in, and supersedes
  * the previous live row. The poke lets the check leave `Promoting` within a
  * minute.

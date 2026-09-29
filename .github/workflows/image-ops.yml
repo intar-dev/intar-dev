@@ -1,13 +1,15 @@
 name: Image operations
 run-name: "Image ops ${{ inputs.operation }} @ ${{ github.sha }}"
 
-# One operator lane for everything that mutates the image flywheel: the run
-# gate, the catalog promotion, the guest-tools build and promotion, and the
-# registry cleanup. Each operation keeps its own inputs, its own confirmation,
-# and its own job, so the plane fence and the deliberate-release property stay
-# explicit. Three lock groups keep unrelated work from blocking recovery: the
-# image pipeline group, the cleanup campaign group, and the cleanup status
-# group, which must stay readable while a campaign holds the other two.
+# One operator lane for the image flywheel work that stays manual: the run
+# gate, the guest-tools build and promotion, and the registry cleanup. Intar
+# promotes image catalogs itself (Admin, Scenarios, Image promotion), also
+# inside a drain this lane holds. Each operation keeps its own inputs, its own
+# confirmation, and its own job, so the plane fence and the deliberate-release
+# property stay explicit. Three lock groups keep unrelated work from blocking
+# recovery: the image pipeline group, the cleanup campaign group, and the
+# cleanup status group, which must stay readable while a campaign holds the
+# other two.
 
 on:
   workflow_dispatch:
@@ -19,7 +21,6 @@ on:
         options:
           - gate-open
           - gate-drained
-          - catalog-promote
           - tools-build
           - tools-promote
           - cleanup-status
@@ -32,7 +33,7 @@ on:
         default: ""
         type: string
       revision:
-        description: verified candidate bundle revision, for a catalog promotion or a tools promotion
+        description: verified candidate bundle revision, for a tools promotion
         required: false
         default: ""
         type: string
@@ -90,10 +91,6 @@ jobs:
               job=gate
               state=drained
               ;;
-            catalog-promote)
-              job=catalog-promotion
-              [[ "${REVISION}" =~ ^[A-Za-z0-9._-]+$ ]]
-              ;;
             tools-build)
               job=tools-build
               [[ "${KINO_TAG}" =~ ^kino/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -121,7 +118,7 @@ jobs:
               ;;
             *)
               echo "unsupported operation: ${OPERATION}" >&2
-              echo 'Use gate-open, gate-drained, catalog-promote, tools-build, tools-promote, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
+              echo 'Use gate-open, gate-drained, tools-build, tools-promote, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
               exit 1
               ;;
           esac
@@ -201,181 +198,6 @@ jobs:
             --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
             "https://intar.dev/registry/v1/cutover/gate" \
             | jq -e '.state == "open"' >/dev/null
-
-
-  catalog-promotion:
-    name: Drain, promote, and verify cache
-    runs-on: namespace-profile-intar-dev
-    needs:
-      - request
-    if: needs.request.outputs.job == 'catalog-promotion'
-    concurrency:
-      group: intar-image-catalog-promotion
-      cancel-in-progress: false
-    timeout-minutes: 420
-    environment: production
-    env:
-      INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-      REVISION: ${{ inputs.revision }}
-      CONFIRMATION: ${{ inputs.confirmation }}
-
-    steps:
-      - name: Validate catalog-promotion authority
-        run: |
-          set -euo pipefail
-          test "${GITHUB_REF}" = "refs/heads/main"
-          test "${CONFIRMATION}" = "DRAIN AND PROMOTE IMAGE CATALOG"
-          [[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
-          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
-
-      - name: Stop new image runs
-        run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --retry 3 \
-            --request POST \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data '{"state":"drained"}' \
-            "https://intar.dev/registry/v1/cutover/gate" \
-            | jq -e '.ok == true and .state == "drained"' >/dev/null
-
-      - name: Require a promotable scenario source revision
-        run: |
-          set -euo pipefail
-          # A git- revision promotes only as the applied public catalog, or as
-          # the public live revision on a retry. The drain now holds every new
-          # public apply, so the answer stays put until the promotion.
-          [[ "${REVISION}" == git-* ]] || exit 0
-          status="${RUNNER_TEMP}/source-status.json"
-          if curl --fail --silent --show-error --retry 3 \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
-            > "${status}" && jq -e '.source_promotable == true' "${status}" >/dev/null; then
-            jq -c '{source_state, source_promotable}' "${status}"
-            exit 0
-          fi
-          echo "The scenario source revision is not promotable; reopening the gate." >&2
-          jq -c '{source_state, source_promotable}' "${status}" >&2 || true
-          curl --fail --silent --show-error --retry 3 \
-            --request POST \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data '{"state":"open"}' \
-            "https://intar.dev/registry/v1/cutover/gate" \
-            | jq -e '.ok == true and .state == "open"' >/dev/null
-          exit 1
-
-      - name: Let active VMs finish
-        run: |
-          set -euo pipefail
-          status="${RUNNER_TEMP}/image-gate.json"
-          for _ in $(seq 1 720); do
-            curl --fail --silent --show-error --retry 2 \
-              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-              "https://intar.dev/registry/v1/cutover/gate" > "${status}"
-            jq -c '{state, active_desired_vms}' "${status}"
-            if jq -e '.state == "drained" and .active_desired_vms == 0' \
-              "${status}" >/dev/null; then
-              exit 0
-            fi
-            sleep 30
-          done
-          echo "Active VMs did not drain within six hours." >&2
-          exit 1
-
-      - name: Require complete builds and exact stable tool cache
-        run: |
-          set -euo pipefail
-          status="${RUNNER_TEMP}/pre-promotion-status.json"
-          curl --fail --silent --show-error --retry 3 \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
-            > "${status}"
-          jq -e '
-            .ok == true and
-            .state == "ready" and
-            .tools_channel == "stable" and
-            (.guest_tools | type == "object") and
-            (.builds | length > 0) and
-            (.hosts | length > 0) and
-            all(.builds[]; .status == "succeeded") and
-            all(.hosts[]; .ready == true and .desired_guest_tools_ready == true and .actual_guest_tools_ready == true)
-          ' "${status}" >/dev/null
-
-      - name: Promote catalog
-        run: |
-          set -euo pipefail
-          response="${RUNNER_TEMP}/catalog-promotion.json"
-          # The promotion endpoint deletes the retired registry artifacts before
-          # it reports success, and it answers 503 with catalog_promoted true and
-          # retry true while that cleanup still runs. This lane repeats the call
-          # until the endpoint reports completion, so the run that opens the
-          # fleet gate afterwards never starts on unfinished cleanup.
-          for _ in $(seq 1 60); do
-            status="$(curl --silent --show-error \
-              --request POST \
-              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-              --header "x-intar-drained: true" \
-              --output "${response}" --write-out '%{http_code}' \
-              "https://intar.dev/registry/v1/catalog/promote/${REVISION}" || true)"
-            if [ "${status}" = 200 ] && \
-              jq -e --arg revision "${REVISION}" \
-                '.ok == true and .revision == $revision' "${response}" >/dev/null; then
-              jq -c '{revision, cleanup}' "${response}"
-              exit 0
-            fi
-            if [ "${status}" = 503 ] && \
-              jq -e '.catalog_promoted == true and .retry == true' \
-                "${response}" >/dev/null; then
-              echo "the catalog is promoted and the registry cleanup is still running"
-              jq -c '{cleanup}' "${response}"
-              sleep 15
-              continue
-            fi
-            echo "catalog promotion failed with HTTP ${status}" >&2
-            cat "${response}" >&2
-            exit 1
-          done
-          echo "The registry cleanup did not finish within fifteen minutes." >&2
-          exit 1
-
-      - name: Require the promoted catalog and no pending registry cleanup
-        run: |
-          set -euo pipefail
-          # The promotion above only returns once the retired artifacts are
-          # gone, so a successful promotion is the cleanup proof. This step
-          # records the deleted objects in the run summary.
-          response="${RUNNER_TEMP}/catalog-promotion.json"
-          jq -c '{revision, retired_build_ids: (.retired_build_ids // []), cleanup}' \
-            "${response}" >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Require promoted catalog and stable tool cache within 60 seconds
-        run: |
-          set -euo pipefail
-          status="${RUNNER_TEMP}/stable-status.json"
-          started_at="$(date +%s)"
-          for _ in $(seq 1 12); do
-            curl --fail --silent --show-error --retry 2 \
-              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-              "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
-              > "${status}"
-            if jq -e '
-              .ok == true and
-              .state == "ready" and
-              .tools_channel == "stable" and
-              (.guest_tools | type == "object") and
-              (.hosts | length > 0) and
-              all(.hosts[]; .ready == true and .desired_guest_tools_ready == true and .actual_guest_tools_ready == true)
-            ' \
-              "${status}" >/dev/null; then
-              completed_at="$(date +%s)"
-              test "$((completed_at - started_at))" -lt 60
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Promoted image and stable tool cache did not converge within 60 seconds." >&2
-          exit 1
 
 
   tools-build:

@@ -32,7 +32,6 @@ import {
 } from "./guest-tools";
 import { handleImageBuildRevisionStatus } from "./build-status";
 import {
-  handleCandidateCatalogPromotion,
   handleCatalogRollback,
 } from "./catalog-promotion";
 import { handleImageCutoverGate } from "./cutover-gate";
@@ -155,20 +154,6 @@ export async function handleImageRegistryRequest(
     );
   }
 
-  const catalogPromotionMatch = url.pathname.match(
-    /^\/registry\/v1\/catalog\/promote\/([A-Za-z0-9._-]{1,128})$/,
-  );
-  if (catalogPromotionMatch) {
-    // Promotion awaits the cleanup service. Wrapping the whole handler in a
-    // writer lease would deadlock the collector: the sweep can never acquire
-    // while this request holds an unresolved writer. The handler therefore
-    // takes a short lease around its own catalog commit only.
-    return handleCandidateCatalogPromotion(
-      request,
-      env,
-      catalogPromotionMatch[1] ?? "",
-    );
-  }
   const catalogRollbackMatch = url.pathname.match(
     /^\/registry\/v1\/catalog\/rollback\/([A-Za-z0-9._-]{1,128})$/,
   );

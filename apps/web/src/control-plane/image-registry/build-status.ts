@@ -235,7 +235,7 @@ export async function loadRevisionStatus(
   };
 }
 
-/** A `git-` rev's commit state, and whether the drained lane admits it. */
+/** A `git-` rev's commit state, and whether Intar's promotion admits it. */
 async function scenarioSourceStatus(
   d1: D1Database,
   revision: string,

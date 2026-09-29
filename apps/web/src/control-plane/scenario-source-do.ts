@@ -4,9 +4,9 @@
 // head commit's staged bundle, fails or heals the target's builds, and
 // promotes the target as a whole: images, then catalog, then `live`. A public
 // commit that replaces a live image applies its catalog and leaves its images
-// to the drained lane. The head commit's state shows as a GitHub check run.
-// Every head comparison runs in SQL against the stored head, so a push claim
-// that moves the head mid-alarm is never overwritten.
+// to Intar's image promotion. The head commit's state shows as a GitHub check
+// run. Every head comparison runs in SQL against the stored head, so a push
+// claim that moves the head mid-alarm is never overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, isNull, lt, not, sql } from "drizzle-orm";
@@ -923,7 +923,7 @@ const REFUSAL_STATES = {
   incomplete_catalog: "building",
   image_in_use: "waiting",
   ownership_conflict: "invalid",
-  // Only the drained lane asks; the DO never does.
+  // Only Intar's image promotion asks; the DO never does.
   not_promotable: "waiting",
   // Only Intar's image promotion passes a fence; the DO never does.
   fenced: "waiting",
@@ -1022,7 +1022,7 @@ async function replacesLiveImages(
 }
 
 // A public commit that replaces a live image: its catalog applies here, and
-// its images go live only through the drained lane. The re-read right before
+// its images go live only through Intar's image promotion. The re-read before
 // the sync stops an alarm whose binding was paused, or whose fleet was
 // drained, since it began. `awaiting_promote` needs the complete candidate
 // set; a candidate the collector retired meanwhile is heal's to restage.

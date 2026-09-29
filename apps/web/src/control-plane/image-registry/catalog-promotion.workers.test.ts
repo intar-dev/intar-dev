@@ -40,6 +40,7 @@ import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gat
 import type { ScenarioCatalogRollbackV1 } from "@/lib/scenario-catalog-rollback";
 import { resetD1Database } from "@/test/d1-migrations";
 import { createCleanupServiceDouble } from "./cleanup-service-double";
+import { promoteThroughDrainedLane } from "./promotion-lane-double";
 import {
   enableRegistryDeletion,
   seedChunkedImage,
@@ -160,30 +161,12 @@ describe("candidate scenario catalog promotion", () => {
     });
   });
 
-  it("switches every catalog row in one D1 batch after the drain gate", async () => {
+  it("switches every catalog row in one D1 batch, and the rollback restores them", async () => {
     // Promotion deletes retired artifacts through the collector, so the test
     // reaches the collector the same way production does: a bound service.
-    const response = await handleImageRegistryRequest(
-      new Request(
-        "https://intar.test/registry/v1/catalog/promote/revision-1",
-        {
-          method: "POST",
-          headers: {
-            authorization: "Bearer test-publish-token",
-            "x-intar-drained": "true",
-          },
-        },
-      ),
-      {
-        ...env,
-        REGISTRY_CLEANUP: createCleanupServiceDouble({
-          DB: env.DB,
-          VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
-        }),
-      } as unknown as Cloudflare.Env,
-    );
-    expect(response?.status).toBe(200);
-    await expect(response?.json()).resolves.toMatchObject({
+    const response = await promoteDrained();
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
       ok: true,
       revision: "revision-1",
       scenario_ids: ["broken-nginx"],
@@ -247,7 +230,7 @@ describe("candidate scenario catalog promotion", () => {
     expect(restoredVms[0]).toMatchObject({ imageFormat: "raw_zstd" });
   });
 
-  it("refuses the drained lane while Intar holds a promotion, and the gate reports the hold", async () => {
+  it("refuses a rollback while Intar holds a promotion, and the gate reports the hold", async () => {
     await drizzle(env.DB)
       .insert(runtimeOperationGates)
       .values({ key: PROMOTION_HOLD_GATE, state: "drained" });
@@ -260,13 +243,11 @@ describe("candidate scenario catalog promotion", () => {
         env,
       );
 
-    for (const path of ["catalog/promote/revision-1", "catalog/rollback/revision-1"]) {
-      const refused = await call(path);
-      expect(refused?.status, path).toBe(409);
-      await expect(refused?.json()).resolves.toEqual({
-        error: "an image promotion in Intar holds the fleet",
-      });
-    }
+    const refused = await call("catalog/rollback/revision-1");
+    expect(refused?.status).toBe(409);
+    await expect(refused?.json()).resolves.toEqual({
+      error: "an image promotion in Intar holds the fleet",
+    });
     const gate = await call("cutover/gate", "GET");
     await expect(gate?.json()).resolves.toMatchObject({
       state: "drained",
@@ -438,22 +419,10 @@ describe("candidate scenario catalog promotion", () => {
       })
       .where(eq(imageBuildBundles.rev, "revision-1"));
 
-    const response = await handleImageRegistryRequest(
-      new Request(
-        "https://intar.test/registry/v1/catalog/promote/revision-1",
-        {
-          method: "POST",
-          headers: {
-            authorization: "Bearer test-publish-token",
-            "x-intar-drained": "true",
-          },
-        },
-      ),
-      env,
-    );
+    const response = await promoteThroughDrainedLane(env, "revision-1");
 
-    expect(response?.status).toBe(409);
-    await expect(response?.json()).resolves.toEqual({
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
       error: "candidate bundle uses an unsupported image build format",
     });
   });
@@ -463,14 +432,7 @@ async function promoteDrained(
   revision = "revision-1",
   cleanup: Parameters<typeof createCleanupServiceDouble>[1] = {},
 ): Promise<Response> {
-  const response = await handleImageRegistryRequest(
-    new Request(`https://intar.test/registry/v1/catalog/promote/${revision}`, {
-      method: "POST",
-      headers: {
-        authorization: "Bearer test-publish-token",
-        "x-intar-drained": "true",
-      },
-    }),
+  return promoteThroughDrainedLane(
     {
       ...env,
       REGISTRY_CLEANUP: createCleanupServiceDouble(
@@ -481,9 +443,8 @@ async function promoteDrained(
         cleanup,
       ),
     } as unknown as Cloudflare.Env,
+    revision,
   );
-  if (!response) throw new Error("the promotion route did not answer");
-  return response;
 }
 
 /** A platform host still fetching the image, which blocks its replacement. */
@@ -661,7 +622,6 @@ describe("scenario source revisions in the drained lane", () => {
     staging.after = undefined;
     await stageAndPromote(LIVE, [{ image: await image("live") }]);
     await stage(REV, [{ image: await image("next") }]);
-    await db().insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "drained" });
     await db().insert(scenarioSources).values({
       scopeKey: "public",
       githubInstallationId: 7,
@@ -730,7 +690,7 @@ describe("scenario source revisions in the drained lane", () => {
     await db().insert(scenarioSourceCommits).values(commit("commit-b", OTHER, "promoting"));
     expect((await promoteDrained(REV)).status).toBe(409);
 
-    // The DO writes its promoting row after this request's admission.
+    // The DO writes its promoting row after this promotion's admission.
     await db().delete(scenarioSourceCommits).where(eq(scenarioSourceCommits.rev, OTHER));
     staging.after = async () => {
       await db().insert(scenarioSourceCommits).values(commit("commit-b", OTHER, "promoting"));

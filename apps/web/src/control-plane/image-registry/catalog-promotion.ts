@@ -23,9 +23,7 @@ import { toErrorResponse } from "@/lib/app-error";
 import { pruneSupersededHostCachedImages } from "@/lib/registry-host-cache-eviction";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
-  REGISTRY_CLEANUP_WAIT_BUDGET_MS,
   registryCleanupService,
-  runRegistryCleanup,
   type RegistryCleanupServiceBinding,
 } from "@/lib/registry-cleanup-client";
 import {
@@ -144,102 +142,6 @@ export type DrainedPromotionResult =
 const SOURCE_NOT_PROMOTABLE = "scenario source revision is not promotable";
 // One swap at a time: an operator lane waits while Intar's promotion holds.
 const PROMOTION_HELD = "an image promotion in Intar holds the fleet";
-
-export async function handleCandidateCatalogPromotion(
-  request: Request,
-  env: Cloudflare.Env,
-  revision: string,
-): Promise<Response> {
-  if (request.method !== "POST") {
-    return jsonResponse({ error: "method not allowed" }, 405);
-  }
-  if (!(await hasRegistryPublishToken(request, env))) {
-    return jsonResponse({ error: "unauthorized" }, 401);
-  }
-  if (!isSafeBundleRev(revision)) {
-    return jsonResponse({ error: "invalid bundle rev" }, 400);
-  }
-  if (request.headers.get("x-intar-drained") !== "true") {
-    return jsonResponse({ error: "catalog promotion requires a drained host fleet" }, 409);
-  }
-
-  const gate = await env.DB.prepare(
-    "SELECT state FROM runtime_operation_gates WHERE key = ?",
-  )
-    .bind(IMAGE_CUTOVER_GATE)
-    .first<{ state: string }>();
-  if (gate?.state !== "drained") {
-    return jsonResponse({ error: "runtime cutover gate is not drained" }, 409);
-  }
-  if (await promotionHoldActive(env.DB)) {
-    return jsonResponse({ error: PROMOTION_HELD }, 409);
-  }
-
-  const active = await env.DB.prepare(
-    `SELECT COUNT(*) AS count
-       FROM host_desired_state, json_each(host_desired_state.doc_json, '$.vms') AS vm
-      WHERE json_extract(vm.value, '$.desired_phase') = 'running'`,
-  ).first<{ count: number }>();
-  if ((active?.count ?? 0) !== 0) {
-    return jsonResponse({ error: "catalog promotion requires zero running desired VMs" }, 409);
-  }
-
-  const result = await promoteDrainedRevision(env, revision, {
-    admit: () =>
-      admitRegistryOperation(request, env, {
-        operation: "pointer_mutation",
-        requireSession: false,
-      }),
-  });
-  if (!result.ok) return result.response ?? jsonResponse(result.body, result.status);
-  const { outcome: promoted, cleanupService, nowUnixMs: now } = result;
-  if (promoted.failedHostIds.length > 0) {
-    return jsonResponse(
-      {
-        error: "catalog promoted but host desired-state reconciliation failed",
-        failed_host_ids: promoted.failedHostIds,
-      },
-      503,
-    );
-  }
-
-  // The guard is released here, so the collector can hold its exclusive sweep.
-  // The collector computes the root set itself, so it needs no scope argument.
-  const cleanup = await runRegistryCleanup(cleanupService, {
-    nowUnixMs: now,
-    waitBudgetMs: REGISTRY_CLEANUP_WAIT_BUDGET_MS,
-  });
-  // The catalog is committed either way. Only a pass that applied deletions and
-  // finished its whole worklist completes the promotion: a report-only, paused,
-  // busy, fenced, refused, or partial collector leaves the deletion half
-  // pending and says so.
-  if (!cleanup.applied || cleanup.partial) {
-    return jsonResponse(
-      {
-        error:
-          cleanup.error ??
-          (cleanup.partial
-            ? "registry artifacts are not deleted yet: the sweep did not finish"
-            : "registry artifacts are not deleted yet: cleanup did not apply"),
-        catalog_promoted: true,
-        retry: true,
-        cleanup: cleanupPayload(cleanup),
-      },
-      503,
-    );
-  }
-
-  return jsonResponse({
-    ok: true,
-    revision,
-    scenario_ids: promoted.scenarioIds,
-    changed_host_ids: promoted.changedHostIds,
-    rollback_snapshot_retained: promoted.rollbackSnapshotRetained,
-    retried: promoted.alreadyPromoted,
-    evicted_host_ids: promoted.evictedHostIds,
-    cleanup: cleanupPayload(cleanup),
-  });
-}
 
 /**
  * Promotes a candidate revision into a drained fleet: the bundle and collector
@@ -677,34 +579,6 @@ export async function readCleanupReadiness(
       hold: "unknown",
     };
   }
-}
-
-/**
- * A report-only or failed pass is not completed retention: the caller must
- * treat the deletion half of the promotion as pending, not as done.
- */
-function cleanupPayload(cleanup: {
-  ok: boolean;
-  applied: boolean;
-  partial: boolean;
-  status: string;
-  deletedObjects: number;
-  deletedBytes: number;
-  failedObjects: number;
-  candidates: number;
-  truncated: boolean;
-}) {
-  return {
-    state: cleanup.status,
-    applied: cleanup.applied,
-    partial: cleanup.partial,
-    pending: !cleanup.applied,
-    deleted_objects: cleanup.deletedObjects,
-    deleted_bytes: cleanup.deletedBytes,
-    failed_objects: cleanup.failedObjects,
-    candidate_objects: cleanup.candidates,
-    truncated: cleanup.truncated,
-  };
 }
 
 export async function handleCatalogRollback(

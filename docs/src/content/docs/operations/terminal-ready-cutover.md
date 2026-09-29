@@ -49,6 +49,10 @@ Every step here talks to `/api/*` or `/registry/*`, so every one of them must
 run while the plane is still open. This step never flips maintenance: the
 cutover lane closes the plane itself, as the first action of step 4.
 
+Before draining, the gate must report `promotion_hold` `open`. While Intar
+holds runs for its own image promotion, let it finish or reopen runs under
+Admin → Scenarios → Image promotion first.
+
 ```sh
 # 1. Runtime cutover gate: block new scenario placement fleet-wide. The lane
 #    sets the state and polls until the registry reports drained with
@@ -208,8 +212,10 @@ the maintenance page, so registry work cannot run in the middle of this step.
    its builds to report ready, then run the `tools-promote` operation of
    `image-ops.yml` with the
    expected candidate digest to warm every host and move the tools to the
-   `stable` channel, and only then promote the image catalog, which requires
-   stable tools ready. Every call goes to `/registry/*`, which the fence
+   `stable` channel, and only then promote the image catalog under Admin →
+   Scenarios → Image promotion with **Promote a revision…**, which requires
+   stable tools ready. Intar holds its own run gate for the swap and leaves
+   this drain in place. Every call goes to `/registry/*`, which the fence
    covered until step 5, so this is the first point where any of it can run.
    Publishing the catalog replaces its scope, so use the live Course source
    and confirm the set.
@@ -225,7 +231,9 @@ the maintenance page, so registry work cannot run in the middle of this step.
    run, including K3s readiness, and play back one SSH recording. While the
    gate is drained a learner start answers `503` `runtime_cutover_drained`;
    the existing `isAdmin` to `allowDrainedAdminProof` path admits an
-   administrator-started run for exactly this proof.
+   administrator-started run for exactly this proof. Intar's own promotion
+   hold refuses administrator starts too, so no promotion may hold runs
+   during the proof.
 9. Only then reopen the fleet: set the cutover gate to `open`, then confirm
    the host reports healthy and the fleet accepts a normal start.
 
