@@ -1,17 +1,8 @@
+# Generated from ci/workflows/image-ops.cue by cuenv; do not edit manually.
+# Regenerate with: cuenv sync codegen
 name: Image operations
-run-name: "Image ops ${{ inputs.operation }} @ ${{ github.sha }}"
-
-# One operator lane for the image flywheel work that stays manual: the run
-# gate, the guest-tools build and promotion, and the registry cleanup. Intar
-# promotes image catalogs itself (Admin, Scenarios, Image promotion), also
-# inside a drain this lane holds. Each operation keeps its own inputs, its own
-# confirmation, and its own job, so the plane fence and the deliberate-release
-# property stay explicit. Three lock groups keep unrelated work from blocking
-# recovery: the image pipeline group, the cleanup campaign group, and the
-# cleanup status group, which must stay readable while a campaign holds the
-# other two.
-
-on:
+run-name: Image ops ${{ inputs.operation }} @ ${{ github.sha }}
+"on":
   workflow_dispatch:
     inputs:
       operation:
@@ -52,13 +43,10 @@ on:
         required: false
         default: ""
         type: string
-
 permissions:
   actions: read
   contents: read
-
 jobs:
-
   request:
     name: Validate the operation
     runs-on: namespace-profile-intar-dev
@@ -138,15 +126,12 @@ jobs:
     concurrency:
       group: intar-image-catalog-promotion
       cancel-in-progress: false
-    # The gate polls until the registry reports drained with zero desired VMs,
-    # which can take several minutes.
     timeout-minutes: 20
     environment: production
     env:
       INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
       STATE: ${{ needs.request.outputs.state }}
       CONFIRMATION: ${{ inputs.confirmation }}
-
     steps:
       - name: Validate authority
         run: |
@@ -159,7 +144,6 @@ jobs:
             *) echo "Unsupported run gate state." >&2; exit 1 ;;
           esac
           test "${CONFIRMATION}" = "${expected}"
-
       - name: Set exact gate state
         run: |
           set -euo pipefail
@@ -170,7 +154,6 @@ jobs:
             --data "{\"state\":\"${STATE}\"}" \
             "https://intar.dev/registry/v1/cutover/gate" \
             | jq -e --arg state "${STATE}" '.ok == true and .state == $state' >/dev/null
-
       - name: Verify drained state has no active desired VMs
         if: needs.request.outputs.state == 'drained'
         run: |
@@ -189,7 +172,6 @@ jobs:
           done
           echo "Agent-KVM runs did not drain within ten minutes." >&2
           exit 1
-
       - name: Verify open state
         if: needs.request.outputs.state == 'open'
         run: |
@@ -198,8 +180,6 @@ jobs:
             --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
             "https://intar.dev/registry/v1/cutover/gate" \
             | jq -e '.state == "open"' >/dev/null
-
-
   tools-build:
     name: Build and verify tools
     runs-on: namespace-profile-intar-dev
@@ -215,7 +195,6 @@ jobs:
       KINO_TAG: ${{ inputs.kino_tag }}
       CONFIRMATION: ${{ inputs.confirmation }}
       BUCKET: intar-dev-vm-image-registry-20260709
-
     steps:
       - name: Validate deployment inputs
         run: |
@@ -225,14 +204,12 @@ jobs:
           [[ "${KINO_TAG}" =~ ^kino/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir -p "${RUNNER_TEMP}/guest-tools"
           printf 'TOOLS_DIR=%s/guest-tools\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
-
       - name: Checkout deployment revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-
       - name: Verify published Kino source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -248,32 +225,26 @@ jobs:
             --arg workflow "${GITHUB_SHA}" \
             '{tag: $tag, source_sha: $source, workflow_sha: $workflow, profile: "guest", target: "x86_64-unknown-linux-musl"}' \
             > "${TOOLS_DIR}/provenance.json"
-
       - name: Install Rust toolchain
         run: |
           rustup toolchain install 1.97.0 --profile minimal
           rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
-
       - name: Set up Rust cache
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
-
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-zigbuild@0.23.0
-
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
-
       - name: Verify runner disk tools
         run: |
           test -x /usr/sbin/mke2fs
           command -v zstd
-
       - name: Prepare Kino source workspace
         run: |
           set -euo pipefail
@@ -291,7 +262,6 @@ jobs:
             echo "neither a preparation script nor committed libnbd bindings under ${RUNNER_TEMP}/kino-source" >&2
             exit 1
           fi
-
       - name: Build guest Kino and tools disk
         run: |
           set -euo pipefail
@@ -311,13 +281,10 @@ jobs:
             candidate.json > SHA256SUMS
           sha256sum --check SHA256SUMS
           zstd --decompress --stdout "${disk}.ext4.zst" | sha256sum | cut -d ' ' -f 1 | diff - <(printf '%s\n' "${disk}")
-
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
-
       - name: Install pinned Wrangler
         run: bun install --frozen-lockfile
-
       - name: Upload candidate objects
         working-directory: apps/web
         env:
@@ -333,7 +300,6 @@ jobs:
             --remote --jurisdiction eu --file "${TOOLS_DIR}/kino"
           bunx wrangler r2 object put "${BUCKET}/guest-tools/scenario/candidate.json" \
             --remote --jurisdiction eu --file "${TOOLS_DIR}/candidate.json" --content-type application/json
-
       - name: Verify uploaded objects by re-download
         working-directory: apps/web
         env:
@@ -368,7 +334,6 @@ jobs:
             '{uploaded_objects_verified: 3, tools_disk_sha256: $disk, kino_sha256: $kino}' \
             > "${TOOLS_DIR}/upload-verification.json"
           cat "${TOOLS_DIR}/upload-verification.json"
-
       - name: Retain build and deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -376,8 +341,6 @@ jobs:
           name: guest-tools-deployment-${{ github.run_id }}
           path: ${{ runner.temp }}/guest-tools/
           if-no-files-found: error
-
-
   tools-promote:
     name: Promote and verify the tools channel
     runs-on: namespace-profile-intar-dev
@@ -394,7 +357,6 @@ jobs:
       EXPECTED_CANDIDATE_SHA256: ${{ inputs.expected_candidate_sha256 }}
       CONFIRMATION: ${{ inputs.confirmation }}
       BUCKET: intar-dev-vm-image-registry-20260709
-
     steps:
       - name: Validate promotion inputs
         run: |
@@ -405,19 +367,15 @@ jobs:
           [[ "${EXPECTED_CANDIDATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           mkdir -p "${RUNNER_TEMP}/guest-tools"
           printf 'TOOLS_DIR=%s/guest-tools\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
-
       - name: Checkout promotion revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
-
       - name: Install pinned Wrangler
         run: bun install --frozen-lockfile
-
       - name: Read the candidate pin from the registry bucket
         working-directory: apps/web
         env:
@@ -442,7 +400,6 @@ jobs:
             exit 1
           fi
           printf 'candidate_sha256=%s\n' "${measured_sha}"
-
       - name: Require drained host and retain previous stable pin
         working-directory: apps/web
         env:
@@ -457,14 +414,12 @@ jobs:
             | jq -e '.state == "drained" and .active_desired_vms == 0' >/dev/null
           bunx wrangler r2 object get "${BUCKET}/guest-tools/scenario/stable.json" \
             --remote --jurisdiction eu --file "${TOOLS_DIR}/previous-stable.json"
-
       - name: Retain rollback pin before promotion
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: guest-tools-rollback-${{ github.run_id }}
           path: ${{ runner.temp }}/guest-tools/previous-stable.json
           if-no-files-found: error
-
       - name: Warm every host and wait for the candidate cache
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
@@ -512,7 +467,6 @@ jobs:
             "${TOOLS_DIR}/cache.json" >&2 || true
           echo 'The candidate host cache did not become ready for every warmed host.' >&2
           exit 1
-
       - name: Promote the exact candidate while drained
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
@@ -538,7 +492,6 @@ jobs:
           # that was verified. The disk is already checked above.
           jq -e --arg kino "$(jq -r .kino_sha256 "${TOOLS_DIR}/candidate.json")" \
             '.stable.kino_sha256 == $kino' "${TOOLS_DIR}/promotion.json" >/dev/null
-
       - name: Retain promotion evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -546,8 +499,6 @@ jobs:
           name: guest-tools-promotion-${{ github.run_id }}
           path: ${{ runner.temp }}/guest-tools/
           if-no-files-found: error
-
-
   cleanup:
     name: Image registry cleanup
     runs-on: namespace-profile-intar-dev
@@ -555,51 +506,38 @@ jobs:
       - request
     if: needs.request.outputs.job == 'cleanup'
     timeout-minutes: 75
-    # The status and resolve paths are read-only and must stay reachable
-    # while a campaign holds the other cleanup group.
     concurrency:
       group: ${{ needs.request.outputs.action == 'status' && 'intar-image-registry-cleanup-status' || 'intar-image-registry-cleanup' }}
       cancel-in-progress: false
     environment:
       name: production
-    # The run action campaigns for up to 60 minutes
-    # (REGISTRY_CLEANUP_RUN_DEADLINE_MS), so the job allows 75.
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
-      # The parent control-plane database, the same one the deploy lane pins.
       DATABASE_ID: c53ff120-c555-4702-b3a1-eaab44fd76f6
       GATE_URL: https://intar.dev/api/maintenance/registry-cleanup
       ACTION: ${{ needs.request.outputs.action }}
       EXPECTED_GC_RUN_ID: ${{ inputs.expected_gc_run_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
-
     steps:
       - name: Checkout exact main revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
       - name: Set up Bun
-        # status and resolve are curl and jq only, so they stay fast. plan and run
-        # delegate to the gate script, which resolves wrangler through the locked
-        # dependency tree; without the locked install `bunx` may fetch a latest.
         if: needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
-
       - name: Set up Node
         if: needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: apps/web/.node-version
-
       - name: Install locked dependencies
         if: needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'
         run: bun install --frozen-lockfile
-
       - name: Validate cleanup authority
         run: |
           set -euo pipefail
@@ -631,7 +569,6 @@ jobs:
           test -n "${CLOUDFLARE_API_TOKEN}"
           test -n "${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}"
           mkdir -p "${RUNNER_TEMP}/intar-image-registry-cleanup"
-
       - name: Read the collector status and the shared ledger
         run: |
           set -euo pipefail
@@ -803,7 +740,6 @@ jobs:
             echo "${ledger_problem}" >&2
             exit 1
           fi
-
       - name: List the candidate set
         if: needs.request.outputs.action == 'plan'
         run: |
@@ -814,13 +750,9 @@ jobs:
           jq -e '.idle == true' "${evidence_dir}/state.json" >/dev/null
           tools/deploy/registry-cleanup-gate.sh plan delete \
             "${evidence_dir}/registry-cleanup-plan.json"
-
       - name: Run the delete campaign
         if: needs.request.outputs.action == 'run'
         env:
-          # A full plan takes roughly 90 seconds plus its post-scan, so the
-          # script's 15-minute manual default can not finish a large backlog.
-          # CI gets 60 minutes here, inside the job's 75.
           REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
         run: |
           set -euo pipefail
@@ -832,14 +764,11 @@ jobs:
             "${evidence_dir}/state.json" >/dev/null
           tools/deploy/registry-cleanup-gate.sh run delete \
             "${evidence_dir}/registry-cleanup-run.json"
-
       - name: Resolve one stalled sweep
         if: needs.request.outputs.action == 'resolve'
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
           REAP_URL: https://intar.dev/registry/v1/admission/reap
-          # The same threshold the call is made with, so the local precondition
-          # and the service's grace window can not disagree.
           STALE_MS: "600000"
         run: |
           set -euo pipefail
@@ -1009,11 +938,9 @@ jobs:
             exit 1
           fi
           cat "${summary_file}" >> "${GITHUB_STEP_SUMMARY}"
-
       - name: Remove any response that reflected the machine credential
         if: always()
         env:
-          # The scrub compares both credentials, and keeps neither.
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |
           set -euo pipefail
@@ -1037,7 +964,6 @@ jobs:
             echo 'the image registry cleanup evidence reflected a machine credential.' >&2
             exit 1
           fi
-
       - name: Retain cleanup evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1058,4 +984,3 @@ jobs:
             ${{ runner.temp }}/intar-registry-cleanup-gate-${{ github.run_id }}/
           if-no-files-found: warn
           retention-days: 30
-

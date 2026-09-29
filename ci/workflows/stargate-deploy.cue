@@ -1,0 +1,390 @@
+package workflows
+
+"workflows": "stargate-deploy": {
+	name:       "Stargate production"
+	"run-name": "Stargate ${{ inputs.operation }} ${{ inputs.operation == 'rollback' && inputs.rollback_backup || inputs.release_tag }} @ ${{ github.sha }}"
+	on: workflow_dispatch: inputs: {
+		operation: {
+			description: "Operation to perform"
+			required:    true
+			type:        "choice"
+			options: [
+				"plan",
+				"apply",
+				"rollback",
+			]
+		}
+		release_tag: {
+			description: "Exact Stargate release tag for plan/apply"
+			required:    false
+			type:        "string"
+		}
+		rollback_backup: {
+			description: "Exact host backup ID for rollback"
+			required:    false
+			type:        "string"
+		}
+		confirmation: {
+			description: "Type DEPLOY STARGATE or ROLLBACK STARGATE for a mutation"
+			required:    false
+			type:        "string"
+		}
+		single_operator_confirmation: {
+			description: "Type SINGLE OPERATOR STARGATE only when no independent reviewer exists"
+			required:    false
+			type:        "string"
+		}
+	}
+	permissions: {
+		actions:  "read"
+		contents: "read"
+	}
+	concurrency: {
+		group:                "stargate-production"
+		"cancel-in-progress": false
+	}
+	jobs: {
+		preflight: {
+			name:              "Validate deployment request"
+			"runs-on":         "ubuntu-24.04"
+			"timeout-minutes": 5
+			steps: [{
+				name: "Require main revision"
+				run:  "test \"${GITHUB_REF}\" = refs/heads/main"
+			}, {
+				name: "Checkout"
+				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				with: "persist-credentials": false
+			}, {
+				name: "Validate operation"
+				env: {
+					OPERATION:                    "${{ inputs.operation }}"
+					RELEASE_TAG:                  "${{ inputs.release_tag }}"
+					ROLLBACK_BACKUP:              "${{ inputs.rollback_backup }}"
+					CONFIRMATION:                 "${{ inputs.confirmation }}"
+					SINGLE_OPERATOR_CONFIRMATION: "${{ inputs.single_operator_confirmation }}"
+				}
+				run: """
+					set -euo pipefail
+					test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+					test -z "${SINGLE_OPERATOR_CONFIRMATION}" || \\
+					  test "${SINGLE_OPERATOR_CONFIRMATION}" = "SINGLE OPERATOR STARGATE"
+					case "${OPERATION}" in
+					  plan)
+					    [[ "${RELEASE_TAG}" =~ ^stargate/v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]
+					    test -z "${ROLLBACK_BACKUP}"
+					    test -z "${CONFIRMATION}"
+					    ;;
+					  apply)
+					    test "${CONFIRMATION}" = "DEPLOY STARGATE"
+					    [[ "${RELEASE_TAG}" =~ ^stargate/v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]
+					    test -z "${ROLLBACK_BACKUP}"
+					    ;;
+					  rollback)
+					    test "${CONFIRMATION}" = "ROLLBACK STARGATE"
+					    [[ "${ROLLBACK_BACKUP}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
+					    ;;
+					  *) exit 2 ;;
+					esac
+
+					"""
+			}, {
+				name: "Validate host deployment scripts"
+				run: """
+					test -x deploy/stargate/scripts/intar-deploy-stargate
+					test -x deploy/stargate/scripts/bootstrap-deploy-user
+					bash -n deploy/stargate/scripts/intar-deploy-stargate
+					bash -n deploy/stargate/scripts/bootstrap-deploy-user
+					bash -n tools/deploy/configure-stargate-ssh.sh
+
+					"""
+			}]
+		}
+		deploy: {
+			name:              "${{ inputs.operation }} production Stargate"
+			needs:             "preflight"
+			"runs-on":         "ubuntu-24.04"
+			environment:       "production"
+			"timeout-minutes": 20
+			env: {
+				GH_TOKEN:                          "${{ github.token }}"
+				DEPLOY_HOST:                       "${{ vars.STARGATE_DEPLOY_HOST }}"
+				DEPLOY_PORT:                       "${{ vars.STARGATE_DEPLOY_PORT }}"
+				DEPLOY_USER:                       "${{ vars.STARGATE_DEPLOY_USER }}"
+				APPROVAL_MODE:                     "${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}"
+				SINGLE_OPERATOR_LOGIN:             "${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}"
+				SINGLE_OPERATOR_ID:                "${{ vars.STARGATE_SINGLE_OPERATOR_ID }}"
+				SINGLE_OPERATOR_EXPIRES_AT:        "${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}"
+				SINGLE_OPERATOR_ADMIN_ATTESTED_AT: "${{ vars.STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT }}"
+				ACTOR_ID:                          "${{ github.actor_id }}"
+				RUN_ATTEMPT:                       "${{ github.run_attempt }}"
+				SINGLE_OPERATOR_CONFIRMATION:      "${{ inputs.single_operator_confirmation }}"
+			}
+			steps: [{
+				name: "Checkout"
+				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				with: {
+					"fetch-depth":         0
+					"persist-credentials": false
+				}
+			}, {
+				name: "Verify protected production dispatch"
+				run: """
+					set -euo pipefail
+					test "${GITHUB_REF}" = refs/heads/main
+					test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+					test "${DEPLOY_HOST}" = intar.app
+					test "${DEPLOY_PORT}" = 2222
+					test "${DEPLOY_USER}" = stargate-deploy
+					test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
+
+					environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
+					case "${APPROVAL_MODE}" in
+					  reviewed)
+					    test -z "${SINGLE_OPERATOR_CONFIRMATION}"
+					    jq -e '
+					      .can_admins_bypass == false and
+					      any(
+					        .protection_rules[]?;
+					          .type == "required_reviewers" and
+					          .prevent_self_review == true and
+					          ((.reviewers // []) | length) > 0
+					      )
+					    ' <<<"${environment_json}" >/dev/null
+					    ;;
+					  single-operator)
+					    test "${SINGLE_OPERATOR_CONFIRMATION}" = "SINGLE OPERATOR STARGATE"
+					    test -n "${SINGLE_OPERATOR_LOGIN}"
+					    [[ "${SINGLE_OPERATOR_LOGIN}" =~ ^[A-Za-z0-9-]{1,39}$ ]]
+					    [[ "${SINGLE_OPERATOR_LOGIN}" != -* ]]
+					    [[ "${SINGLE_OPERATOR_LOGIN}" != *- ]]
+					    [[ "${SINGLE_OPERATOR_ID}" =~ ^[0-9]+$ ]]
+					    [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+					    [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+					    test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+					    test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+					    test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
+					    test "${RUN_ATTEMPT}" = 1
+					    triggering_actor_json="$(gh api "users/${GITHUB_TRIGGERING_ACTOR}")"
+					    jq -e \\
+					      --arg login "${SINGLE_OPERATOR_LOGIN}" \\
+					      --arg id "${SINGLE_OPERATOR_ID}" '
+					        .type == "User" and
+					        .login == $login and
+					        ((.id | tostring) == $id)
+					      ' <<<"${triggering_actor_json}" >/dev/null
+					    jq -e '
+					      ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
+					    ' <<<"${environment_json}" >/dev/null
+					    now_epoch="$(date -u +%s)"
+					    expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+					    attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
+					    remaining_seconds="$((expires_epoch - now_epoch))"
+					    attestation_age="$((now_epoch - attested_epoch))"
+					    test "${remaining_seconds}" -gt 0
+					    test "${remaining_seconds}" -le 604800
+					    test "${attestation_age}" -ge 0
+					    test "${attestation_age}" -le 900
+					    printf 'single_operator_expires_at=%s remaining_seconds=%s admin_attestation_age=%s\\n' \\
+					      "${SINGLE_OPERATOR_EXPIRES_AT}" "${remaining_seconds}" \\
+					      "${attestation_age}"
+					    ;;
+					  *)
+					    printf 'Unsupported Stargate approval mode: %s\\n' \\
+					      "${APPROVAL_MODE:-<unset>}" >&2
+					    exit 1
+					    ;;
+					esac
+					printf 'approval_mode=%s actor=%s\\n' "${APPROVAL_MODE}" "${GITHUB_ACTOR}" |
+					  tee -a "${GITHUB_STEP_SUMMARY}"
+
+					branch_policies="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production/deployment-branch-policies")"
+					jq -e '
+					  (.branch_policies // .) as $policies |
+					  ($policies | length) == 1 and
+					  $policies[0].type == "branch" and
+					  $policies[0].name == "main"
+					' <<<"${branch_policies}" >/dev/null
+
+					"""
+			}, {
+				name: "Verify release provenance"
+				if:   "inputs.operation != 'rollback'"
+				env: RELEASE_TAG: "${{ inputs.release_tag }}"
+				run: """
+					set -euo pipefail
+					tag_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
+					git merge-base --is-ancestor "${tag_commit}" "${GITHUB_SHA}"
+					version="${RELEASE_TAG#stargate/v}"
+					manifest_version="$(
+					  git show "${RELEASE_TAG}:crates/stargate-gateway/Cargo.toml" |
+					    awk -F ' *= *' '$1 == "version" {gsub(/"/, "", $2); print $2; exit}'
+					)"
+					test "${manifest_version}" = "${version}"
+
+					"""
+			}, {
+				name: "Configure pinned SSH identity"
+				id:   "ssh"
+				env: {
+					STARGATE_DEPLOY_HOST:            "${{ vars.STARGATE_DEPLOY_HOST }}"
+					STARGATE_DEPLOY_PORT:            "${{ vars.STARGATE_DEPLOY_PORT }}"
+					STARGATE_DEPLOY_USER:            "${{ vars.STARGATE_DEPLOY_USER }}"
+					STARGATE_DEPLOY_SSH_PRIVATE_KEY: "${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}"
+					STARGATE_DEPLOY_KNOWN_HOSTS:     "${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}"
+				}
+				run: """
+					set -euo pipefail
+					config="$(tools/deploy/configure-stargate-ssh.sh "${RUNNER_TEMP}/intar-ssh")"
+					test "${config}" = "${RUNNER_TEMP}/intar-ssh/config"
+
+					"""
+			}, {
+				name: "Read host deployment plan"
+				run: """
+					set -euo pipefail
+					ssh -F "${RUNNER_TEMP}/intar-ssh/config" \\
+					  intar-stargate-production plan
+
+					"""
+			}, {
+				name: "Download and verify release"
+				if:   "inputs.operation == 'apply'"
+				env: RELEASE_TAG: "${{ inputs.release_tag }}"
+				run: """
+					set -euo pipefail
+					version="${RELEASE_TAG#stargate/v}"
+					archive="stargate_${version}_linux_amd64.tar.gz"
+					checksums="stargate_${version}_checksums.txt"
+					mkdir -p "${RUNNER_TEMP}/stargate-release/extracted"
+					gh release download "${RELEASE_TAG}" \\
+					  --repo "${GITHUB_REPOSITORY}" \\
+					  --pattern "${archive}" \\
+					  --pattern "${checksums}" \\
+					  --dir "${RUNNER_TEMP}/stargate-release"
+
+					grep -E "^[0-9a-f]{64}  ${archive}$" \\
+					  "${RUNNER_TEMP}/stargate-release/${checksums}" \\
+					  >"${RUNNER_TEMP}/stargate-release/expected"
+					test "$(wc -l <"${RUNNER_TEMP}/stargate-release/expected")" -eq 1
+					(
+					  cd "${RUNNER_TEMP}/stargate-release"
+					  sha256sum --check --strict expected
+					)
+					test "$(tar -tzf "${RUNNER_TEMP}/stargate-release/${archive}")" = $'./\\n./stargate'
+					tar -xzf "${RUNNER_TEMP}/stargate-release/${archive}" \\
+					  -C "${RUNNER_TEMP}/stargate-release/extracted" \\
+					  --no-same-owner --no-same-permissions
+					test -f "${RUNNER_TEMP}/stargate-release/extracted/stargate"
+					test ! -L "${RUNNER_TEMP}/stargate-release/extracted/stargate"
+
+					archive_sha256="$(sha256sum "${RUNNER_TEMP}/stargate-release/${archive}" | awk '{print $1}')"
+					binary_sha256="$(sha256sum "${RUNNER_TEMP}/stargate-release/extracted/stargate" | awk '{print $1}')"
+					{
+					  printf 'archive=%s\\n' "${RUNNER_TEMP}/stargate-release/${archive}"
+					  printf 'archive_sha256=%s\\n' "${archive_sha256}"
+					  printf 'binary_sha256=%s\\n' "${binary_sha256}"
+					} >>"${GITHUB_OUTPUT}"
+
+					"""
+				id: "release"
+			}, {
+				name: "Recheck sole-operator mutation window"
+				if:   "inputs.operation != 'plan'"
+				run: """
+					set -euo pipefail
+					case "${APPROVAL_MODE}" in
+					  reviewed)
+					    ;;
+					  single-operator)
+					    now_epoch="$(date -u +%s)"
+					    expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+					    attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
+					    remaining_seconds="$((expires_epoch - now_epoch))"
+					    attestation_age="$((now_epoch - attested_epoch))"
+					    test "${remaining_seconds}" -gt 0
+					    test "${remaining_seconds}" -le 604800
+					    test "${attestation_age}" -ge 0
+					    test "${attestation_age}" -le 900
+					    ;;
+					  *)
+					    printf 'Unsupported Stargate approval mode: %s\\n' \\
+					      "${APPROVAL_MODE:-<unset>}" >&2
+					    exit 1
+					    ;;
+					esac
+
+					"""
+			}, {
+				name: "Apply release"
+				if:   "inputs.operation == 'apply'"
+				id:   "apply"
+				env: {
+					RELEASE_TAG:    "${{ inputs.release_tag }}"
+					ARCHIVE:        "${{ steps.release.outputs.archive }}"
+					ARCHIVE_SHA256: "${{ steps.release.outputs.archive_sha256 }}"
+					BINARY_SHA256:  "${{ steps.release.outputs.binary_sha256 }}"
+				}
+				run: """
+					set -euo pipefail
+					output="${RUNNER_TEMP}/stargate-apply-output"
+					ssh -F "${RUNNER_TEMP}/intar-ssh/config" \\
+					  intar-stargate-production apply \\
+					    "${RELEASE_TAG}" "${ARCHIVE_SHA256}" "${BINARY_SHA256}" \\
+					  <"${ARCHIVE}" | tee "${output}"
+					backup_id="$(awk -F= '$1 == "backup_id" {print $2}' "${output}")"
+					[[ "${backup_id}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
+					test "$(grep -c '^backup_id=' "${output}")" -eq 1
+					printf 'backup_id=%s\\n' "${backup_id}" >>"${GITHUB_OUTPUT}"
+
+					"""
+			}, {
+				name: "Roll back release"
+				if:   "inputs.operation == 'rollback'"
+				env: ROLLBACK_BACKUP: "${{ inputs.rollback_backup }}"
+				run: """
+					set -euo pipefail
+					ssh -F "${RUNNER_TEMP}/intar-ssh/config" \\
+					  intar-stargate-production rollback "${ROLLBACK_BACKUP}"
+
+					"""
+			}, {
+				name: "Verify public routing"
+				if:   "inputs.operation != 'plan'"
+				id:   "public"
+				env: OPERATION: "${{ inputs.operation }}"
+				run: """
+					set -euo pipefail
+					curl --fail-with-body --silent --show-error https://ws.intar.app/healthz >/dev/null
+					garbage_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://garbage.intar.app/)"
+					test "${garbage_status}" = 404
+					if [ "${OPERATION}" = apply ]; then
+					  application_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://wa-no-such-route.intar.app/)"
+					  test "${application_status}" = 401
+					fi
+
+					"""
+			}, {
+				name: "Restore prior release after failed public verification"
+				if:   "failure() && inputs.operation == 'apply' && steps.apply.outcome == 'success' && steps.public.outcome == 'failure'"
+				env: BACKUP_ID: "${{ steps.apply.outputs.backup_id }}"
+				run: """
+					set -euo pipefail
+					[[ "${BACKUP_ID}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
+					ssh -F "${RUNNER_TEMP}/intar-ssh/config" \\
+					  intar-stargate-production rollback "${BACKUP_ID}"
+
+					"""
+			}, {
+				name: "Read final host state"
+				if:   "always() && steps.ssh.outcome == 'success'"
+				run: """
+					set -euo pipefail
+					ssh -F "${RUNNER_TEMP}/intar-ssh/config" \\
+					  intar-stargate-production plan
+
+					"""
+			}]
+		}
+	}
+}

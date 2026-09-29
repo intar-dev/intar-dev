@@ -1,10 +1,11 @@
+# Generated from ci/workflows/release.cue by cuenv; do not edit manually.
+# Regenerate with: cuenv sync codegen
 name: Release
-run-name: >-
+run-name: |-
   ${{ inputs.resume_tag != ''
       && format('{0} resume {1} from {2}', inputs.project, inputs.resume_tag, github.ref_name)
       || format('{0} release {1} from {2}', inputs.project, inputs.bump, github.ref_name) }}
-
-on:
+"on":
   workflow_dispatch:
     inputs:
       project:
@@ -30,29 +31,19 @@ on:
         required: false
         type: string
         default: ""
-
 permissions:
   actions: read
   contents: read
-
 concurrency:
   group: release-${{ inputs.project }}
   cancel-in-progress: false
-
-# This is a shared artifact-release workflow, not a production deployment.
-# Keep protected-environment approval on the project-specific install/deploy
-# workflow so unrelated release targets do not inherit production approvals.
 jobs:
   release:
     name: Bump, tag, and build
     permissions:
       actions: read
       contents: write
-    # The jailed agent release needs a host kernel with Landlock enabled.
-    # Namespace's runner kernel currently has Landlock disabled at boot, while
-    # the other release targets do not execute the privileged jailer smoke.
     runs-on: ${{ inputs.project == 'intar-agent' && 'ubuntu-24.04' || 'namespace-profile-intar-dev' }}
-
     steps:
       - name: Ensure main
         env:
@@ -78,19 +69,16 @@ jobs:
                 ;;
             esac
           fi
-
       - name: Checkout on Namespace
         if: inputs.project != 'intar-agent'
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           fetch-depth: 0
-
       - name: Checkout jailed agent release
         if: inputs.project == 'intar-agent'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-
       - name: Preflight jailed release runner
         if: inputs.project == 'intar-agent'
         run: |
@@ -132,7 +120,6 @@ jobs:
               )
           print(f"Landlock ABI {abi}")
           PY
-
       - name: Resolve project
         id: project
         env:
@@ -181,7 +168,6 @@ jobs:
             echo "binary=${binary}"
             echo "tag_prefix=${tag_prefix}"
           } >> "${GITHUB_OUTPUT}"
-
       - name: Determine release tag
         id: next
         env:
@@ -330,7 +316,6 @@ jobs:
             echo "version_tag=${next_version}"
             echo "tag=${next_tag}"
           } >> "${GITHUB_OUTPUT}"
-
       - name: Install Rust toolchain
         if: steps.next.outputs.resume != 'true'
         run: |
@@ -338,29 +323,24 @@ jobs:
           rustup component add --toolchain 1.97.0 rustfmt clippy
           rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           rustup show active-toolchain
-
       - name: Set up Namespace caches
         if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
-
       - name: Install tools
         if: steps.next.outputs.resume != 'true'
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-nextest@0.9.143,cargo-zigbuild@0.23.0
-
       - name: Set up cuenv
         if: steps.next.outputs.resume != 'true'
         uses: ./.github/actions/setup-cuenv
-
       - name: Install Zig
         if: steps.next.outputs.resume != 'true'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
-
       - name: Apply release version
         if: steps.next.outputs.resume != 'true'
         env:
@@ -397,23 +377,19 @@ jobs:
           manifest.write_text(updated)
           PY
           tools/image-build/with-libnbd-env.sh --rust-only -- cargo update -p "${PACKAGE}" --precise "${VERSION}"
-
       - name: Set up Bun for pinned content hydration
         if: steps.next.outputs.resume != 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
-
       - name: Restore shared Bun cache
         if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           path: ~/.bun/install/cache
-
       - name: Run checks
         if: steps.next.outputs.resume != 'true'
         run: cuenv task verify
-
       - name: Build release artifacts
         if: steps.next.outputs.resume != 'true'
         env:
@@ -538,11 +514,9 @@ jobs:
           fi
           cd "${dist_dir}"
           sha256sum "${BINARY}_${VERSION}_"* > "${BINARY}_${VERSION}_checksums.txt"
-
       - name: Test personal-host installer
         if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
         run: cuenv task installer-tests
-
       - name: Run privileged agent package smoke
         if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
         env:
@@ -566,7 +540,6 @@ jobs:
           sudo sh crates/intar-jailerd/tests/package-smoke.sh \
             "${PWD}/dist/intar-agent_${VERSION}_linux_amd64.tar.gz"
           rm -rf "${package_root}"
-
       - name: Smoke-test image CLI release package
         if: inputs.project == 'intar-image-cli' && steps.next.outputs.resume != 'true'
         env:
@@ -681,7 +654,6 @@ jobs:
               exit 1
             fi
           done
-
       - name: Preserve exact release payload
         id: release_payload
         if: steps.next.outputs.resume != 'true'
@@ -693,7 +665,6 @@ jobs:
           compression-level: 0
           overwrite: true
           retention-days: 30
-
       - name: Resolve release payload
         id: payload
         env:
@@ -735,7 +706,6 @@ jobs:
             echo "run_id=${payload_run_id}"
             echo "source_sha=${payload_source_sha}"
           } >> "${GITHUB_OUTPUT}"
-
       - name: Validate preserved resume payload
         if: steps.next.outputs.resume == 'true'
         env:
@@ -776,7 +746,6 @@ jobs:
             echo "Stored release payload did not come from the expected release run." >&2
             exit 1
           fi
-
       - name: Restore exact release payload
         if: steps.next.outputs.resume == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -785,7 +754,6 @@ jobs:
           path: dist/
           github-token: ${{ github.token }}
           run-id: ${{ steps.payload.outputs.run_id }}
-
       - name: Commit release version
         id: version_commit
         env:
@@ -822,7 +790,6 @@ jobs:
             release_sha="$(git rev-parse HEAD)"
           fi
           echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
-
       - name: Publish tagged GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

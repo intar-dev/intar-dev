@@ -1,16 +1,11 @@
+# Generated from ci/workflows/website.cue by cuenv; do not edit manually.
+# Regenerate with: cuenv sync codegen
 name: Website
-run-name: >-
+run-name: |-
   ${{ github.event_name == 'pull_request'
       && format('Website validate PR #{0}', github.event.pull_request.number)
       || format('Website release main @ {0}', github.sha) }}
-
-# One lane for the website: validate and smoke on every change, then release
-# the tested artifact. The personal-metal rollout guard blocks normal deploys.
-# Otherwise, a push to main deploys it. A manual dispatch may deploy
-# deliberately (maintenance on or off, or the registry delete campaign) or
-# validate only, which is what the default operation does.
-
-on:
+"on":
   workflow_dispatch:
     inputs:
       operation:
@@ -43,8 +38,8 @@ on:
         type: choice
         options:
           - auto
-          - on
-          - off
+          - "on"
+          - "off"
       registry_cleanup_mode:
         description: Image registry cleanup worker mode for this release
         required: false
@@ -61,79 +56,83 @@ on:
   push:
     branches:
       - main
-    paths: &website_paths
-      - ".github/workflows/website.yml"
-      - ".github/actions/setup-runtime/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "env.cue"
-      - "package.json"
-      - "bun.lock"
-      - "patches/**"
-      - "tsconfig.base.json"
-      - "tools/check-import-boundaries.ts"
-      - "tools/database/**"
-      - "tools/deploy/**"
-      - "tools/vm-boot-benchmark/**"
-      - "tools/vm-boot-benchmark.py"
-      - "tools/test_vm_boot_benchmark.py"
-      - "crates/intar-image-scenario/**"
-      - "apps/web/**"
+    paths:
+      - .github/workflows/website.yml
+      - .github/actions/setup-runtime/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - env.cue
+      - package.json
+      - bun.lock
+      - patches/**
+      - tsconfig.base.json
+      - tools/check-import-boundaries.ts
+      - tools/database/**
+      - tools/deploy/**
+      - tools/vm-boot-benchmark/**
+      - tools/vm-boot-benchmark.py
+      - tools/test_vm_boot_benchmark.py
+      - crates/intar-image-scenario/**
+      - apps/web/**
   pull_request:
-    paths: *website_paths
-
+    paths:
+      - .github/workflows/website.yml
+      - .github/actions/setup-runtime/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - env.cue
+      - package.json
+      - bun.lock
+      - patches/**
+      - tsconfig.base.json
+      - tools/check-import-boundaries.ts
+      - tools/database/**
+      - tools/deploy/**
+      - tools/vm-boot-benchmark/**
+      - tools/vm-boot-benchmark.py
+      - tools/test_vm_boot_benchmark.py
+      - crates/intar-image-scenario/**
+      - apps/web/**
 permissions:
   actions: read
   contents: read
-
 concurrency:
-  # Validation never shares a group with the deploy job, which waits for this
-  # run: one shared group could deadlock both.
-  group: "website-validate-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}"
+  group: website-validate-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-
   validate:
     name: Test and build
     runs-on: namespace-profile-intar-dev
     outputs:
       artifact_id: ${{ steps.artifact.outputs.artifact_id }}
       artifact_digest: ${{ steps.artifact.outputs.artifact_digest }}
-
     steps:
       - name: Checkout
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
-
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
-
       - name: Set up Bun cache
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           path: ~/.bun/install/cache
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
-
       - name: Check web contracts
         run: |
           bun run check:imports
           bun run check:deploy
           bun run check:vm-boot-benchmark
           bun run check:database-migrations
-
       - name: Test
         working-directory: apps/web
         run: bun run test
-
       - name: Build
         working-directory: apps/web
         run: bun run build
-
       - name: Verify the image registry cleanup worker artifact
         run: |
           set -euo pipefail
@@ -170,14 +169,7 @@ jobs:
           ' "${cleanup_config}" >/dev/null
           printf 'auxiliary worker config: %s\n' "${cleanup_config}" \
             >> "${GITHUB_STEP_SUMMARY}"
-
       - name: Upload tested deployment artifact
-        # The release workflow pushes its version commit with GITHUB_TOKEN,
-        # and GitHub suppresses workflow triggers for that token, so a release
-        # SHA can reach main with no Website run. A manual dispatch of this
-        # same workflow on that same main revision is the supported way to
-        # produce the tested artifact, and the deploy lane accepts either
-        # event as long as the revision matches exactly.
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -187,7 +179,6 @@ jobs:
           overwrite: ${{ !startsWith(inputs.operation, 'metal-') }}
           if-no-files-found: error
           retention-days: ${{ inputs.operation == 'metal-deploy' && 90 || 1 }}
-
       - name: Record the tested artifact identity
         id: artifact
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -222,44 +213,36 @@ jobs:
             printf 'artifact_digest=%s\n' \
               "$(jq -r --arg name "${artifact_name}" '[.artifacts[] | select(.name == $name)] | .[0].digest' "${artifacts_json}")"
           } >> "${GITHUB_OUTPUT}"
-
   ui:
     name: Chromium smoke
     runs-on: namespace-profile-intar-dev
     container:
       image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
       options: --ipc=host
-
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: apps/web/.node-version
-
       - name: Install Bun setup prerequisite
         working-directory: apps/web
         run: apt-get update && apt-get install --yes --no-install-recommends unzip=6.0-28ubuntu4.1
-
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
-
       - name: Run Chromium smoke
         working-directory: apps/web
         env:
           CI: "true"
           HOME: /root
         run: bunx playwright test tests/ui/smoke.spec.ts --project=chromium-smoke
-
       - name: Upload smoke report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -270,17 +253,13 @@ jobs:
             .tmp/website-playwright/test-results
           if-no-files-found: warn
           retention-days: 7
-
   plan:
     name: Plan the release
     needs:
       - validate
       - ui
-    # During this rollout, only explicit metal actions may reach production.
-    # The guard must be a repository variable, available before jobs start.
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      ((vars.PERSONAL_METAL_ROLLOUT != 'active' &&
+    if: |-
+      github.ref == 'refs/heads/main' && ((vars.PERSONAL_METAL_ROLLOUT != 'active' &&
         (github.event_name == 'push' ||
          (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))) ||
        (vars.PERSONAL_METAL_ROLLOUT == 'active' && github.event_name == 'workflow_dispatch' &&
@@ -300,7 +279,6 @@ jobs:
       artifact_id: ${{ needs.validate.outputs.artifact_id }}
       artifact_digest: ${{ needs.validate.outputs.artifact_digest }}
     steps:
-
       - name: Validate the release request
         id: request
         env:
@@ -376,18 +354,14 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           printf 'maintenance=%s registry_cleanup_mode=%s\n' \
             "${REQUESTED_MAINTENANCE}" "${REQUESTED_CLEANUP_MODE}"
-
       - name: Checkout exact main revision
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
-
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
-
       - name: Install locked workspace tools
         run: bun install --frozen-lockfile
-
       - name: Resolve the verified guest-tools pin
         if: steps.request.outputs.metal_action == '' || (steps.request.outputs.metal_action == 'deploy' && inputs.metal_deploy_run_id == '')
         id: pin
@@ -517,9 +491,6 @@ jobs:
           jq -c '{static_pin_sha256, compressed_disk_sha256, tools_disk_sha256, kino_sha256}' \
             "${evidence_file}" >> "${GITHUB_STEP_SUMMARY}"
       - name: Activate the D1 upload admission switch for a delete release
-        # An explicit prerequisite: only a dispatch that asked for delete turns
-        # this on. It runs before the deploy job closes the plane, because the
-        # registry sits behind the maintenance fence.
         if: steps.request.outputs.metal_action == '' && steps.request.outputs.registry_cleanup_mode == 'delete'
         env:
           REGISTRY_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
@@ -530,7 +501,6 @@ jobs:
           jq -c '{ok, requested_mode, http_status, problem}' \
             "${RUNNER_TEMP}/registry-cleanup-activation.json" \
             >> "${GITHUB_STEP_SUMMARY}"
-
       - name: Retain release evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -542,13 +512,9 @@ jobs:
             ${{ runner.temp }}/registry-cleanup-activation.json
           if-no-files-found: warn
           retention-days: 30
-
   deploy:
     name: Deploy production
-    # Guard the whole job, including always() cleanup, during the metal rollout.
-    if: >-
-      (vars.PERSONAL_METAL_ROLLOUT != 'active' && needs.plan.outputs.metal_action == '') ||
-      (vars.PERSONAL_METAL_ROLLOUT == 'active' && needs.plan.outputs.metal_action != '')
+    if: (vars.PERSONAL_METAL_ROLLOUT != 'active' && needs.plan.outputs.metal_action == '') || (vars.PERSONAL_METAL_ROLLOUT == 'active' && needs.plan.outputs.metal_action != '')
     needs:
       - plan
     runs-on: namespace-profile-intar-dev
@@ -558,19 +524,15 @@ jobs:
     environment:
       name: production
       url: https://intar.dev
-    # Preparation is the plan job now, so this bound covers the deployment
-    # phases plus the delete campaign's sixty minutes.
     timeout-minutes: 90
     concurrency:
       group: website-production
       cancel-in-progress: false
     steps:
-
       - name: Checkout exact main revision
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
-
       - name: Verify exact-main deployment revision
         run: |
           set -euo pipefail
@@ -587,7 +549,6 @@ jobs:
               exit 1
               ;;
           esac
-
       - name: Restore metal retirement evidence
         if: needs.plan.outputs.metal_action != '' && inputs.metal_deploy_run_id != ''
         env:
@@ -655,7 +616,6 @@ jobs:
             cp "${RUNNER_TEMP}/metal-artifact-${PROOF_ARTIFACT_ID}.json" \
               "${RUNNER_TEMP}/personal-metal/proof-artifact.json"
           fi
-
       - name: Download tested deployment artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -715,18 +675,14 @@ jobs:
                 buildArtifactId: $id, buildArtifactDigest: $digest}' \
               > "${RUNNER_TEMP}/personal-metal/release.json"
           fi
-
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
-
       - name: Set up Bun cache
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           path: ~/.bun/install/cache
-
       - name: Install deployment dependencies
         run: bun install --frozen-lockfile
-
       - name: Pin and verify production configuration
         working-directory: apps/web
         run: |
@@ -785,7 +741,6 @@ jobs:
             printf 'DATABASE_ID=%s\n' "${database_id}"
             printf 'DEPLOYMENT_CONFIG=%s\n' "${config}"
           } >> "${GITHUB_ENV}"
-
       - name: Inject the verified ABI 2 guest-tools pin
         env:
           METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
@@ -832,7 +787,6 @@ jobs:
           {
             printf 'MAINTENANCE_MODE=%s\n' "${MAINTENANCE_MODE}"
           } >> "${GITHUB_ENV}"
-
       - name: Prepare runtime secrets
         id: runtime-secrets
         env:
@@ -850,7 +804,6 @@ jobs:
           chmod 600 "${secrets_file}"
           printf 'ACTIVATION_SECRETS_FILE=%s\n' "${secrets_file}" \
             >> "${GITHUB_ENV}"
-
       - name: Plan production D1 migrations
         if: needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy'
         id: migrations
@@ -879,24 +832,17 @@ jobs:
           printf 'd1_applied=%s d1_committed=%s d1_pending=%s\n' \
             "${applied}" "${committed}" "${pending}" \
             >> "${GITHUB_STEP_SUMMARY}"
-
       - name: Rehearse pending migrations on disposable D1
         if: (needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy') && steps.migrations.outputs.pending == 'true'
         env:
-          # Step outputs travel through the environment, never interpolated
-          # into the command line.
           APPLIED_MIGRATION_COUNT: ${{ steps.migrations.outputs.applied }}
         run: |
           bun tools/database/rehearse-removal-migration.ts \
             --applied "$APPLIED_MIGRATION_COUNT" \
             --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
-
       - name: Capture pre-migration D1 evidence
         if: needs.plan.outputs.metal_action == 'deploy' || (needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'))
         env:
-          # Both cutover operations, the pin deploy and the return to service,
-          # require the drained gate and a whole-fleet zero state. The normal
-          # migration path keeps only its original run and artifact checks.
           REQUIRE_DRAINED_GATE: ${{ needs.plan.outputs.maintenance != 'auto' }}
           METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
         run: |
@@ -1000,7 +946,6 @@ jobs:
             WHERE enabled = 1
             ORDER BY scope_key, scenario_id;"
           d1_readonly_query "${enabled_scenarios_sql}" "${enabled_scenarios}"
-
       - name: Inspect the image registry cleanup deployment
         id: registry-cleanup-state
         env:
@@ -1072,7 +1017,6 @@ jobs:
           printf 'registry cleanup worker present: %s; intent: %s; resolved mode: %s; live mode: %s\n' \
             "${child_present}" "${REGISTRY_CLEANUP_INTENT}" "${resolved}" "${live_mode}" \
             >> "${GITHUB_STEP_SUMMARY}"
-
       - name: Retain immutable personal-metal release inputs
         if: needs.plan.outputs.metal_action == 'deploy'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1083,7 +1027,6 @@ jobs:
             ${{ runner.temp }}/personal-metal/release-static-pin.json
           if-no-files-found: error
           retention-days: 90
-
       - name: Run the staged personal-metal action
         if: needs.plan.outputs.metal_action != ''
         env:
@@ -1120,7 +1063,6 @@ jobs:
           if [ "${METAL_ACTION}" != open-admission ]; then
             echo 'Personal registration and scenario admission remain closed. Real VM/NAT proof is still required.' >> "${GITHUB_STEP_SUMMARY}"
           fi
-
       - name: Prepare the parent bootstrap configuration
         working-directory: apps/web
         if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true')
@@ -1137,7 +1079,6 @@ jobs:
           jq -e '.name == "intar-dev"' "${bootstrap}" >/dev/null
           printf 'BOOTSTRAP_DEPLOYMENT_CONFIG=%s\n' "${bootstrap}" \
             >> "${GITHUB_ENV}"
-
       - name: Prepare maintenance configuration
         working-directory: apps/web
         if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
@@ -1174,18 +1115,9 @@ jobs:
             printf 'DEPLOYMENT_CONFIG=%s\n' "${full_maintenance_config}" \
               >> "${GITHUB_ENV}"
           fi
-
       - name: Hold the image registry collector before the migration
-        # A reopen already holds a paused collector, and the control plane is
-        # still closed at this point, so its hold would travel to a fenced
-        # route. The release step below is what the reopen needs.
         if: needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance != 'off')
         env:
-          # The collector has no public route: the parent worker holds the
-          # service binding, and the gate route on that worker is the only path
-          # to it. The route sits behind the maintenance fence, so the hold
-          # happens here, while the control plane still serves. A no-op when no
-          # collector version is deployed yet.
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: |
           set -euo pipefail
@@ -1202,7 +1134,6 @@ jobs:
           # to service, proves otherwise.
           tools/deploy/registry-cleanup-gate.sh hold "${REGISTRY_CLEANUP_MODE}" \
             "${RUNNER_TEMP}/registry-cleanup-hold.json"
-
       - name: Enable maintenance for pending migrations
         if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         env:
@@ -1213,7 +1144,6 @@ jobs:
             "${DATABASE_ID}" \
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-maintenance.json"
-
       - name: Drain and recheck maintenance
         if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         run: |
@@ -1239,7 +1169,6 @@ jobs:
           test "${root_status}" = 503
           test "${probe_status}" = 503
           test "$(jq -er '.code' "${probe}")" = maintenance
-
       - name: Deploy the parent revision for the first cleanup rollout
         if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')
         env:
@@ -1256,7 +1185,6 @@ jobs:
             "${DATABASE_ID}" \
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-bootstrap.json"
-
       - name: Apply pending D1 migrations
         if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true')
         env:
@@ -1266,7 +1194,6 @@ jobs:
           set -euo pipefail
           bun tools/database/apply-generated-migrations.ts 2>&1 | \
             tee "${RUNNER_TEMP}/production-d1-migrate.log"
-
       - name: Verify production D1 schema
         if: needs.plan.outputs.metal_action == ''
         run: |
@@ -1284,16 +1211,7 @@ jobs:
             .triggers == 0 and
             .views == 0
           ' "${evidence}" >/dev/null
-
       - name: Verify the deployed image registry cleanup worker
-        # The reopen operation runs with the control plane already closed and in
-        # a fresh runner, so the hold evidence that a delete-capable child
-        # deploy requires can never exist here. This gate decides instead: when
-        # the collector that serves is already this revision in this mode, the
-        # reopen keeps it, releases it, and lets the campaign prove the delete
-        # authority from the open parent. When it would have to replace a
-        # delete-capable collector, it refuses with the operation to run instead
-        # of deadlocking on evidence the fenced control plane can not produce.
         id: registry-cleanup-child
         if: needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance == 'off')
         env:
@@ -1303,12 +1221,7 @@ jobs:
           tools/deploy/registry-cleanup-child-gate.sh "${REGISTRY_CLEANUP_OPERATION}" \
             "${REGISTRY_CLEANUP_MODE}" "${GITHUB_SHA:0:12}" \
             "${RUNNER_TEMP}/registry-cleanup-child.json" | tee -a "${GITHUB_OUTPUT}"
-
       - name: Deploy the image registry cleanup worker
-        # A reopen verifies the deployed collector instead of replacing it: the
-        # verification step above sets skip, and the reopen then only reopens
-        # the parent, releases the collector, and runs the campaign. A skipped
-        # verification step leaves skip empty, so every other path still deploys.
         if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-child.outputs.skip != 'true')
         run: |
           set -euo pipefail
@@ -1344,7 +1257,6 @@ jobs:
             "${bucket_name}" \
             "${REGISTRY_CLEANUP_MODE}" \
             "${RUNNER_TEMP}/registry-cleanup-deploy.json"
-
       - name: Deploy production at 100 percent
         if: needs.plan.outputs.metal_action == ''
         env:
@@ -1355,12 +1267,7 @@ jobs:
             "${DATABASE_ID}" \
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-production.json"
-
       - name: Release the image registry collector
-        # A cutover keeps the control plane closed, so the collector stays held
-        # and the reopen operation releases it after its maintenance-off deploy.
-        # A paused collector can not retire anything, and it can not refuse a
-        # learner either.
         if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
@@ -1373,16 +1280,7 @@ jobs:
           # absent gate when it did not.
           tools/deploy/registry-cleanup-gate.sh release report-only \
             "${RUNNER_TEMP}/registry-cleanup-release.json"
-
       - name: Verify the report-only collector through the parent binding
-        # The rollout verification of the report-only phase: the parent now
-        # serves with maintenance off and the collector has been released, so
-        # one plan call proves the first report child binding. The collector
-        # must report that it read the maintenance flag from the control plane
-        # version that serves traffic, and that version must be open, and the
-        # plan must be complete and fault free. That is the evidence a later
-        # delete release needs from the report-only rollout before it turns
-        # deletes on. A plan is a read, so it deletes nothing.
         if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
@@ -1390,21 +1288,10 @@ jobs:
           set -euo pipefail
           tools/deploy/registry-cleanup-gate.sh plan report-only \
             "${RUNNER_TEMP}/registry-cleanup-preview.json"
-
       - name: Run the image registry cleanup to completion
-        # The release that turns deletes on, and the reopen that follows a
-        # cutover, clear the backlog in the same rollout: a report-only
-        # collector never deletes, so this step runs only in delete mode. The
-        # campaign is bounded by passes and by wall clock inside the script,
-        # and it proves the result with a fresh report whose keyset digest is
-        # the one the finished campaign recorded.
         if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
-          # A full plan takes roughly 90 seconds plus its post-scan, so the
-          # script's 15-minute manual default can not finish a large backlog.
-          # CI gets 60 minutes here, inside the job's 75. Early completion still
-          # returns immediately.
           REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
         run: |
           set -euo pipefail
@@ -1415,7 +1302,6 @@ jobs:
       - name: Remove runtime secret file
         if: always() && steps.runtime-secrets.outcome != 'skipped'
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
-
       - name: Collect personal-metal diagnostics
         if: always() && needs.plan.outputs.metal_action != ''
         run: |
@@ -1431,7 +1317,6 @@ jobs:
               cp -R "${RUNNER_TEMP}/${item}" "${destination}/"
             fi
           done
-
       - name: Retain personal-metal evidence
         if: always() && needs.plan.outputs.metal_action != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1440,7 +1325,6 @@ jobs:
           path: ${{ runner.temp }}/personal-metal/
           if-no-files-found: warn
           retention-days: 90
-
       - name: Retain deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -1,7 +1,8 @@
+# Generated from ci/workflows/stargate-deploy.cue by cuenv; do not edit manually.
+# Regenerate with: cuenv sync codegen
 name: Stargate production
-run-name: "Stargate ${{ inputs.operation }} ${{ inputs.operation == 'rollback' && inputs.rollback_backup || inputs.release_tag }} @ ${{ github.sha }}"
-
-on:
+run-name: Stargate ${{ inputs.operation }} ${{ inputs.operation == 'rollback' && inputs.rollback_backup || inputs.release_tag }} @ ${{ github.sha }}
+"on":
   workflow_dispatch:
     inputs:
       operation:
@@ -28,30 +29,24 @@ on:
         description: Type SINGLE OPERATOR STARGATE only when no independent reviewer exists
         required: false
         type: string
-
 permissions:
   actions: read
   contents: read
-
 concurrency:
   group: stargate-production
   cancel-in-progress: false
-
 jobs:
   preflight:
     name: Validate deployment request
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-
     steps:
       - name: Require main revision
         run: test "${GITHUB_REF}" = refs/heads/main
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
       - name: Validate operation
         env:
           OPERATION: ${{ inputs.operation }}
@@ -81,7 +76,6 @@ jobs:
               ;;
             *) exit 2 ;;
           esac
-
       - name: Validate host deployment scripts
         run: |
           test -x deploy/stargate/scripts/intar-deploy-stargate
@@ -89,14 +83,12 @@ jobs:
           bash -n deploy/stargate/scripts/intar-deploy-stargate
           bash -n deploy/stargate/scripts/bootstrap-deploy-user
           bash -n tools/deploy/configure-stargate-ssh.sh
-
   deploy:
     name: ${{ inputs.operation }} production Stargate
     needs: preflight
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 20
-
     env:
       GH_TOKEN: ${{ github.token }}
       DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
@@ -110,14 +102,12 @@ jobs:
       ACTOR_ID: ${{ github.actor_id }}
       RUN_ATTEMPT: ${{ github.run_attempt }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-
       - name: Verify protected production dispatch
         run: |
           set -euo pipefail
@@ -195,7 +185,6 @@ jobs:
             $policies[0].type == "branch" and
             $policies[0].name == "main"
           ' <<<"${branch_policies}" >/dev/null
-
       - name: Verify release provenance
         if: inputs.operation != 'rollback'
         env:
@@ -210,7 +199,6 @@ jobs:
               awk -F ' *= *' '$1 == "version" {gsub(/"/, "", $2); print $2; exit}'
           )"
           test "${manifest_version}" = "${version}"
-
       - name: Configure pinned SSH identity
         id: ssh
         env:
@@ -223,13 +211,11 @@ jobs:
           set -euo pipefail
           config="$(tools/deploy/configure-stargate-ssh.sh "${RUNNER_TEMP}/intar-ssh")"
           test "${config}" = "${RUNNER_TEMP}/intar-ssh/config"
-
       - name: Read host deployment plan
         run: |
           set -euo pipefail
           ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
             intar-stargate-production plan
-
       - name: Download and verify release
         if: inputs.operation == 'apply'
         env:
@@ -269,7 +255,6 @@ jobs:
             printf 'binary_sha256=%s\n' "${binary_sha256}"
           } >>"${GITHUB_OUTPUT}"
         id: release
-
       - name: Recheck sole-operator mutation window
         if: inputs.operation != 'plan'
         run: |
@@ -294,7 +279,6 @@ jobs:
               exit 1
               ;;
           esac
-
       - name: Apply release
         if: inputs.operation == 'apply'
         id: apply
@@ -314,7 +298,6 @@ jobs:
           [[ "${backup_id}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
           test "$(grep -c '^backup_id=' "${output}")" -eq 1
           printf 'backup_id=%s\n' "${backup_id}" >>"${GITHUB_OUTPUT}"
-
       - name: Roll back release
         if: inputs.operation == 'rollback'
         env:
@@ -323,7 +306,6 @@ jobs:
           set -euo pipefail
           ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
             intar-stargate-production rollback "${ROLLBACK_BACKUP}"
-
       - name: Verify public routing
         if: inputs.operation != 'plan'
         id: public
@@ -338,7 +320,6 @@ jobs:
             application_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://wa-no-such-route.intar.app/)"
             test "${application_status}" = 401
           fi
-
       - name: Restore prior release after failed public verification
         if: failure() && inputs.operation == 'apply' && steps.apply.outcome == 'success' && steps.public.outcome == 'failure'
         env:
@@ -348,7 +329,6 @@ jobs:
           [[ "${BACKUP_ID}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
           ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
             intar-stargate-production rollback "${BACKUP_ID}"
-
       - name: Read final host state
         if: always() && steps.ssh.outcome == 'success'
         run: |

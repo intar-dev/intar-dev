@@ -4,6 +4,8 @@ import (
 	"list"
 
 	"github.com/cuenv/cuenv/schema"
+	gen "github.com/cuenv/cuenv/schema/codegen"
+	"github.com/intar-dev/intar-dev/ci/workflows"
 )
 
 // Every task runs in the live checkout with the caller's environment. The Rust
@@ -66,6 +68,14 @@ schema.#Project & {
 		_t."generate-contracts",
 		#Host & {command: "git", args: ["diff", "--exit-code", "--", "apps/web/src/generated"]},
 	]
+
+	// The workflows cuenv's CI generator cannot express are GitHub Actions
+	// data in ci/workflows, rendered here. See ci/workflows/render.cue.
+	codegen: files: {
+		for path, rendered in workflows.files {
+			(path): gen.#YAMLFile & {content: rendered, gitignore: false}
+		}
+	}
 
 	ci: {
 		providers: ["github"]
