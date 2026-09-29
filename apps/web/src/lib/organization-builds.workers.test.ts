@@ -12,6 +12,7 @@ import {
   organization,
 } from "@/db/schema";
 import {
+  administeredBuildsQuery,
   listAdministeredBuilds,
   readAdministeredBuildLog,
   TENANT_BUILD_LOG_BYTES,
@@ -34,6 +35,8 @@ beforeEach(async () => {
     { id: "m1", organizationId: "org-a", userId: "owner-a", role: "owner", createdAt: new Date() },
     { id: "m2", organizationId: "org-b", userId: "admin-b", role: "admin", createdAt: new Date() },
     { id: "m3", organizationId: "org-a", userId: "member-a", role: "member", createdAt: new Date() },
+    // Administering org-b grants nothing in org-a, where admin-b is a member.
+    { id: "m4", organizationId: "org-a", userId: "admin-b", role: "member", createdAt: new Date() },
   ]);
   await db.insert(agentHosts).values({
     id: "builder-1",
@@ -109,6 +112,17 @@ describe("organization builds", () => {
     expect(await readAdministeredBuildLog("owner-a", "build-b")).toBeNull();
     expect(await readAdministeredBuildLog("owner-a", "build-public")).toBeNull();
     expect(await readAdministeredBuildLog("member-a", "build-a")).toBeNull();
+    expect(await readAdministeredBuildLog("admin-b", "build-a")).toBeNull();
+  });
+
+  it("reads builds through the organization index", async () => {
+    const { sql: query, params } = administeredBuildsQuery(drizzle(env.DB), "owner-a").toSQL();
+    const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${query}`)
+      .bind(...params)
+      .all<{ detail: string }>();
+    expect(plan.results.map((row) => row.detail).join("\n")).toContain(
+      "SEARCH image_builds USING INDEX image_builds_organization_idx",
+    );
   });
 
   it("serves only the tail of an oversized log and drops the line it cuts", async () => {
