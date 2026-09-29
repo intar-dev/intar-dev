@@ -143,6 +143,19 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
       }
     }
   }
+  // The step bodies in tools/workflows run in those workflows' jobs, so their
+  // installs carry the same pins as an inline run block.
+  const stepScripts: string[] = [];
+  visit(resolve(repositoryRoot, "tools/workflows"), stepScripts, [".sh"]);
+  for (const scriptPath of stepScripts.sort()) {
+    const name = relative(repositoryRoot, scriptPath);
+    const lines = readFileSync(scriptPath, "utf8").split("\n");
+    for (const [index, line] of lines.entries()) {
+      const content = line.trim();
+      if (!content || content.startsWith("#")) continue;
+      checkInstalledToolVersions(content, name, index + 1, violations);
+    }
+  }
   for (const [location, reference] of renderedPins) {
     if (!scannedPins.has(reference)) {
       violations.push(
@@ -218,12 +231,16 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
 function policyPaths(repositoryRoot: string): string[] {
   const paths: string[] = [];
   for (const directory of POLICY_DIRECTORIES) {
-    visit(resolve(repositoryRoot, directory), paths);
+    visit(resolve(repositoryRoot, directory), paths, [".yml", ".yaml"]);
   }
   return paths.sort();
 }
 
-function visit(directory: string, paths: string[]): void {
+function visit(
+  directory: string,
+  paths: string[],
+  extensions: readonly string[],
+): void {
   // A repository without a composite action has no such directory.
   if (!existsSync(directory)) return;
   for (const name of readdirSync(directory).sort()) {
@@ -231,12 +248,12 @@ function visit(directory: string, paths: string[]): void {
     const metadata = lstatSync(path);
     if (metadata.isSymbolicLink()) continue;
     if (metadata.isDirectory()) {
-      visit(path, paths);
+      visit(path, paths, extensions);
       continue;
     }
     if (
       metadata.isFile() &&
-      (name.endsWith(".yml") || name.endsWith(".yaml"))
+      extensions.some((extension) => name.endsWith(extension))
     ) {
       paths.push(path);
     }

@@ -35,6 +35,8 @@ on:
     - rustfmt.toml/**
     - schema/**
     - tools/image-build/**
+    - tools/workflows/release/build-release-artifacts.sh
+    - tools/workflows/release/build-release-artifacts.sh/**
   pull_request:
     branches:
     - main
@@ -67,6 +69,8 @@ on:
     - rustfmt.toml/**
     - schema/**
     - tools/image-build/**
+    - tools/workflows/release/build-release-artifacts.sh
+    - tools/workflows/release/build-release-artifacts.sh/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}

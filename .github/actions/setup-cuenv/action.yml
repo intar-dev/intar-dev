@@ -28,7 +28,6 @@ runs:
         echo "${CUENV_SHA256}  ${bin}/cuenv" | sha256sum -c -
         chmod +x "${bin}/cuenv"
         "${bin}/cuenv" --version
-        echo "${bin}" >> "${GITHUB_PATH}"
 
         # The schema decides what every task runs, and CUE modules have no sum
         # file. Seed a fresh CUE cache with the verified layers and turn the
@@ -42,3 +41,6 @@ runs:
         printf '%s  %s\n' "${SCHEMA_ZIP_SHA256}" "${mod}.zip" "${SCHEMA_MOD_SHA256}" "${mod}.mod" | sha256sum -c -
         echo "CUE_CACHE_DIR=${cache}" >> "${GITHUB_ENV}"
         echo 'CUE_REGISTRY=none' >> "${GITHUB_ENV}"
+        # Last, so a later always() step cannot find cuenv unless the schema
+        # checked out and the registry is off.
+        echo "${bin}" >> "${GITHUB_PATH}"

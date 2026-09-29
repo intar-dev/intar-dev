@@ -300,7 +300,12 @@ schema.#Project & {
 			  tools/workflows/*/*.sh; do
 			  test -x "${script}"
 			  bash -n "${script}"
-			  shellcheck --severity=warning "${script}"
+			  # The workflow step bodies keep the full-severity shellcheck
+			  # actionlint gave them when they were inline.
+			  case "${script}" in
+			    tools/workflows/*) shellcheck "${script}" ;;
+			    *) shellcheck --severity=warning "${script}" ;;
+			  esac
 			done
 			"""}
 
@@ -365,8 +370,10 @@ schema.#Project & {
 					"tools/image-build/**",
 					".github/actions/setup-cuenv/**",
 					".github/actions/setup-rust/**",
-					// deploy/personal-metal/test_installer.py reads release.yml.
+					// deploy/personal-metal/test_installer.py reads release.yml and
+					// the release artifact build step.
 					".github/workflows/release.yml",
+					"tools/workflows/release/build-release-artifacts.sh",
 					"rustfmt.toml",
 					"package.json",
 					"bun.lock",

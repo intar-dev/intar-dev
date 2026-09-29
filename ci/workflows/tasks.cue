@@ -11,6 +11,10 @@ tasks: [string]: schema.#Task
 // repository root with the step's whole environment, as bash with errexit
 // only, the shell GitHub uses for a run step without `shell:`.
 //
+// cuenv sets CLICOLOR_FORCE and FORCE_COLOR for its tasks, which make `gh api`
+// write coloured JSON even into a pipe or a file. A step reads that JSON with
+// jq, so both are removed.
+//
 // A production step also refuses to start outside GitHub Actions, so a local
 // `cuenv task` cannot reach production with a developer's credentials.
 #Script: schema.#Task & {
@@ -18,9 +22,9 @@ tasks: [string]: schema.#Task
 	_production: *false | bool
 	hermetic:    false
 	dir: from: "module"
-	command: "bash"
-	if !_production {args: ["-e", _script]}
-	if _production {args: ["-e", "-c", """
+	command: "env"
+	if !_production {args: ["-u", "CLICOLOR_FORCE", "-u", "FORCE_COLOR", "bash", "-e", _script]}
+	if _production {args: ["-u", "CLICOLOR_FORCE", "-u", "FORCE_COLOR", "bash", "-e", "-c", """
 		if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
 		  echo "$0 changes production and runs only in GitHub Actions." >&2
 		  exit 1
