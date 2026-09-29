@@ -1,0 +1,28 @@
+name: Set up cuenv
+description: Install the pinned cuenv release after checking its SHA-256 digest.
+
+# Checkout stays with the caller. cuenv fetches its CUE schema module from the
+# CUE registry on first evaluation.
+runs:
+  using: composite
+  steps:
+    - name: Install cuenv
+      shell: bash
+      env:
+        CUENV_VERSION: 0.56.7
+        # GitHub's digest for the cuenv-linux-x64 asset of that release.
+        CUENV_SHA256: de1e5080fca8abcd06a723a66df8661e163dad7941a96537167e0e149d77a909
+      run: |
+        set -euo pipefail
+        if [[ "$(uname -sm)" != "Linux x86_64" ]]; then
+          echo "The pinned cuenv binary is for linux-x64 only." >&2
+          exit 1
+        fi
+        bin="${RUNNER_TEMP}/cuenv-${CUENV_VERSION}"
+        mkdir -p "${bin}"
+        curl -fsSL --retry 3 -o "${bin}/cuenv" \
+          "https://github.com/cuenv/cuenv/releases/download/${CUENV_VERSION}/cuenv-linux-x64"
+        echo "${CUENV_SHA256}  ${bin}/cuenv" | sha256sum -c -
+        chmod +x "${bin}/cuenv"
+        "${bin}/cuenv" --version
+        echo "${bin}" >> "${GITHUB_PATH}"

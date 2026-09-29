@@ -1,0 +1,32 @@
+name: Set up Rust
+description: Install the pinned Rust toolchain, Cargo tools, and Zig this repository builds with.
+
+# Checkout stays with the caller. The components and target match
+# rust-toolchain.toml; installing them here keeps the first Cargo run from
+# installing them implicitly.
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      shell: bash
+      run: |
+        rustup toolchain install 1.97.0 --profile minimal
+        rustup component add --toolchain 1.97.0 rustfmt clippy
+        rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
+        rustup show active-toolchain
+
+    - name: Set up Namespace caches
+      uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
+      with:
+        cache: rust
+
+    - name: Install cargo-nextest, cargo-zigbuild, and cargo-audit
+      uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      with:
+        tool: cargo-nextest@0.9.143,cargo-zigbuild@0.23.0,cargo-audit@0.22.2
+        fallback: none
+
+    - name: Install Zig
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      with:
+        version: 0.16.0
