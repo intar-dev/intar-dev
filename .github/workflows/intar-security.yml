@@ -45,6 +45,7 @@ on:
     - tools/deploy/configure-stargate-ssh.test.ts
     - tools/deploy/configure-stargate-ssh.test.ts/**
     - tools/image-build/**
+    - tools/workflows/**
   pull_request:
     branches:
     - main
@@ -87,6 +88,7 @@ on:
     - tools/deploy/configure-stargate-ssh.test.ts
     - tools/deploy/configure-stargate-ssh.test.ts/**
     - tools/image-build/**
+    - tools/workflows/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}

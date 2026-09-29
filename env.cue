@@ -71,6 +71,9 @@ schema.#Project & {
 
 	// The workflows cuenv's CI generator cannot express are GitHub Actions
 	// data in ci/workflows, rendered here. See ci/workflows/render.cue.
+	// Workflow steps run as tasks from ci/workflows; see ci/workflows/tasks.cue.
+	tasks: {for name, task in workflows.tasks {(name): task}}
+
 	codegen: files: {
 		for path, rendered in workflows.files {
 			(path): gen.#YAMLFile & {content: rendered, gitignore: false}
@@ -289,10 +292,12 @@ schema.#Project & {
 
 		// The Stargate host scripts run as root on the gateway.
 		"host-scripts": #Bash & {_script: """
+			shopt -s nullglob
 			for script in \\
 			  deploy/stargate/scripts/intar-deploy-stargate \\
 			  deploy/stargate/scripts/bootstrap-deploy-user \\
-			  tools/deploy/configure-stargate-ssh.sh; do
+			  tools/deploy/configure-stargate-ssh.sh \\
+			  tools/workflows/*/*.sh; do
 			  test -x "${script}"
 			  bash -n "${script}"
 			  shellcheck --severity=warning "${script}"
@@ -303,7 +308,8 @@ schema.#Project & {
 			if git grep -nI -E '[[:blank:]]+$' -- \\
 			  '.github/workflows/*.yml' \\
 			  'deploy/stargate/scripts/*' \\
-			  'tools/deploy/configure-stargate-ssh.sh'; then
+			  'tools/deploy/configure-stargate-ssh.sh' \\
+			  'tools/workflows/*/*.sh'; then
 			  echo 'Trailing whitespace found in a workflow or a host script.' >&2
 			  exit 1
 			fi
@@ -398,6 +404,7 @@ schema.#Project & {
 					// the only audit that sees a newly published advisory.
 					"crates/**",
 					"tools/ci/**",
+					"tools/workflows/**",
 					"ci/**",
 					"tools/deploy/configure-stargate-ssh.sh",
 					"tools/deploy/configure-stargate-ssh.test.ts",
