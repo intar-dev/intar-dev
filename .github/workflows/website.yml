@@ -63,7 +63,7 @@ on:
       - main
     paths: &website_paths
       - ".github/workflows/website.yml"
-      - ".github/actions/**"
+      - ".github/actions/setup-runtime/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
