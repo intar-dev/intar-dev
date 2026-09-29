@@ -15,7 +15,9 @@ export class BlockableFetchTransport extends FetchTransport {
   }
 
   override logError(...args: unknown[]): void {
-    if (args.some((arg) => arg instanceof TypeError)) {
+    // Faro reports a failed delivery as `{ error, attempts, ... }` once its
+    // retries are spent.
+    if (args.some((arg) => arg instanceof TypeError || (arg as { error?: unknown } | null)?.error instanceof TypeError)) {
       this.unreachable = true;
       return;
     }
