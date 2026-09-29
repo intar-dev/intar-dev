@@ -27,6 +27,7 @@ on:
     - apps/web/wrangler.local.jsonc/**
     - bun.lock
     - bun.lock/**
+    - ci/**
     - crates/**
     - cue.mod/**
     - deploy/stargate/**
@@ -68,6 +69,7 @@ on:
     - apps/web/wrangler.local.jsonc/**
     - bun.lock
     - bun.lock/**
+    - ci/**
     - crates/**
     - cue.mod/**
     - deploy/stargate/**

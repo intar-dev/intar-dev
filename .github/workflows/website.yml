@@ -62,7 +62,6 @@ run-name: |-
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - env.cue
       - package.json
       - bun.lock
       - patches/**
@@ -82,7 +81,6 @@ run-name: |-
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - env.cue
       - package.json
       - bun.lock
       - patches/**

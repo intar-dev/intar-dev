@@ -317,7 +317,7 @@ schema.#Project & {
 		actionlint: #Host & {command: "tools/ci/actionlint.sh"}
 
 		// Generated workflows must match env.cue.
-		"sync-check": #Host & {command: "cuenv", args: ["sync", "ci", "--check"]}
+		"sync-check": #Bash & {_script: "cuenv sync ci --check\ncuenv sync codegen --check"}
 
 		lanes: {
 			type: "group"
@@ -371,6 +371,7 @@ schema.#Project & {
 					// the only audit that sees a newly published advisory.
 					"crates/**",
 					"tools/ci/**",
+					"ci/**",
 					"tools/deploy/configure-stargate-ssh.sh",
 					"tools/deploy/configure-stargate-ssh.test.ts",
 					"tools/image-build/**",

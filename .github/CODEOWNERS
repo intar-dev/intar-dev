@@ -8,6 +8,7 @@
 # Task definitions and the source of the generated workflows.
 /env.cue @icepuma
 /cue.mod/ @icepuma
+/ci/ @icepuma
 
 # Deployment helpers and database tooling run against production.
 /tools/deploy/ @icepuma
