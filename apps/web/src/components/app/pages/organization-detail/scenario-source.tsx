@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { GitBranch, Pause, Play, Unplug } from "lucide-react";
+import { GitBranch, Hammer, Pause, Play, Unplug } from "lucide-react";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import { Section } from "../../patterns/Section";
@@ -63,6 +63,13 @@ export function ScenarioSourceSection({
       density="compact"
       title="Scenario source"
       description="Merging to the repository's default branch releases its courses here."
+      actions={
+        // The one builds page; it shows organization admins only their builds.
+        <Button size="sm" variant="outline" render={<a href="/admin/builds" />}>
+          <Hammer className="size-4" />
+          Builds
+        </Button>
+      }
     >
       <div className="space-y-4 text-sm">
         {source ? (

@@ -7,15 +7,23 @@ import {
   imageBuildBundles,
   imageBuilds,
 } from "@/db/schema";
-import { jsonResponse, requireAdminUserContext } from "@/lib/agent-bridge";
+import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { serializeAdminBuildSummary } from "@/lib/admin-build-response";
+import { listAdministeredBuilds } from "@/lib/organization-builds";
 
 export const prerender = false;
 
 export const GET: APIRoute = async ({ request }) => {
-  const authz = await requireAdminUserContext(request);
+  const authz = await requireUserContext(request);
   if (!authz.ok) {
     return authz.response;
+  }
+  if (!authz.context.isAdmin) {
+    // Organization owners and admins read their own builds on the same page.
+    const builds = await listAdministeredBuilds(authz.context.userId);
+    return builds
+      ? jsonResponse({ builds })
+      : jsonResponse({ error: "admin required" }, { status: 403 });
   }
 
   const rows = await drizzle(env.DB)

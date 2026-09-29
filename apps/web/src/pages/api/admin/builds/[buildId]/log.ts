@@ -3,13 +3,14 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { imageBuilds } from "@/db/schema";
-import { jsonResponse, requireAdminUserContext } from "@/lib/agent-bridge";
+import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { isSafeAdminBuildId } from "@/lib/admin-build-response";
+import { readAdministeredBuildLog } from "@/lib/organization-builds";
 
 export const prerender = false;
 
 export const GET: APIRoute = async ({ request, params }) => {
-  const authz = await requireAdminUserContext(request);
+  const authz = await requireUserContext(request);
   if (!authz.ok) {
     return authz.response;
   }
@@ -20,6 +21,18 @@ export const GET: APIRoute = async ({ request, params }) => {
   }
   if (!isSafeAdminBuildId(buildId)) {
     return jsonResponse({ error: "invalid build id" }, { status: 400 });
+  }
+  if (!authz.context.isAdmin) {
+    // Only a build of an organization the caller owns or administers.
+    const log = await readAdministeredBuildLog(authz.context.userId, buildId);
+    return log === null
+      ? jsonResponse({ error: "build log not found" }, { status: 404 })
+      : new Response(log, {
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "cache-control": "private, no-store",
+          },
+        });
   }
 
   const rows = await drizzle(env.DB)
