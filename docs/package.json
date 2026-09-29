@@ -19,7 +19,8 @@
     "astro": "7.3.5"
   },
   "overrides": {
-    "devalue": "5.9.4"
+    "devalue": "5.9.4",
+    "undici": "7.30.0"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.10",
