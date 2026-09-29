@@ -46,7 +46,7 @@ import {
   admitInternalRegistryOperation,
   createRegistryWriterGuard,
 } from "@/lib/image-registry-admission";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { runsHeldCondition } from "@/lib/run-admission-gate";
 import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
   countUnitGuardRuns,
@@ -926,12 +926,12 @@ const REFUSAL_STATES = {
   not_promotable: "waiting",
 } as const satisfies Record<CandidatePromotionRefusal["kind"], ScenarioSourceCommitState>;
 
-const fleetDrained = sql`EXISTS (SELECT 1 FROM runtime_operation_gates
-  WHERE key = ${IMAGE_CUTOVER_GATE} AND state = 'drained')`;
+// An operator's image release or Intar's own promotion hold.
+const fleetDrained = sql.raw(runsHeldCondition());
 
 /**
  * The target may start to apply: it is still the head, the binding may write,
- * and for `public` no image release has drained the fleet.
+ * and for `public` no drain holds the fleet.
  */
 const mayApply = (step: Step, rev: string) => sql`EXISTS (SELECT 1 FROM scenario_sources
   WHERE scope_key = ${step.scopeKey} AND target_rev = ${rev}
@@ -940,8 +940,8 @@ const mayApply = (step: Step, rev: string) => sql`EXISTS (SELECT 1 FROM scenario
     AND (organization_id IS NOT NULL OR NOT ${fleetDrained}))`;
 
 // Promotes a ready target that is still the head. The unit guard holds it in
-// `waiting` while a run with access would lose it, and for `public` so does an
-// image release's drain. `promoting` is written only while the target may
+// `waiting` while a run with access would lose it, and for `public` so does a
+// fleet drain. `promoting` is written only while the target may
 // apply, so a pause or a drain during this alarm stops it here. A public
 // commit that replaces a live image takes the catalog-first route instead.
 async function promoteTarget(step: Step): Promise<boolean> {
@@ -969,7 +969,7 @@ async function promoteTarget(step: Step): Promise<boolean> {
     step.organizationId === null &&
     (await db.get<{ drained: number }>(sql`SELECT ${fleetDrained} AS drained`))?.drained
   ) {
-    await settle(step, target, { state: "waiting", detail: "an image release has drained the fleet" });
+    await settle(step, target, { state: "waiting", detail: "the fleet is drained for an image swap" });
     return false;
   }
   if (await countUnitGuardRuns(step.env.DB, step.organizationId, bundle.meta.courseCatalog)) {

@@ -34,7 +34,7 @@ import {
   type RegistryWriterGuard,
 } from "@/lib/image-registry-admission";
 import { withImageBuildCoordinationLocks } from "@/lib/image-build-lock";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, promotionHoldActive } from "@/lib/run-admission-gate";
 import {
   catalogRollbackRotates,
   catalogRollbackSnapshotStatement,
@@ -104,6 +104,8 @@ export type CandidatePromotionResult =
   | CandidatePromotionRefusal;
 
 const SOURCE_NOT_PROMOTABLE = "scenario source revision is not promotable";
+// One swap at a time: an operator lane waits while Intar's promotion holds.
+const PROMOTION_HELD = "an image promotion in Intar holds the fleet";
 
 export async function handleCandidateCatalogPromotion(
   request: Request,
@@ -130,6 +132,9 @@ export async function handleCandidateCatalogPromotion(
     .first<{ state: string }>();
   if (gate?.state !== "drained") {
     return jsonResponse({ error: "runtime cutover gate is not drained" }, 409);
+  }
+  if (await promotionHoldActive(env.DB)) {
+    return jsonResponse({ error: PROMOTION_HELD }, 409);
   }
 
   const active = await env.DB.prepare(
@@ -653,6 +658,9 @@ export async function handleCatalogRollback(
     .first<{ state: string }>();
   if (gate?.state !== "drained") {
     return jsonResponse({ error: "runtime cutover gate is not drained" }, 409);
+  }
+  if (await promotionHoldActive(env.DB)) {
+    return jsonResponse({ error: PROMOTION_HELD }, 409);
   }
   const active = await env.DB.prepare(
     `SELECT COUNT(*) AS count

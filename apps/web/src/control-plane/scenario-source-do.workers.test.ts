@@ -47,7 +47,7 @@ import { maintainHostBuildAssignments, queueImageBuildsFromBundle } from "@/lib/
 import { BUILDER_REASSIGN_AFTER_MS } from "@/lib/build-scheduler-core";
 import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
 import { setRegistryPause } from "@/lib/image-registry-admission";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gate";
 import {
   countUnitGuardRuns,
   loadScenarioSource,
@@ -1654,13 +1654,13 @@ describe("ScenarioSourceDO public apply", () => {
     expect(await binding()).toMatchObject({ liveRev: rev(SHA_A), targetRev: rev(SHA_B) });
   });
 
-  it("holds a new head in waiting while the fleet is drained", async () => {
-    await drain();
+  it.each([IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE])("holds a new head in waiting while %s is drained", async (key) => {
+    await db().insert(runtimeOperationGates).values({ key, state: "drained" });
     await publicCommit(SHA_B, { title: "Next" });
 
     expect(await commitState(SHA_B)).toEqual({
       state: "waiting",
-      detail: "an image release has drained the fleet",
+      detail: "the fleet is drained for an image swap",
     });
     expect(await catalogRev()).toBe(rev(SHA_A));
 
@@ -1726,7 +1726,7 @@ describe("ScenarioSourceDO public apply", () => {
     expect(await commitState(SHA_C)).toMatchObject({ state: "superseded" });
     expect(await commitState(SHA_B)).toEqual({
       state: "waiting",
-      detail: "an image release has drained the fleet",
+      detail: "the fleet is drained for an image swap",
     });
     expect(await catalogRev()).toBe(rev(SHA_C));
 

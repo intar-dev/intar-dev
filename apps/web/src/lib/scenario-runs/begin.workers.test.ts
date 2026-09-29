@@ -49,7 +49,7 @@ import {
   finishRegistrySweep,
 } from "@/lib/image-registry-admission";
 import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gate";
 import { candidateScenarioId } from "@/lib/scenario-catalog-candidates";
 import { beginScenarioRun, type BeginScenarioRunInput } from "@/lib/scenario-runs/begin";
 import {
@@ -884,7 +884,7 @@ describe("scenario admission batch", () => {
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
 
-  it("stops a start when the drain gate closes after the selection", async () => {
+  it.each([IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE])("stops a start when %s closes after the selection", async (key) => {
     const fixture = await seedAdmissionFixture();
     admissionHarness.armBeforeAdmissionBatch(async () => {
       await env.DB.prepare(
@@ -892,7 +892,7 @@ describe("scenario admission batch", () => {
           " VALUES (?1, 'drained', ?2)" +
           " ON CONFLICT(key) DO UPDATE SET state = 'drained', updated_at = ?2",
       )
-        .bind(IMAGE_CUTOVER_GATE, Date.now())
+        .bind(key, Date.now())
         .run();
     });
 
@@ -904,7 +904,7 @@ describe("scenario admission batch", () => {
       drizzle(env.DB)
         .select({ key: runtimeOperationGates.key })
         .from(runtimeOperationGates)
-        .where(eq(runtimeOperationGates.key, IMAGE_CUTOVER_GATE)),
+        .where(eq(runtimeOperationGates.key, key)),
     ).resolves.toHaveLength(1);
   });
 

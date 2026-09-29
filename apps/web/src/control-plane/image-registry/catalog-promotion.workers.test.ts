@@ -33,7 +33,7 @@ import {
   admitInternalRegistryOperation,
   createRegistryWriterGuard,
 } from "@/lib/image-registry-admission";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gate";
 import type { ScenarioCatalogRollbackV1 } from "@/lib/scenario-catalog-rollback";
 import { resetD1Database } from "@/test/d1-migrations";
 import { createCleanupServiceDouble } from "./cleanup-service-double";
@@ -242,6 +242,36 @@ describe("candidate scenario catalog promotion", () => {
       .where(eq(vmScenarioVms.scenarioId, "broken-nginx"));
     expect(restoredScenario[0]).toMatchObject({ title: "Old catalog" });
     expect(restoredVms[0]).toMatchObject({ imageFormat: "raw_zstd" });
+  });
+
+  it("refuses the drained lane while Intar holds a promotion, and the gate reports the hold", async () => {
+    await drizzle(env.DB)
+      .insert(runtimeOperationGates)
+      .values({ key: PROMOTION_HOLD_GATE, state: "drained" });
+    const call = (path: string, method = "POST") =>
+      handleImageRegistryRequest(
+        new Request(`https://intar.test/registry/v1/${path}`, {
+          method,
+          headers: { authorization: "Bearer test-publish-token", "x-intar-drained": "true" },
+        }),
+        env,
+      );
+
+    for (const path of ["catalog/promote/revision-1", "catalog/rollback/revision-1"]) {
+      const refused = await call(path);
+      expect(refused?.status, path).toBe(409);
+      await expect(refused?.json()).resolves.toEqual({
+        error: "an image promotion in Intar holds the fleet",
+      });
+    }
+    const gate = await call("cutover/gate", "GET");
+    await expect(gate?.json()).resolves.toMatchObject({
+      state: "drained",
+      promotion_hold: "drained",
+    });
+    expect(
+      (await drizzle(env.DB).select().from(vmScenarios).where(eq(vmScenarios.scenarioId, "broken-nginx")))[0],
+    ).toMatchObject({ title: "Old catalog" });
   });
 
   it("answers a committed retry without a second rollback row", async () => {
