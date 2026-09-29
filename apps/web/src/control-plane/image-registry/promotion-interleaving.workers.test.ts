@@ -4,12 +4,10 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
-import { handleCandidateCatalogPromotion } from "@/control-plane/image-registry/catalog-promotion";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   imageBuildBundles,
   imageBuilds,
-  runtimeOperationGates,
   scenarioCatalogCandidates,
   scenarioCatalogSnapshots,
   vmScenarioVms,
@@ -25,7 +23,6 @@ import {
   finishRegistrySweep,
 } from "@/lib/image-registry-admission";
 import { createImageRegistryCleanupCore } from "@/lib/image-registry-cleanup";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   enableRegistryDeletion,
@@ -34,6 +31,7 @@ import {
   type SeededChunkedImage,
 } from "./registry-artifact-fixtures";
 import { createCleanupServiceDouble } from "./cleanup-service-double";
+import { promoteThroughDrainedLane } from "./promotion-lane-double";
 
 /**
  * Interleaving of a candidate promotion with the collector and with a direct
@@ -123,10 +121,6 @@ async function seedCandidate(): Promise<void> {
       ],
     },
   });
-  await db.insert(runtimeOperationGates).values({
-    key: IMAGE_CUTOVER_GATE,
-    state: "drained",
-  });
   await db.insert(imageBuilds).values({
     id: "build-1",
     scenarioId: SCENARIO_ID,
@@ -175,19 +169,6 @@ async function seedCandidate(): Promise<void> {
     memoryMib: 512,
     diskMib: 1_024,
   });
-}
-
-function promotionRequest(): Request {
-  return new Request(
-    "https://intar.test/registry/v1/catalog/promote/" + REVISION,
-    {
-      method: "POST",
-      headers: {
-        authorization: "Bearer test-publish-token",
-        "x-intar-drained": "true",
-      },
-    },
-  );
 }
 
 function cleanupService() {
@@ -267,11 +248,7 @@ describe("candidate promotion interleaving", () => {
       },
     );
 
-    const promotion = handleCandidateCatalogPromotion(
-      promotionRequest(),
-      promotionEnv(),
-      REVISION,
-    );
+    const promotion = promoteThroughDrainedLane(promotionEnv(), REVISION);
     await ready;
     await waitForPendingWriter();
 
@@ -316,13 +293,13 @@ describe("candidate promotion interleaving", () => {
       live: await liveImageIds(),
     };
 
-    const response = await handleCandidateCatalogPromotion(
-      promotionRequest(),
-      promotionEnv(),
-      REVISION,
-    );
+    const response = await promoteThroughDrainedLane(promotionEnv(), REVISION);
 
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "the registry refused a writer: registry_sweep_active",
+      code: "registry_sweep_active",
+    });
     const after = {
       candidates: await db.select().from(scenarioCatalogCandidates),
       snapshots: await db.select().from(scenarioCatalogSnapshots),
@@ -336,10 +313,7 @@ describe("candidate promotion interleaving", () => {
       { sweepToken: sweep.lease.sweepToken, outcome: "completed" },
     );
     // With the sweep released the promotion proceeds.
-    expect(
-      (await handleCandidateCatalogPromotion(promotionRequest(), promotionEnv(), REVISION))
-        .status,
-    ).toBe(200);
+    expect((await promoteThroughDrainedLane(promotionEnv(), REVISION)).status).toBe(200);
   });
 
   it("serializes a live publish against the promotion", async () => {
@@ -359,7 +333,7 @@ describe("candidate promotion interleaving", () => {
     if (!session.ok) return;
 
     const [promotion, publish] = await Promise.all([
-      handleCandidateCatalogPromotion(promotionRequest(), promotionEnv(), REVISION),
+      promoteThroughDrainedLane(promotionEnv(), REVISION),
       handleImageRegistryRequest(
         new Request("https://intar.test/registry/v1/publish", {
           method: "POST",
@@ -397,11 +371,7 @@ describe("candidate promotion interleaving", () => {
     };
     if (promotion.status === 503) {
       expect(body).toMatchObject({ catalog_promoted: true, retry: true });
-      const retry = await handleCandidateCatalogPromotion(
-        promotionRequest(),
-        promotionEnv(),
-        REVISION,
-      );
+      const retry = await promoteThroughDrainedLane(promotionEnv(), REVISION);
       expect(retry.status).toBe(200);
       await expect(retry.json()).resolves.toMatchObject({ ok: true });
     } else {

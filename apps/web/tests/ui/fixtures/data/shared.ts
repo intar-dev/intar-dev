@@ -89,6 +89,7 @@ export interface MockApiState {
   hosts: Array<Record<string, unknown>>;
   hostRuns: Record<string, unknown>;
   adminScenarios: Array<Record<string, unknown>>;
+  imagePromotion: Record<string, unknown>;
   adminScenarioDetail: Record<string, unknown>;
   builds: Array<Record<string, unknown>>;
   buildDetails: Record<string, Record<string, unknown>>;

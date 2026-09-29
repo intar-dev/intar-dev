@@ -7,6 +7,8 @@ import { runtimeOperationGates } from "@/db/schema";
 import {
   assertAgentKvmRunsOpen,
   IMAGE_CUTOVER_GATE,
+  PROMOTION_HOLD_GATE,
+  promotionHoldActive,
 } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -29,6 +31,22 @@ describe("agent-KVM run admission gate", () => {
     await expect(
       assertAgentKvmRunsOpen(env.DB, { allowDrainedAdminProof: true }),
     ).resolves.toBeUndefined();
+  });
+
+  it("blocks admin proof runs too while Intar holds runs for a promotion", async () => {
+    await drizzle(env.DB).insert(runtimeOperationGates).values({
+      key: PROMOTION_HOLD_GATE,
+      state: "drained",
+      updatedAt: Date.now(),
+    });
+
+    for (const options of [{}, { allowDrainedAdminProof: true }]) {
+      await expect(assertAgentKvmRunsOpen(env.DB, options)).rejects.toMatchObject({
+        status: 503,
+        code: "runtime_cutover_drained",
+      });
+    }
+    await expect(promotionHoldActive(env.DB)).resolves.toBe(true);
   });
 
   it("keeps normal and admin proof runs open when the gate is open", async () => {
