@@ -29,15 +29,18 @@ command -v shellcheck >/dev/null 2>&1 || {
     exit 1
 }
 
-dir="target/actionlint/${VERSION}"
-if [ ! -x "${dir}/actionlint" ]; then
-    mkdir -p "${dir}"
-    archive="${dir}/actionlint.tar.gz"
+# target/ sits on the CI Rust cache, which pull request runs write to. Only the
+# archive is kept there, and it is checked on every run before extraction.
+archive="target/actionlint/${VERSION}/actionlint_${platform}.tar.gz"
+if ! echo "${digest}  ${archive}" | shasum -a 256 -c - >/dev/null 2>&1; then
+    mkdir -p "$(dirname "${archive}")"
     curl -fsSL --retry 3 -o "${archive}" \
         "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_${platform}.tar.gz"
     echo "${digest}  ${archive}" | shasum -a 256 -c - >/dev/null
-    tar -xzf "${archive}" -C "${dir}" actionlint
-    rm "${archive}"
 fi
 
-"${dir}/actionlint" .github/workflows/*.yml
+bin="$(mktemp -d)"
+trap 'rm -rf "${bin}"' EXIT
+tar -xzf "${archive}" -C "${bin}" actionlint
+
+"${bin}/actionlint" .github/workflows/*.yml
