@@ -15,15 +15,15 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/starlight": "0.38.2",
-    "astro": "6.1.2"
+    "@astrojs/starlight": "0.42.4",
+    "astro": "7.3.5"
   },
   "overrides": {
-    "devalue": "5.9.2"
+    "devalue": "5.9.4"
   },
   "devDependencies": {
-    "@astrojs/check": "0.9.9",
+    "@astrojs/check": "0.9.10",
     "typescript": "6.0.3",
-    "wrangler": "4.126.0"
+    "wrangler": "4.143.0"
   }
 }
