@@ -537,7 +537,7 @@ def claim(enrollment):
             result = json.loads(response.read(16384))
     except urllib.error.HTTPError as error:
         if error.code == 401:
-            raise HostError('Enrollment was refused. The saved claim is intact. Follow https://docs.intar.dev/operations/personal-host/#register-again') from None
+            raise HostError('Enrollment was refused. The saved claim is intact. If registration is closed, wait and repeat setup. Otherwise save any local data you need, run sudo intar-host uninstall --remove-data, and install again with a new token from Profile > My servers.') from None
         raise HostError('Enrollment service failed. The saved claim is intact. Repeat setup to recover it.') from None
     except (OSError, ValueError, urllib.error.URLError):
         # Never print the request, response, or exception: they can contain secrets.

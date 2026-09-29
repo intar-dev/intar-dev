@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "5129fc89-5f61-4962-b12b-0efad33e7eba",
-  "prevId": "55dd132e-25d3-4c99-9cd7-1173212faeef",
+  "id": "0d9331f0-b993-4f3a-a619-5843e6b48a39",
+  "prevId": "5129fc89-5f61-4962-b12b-0efad33e7eba",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -2846,6 +2846,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "client_discovery_id": {
+          "name": "client_discovery_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "disabled": {
           "name": "disabled",
           "type": "integer",
@@ -2877,6 +2884,13 @@
         },
         "scopes": {
           "name": "scopes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "client_credentials_scopes": {
+          "name": "client_credentials_scopes",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -2998,6 +3012,13 @@
         },
         "token_endpoint_auth_method": {
           "name": "token_endpoint_auth_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "application_type": {
+          "name": "application_type",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

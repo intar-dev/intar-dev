@@ -480,12 +480,14 @@ describe("organization sign-up", () => {
       domain: "other.example.test",
     });
     const flow = await startFlow({ kind: "sign-in", providerId: PROVIDER_ID });
+    // The plugin refuses the state itself; the callback error boundary shows
+    // it as sso_flow_invalid.
     expectError(
       await completeCallback(
         { ...flow, providerId: "org-sso-other" },
         { sub: "mixed-up", email: "mixed@example.test" },
       ),
-      "sso_flow_invalid",
+      "invalid_state",
     );
     await expect(countUsers()).resolves.toBe(1);
   });
@@ -845,11 +847,11 @@ describe("connecting GitHub", () => {
     await signIn({ sub: "raced-linker", email: "raced.linker@example.test" });
     const userId = (await accountOwner("raced-linker"))!;
     const { internalAdapter } = await auth.$context;
-    const findAccount = internalAdapter.findAccountByProviderId.bind(internalAdapter);
+    const findAccount = internalAdapter.findAccountByKey.bind(internalAdapter);
     // Another tab connects a GitHub account after this callback's checks,
     // just before its insert.
     const lookup = vi
-      .spyOn(internalAdapter, "findAccountByProviderId")
+      .spyOn(internalAdapter, "findAccountByKey")
       .mockImplementationOnce(async (...args) => {
         await env.DB.prepare(
           `INSERT INTO account (id, account_id, provider_id, user_id, created_at, updated_at)
@@ -918,13 +920,14 @@ describe("connecting GitHub", () => {
       env.DB.prepare("DELETE FROM session WHERE user_id = ?1").bind(userId).run(),
     );
     try {
-      await expect(
+      await expectRefusal(
         connectGithub(cookie, {
           githubAccountId: "5151007",
           login: "fenced-linker",
           email: "fenced.linker@personal.test",
         }),
-      ).rejects.toMatchObject({ body: { code: "link_session_ended" } });
+        "link_session_ended",
+      );
       expect(race.fired()).toBe(true);
     } finally {
       race.restore();
@@ -954,13 +957,14 @@ describe("connecting GitHub", () => {
         if (restore) await restoreFixtureAccount({ d1: env.DB, userId });
       });
       try {
-        await expect(
+        await expectRefusal(
           connectGithub(cookie, {
             githubAccountId,
             login: sub,
             email: `${sub}@personal.test`,
           }),
-        ).rejects.toMatchObject({ body: { code: "access_revoked" } });
+          "access_revoked",
+        );
         expect(race.fired()).toBe(true);
       } finally {
         race.restore();
@@ -1492,6 +1496,13 @@ function sessionCookieFor(
     now: Date.now(),
     ...options,
   });
+}
+
+/** A refusal inside the endpoint; the auth route sends it to the landing page. */
+async function expectRefusal(pending: Promise<Response>, code: string): Promise<void> {
+  const response = await pending;
+  expect(response.status).toBe(403);
+  await expect(response.json()).resolves.toMatchObject({ code });
 }
 
 function expectError(response: Response, code: string): void {

@@ -113,7 +113,7 @@ pub const KERNEL_SOURCE_FILES: &[KernelSourceFile] = &[
 /// Every symbol that the guest contract needs built in (value y).
 ///
 /// A missing symbol fails the build. Do not trim this list without checking the
-/// guest contract in docs/src/content/docs/operations/scenario-host-jailer.md.
+/// guest contract.
 pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     // Cloud Hypervisor CPU enumeration uses x2APIC MADT entries.
     "CONFIG_SMP",

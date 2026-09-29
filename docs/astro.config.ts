@@ -6,8 +6,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "Intar Documentation",
-      description:
-        "Architecture, authoring contracts, and operations runbooks for the Intar platform.",
+      description: "Documentation for the Intar platform is coming soon.",
       social: [
         {
           icon: "github",
@@ -18,25 +17,6 @@ export default defineConfig({
       editLink: {
         baseUrl: "https://github.com/intar-dev/intar-dev/edit/main/docs/",
       },
-      sidebar: [
-        { slug: "index" },
-        {
-          label: "Architecture",
-          autogenerate: { directory: "architecture" },
-        },
-        {
-          label: "Authoring",
-          autogenerate: { directory: "authoring" },
-        },
-        {
-          label: "Operations",
-          autogenerate: { directory: "operations" },
-        },
-        {
-          label: "Decisions",
-          autogenerate: { directory: "adr" },
-        },
-      ],
     }),
   ],
 });

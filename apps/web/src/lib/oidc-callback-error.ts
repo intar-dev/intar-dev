@@ -15,6 +15,8 @@ const BETTER_AUTH_ERROR_CODES: Record<string, string> = {
   // The provider's email belongs to an account the identity isn't connected
   // to, and Better Auth refused to link by email.
   "account not linked": "sso_email_in_use",
+  // The flow's state expired, or it belongs to a different provider.
+  invalid_state: "sso_flow_invalid",
 };
 
 /** Replace IdP and upstream server error details before they reach a browser. */

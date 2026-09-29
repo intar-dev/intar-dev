@@ -14,11 +14,13 @@ export const oauthClient = sqliteTable(
     id: text("id").primaryKey(),
     clientId: text("client_id").notNull().unique(),
     clientSecret: text("client_secret"),
+    clientDiscoveryId: text("client_discovery_id"),
     disabled: integer("disabled", { mode: "boolean" }).default(false).notNull(),
     skipConsent: integer("skip_consent", { mode: "boolean" }),
     enableEndSession: integer("enable_end_session", { mode: "boolean" }),
     subjectType: text("subject_type"),
     scopes: jsonText<string[]>("scopes"),
+    clientCredentialsScopes: jsonText<string[]>("client_credentials_scopes"),
     userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .default(nowMsDefault)
@@ -44,6 +46,7 @@ export const oauthClient = sqliteTable(
       { mode: "boolean" },
     ),
     tokenEndpointAuthMethod: text("token_endpoint_auth_method"),
+    applicationType: text("application_type"),
     jwks: text("jwks"),
     jwksUri: text("jwks_uri"),
     grantTypes: jsonText<string[]>("grant_types"),

@@ -13,8 +13,8 @@
   ],
   "devDependencies": {
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.131.1"
+    "vitest": "^4.1.11",
+    "wrangler": "^4.143.0"
   },
   "scripts": {
     "check:imports": "bun tools/check-import-boundaries.ts",
@@ -29,31 +29,32 @@
     "build": "bun run build:web"
   },
   "overrides": {
-    "@better-auth/core": "1.7.0-beta.10",
-    "@cloudflare/vite-plugin": "1.53.1",
-    "@hono/node-server": "1.19.13",
-    "@xmldom/xmldom": "0.8.15",
+    "@better-auth/core": "1.7.6",
+    "@cloudflare/vite-plugin": "1.62.0",
+    "@hono/node-server": "1.19.17",
     "ajv": "8.20.0",
-    "astro": "7.2.8",
+    "astro": "7.3.5",
     "defu": "6.1.7",
-    "devalue": "5.9.2",
-    "effect": "3.20.0",
+    "devalue": "5.9.4",
+    "effect": "3.22.2",
     "esbuild": "0.25.12",
-    "fast-uri": "3.1.6",
-    "hono": "4.12.25",
+    "fast-uri": "3.1.8",
+    "hono": "4.13.11",
     "js-yaml": "4.3.2",
     "kysely": "0.28.17",
     "lodash": "4.18.1",
-    "nanoid": "3.3.18",
+    "nanoid": "3.3.19",
     "picomatch": "2.3.2",
-    "rollup": "4.59.0",
-    "sharp": "0.35.4",
-    "smol-toml": "1.7.1",
+    "rollup": "4.63.5",
+    "sharp": "0.35.5",
+    "smol-toml": "1.9.0",
     "svgo": "4.1.0",
+    "undici": "7.30.0",
     "vitest": "4.1.11",
-    "yaml": "2.8.3"
+    "yaml": "2.9.1"
   },
   "patchedDependencies": {
-    "@better-auth/sso@1.7.0-beta.10": "patches/@better-auth%2Fsso@1.7.0-beta.10.patch"
+    "@better-auth/sso@1.7.6": "patches/@better-auth%2Fsso@1.7.6.patch",
+    "@better-auth/core@1.7.6": "patches/@better-auth%2Fcore@1.7.6.patch"
   }
 }

@@ -9,7 +9,10 @@ const item: TransportItem = {
 };
 
 function transport() {
-  const instance = new BlockableFetchTransport({ url: "https://collector.example/collect/app" });
+  const instance = new BlockableFetchTransport({
+    url: "https://collector.example/collect/app",
+    retry: { initialBackoffMs: 0, maxBackoffMs: 0 },
+  });
   instance.metas = { value: {} } as BlockableFetchTransport["metas"];
   const logged = vi.fn();
   instance.internalLogger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: logged, prefix: "" };
@@ -35,9 +38,11 @@ describe("blockable telemetry transport", () => {
   it("keeps sending and logging when the collector answers with an error", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response("nope", { status: 500 }));
     vi.stubGlobal("fetch", fetch);
-    const { instance } = transport();
+    const { instance, logged } = transport();
     await instance.send([item]);
+    const attempts = fetch.mock.calls.length;
     await instance.send([item]);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(attempts * 2);
+    expect(logged).toHaveBeenCalledTimes(2);
   });
 });

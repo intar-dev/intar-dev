@@ -32,6 +32,26 @@ describe("auth route", () => {
     );
   });
 
+  it("sends a GitHub callback its hook refused to the landing page", async () => {
+    // A refusal inside the endpoint comes back as a JSON response.
+    mocks.handler.mockResolvedValueOnce(
+      Response.json(
+        { code: "link_session_ended", message: "Signed out" },
+        { status: 403 },
+      ),
+    );
+    const response = await ALL({
+      request: new Request(
+        "https://intar.test/api/auth/callback/github?code=c&state=s",
+      ),
+    } as never);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "https://intar.test/?error=link_session_ended",
+    );
+  });
+
   it("sends a refused app authorization to the landing page", async () => {
     // The before hook's refusal comes back as a JSON response.
     mocks.handler.mockResolvedValueOnce(

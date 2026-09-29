@@ -42,9 +42,10 @@ export const ALL: APIRoute = async ({ request }) => {
 };
 
 /**
- * Browsers navigate to an app's authorization link. When Intar refuses the
- * session there (an impersonation, or an account that lost access), the
- * landing page explains the code instead of showing JSON.
+ * Browsers navigate to an app's authorization link and return to a GitHub
+ * callback. When Intar refuses the session or the link there (an
+ * impersonation, or an account that lost access), the landing page explains
+ * the code instead of showing JSON.
  */
 async function authorizeRefusalRedirect(
   request: Request,
@@ -53,7 +54,8 @@ async function authorizeRefusalRedirect(
   const url = new URL(request.url);
   if (
     request.method !== "GET" ||
-    url.pathname !== "/api/auth/oauth2/authorize" ||
+    (url.pathname !== "/api/auth/oauth2/authorize" &&
+      !url.pathname.startsWith("/api/auth/callback/")) ||
     (response.status !== 401 && response.status !== 403)
   ) {
     return response;

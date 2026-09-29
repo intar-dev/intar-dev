@@ -79,6 +79,7 @@ describe("OIDC callback error boundary", () => {
 
     for (const [source, expected] of [
       ["account not linked", "sso_email_in_use"],
+      ["invalid_state", "sso_flow_invalid"],
       ["signups_full", "signups_full"],
       ["sso_removed_from_organization", "sso_removed_from_organization"],
       ["constructor", "oidc_sign_in_failed"],
@@ -96,9 +97,9 @@ describe("OIDC callback error boundary", () => {
 
   it("sends generic error pages to organization sign-in", () => {
     for (const target of [
-      "https://intar.dev/api/auth/error?error=invalid_state",
+      "https://intar.dev/api/auth/error?error=internal_server_error",
       // Better Auth's onAPIError.errorURL.
-      "https://intar.dev/?error=invalid_state",
+      "https://intar.dev/?error=internal_server_error",
     ]) {
       const sanitized = sanitizeOidcErrorResponse(
         callbackRequest(),
