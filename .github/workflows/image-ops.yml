@@ -271,6 +271,13 @@ jobs:
         id: drain
         run: |
           set -euo pipefail
+          # The state before this run, written before the drain, so a failed
+          # run reopens only a gate it drained itself. A gate an operator
+          # drained earlier, for a tools promotion or a metal release, stays.
+          prior="$(curl --fail --silent --show-error --retry 3 \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            "https://intar.dev/registry/v1/cutover/gate" | jq -er '.state')"
+          printf 'prior=%s\n' "${prior}" >> "${GITHUB_OUTPUT}"
           curl --fail --silent --show-error --retry 3 \
             --request POST \
             --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
@@ -319,15 +326,22 @@ jobs:
       - name: Require complete builds and exact stable tool cache
         run: |
           set -euo pipefail
+          # A host counts as ready once it applied its latest desired state, and
+          # the teardown of the last VM can trail the drain by a moment.
           status="${RUNNER_TEMP}/pre-promotion-status.json"
-          curl --fail --silent --show-error --retry 3 \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
-            > "${status}"
-          if ! jq -e "${READY}" "${status}" >/dev/null; then
-            jq -c "${PENDING}" "${status}" >&2
-            exit 1
-          fi
+          for _ in $(seq 1 20); do
+            curl --fail --silent --show-error --retry 3 \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
+              > "${status}"
+            if jq -e "${READY}" "${status}" >/dev/null; then
+              exit 0
+            fi
+            sleep 15
+          done
+          jq -c "${PENDING}" "${status}" >&2
+          echo "The builds and host caches were not ready within five minutes of the drain." >&2
+          exit 1
 
       - name: Promote catalog
         id: promote
@@ -406,10 +420,11 @@ jobs:
           exit 1
 
       - name: Reopen the gate when no promotion ran
-        # A drained fleet that no promotion followed has nothing to finish, so
-        # new runs may start again. A promotion that started may have
-        # committed, so after one the gate stays for the operator to open.
-        if: (failure() || cancelled()) && steps.drain.outcome == 'success' && steps.promote.outcome == 'skipped'
+        # A drain of this run that no promotion followed has nothing to finish,
+        # so new runs may start again. This holds even when the drain step
+        # failed after the server stored the drain. A promotion that started
+        # may have committed, so after one the gate stays for the operator.
+        if: (failure() || cancelled()) && steps.drain.outputs.prior == 'open' && steps.promote.outcome == 'skipped'
         run: |
           set -euo pipefail
           curl --fail --silent --show-error --retry 3 \
