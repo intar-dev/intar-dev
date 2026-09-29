@@ -1332,7 +1332,7 @@ mod tests {
                 fixture["base_images_sha256"].as_str().unwrap()
             )),
             fixture["digest"],
-            "update the vector in intar-contracts-typegen and run `just generate-contracts`"
+            "update the vector in intar-contracts-typegen and run `cuenv task generate-contracts`"
         );
     }
 

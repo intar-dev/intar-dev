@@ -185,7 +185,7 @@ fn selects_the_compile_mode() {
         courses_root: PathBuf::from(courses_root),
         base_images: PathBuf::from(base_images),
     };
-    // No flags and no intar.yaml: the defaults `just validate-images` uses.
+    // No flags and no intar.yaml: the defaults `cuenv task validate-images` uses.
     assert_eq!(
         compile_mode(None, None, repository.path()),
         legacy("content/courses", "content/scenarios/base-images.hcl")

@@ -6,17 +6,18 @@ Monorepo for the intar platform:
 - `apps/web/` contains the Cloudflare-hosted web and control plane.
 - `content/` contains authored Course and Scenario source locks.
 
-Common commands:
+Tasks are defined in `env.cue` and run with [cuenv](https://github.com/cuenv/cuenv)
+0.56.7. `cuenv task` lists them. Common commands:
 
 ```sh
-bun install --frozen-lockfile
-just check
-just test
-just build
-just check-generated
+cuenv task install-js
+cuenv task check
+cuenv task test
+cuenv task build
+cuenv task check-generated
 ```
 
-`just clean-generated` removes only allowlisted repository output. It preserves
+`cuenv task clean-generated` removes only allowlisted repository output. It preserves
 the root `node_modules/`, Bun cache, Cargo cache, and root `target/`.
 
 The website database is schema-first. Files under `apps/web/src/db/schema/`
