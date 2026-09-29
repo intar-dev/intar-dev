@@ -1,7 +1,15 @@
 name: Docs
-run-name: "${{ github.event_name == 'pull_request' && format('Docs validate PR #{0}', github.event.pull_request.number) || format('Docs deploy main @ {0}', github.sha) }}"
+run-name: "${{ github.event_name == 'pull_request' && format('Docs validate PR #{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && (inputs.confirmation != 'DEPLOY DOCS' || github.ref != 'refs/heads/main') && format('Docs validate {0} @ {1}', github.ref_name, github.sha) || format('Docs deploy main @ {0}', github.sha) }}"
 
+# A push to main deploys. A manual dispatch validates, and deploys main only
+# with the confirmation, for when a push never started a run.
 on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DEPLOY DOCS to deploy main from a manual dispatch
+        required: false
+        type: string
   pull_request:
     paths: &docs_paths
       - ".github/workflows/docs.yml"
@@ -49,7 +57,11 @@ jobs:
         run: bunx --no-install wrangler deploy --dry-run
 
       - name: Upload tested docs
-        if: github.event_name == 'push'
+        if: >-
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          inputs.confirmation == 'DEPLOY DOCS')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: docs-dist-${{ github.sha }}
@@ -60,7 +72,11 @@ jobs:
 
   deploy:
     name: Deploy production
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'DEPLOY DOCS')
     needs: build
     runs-on: namespace-profile-intar-dev
     timeout-minutes: 10
