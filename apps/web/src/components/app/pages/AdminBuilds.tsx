@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  ArrowLeft,
   ExternalLink,
   Hammer,
   Info,
@@ -8,7 +9,7 @@ import {
   Play,
   RefreshCcw,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -25,9 +26,12 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { BuildPhase } from "@/generated/bridge";
+import { isAdminUser } from "@/lib/authz";
 import { isActiveImageBuild } from "@/lib/build-scheduler-core";
 import { cn } from "@/lib/utils";
 import { requestScenarioStartWithCapacityWait } from "@/components/app/lib/scenario-start";
+import { useSession } from "../hooks/useSession";
+import { usePageChrome } from "../shell/page-chrome";
 
 interface ImageBuildTimings {
   queuedAt?: number | null;
@@ -85,9 +89,31 @@ interface ImageBuildDetailResponse {
   build: ImageBuildDetailRecord;
 }
 
+/**
+ * Platform admins manage every build. Organization owners and admins see
+ * only their organizations' builds, read-only: the API projects them without
+ * builder hosts, and retry, details and candidate runs stay platform-only.
+ */
 export function AdminBuilds() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const manage = isAdminUser(useSession().data?.user);
+  // The Admin crumb would bounce organization admins to the landing page.
+  const back = useMemo(
+    () =>
+      manage ? undefined : (
+        <Link
+          to="/organizations"
+          aria-label="Back to Organizations"
+          className="inline-flex min-h-9 min-w-9 items-center justify-center gap-1.5 rounded-lg px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+        >
+          <ArrowLeft className="size-4" aria-hidden="true" />
+          <span className="hidden md:inline">Organizations</span>
+        </Link>
+      ),
+    [manage],
+  );
+  usePageChrome({ back });
   const [selectedBuildId, setSelectedBuildId] = useState<string | null>(null);
   const builds = useQuery({
     queryKey: ["admin-builds"],
@@ -104,7 +130,7 @@ export function AdminBuilds() {
   const buildDetail = useQuery({
     queryKey: ["admin-build", selectedBuildId],
     queryFn: () => fetchBuildDetail(selectedBuildId ?? ""),
-    enabled: selectedBuildId !== null,
+    enabled: manage && selectedBuildId !== null,
     staleTime: 2_000,
   });
 
@@ -232,6 +258,7 @@ export function AdminBuilds() {
                   <BuildRow
                     key={build.id}
                     build={build}
+                    manage={manage}
                     retryPending={
                       retryBuild.isPending && retryBuild.variables === build.id
                     }
@@ -281,6 +308,7 @@ export function AdminBuilds() {
 
 function BuildRow(props: {
   build: ImageBuildRecord;
+  manage: boolean;
   retryPending: boolean;
   retryDisabled: boolean;
   runCandidatePending: boolean;
@@ -323,10 +351,12 @@ function BuildRow(props: {
         </div>
 
         <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
-          <BuildMeta
-            label="Host"
-            value={build.hostName ?? build.hostId ?? "Unassigned"}
-          />
+          {props.manage ? (
+            <BuildMeta
+              label="Host"
+              value={build.hostName ?? build.hostId ?? "Unassigned"}
+            />
+          ) : null}
           <BuildMeta label="Attempt" value={String(build.attempt)} />
           <BuildMeta
             label="Updated"
@@ -354,6 +384,7 @@ function BuildRow(props: {
         {props.detailOpen ? (
           <BuildDetails
             id={detailId}
+            build={build}
             detail={props.detail}
             loading={props.detailLoading}
             error={props.detailError}
@@ -376,19 +407,21 @@ function BuildRow(props: {
           <Info className="size-4" />
           Details
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={props.onRetry}
-          disabled={props.retryDisabled}
-          className="lg:w-full"
-        >
-          <RefreshCcw
-            className={cn("size-4", props.retryPending ? "animate-spin" : "")}
-          />
-          Retry
-        </Button>
+        {props.manage ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={props.onRetry}
+            disabled={props.retryDisabled}
+            className="lg:w-full"
+          >
+            <RefreshCcw
+              className={cn("size-4", props.retryPending ? "animate-spin" : "")}
+            />
+            Retry
+          </Button>
+        ) : null}
         {build.hasLog ? (
           <Button
             type="button"
@@ -458,8 +491,10 @@ async function fetchBuildDetail(
   return (await response.json()) as ImageBuildDetailResponse;
 }
 
+// Only platform admins load `detail`: the builder host and candidate proof.
 function BuildDetails(props: {
   id: string;
+  build: ImageBuildRecord;
   detail: ImageBuildDetailRecord | null | undefined;
   loading: boolean;
   error: unknown;
@@ -487,37 +522,37 @@ function BuildDetails(props: {
     );
   }
 
-  const detail = props.detail;
-  if (!detail) {
-    return <div id={props.id} />;
-  }
-
+  const { build, detail } = props;
   return (
     <div id={props.id} className="border-t pt-3">
       <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
-        <BuildMeta label="Bundle" value={detail.bundle.r2Key ?? detail.rev} />
-        <BuildMeta
-          label="Host status"
-          value={detail.host ? hostStatus(detail.host) : "Unassigned"}
-        />
+        <BuildMeta label="Bundle" value={detail?.bundle.r2Key ?? build.rev} />
+        {detail ? (
+          <BuildMeta
+            label="Host status"
+            value={detail.host ? hostStatus(detail.host) : "Unassigned"}
+          />
+        ) : null}
         <BuildMeta
           label="Started"
-          value={formatTimestamp(detail.timings.startedAt)}
+          value={formatTimestamp(build.timings.startedAt)}
         />
       </div>
       <dl className="terminal-surface mt-3 grid gap-x-6 gap-y-3 rounded-lg border p-3 text-xs md:grid-cols-2">
-        <DetailPair label="Created" value={formatTimestamp(detail.createdAt)} />
+        <DetailPair label="Created" value={formatTimestamp(build.createdAt)} />
         <DetailPair
           label="Finished"
-          value={formatTimestamp(detail.timings.finishedAt)}
+          value={formatTimestamp(build.timings.finishedAt)}
         />
-        <DetailPair label="Content hash" value={detail.contentHash} />
-        <DetailPair
-          label="Host heartbeat"
-          value={formatTimestamp(detail.host?.lastHeartbeatAt)}
-        />
+        <DetailPair label="Content hash" value={build.contentHash} />
+        {detail ? (
+          <DetailPair
+            label="Host heartbeat"
+            value={formatTimestamp(detail.host?.lastHeartbeatAt)}
+          />
+        ) : null}
       </dl>
-      {detail.candidateAvailable ? (
+      {detail?.candidateAvailable ? (
         <div className="mt-3">
           <Button
             type="button"

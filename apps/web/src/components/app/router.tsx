@@ -359,7 +359,8 @@ const adminBuildsRoute = createRoute({
   path: "admin/builds",
   head: () =>
     routeHead("Builds", "Monitor scenario image builds, logs, and retries."),
-  beforeLoad: requireAdminRoute,
+  // Organization owners and admins see their own builds here too; the API
+  // decides what each caller may read.
   component: lazyRouteComponent(
     () => import("./pages/AdminBuilds"),
     "AdminBuilds",

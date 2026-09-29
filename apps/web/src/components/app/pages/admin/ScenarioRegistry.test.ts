@@ -65,6 +65,11 @@ describe("scenario source card", () => {
     );
   });
 
+  it("links to the builds page, connected or not", () => {
+    expect(renderCard(null)).toContain('href="/admin/builds"');
+    expect(renderCard({})).toContain('href="/admin/builds"');
+  });
+
   it("offers an admin pause over a suspension, but only resume otherwise", () => {
     const suspended = renderCard({ pausedAt: 1, pauseReason: "suspended" });
     expect(suspended).toContain("Pause</button>");
