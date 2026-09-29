@@ -47,6 +47,7 @@ import {
   createRegistryWriterGuard,
 } from "@/lib/image-registry-admission";
 import { runsHeldCondition } from "@/lib/run-admission-gate";
+import { promotionHolding } from "./image-promotion";
 import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
   countUnitGuardRuns,
@@ -1164,7 +1165,8 @@ const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_r
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
-// The summary says what a row waits for.
+// The summary says what a row waits for. A catalog-first row waits for Intar's
+// image promotion, which runs at the next idle moment.
 const DEPLOY_CHECKS = {
   fetching: { status: "queued", title: "Queued" },
   ingesting: { status: "queued", title: "Queued" },
@@ -1172,7 +1174,7 @@ const DEPLOY_CHECKS = {
   building: { status: "in_progress", title: "Building" },
   waiting: { status: "in_progress", title: "Waiting" },
   promoting: { status: "in_progress", title: "Promoting" },
-  awaiting_promote: { status: "in_progress", title: "Promoting" },
+  awaiting_promote: { status: "in_progress", title: "Waiting for an idle moment" },
   live: { status: "completed", conclusion: "success", title: "Live" },
   failed: { status: "completed", conclusion: "failure", title: "Failed" },
   invalid: { status: "completed", conclusion: "failure", title: "Invalid" },
@@ -1259,7 +1261,9 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
       ? "Restoring"
       : state === "building"
         ? `Building ${built}/${scenarios.length}`
-        : check.title;
+        : state === "awaiting_promote" && (await promotionHolding(drizzle(step.env.DB), row.rev))
+          ? "Promoting images"
+          : check.title;
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),
