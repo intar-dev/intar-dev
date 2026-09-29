@@ -210,7 +210,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(host.CREDENTIAL.exists())
                 self.assertLessEqual(prompt.call_count, 1)
                 self.assertNotIn('secret', str(error.exception))
-                self.assertIn('#register-again' if status == 401 else 'Repeat setup', str(error.exception))
+                self.assertIn('uninstall --remove-data' if status == 401 else 'Repeat setup', str(error.exception))
 
     def test_organization_claim_keeps_creator_identity_and_outbound_relay(self):
         identity = {**self.identity, 'scope': 'organization'}

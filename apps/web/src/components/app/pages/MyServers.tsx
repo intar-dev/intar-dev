@@ -412,12 +412,6 @@ function AddServer({
           No inbound ports or public IP address are required. Browser terminals
           and SSH connect through Intar.
         </p>
-        <a
-          className="underline underline-offset-4"
-          href="https://docs.intar.dev/operations/personal-host/"
-        >
-          Installation and repair guide
-        </a>
       </div>
       {enrollment ? (
         <>

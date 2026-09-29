@@ -29,10 +29,4 @@ and `bun run check:database-migrations` before committing it.
 `content/courses/` contains Markdown-first Course source. Each Course contains
 `course.md` and ordered Lecture directories. Each Lecture contains `lecture.md`
 and can contain a technical `scenario.hcl`. The base image catalog remains at
-`content/scenarios/base-images.hcl`. See the
-[Course authoring guide](docs/src/content/docs/authoring/course-catalogs.md).
-
-Scenario-host operators should follow the
-[Cloud Hypervisor jailer operations guide](docs/src/content/docs/operations/scenario-host-jailer.md),
-including the exact fractional-CPU contract and separate unprivileged
-doctor/root self-test readiness gates.
+`content/scenarios/base-images.hcl`.

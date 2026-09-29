@@ -178,6 +178,4 @@ VM resource objects are V3 and runtime quota evidence is V2. The local jailer
 protocol is V4. Older hosts must be drained and upgraded before scheduling.
 
 Agent readiness deadlines remain bounded to 45–360 seconds according to the
-CPU limit. A slower startup never increases the quota. See
-[Scenario Host Jailer](../../docs/src/content/docs/operations/scenario-host-jailer.md)
-for host verification and upgrades.
+CPU limit. A slower startup never increases the quota.
