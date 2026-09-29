@@ -1,8 +1,7 @@
 name: Set up cuenv
-description: Install the pinned cuenv release after checking its SHA-256 digest.
+description: Install the pinned cuenv release and its CUE schema module after checking their SHA-256 digests.
 
-# Checkout stays with the caller. cuenv fetches its CUE schema module from the
-# CUE registry on first evaluation.
+# Checkout stays with the caller.
 runs:
   using: composite
   steps:
@@ -12,6 +11,10 @@ runs:
         CUENV_VERSION: 0.56.7
         # GitHub's digest for the cuenv-linux-x64 asset of that release.
         CUENV_SHA256: de1e5080fca8abcd06a723a66df8661e163dad7941a96537167e0e149d77a909
+        # The zip and module.cue layers that registry.cue.works serves for
+        # github.com/cuenv/cuenv@v0.56.7, the dependency in cue.mod/module.cue.
+        SCHEMA_ZIP_SHA256: 079edc09c3ab17fad69f8a2b0c2f50e0d188c9f79525b153225c52b596d60dc8
+        SCHEMA_MOD_SHA256: 132f127337f3258d51664ff1a4cc3ce343a58d3ab0edabf1c006b42237c8eec2
       run: |
         set -euo pipefail
         if [[ "$(uname -sm)" != "Linux x86_64" ]]; then
@@ -26,3 +29,16 @@ runs:
         chmod +x "${bin}/cuenv"
         "${bin}/cuenv" --version
         echo "${bin}" >> "${GITHUB_PATH}"
+
+        # The schema decides what every task runs, and CUE modules have no sum
+        # file. Seed a fresh CUE cache with the verified layers and turn the
+        # registry off, so a moved tag cannot change a task.
+        cache="${RUNNER_TEMP}/cue-cache"
+        mod="${cache}/mod/download/github.com/cuenv/cuenv/@v/v${CUENV_VERSION}"
+        mkdir -p "$(dirname "${mod}")"
+        blobs='https://registry.cue.works/v2/github.com/cuenv/cuenv/blobs/sha256:'
+        curl -fsSL --retry 3 -o "${mod}.zip" "${blobs}${SCHEMA_ZIP_SHA256}"
+        curl -fsSL --retry 3 -o "${mod}.mod" "${blobs}${SCHEMA_MOD_SHA256}"
+        printf '%s  %s\n' "${SCHEMA_ZIP_SHA256}" "${mod}.zip" "${SCHEMA_MOD_SHA256}" "${mod}.mod" | sha256sum -c -
+        echo "CUE_CACHE_DIR=${cache}" >> "${GITHUB_ENV}"
+        echo 'CUE_REGISTRY=none' >> "${GITHUB_ENV}"
